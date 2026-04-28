@@ -11,6 +11,7 @@ import type {
   BackendSpawnOptions,
   SessionRuntimeInfo,
 } from '../sessionManager.js'
+import { getSystemSettings } from '../systemSettings.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -47,6 +48,10 @@ export function buildSessionEnv(
   options: BackendSpawnOptions,
   overrides: Record<string, string | undefined> = {},
 ): NodeJS.ProcessEnv {
+  // Read moss settings so the ACP subprocess inherits the configured API URL
+  // and auth token even when the server process itself doesn't have them in env
+  // (e.g. standalone moss-server that wasn't launched from the Electron host).
+  const mossSettings = getSystemSettings()
   return {
     ...process.env,
     MOSS_HOME,
@@ -59,6 +64,10 @@ export function buildSessionEnv(
     ...(options.assistantName
       ? { MOSS_ASSISTANT_NAME: options.assistantName }
       : {}),
+    // Inject API base URL and auth token from ~/.moss/settings.json so the
+    // ACP subprocess talks to the right provider with the right credentials.
+    ...(mossSettings.url ? { ANTHROPIC_BASE_URL: mossSettings.url } : {}),
+    ...(mossSettings.apiKey ? { ANTHROPIC_AUTH_TOKEN: mossSettings.apiKey } : {}),
     ...Object.fromEntries(
       Object.entries(overrides).filter(([, value]) => value !== undefined),
     ),
@@ -160,22 +169,14 @@ export function spawnLocalCliProcess(
   const nodeCliPath = resolveNodeCliPath()
   ensureCliExists(nodeCliPath)
 
+  // Use --acp flag to run as ACP Agent Server (JSON-RPC 2.0 over stdin/stdout)
   const args = [
     nodeCliPath,
-    '--print',
-    '--verbose',
-    '--input-format',
-    'stream-json',
-    '--output-format',
-    'stream-json',
-    '--permission-prompt-tool',
-    'stdio',
+    '--acp',
   ]
 
   if (options.resumeSessionId) {
     args.push('--resume', options.resumeSessionId)
-  } else {
-    args.push('--session-id', options.sessionId)
   }
 
   if (options.dangerouslySkipPermissions) {

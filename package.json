@@ -3,11 +3,10 @@
   "version": "2.1.88",
   "type": "module",
   "bin": {
-    "claude": "cli.js"
+    "claude": "bin/cli.js"
   },
   "scripts": {
-    "build": "bun run build.js",
-    "build:node": "bun run build.js --target=node",
+    "build": "bun run scripts/build.js",
     "postinstall": "bun run scripts/copy-vendor.js"
   },
   "dependencies": {

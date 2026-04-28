@@ -18,6 +18,16 @@ export const connectResponseSchema = lazySchema(() =>
     ws_url: z.string(),
     work_dir: z.string().optional(),
     runtime: runtimeInfoSchema().optional(),
+    // Always ACP protocol now
+    protocol: z.literal('acp'),
+    model_info: z.object({
+      current_model_id: z.string().optional(),
+      can_switch: z.boolean().optional(),
+      available_models: z.array(z.object({
+        id: z.string(),
+        label: z.string().optional(),
+      })).optional(),
+    }).optional(),
   }),
 )
 
@@ -37,6 +47,11 @@ export const attachSessionResponseSchema = lazySchema(() =>
       createdAt: z.number(),
       lastActiveAt: z.number(),
       endedAt: z.number().nullable().optional(),
+      // Always ACP protocol now
+      protocol: z.literal('acp'),
+      // ACP config fields (for model/mode switching)
+      acpMode: z.string().nullable().optional(),
+      acpModelId: z.string().nullable().optional(),
     }),
     ws_url: z.string(),
   }),
@@ -187,6 +202,9 @@ export type SessionRecord = {
   lastActiveAt: number
   endedAt: number | null
   deletedAt: number | null
+  // ACP config fields (for model/mode switching)
+  acpMode: string | null
+  acpModelId: string | null
 }
 
 export type AttemptRecord = {
@@ -250,6 +268,9 @@ export type SessionSummary = {
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
+  // ACP config fields (for model/mode switching)
+  acpMode: string | null
+  acpModelId: string | null
 }
 
 export type SessionCreateInput = {

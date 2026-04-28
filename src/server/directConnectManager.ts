@@ -3,10 +3,13 @@
 import { randomUUID } from 'crypto'
 import type WsWebSocket from 'ws'
 import type { SDKMessage } from '../entrypoints/agentSdkTypes.js'
-import type {
-  SDKControlPermissionRequest,
-  StdoutMessage,
-} from '../entrypoints/sdk/controlTypes.js'
+import type { SDKControlPermissionRequest } from '../entrypoints/sdk/controlTypes.js'
+import {
+  convertAcpToSdkMessage,
+  extractImagesFromContent,
+  extractTextFromContent,
+  isAcpClientMessage,
+} from '../remote/acpMessageAdapter.js'
 import type { RemotePermissionResponse } from '../remote/RemoteSessionManager.js'
 import { CircularBuffer } from '../utils/CircularBuffer.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -66,15 +69,6 @@ export type DirectConnectCallbacks = {
   onDisconnected?: () => void
   onReconnecting?: (attempt: number, maxAttempts: number) => void
   onError?: (error: Error) => void
-}
-
-function isStdoutMessage(value: unknown): value is StdoutMessage {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'type' in value &&
-    typeof value.type === 'string'
-  )
 }
 
 export class DirectConnectSessionManager {
@@ -246,6 +240,7 @@ export class DirectConnectSessionManager {
     this.pongReceived = true
 
     const lines = data.split('\n').filter((line: string) => line.trim())
+
     for (const line of lines) {
       let raw: unknown
       try {
@@ -254,36 +249,35 @@ export class DirectConnectSessionManager {
         continue
       }
 
-      if (!isStdoutMessage(raw)) {
-        continue
-      }
-      const parsed = raw
+      // Always handle as ACP message (cli-node.js runs with --acp)
+      this.handleAcpMessage(raw)
+    }
+  }
 
-      if (parsed.type === 'control_request') {
-        if (parsed.request.subtype === 'can_use_tool') {
-          this.callbacks.onPermissionRequest(parsed.request, parsed.request_id)
-        } else {
-          logForDebugging(
-            `[DirectConnect] Unsupported control request subtype: ${parsed.request.subtype}`,
-          )
-          this.sendErrorResponse(
-            parsed.request_id,
-            `Unsupported control request subtype: ${parsed.request.subtype}`,
-          )
-        }
-        continue
-      }
+  private handleAcpMessage(raw: unknown): void {
+    if (!isAcpClientMessage(raw)) {
+      return
+    }
 
-      if (
-        parsed.type !== 'control_response' &&
-        parsed.type !== 'keep_alive' &&
-        parsed.type !== 'control_cancel_request' &&
-        parsed.type !== 'streamlined_text' &&
-        parsed.type !== 'streamlined_tool_use_summary' &&
-        !(parsed.type === 'system' && parsed.subtype === 'post_turn_summary')
-      ) {
-        this.callbacks.onMessage(parsed)
+    // Handle permission_request separately
+    if (raw.type === 'permission_request') {
+      const request: SDKControlPermissionRequest = {
+        subtype: 'can_use_tool',
+        tool_name: raw.data.tool_name,
+        tool_use_id: raw.data.tool_use_id,
+        description: raw.data.description,
+        input: raw.data.input as Record<string, unknown>,
+        permission_suggestions: raw.data.options?.map(o => o.name),
       }
+      this.callbacks.onPermissionRequest(request, raw.request_id)
+      return
+    }
+
+    // Convert ACP message to SDKMessage and forward
+    const converted = convertAcpToSdkMessage(raw)
+    if (converted) {
+      // Cast to SDKMessage - converted format is compatible
+      this.callbacks.onMessage(converted as SDKMessage)
     }
   }
 
@@ -441,15 +435,14 @@ export class DirectConnectSessionManager {
     opts?: { uuid?: string },
   ): boolean {
     const uuid = opts?.uuid ?? randomUUID()
+
+    // Always use ACP protocol format: user_message
+    const textContent = extractTextFromContent(content)
+    const images = extractImagesFromContent(content)
     const line = jsonStringify({
-      type: 'user',
-      message: {
-        role: 'user',
-        content,
-      },
-      parent_tool_use_id: null,
-      session_id: '',
-      uuid,
+      type: 'user_message',
+      content: textContent,
+      ...(images.length > 0 && { images }),
     })
 
     this.replayBuffer.add({ line, uuid })
@@ -472,18 +465,14 @@ export class DirectConnectSessionManager {
       return
     }
 
+    // Always use ACP protocol format: permission_response
+    // Map behavior to correct optionId format
+    const optionId = result.behavior === 'allow' ? 'allow_once' : 'reject_once'
     const line = jsonStringify({
-      type: 'control_response',
-      response: {
-        subtype: 'success',
-        request_id: requestId,
-        response: {
-          behavior: result.behavior,
-          ...(result.behavior === 'allow'
-            ? { updatedInput: result.updatedInput }
-            : { message: result.message }),
-        },
-      },
+      type: 'permission_response',
+      request_id: requestId,
+      option_id: optionId,
+      ...(result.behavior === 'deny' && result.message && { feedback: result.message }),
     })
     this.sendLine(line)
   }
@@ -493,29 +482,8 @@ export class DirectConnectSessionManager {
       return
     }
 
-    const line = jsonStringify({
-      type: 'control_request',
-      request_id: randomUUID(),
-      request: {
-        subtype: 'interrupt',
-      },
-    })
-    this.sendLine(line)
-  }
-
-  private sendErrorResponse(requestId: string, error: string): void {
-    if (!this.ws || this.state !== 'connected') {
-      return
-    }
-
-    const line = jsonStringify({
-      type: 'control_response',
-      response: {
-        subtype: 'error',
-        request_id: requestId,
-        error,
-      },
-    })
+    // Always use ACP protocol: cancel message
+    const line = jsonStringify({ type: 'cancel' })
     this.sendLine(line)
   }
 

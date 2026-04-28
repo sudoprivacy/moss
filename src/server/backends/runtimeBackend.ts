@@ -29,6 +29,7 @@ export class RuntimeBackend implements SessionBackend {
   }
 
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
+    // Always use host/docker backend (cli-node.js runs with --acp flag)
     const runtimeType = options.runtime?.type || this.#defaultRuntime.type || 'host'
     const mergedOptions: BackendSpawnOptions = {
       ...options,

@@ -18,6 +18,7 @@ export type SystemSettingsSkillStore = {
 export type SystemSettingsPayload = {
   bypassPermissions: boolean
   model: string
+  modelExplicitlyConfigured: boolean
   maxTurns: number
   thinkingMode: ThinkingMode
   thinkingBudgetTokens: number
@@ -46,15 +47,15 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError'
 > = Object.freeze({
   bypassPermissions: DEFAULT_BYPASS_PERMISSIONS,
-  model: 'claude-sonnet-4-6',
+  model: '',
   maxTurns: 100,
   thinkingMode: 'adaptive',
   thinkingBudgetTokens: 16000,
   url: '',
   apiKey: '',
   image: {
-    provider: 'minimax',
-    url: 'https://api.minimaxi.com/v1/image_generation',
+    provider: '',
+    url: '',
     apiKey: '',
     model: '',
   },
@@ -68,6 +69,7 @@ type SystemSettingsState = {
   exists: boolean
   loaded: boolean
   parseError: string
+  modelExplicitlyConfigured: boolean
   value: PersistedSystemSettings
 }
 
@@ -197,6 +199,7 @@ function readSystemSettingsState(): SystemSettingsState {
     exists: false,
     loaded: false,
     parseError: '',
+    modelExplicitlyConfigured: false,
     value: { ...DEFAULT_SYSTEM_SETTINGS },
   }
 
@@ -218,6 +221,8 @@ function readSystemSettingsState(): SystemSettingsState {
       typeof env.ANTHROPIC_AUTH_TOKEN === 'string'
         ? env.ANTHROPIC_AUTH_TOKEN.trim()
         : ''
+    result.modelExplicitlyConfigured =
+      typeof rawSettings.model === 'string' && rawSettings.model.trim().length > 0
     const normalized = normalizeSystemSettings(rawSettings, rawSettings)
 
     result.value = {
@@ -245,6 +250,7 @@ function toSystemSettingsPayload(
   return {
     bypassPermissions: state.value.bypassPermissions,
     model: state.value.model,
+    modelExplicitlyConfigured: state.modelExplicitlyConfigured,
     maxTurns: state.value.maxTurns,
     thinkingMode: state.value.thinkingMode,
     thinkingBudgetTokens: state.value.thinkingBudgetTokens,
@@ -319,6 +325,7 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
   return {
     bypassPermissions: nextSettings.bypassPermissions,
     model: nextSettings.model,
+    modelExplicitlyConfigured: typeof nextSettings.model === 'string' && nextSettings.model.trim().length > 0,
     maxTurns: nextSettings.maxTurns,
     thinkingMode: nextSettings.thinkingMode,
     thinkingBudgetTokens: nextSettings.thinkingBudgetTokens,

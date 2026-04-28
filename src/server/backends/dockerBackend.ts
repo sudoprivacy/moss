@@ -139,20 +139,11 @@ export class DockerBackend implements SessionBackend {
       image,
       'node',
       nodeCliPath,
-      '--print',
-      '--verbose',
-      '--input-format',
-      'stream-json',
-      '--output-format',
-      'stream-json',
-      '--permission-prompt-tool',
-      'stdio',
+      '--acp',  // Use ACP Agent Server mode (JSON-RPC 2.0)
     )
 
     if (options.resumeSessionId) {
       args.push('--resume', options.resumeSessionId)
-    } else {
-      args.push('--session-id', options.sessionId)
     }
 
     if (options.dangerouslySkipPermissions) {

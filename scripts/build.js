@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 /**
- * 构建脚本：读取 features.js，生成 bun build 命令
- * 用法：bun run build.js [--target=node]
+ * 构建脚本：生成 bun build 命令
  */
 import { RECOMMENDED, EXPERIMENTAL, NATIVE_REQUIRED, INTERNAL_ONLY } from './features.js'
 import { spawnSync } from 'child_process'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { resolve } from 'path'
 
 /**
@@ -26,8 +25,6 @@ function sanitizePaths(outfile) {
   }
 }
 
-const onlyNode = process.argv.includes('--target=node')
-
 const enabledFeatures = Object.entries({ ...RECOMMENDED, ...EXPERIMENTAL, ...NATIVE_REQUIRED, ...INTERNAL_ONLY })
   .filter(([, v]) => v)
   .map(([k]) => k)
@@ -43,7 +40,7 @@ const defines = [
 ]
 
 const aliases = [
-  '--alias=bun:bundle=./bun-bundle-feature.js',
+  '--alias=bun:bundle=./scripts/bun-bundle-feature.js',
   '--alias=@ant/claude-for-chrome-mcp=./vendor/@ant/claude-for-chrome-mcp/index.js',
   '--alias=@anthropic-ai/bedrock-sdk=./vendor/@anthropic-ai/bedrock-sdk/index.mjs',
   '--alias=@anthropic-ai/foundry-sdk=./vendor/@anthropic-ai/foundry-sdk/index.mjs',
@@ -73,37 +70,29 @@ function ensureAdminBuildDependencies() {
 
 console.log(`Enabled features (${enabledFeatures.length}): ${enabledFeatures.join(', ') || '(none)'}`)
 
-if (!onlyNode) {
-  // cli.js（bun target，生产用）
-  build('cli.js', [
-    'build', 'src/entrypoints/cli.tsx',
-    '--outfile=cli.js',
-    '--target=bun',
-    ...aliases,
-    ...defines,
-  ])
-}
+// 确保 bin 目录存在
+mkdirSync('bin', { recursive: true })
 
-// cli-node.js（node target，测试 / electron-sdk 子进程用）
+// cli-node.js（node target）
 build('cli-node.js', [
   'build', 'src/entrypoints/cli.tsx',
-  '--outfile=cli-node.js',
+  '--outfile=bin/cli-node.js',
   '--target=node',
   ...aliases,
   ...defines,
 ])
-sanitizePaths('cli-node.js')
+sanitizePaths('bin/cli-node.js')
 
 // ui/electron-direct.mjs（供 Electron 桌面端打包）
 build('ui/electron-direct.mjs', [
   'build', 'src/electron-direct.ts',
-  '--outfile=ui/electron-direct.mjs',
+  '--outfile=bin/electron-direct.mjs',
   '--target=node',
   '--format=esm',
   ...aliases,
   ...defines,
 ])
-sanitizePaths('ui/electron-direct.mjs')
+sanitizePaths('bin/electron-direct.mjs')
 
 // admin/dist（由 moss server 直接挂载到 /admin）
 ensureAdminBuildDependencies()
@@ -116,18 +105,18 @@ build('admin/dist', [
 // moss-server.mjs（统一服务端入口）
 build('moss-server.mjs', [
   'build', 'src/server/serverCli.ts',
-  '--outfile=moss-server.mjs',
+  '--outfile=bin/moss-server.mjs',
   '--target=node',
   '--format=esm',
   ...aliases,
   ...defines,
 ])
-sanitizePaths('moss-server.mjs')
+sanitizePaths('bin/moss-server.mjs')
 
 //direct-connect-session-runner.mjs（session detached runner）
 build('direct-connect-session-runner.mjs', [
   'build', 'src/server/sessionRunnerCli.ts',
-  '--outfile=direct-connect-session-runner.mjs',
+  '--outfile=bin/direct-connect-session-runner.mjs',
   '--target=node',
   '--format=esm',
   ...aliases,

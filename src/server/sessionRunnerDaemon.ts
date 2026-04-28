@@ -156,6 +156,28 @@ export class SessionRunnerDaemon {
         this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)
         this.#store.touchSessionActivity(this.manifest.session.sessionId)
         void appendFile(this.manifest.attempt.stdoutLogPath, line, 'utf8').catch(() => {})
+
+        // Always try to parse as ACP JSON-RPC notification (cli-node.js runs with --acp)
+        try {
+          const parsed = jsonParse(line.trim()) as { jsonrpc?: string; method?: string; id?: string | number; params?: unknown }
+          if (parsed.jsonrpc === '2.0' && parsed.method) {
+            // Forward as ACP notification (preserve id for agent→client requests)
+            this.#broadcast({
+              type: 'acp_notification',
+              notification: {
+                jsonrpc: '2.0',
+                ...(parsed.id !== undefined && { id: parsed.id }),
+                method: parsed.method,
+                params: parsed.params,
+              },
+            })
+            return
+          }
+        } catch {
+          // Not valid JSON, fall through to normal stdout
+        }
+
+        // Normal stdout broadcast for non-JSON lines
         this.#broadcast({ type: 'stdout', line })
       })
 
@@ -267,6 +289,8 @@ export class SessionRunnerDaemon {
       sessionId: this.manifest.session.sessionId,
       runtimeType: this.manifest.session.runtime.type,
       state: this.#state,
+      // Always ACP protocol now (cli-node.js runs with --acp)
+      protocol: 'acp',
     })
     socket.on('data', chunk => {
       const text = Buffer.from(chunk).toString('utf8')

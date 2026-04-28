@@ -24,6 +24,7 @@ import {
   getTranscriptPath,
 } from './runtimePaths.js'
 import { errorMessage } from '../utils/errors.js'
+import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -284,6 +285,128 @@ export class RuntimeService {
       const socket = net.createConnection(attempt.attachPath)
       socket.once('connect', () => resolve(socket))
       socket.once('error', reject)
+    })
+  }
+
+  /**
+   * Send ACP JSON-RPC request to runner and wait for response
+   * Used by HTTP APIs to control session (model/mode switching, etc.)
+   */
+  async sendAcpRequest(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number = 10_000,
+  ): Promise<unknown> {
+    const session = this.store.getSession(sessionId)
+    if (!session) {
+      throw new Error('Session not found')
+    }
+    const attempt = session.currentAttemptId
+      ? this.store.getAttempt(session.currentAttemptId)
+      : null
+    if (!attempt?.attachPath) {
+      throw new Error('Session has no active attempt')
+    }
+    const attachPath: string = attempt.attachPath // TypeScript narrowing issue workaround
+
+    // Generate unique request ID
+    const requestId = `http-${Date.now()}-${randomUUID().slice(0, 8)}`
+
+    // Build ACP JSON-RPC request
+    const acpRequest = {
+      jsonrpc: '2.0',
+      id: requestId,
+      method,
+      params,
+    }
+
+    // Build runner protocol message
+    const runnerMessage = {
+      type: 'stdin',
+      data: `${jsonStringify(acpRequest)}\n`,
+    }
+
+    return await new Promise<unknown>((resolve, reject) => {
+      const socket = net.createConnection(attachPath)
+      let buffer = ''
+      const timer = setTimeout(() => {
+        socket.destroy()
+        reject(new Error(`ACP request timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+
+      socket.once('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+
+      socket.once('connect', () => {
+        // Send the request
+        socket.write(`${jsonStringify(runnerMessage)}\n`)
+      })
+
+      socket.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8')
+
+        // Parse lines to find response
+        while (true) {
+          const idx = buffer.indexOf('\n')
+          if (idx < 0) break
+          const line = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 1)
+
+          if (!line.trim()) continue
+
+          try {
+            const parsed = jsonParse(line) as {
+              type?: string
+              line?: string
+              jsonrpc?: string
+              id?: string
+              result?: unknown
+              error?: { message: string }
+            }
+
+            // Check for runner stdout that contains ACP response
+            if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
+              try {
+                const acpParsed = jsonParse(parsed.line) as {
+                  jsonrpc?: string
+                  id?: string
+                  result?: unknown
+                  error?: { message: string }
+                }
+                if (acpParsed.jsonrpc === '2.0' && acpParsed.id === requestId) {
+                  clearTimeout(timer)
+                  socket.destroy()
+                  if (acpParsed.error) {
+                    reject(new Error(acpParsed.error.message))
+                  } else {
+                    resolve(acpParsed.result)
+                  }
+                  return
+                }
+              } catch {
+                // Not valid JSON in stdout, continue
+              }
+            }
+
+            // Direct JSON-RPC response (from hello or other control messages)
+            if (parsed.jsonrpc === '2.0' && parsed.id === requestId) {
+              clearTimeout(timer)
+              socket.destroy()
+              if (parsed.error) {
+                reject(new Error(parsed.error.message))
+              } else {
+                resolve(parsed.result)
+              }
+              return
+            }
+          } catch {
+            // Not valid JSON, continue
+          }
+        }
+      })
     })
   }
 

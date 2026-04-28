@@ -161,6 +161,7 @@ export async function createDirectConnectSession({
       sessionId: data.session_id,
       wsUrl: data.ws_url,
       authToken: resolvedToken,
+      // Always ACP protocol now
     },
     workDir: data.work_dir,
   }
@@ -235,6 +236,7 @@ export async function attachDirectConnectSession({
       sessionId: data.session.sessionId,
       wsUrl: data.ws_url,
       authToken: resolvedToken,
+      // Always ACP protocol now
     },
     workDir: data.session.workDir,
     session: data.session,

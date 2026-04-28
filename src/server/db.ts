@@ -73,6 +73,9 @@ function mapSession(row: SqlRow): SessionRecord {
     lastActiveAt: Number(row.last_active_at),
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
     deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
+    // ACP config fields (for model/mode switching)
+    acpMode: typeof row.acp_mode === 'string' ? row.acp_mode : null,
+    acpModelId: typeof row.acp_model_id === 'string' ? row.acp_model_id : null,
   }
 }
 
@@ -193,6 +196,22 @@ export class DirectConnectStore {
     } catch {
       // Column already exists, ignore
     }
+
+    // Migration: add ACP protocol columns
+    const acpMigrations = [
+      `ALTER TABLE sessions ADD COLUMN protocol TEXT DEFAULT 'cli'`,
+      `ALTER TABLE sessions ADD COLUMN acp_backend TEXT`,
+      `ALTER TABLE sessions ADD COLUMN acp_session_id TEXT`,
+      `ALTER TABLE sessions ADD COLUMN acp_mode TEXT`,
+      `ALTER TABLE sessions ADD COLUMN acp_model_id TEXT`,
+    ]
+    for (const migration of acpMigrations) {
+      try {
+        this.db.exec(migration)
+      } catch {
+        // Column already exists, ignore
+      }
+    }
   }
 
   close(): void {
@@ -248,6 +267,9 @@ export class DirectConnectStore {
     status: SessionStatus
     desiredState: DesiredSessionState
     assistantName?: string
+    // ACP config fields (for model/mode switching)
+    acpMode?: string
+    acpModelId?: string
   }): SessionRecord {
     const ts = now()
     this.db.prepare(`
@@ -255,8 +277,9 @@ export class DirectConnectStore {
         session_id, transcript_session_id, org_id, user_id, role, scopes_json,
         cwd, runtime_type, docker_image, docker_mode, config_dir, container_name,
         status, desired_state, current_attempt_id, transcript_path, assistant_name,
+        acp_mode, acp_model_id,
         created_at, last_active_at, ended_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `).run(
       input.sessionId,
       input.transcriptSessionId,
@@ -274,6 +297,8 @@ export class DirectConnectStore {
       input.desiredState,
       input.transcriptPath,
       input.assistantName ?? null,
+      input.acpMode ?? null,
+      input.acpModelId ?? null,
       ts,
       ts,
     )
@@ -281,6 +306,7 @@ export class DirectConnectStore {
       runtime: input.runtime,
       cwd: input.cwd,
       assistantName: input.assistantName,
+      acpMode: input.acpMode,
     })
     return this.getSession(input.sessionId)!
   }
@@ -396,6 +422,22 @@ export class DirectConnectStore {
     `).run(
       patch.title === undefined ? null : patch.title,
       patch.summary === undefined ? null : patch.summary,
+      sessionId,
+    )
+  }
+
+  updateSessionAcpConfig(
+    sessionId: string,
+    patch: { acpMode?: string | null; acpModelId?: string | null },
+  ): void {
+    this.db.prepare(`
+      UPDATE sessions
+      SET acp_mode = COALESCE(?, acp_mode),
+          acp_model_id = COALESCE(?, acp_model_id)
+      WHERE session_id = ?
+    `).run(
+      patch.acpMode === undefined ? null : patch.acpMode,
+      patch.acpModelId === undefined ? null : patch.acpModelId,
       sessionId,
     )
   }
@@ -637,6 +679,9 @@ export function toSessionSummary(session: SessionRecord): SessionSummary {
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,
+    // ACP config fields
+    acpMode: session.acpMode,
+    acpModelId: session.acpModelId,
   }
 }
 

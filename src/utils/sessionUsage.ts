@@ -29,7 +29,7 @@ export type SessionUsageSummary = {
   subagentTranscriptCount: number
 }
 
-function createEmptyUsageSummary(): SessionUsageSummary {
+export function createEmptyUsageSummary(): SessionUsageSummary {
   return {
     inputTokens: 0,
     outputTokens: 0,

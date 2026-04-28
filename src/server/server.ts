@@ -4,7 +4,7 @@ import { existsSync } from 'fs'
 import { readFile, stat } from 'fs/promises'
 import { dirname, extname, join, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
-import { WebSocketServer } from 'ws'
+import { WebSocket, WebSocketServer } from 'ws'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
 import { hasScope, type AuthContext } from './auth/token.js'
@@ -39,7 +39,10 @@ import { adapterProcessManager } from './adapterProcessManager.js'
 import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
+import { createEmptyUsageSummary } from '../utils/sessionUsage.js'
+import type { SessionRuntimeOptions } from './sessionManager.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
+import { errorMessage } from '../utils/errors.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -87,6 +90,9 @@ function serializeSession(session: {
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
+  // ACP config fields (for model/mode switching)
+  acpMode?: string | null
+  acpModelId?: string | null
 }) {
   return {
     sessionId: session.sessionId,
@@ -103,6 +109,11 @@ function serializeSession(session: {
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,
+    // Always ACP protocol now
+    protocol: 'acp',
+    // ACP config fields
+    acpMode: session.acpMode,
+    acpModelId: session.acpModelId,
   }
 }
 
@@ -189,10 +200,10 @@ function redirect(
   res.end()
 }
 
-function parseRuntimeOptions(body: JsonBody) {
+function parseRuntimeOptions(body: JsonBody): SessionRuntimeOptions | undefined {
   if (typeof body.runtime_type === 'string') {
     return {
-      type: body.runtime_type === 'docker' ? 'docker' : 'host',
+      type: (body.runtime_type === 'docker' ? 'docker' : 'host') as 'host' | 'docker',
       dockerImage:
         typeof body.docker_image === 'string' ? body.docker_image : undefined,
       dockerMode:
@@ -217,7 +228,7 @@ function parseRuntimeOptions(body: JsonBody) {
     return undefined
   }
   return {
-    type,
+    type: type as 'host' | 'docker',
     dockerImage:
       typeof runtime.dockerImage === 'string'
         ? runtime.dockerImage
@@ -1242,7 +1253,23 @@ export function startServer(
           throw new HttpError(403, 'Forbidden')
         }
         const context = await loadSessionContextFromTranscript(session)
+        // For active/creating sessions, return empty context if transcript doesn't exist yet
+        // This allows viewing session details for newly created sessions
         if (!context) {
+          const isActiveSession = ['creating', 'active', 'detached'].includes(session.status)
+          if (isActiveSession) {
+            writeJson(res, 200, {
+              session: serializeSession(session),
+              usage: createEmptyUsageSummary(),
+              context: {
+                customTitle: undefined,
+                tag: undefined,
+                summary: undefined,
+                messages: [],
+              },
+            })
+            return
+          }
           throw new HttpError(404, 'Session context not found')
         }
         writeJson(res, 200, {
@@ -1326,6 +1353,7 @@ export function startServer(
           typeof body.assistant_name === 'string' && body.assistant_name.trim()
             ? body.assistant_name.trim()
             : undefined
+
         const created = await runtime.createSession({
           cwd,
           dangerouslySkipPermissions,
@@ -1336,12 +1364,244 @@ export function startServer(
           runtime: runtimeOptions,
           assistantName,
         })
-        writeJson(res, 200, {
+
+        // Build response (always ACP protocol now)
+        const response: Record<string, unknown> = {
           session_id: created.sessionId,
           ws_url: buildWsUrl(server, config, created.sessionId),
           work_dir: created.cwd,
           runtime: created.runtime,
+          protocol: 'acp',
+        }
+
+        writeJson(res, 200, response)
+        return
+      }
+
+      // GET /api/v1/acp/backends - Get ACP backend list
+      // Note: This endpoint is deprecated since we no longer support external ACP backends
+      // All sessions now use cli-node.js with --acp flag
+      if (req.method === 'GET' && pathname === '/api/v1/acp/backends') {
+        writeJson(res, 200, { backends: [] })
+        return
+      }
+
+      // POST /api/v1/sessions/:sessionId/cancel - Cancel session operation
+      const cancelMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/cancel$/)
+      if (req.method === 'POST' && cancelMatch) {
+        authService.requireScope(auth, 'sessions:attach')
+        const sessionId = cancelMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        const body = await readJsonBody(req)
+        const force = body.force === true
+
+        // Send session/cancel to ACP agent
+        try {
+          await runtime.sendAcpRequest(sessionId, 'session/cancel', {
+            sessionId,
+            force,
+          })
+        } catch (error) {
+          // Log error but still return success (session may have already ended)
+          process.stderr.write(`[server] Failed to cancel session: ${errorMessage(error)}\n`)
+        }
+
+        writeJson(res, 200, { ok: true, result: 'cancelled', session })
+        return
+      }
+
+      // POST /api/v1/sessions/:sessionId/model - Switch model (ACP only)
+      const modelMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/model$/)
+      if (req.method === 'POST' && modelMatch) {
+        authService.requireScope(auth, 'sessions:attach')
+        const sessionId = modelMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        const body = await readJsonBody(req)
+        const modelId = typeof body.model_id === 'string' ? body.model_id : ''
+
+        // Send session/set_model to ACP agent
+        try {
+          await runtime.sendAcpRequest(sessionId, 'session/set_model', {
+            sessionId,
+            modelId,
+          })
+          // Update database record
+          runtime.store.updateSessionAcpConfig(sessionId, { acpModelId: modelId })
+        } catch (error) {
+          // Log error but still return success (agent may not support model switching)
+          process.stderr.write(`[server] Failed to set model: ${errorMessage(error)}\n`)
+        }
+
+        writeJson(res, 200, {
+          ok: true,
+          model_info: {
+            current_model_id: modelId,
+            can_switch: true,
+            available_models: [],
+          },
         })
+        return
+      }
+
+      // POST /api/v1/sessions/:sessionId/mode - Switch mode
+      const modeMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/mode$/)
+      if (req.method === 'POST' && modeMatch) {
+        authService.requireScope(auth, 'sessions:attach')
+        const sessionId = modeMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        const body = await readJsonBody(req)
+        const mode = typeof body.mode === 'string' ? body.mode : 'default'
+
+        // Send session/set_mode to ACP agent
+        try {
+          await runtime.sendAcpRequest(sessionId, 'session/set_mode', {
+            sessionId,
+            modeId: mode,
+          })
+          // Update database record
+          runtime.store.updateSessionAcpConfig(sessionId, { acpMode: mode })
+        } catch (error) {
+          // Log error but still return success
+          process.stderr.write(`[server] Failed to set mode: ${errorMessage(error)}\n`)
+        }
+
+        writeJson(res, 200, { ok: true, mode })
+        return
+      }
+
+      // GET /api/v1/sessions/:sessionId/model - Get model info
+      if (req.method === 'GET' && modelMatch) {
+        authService.requireScope(auth, 'sessions:attach')
+        const sessionId = modelMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        // Always ACP protocol now, so can_switch is always true
+        writeJson(res, 200, {
+          model_info: {
+            source: 'configOption',
+            current_model_id: session.acpModelId || null,
+            current_model_label: session.acpModelId || 'Default',
+            can_switch: true,
+            available_models: [],
+          },
+        })
+        return
+      }
+
+      // GET /api/v1/sessions/:sessionId/config-options - Get config options (ACP only)
+      const configOptionsMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/config-options$/)
+      if (req.method === 'GET' && configOptionsMatch) {
+        authService.requireScope(auth, 'sessions:attach')
+        const sessionId = configOptionsMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        // TODO: Fetch actual config options from ACP agent
+        writeJson(res, 200, {
+          config_options: [
+            {
+              id: 'model',
+              name: 'Model',
+              category: 'model',
+              type: 'select',
+              current_value: session.acpModelId || '',
+              options: [],
+            },
+            {
+              id: 'mode',
+              name: 'Mode',
+              category: 'mode',
+              type: 'select',
+              current_value: session.acpMode || 'default',
+              options: [
+                { value: 'default', label: 'Default' },
+                { value: 'yolo', label: 'YOLO' },
+                { value: 'bypassPermissions', label: 'Bypass Permissions' },
+              ],
+            },
+          ],
+        })
+        return
+      }
+
+      // PATCH /api/v1/sessions/:sessionId/config-options/:configId - Set config option (ACP only)
+      const configOptionPatchMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/config-options\/([^/]+)$/)
+      if (req.method === 'PATCH' && configOptionPatchMatch) {
+        authService.requireScope(auth, 'sessions:attach')
+        const sessionId = configOptionPatchMatch[1] || ''
+        const configId = configOptionPatchMatch[2] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        const body = await readJsonBody(req)
+        const value = typeof body.value === 'string' ? body.value : ''
+
+        // Send session/set_config_option to ACP agent
+        try {
+          const result = await runtime.sendAcpRequest(sessionId, 'session/set_config_option', {
+            sessionId,
+            configId,
+            value,
+          }) as { configOptions?: Array<{ id: string; currentValue?: string }> }
+
+          // Update database record based on configId
+          if (configId === 'mode') {
+            runtime.store.updateSessionAcpConfig(sessionId, { acpMode: value })
+          } else if (configId === 'model') {
+            runtime.store.updateSessionAcpConfig(sessionId, { acpModelId: value })
+          }
+
+          writeJson(res, 200, {
+            ok: true,
+            config_id: configId,
+            value,
+            config_options: result?.configOptions || [],
+          })
+        } catch (error) {
+          process.stderr.write(`[server] Failed to set config option: ${errorMessage(error)}\n`)
+          writeJson(res, 200, {
+            ok: true,
+            config_id: configId,
+            value,
+          })
+        }
         return
       }
 
@@ -1384,25 +1644,194 @@ export function startServer(
         }
 
         const ready = await runtime.ensureSessionReady(sessionId)
-        wss.handleUpgrade(req, socket, head, ws => {
+
+        wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
             let buffer = ''
+            let msgIdCounter = 0
+            let sessionInitialized = false
+            const pendingAcpResponses = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>()
+            const nextMsgId = () => {
+              msgIdCounter++
+              return `msg-${msgIdCounter}-${Date.now()}`
+            }
+
             const sendToRunner = (payload: Record<string, unknown>) => {
               if (!runnerSocket.destroyed) {
                 runnerSocket.write(`${jsonStringify(payload)}\n`)
               }
             }
 
-            ws.on('message', data => {
+            // Send JSON-RPC to runner and optionally wait for response
+            const sendAcpRequest = (method: string, params?: unknown, waitForResponse = false): string | Promise<unknown> => {
+              const id = nextMsgId()
+              const request = {
+                jsonrpc: '2.0',
+                id,
+                method,
+                params,
+              }
+              sendToRunner({ type: 'stdin', data: `${jsonStringify(request)}\n` })
+
+              if (waitForResponse) {
+                return new Promise<unknown>((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    pendingAcpResponses.delete(id)
+                    reject(new Error(`ACP request ${id} timed out`))
+                  }, 10_000)
+                  pendingAcpResponses.set(id, {
+                    resolve: (result: unknown) => {
+                      clearTimeout(timeout)
+                      resolve(result)
+                    },
+                    reject,
+                  })
+                })
+              }
+              return id
+            }
+
+            const sendAcpNotification = (method: string, params?: unknown) => {
+              const notification = {
+                jsonrpc: '2.0',
+                method,
+                params,
+              }
+              sendToRunner({ type: 'stdin', data: `${jsonStringify(notification)}\n` })
+            }
+
+            // Initialize ACP session on connection
+            const initializeAcpSession = async () => {
+              try {
+                // Send initialize request
+                await sendAcpRequest('initialize', {}, true)
+
+                // Send session/new with the sessionId and cwd
+                const cwd = session.cwd
+                await sendAcpRequest('session/new', { sessionId, cwd }, true)
+
+                sessionInitialized = true
+              } catch (error) {
+                // Log error but don't fail the connection
+                process.stderr.write(`[server] ACP initialization failed: ${errorMessage(error)}\n`)
+              }
+            }
+
+            // Pending messages queue for during initialization
+            const pendingMessages: string[] = []
+            let initializationComplete = false
+
+            // Process pending messages after initialization
+            const processPendingMessages = () => {
+              for (const msg of pendingMessages) {
+                // Re-trigger message handling
+                ws.emit('message', Buffer.from(msg))
+              }
+              pendingMessages.length = 0
+            }
+
+            // Start initialization and then process pending messages
+            initializeAcpSession().then(() => {
+              initializationComplete = true
+              processPendingMessages()
+            }).catch(error => {
+              process.stderr.write(`[server] ACP initialization error: ${errorMessage(error)}\n`)
+              initializationComplete = true
+              processPendingMessages()
+            })
+
+            // Handle client messages - always ACP protocol
+            ws.on('message', (data: string | Buffer) => {
               const text =
                 typeof data === 'string'
                   ? data
                   : Buffer.from(data).toString('utf8')
-              sendToRunner({
-                type: 'stdin',
-                data: text.endsWith('\n') ? text : `${text}\n`,
-              })
+
+              // Queue messages during initialization
+              if (!initializationComplete) {
+                pendingMessages.push(text)
+                return
+              }
+
+              // ACP protocol: Parse client message and convert to JSON-RPC
+              try {
+                const clientMsg = jsonParse(text) as {
+                  type?: string
+                  content?: string
+                  images?: unknown[]
+                  request_id?: string
+                  option_id?: string
+                  force?: boolean
+                }
+
+                if (clientMsg.type === 'user_message') {
+                  // Convert to session/prompt with proper ACP format
+                  const promptContent: Array<Record<string, unknown>> = [
+                    { type: 'text', text: clientMsg.content || '' },
+                  ]
+                  // Add images if present (ACP format)
+                  if (clientMsg.images && Array.isArray(clientMsg.images)) {
+                    for (const img of clientMsg.images) {
+                      if (typeof img === 'object' && img !== null) {
+                        promptContent.push(img as Record<string, unknown>)
+                      }
+                    }
+                  }
+                  ;(sendAcpRequest('session/prompt', {
+                    sessionId,
+                    prompt: { content: promptContent },
+                  }, true) as Promise<unknown>).catch(error => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(jsonStringify({
+                        type: 'error',
+                        msg_id: nextMsgId(),
+                        data: {
+                          message: error instanceof Error ? error.message : 'Prompt failed',
+                        },
+                      }))
+                    }
+                  })
+                } else if (clientMsg.type === 'permission_response') {
+                  // Send JSON-RPC response for permission request
+                  if (clientMsg.request_id) {
+                    const optionId = clientMsg.option_id || ''
+                    const outcome = optionId.startsWith('reject') ? 'cancelled' : 'selected'
+                    sendToRunner({
+                      type: 'stdin',
+                      data: `${jsonStringify({
+                        jsonrpc: '2.0',
+                        id: clientMsg.request_id,
+                        result: {
+                          outcome: {
+                            outcome,
+                            optionId,
+                          },
+                        },
+                      })}\n`,
+                    })
+                  }
+                } else if (clientMsg.type === 'cancel') {
+                  // Send session/cancel as notification (no need to wait for response)
+                  sendAcpNotification('session/cancel', { sessionId, force: clientMsg.force })
+                } else if (clientMsg.type === 'interrupt') {
+                  // Send interrupt notification with sessionId
+                  sendAcpNotification('session/interrupt', { sessionId })
+                } else {
+                  // Fallback: send as stdin
+                  sendToRunner({
+                    type: 'stdin',
+                    data: text.endsWith('\n') ? text : `${text}\n`,
+                  })
+                }
+              } catch {
+                // Not valid JSON, send as stdin
+                sendToRunner({
+                  type: 'stdin',
+                  data: text.endsWith('\n') ? text : `${text}\n`,
+                })
+              }
             })
+
             ws.on('close', () => {
               runnerSocket.destroy()
             })
@@ -1410,8 +1839,9 @@ export function startServer(
               runnerSocket.destroy()
             })
 
-            runnerSocket.on('data', chunk => {
-              buffer += Buffer.from(chunk).toString('utf8')
+            // Handle runner output
+            runnerSocket.on('data', (chunk: Buffer) => {
+              buffer += chunk.toString('utf8')
               while (true) {
                 const idx = buffer.indexOf('\n')
                 if (idx < 0) {
@@ -1423,31 +1853,296 @@ export function startServer(
                   continue
                 }
 
-                let parsed: { type?: string; line?: string }
+                let parsed: { type?: string; line?: string; jsonrpc?: string; method?: string; params?: unknown; notification?: { jsonrpc: string; method: string; params?: unknown }; id?: string; result?: unknown; error?: { message?: string } }
                 try {
-                  parsed = jsonParse(line) as { type?: string; line?: string }
+                  parsed = jsonParse(line) as typeof parsed
                 } catch {
                   continue
                 }
 
-                if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
-                  if (ws.readyState === ws.OPEN) {
-                    ws.send(parsed.line)
+                // Check for ACP JSON-RPC (always ACP now)
+                if (parsed.jsonrpc === '2.0') {
+                  // ACP notification
+                  if (parsed.method && ws.readyState === WebSocket.OPEN) {
+                    // Convert ACP notification to client-friendly format
+                    const params = parsed.params as Record<string, unknown> | undefined
+                    const update = params?.update as Record<string, unknown> | undefined
+                    const msgId = nextMsgId()
+
+                    if (parsed.method === 'session/update' && update) {
+                      const sessionUpdate = update.sessionUpdate as string
+
+                      if (sessionUpdate === 'agent_message_chunk') {
+                        const content = update.content as Record<string, unknown>
+                        ws.send(jsonStringify({
+                          type: 'start',
+                          msg_id: msgId,
+                        }))
+                        ws.send(jsonStringify({
+                          type: 'content',
+                          msg_id: msgId,
+                          data: content.text || '',
+                        }))
+                      } else if (sessionUpdate === 'agent_thought_chunk') {
+                        const content = update.content as Record<string, unknown>
+                        ws.send(jsonStringify({
+                          type: 'thought',
+                          msg_id: msgId,
+                          data: content.text || '',
+                        }))
+                      } else if (sessionUpdate === 'tool_call') {
+                        ws.send(jsonStringify({
+                          type: 'tool_call',
+                          msg_id: msgId,
+                          data: {
+                            tool_name: update.title || update.kind || 'unknown',
+                            tool_use_id: update.toolCallId || '',
+                            input: update.rawInput || {},
+                            kind: update.kind || 'other',
+                            status: update.status || 'pending',
+                          },
+                        }))
+                      } else if (sessionUpdate === 'tool_call_update') {
+                        ws.send(jsonStringify({
+                          type: 'tool_call_update',
+                          msg_id: msgId,
+                          data: {
+                            tool_use_id: update.toolCallId || '',
+                            status: update.status || 'running',
+                            output: typeof update.rawOutput === 'string' ? update.rawOutput :
+                                    update.rawOutput ? jsonStringify(update.rawOutput) : '',
+                          },
+                        }))
+                      } else if (sessionUpdate === 'plan') {
+                        ws.send(jsonStringify({
+                          type: 'plan',
+                          msg_id: msgId,
+                          data: { entries: update.entries || [] },
+                        }))
+                      } else if (sessionUpdate === 'permission_request') {
+                        const toolCall = update.toolCall as Record<string, unknown> | undefined
+                        const options = update.options as Array<Record<string, unknown>> | undefined
+                        const requestId = update.requestId as string | undefined
+                        ws.send(jsonStringify({
+                          type: 'permission_request',
+                          request_id: requestId || msgId,
+                          data: {
+                            tool_name: toolCall?.title || '',
+                            tool_use_id: toolCall?.toolCallId || '',
+                            description: toolCall?.title || '',
+                            input: toolCall?.rawInput || {},
+                            options: (options || []).map(o => ({
+                              id: o.optionId as string || '',
+                              name: o.name as string || '',
+                            })),
+                          },
+                        }))
+                      } else if (sessionUpdate === 'config_option_update') {
+                        ws.send(jsonStringify({
+                          type: 'model_info',
+                          msg_id: msgId,
+                          data: update.configOptions || [],
+                        }))
+                      } else if (sessionUpdate === 'message_stopped') {
+                        ws.send(jsonStringify({
+                          type: 'finish',
+                          msg_id: msgId,
+                          stop_reason: update.stopReason,
+                        }))
+                      } else if (sessionUpdate === 'usage_update') {
+                        ws.send(jsonStringify({
+                          type: 'context_usage',
+                          msg_id: msgId,
+                          data: { used: update.used, size: update.size },
+                        }))
+                      } else if (sessionUpdate === 'error') {
+                        ws.send(jsonStringify({
+                          type: 'error',
+                          msg_id: msgId,
+                          data: {
+                            message: update.message || 'Unknown error',
+                            code: update.code || undefined,
+                          },
+                        }))
+                      }
+                    }
+                  }
+                  // ACP response (has id) - resolve pending request if applicable
+                  else if ('id' in parsed) {
+                    const responseId = String(parsed.id)
+                    const pending = pendingAcpResponses.get(responseId)
+                    if (pending) {
+                      pendingAcpResponses.delete(responseId)
+                      if (parsed.error) {
+                        pending.reject(new Error((parsed.error as { message?: string }).message || 'ACP error'))
+                      } else {
+                        pending.resolve(parsed.result)
+                      }
+                    }
+                    // Could also be permission response acknowledgment, forward to client if needed
                   }
                 }
-                if (parsed.type === 'exit') {
+                // ACP notification from daemon (always ACP now)
+                else if (parsed.type === 'acp_notification' && parsed.notification) {
+                  const notification = parsed.notification as { jsonrpc: string; id?: string | number; method: string; params?: unknown }
+                  // Handle agent→client permission requests (have both id and method)
+                  if (notification.id !== undefined && notification.method === 'session/request_permission' && ws.readyState === WebSocket.OPEN) {
+                    const params = notification.params as Record<string, unknown> | undefined
+                    const toolCall = params?.toolCall as Record<string, unknown> | undefined
+                    const options = params?.options as Array<Record<string, unknown>> | undefined
+                    // Use the ACP request id as the request_id so the response can be correlated
+                    const requestId = String(notification.id)
+                    ws.send(jsonStringify({
+                      type: 'permission_request',
+                      request_id: requestId,
+                      data: {
+                        tool_name: toolCall?.title || toolCall?.kind || 'unknown',
+                        tool_use_id: toolCall?.toolCallId || '',
+                        description: toolCall?.title || '',
+                        input: toolCall?.rawInput || {},
+                        options: (options || []).map(o => ({
+                          id: o.optionId as string || '',
+                          name: o.name as string || '',
+                        })),
+                      },
+                    }))
+                  } else if (notification.jsonrpc === '2.0' && notification.method === 'session/update' && ws.readyState === WebSocket.OPEN) {
+                    const params = notification.params as Record<string, unknown> | undefined
+                    const update = params?.update as Record<string, unknown> | undefined
+                    const msgId = nextMsgId()
+
+                    if (update) {
+                      const sessionUpdate = update.sessionUpdate as string
+                      // Same handling as above - all types
+                      if (sessionUpdate === 'agent_message_chunk') {
+                        const content = update.content as Record<string, unknown>
+                        ws.send(jsonStringify({
+                          type: 'start',
+                          msg_id: msgId,
+                        }))
+                        ws.send(jsonStringify({
+                          type: 'content',
+                          msg_id: msgId,
+                          data: content.text || '',
+                        }))
+                      } else if (sessionUpdate === 'agent_thought_chunk') {
+                        const content = update.content as Record<string, unknown>
+                        ws.send(jsonStringify({
+                          type: 'thought',
+                          msg_id: msgId,
+                          data: content.text || '',
+                        }))
+                      } else if (sessionUpdate === 'tool_call') {
+                        ws.send(jsonStringify({
+                          type: 'tool_call',
+                          msg_id: msgId,
+                          data: {
+                            tool_name: update.title || update.kind || 'unknown',
+                            tool_use_id: update.toolCallId || '',
+                            input: update.rawInput || {},
+                            kind: update.kind || 'other',
+                            status: update.status || 'pending',
+                          },
+                        }))
+                      } else if (sessionUpdate === 'tool_call_update') {
+                        ws.send(jsonStringify({
+                          type: 'tool_call_update',
+                          msg_id: msgId,
+                          data: {
+                            tool_use_id: update.toolCallId || '',
+                            status: update.status || 'running',
+                            output: typeof update.rawOutput === 'string' ? update.rawOutput :
+                                    update.rawOutput ? jsonStringify(update.rawOutput) : '',
+                          },
+                        }))
+                      } else if (sessionUpdate === 'permission_request') {
+                        const toolCall = update.toolCall as Record<string, unknown> | undefined
+                        const options = update.options as Array<Record<string, unknown>> | undefined
+                        const requestId = update.requestId as string | undefined
+                        ws.send(jsonStringify({
+                          type: 'permission_request',
+                          request_id: requestId || msgId,
+                          data: {
+                            tool_name: toolCall?.title || '',
+                            tool_use_id: toolCall?.toolCallId || '',
+                            description: toolCall?.title || '',
+                            input: toolCall?.rawInput || {},
+                            options: (options || []).map(o => ({
+                              id: o.optionId as string || '',
+                              name: o.name as string || '',
+                            })),
+                          },
+                        }))
+                      } else if (sessionUpdate === 'plan') {
+                        ws.send(jsonStringify({
+                          type: 'plan',
+                          msg_id: msgId,
+                          data: { entries: update.entries || [] },
+                        }))
+                      } else if (sessionUpdate === 'message_stopped') {
+                        ws.send(jsonStringify({
+                          type: 'finish',
+                          msg_id: msgId,
+                          stop_reason: update.stopReason,
+                        }))
+                      } else if (sessionUpdate === 'usage_update') {
+                        ws.send(jsonStringify({
+                          type: 'context_usage',
+                          msg_id: msgId,
+                          data: { used: update.used, size: update.size },
+                        }))
+                      } else if (sessionUpdate === 'error') {
+                        ws.send(jsonStringify({
+                          type: 'error',
+                          msg_id: msgId,
+                          data: {
+                            message: update.message || 'Unknown error',
+                            code: update.code || undefined,
+                          },
+                        }))
+                      }
+                    }
+                  }
+                }
+                // stdout from daemon (non-JSON lines)
+                else if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
+                  // Check if this is an ACP response
+                  try {
+                    const acpParsed = jsonParse(parsed.line) as { jsonrpc?: string; id?: string; result?: unknown; error?: { message?: string } }
+                    if (acpParsed.jsonrpc === '2.0' && acpParsed.id) {
+                      const pending = pendingAcpResponses.get(acpParsed.id)
+                      if (pending) {
+                        pendingAcpResponses.delete(acpParsed.id)
+                        if (acpParsed.error) {
+                          pending.reject(new Error(acpParsed.error.message || 'ACP error'))
+                        } else {
+                          pending.resolve(acpParsed.result)
+                        }
+                      }
+                    } else if (ws.readyState === WebSocket.OPEN) {
+                      // Not an ACP response, forward to client
+                      ws.send(parsed.line)
+                    }
+                  } catch {
+                    // Not valid JSON, forward to client
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(parsed.line)
+                    }
+                  }
+                }
+                else if (parsed.type === 'exit') {
                   ws.close()
                 }
               }
             })
 
             runnerSocket.on('close', () => {
-              if (ws.readyState === ws.OPEN) {
+              if (ws.readyState === WebSocket.OPEN) {
                 ws.close()
               }
             })
             runnerSocket.on('error', () => {
-              if (ws.readyState === ws.OPEN) {
+              if (ws.readyState === WebSocket.OPEN) {
                 ws.close()
               }
             })

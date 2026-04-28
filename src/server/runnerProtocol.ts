@@ -18,6 +18,8 @@ export type RunnerServerMessage =
       sessionId: string
       runtimeType: 'host' | 'docker'
       state: string
+      // Always ACP protocol now
+      protocol: 'acp'
     }
   | {
       type: 'stdout'
@@ -43,4 +45,14 @@ export type RunnerServerMessage =
   | {
       type: 'error'
       message: string
+    }
+  | {
+      // ACP notification or request from agent
+      type: 'acp_notification'
+      notification: {
+        jsonrpc: '2.0'
+        id?: string | number
+        method: string
+        params?: unknown
+      }
     }
