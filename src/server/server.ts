@@ -84,6 +84,12 @@ import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
 import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_TENANT_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
+import {
+  getUserModelPreference,
+  setUserModelPreference,
+  initUserModelPreferenceStore,
+} from './userModelPreference.js'
+import { getAvailableModels, getCacheStatus, refreshModelCache } from './modelListCache.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -693,6 +699,9 @@ export function startServer(
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir)
   const documentStore = new DocumentStore(runtime.store)
+
+  // Initialize user model preference store with the database
+  initUserModelPreferenceStore(runtime.store.db)
 
   // Document Center v2: seed builtin system assistants (wiki-builder etc.)
   // from the repo into $MOSS_HOME/assistants/system/ if not already present.
@@ -2070,6 +2079,81 @@ export function startServer(
           sessions: runtime.store
             .listUserSessions(auth.orgId, userId)
             .map(session => serializeSession(session)),
+        })
+        return
+      }
+
+      // User model preference endpoints
+      const userModelMatch = pathname.match(/^\/api\/v1\/users\/([^/]+)\/model$/)
+      if (userModelMatch) {
+        // Replace 'me' with actual user ID
+        let userId = userModelMatch[1] || ''
+        if (userId === 'me') {
+          userId = auth.userId
+        }
+        // Users can only get/set their own preference unless they have admin scope
+        if (userId !== auth.userId && !hasScope(auth.scopes, 'admin:users')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+
+        if (req.method === 'GET') {
+          const preference = getUserModelPreference(userId)
+          const systemSettings = getSystemSettings()
+          console.log(`[ModelPreference] GET /api/v1/users/${userId}/model - userPref: ${JSON.stringify(preference)}, systemDefault: ${systemSettings.model}`)
+          writeJson(res, 200, {
+            success: true,
+            data: preference,
+            // Include system default model for frontend to display when user has no preference
+            systemDefaultModel: systemSettings.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview',
+          })
+          return
+        }
+
+        if (req.method === 'PUT') {
+          const body = await readJsonBody(req)
+          const modelId = typeof body.modelId === 'string' ? body.modelId : ''
+          console.log(`[ModelPreference] PUT /api/v1/users/${userId}/model - modelId: ${modelId}`)
+          if (!modelId) {
+            throw new HttpError(400, 'modelId is required')
+          }
+          setUserModelPreference(userId, modelId)
+          console.log(`[ModelPreference] Saved preference for user ${userId}: ${modelId}`)
+          writeJson(res, 200, {
+            success: true,
+            data: { modelId, updatedAt: Date.now() },
+          })
+          return
+        }
+      }
+
+      // Available models endpoint
+      if (req.method === 'GET' && pathname === '/api/v1/models/available') {
+        const models = await getAvailableModels()
+        writeJson(res, 200, {
+          success: true,
+          data: models,
+        })
+        return
+      }
+
+      // Model cache status endpoint (admin only)
+      if (req.method === 'GET' && pathname === '/api/v1/models/cache-status') {
+        authService.requireScope(auth, 'admin:settings')
+        const status = getCacheStatus()
+        writeJson(res, 200, {
+          success: true,
+          data: status,
+        })
+        return
+      }
+
+      // Model cache refresh endpoint (admin only)
+      if (req.method === 'POST' && pathname === '/api/v1/models/refresh-cache') {
+        authService.requireScope(auth, 'admin:settings')
+        const models = await refreshModelCache()
+        writeJson(res, 200, {
+          success: true,
+          data: models,
         })
         return
       }
@@ -3544,7 +3628,10 @@ export function startServer(
             let buffer = ''
             const sendToRunner = (payload: Record<string, unknown>) => {
               if (!runnerSocket.destroyed) {
+                process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
                 runnerSocket.write(`${jsonStringify(payload)}\n`)
+              } else {
+                process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
               }
             }
 
@@ -3553,6 +3640,7 @@ export function startServer(
                 typeof data === 'string'
                   ? data
                   : Buffer.from(data).toString('utf8')
+              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
               sendToRunner({
                 type: 'stdin',
                 data: text.endsWith('\n') ? text : `${text}\n`,

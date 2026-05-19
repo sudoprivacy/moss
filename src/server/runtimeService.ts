@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
-import { mkdir, readFile, writeFile } from 'fs/promises'
+import { mkdir, readFile, writeFile, open } from 'fs/promises'
 import net from 'net'
 import os from 'os'
 import { dirname, join } from 'path'
@@ -28,6 +28,7 @@ import {
 } from './runtimePaths.js'
 import { errorMessage } from '../utils/errors.js'
 import { getSystemSettings } from './systemSettings.js'
+import { getUserModelPreference } from './userModelPreference.js'
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -533,8 +534,24 @@ export class RuntimeService {
 
     // Build environment for runner from system settings
     const systemSettings = getSystemSettings()
+
+    // Get user model preference in main process (runner doesn't have DB access)
+    // Model priority: user preference > system settings > default
+    const userModelPref = session.userId ? getUserModelPreference(session.userId) : null
+    const defaultModel = userModelPref?.modelId
+      || systemSettings.model
+      || process.env.MOSS_DEFAULT_MODEL
+      || 'gemini-3-flash-preview'
+
+    process.stderr.write(`[RuntimeService] Model selection for session ${session.sessionId}:\n`)
+    process.stderr.write(`  - userId: ${session.userId}\n`)
+    process.stderr.write(`  - userModelPref: ${JSON.stringify(userModelPref)}\n`)
+    process.stderr.write(`  - systemSettings.model: ${systemSettings.model || 'undefined'}\n`)
+    process.stderr.write(`  - defaultModel: ${defaultModel}\n`)
+
     const runnerEnv: Record<string, string> = {
       ...process.env as Record<string, string>,
+      MOSS_DEFAULT_MODEL: defaultModel,
     }
     // Pass settings.json env vars to runner
     if (systemSettings.url) {
@@ -550,9 +567,14 @@ export class RuntimeService {
     const runnerPath = resolveRunnerPath()
     const cwd = (existsSync(session.cwd) ? session.cwd : process.cwd())
     const safeCwd = cwd === '/' ? os.homedir() : cwd
+
+    // Open log files for runner output
+    const stdoutFd = await open(stdoutLogPath, 'a')
+    const stderrFd = await open(stderrLogPath, 'a')
+
     const child = spawn(process.execPath, [runnerPath, manifestPath], {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', stdoutFd, stderrFd],
       cwd: session.cwd,
       env: runnerEnv,
     })

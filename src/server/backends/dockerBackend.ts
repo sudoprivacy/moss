@@ -18,6 +18,7 @@ import {
   createSkillSymlinks,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { buildAllModelsConfig } from '../modelListCache.js'
 
 type DockerBackendDefaults = {
   image?: string
@@ -120,12 +121,17 @@ export class DockerBackend implements SessionBackend {
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      const modelName = runtime?.model || env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview'
-      let scodeModelName = modelName
+      // Use model from env (which includes user preference), or fallback
+      // env.MOSS_DEFAULT_MODEL has priority: user preference > system settings > default
+      const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
+      let scodeModelName = model
       if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
         scodeModelName = `proxy/${scodeModelName}`
       }
-      const wireModel = modelName.includes('/') ? modelName.split('/')[1] : modelName
+
+      // Preload all available models from sudorouter API
+      // This allows dynamic model switching without modifying sudocode.json
+      const allModels = await buildAllModelsConfig(baseUrl)
 
       const scodeConfig = {
         auth_modes: {
@@ -136,22 +142,10 @@ export class DockerBackend implements SessionBackend {
             }
           }
         },
-        models: {
-          [scodeModelName]: {
-            alias: scodeModelName,
-            name: `Moss Dynamic: ${scodeModelName}`,
-            input: ["text"],
-            providers: {
-              proxy: {
-                provider: "moss-proxy",
-                model: wireModel,
-                api: "openai-completions"
-              }
-            }
-          }
-        }
+        models: allModels  // Preload all available models
       }
       writeFileSync(dummySudocodePath, JSON.stringify(scodeConfig, null, 2), 'utf8')
+      process.stderr.write(`[DockerBackend] Preloaded ${Object.keys(allModels).length} models into sudocode.json\n`)
     } catch (e) {
       process.stderr.write(`[DockerBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
@@ -164,10 +158,12 @@ export class DockerBackend implements SessionBackend {
       MOSS_HOME,
     ]).filter(p => p !== '/')
 
-    let model = runtime?.model || env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview'
+    // Use model from env (which includes user preference), or fallback
+    let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
     if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
       model = `proxy/${model}`
     }
+    console.log(`[DockerBackend] Model for session ${options.sessionId}: ${model} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})`)
 
     const args = ['run', '--rm', '-i', '--name', containerName]
     // Add security options to allow Tokio runtime to spawn threads

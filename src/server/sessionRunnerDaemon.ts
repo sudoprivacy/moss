@@ -307,6 +307,7 @@ export class SessionRunnerDaemon {
   }
 
   #handleClientLine(socket: SocketWithBuffer, line: string): void {
+    process.stderr.write(`[SessionRunnerDaemon] Received client line: ${line.slice(0, 200)}...\n`)
     if (!line.trim()) return
     let parsed: RunnerClientMessage
     try {
@@ -315,6 +316,7 @@ export class SessionRunnerDaemon {
       this.#send(socket, { type: 'error', message: 'invalid_json' })
       return
     }
+    process.stderr.write(`[SessionRunnerDaemon] Parsed message type: ${parsed.type}\n`)
     if (parsed.type === 'ping') {
       this.#send(socket, { type: 'pong', ts: Date.now() })
       return

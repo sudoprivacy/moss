@@ -49,6 +49,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let lastPersistedUuid: string | null = null
   let isHandshakeComplete = false
   let currentTurnAssistantUuid: string | null = null
+  let currentModel = model  // Track current model for dynamic switching
+
+  // Pending RPC requests waiting for response
+  const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
 
   // 新增：首次消息标记
   let isFirstMessage = true
@@ -69,6 +73,24 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
     child.stdin!.write(raw)
+  }
+
+  // Send RPC and wait for response (for model switching)
+  const sendRpcAndWait = (method: string, params: any, customId?: string, timeoutMs = 30000): Promise<any> => {
+    const id = customId || `m-${rpcId++}`
+    const msg = { jsonrpc: '2.0', id, method, params }
+    const raw = JSON.stringify(msg) + '\n'
+    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
+    child.stdin!.write(raw)
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        pendingRpcRequests.delete(id)
+        reject(new Error(`RPC ${method} timed out after ${timeoutMs / 1000}s`))
+      }, timeoutMs)
+
+      pendingRpcRequests.set(id, { resolve, reject, timeoutId })
+    })
   }
 
   const emitStdout = (line: string) => {
@@ -215,6 +237,24 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           process.stderr.write(`[AcpBridge] Handshake complete, flushing buffers (Stdout: ${pendingStdout.length}, Stdin: ${pendingStdin.length})\n`)
           flushStdout()
           flushPending()
+          continue
+        }
+
+        // Handle session/setModel response
+        if (parsed.id === 'm-set-model') {
+          process.stderr.write(`[AcpBridge] session/setModel response: ${JSON.stringify(parsed)}\n`)
+          const pending = pendingRpcRequests.get('m-set-model')
+          if (pending) {
+            clearTimeout(pending.timeoutId)
+            pendingRpcRequests.delete('m-set-model')
+            if (parsed.error) {
+              process.stderr.write(`[AcpBridge] Model switch failed: ${JSON.stringify(parsed.error)}\n`)
+              pending.reject(new Error(parsed.error.message || JSON.stringify(parsed.error)))
+            } else {
+              process.stderr.write(`[AcpBridge] Model switch succeeded\n`)
+              pending.resolve(parsed.result)
+            }
+          }
           continue
         }
 
@@ -375,6 +415,65 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       if (child.stdin?.destroyed) {
         process.stderr.write(`[AcpBridge] writeStdin: stdin destroyed, ignoring\n`)
         return
+      }
+
+      // Handle control_request for model switching (async)
+      try {
+        const parsed = JSON.parse(data)
+        process.stderr.write(`[AcpBridge] Received control_request: ${JSON.stringify(parsed)}\n`)
+        if (parsed.type === 'control_request' && parsed.request?.subtype === 'set_model') {
+          const modelId = parsed.request.model_id
+          if (!modelId) {
+            process.stderr.write(`[AcpBridge] set_model request missing model_id\n`)
+            return
+          }
+
+          // Build scode model name with proxy/ prefix if needed
+          let scodeModelName = modelId
+          if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
+            scodeModelName = `proxy/${scodeModelName}`
+          }
+
+          process.stderr.write(`[AcpBridge] Model switch requested: ${scodeModelName}, acpSessionId: ${acpSessionId}\n`)
+
+          // Send ACP SetSessionModelRequest and wait for response
+          // Use async handling to ensure model switch completes before next message
+          // Note: method name is "session/set_model" (underscore), not "session/setModel" (camelCase)
+          sendRpcAndWait('session/set_model', {
+            sessionId: acpSessionId,
+            modelId: scodeModelName,
+          }, 'm-set-model', 30000)
+            .then((result) => {
+              process.stderr.write(`[AcpBridge] Model switch completed: ${JSON.stringify(result)}\n`)
+              // Update current model tracking
+              currentModel = scodeModelName
+
+              // Emit model_changed event to notify frontend
+              const modelChangedEvent = JSON.stringify({
+                type: 'system',
+                subtype: 'model_changed',
+                session_id: sessionId,
+                model: scodeModelName,
+              })
+              process.stderr.write(`[AcpBridge] Emitting model_changed event: ${modelChangedEvent}\n`)
+              emitStdout(modelChangedEvent + '\n')
+            })
+            .catch((error) => {
+              process.stderr.write(`[AcpBridge] Model switch failed: ${error.message}\n`)
+              // Still emit model_changed event for UI consistency (model preference is saved)
+              const modelChangedEvent = JSON.stringify({
+                type: 'system',
+                subtype: 'model_changed',
+                session_id: sessionId,
+                model: scodeModelName,
+              })
+              emitStdout(modelChangedEvent + '\n')
+            })
+
+          return
+        }
+      } catch {
+        // Not a JSON message or not a control_request, continue with normal processing
       }
 
       if (!acpSessionId) {

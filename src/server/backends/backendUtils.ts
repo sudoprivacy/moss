@@ -16,6 +16,7 @@ import type {
   SessionRuntimeInfo,
 } from '../sessionManager.js'
 import { getSystemSettings } from '../systemSettings.js'
+import { getUserModelPreference } from '../userModelPreference.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -67,6 +68,24 @@ export function buildSessionEnv(
       || (settings as { serverUrl?: string }).serverUrl
       || ''
 
+  // Get user model preference if available
+  // Model priority: user preference > system settings > default
+  // NOTE: In session runner process, userPref is null (no DB access)
+  // The main process passes user preference via MOSS_DEFAULT_MODEL env var
+  // So we prioritize process.env.MOSS_DEFAULT_MODEL over settings.model
+  const userPref = options.userId ? getUserModelPreference(options.userId) : null
+  const defaultModel = userPref?.modelId
+    || process.env.MOSS_DEFAULT_MODEL  // From main process (includes user preference)
+    || settings.model
+    || 'gemini-3-flash-preview'
+
+  process.stderr.write(`\n[buildSessionEnv] Model selection for session ${options.sessionId}:\n`)
+  process.stderr.write(`  - userId: ${options.userId || 'undefined'}\n`)
+  process.stderr.write(`  - userPref: ${JSON.stringify(userPref)}\n`)
+  process.stderr.write(`  - settings.model: ${settings.model || 'undefined'}\n`)
+  process.stderr.write(`  - MOSS_DEFAULT_MODEL env: ${process.env.MOSS_DEFAULT_MODEL || 'undefined'}\n`)
+  process.stderr.write(`  - selected defaultModel: ${defaultModel}\n`)
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     MOSS_HOME,
@@ -87,7 +106,7 @@ export function buildSessionEnv(
       ? { MOSS_ASSISTANT_NAME: options.assistantName }
       : {}),
     ...(inferredServerUrl ? { MOSS_SERVER_URL: inferredServerUrl } : {}),
-    MOSS_DEFAULT_MODEL: settings.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview',
+    MOSS_DEFAULT_MODEL: defaultModel,
     ...Object.fromEntries(
       Object.entries(overrides).filter(([, value]) => value !== undefined),
     ),

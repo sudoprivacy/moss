@@ -11,6 +11,7 @@ import {
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { syncWorkspaceSkills } from '../../utils/scodeBridge.js'
+import { buildAllModelsConfig } from '../modelListCache.js'
 import type {
   BackendHandle,
   BackendSpawnOptions,
@@ -50,16 +51,26 @@ export class ScodeBackend implements SessionBackend {
       ...(options.sessionToken ? { SESSION_TOKEN: options.sessionToken } : {}),
     })
 
+    process.stderr.write(`\n[ScodeBackend] Session ${options.sessionId} - buildSessionEnv completed:\n`)
+    process.stderr.write(`  - options.userId: ${options.userId}\n`)
+    process.stderr.write(`  - env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL}\n`)
+    process.stderr.write(`  - options.runtime?.model: ${options.runtime?.model || 'undefined'}\n`)
+
     const dummySudocodePath = join(dotNexusDir, 'sudocode.json')
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      const modelName = options.runtime?.model || env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview'
-      let scodeModelName = modelName
+      // Use model from env (which includes user preference), or fallback
+      // env.MOSS_DEFAULT_MODEL has priority: user preference > system settings > default
+      const model = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
+      let scodeModelName = model
       if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
         scodeModelName = `proxy/${scodeModelName}`
       }
-      const wireModel = modelName.includes('/') ? modelName.split('/')[1] : modelName
+
+      // Preload all available models from sudorouter API
+      // This allows dynamic model switching without modifying sudocode.json
+      const allModels = await buildAllModelsConfig(baseUrl)
 
       const scodeConfig = {
         auth_modes: {
@@ -70,31 +81,21 @@ export class ScodeBackend implements SessionBackend {
             }
           }
         },
-        models: {
-          [scodeModelName]: {
-            alias: scodeModelName,
-            name: `Moss Dynamic: ${scodeModelName}`,
-            input: ["text"],
-            providers: {
-              proxy: {
-                provider: "moss-proxy",
-                model: wireModel,
-                api: "openai-completions"
-              }
-            }
-          }
-        }
+        models: allModels  // Preload all available models
       }
       writeFileSync(dummySudocodePath, JSON.stringify(scodeConfig, null, 2), 'utf8')
+      process.stderr.write(`[ScodeBackend] Preloaded ${Object.keys(allModels).length} models into sudocode.json\n`)
     } catch (e) {
       process.stderr.write(`[ScodeBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
 
-    const model = options.runtime?.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview'
+    // Use model from env (which includes user preference), or fallback
+    const model = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
     let scodeModel = model
     if (!scodeModel.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModel)) {
       scodeModel = `proxy/${scodeModel}`
     }
+    process.stderr.write(`[ScodeBackend] Model for session ${options.sessionId}: ${scodeModel} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})\n`)
 
     // 同步技能到工作空间目录（新方案）
     // 在工作空间的 .nexus/sudocode/skills/ 目录创建符号链接
