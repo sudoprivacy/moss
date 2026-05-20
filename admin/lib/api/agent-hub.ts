@@ -243,6 +243,8 @@ export interface TenantAssistantInfo {
   name: string
   display_name?: string
   description?: string
+  avatar?: string
+  emoji?: string
   version?: string
   author_id: string
   author_name?: string
@@ -250,7 +252,9 @@ export interface TenantAssistantInfo {
   source_url?: string
   checksum?: string
   file_path?: string
+  skills?: string[]
   enabled_skills?: string[]
+  enabled_wikis?: string[]
   memory_mode?: 'session' | 'user'
   agent_type?: 'chat' | 'workflow'
   publish_note?: string
@@ -259,6 +263,14 @@ export interface TenantAssistantInfo {
   reviewed_at?: number
   enabled: number
   visible_to?: VisibleTo | null
+  workflow?: {
+    trigger?: 'cron' | 'webhook' | 'manual'
+    cron?: string
+    webhook_path?: string
+    output_webhook?: string
+    timeout_minutes?: number
+    output_targets?: string[]
+  } | null
   created_at: number
   updated_at: number
 }
