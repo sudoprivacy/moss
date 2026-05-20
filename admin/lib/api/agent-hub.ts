@@ -291,11 +291,44 @@ export function approveTenantAssistant(
   )
 }
 
+export interface CreateTenantAssistantRequest {
+  name: string
+  display_name: string
+  description?: string
+  avatar?: string
+  emoji?: string
+  skills?: string[]
+  enabled_skills?: string[]
+  enabled_wikis?: string[]
+  agent_type?: 'chat' | 'workflow'
+  memory_mode?: 'session' | 'user'
+  visible_to?: VisibleTo | null
+  workflow?: TenantAssistantInfo['workflow']
+}
+
+export function createTenantAssistant(
+  data: CreateTenantAssistantRequest,
+): Promise<{ success: boolean; data: TenantAssistantInfo }> {
+  return authClient.post<{ success: boolean; data: TenantAssistantInfo }>(
+    '/api/v1/agents/tenant/create',
+    data,
+  )
+}
+
 export function updateTenantAssistantMeta(params: {
   id: string
-  enabled?: boolean
+  display_name?: string
+  description?: string
+  avatar?: string
+  emoji?: string
+  agent_type?: 'chat' | 'workflow'
+  memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo | null
+  workflow?: TenantAssistantInfo['workflow']
+  enabled?: boolean
   enabledSkills?: string[]
+  enabledWikis?: string[]
+  skills?: string[]
 }): Promise<{ ok: boolean }> {
   return authClient.patch<{ ok: boolean }>(
     `/api/v1/agents/tenant/${encodeURIComponent(params.id)}`,
