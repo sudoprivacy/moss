@@ -1,5 +1,6 @@
 import {
   createHash } from 'crypto'
+import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -9,6 +10,7 @@ import {
   MOSS_SKILLS_CUSTOM_DIR,
   MOSS_SKILLS_HUB_DIR,
   MOSS_SKILLS_SYSTEM_DIR,
+  MOSS_SKILLS_TENANT_DIR,
   SKILL_HUB_META_FILE,
   USER_SKILLS_DIR,
 } from '../utils/skills/localSkillDirectories.js'
@@ -1092,5 +1094,93 @@ async function addDirectoryToZip(
       const content = await readFile(fullPath)
       zip.file(entryZipPath, content)
     }
+  }
+}
+
+export type ImportTenantSkillResult = {
+  skillName: string
+  id: string
+  status: string
+  version: string
+}
+
+export async function importTenantSkillArchive(
+  payload: ImportSkillArchivePayload & { userId: string; authorName?: string },
+): Promise<ImportTenantSkillResult> {
+  if (!payload.archiveBase64?.trim()) {
+    throw new Error('archiveBase64 is required')
+  }
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'moss-tenant-skill-import-'))
+  try {
+    await extractSkillZip(Buffer.from(payload.archiveBase64, 'base64'), tempDir)
+    return await installTenantSkillFromTemp(tempDir, payload.fileName, payload.userId, payload.authorName)
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+}
+
+export async function importTenantSkillDirectory(
+  payload: ImportSkillDirectoryPayload & { userId: string; authorName?: string },
+): Promise<ImportTenantSkillResult> {
+  if (!Array.isArray(payload.entries) || payload.entries.length === 0) {
+    throw new Error('entries is required')
+  }
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'moss-tenant-skill-import-'))
+  try {
+    await writeDirectoryEntries(tempDir, payload.entries)
+    return await installTenantSkillFromTemp(tempDir, undefined, payload.userId, payload.authorName)
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+}
+
+async function installTenantSkillFromTemp(
+  tempDir: string,
+  preferredName?: string,
+  userId?: string,
+  authorName?: string,
+): Promise<ImportTenantSkillResult> {
+  const skillDir = await findSkillDirWithSkillMd(tempDir)
+  if (!skillDir) {
+    throw new Error('未找到 SKILL.md，无法识别技能目录')
+  }
+
+  const frontmatter = await readSkillFrontmatter(skillDir)
+  if (!frontmatter) {
+    throw new Error('SKILL.md 读取失败')
+  }
+
+  const normalizedPreferredName = normalizeImportedSkillName(preferredName || '')
+  const skillName =
+    skillDir === tempDir && normalizedPreferredName
+      ? normalizedPreferredName
+      : path.basename(skillDir)
+
+  // Check if skill already exists in tenant directory
+  const existingTenantPath = path.join(MOSS_SKILLS_TENANT_DIR, skillName)
+  if (existsSync(existingTenantPath)) {
+    throw new Error(`专属技能已存在: ${skillName}`)
+  }
+
+  // Install to tenant directory
+  const targetDir = path.join(MOSS_SKILLS_TENANT_DIR, skillName)
+  await mkdir(MOSS_SKILLS_TENANT_DIR, { recursive: true })
+  await rm(targetDir, { recursive: true, force: true })
+  await copyDirectoryRecursive(skillDir, targetDir)
+
+  // Build metadata with source_type = 'tenant'
+  const meta = buildSkillMetaFromFrontmatter(skillName, frontmatter, {
+    source_type: 'tenant',
+    is_builtin: false,
+  })
+  await writeSkillMeta(targetDir, meta)
+
+  return {
+    skillName,
+    id: `tenant-skill-${Date.now()}`,
+    status: 'approved',
+    version: meta.installed_version || '1.0.0',
   }
 }

@@ -277,6 +277,25 @@ export function deleteTenantSkill(id: string): Promise<{ ok: boolean }> {
   )
 }
 
+export function uploadTenantSkillArchive(data: {
+  fileName: string
+  archiveBase64: string
+}): Promise<{ skillName: string; id: string; status: string; version: string }> {
+  return authClient.post<{ skillName: string; id: string; status: string; version: string }>(
+    '/api/v1/skills/tenant/upload',
+    data,
+  )
+}
+
+export function uploadTenantSkillDirectory(data: {
+  entries: ImportDirectoryEntry[]
+}): Promise<{ skillName: string; id: string; status: string; version: string }> {
+  return authClient.post<{ skillName: string; id: string; status: string; version: string }>(
+    '/api/v1/skills/tenant/upload',
+    data,
+  )
+}
+
 export function downloadSkill(skillId: string, type: 'installed' | 'tenant'): Promise<Blob> {
   const path = type === 'installed'
     ? `/api/v1/skills/installed/${encodeURIComponent(skillId)}/download`

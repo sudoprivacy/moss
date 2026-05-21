@@ -32,6 +32,8 @@ import {
   uninstallSkill,
   getSkillSyncStatus,
   getTenantSkills,
+  uploadTenantSkillArchive,
+  uploadTenantSkillDirectory,
   type TenantSkillInfo,
   type BatchSyncResult,
   type InstalledSkillInfo,
@@ -1218,19 +1220,31 @@ export default function SkillStorePage() {
       setImportingMode('zip')
       try {
         const archiveBase64 = await fileToBase64(file)
-        const result = await importSkillArchive({
-          fileName: file.name,
-          archiveBase64,
-        })
-        toast.success(`已导入技能 ${result.skillName}`)
-        await fetchInstalledList()
+
+        if (activeTab === 'exclusive') {
+          // Upload to tenant skills (auto-approved)
+          const result = await uploadTenantSkillArchive({
+            fileName: file.name,
+            archiveBase64,
+          })
+          toast.success(`已上传专属技能 ${result.skillName}`)
+          await fetchTenantSkills()
+        } else {
+          // Upload to custom skills
+          const result = await importSkillArchive({
+            fileName: file.name,
+            archiveBase64,
+          })
+          toast.success(`已导入技能 ${result.skillName}`)
+          await fetchInstalledList()
+        }
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : '导入技能失败')
+        toast.error(error instanceof Error ? error.message : '上传技能失败')
       } finally {
         setImportingMode(null)
       }
     },
-    [fetchInstalledList],
+    [activeTab, fetchInstalledList, fetchTenantSkills],
   )
 
   const handleImportDirectoryFiles = useCallback(
@@ -1250,16 +1264,25 @@ export default function SkillStorePage() {
             }
           }),
         )
-        const result = await importSkillDirectory({ entries })
-        toast.success(`已导入技能 ${result.skillName}`)
-        await fetchInstalledList()
+
+        if (activeTab === 'exclusive') {
+          // Upload to tenant skills (auto-approved)
+          const result = await uploadTenantSkillDirectory({ entries })
+          toast.success(`已上传专属技能 ${result.skillName}`)
+          await fetchTenantSkills()
+        } else {
+          // Upload to custom skills
+          const result = await importSkillDirectory({ entries })
+          toast.success(`已导入技能 ${result.skillName}`)
+          await fetchInstalledList()
+        }
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : '导入技能失败')
+        toast.error(error instanceof Error ? error.message : '上传技能失败')
       } finally {
         setImportingMode(null)
       }
     },
-    [fetchInstalledList],
+    [activeTab, fetchInstalledList, fetchTenantSkills],
   )
 
   const handleOpenVisibilityEdit = useCallback((skill: InstalledSkillInfo) => {
@@ -1599,7 +1622,7 @@ export default function SkillStorePage() {
                 </div>
               </div>
 
-              {activeTab === 'custom' ? (
+              {activeTab === 'exclusive' ? (
                 <Button onClick={() => setImportDialogOpen(true)}>
                   <Upload className="mr-2 size-4" />
                   上传技能
@@ -1607,7 +1630,7 @@ export default function SkillStorePage() {
               ) : null}
             </div>
 
-            {activeTab !== 'custom' ? (
+            {activeTab !== 'custom' && activeTab !== 'exclusive' ? (
               <div className="flex flex-wrap gap-2">
                 {[{ key: 'all', label: '全部' }, ...categories.map(item => ({ key: item, label: item }))].map(item => (
                   <button
@@ -2067,7 +2090,9 @@ export default function SkillStorePage() {
           <DialogHeader>
             <DialogTitle>上传技能</DialogTitle>
             <DialogDescription>
-              支持导入 ZIP 压缩包，或直接上传本地技能目录。
+              {activeTab === 'exclusive'
+                ? '上传技能到专属技能，自动审批通过后全员可见。支持 ZIP 压缩包或本地技能目录。'
+                : '支持导入 ZIP 压缩包，或直接上传本地技能目录。'}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">

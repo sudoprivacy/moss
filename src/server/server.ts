@@ -43,6 +43,8 @@ import {
   getHubInstalledSkills,
   importLocalSkillArchive,
   importLocalSkillDirectory,
+  importTenantSkillArchive,
+  importTenantSkillDirectory,
   installHubSkill,
   setInstalledSkillEnabled,
   setInstalledSkillMeta,
@@ -3496,6 +3498,75 @@ export function startServer(
           throw new HttpError(404, `Skill not found: ${skillId}`)
         }
         return
+      }
+
+      // POST /api/v1/skills/tenant/upload - Upload tenant skill (auto-approved)
+      if (req.method === 'POST' && pathname === '/api/v1/skills/tenant/upload') {
+        authService.requireScope(auth, 'admin:settings')
+        const body = await readJsonBody(req)
+
+        // Get author name from user info
+        const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const authorName = authorUser?.name || undefined
+
+        // Handle ZIP archive upload
+        if (typeof body.archiveBase64 === 'string' && body.archiveBase64) {
+          const result = await importTenantSkillArchive({
+            fileName: typeof body.fileName === 'string' ? body.fileName : '',
+            archiveBase64: body.archiveBase64,
+            userId: auth.userId,
+            authorName,
+          })
+
+          // Create tenant_skills record with approved status
+          runtime.store.createTenantSkill({
+            id: result.id,
+            name: result.skillName,
+            display_name: result.skillName,
+            version: result.version,
+            author_id: auth.userId,
+            author_name: authorName,
+            status: 'approved',
+            enabled: 1,
+          })
+
+          writeJson(res, 200, result)
+          return
+        }
+
+        // Handle directory upload
+        if (Array.isArray(body.entries) && body.entries.length > 0) {
+          const entries = body.entries
+            .filter(isJsonBody)
+            .map(entry => ({
+              path: typeof entry.path === 'string' ? entry.path : '',
+              contentBase64: typeof entry.contentBase64 === 'string' ? entry.contentBase64 : '',
+            }))
+            .filter(entry => entry.path && entry.contentBase64)
+
+          const result = await importTenantSkillDirectory({
+            entries,
+            userId: auth.userId,
+            authorName,
+          })
+
+          // Create tenant_skills record with approved status
+          runtime.store.createTenantSkill({
+            id: result.id,
+            name: result.skillName,
+            display_name: result.skillName,
+            version: result.version,
+            author_id: auth.userId,
+            author_name: authorName,
+            status: 'approved',
+            enabled: 1,
+          })
+
+          writeJson(res, 200, result)
+          return
+        }
+
+        throw new HttpError(400, 'Missing archiveBase64 or entries')
       }
 
       // POST /api/v1/skills/tenant/publish - Publish tenant skill request
