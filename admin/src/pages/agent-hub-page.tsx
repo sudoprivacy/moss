@@ -566,6 +566,24 @@ export default function AgentHubPage() {
   const [savingTenantVisibility, setSavingTenantVisibility] = useState(false)
   const [tenantAssistantDetail, setTenantAssistantDetail] = useState<TenantAssistantInfo | null>(null)
 
+  // Tenant assistant edit states
+  const [tenantEditOpen, setTenantEditOpen] = useState(false)
+  const [editingTenantAgent, setEditingTenantAgent] = useState<TenantAssistantInfo | null>(null)
+  const [tenantEditName, setTenantEditName] = useState('')
+  const [tenantEditDescription, setTenantEditDescription] = useState('')
+  const [tenantEditAvatar, setTenantEditAvatar] = useState('')
+  const [tenantEditEmoji, setTenantEditEmoji] = useState('')
+  const [tenantEditAgentType, setTenantEditAgentType] = useState<'chat' | 'workflow'>('chat')
+  const [tenantEditMemoryMode, setTenantEditMemoryMode] = useState<'session' | 'user'>('session')
+  const [tenantEditVisibilityMode, setTenantEditVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
+  const [tenantEditVisibleTo, setTenantEditVisibleTo] = useState<string[]>([])
+  const [tenantEditVisibleUserIds, setTenantEditVisibleUserIds] = useState<string[]>([])
+  const [tenantEditSkills, setTenantEditSkills] = useState<string[]>([])
+  const [tenantEditEnabledSkills, setTenantEditEnabledSkills] = useState<string[]>([])
+  const [tenantEditEnabledWikis, setTenantEditEnabledWikis] = useState<string[]>([])
+  const [tenantEditWorkflow, setTenantEditWorkflow] = useState<TenantAssistantInfo['workflow']>(null)
+  const [savingTenantEdit, setSavingTenantEdit] = useState(false)
+
   const requestIdRef = useRef(0)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
@@ -1350,6 +1368,58 @@ export default function AgentHubPage() {
       setEditTenantVisibleUserIds([])
     }
     setTenantVisibilityOpen(true)
+  }, [])
+
+  const openTenantEdit = useCallback((assistant: TenantAssistantInfo) => {
+    setEditingTenantAgent(assistant)
+    setTenantEditName(assistant.display_name || assistant.name)
+    setTenantEditDescription(assistant.description || '')
+    setTenantEditAvatar(assistant.avatar || '')
+    setTenantEditEmoji(assistant.emoji || '')
+    setTenantEditAgentType(assistant.agent_type || 'chat')
+    setTenantEditMemoryMode(assistant.memory_mode || 'session')
+    setTenantEditSkills(assistant.skills || [])
+    setTenantEditEnabledSkills(assistant.enabled_skills || [])
+    setTenantEditEnabledWikis(assistant.enabled_wikis || [])
+    setTenantEditWorkflow(assistant.workflow || null)
+
+    // Set visibility
+    const deptIds = assistant.visible_to?.department_ids
+    const userIds = assistant.visible_to?.user_ids
+
+    if (deptIds === null && userIds === null) {
+      setTenantEditVisibilityMode('all')
+    } else if ((deptIds?.length === 0 && (userIds === null || userIds?.length === 0)) ||
+               (userIds?.length === 0 && (deptIds === null || deptIds?.length === 0))) {
+      setTenantEditVisibilityMode('admin')
+    } else if (userIds !== null && userIds !== undefined && userIds.length > 0) {
+      setTenantEditVisibilityMode('users')
+    } else if (deptIds !== null && deptIds !== undefined && deptIds.length > 0) {
+      setTenantEditVisibilityMode('departments')
+    } else {
+      setTenantEditVisibilityMode('all')
+    }
+
+    setTenantEditVisibleTo(deptIds || [])
+    setTenantEditVisibleUserIds(userIds || [])
+
+    // Load available wikis
+    void (async () => {
+      try {
+        const { listWikis } = await import('@/lib/api/document-center')
+        const list = await listWikis()
+        setAvailableWikis(list.map(w => ({
+          id: w.id,
+          name: w.name,
+          description: w.description,
+          buildStatus: w.buildStatus,
+        })))
+      } catch {
+        setAvailableWikis([])
+      }
+    })()
+
+    setTenantEditOpen(true)
   }, [])
 
   const handleSaveTenantVisibility = useCallback(async () => {
