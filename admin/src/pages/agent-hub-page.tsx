@@ -1422,6 +1422,48 @@ export default function AgentHubPage() {
     setTenantEditOpen(true)
   }, [])
 
+  const handleSaveTenantEdit = useCallback(async () => {
+    if (!editingTenantAgent) return
+    setSavingTenantEdit(true)
+
+    try {
+      const visible_to = tenantEditVisibilityMode === 'all'
+        ? null
+        : tenantEditVisibilityMode === 'admin'
+          ? { department_ids: [], user_ids: [] }
+          : tenantEditVisibilityMode === 'departments'
+            ? { department_ids: tenantEditVisibleTo, user_ids: null }
+            : { department_ids: null, user_ids: tenantEditVisibleUserIds }
+
+      await updateTenantAssistantMeta({
+        id: editingTenantAgent.id,
+        display_name: tenantEditName,
+        description: tenantEditDescription,
+        avatar: tenantEditAvatar,
+        emoji: tenantEditEmoji,
+        agent_type: tenantEditAgentType,
+        memory_mode: tenantEditMemoryMode,
+        visible_to,
+        enabledSkills: tenantEditEnabledSkills,
+        enabledWikis: tenantEditEnabledWikis,
+        skills: tenantEditSkills,
+        workflow: tenantEditWorkflow,
+      })
+
+      toast.success('保存成功')
+      setTenantEditOpen(false)
+      setEditingTenantAgent(null)
+      await fetchTenantAssistants()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存失败')
+    } finally {
+      setSavingTenantEdit(false)
+    }
+  }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditEmoji,
+      tenantEditAgentType, tenantEditMemoryMode, tenantEditVisibilityMode, tenantEditVisibleTo,
+      tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditSkills,
+      tenantEditWorkflow, fetchTenantAssistants])
+
   const handleSaveTenantVisibility = useCallback(async () => {
     if (!editingTenantAssistant) return
     setSavingTenantVisibility(true)
@@ -3667,6 +3709,289 @@ export default function AgentHubPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setTenantAssistantDetail(null)}>
               关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 专属智能体编辑对话框 */}
+      <Dialog
+        open={tenantEditOpen}
+        onOpenChange={open => {
+          setTenantEditOpen(open)
+          if (!open) {
+            setEditingTenantAgent(null)
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>编辑专属智能体</DialogTitle>
+            <DialogDescription>
+              修改专属智能体的展示信息和配置。
+            </DialogDescription>
+          </DialogHeader>
+
+          <ScrollArea className="max-h-[65vh] pr-4">
+            <div className="space-y-5">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">显示名称</label>
+                <Input
+                  value={tenantEditName}
+                  onChange={event => setTenantEditName(event.target.value)}
+                  placeholder="输入智能体显示名称"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">头像地址</label>
+                <Input
+                  value={tenantEditAvatar}
+                  onChange={event => setTenantEditAvatar(event.target.value)}
+                  placeholder="https://..."
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Emoji</label>
+                <Input
+                  value={tenantEditEmoji}
+                  onChange={event => setTenantEditEmoji(event.target.value)}
+                  placeholder="🚀"
+                  className="w-32"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">描述</label>
+                <Textarea
+                  value={tenantEditDescription}
+                  onChange={event => setTenantEditDescription(event.target.value)}
+                  rows={4}
+                  placeholder="输入智能体描述"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">工作模式</label>
+                <Select value={tenantEditAgentType} onValueChange={value => setTenantEditAgentType(value as 'chat' | 'workflow')}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="chat">对话助手</SelectItem>
+                    <SelectItem value="workflow">业务流程</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {tenantEditAgentType === 'chat' ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">记忆模式</label>
+                  <Select value={tenantEditMemoryMode} onValueChange={value => setTenantEditMemoryMode(value as 'session' | 'user')}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="session">会话独立</SelectItem>
+                      <SelectItem value="user">跨会话共享</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    会话独立模式下每次对话互不影响；跨会话共享模式会保留用户历史记忆。
+                  </p>
+                </div>
+              ) : null}
+
+              {tenantEditAgentType === 'workflow' && tenantEditWorkflow ? (
+                <div className="space-y-4 rounded-lg border p-4">
+                  <div className="text-sm font-medium">工作流配置</div>
+                  {tenantEditWorkflow.trigger ? (
+                    <div className="space-y-1">
+                      <span className="text-xs text-muted-foreground">触发方式：</span>
+                      <span className="text-sm">
+                        {tenantEditWorkflow.trigger === 'manual' ? '手动' :
+                         tenantEditWorkflow.trigger === 'cron' ? '定时' : 'Webhook'}
+                      </span>
+                    </div>
+                  ) : null}
+                  {tenantEditWorkflow.cron ? (
+                    <div className="space-y-1">
+                      <span className="text-xs text-muted-foreground">Cron 表达式：</span>
+                      <code className="text-sm bg-muted px-1 rounded">{tenantEditWorkflow.cron}</code>
+                    </div>
+                  ) : null}
+                  {tenantEditWorkflow.webhook_path ? (
+                    <div className="space-y-1">
+                      <span className="text-xs text-muted-foreground">Webhook 路径：</span>
+                      <code className="text-sm bg-muted px-1 rounded">{tenantEditWorkflow.webhook_path}</code>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-sm font-medium">可见范围</label>
+                </div>
+                <RadioGroup
+                  value={tenantEditVisibilityMode}
+                  onValueChange={value => setTenantEditVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
+                >
+                  <div className="flex items-center gap-2">
+                    <RadioGroupItem value="all" />
+                    <label className="text-sm cursor-pointer">全员可见</label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <RadioGroupItem value="departments" />
+                    <label className="text-sm cursor-pointer">指定部门可见</label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <RadioGroupItem value="users" />
+                    <label className="text-sm cursor-pointer">指定人员可见</label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <RadioGroupItem value="admin" />
+                    <label className="text-sm cursor-pointer">仅管理员可见</label>
+                  </div>
+                </RadioGroup>
+                {tenantEditVisibilityMode === 'departments' ? (
+                  departmentOptions.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">暂无部门数据</p>
+                  ) : (
+                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-48 overflow-y-auto">
+                      {departmentOptions.map(dept => (
+                        <label
+                          key={dept.id}
+                          className="flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1"
+                        >
+                          <Checkbox
+                            checked={tenantEditVisibleTo.includes(dept.id)}
+                            onCheckedChange={checked => {
+                              setTenantEditVisibleTo(
+                                checked === true
+                                  ? [...tenantEditVisibleTo, dept.id]
+                                  : tenantEditVisibleTo.filter(id => id !== dept.id),
+                              )
+                            }}
+                          />
+                          <span>{'— '.repeat(dept.depth)}{dept.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )
+                ) : tenantEditVisibilityMode === 'users' ? (
+                  users.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">暂无用户数据</p>
+                  ) : (
+                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-48 overflow-y-auto">
+                      {users.map(user => (
+                        <label
+                          key={user.id}
+                          className="flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1"
+                        >
+                          <Checkbox
+                            checked={tenantEditVisibleUserIds.includes(user.id)}
+                            onCheckedChange={checked => {
+                              setTenantEditVisibleUserIds(
+                                checked === true
+                                  ? [...tenantEditVisibleUserIds, user.id]
+                                  : tenantEditVisibleUserIds.filter(id => id !== user.id),
+                              )
+                            }}
+                          />
+                          <span>{user.name || user.email}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )
+                ) : null}
+              </div>
+
+              <div className="space-y-2 pt-4 border-t">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium">关联 Wiki（来自文档中心）</div>
+                  <Badge variant="outline">{tenantEditEnabledWikis.length} / {availableWikis.length} 已关联</Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  勾选 Wiki 即可让该助手在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
+                </p>
+                {availableWikis.length === 0 ? (
+                  <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+                    暂无可用 Wiki。请先在「文档中心」上传文档并构建 Wiki。
+                  </div>
+                ) : (
+                  <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
+                    {availableWikis.map(wiki => {
+                      const isEnabled = tenantEditEnabledWikis.includes(wiki.id)
+                      const isBuilt = wiki.buildStatus === 'succeeded'
+                      const toggle = () => {
+                        setTenantEditEnabledWikis(prev =>
+                          prev.includes(wiki.id)
+                            ? prev.filter(id => id !== wiki.id)
+                            : Array.from(new Set([...prev, wiki.id])),
+                        )
+                      }
+                      return (
+                        <div
+                          key={wiki.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={toggle}
+                          onKeyDown={(e) => {
+                            if (e.key === ' ' || e.key === 'Enter') {
+                              e.preventDefault()
+                              toggle()
+                            }
+                          }}
+                          className={cn(
+                            'flex items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent cursor-pointer',
+                            !isBuilt && 'opacity-60',
+                          )}
+                        >
+                          <Checkbox
+                            checked={isEnabled}
+                            tabIndex={-1}
+                            aria-hidden="true"
+                            className="mt-0.5 pointer-events-none"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate">{wiki.name}</span>
+                              {!isBuilt && (
+                                <Badge variant="outline" className="text-xs">
+                                  {wiki.buildStatus === 'running' ? '构建中' : wiki.buildStatus === 'failed' ? '构建失败' : '未构建'}
+                                </Badge>
+                              )}
+                            </div>
+                            {wiki.description && (
+                              <p className="text-xs text-muted-foreground line-clamp-1">
+                                {wiki.description}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </ScrollArea>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTenantEditOpen(false)}>
+              取消
+            </Button>
+            <Button disabled={savingTenantEdit || !editingTenantAgent} onClick={() => void handleSaveTenantEdit()}>
+              {savingTenantEdit ? (
+                <>
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                  保存中
+                </>
+              ) : (
+                '保存'
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
