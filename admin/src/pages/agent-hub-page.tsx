@@ -1296,6 +1296,9 @@ export default function AgentHubPage() {
       setCreateVisibleUserIds([])
       setCreateWorkflowTrigger('manual')
       setCreateWorkflowCron('')
+      setCreateWorkflowWebhookPath('')
+      setCreateWorkflowOutputWebhook('')
+      setCreateWorkflowTimeout('')
       setCreateWorkflowOutputTargets([])
       setCreateSelectedSkills([])
       await fetchTenantAssistants()
@@ -3254,21 +3257,6 @@ export default function AgentHubPage() {
               ) : null}
             </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">
-                系统指令 <span className="text-destructive">*</span>
-              </label>
-              <Textarea
-                value={createRules}
-                onChange={event => setCreateRules(event.target.value)}
-                rows={8}
-                placeholder="输入智能体的系统指令（System Prompt），定义智能体的行为和角色..."
-              />
-              <p className="text-xs text-muted-foreground">
-                系统指令将写入 instructions.md 文件，作为智能体的核心行为定义
-              </p>
-            </div>
-
             <div className="space-y-3">
               <div>
                 <div className="text-sm font-medium">关联技能</div>
@@ -3328,7 +3316,7 @@ export default function AgentHubPage() {
               取消
             </Button>
             <Button
-              disabled={creatingAssistant || !createName.trim() || !createDisplayName.trim() || !createRules.trim()}
+              disabled={creatingAssistant || !createName.trim() || !createDisplayName.trim()}
               onClick={() => void handleCreate()}
             >
               {creatingAssistant ? (
