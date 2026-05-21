@@ -3072,7 +3072,25 @@ export function startServer(
         const tenantAssistantId = agentTenantPatchMatch[1] || ''
         const body = await readJsonBody(req)
 
-        const updates: { enabled?: number; visible_to?: string | null; enabled_skills?: string | null } = {}
+        const updates: Record<string, unknown> = {}
+        if (typeof body.display_name === 'string') {
+          updates.display_name = body.display_name
+        }
+        if (typeof body.description === 'string') {
+          updates.description = body.description
+        }
+        if (typeof body.avatar === 'string') {
+          updates.avatar = body.avatar
+        }
+        if (typeof body.emoji === 'string') {
+          updates.emoji = body.emoji
+        }
+        if (typeof body.agent_type === 'string') {
+          updates.agent_type = body.agent_type
+        }
+        if (typeof body.memory_mode === 'string') {
+          updates.memory_mode = body.memory_mode
+        }
         if (typeof body.enabled === 'boolean') {
           updates.enabled = body.enabled ? 1 : 0
         }
@@ -3082,10 +3100,19 @@ export function startServer(
         if (Array.isArray(body.enabledSkills)) {
           updates.enabled_skills = JSON.stringify(body.enabledSkills.filter((s: unknown) => typeof s === 'string'))
         }
+        if (Array.isArray(body.enabledWikis)) {
+          updates.enabled_wikis = JSON.stringify(body.enabledWikis.filter((s: unknown) => typeof s === 'string'))
+        }
+        if (Array.isArray(body.skills)) {
+          updates.skills = JSON.stringify(body.skills.filter((s: unknown) => typeof s === 'string'))
+        }
+        if (body.workflow !== undefined) {
+          updates.workflow = body.workflow ? JSON.stringify(body.workflow) : null
+        }
 
         runtime.store.updateTenantAssistantMeta(tenantAssistantId, updates)
 
-        // Sync enabled/visible_to/enabledSkills to file metadata
+        // Sync to file metadata if approved
         const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
         if (tenantAssistant && tenantAssistant.status === 'approved') {
           const assistantName = tenantAssistant.name as string
@@ -3095,15 +3122,18 @@ export function startServer(
           if (existsSync(assistantDir)) {
             const meta = await readAssistantMeta(assistantDir)
             if (meta) {
-              if (updates.enabled !== undefined) {
-                meta.enabled = updates.enabled === 1
-              }
-              if (body.visible_to !== undefined) {
-                meta.visible_to = body.visible_to as VisibleTo | null
-              }
-              if (body.enabledSkills !== undefined) {
-                meta.enabledSkills = body.enabledSkills as string[]
-              }
+              if (updates.display_name !== undefined) meta.display_name = updates.display_name as string
+              if (updates.description !== undefined) meta.description = updates.description as string
+              if (updates.avatar !== undefined) meta.avatar = updates.avatar as string
+              if (updates.emoji !== undefined) meta.emoji = updates.emoji as string
+              if (updates.agent_type !== undefined) meta.agent_type = updates.agent_type as 'chat' | 'workflow'
+              if (updates.memory_mode !== undefined) meta.memory_mode = updates.memory_mode as 'session' | 'user'
+              if (updates.enabled !== undefined) meta.enabled = updates.enabled === 1
+              if (body.visible_to !== undefined) meta.visible_to = body.visible_to as VisibleTo | null
+              if (body.enabledSkills !== undefined) meta.enabledSkills = body.enabledSkills as string[]
+              if (body.enabledWikis !== undefined) meta.enabledWikis = body.enabledWikis as string[]
+              if (body.skills !== undefined) meta.skills = body.skills as string[]
+              if (body.workflow !== undefined) meta.workflow = body.workflow as AssistantStoreMeta['workflow']
               await writeAssistantMeta(assistantDir, meta)
             }
           }
