@@ -112,8 +112,12 @@ export class NexusManager {
 
   private resolveBinary(): string | null {
     const paths = [
+      // 1. User-installed nexus in ~/.moss/nexus/bin/
       join(this.binDir, 'nexusd.exe'),
       join(this.binDir, 'nexusd'),
+      // 2. Bundled nexus in bin/nexus/ (relative to moss-server.mjs)
+      join(process.cwd(), 'bin', 'nexus', 'nexusd.exe'),
+      join(process.cwd(), 'bin', 'nexus', 'nexusd'),
     ]
     for (const p of paths) {
       if (existsSync(p)) return p

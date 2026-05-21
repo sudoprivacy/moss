@@ -81,6 +81,41 @@ jobs:
 
           echo "scode ready: $(ls -la bin/scode)"
 
+      # 2.5. 下载 Nexus
+      - name: Download Nexus
+        run: |
+          NEXUS_VERSION="0.9.43"
+          echo "Downloading Nexus $NEXUS_VERSION for linux-x64"
+
+          DOWNLOAD_URL="https://github.com/nexi-lab/nexus/releases/download/v${NEXUS_VERSION}/nexus-cluster-linux-x86_64.tar.gz"
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -L -o nexus.tar.gz "$DOWNLOAD_URL"
+
+          mkdir -p nexus-bin
+          tar -xzf nexus.tar.gz -C nexus-bin
+
+          # Find nexusd binary in extracted archive
+          NEXUSD=$(find nexus-bin -name "nexusd" -type f | head -1)
+          if [ -z "$NEXUSD" ]; then
+            echo "ERROR: nexusd not found in archive"
+            ls -la nexus-bin/
+            exit 1
+          fi
+
+          mkdir -p bin/nexus
+          cp "$NEXUSD" bin/nexus/nexusd
+          chmod +x bin/nexus/nexusd
+
+          # Copy _internal directory if exists (Python runtime)
+          INTERNAL_DIR=$(find nexus-bin -type d -name "_internal" | head -1)
+          if [ -n "$INTERNAL_DIR" ]; then
+            cp -r "$INTERNAL_DIR" bin/nexus/_internal
+            echo "Copied _internal directory"
+          fi
+
+          rm -rf nexus-bin nexus.tar.gz
+          echo "Nexus ready: $(ls -la bin/nexus/)"
+
       # 3. 构建 Docker 镜像
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
