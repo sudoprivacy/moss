@@ -57,6 +57,7 @@ import {
   uninstallAgent,
   updateInstalledAgentMeta,
   createCustomAssistant,
+  createTenantAssistant,
   getAgentSyncStatus,
   getTenantAssistants,
   approveTenantAssistant,
@@ -1145,76 +1146,6 @@ export default function AgentHubPage() {
     }
   }, [editAvatar, editDescription, editEmoji, editName, editAgentType, editMemoryMode, editVisibilityMode, editVisibleTo, editVisibleUserIds, editWorkflowTrigger, editWorkflowCron, editWorkflowWebhookPath, editWorkflowOutputWebhook, editWorkflowTimeout, editWorkflowOutputTargets, editEnabledSkills, editEnabledWikis, editSkills, editingAgent, fetchInstalledState])
 
-  const handleCreate = useCallback(async () => {
-    const name = createName.trim()
-    const displayName = createDisplayName.trim()
-    const rules = createRules.trim()
-
-    if (!name || !displayName) {
-      toast.error('名称和显示名称为必填项')
-      return
-    }
-
-    if (!rules) {
-      toast.error('系统指令为必填项')
-      return
-    }
-
-    setCreatingAssistant(true)
-    try {
-      await createCustomAssistant({
-        name,
-        displayName,
-        description: createDescription.trim() || undefined,
-        avatar: createAvatar.trim() || undefined,
-        emoji: createEmoji.trim() || undefined,
-        rules,
-        skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
-        agent_type: createAgentType,
-        memory_mode: createAgentType === 'chat' ? createMemoryMode : undefined,
-        visible_to: createVisibilityMode === 'admin'
-          ? { department_ids: [], user_ids: [] }
-          : createVisibilityMode === 'departments'
-            ? { department_ids: createVisibleTo.length > 0 ? createVisibleTo : null, user_ids: null }
-            : createVisibilityMode === 'users'
-              ? { department_ids: null, user_ids: createVisibleUserIds.length > 0 ? createVisibleUserIds : null }
-              : null,
-        workflow: createAgentType === 'workflow'
-          ? {
-              trigger: createWorkflowTrigger,
-              cron: createWorkflowTrigger === 'cron' ? createWorkflowCron.trim() || undefined : undefined,
-              webhook_path: createWorkflowTrigger === 'webhook' ? createWorkflowWebhookPath.trim() || undefined : undefined,
-              output_targets: createWorkflowOutputTargets.length > 0 ? createWorkflowOutputTargets : undefined,
-              output_webhook: createWorkflowOutputWebhook.trim() || undefined,
-              timeout_minutes: createWorkflowTimeout ? Number(createWorkflowTimeout) || undefined : undefined,
-            }
-          : null,
-      })
-      toast.success(`已创建智能体 ${displayName}`)
-      setCreateOpen(false)
-      setCreateName('')
-      setCreateDisplayName('')
-      setCreateDescription('')
-      setCreateAvatar('')
-      setCreateEmoji('')
-      setCreateRules('')
-      setCreateAgentType('chat')
-      setCreateMemoryMode('session')
-      setCreateVisibilityMode('all')
-      setCreateVisibleTo([])
-      setCreateVisibleUserIds([])
-      setCreateWorkflowTrigger('manual')
-      setCreateWorkflowCron('')
-      setCreateWorkflowOutputTargets([])
-      setCreateSelectedSkills([])
-      await fetchInstalledState(false)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '创建智能体失败')
-    } finally {
-      setCreatingAssistant(false)
-    }
-  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, fetchInstalledState])
-
   const handleConfirmUninstall = useCallback(async () => {
     if (!pendingUninstallAgent) {
       return
@@ -1306,6 +1237,74 @@ export default function AgentHubPage() {
       setTenantAssistantsLoading(false)
     }
   }, [])
+
+  const handleCreate = useCallback(async () => {
+    const name = createName.trim()
+    const displayName = createDisplayName.trim()
+
+    if (!name || !displayName) {
+      toast.error('名称和显示名称为必填项')
+      return
+    }
+
+    setCreatingAssistant(true)
+    try {
+      const visible_to = createVisibilityMode === 'admin'
+        ? { department_ids: [], user_ids: [] }
+        : createVisibilityMode === 'departments'
+          ? { department_ids: createVisibleTo.length > 0 ? createVisibleTo : null, user_ids: null }
+          : createVisibilityMode === 'users'
+            ? { department_ids: null, user_ids: createVisibleUserIds.length > 0 ? createVisibleUserIds : null }
+            : null
+
+      const workflow = createAgentType === 'workflow'
+        ? {
+            trigger: createWorkflowTrigger,
+            cron: createWorkflowTrigger === 'cron' ? createWorkflowCron.trim() || undefined : undefined,
+            webhook_path: createWorkflowTrigger === 'webhook' ? createWorkflowWebhookPath.trim() || undefined : undefined,
+            output_targets: createWorkflowOutputTargets.length > 0 ? createWorkflowOutputTargets : undefined,
+            output_webhook: createWorkflowOutputWebhook.trim() || undefined,
+            timeout_minutes: createWorkflowTimeout ? Number(createWorkflowTimeout) || undefined : undefined,
+          }
+        : null
+
+      await createTenantAssistant({
+        name,
+        display_name: displayName,
+        description: createDescription.trim() || undefined,
+        avatar: createAvatar.trim() || undefined,
+        emoji: createEmoji.trim() || undefined,
+        skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
+        enabled_skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
+        agent_type: createAgentType,
+        memory_mode: createAgentType === 'chat' ? createMemoryMode : undefined,
+        visible_to,
+        workflow,
+      })
+      toast.success(`已创建智能体 ${displayName}`)
+      setCreateOpen(false)
+      setCreateName('')
+      setCreateDisplayName('')
+      setCreateDescription('')
+      setCreateAvatar('')
+      setCreateEmoji('')
+      setCreateRules('')
+      setCreateAgentType('chat')
+      setCreateMemoryMode('session')
+      setCreateVisibilityMode('all')
+      setCreateVisibleTo([])
+      setCreateVisibleUserIds([])
+      setCreateWorkflowTrigger('manual')
+      setCreateWorkflowCron('')
+      setCreateWorkflowOutputTargets([])
+      setCreateSelectedSkills([])
+      await fetchTenantAssistants()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '创建智能体失败')
+    } finally {
+      setCreatingAssistant(false)
+    }
+  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, fetchTenantAssistants])
 
   const handleApproveTenantAssistant = useCallback(async (approved: boolean) => {
     if (!approvingAssistant) return
