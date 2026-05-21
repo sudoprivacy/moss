@@ -393,6 +393,24 @@ export class DirectConnectStore {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN agent_type TEXT DEFAULT 'chat'`)
     }
 
+    // Migration: Add new columns to tenant_assistants for exclusive agent editing feature
+    const assistantColumns = this.db.prepare(`PRAGMA table_info(tenant_assistants)`).all() as { name: string }[]
+    if (!assistantColumns.some(col => col.name === 'avatar')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN avatar TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'emoji')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN emoji TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'skills')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN skills TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'enabled_wikis')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN enabled_wikis TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'workflow')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN workflow TEXT`)
+    }
+
     // ============================================================
     // Document Center (P0): document tree, documents, wikis, build jobs
     // Assistant ↔ Wiki association lives in assistant `_moss_meta.json` (enabledWikis: string[]),
