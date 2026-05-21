@@ -600,13 +600,27 @@ async function installImportedSkillFromTemp(
     throw new Error('SKILL.md 读取失败')
   }
 
-  const normalizedPreferredName = normalizeImportedSkillName(
-    preferredName || '',
-  )
-  const skillName =
-    skillDir === tempDir && normalizedPreferredName
-      ? normalizedPreferredName
-      : path.basename(skillDir)
+  // Determine skill name with priority: preferredName > frontmatter.name > frontmatter.displayName > directory name
+  const normalizedPreferredName = normalizeImportedSkillName(preferredName || '')
+  const frontmatterName = typeof frontmatter.name === 'string' && frontmatter.name.trim()
+    ? normalizeImportedSkillName(frontmatter.name.trim())
+    : ''
+  const frontmatterDisplayName = typeof frontmatter.displayName === 'string' && frontmatter.displayName.trim()
+    ? normalizeImportedSkillName(frontmatter.displayName.trim())
+    : ''
+
+  let skillName: string
+  if (normalizedPreferredName) {
+    skillName = normalizedPreferredName
+  } else if (frontmatterName) {
+    skillName = frontmatterName
+  } else if (frontmatterDisplayName) {
+    skillName = frontmatterDisplayName
+  } else if (skillDir !== tempDir) {
+    skillName = path.basename(skillDir)
+  } else {
+    throw new Error('无法确定技能名称，请在 SKILL.md 中指定 name 或 displayName 字段')
+  }
 
   const targetDir = path.join(USER_SKILLS_DIR, skillName)
   await mkdir(USER_SKILLS_DIR, { recursive: true })
@@ -1152,11 +1166,27 @@ async function installTenantSkillFromTemp(
     throw new Error('SKILL.md 读取失败')
   }
 
+  // Determine skill name with priority: preferredName > frontmatter.name > frontmatter.displayName > directory name
   const normalizedPreferredName = normalizeImportedSkillName(preferredName || '')
-  const skillName =
-    skillDir === tempDir && normalizedPreferredName
-      ? normalizedPreferredName
-      : path.basename(skillDir)
+  const frontmatterName = typeof frontmatter.name === 'string' && frontmatter.name.trim()
+    ? normalizeImportedSkillName(frontmatter.name.trim())
+    : ''
+  const frontmatterDisplayName = typeof frontmatter.displayName === 'string' && frontmatter.displayName.trim()
+    ? normalizeImportedSkillName(frontmatter.displayName.trim())
+    : ''
+
+  let skillName: string
+  if (normalizedPreferredName) {
+    skillName = normalizedPreferredName
+  } else if (frontmatterName) {
+    skillName = frontmatterName
+  } else if (frontmatterDisplayName) {
+    skillName = frontmatterDisplayName
+  } else if (skillDir !== tempDir) {
+    skillName = path.basename(skillDir)
+  } else {
+    throw new Error('无法确定技能名称，请在 SKILL.md 中指定 name 或 displayName 字段')
+  }
 
   // Check if skill already exists in tenant directory
   const existingTenantPath = path.join(MOSS_SKILLS_TENANT_DIR, skillName)
