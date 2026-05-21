@@ -2984,6 +2984,7 @@ export function startServer(
           author_name: authorName,
           status: 'approved',
           file_path: assistantDir,
+          skills: meta.skills && meta.skills.length > 0 ? JSON.stringify(meta.skills) : null,
           enabled_skills: meta.enabledSkills && meta.enabledSkills.length > 0 ? JSON.stringify(meta.enabledSkills) : null,
           agent_type: meta.agent_type,
           memory_mode: meta.memory_mode,

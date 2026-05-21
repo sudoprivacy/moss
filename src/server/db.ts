@@ -1520,6 +1520,7 @@ export class DirectConnectStore {
     checksum?: string | null
     file_path?: string | null
     enabled_skills?: string | null
+    skills?: string | null
     memory_mode?: string
     agent_type?: string
     publish_note?: string | null
@@ -1530,8 +1531,8 @@ export class DirectConnectStore {
     this.db.prepare(`
       INSERT INTO tenant_assistants (
         id, name, display_name, description, version, author_id, author_name, status,
-        source_url, checksum, file_path, enabled_skills, memory_mode, agent_type, publish_note, enabled, visible_to, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.name,
@@ -1545,6 +1546,7 @@ export class DirectConnectStore {
       row.checksum ?? null,
       row.file_path ?? null,
       row.enabled_skills ?? null,
+      row.skills ?? null,
       row.memory_mode ?? 'session',
       row.agent_type ?? 'chat',
       row.publish_note ?? null,
