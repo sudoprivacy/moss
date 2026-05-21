@@ -1906,11 +1906,11 @@ export default function AgentHubPage() {
                         key={assistant.id}
                         role="button"
                         tabIndex={0}
-                        onClick={() => setTenantAssistantDetail(assistant)}
+                        onClick={() => openTenantEdit(assistant)}
                         onKeyDown={event => {
                           if (event.key === 'Enter' || event.key === ' ') {
                             event.preventDefault()
-                            setTenantAssistantDetail(assistant)
+                            openTenantEdit(assistant)
                           }
                         }}
                         className="rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent/30"
