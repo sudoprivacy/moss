@@ -583,6 +583,10 @@ export default function AgentHubPage() {
   const [tenantEditEnabledWikis, setTenantEditEnabledWikis] = useState<string[]>([])
   const [tenantEditWorkflow, setTenantEditWorkflow] = useState<TenantAssistantInfo['workflow']>(null)
   const [savingTenantEdit, setSavingTenantEdit] = useState(false)
+  const [tenantEditSkillsDetails, setTenantEditSkillsDetails] = useState<SkillHubSkill[]>([])
+  const [tenantEditSkillsLoading, setTenantEditSkillsLoading] = useState(false)
+  const [tenantEditAddSkillOpen, setTenantEditAddSkillOpen] = useState(false)
+  const [tenantEditAddSkillSelection, setTenantEditAddSkillSelection] = useState<string[]>([])
 
   const requestIdRef = useRef(0)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
@@ -1382,6 +1386,11 @@ export default function AgentHubPage() {
     setTenantEditEnabledSkills(assistant.enabled_skills || [])
     setTenantEditEnabledWikis(assistant.enabled_wikis || [])
     setTenantEditWorkflow(assistant.workflow || null)
+    // Reset skill-related states
+    setTenantEditSkillsDetails([])
+    setTenantEditSkillsLoading(false)
+    setTenantEditAddSkillOpen(false)
+    setTenantEditAddSkillSelection([])
 
     // Set visibility
     const deptIds = assistant.visible_to?.department_ids
@@ -1419,8 +1428,63 @@ export default function AgentHubPage() {
       }
     })()
 
+    // Fetch skill details if there are skills
+    const skillRefs = assistant.skills || []
+    if (skillRefs.length === 0) {
+      setTenantEditSkillsLoading(false)
+    } else {
+      setTenantEditSkillsLoading(true)
+      void (async () => {
+        try {
+          const allInstalled = installedSkills
+          const localSkills: SkillHubSkill[] = []
+          const missingIds: string[] = []
+
+          for (const skillRef of skillRefs) {
+            const trimmed = skillRef.trim()
+            const local = allInstalled.find(
+              s => s.id.trim() === trimmed || s.name.trim() === trimmed || (s.meta?.id || '').trim() === trimmed,
+            )
+            if (local) {
+              localSkills.push({
+                id: (local.meta?.id || local.id).trim(),
+                name: local.name.trim(),
+                display_name: local.displayName,
+                description: local.description,
+                icon: resolveIconUrl(local.icon),
+                emoji: local.emoji,
+                category: local.category,
+                categories: local.categories,
+              })
+            } else {
+              missingIds.push(trimmed)
+            }
+          }
+
+          // Fetch missing skill details from Hub API
+          if (missingIds.length > 0) {
+            try {
+              const hubSkills = await fetchAgentHubSkillDetailsByIds(missingIds)
+              localSkills.push(...hubSkills)
+            } catch {
+              for (const mid of missingIds) {
+                localSkills.push({ id: mid, name: mid, display_name: mid })
+              }
+            }
+          }
+
+          setTenantEditSkillsDetails(localSkills)
+        } catch {
+          // Fallback: create placeholder skills from IDs
+          setTenantEditSkillsDetails(skillRefs.map(id => ({ id: id.trim(), name: id.trim(), display_name: id.trim() })))
+        } finally {
+          setTenantEditSkillsLoading(false)
+        }
+      })()
+    }
+
     setTenantEditOpen(true)
-  }, [])
+  }, [installedSkills])
 
   const handleSaveTenantEdit = useCallback(async () => {
     if (!editingTenantAgent) return
@@ -3906,6 +3970,195 @@ export default function AgentHubPage() {
                     </div>
                   )
                 ) : null}
+              </div>
+
+              {/* Skills management section */}
+              <div className="space-y-3 pt-4 border-t">
+                <div>
+                  <div className="text-sm font-medium">关联技能</div>
+                  <p className="text-sm text-muted-foreground">
+                    管理该智能体关联的技能，可勾选启用、添加或移除。
+                  </p>
+                </div>
+
+                {tenantEditSkillsLoading ? (
+                  <div className="space-y-2">
+                    <Skeleton className="h-10 w-full" />
+                    <Skeleton className="h-10 w-full" />
+                  </div>
+                ) : (
+                  <>
+                    {/* Current associated skills */}
+                    {tenantEditSkillsDetails.length > 0 ? (
+                      <div className="space-y-2">
+                        {tenantEditSkillsDetails.map(skill => {
+                          const skillId = skill.id || skill.name
+                          const isInstalled = installedSkillLookup.has(skill.id?.trim()) || installedSkillLookup.has(skill.name?.trim())
+                          const isEnabled = tenantEditEnabledSkills.includes(skillId) || tenantEditEnabledSkills.includes(skill.name?.trim())
+                          return (
+                            <div
+                              key={`tenant-edit-skill:${skillId}`}
+                              className="flex items-center gap-3 rounded-lg border px-3 py-2 hover:bg-accent/30"
+                            >
+                              <Checkbox
+                                checked={isEnabled}
+                                onCheckedChange={checked => {
+                                  setTenantEditEnabledSkills(
+                                    checked === true
+                                      ? [...tenantEditEnabledSkills, skill.name?.trim() || skillId]
+                                      : tenantEditEnabledSkills.filter(s => s !== skillId && s !== skill.name?.trim()),
+                                  )
+                                }}
+                              />
+                              <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-background text-lg">
+                                {skill.icon ? (
+                                  <img src={skill.icon} alt={skill.display_name} className="size-full object-cover" />
+                                ) : skill.emoji ? (
+                                  <span>{skill.emoji}</span>
+                                ) : (
+                                  <Package className="size-4 text-muted-foreground" />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm font-medium">{skill.display_name || skill.name}</div>
+                                {skill.description ? (
+                                  <div className="line-clamp-1 text-xs text-muted-foreground">{skill.description}</div>
+                                ) : null}
+                              </div>
+                              {isInstalled ? (
+                                <Badge variant="secondary">已安装</Badge>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={async () => {
+                                    try {
+                                      const detail = await getSkillHubDetail(skillId)
+                                      const latestVersion = detail?.versions?.[0]
+                                      if (!latestVersion?.source_url) {
+                                        toast.error('该技能暂不支持安装')
+                                        return
+                                      }
+                                      await installSkill({
+                                        skillName: skill.name?.trim() || skillId,
+                                        sourceUrl: latestVersion.source_url,
+                                        version: typeof latestVersion.version === 'string' ? latestVersion.version : undefined,
+                                        checksum: typeof latestVersion.checksum === 'string' ? latestVersion.checksum : undefined,
+                                        skillMeta: skill,
+                                      })
+                                      toast.success(`已安装技能 ${skill.display_name || skill.name}`)
+                                      await fetchInstalledState(false)
+                                    } catch (err) {
+                                      toast.error(err instanceof Error ? err.message : '安装技能失败')
+                                    }
+                                  }}
+                                >
+                                  安装
+                                </Button>
+                              )}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="size-8 text-muted-foreground hover:text-destructive"
+                                onClick={() => {
+                                  setTenantEditSkills(prev => prev.filter(s => s !== skillId && s !== skill.name?.trim()))
+                                  setTenantEditSkillsDetails(prev => prev.filter(s => (s.id || s.name) !== skillId))
+                                  setTenantEditEnabledSkills(prev => prev.filter(s => s !== skillId && s !== skill.name?.trim()))
+                                }}
+                                title="移除关联"
+                              >
+                                <Trash2 className="size-4" />
+                              </Button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-sm text-muted-foreground">
+                        该智能体暂无关联技能，点击下方按钮添加。
+                      </div>
+                    )}
+
+                    {/* Add skill from installed skills */}
+                    {(() => {
+                      const associatedNames = new Set(tenantEditSkills.map(s => s.trim()))
+                      const availableToAdd = installedSkills.filter(s => !associatedNames.has(s.name.trim()))
+                      if (availableToAdd.length === 0) return null
+                      return (
+                        <div className="space-y-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setTenantEditAddSkillOpen(!tenantEditAddSkillOpen)}
+                          >
+                            <Plus className="mr-1 size-4" />
+                            添加已安装技能
+                          </Button>
+                          {tenantEditAddSkillOpen ? (
+                            <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border p-2">
+                              {availableToAdd.map(skill => (
+                                <label
+                                  key={`tenant-add-skill:${skill.name}`}
+                                  className="flex items-center gap-3 rounded-lg px-2 py-1.5 cursor-pointer hover:bg-accent/30"
+                                >
+                                  <Checkbox
+                                    checked={tenantEditAddSkillSelection.includes(skill.name.trim())}
+                                    onCheckedChange={checked => {
+                                      const name = skill.name.trim()
+                                      setTenantEditAddSkillSelection(
+                                        checked === true
+                                          ? [...tenantEditAddSkillSelection, name]
+                                          : tenantEditAddSkillSelection.filter(n => n !== name),
+                                      )
+                                    }}
+                                  />
+                                  <div className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-background">
+                                    {skill.icon ? (
+                                      <img src={resolveIconUrl(skill.icon)} alt={skill.displayName} className="size-full object-cover" />
+                                    ) : skill.emoji ? (
+                                      <span className="text-sm">{skill.emoji}</span>
+                                    ) : (
+                                      <Package className="size-3.5 text-muted-foreground" />
+                                    )}
+                                  </div>
+                                  <span className="text-sm">{skill.displayName}</span>
+                                </label>
+                              ))}
+                            </div>
+                          ) : null}
+                          {tenantEditAddSkillSelection.length > 0 ? (
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                const newSkillNames = tenantEditAddSkillSelection
+                                const newSkillDetails = tenantEditAddSkillSelection
+                                  .map(name => installedSkills.find(s => s.name.trim() === name))
+                                  .filter(Boolean)
+                                  .map(s => ({
+                                    id: (s!.meta?.id || s!.id).trim(),
+                                    name: s!.name.trim(),
+                                    display_name: s!.displayName,
+                                    description: s!.description,
+                                    icon: resolveIconUrl(s!.icon),
+                                    emoji: s!.emoji,
+                                    category: s!.category,
+                                    categories: s!.categories,
+                                  }))
+                                setTenantEditSkills(prev => [...prev, ...newSkillNames])
+                                setTenantEditSkillsDetails(prev => [...prev, ...newSkillDetails])
+                                setTenantEditEnabledSkills(prev => [...prev, ...newSkillNames])
+                                setTenantEditAddSkillSelection([])
+                                setTenantEditAddSkillOpen(false)
+                              }}
+                            >
+                              确认添加 ({tenantEditAddSkillSelection.length})
+                            </Button>
+                          ) : null}
+                        </div>
+                      )
+                    })()}
+                  </>
+                )}
               </div>
 
               <div className="space-y-2 pt-4 border-t">
