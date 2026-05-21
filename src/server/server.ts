@@ -2878,6 +2878,16 @@ export function startServer(
             return isVisibleTo(visibleTo, filter)
           }
           return true
+        }).map((row: Record<string, unknown>) => {
+          // Parse JSON fields for frontend consumption
+          return {
+            ...row,
+            skills: typeof row.skills === 'string' ? JSON.parse(row.skills) : row.skills ?? [],
+            enabled_skills: typeof row.enabled_skills === 'string' ? JSON.parse(row.enabled_skills) : row.enabled_skills ?? [],
+            enabled_wikis: typeof row.enabled_wikis === 'string' ? JSON.parse(row.enabled_wikis) : row.enabled_wikis ?? [],
+            workflow: typeof row.workflow === 'string' ? JSON.parse(row.workflow) : row.workflow ?? null,
+            visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
+          }
         })
         writeJson(res, 200, rows)
         return
@@ -2919,6 +2929,12 @@ export function startServer(
           throw new HttpError(400, 'name is required')
         }
 
+        // Check if name already exists
+        const existingAssistant = runtime.store.getTenantAssistantByName(name)
+        if (existingAssistant) {
+          throw new HttpError(400, `智能体名称 "${name}" 已存在，请使用其他名称`)
+        }
+
         // Generate UUID for the assistant
         const assistantId = randomUUID()
 
@@ -2926,10 +2942,10 @@ export function startServer(
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
-        // Create assistant directory in tenant folder
+        // Create assistant directory in tenant folder using name (not UUID)
         const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
         const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
-        const assistantDir = join(ASSISTANT_TENANT_DIR, assistantId)
+        const assistantDir = join(ASSISTANT_TENANT_DIR, name)
 
         await mkdir(assistantDir, { recursive: true })
 
