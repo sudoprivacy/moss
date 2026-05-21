@@ -3522,7 +3522,8 @@ export function startServer(
           runtime.store.createTenantSkill({
             id: result.id,
             name: result.skillName,
-            display_name: result.skillName,
+            display_name: result.displayName,
+            description: result.description,
             version: result.version,
             author_id: auth.userId,
             author_name: authorName,
@@ -3554,7 +3555,8 @@ export function startServer(
           runtime.store.createTenantSkill({
             id: result.id,
             name: result.skillName,
-            display_name: result.skillName,
+            display_name: result.displayName,
+            description: result.description,
             version: result.version,
             author_id: auth.userId,
             author_name: authorName,

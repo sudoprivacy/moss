@@ -1116,6 +1116,8 @@ export type ImportTenantSkillResult = {
   id: string
   status: string
   version: string
+  displayName: string
+  description: string
 }
 
 export async function importTenantSkillArchive(
@@ -1212,5 +1214,7 @@ async function installTenantSkillFromTemp(
     id: `tenant-skill-${Date.now()}`,
     status: 'approved',
     version: meta.installed_version || '1.0.0',
+    displayName: meta.display_name || skillName,
+    description: meta.description || '',
   }
 }
