@@ -2827,7 +2827,6 @@ export function startServer(
 
       // POST /api/v1/agents/custom - Upload custom assistant
       if (req.method === 'POST' && pathname === '/api/v1/agents/custom') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         console.log('[Upload Assistant] Received upload request, name:', body.name, 'id:', body.id, 'displayName:', body.displayName)
         const fileBase64 = typeof body.file === 'string' ? body.file : ''
@@ -2999,7 +2998,6 @@ export function startServer(
 
       // POST /api/v1/agents/tenant/publish - Publish tenant assistant request
       if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/publish') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const assistantId = typeof body.assistantId === 'string' ? body.assistantId : ''
         const publishNote = typeof body.publishNote === 'string' ? body.publishNote : undefined
@@ -3031,7 +3029,8 @@ export function startServer(
           display_name: meta?.display_name || actualAssistantName,
           description: meta?.description || undefined,
           version: meta?.installed_version || undefined,
-          enabled_skills: meta?.enabledSkills || meta?.skills ? JSON.stringify(meta?.enabledSkills || meta?.skills) : null,
+          skills: meta?.skills ? JSON.stringify(meta.skills) : null,
+          enabled_skills: meta?.enabledSkills ? JSON.stringify(meta.enabledSkills) : null,
           memory_mode: meta?.memory_mode || 'session',
           agent_type: meta?.agent_type || 'chat',
           publish_note: publishNote,
@@ -3254,7 +3253,6 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/skills/installed') {
-        authService.requireScope(auth, 'admin:settings')
         const filter = authService.buildVisibilityFilter(auth)
         const all = await getHubInstalledSkills()
         writeJson(res, 200, all.filter(s => isVisibleTo(s.visibleTo, filter)))
@@ -3441,7 +3439,6 @@ export function startServer(
 
       // POST /api/v1/skills/custom - Upload custom skill
       if (req.method === 'POST' && pathname === '/api/v1/skills/custom') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const fileBase64 = typeof body.file === 'string' ? body.file : ''
         const fileBuffer = Buffer.from(fileBase64, 'base64')
@@ -3503,7 +3500,6 @@ export function startServer(
 
       // POST /api/v1/skills/tenant/publish - Publish tenant skill request
       if (req.method === 'POST' && pathname === '/api/v1/skills/tenant/publish') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const skillName = typeof body.skillName === 'string' ? body.skillName : ''
         const skillId = typeof body.skillId === 'string' ? body.skillId : skillName
