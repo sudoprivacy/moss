@@ -2906,6 +2906,80 @@ export function startServer(
         return
       }
 
+      // POST /api/v1/agents/tenant/create - Create tenant assistant directly (admin only)
+      if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
+        authService.requireScope(auth, 'admin:settings')
+        const body = await readJsonBody(req)
+
+        // Validate required fields
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        const displayName = typeof body.display_name === 'string' ? body.display_name.trim() : name
+
+        if (!name) {
+          throw new HttpError(400, 'name is required')
+        }
+
+        // Generate UUID for the assistant
+        const assistantId = randomUUID()
+
+        // Get author info
+        const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const authorName = authorUser?.name || undefined
+
+        // Create assistant directory in tenant folder
+        const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
+        const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
+        const assistantDir = join(ASSISTANT_TENANT_DIR, assistantId)
+
+        await mkdir(assistantDir, { recursive: true })
+
+        // Create metadata
+        const meta: AssistantStoreMeta = {
+          id: assistantId,
+          name,
+          display_name: displayName,
+          description: typeof body.description === 'string' ? body.description : undefined,
+          avatar: typeof body.avatar === 'string' ? body.avatar : undefined,
+          emoji: typeof body.emoji === 'string' ? body.emoji : undefined,
+          source_type: 'tenant',
+          enabled: true,
+          skills: Array.isArray(body.skills) ? body.skills : [],
+          enabledSkills: Array.isArray(body.enabled_skills) ? body.enabled_skills : [],
+          enabledWikis: Array.isArray(body.enabled_wikis) ? body.enabled_wikis : [],
+          agent_type: body.agent_type || 'chat',
+          memory_mode: body.memory_mode || 'session',
+          visible_to: body.visible_to || null,
+          workflow: body.workflow || null,
+        }
+
+        await writeAssistantMeta(assistantDir, meta)
+
+        // Create default rules file
+        const rulesContent = `# ${displayName}\n\n${typeof body.description === 'string' ? body.description : '这是一个专属智能体。'}\n`
+        await writeFile(join(assistantDir, 'system.md'), rulesContent)
+
+        // Create database record with approved status
+        runtime.store.createTenantAssistant({
+          id: assistantId,
+          name,
+          display_name: displayName,
+          description: meta.description,
+          author_id: auth.userId,
+          author_name: authorName,
+          status: 'approved',
+          file_path: assistantDir,
+          enabled_skills: meta.enabledSkills && meta.enabledSkills.length > 0 ? JSON.stringify(meta.enabledSkills) : null,
+          agent_type: meta.agent_type,
+          memory_mode: meta.memory_mode,
+          visible_to: meta.visible_to ? JSON.stringify(meta.visible_to) : null,
+          enabled: 1,
+        })
+
+        const result = runtime.store.getTenantAssistant(assistantId)
+        writeJson(res, 200, { success: true, data: result })
+        return
+      }
+
       // POST /api/v1/agents/tenant/publish - Publish tenant assistant request
       if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/publish') {
         authService.requireScope(auth, 'admin:settings')
