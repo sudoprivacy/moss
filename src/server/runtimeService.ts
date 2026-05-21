@@ -9,6 +9,8 @@ import { spawn } from 'child_process'
 import { loadBudgetStats } from './budgetStats.js'
 import { DirectConnectStore, mergeRuntime, openDirectConnectStore, toSessionSummary } from './db.js'
 import { AuthService } from './auth/service.js'
+import { hasScope } from './auth/token.js'
+import { getUserAncestorIds } from './visibilityFilter.js'
 import type {
   AttemptRecord,
   RunnerManifest,
@@ -17,6 +19,7 @@ import type {
   SessionRecord,
   SessionSummary,
 } from './types.js'
+import type { VisibilityFilterContext } from './sessionManager.js'
 import {
   getAttachPath,
   getAttemptDir,
@@ -505,6 +508,25 @@ export class RuntimeService {
       }
     }
 
+    // Build visibility filter context for skill filtering
+    let visibilityFilter: VisibilityFilterContext | null = null
+    if (session.userId) {
+      const isAdmin = session.role === 'admin' || hasScope(session.scopes, '*')
+      if (isAdmin) {
+        visibilityFilter = { isAdmin: true, userId: session.userId, departmentId: null, visibleDepartmentIds: null }
+      } else {
+        const user = this.authService.getUserOrNull(session.userId, session.orgId)
+        const departmentId = user?.departmentId ?? null
+        const visibleDepartmentIds = getUserAncestorIds(
+          session.userId,
+          session.orgId,
+          (userId, orgId) => this.authService.getUserOrNull(userId, orgId),
+          (orgId) => this.authService.listDepartmentsByOrg(orgId),
+        )
+        visibilityFilter = { isAdmin: false, userId: session.userId, departmentId, visibleDepartmentIds }
+      }
+    }
+
     const manifest: RunnerManifest = {
       config: this.options.config,
       session: {
@@ -524,6 +546,12 @@ export class RuntimeService {
         sessionToken,
         availableWikis,
         enabledSkills: options.enabledSkills,
+        visibilityFilter: visibilityFilter ? {
+          isAdmin: visibilityFilter.isAdmin,
+          userId: visibilityFilter.userId,
+          departmentId: visibilityFilter.departmentId,
+          visibleDepartmentIds: visibilityFilter.visibleDepartmentIds ? Array.from(visibilityFilter.visibleDepartmentIds) : null,
+        } : null,
         runtime: {
           ...session.runtime,
           containerName:

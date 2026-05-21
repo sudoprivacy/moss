@@ -330,6 +330,15 @@ export type RunnerManifest = {
     availableWikis?: Array<{ id: string; name: string; description?: string | null }>
     /** Enabled skill names (from client or assistant config) */
     enabledSkills?: string[]
+    /**
+     * 可见性过滤上下文，用于过滤用户有权访问的技能
+     */
+    visibilityFilter?: {
+      isAdmin: boolean
+      userId: string
+      departmentId: string | null
+      visibleDepartmentIds: string[] | null // Set 序列化为数组
+    } | null
   }
   attempt: {
     attemptId: string

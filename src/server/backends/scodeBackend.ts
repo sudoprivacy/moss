@@ -111,8 +111,9 @@ export class ScodeBackend implements SessionBackend {
     // 同步技能到工作空间目录（新方案）
     // 在工作空间的 .nexus/sudocode/skills/ 目录创建符号链接
     // enabledSkills: 客户端传递 > 助手配置 > 默认（所有可用 skills）
+    // visibilityFilter: 过滤用户无权访问的技能
     try {
-      await syncWorkspaceSkills(options.cwd, enabledSkills)
+      await syncWorkspaceSkills(options.cwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[ScodeBackend] Workspace skills synced to ${options.cwd}/.nexus/sudocode/skills/ with ${enabledSkills.length} skills: ${enabledSkills.join(', ') || 'none'}\n`)
     } catch (err) {
       process.stderr.write(`[ScodeBackend] Workspace skills sync warning: ${err}\n`)

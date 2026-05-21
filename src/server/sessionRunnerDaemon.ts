@@ -129,6 +129,14 @@ export class SessionRunnerDaemon {
         sessionToken: this.manifest.session.sessionToken,
         availableWikis: this.manifest.session.availableWikis,
         enabledSkillNames: this.manifest.session.enabledSkills,
+        visibilityFilter: this.manifest.session.visibilityFilter ? {
+          isAdmin: this.manifest.session.visibilityFilter.isAdmin,
+          userId: this.manifest.session.visibilityFilter.userId,
+          departmentId: this.manifest.session.visibilityFilter.departmentId,
+          visibleDepartmentIds: this.manifest.session.visibilityFilter.visibleDepartmentIds
+            ? new Set(this.manifest.session.visibilityFilter.visibleDepartmentIds)
+            : null,
+        } : null,
       })
 
       this.#handle = handle

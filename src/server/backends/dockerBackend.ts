@@ -75,8 +75,9 @@ export class DockerBackend implements SessionBackend {
     // 在工作空间的 .nexus/sudocode/skills/ 目录创建符号链接
     // Docker 会挂载工作空间，所以容器内可以访问这些符号链接
     // enabledSkills: 由 getAssistantRuntimeConfig 统一处理
+    // visibilityFilter: 过滤用户无权访问的技能
     try {
-      await syncWorkspaceSkills(safeCwd, assistantConfig.enabledSkills)
+      await syncWorkspaceSkills(safeCwd, assistantConfig.enabledSkills, options.visibilityFilter)
       process.stderr.write(`[DockerBackend] Workspace skills synced to ${safeCwd}/.nexus/sudocode/skills/ with ${assistantConfig.enabledSkills.length} skills\n`)
     } catch (err) {
       process.stderr.write(`[DockerBackend] Workspace skills sync warning: ${err}\n`)

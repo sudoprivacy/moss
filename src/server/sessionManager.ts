@@ -28,6 +28,16 @@ export type SessionRuntimeInfo = {
   hostMode?: 'session' | 'user'
 }
 
+/**
+ * 可见性过滤上下文，用于过滤用户有权访问的技能/智能体
+ */
+export type VisibilityFilterContext = {
+  isAdmin: boolean
+  userId: string
+  departmentId: string | null
+  visibleDepartmentIds: Set<string> | null
+}
+
 export type SessionCreateOptions = {
   cwd?: string
   dangerouslySkipPermissions?: boolean
@@ -67,6 +77,10 @@ export type BackendSpawnOptions = {
    * the `wiki` CLI.
    */
   availableWikis?: Array<{ id: string; name: string; description?: string | null }>
+  /**
+   * 可见性过滤上下文，用于过滤用户有权访问的技能
+   */
+  visibilityFilter?: VisibilityFilterContext | null
 }
 
 export type BackendHandle = {

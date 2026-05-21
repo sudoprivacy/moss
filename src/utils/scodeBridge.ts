@@ -17,6 +17,7 @@ import {
   ASSISTANT_SEARCH_DIRS,
   ASSISTANT_META_FILE,
 } from '../server/agentStore.js'
+import type { VisibilityFilterContext } from '../server/sessionManager.js'
 
 // ============================================================================
 // 工作空间技能同步函数 (新方案)
@@ -39,10 +40,12 @@ export function resolveWorkspaceSkillsDir(workspace: string): string {
  *
  * @param workspace - 工作空间路径
  * @param enabledSkillNames - 可选，只同步指定的技能名称列表
+ * @param visibilityFilter - 可选，可见性过滤上下文，用于过滤用户无权访问的技能
  */
 export async function syncWorkspaceSkills(
   workspace: string,
-  enabledSkillNames?: string[]
+  enabledSkillNames?: string[],
+  visibilityFilter?: VisibilityFilterContext | null
 ): Promise<void> {
   const workspaceSkillsDir = resolveWorkspaceSkillsDir(workspace)
   await mkdir(workspaceSkillsDir, { recursive: true })
@@ -83,6 +86,11 @@ export async function syncWorkspaceSkills(
 
         // 检查技能是否启用
         if (!isSkillEnabledSync(skillSourcePath)) {
+          continue
+        }
+
+        // 检查技能是否对用户可见
+        if (!isSkillVisibleToSync(skillSourcePath, visibilityFilter ?? null)) {
           continue
         }
 
@@ -152,6 +160,60 @@ function isSkillEnabledSync(skillDir: string): boolean {
   } catch {
     return true // 默认启用
   }
+}
+
+/**
+ * 检查技能是否对用户可见
+ */
+function isSkillVisibleToSync(skillDir: string, filter: VisibilityFilterContext | null): boolean {
+  // 如果没有提供过滤上下文，默认可见（向后兼容）
+  if (!filter) return true
+
+  // 管理员始终可见
+  if (filter.isAdmin) return true
+
+  const metaPath = path.join(skillDir, SKILL_HUB_META_FILE)
+  let meta: { visible_to?: { department_ids?: string[] | null; user_ids?: string[] | null } | null } | null = null
+  try {
+    const content = readFileSync(metaPath, 'utf8')
+    meta = JSON.parse(content)
+  } catch {
+    return true // 无法读取 meta，默认可见
+  }
+
+  const visibleTo = meta?.visible_to
+
+  // visible_to 为 null 或 undefined → 所有人可见
+  if (!visibleTo) return true
+
+  // 检查用户白名单
+  const userIds = visibleTo.user_ids
+  if (userIds !== null && userIds !== undefined) {
+    if (userIds.length === 0) {
+      // 空数组表示仅管理员可见
+      return false
+    }
+    if (userIds.includes(filter.userId)) {
+      return true
+    }
+  }
+
+  // 检查部门白名单
+  const departmentIds = visibleTo.department_ids
+  if (departmentIds !== null && departmentIds !== undefined) {
+    if (departmentIds.length === 0) {
+      // 空数组表示仅管理员可见
+      return false
+    }
+    if (!filter.departmentId) {
+      return false
+    }
+    for (const deptId of filter.visibleDepartmentIds ?? new Set()) {
+      if (departmentIds.includes(deptId)) return true
+    }
+  }
+
+  return false
 }
 
 // ============================================================================
