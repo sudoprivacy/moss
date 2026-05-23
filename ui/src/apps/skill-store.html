@@ -1,0 +1,1377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: file: https:; img-src 'self' data: blob: file: https:; media-src 'self' data: blob: file: https:; font-src 'self' data: blob: file: https:; connect-src 'self' data: blob: file: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'; frame-src 'self' https:;">
+  <title>技能商店</title>
+  <script type="application/ld+json">
+  {
+    "@context": "urn:goose.ai:schema",
+    "@type": "GooseApp",
+    "name": "skill-store",
+    "icon": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>",
+    "description": "技能商店 - 浏览和安装来自 Hub 的技能",
+    "width": 980,
+    "height": 680,
+    "resizable": true,
+    "mcpServers": ["apps"],
+    "runtime": {
+      "hostApi": "window.mossApp",
+      "capabilities": ["storage", "files", "agent", "resources"]
+    }
+  }
+  </script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg: #0b1120;
+      --card: #151c2c;
+      --card-hover: #1c2438;
+      --border: #2a3548;
+      --primary: #6366f1;
+      --primary-light: rgba(99, 102, 241, 0.15);
+      --primary-hover: #818cf8;
+      --text: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-tertiary: #64748b;
+      --danger: #ef4444;
+      --danger-hover: #f87171;
+      --warning: #f59e0b;
+      --warning-light: rgba(245, 158, 11, 0.15);
+      --success: #22c55e;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding: 16px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-shrink: 0;
+    }
+
+    .tabs {
+      display: flex;
+      align-items: center;
+      background: var(--card);
+      border-radius: 8px;
+      padding: 3px;
+      gap: 2px;
+    }
+
+    .tab {
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .tab:hover {
+      color: var(--text);
+    }
+
+    .tab.active {
+      background: var(--bg);
+      color: var(--text);
+      font-weight: 500;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+
+    .tab .badge {
+      background: var(--primary);
+      color: white;
+      font-size: 10px;
+      padding: 0 5px;
+      border-radius: 10px;
+      line-height: 16px;
+      min-width: 16px;
+      text-align: center;
+    }
+
+    .search-box {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .search-box input {
+      width: 100%;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .search-box input:focus {
+      border-color: var(--primary);
+    }
+
+    .search-box input::placeholder {
+      color: var(--text-tertiary);
+    }
+
+    .import-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      height: 34px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text);
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+
+    .import-btn:hover {
+      border-color: var(--primary);
+    }
+
+    .import-btn .icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--primary-light);
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+    }
+
+    /* Category filter */
+    .categories {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      overflow-x: auto;
+      flex-shrink: 0;
+      padding-bottom: 2px;
+    }
+
+    .categories::-webkit-scrollbar {
+      display: none;
+    }
+
+    .category-pill {
+      padding: 4px 14px;
+      border-radius: 16px;
+      font-size: 12px;
+      cursor: pointer;
+      background: var(--card);
+      color: var(--text-secondary);
+      border: none;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+
+    .category-pill:hover {
+      background: var(--card-hover);
+      color: var(--text);
+    }
+
+    .category-pill.active {
+      background: var(--primary);
+      color: white;
+    }
+
+    /* Content area */
+    .content {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .content::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .content::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .content::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    /* Loading & Empty */
+    .loading, .empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 20px;
+      color: var(--text-secondary);
+      gap: 8px;
+    }
+
+    .loading .spinner {
+      width: 28px;
+      height: 28px;
+      border: 3px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .empty .icon {
+      font-size: 32px;
+      opacity: 0.5;
+    }
+
+    .empty p {
+      font-size: 13px;
+    }
+
+    /* Skill grid */
+    .skill-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      padding-bottom: 16px;
+    }
+
+    /* Skill card */
+    .skill-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .skill-card:hover {
+      border-color: var(--primary);
+      background: var(--card-hover);
+    }
+
+    .skill-card .icon-wrap {
+      width: 48px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .skill-card .icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--card-hover);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+    }
+
+    .skill-card .icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .skill-card .installed-badge {
+      margin-top: 6px;
+      padding: 0 5px;
+      font-size: 10px;
+      border-radius: 3px;
+      line-height: 18px;
+    }
+
+    .skill-card .installed-badge.installed {
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+
+    .skill-card .installed-badge.update {
+      background: var(--warning-light);
+      color: var(--warning);
+    }
+
+    .skill-card .content-wrap {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .skill-card .name {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding-right: 50px;
+    }
+
+    .skill-card .desc {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 3px;
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .skill-card .action {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+    }
+
+    .skill-card .action .install-btn {
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      border: none;
+      background: var(--card-hover);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s;
+    }
+
+    .skill-card .action .install-btn:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .skill-card .action .update-btn {
+      background: var(--warning-light);
+      color: var(--warning);
+    }
+
+    .skill-card .action .update-btn:hover {
+      opacity: 0.8;
+    }
+
+    .skill-card .action .installed-btn {
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+
+    .skill-card .progress {
+      width: 52px;
+    }
+
+    .skill-card .progress-bar {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .skill-card .progress-bar .fill {
+      height: 100%;
+      background: var(--primary);
+      transition: width 0.2s;
+    }
+
+    /* Installed section */
+    .installed-section {
+      margin-bottom: 20px;
+    }
+
+    .installed-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .installed-section-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .installed-section-count {
+      padding: 0 6px;
+      background: var(--card);
+      color: var(--text-secondary);
+      font-size: 11px;
+      border-radius: 999px;
+      line-height: 18px;
+    }
+
+    .installed-section-empty {
+      background: var(--card);
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      padding: 18px 14px;
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    /* Detail modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 20px;
+    }
+
+    .modal {
+      background: var(--card);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: flex-end;
+      padding: 12px 12px 0;
+    }
+
+    .modal-close {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--card-hover);
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-secondary);
+      font-size: 14px;
+      transition: background 0.15s;
+    }
+
+    .modal-close:hover {
+      background: var(--border);
+    }
+
+    .modal-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 16px 16px;
+    }
+
+    .modal-icon-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .modal-icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--card-hover);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 34px;
+      margin-bottom: 12px;
+    }
+
+    .modal-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .modal-name {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--text);
+      text-align: center;
+    }
+
+    .modal-categories {
+      display: flex;
+      gap: 4px;
+      margin-top: 6px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .modal-category {
+      padding: 1px 7px;
+      background: var(--card-hover);
+      color: var(--text-secondary);
+      font-size: 11px;
+      border-radius: 4px;
+    }
+
+    .modal-section {
+      background: var(--card-hover);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+
+    .modal-section:last-child {
+      margin-bottom: 0;
+    }
+
+    .modal-section-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+
+    .modal-section-title .icon {
+      font-size: 14px;
+    }
+
+    .modal-section-desc {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .modal-footer {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .modal-footer .btn {
+      flex: 1;
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+
+    .modal-footer .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .modal-footer .btn-primary:hover {
+      background: var(--primary-hover);
+    }
+
+    .modal-footer .btn-secondary {
+      background: var(--card-hover);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .modal-footer .btn-secondary:hover {
+      background: var(--border);
+    }
+
+    .modal-footer .btn-icon {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      flex: none;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card-hover);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s;
+    }
+
+    .modal-footer .btn-icon:hover {
+      background: var(--border);
+    }
+
+    .modal-footer .btn-icon.danger:hover {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .modal-security {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 10px;
+      justify-content: center;
+    }
+
+    .modal-security .icon {
+      color: var(--success);
+      font-size: 12px;
+    }
+
+    .modal-security span {
+      font-size: 10px;
+      color: var(--text-tertiary);
+    }
+
+    .modal .loading-content {
+      display: flex;
+      justify-content: center;
+      padding: 32px;
+    }
+
+    /* Feature list */
+    .feature-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .feature-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .feature-item .bullet {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      margin-top: 1px;
+      flex-shrink: 0;
+    }
+
+    /* Utility */
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <div class="header">
+      <div class="tabs">
+        <button class="tab active" data-tab="store">
+          技能库
+        </button>
+        <button class="tab" data-tab="installed">
+          我的技能
+          <span class="badge" id="installedBadge">0</span>
+        </button>
+      </div>
+      <div class="search-box">
+        <input type="text" id="searchInput" placeholder="搜索..." />
+      </div>
+      <button class="import-btn hidden" id="importBtn">
+        <span class="icon">+</span>
+        <span>上传</span>
+      </button>
+    </div>
+
+    <!-- Category filter (store tab only) -->
+    <div class="categories" id="categoriesBar">
+      <button class="category-pill active" data-category="all">精选</button>
+    </div>
+
+    <!-- Content -->
+    <div class="content" id="content">
+      <div class="loading">
+        <div class="spinner"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Detail Modal -->
+  <div class="modal-overlay hidden" id="detailModal">
+    <div class="modal">
+      <div class="modal-header">
+        <button class="modal-close" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody">
+        <div class="loading-content"><div class="spinner"></div></div>
+      </div>
+      <div class="modal-footer" id="modalFooter"></div>
+    </div>
+  </div>
+
+  <script>
+    // ==================== State ====================
+    const state = {
+      activeTab: 'store',
+      skills: [],
+      categories: [],
+      selectedCategory: 'all',
+      searchQuery: '',
+      installedList: [],
+      installingSkillId: null,
+      installProgress: 0,
+      nextCursor: null,
+      hasMore: false,
+      loading: false,
+      loadingMore: false,
+    };
+
+    // ==================== DOM refs ====================
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => document.querySelectorAll(sel);
+
+    const content = $('#content');
+    const categoriesBar = $('#categoriesBar');
+    const searchInput = $('#searchInput');
+    const installedBadge = $('#installedBadge');
+    const importBtn = $('#importBtn');
+    const detailModal = $('#detailModal');
+    const modalBody = $('#modalBody');
+    const modalFooter = $('#modalFooter');
+    const modalClose = $('#modalClose');
+
+    // ==================== Utils ====================
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function normalizeVersion(version) {
+      const v = (version || '').trim().toLowerCase();
+      if (v === 'unknown' || v === 'unkown') return '';
+      return v;
+    }
+
+    // ==================== API ====================
+    async function fetchSkills(cursor, append = false) {
+      try {
+        if (append) state.loadingMore = true;
+        else state.loading = true;
+        render();
+
+        const params = {};
+        if (cursor) params.cursor = cursor;
+        if (state.selectedCategory && state.selectedCategory !== 'all') params.category = state.selectedCategory;
+        if (state.searchQuery.trim()) params.query = state.searchQuery.trim();
+        params.limit = 40;
+
+        const res = await window.mossApp.skillStore.fetchSkills(params);
+
+        if (res.success && res.data) {
+          const newSkills = res.data.skills || [];
+          if (append) {
+            const existingIds = new Set(state.skills.map(s => s.id));
+            const unique = newSkills.filter(s => !existingIds.has(s.id));
+            state.skills = [...state.skills, ...unique];
+          } else {
+            state.skills = newSkills;
+          }
+          state.nextCursor = res.data.next_cursor || null;
+          state.hasMore = res.data.has_more || false;
+        }
+      } catch (err) {
+        console.error('fetchSkills error:', err);
+      } finally {
+        state.loading = false;
+        state.loadingMore = false;
+        render();
+      }
+    }
+
+    async function fetchCategories() {
+      try {
+        const res = await window.mossApp.skillStore.fetchCategories();
+        if (res.success && res.data) {
+          state.categories = res.data;
+          renderCategories();
+        }
+      } catch (err) {
+        console.error('fetchCategories error:', err);
+      }
+    }
+
+    async function fetchInstalledSkills() {
+      try {
+        const res = await window.mossApp.skillStore.getInstalledSkills();
+        if (res.success && res.data) {
+          state.installedList = res.data;
+          installedBadge.textContent = res.data.length;
+          render();
+        }
+      } catch (err) {
+        console.error('fetchInstalledSkills error:', err);
+      }
+    }
+
+    async function installSkill(skill) {
+      if (state.installingSkillId) return;
+      state.installingSkillId = skill.id;
+      state.installProgress = 0;
+      render();
+
+      // Simulate progress
+      const progressInterval = setInterval(() => {
+        if (state.installProgress < 85) {
+          state.installProgress += 10;
+          render();
+        }
+      }, 200);
+
+      try {
+        // Fetch detail to get version info
+        const detailRes = await window.mossApp.skillStore.fetchSkillDetail(skill.id);
+        console.log('[SkillStore] detailRes:', JSON.stringify(detailRes).slice(0, 500));
+        if (!detailRes.success || !detailRes.data) {
+          alert('获取技能详情失败: ' + (detailRes.error || JSON.stringify(detailRes.data)));
+          return;
+        }
+
+        // Check if versions array exists and has items
+        const versions = detailRes.data.versions || [];
+        console.log('[SkillStore] versions:', JSON.stringify(versions).slice(0, 300));
+        if (!versions || versions.length === 0) {
+          alert('技能无可用版本');
+          return;
+        }
+
+        const latest = versions[0];
+        console.log('[SkillStore] Installing with:', { name: skill.name, sourceUrl: latest.source_url, version: latest.version });
+        const res = await window.mossApp.skillStore.downloadAndInstall({
+          skillName: skill.name,
+          sourceUrl: latest.source_url,
+          version: latest.version,
+          checksum: latest.checksum,
+          skillMeta: skill,
+        });
+        console.log('[SkillStore] install result:', res);
+
+        clearInterval(progressInterval);
+        state.installProgress = 100;
+
+        if (res.success) {
+          await fetchInstalledSkills();
+          await fetchSkills(); // Refresh store list to update "已安装" badges
+          closeDetailModal();
+        } else {
+          alert('安装失败: ' + (res.error || '未知错误'));
+        }
+      } catch (err) {
+        clearInterval(progressInterval);
+        alert('安装失败: ' + err.message);
+      } finally {
+        state.installingSkillId = null;
+        state.installProgress = 0;
+        render();
+      }
+    }
+
+    async function uninstallSkill(skillName) {
+      if (!confirm('确认卸载该技能？')) return;
+
+      try {
+        const res = await window.mossApp.skillStore.uninstall(skillName);
+        if (res.success) {
+          await fetchInstalledSkills();
+          closeDetailModal();
+        } else {
+          alert('卸载失败: ' + (res.error || '未知错误'));
+        }
+      } catch (err) {
+        alert('卸载失败: ' + err.message);
+      }
+    }
+
+    async function openImportDialog() {
+      try {
+        const res = await window.mossApp.skillStore.openImportDialog();
+        if (!res.success || res.error === 'Canceled') return;
+
+        const importRes = await window.mossApp.skillStore.importLocal(res.data.filePath);
+        if (importRes.success) {
+          alert('导入成功');
+          await fetchInstalledSkills();
+        } else {
+          alert('导入失败: ' + (importRes.error || '未知错误'));
+        }
+      } catch (err) {
+        alert('导入失败: ' + err.message);
+      }
+    }
+
+    // ==================== Render ====================
+    function render() {
+      if (state.activeTab === 'store') {
+        renderStore();
+      } else {
+        renderInstalled();
+      }
+    }
+
+    function renderStore() {
+      categoriesBar.classList.remove('hidden');
+      importBtn.classList.add('hidden');
+
+      if (state.loading) {
+        content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+        return;
+      }
+
+      if (state.skills.length === 0) {
+        content.innerHTML = `
+          <div class="empty">
+            <div class="icon">⚡</div>
+            <p>暂无技能</p>
+          </div>
+        `;
+        return;
+      }
+
+      const html = `
+        <div class="skill-grid">
+          ${state.skills.map(skill => renderSkillCard(skill)).join('')}
+        </div>
+        ${state.loadingMore ? '<div class="loading"><div class="spinner"></div></div>' : ''}
+        ${!state.hasMore && !state.loadingMore ? '' : ''}
+      `;
+      content.innerHTML = html;
+    }
+
+    function renderInstalled() {
+      categoriesBar.classList.add('hidden');
+      importBtn.classList.remove('hidden');
+
+      if (state.loading) {
+        content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+        return;
+      }
+
+      if (state.installedList.length === 0) {
+        content.innerHTML = `
+          <div class="empty">
+            <div class="icon">⚡</div>
+            <p>暂无已安装的技能</p>
+          </div>
+        `;
+        return;
+      }
+
+      const custom = state.installedList.filter(s => !s.isBuiltin && s.isUploaded);
+      const hub = state.installedList.filter(s => !s.isBuiltin && s.isHubInstalled);
+      const builtin = state.installedList.filter(s => s.isBuiltin);
+      // Local skills - neither builtin, hub, nor uploaded (e.g., skills in ~/.claude/skills without meta)
+      const local = state.installedList.filter(s => !s.isBuiltin && !s.isHubInstalled && !s.isUploaded);
+
+      let html = '';
+
+      // Custom skills
+      html += renderInstalledSection('自定义技能', custom, 'customSkills');
+      // Hub skills
+      html += renderInstalledSection('Hub 技能', hub, 'hubSkills');
+      // Local skills
+      html += renderInstalledSection('本地技能', local, 'localSkills');
+      // Builtin skills
+      html += renderInstalledSection('内置技能', builtin, 'builtinSkills');
+
+      content.innerHTML = html;
+    }
+
+    function renderInstalledSection(title, skills, emptyKey) {
+      const count = skills.length;
+      if (count === 0) {
+        return `
+          <div class="installed-section">
+            <div class="installed-section-header">
+              <span class="installed-section-title">${title}</span>
+              <span class="installed-section-count">0</span>
+            </div>
+            <div class="installed-section-empty">暂无${title}</div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="installed-section">
+          <div class="installed-section-header">
+            <span class="installed-section-title">${title}</span>
+            <span class="installed-section-count">${count}</span>
+          </div>
+          <div class="skill-grid">
+            ${skills.map(skill => renderInstalledCard(skill)).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderSkillCard(skill) {
+      const isInstalled = state.installedList.some(s => s.name === skill.name || s.meta?.id === skill.id);
+      const isInstalling = state.installingSkillId === skill.id;
+
+      let badgeHtml = '';
+      if (isInstalled) {
+        badgeHtml = '<span class="installed-badge installed">已安装</span>';
+      }
+
+      let actionHtml = '';
+      if (isInstalling) {
+        actionHtml = `
+          <div class="action">
+            <div class="progress">
+              <div class="progress-bar"><div class="fill" style="width:${state.installProgress}%"></div></div>
+            </div>
+          </div>
+        `;
+      } else if (!isInstalled) {
+        actionHtml = `
+          <div class="action">
+            <button class="install-btn" data-install="${skill.id}">安装</button>
+          </div>
+        `;
+      }
+
+      const iconHtml = skill.icon
+        ? `<img src="${escapeHtml(skill.icon)}" alt="${escapeHtml(skill.display_name || skill.name)}" onerror="this.parentElement.innerHTML='${escapeHtml(skill.emoji || '📦')}'"/>`
+        : escapeHtml(skill.emoji || '📦');
+
+      return `
+        <div class="skill-card" data-skill-id="${skill.id}">
+          <div class="icon-wrap">
+            <div class="icon">${iconHtml}</div>
+            ${badgeHtml}
+          </div>
+          <div class="content-wrap">
+            <div class="name">${escapeHtml(skill.display_name || skill.name)}</div>
+            <div class="desc">${escapeHtml(skill.description || '')}</div>
+          </div>
+          ${actionHtml}
+        </div>
+      `;
+    }
+
+    function renderInstalledCard(skill) {
+      const displayName = skill.meta?.display_name || skill.displayName || skill.name;
+      const description = skill.meta?.description || skill.description || '';
+      const emoji = skill.meta?.emoji || skill.emoji || '⚡';
+      const icon = skill.meta?.icon || skill.icon || '';
+      const version = normalizeVersion(skill.meta?.installed_version || skill.version);
+
+      const iconHtml = icon
+        ? `<img src="${escapeHtml(icon)}" alt="${escapeHtml(displayName)}" onerror="this.parentElement.innerHTML='${escapeHtml(emoji)}'"/>`
+        : escapeHtml(emoji);
+
+      return `
+        <div class="skill-card" data-installed-skill="${skill.name}">
+          <div class="icon-wrap">
+            <div class="icon">${iconHtml}</div>
+          </div>
+          <div class="content-wrap">
+            <div class="name">${escapeHtml(displayName)}</div>
+            <div class="desc">${escapeHtml(description)}</div>
+          </div>
+          <div class="action" data-action-skill="${skill.name}">
+            <button class="install-btn" data-uninstall="${skill.name}" title="卸载">✕</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderCategories() {
+      const pills = [
+        { key: 'all', label: '精选' },
+        ...state.categories.map(c => ({ key: c, label: c }))
+      ];
+      categoriesBar.innerHTML = pills.map(p => `
+        <button class="category-pill ${state.selectedCategory === p.key ? 'active' : ''}" data-category="${p.key}">${escapeHtml(p.label)}</button>
+      `).join('');
+    }
+
+    // ==================== Detail Modal ====================
+    function openDetailModal(skill) {
+      detailModal.classList.remove('hidden');
+      modalBody.innerHTML = '<div class="loading-content"><div class="spinner"></div></div>';
+      modalFooter.innerHTML = '';
+
+      const isInstalled = state.installedList.some(s => s.name === skill.name || s.meta?.id === skill.id);
+
+      Promise.all([
+        window.mossApp.skillStore.fetchSkillDetail(skill.id),
+      ]).then(([detailRes]) => {
+        const detail = detailRes.success ? detailRes.data : null;
+        renderModalContent(skill, detail, isInstalled);
+      });
+    }
+
+    function renderModalContent(skill, detail, isInstalled) {
+      const iconHtml = skill.icon
+        ? `<img src="${escapeHtml(skill.icon)}" alt="${escapeHtml(skill.display_name || skill.name)}" onerror="this.innerHTML='${escapeHtml(skill.emoji || '📦')}'"/>`
+        : `<div style="font-size:34px">${escapeHtml(skill.emoji || '📦')}</div>`;
+
+      const categoriesHtml = (skill.categories || []).map(c =>
+        `<span class="modal-category">${escapeHtml(c)}</span>`
+      ).join('');
+
+      let featuresHtml = '';
+      if (detail?.core_features) {
+        try {
+          const features = JSON.parse(detail.core_features);
+          if (Array.isArray(features) && features.length > 0) {
+            featuresHtml = features.map(f =>
+              `<div class="feature-item"><span class="bullet">•</span><span>${escapeHtml(f.title || '')}${f.desc ? escapeHtml('，' + f.desc) : ''}</span></div>`
+            ).join('');
+          }
+        } catch {}
+      }
+
+      if (detail?.applicable_scenarios) {
+        try {
+          const scenarios = JSON.parse(detail.applicable_scenarios);
+          if (Array.isArray(scenarios) && scenarios.length > 0) {
+            featuresHtml += scenarios.map(s =>
+              `<div class="feature-item"><span class="bullet">•</span><span>${escapeHtml(s)}</span></div>`
+            ).join('');
+          }
+        } catch {}
+      }
+
+      modalBody.innerHTML = `
+        <div class="modal-icon-wrap">
+          <div class="modal-icon">${iconHtml}</div>
+          <div class="modal-name">${escapeHtml(skill.display_name || skill.name)}</div>
+          ${categoriesHtml ? `<div class="modal-categories">${categoriesHtml}</div>` : ''}
+        </div>
+
+        <div class="modal-section">
+          <div class="modal-section-title"><span class="icon">✦</span> 技能介绍</div>
+          <div class="modal-section-desc">${escapeHtml(skill.description || '')}</div>
+        </div>
+
+        ${featuresHtml ? `
+          <div class="modal-section">
+            <div class="modal-section-title"><span class="icon">📄</span> 怎么使用？</div>
+            <div class="feature-list">${featuresHtml}</div>
+          </div>
+        ` : ''}
+      `;
+
+      renderModalFooter(skill, detail, isInstalled);
+    }
+
+    function renderModalFooter(skill, detail, isInstalled) {
+      const latestVersion = detail?.versions?.[0];
+      const isInstalling = state.installingSkillId === skill.id;
+
+      if (isInstalled) {
+        modalFooter.innerHTML = `
+          <button class="btn btn-primary" data-action="use">去使用</button>
+          <button class="btn-icon danger" data-action="uninstall" data-skill="${skill.name}">✕</button>
+        `;
+      } else if (isInstalling) {
+        modalFooter.innerHTML = `
+          <div class="progress" style="flex:1">
+            <div class="progress-bar"><div class="fill" style="width:${state.installProgress}%"></div></div>
+          </div>
+        `;
+      } else if (latestVersion) {
+        modalFooter.innerHTML = `
+          <button class="btn btn-primary" data-action="install" data-skill-id="${skill.id}">安装技能</button>
+          <button class="btn btn-secondary" data-action="download" data-skill-id="${skill.id}">下载</button>
+        `;
+      }
+
+      modalFooter.innerHTML += `
+        <div class="modal-security">
+          <span class="icon">✓</span>
+          <span>已通过安全与合规验证，无恶意代码或数据泄露风险。</span>
+        </div>
+      `;
+    }
+
+    function closeDetailModal() {
+      detailModal.classList.add('hidden');
+    }
+
+    // ==================== Event Handlers ====================
+    function setupEventListeners() {
+      // Tab switching
+      $$('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          $$('.tab').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          state.activeTab = tab.dataset.tab;
+          state.skills = [];
+          state.nextCursor = null;
+          state.hasMore = false;
+          if (state.activeTab === 'store') {
+            fetchSkills();
+          } else {
+            fetchInstalledSkills();
+          }
+        });
+      });
+
+      // Search
+      let searchTimer;
+      searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          state.searchQuery = searchInput.value;
+          state.skills = [];
+          state.nextCursor = null;
+          state.hasMore = false;
+          fetchSkills();
+        }, 300);
+      });
+
+      // Category filter
+      categoriesBar.addEventListener('click', (e) => {
+        const pill = e.target.closest('.category-pill');
+        if (!pill) return;
+        $$('.category-pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        state.selectedCategory = pill.dataset.category;
+        state.skills = [];
+        state.nextCursor = null;
+        state.hasMore = false;
+        fetchSkills();
+      });
+
+      // Skill card click (open detail)
+      content.addEventListener('click', (e) => {
+        const card = e.target.closest('.skill-card');
+        if (!card) return;
+
+        // Check for install/uninstall button first
+        const installBtn = e.target.closest('[data-install]');
+        if (installBtn) {
+          const skillId = installBtn.dataset.install;
+          const skill = state.skills.find(s => s.id === skillId);
+          if (skill) installSkill(skill);
+          return;
+        }
+
+        const uninstallBtn = e.target.closest('[data-uninstall]');
+        if (uninstallBtn) {
+          const skillName = uninstallBtn.dataset.uninstall;
+          uninstallSkill(skillName);
+          return;
+        }
+
+        // Open detail modal
+        const skillId = card.dataset.skillId;
+        if (skillId) {
+          const skill = state.skills.find(s => s.id === skillId);
+          if (skill) openDetailModal(skill);
+        }
+      });
+
+      // Modal close
+      modalClose.addEventListener('click', closeDetailModal);
+      detailModal.addEventListener('click', (e) => {
+        if (e.target === detailModal) closeDetailModal();
+      });
+
+      // Modal actions
+      modalFooter.addEventListener('click', (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        const action = btn.dataset.action;
+        const skillId = btn.dataset.skillId;
+        const skillName = btn.dataset.skill;
+
+        if (action === 'install' && skillId) {
+          const skill = state.skills.find(s => s.id === skillId);
+          if (skill) installSkill(skill);
+        } else if (action === 'uninstall' && skillName) {
+          uninstallSkill(skillName);
+        } else if (action === 'use') {
+          closeDetailModal();
+        }
+      });
+
+      // Import button
+      importBtn.addEventListener('click', openImportDialog);
+
+      // Infinite scroll
+      content.addEventListener('scroll', () => {
+        if (!state.hasMore || state.loadingMore || state.activeTab !== 'store') return;
+        const { scrollTop, scrollHeight, clientHeight } = content;
+        if (scrollHeight - scrollTop - clientHeight < 100 && state.nextCursor) {
+          fetchSkills(state.nextCursor, true);
+        }
+      });
+    }
+
+    // ==================== Init ====================
+    async function init() {
+      setupEventListeners();
+      await Promise.all([
+        fetchCategories(),
+        fetchSkills(),
+        fetchInstalledSkills(),
+      ]);
+    }
+
+    init();
+  </script>
+</body>
+</html>

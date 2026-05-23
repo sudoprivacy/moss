@@ -1,0 +1,1 @@
+export const SYNTHETIC_MODEL = '<synthetic>'

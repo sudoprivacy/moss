@@ -1,0 +1,43 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 43127,
+    "advertisedHost": "0.0.0.0"
+  },
+  "auth": {
+    "mode": "local",
+    "tokenTtlSec": 86400
+  },
+  "bootstrapAdmin": {
+    "username": "admin",
+    "password": "admin"
+  },
+  "runtimeDefaults": {
+    "type": "docker",
+    "engine": "scode",
+    "dockerImage": "my-moss-runtime:v1",
+    "dockerMode": "session",
+    "scodePath": "/usr/local/bin/scode",
+    "idleTimeoutMs": 600000,
+    "maxSessions": 32
+  },
+  "storage": {
+    "rootDir": "./data",
+    "dbPath": "./data/moss.db",
+    "transcriptDir": "./data/transcripts",
+    "runtimeDir": "./data/runtime"
+  },
+  "docker": {
+    "stopTimeoutSec": 10,
+    "labels": {}
+  },
+  "recovery": {
+    "startupPolicy": "reattach-or-resume",
+    "heartbeatTimeoutMs": 30000,
+    "reattachProbeTimeoutMs": 3000,
+    "resumeOnMissingRuntime": true
+  },
+  "logging": {
+    "level": "info"
+  }
+}

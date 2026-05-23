@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or reset GitHub Release draft
+        run: |
+          if gh release view ${{ github.ref_name }} --repo ${{ github.repository }} >/dev/null 2>&1; then
+            gh release edit ${{ github.ref_name }} --draft --title "${{ github.ref_name }}" --repo ${{ github.repository }}
+          else
+            gh release create ${{ github.ref_name }} --draft --title "${{ github.ref_name }}" --repo ${{ github.repository }}
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install root dependencies
+        run: bun install
+
+      - name: Install admin dependencies
+        run: bun install
+        working-directory: admin
+
+      - name: Build parent JS files
+        run: bun run build:node
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Sync UI version to release tag
+        run: node scripts/sync-ui-version.mjs "${{ github.ref_name }}"
+
+      - name: Install UI dependencies
+        run: bun install
+        working-directory: ui
+
+      - name: Create build resources directory
+        run: 'node -e "require(''node:fs'').mkdirSync(''ui/build'', { recursive: true })"'
+
+      - name: Build ${{ matrix.os == 'macos-latest' && 'macOS' || 'Windows' }} installer
+        run: bun run ${{ matrix.os == 'macos-latest' && 'release:mac' || 'release:win' }}
+        working-directory: ui
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release has uploaded assets
+        run: |
+          asset_count=$(gh release view ${{ github.ref_name }} --repo ${{ github.repository }} --json assets --jq '.assets | length')
+          if [ "$asset_count" -eq 0 ]; then
+            echo "Release ${{ github.ref_name }} has no uploaded assets; refusing to publish an empty release."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish GitHub Release
+        run: gh release edit ${{ github.ref_name }} --draft=false --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,13 @@
+{
+  "name": "wiki-builder",
+  "display_name": "Wiki 构建助手",
+  "description": "把一批业务文档自动整理成结构化的 Wiki 知识库 —— 切分主题、写 frontmatter、生成 WIKI.md 总览。由 WikiJobExecutor 在文档中心触发 build 时调用,不直接对用户开放。客户可修改 wiki-builder.md 自定义 build 行为。",
+  "emoji": "📚",
+  "category": "系统",
+  "categories": ["系统", "文档中心"],
+  "source_type": "system",
+  "is_builtin": true,
+  "enabled": true,
+  "installed_version": "1.0.0",
+  "installed_at": "2026-05-15T00:00:00.000Z"
+}

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: file: https:; img-src 'self' data: blob: file: https:; media-src 'self' data: blob: file: https:; font-src 'self' data: blob: file: https:; connect-src 'self' data: blob: file: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'; frame-src 'self' https:;">
+  <title>定时任务</title>
+  <script type="application/ld+json">
+  {
+    "@context": "urn:goose.ai:schema",
+    "@type": "GooseApp",
+    "name": "cron-tasks",
+    "icon": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⏰</text></svg>",
+    "description": "定时任务管理 - 查看和管理所有定时任务",
+    "width": 480,
+    "height": 640,
+    "resizable": true,
+    "mcpServers": ["apps"],
+    "runtime": {
+      "hostApi": "window.mossApp",
+      "capabilities": ["storage", "files", "agent", "resources"]
+    }
+  }
+  </script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg: #0b1120;
+      --card: #151c2c;
+      --card-hover: #1c2438;
+      --border: #2a3548;
+      --primary: #6366f1;
+      --primary-hover: #818cf8;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --danger: #ef4444;
+      --danger-hover: #f87171;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .header h1 .icon {
+      font-size: 24px;
+    }
+
+    .refresh-btn {
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .refresh-btn:hover {
+      background: var(--card-hover);
+      border-color: var(--primary);
+    }
+
+    .refresh-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .task-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .task-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      transition: all 0.2s;
+    }
+
+    .task-card:hover {
+      border-color: var(--primary);
+      background: var(--card-hover);
+    }
+
+    .task-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+
+    .task-schedule {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--primary);
+      font-weight: 500;
+      font-size: 14px;
+    }
+
+    .task-schedule .icon {
+      font-size: 16px;
+    }
+
+    .task-badge {
+      background: rgba(99, 102, 241, 0.15);
+      color: var(--primary);
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .delete-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .delete-btn:hover {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .task-prompt {
+      color: var(--text);
+      font-size: 14px;
+      margin-bottom: 8px;
+      word-break: break-word;
+    }
+
+    .task-meta {
+      color: var(--text-muted);
+      font-size: 12px;
+      display: flex;
+      gap: 16px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+    }
+
+    .empty-state .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.5;
+    }
+
+    .empty-state p {
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+    }
+
+    .cron-expr {
+      font-family: 'SF Mono', Monaco, monospace;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: rgba(99, 102, 241, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1><span class="icon">&#128338;</span> 定时任务</h1>
+    <button class="refresh-btn" id="refreshBtn" onclick="loadTasks()">&#8635; 刷新</button>
+  </div>
+
+  <div id="content">
+    <div class="loading">加载中...</div>
+  </div>
+
+  <script>
+    // Cron expression to human readable
+    function cronToHuman(cron) {
+      if (!cron || cron.split(' ').length !== 5) return cron;
+
+      const [min, hour, dom, mon, dow] = cron.split(' ');
+
+      // Every N minutes
+      if (min.startsWith('*/') && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
+        return '每 ' + min.slice(2) + ' 分钟';
+      }
+
+      // Every hour
+      if (min === '0' && hour === '*') {
+        return '每小时';
+      }
+
+      // Every N hours
+      if (min === '0' && hour.startsWith('*/') && dom === '*' && mon === '*' && dow === '*') {
+        return '每 ' + hour.slice(2) + ' 小时';
+      }
+
+      // Daily at specific time
+      if (dom === '*' && mon === '*' && dow === '*') {
+        const h = String(hour).padStart(2, '0');
+        const m = String(min).padStart(2, '0');
+        return '每天 ' + h + ':' + m;
+      }
+
+      // Weekdays at specific time
+      if (dom === '*' && mon === '*' && dow === '1-5') {
+        const h = String(hour).padStart(2, '0');
+        const m = String(min).padStart(2, '0');
+        return '工作日 ' + h + ':' + m;
+      }
+
+      return cron;
+    }
+
+    // Format relative time
+    function formatRelativeTime(timestamp) {
+      const diff = Date.now() - timestamp;
+      const minute = 60_000;
+      const hour = 60 * minute;
+      const day = 24 * hour;
+
+      if (diff < minute) return '刚刚';
+      if (diff < hour) return Math.floor(diff / minute) + ' 分钟前';
+      if (diff < day) return Math.floor(diff / hour) + ' 小时前';
+      return Math.floor(diff / day) + ' 天前';
+    }
+
+    // Escape HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Load tasks
+    async function loadTasks() {
+      const btn = document.getElementById('refreshBtn');
+      btn.disabled = true;
+
+      const content = document.getElementById('content');
+      content.innerHTML = '<div class="loading">加载中...</div>';
+
+      try {
+        const tasks = await window.mossApp.cron.list();
+
+        if (!tasks || tasks.length === 0) {
+          content.innerHTML = `
+            <div class="empty-state">
+              <div class="icon">&#128338;</div>
+              <p>暂无定时任务<br><br>在主界面聊天中说"每 X 分钟..."来创建定时任务</p>
+            </div>
+          `;
+        } else {
+          content.innerHTML = '<div class="task-list">' + tasks.map(task => `
+            <div class="task-card">
+              <div class="task-header">
+                <div class="task-schedule">
+                  <span class="icon">&#128338;</span>
+                  ${escapeHtml(cronToHuman(task.cron))}
+                  <span class="cron-expr">${escapeHtml(task.cron)}</span>
+                  ${task.recurring ? '<span class="task-badge">重复</span>' : ''}
+                </div>
+                <button class="delete-btn" onclick="deleteTask('${task.id}')" title="删除">&#10005;</button>
+              </div>
+              <div class="task-prompt">${escapeHtml(task.prompt)}</div>
+              <div class="task-meta">
+                <span>创建于 ${formatRelativeTime(task.createdAt)}</span>
+                ${task.lastFiredAt ? '<span>上次运行 ' + formatRelativeTime(task.lastFiredAt) + '</span>' : ''}
+              </div>
+            </div>
+          `).join('') + '</div>';
+        }
+      } catch (err) {
+        content.innerHTML = '<div class="empty-state"><div class="icon">&#9888;</div><p>加载失败: ' + escapeHtml(err.message) + '</p></div>';
+      }
+
+      btn.disabled = false;
+    }
+
+    // Delete task
+    async function deleteTask(id) {
+      if (!confirm('确定要删除这个定时任务吗？')) return;
+
+      try {
+        await window.mossApp.cron.delete(id);
+        await loadTasks();
+      } catch (err) {
+        alert('删除失败: ' + err.message);
+      }
+    }
+
+    // Initial load
+    loadTasks();
+
+    // Auto-refresh every 30 seconds
+    setInterval(loadTasks, 30000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Code Electron UI</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="appShell" class="app-shell">
+      <aside id="leftSidebar" class="sidebar panel">
+        <div class="sidebar-head">
+          <div class="sidebar-brand">
+            <div class="brand-mark">moss</div>
+          </div>
+          <div class="sidebar-head-actions">
+            <button id="toggleLeftSidebarBtn" class="ghost panel-toggle" type="button" aria-label="收起左侧栏">◂</button>
+            <button id="newSessionBtn" class="primary">新建会话</button>
+          </div>
+        </div>
+
+        <div class="status-strip">
+          <span id="cliStatusPill" class="pill">CLI</span>
+          <span id="sdkStatusPill" class="pill">SDK</span>
+        </div>
+
+        <div class="sidebar-section-title">会话列表</div>
+        <div id="sessionList" class="session-list"></div>
+      </aside>
+
+      <div id="leftResizeHandle" class="panel-resizer" data-side="left" role="separator" aria-label="调整左侧栏宽度"></div>
+
+      <main class="chat-column panel">
+        <header class="chat-header">
+          <div class="chat-header-copy">
+            <div class="eyebrow">Conversation</div>
+            <h2 id="chatTitle">选择一个会话</h2>
+            <div id="chatMeta" class="chat-meta">新建会话后开始发送消息</div>
+          </div>
+          <div class="chat-actions">
+            <button id="deleteSessionBtn" class="ghost" disabled>删除会话</button>
+            <button id="stopBtn" class="warn" disabled>停止</button>
+          </div>
+        </header>
+
+        <section id="messageList" class="message-list"></section>
+
+        <section class="composer">
+          <textarea id="promptInput" rows="5" placeholder="输入任务，Cmd/Ctrl + Enter 发送"></textarea>
+          <div class="composer-row">
+            <div id="errorText" class="error-text"></div>
+            <button id="sendBtn" class="primary" disabled>发送</button>
+          </div>
+        </section>
+      </main>
+
+      <div id="rightResizeHandle" class="panel-resizer" data-side="right" role="separator" aria-label="调整右侧栏宽度"></div>
+
+      <aside id="rightSidebar" class="workspace-column panel">
+        <header class="workspace-header">
+          <div>
+            <div class="eyebrow">Workspace</div>
+            <h2 id="workspaceTitle">工作区</h2>
+            <div id="workspaceMeta" class="workspace-meta">选择会话后可浏览目录</div>
+          </div>
+          <div class="workspace-actions">
+            <button id="toggleRightSidebarBtn" class="ghost panel-toggle" type="button" aria-label="收起右侧栏">▸</button>
+            <button id="pickDirBtn" class="ghost" disabled>选择目录</button>
+            <button id="refreshTreeBtn" class="ghost" disabled>刷新</button>
+          </div>
+        </header>
+
+        <div class="workspace-path-row">
+          <code id="workspacePath" class="workspace-path">-</code>
+        </div>
+
+        <div class="workspace-tabs">
+          <button id="filesTabBtn" class="workspace-tab active">文件</button>
+          <button id="previewTabBtn" class="workspace-tab">预览</button>
+        </div>
+
+        <section class="workspace-body single-panel">
+          <div id="treePanel" class="tree-panel">
+            <div class="sidebar-section-title">文件</div>
+            <input id="workspaceSearchInput" class="workspace-search" type="text" placeholder="搜索文件名或路径" />
+            <div id="treeRoot" class="tree-root"></div>
+          </div>
+
+          <div id="previewPanel" class="preview-panel" hidden>
+            <div class="sidebar-section-title">预览</div>
+            <div id="previewTabs" class="preview-tabs"></div>
+            <div id="filePreviewTitle" class="preview-title">未选择文件</div>
+            <pre id="filePreviewContent" class="preview-content">在右侧文件树里点一个文件。</pre>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

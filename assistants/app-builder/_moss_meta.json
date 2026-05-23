@@ -1,0 +1,13 @@
+{
+  "name": "app-builder-assistant",
+  "display_name": "App 构建助手",
+  "description": "帮助你创建和迭代桌面 App。描述你的需求，AI 自动生成完整的单文件应用，支持精美 UI、数据持久化和主机能力；也可以对已有App进行修改迭代，自动版本管理。",
+  "emoji": "🚀",
+  "category": "系统",
+  "categories": ["系统", "应用创建"],
+  "source_type": "system",
+  "is_builtin": true,
+  "enabled": true,
+  "installed_version": "1.0.0",
+  "installed_at": "2026-04-20T00:00:00.000Z"
+}

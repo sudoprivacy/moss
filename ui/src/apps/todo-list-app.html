@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>待办事项</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .app-container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 900px;
+            height: 700px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 24px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .stats {
+            display: flex;
+            gap: 24px;
+            font-size: 14px;
+        }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .stat-label {
+            opacity: 0.8;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 240px;
+            background: #f8f9fa;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #e9ecef;
+        }
+
+        .filter-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 24px;
+        }
+
+        .filter-btn {
+            padding: 12px 16px;
+            border: none;
+            border-radius: 8px;
+            background: white;
+            color: #495057;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: left;
+        }
+
+        .filter-btn:hover {
+            background: #e9ecef;
+            transform: translateX(4px);
+        }
+
+        .filter-btn.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .add-category {
+            margin-top: auto;
+            padding: 12px 16px;
+            border: 2px dashed #dee2e6;
+            border-radius: 8px;
+            background: transparent;
+            color: #6c757d;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .add-category:hover {
+            border-color: #667eea;
+            color: #667eea;
+            background: rgba(102, 126, 234, 0.05);
+        }
+
+        .content {
+            flex: 1;
+            padding: 32px;
+            overflow-y: auto;
+        }
+
+        .todo-form {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 32px;
+        }
+
+        .todo-input {
+            flex: 1;
+            padding: 16px 20px;
+            border: 2px solid #e9ecef;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .todo-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .add-btn {
+            padding: 16px 32px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .add-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .add-btn:active {
+            transform: translateY(0);
+        }
+
+        .todo-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .todo-item {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            transition: all 0.2s;
+        }
+
+        .todo-item:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            transform: translateY(-2px);
+        }
+
+        .todo-item.completed {
+            opacity: 0.6;
+            background: #f8f9fa;
+        }
+
+        .todo-checkbox {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        .todo-content {
+            flex: 1;
+        }
+
+        .todo-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #212529;
+            margin-bottom: 4px;
+        }
+
+        .todo-description {
+            font-size: 14px;
+            color: #6c757d;
+        }
+
+        .todo-meta {
+            display: flex;
+            gap: 12px;
+            font-size: 12px;
+            color: #adb5bd;
+            margin-top: 8px;
+        }
+
+        .todo-actions {
+            display: flex;
+            gap: 8px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .todo-item:hover .todo-actions {
+            opacity: 1;
+        }
+
+        .action-btn {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 6px;
+            background: #f8f9fa;
+            color: #495057;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .action-btn:hover {
+            background: #e9ecef;
+        }
+
+        .delete-btn:hover {
+            background: #dc3545;
+            color: white;
+        }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #6c757d;
+        }
+
+        .empty-state svg {
+            width: 120px;
+            height: 120px;
+            margin-bottom: 24px;
+            opacity: 0.3;
+        }
+
+        .empty-state h3 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 8px;
+        }
+
+        .empty-state p {
+            font-size: 14px;
+            text-align: center;
+            max-width: 320px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            padding: 32px;
+            width: 480px;
+            max-width: 90%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #212529;
+        }
+
+        .close-btn {
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 50%;
+            background: #f8f9fa;
+            color: #495057;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .close-btn:hover {
+            background: #e9ecef;
+            color: #212529;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .form-textarea {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 120px;
+            transition: all 0.2s;
+        }
+
+        .form-textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            margin-top: 24px;
+        }
+
+        .cancel-btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            background: #f8f9fa;
+            color: #495057;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .cancel-btn:hover {
+            background: #e9ecef;
+        }
+
+        .save-btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .save-btn:hover {
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        @media (max-width: 768px) {
+            .app-container {
+                width: 100%;
+                height: 100%;
+                border-radius: 0;
+            }
+
+            .main-content {
+                flex-direction: column;
+            }
+
+            .sidebar {
+                width: 100%;
+                border-right: none;
+                border-bottom: 1px solid #e9ecef;
+            }
+
+            .filter-buttons {
+                flex-direction: row;
+                overflow-x: auto;
+            }
+
+            .filter-btn {
+                white-space: nowrap;
+            }
+        }
+    </style>
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "todo-list-app",
+  "title": "待办事项",
+  "icon": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>",
+  "description": "一个简洁美观的待办事项管理应用",
+  "width": 900,
+  "height": 700,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ],
+  "runtime": {
+    "hostApi": "window.gooseApp",
+    "capabilities": [
+      "storage",
+      "files",
+      "agent",
+      "resources"
+    ]
+  }
+}
+  </script>
+  <script type="application/x-goose-prd">
+继续创建啊
+  </script>
+</head>
+<body>
+    <div class="app-container">
+        <div class="header">
+            <h1>待办事项</h1>
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-value" id="totalTasks">0</div>
+                    <div class="stat-label">总任务</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="activeTasks">0</div>
+                    <div class="stat-label">待处理</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="completedTasks">0</div>
+                    <div class="stat-label">已完成</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="sidebar">
+                <div class="filter-buttons">
+                    <button class="filter-btn active" data-filter="all">全部</button>
+                    <button class="filter-btn" data-filter="active">待处理</button>
+                    <button class="filter-btn" data-filter="completed">已完成</button>
+                </div>
+                <button class="add-category">+ 新建分类</button>
+            </div>
+
+            <div class="content">
+                <div class="todo-form">
+                    <input type="text" class="todo-input" id="newTodoTitle" placeholder="添加新任务...">
+                    <button class="add-btn" id="addTodoBtn">添加</button>
+                </div>
+
+                <div class="todo-list" id="todoList">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M9 11l3 3L22 4" />
+                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                        </svg>
+                        <h3>暂无任务</h3>
+                        <p>添加您的第一个任务，开始提高效率吧！</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modalTitle">编辑任务</h2>
+                <button class="close-btn" id="closeModal">&times;</button>
+            </div>
+            <form id="editTodoForm">
+                <div class="form-group">
+                    <label class="form-label" for="editTitle">任务标题</label>
+                    <input type="text" class="form-input" id="editTitle" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="editDescription">任务描述</label>
+                    <textarea class="form-textarea" id="editDescription"></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="cancel-btn" id="cancelEdit">取消</button>
+                    <button type="submit" class="save-btn">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // 应用状态
+        let todos = [];
+        let currentFilter = 'all';
+        let editingTodoId = null;
+
+        // DOM 元素
+        const todoListElement = document.getElementById('todoList');
+        const newTodoTitleInput = document.getElementById('newTodoTitle');
+        const addTodoBtn = document.getElementById('addTodoBtn');
+        const filterBtns = document.querySelectorAll('.filter-btn');
+        const totalTasksElement = document.getElementById('totalTasks');
+        const activeTasksElement = document.getElementById('activeTasks');
+        const completedTasksElement = document.getElementById('completedTasks');
+        const editModal = document.getElementById('editModal');
+        const editTodoForm = document.getElementById('editTodoForm');
+        const editTitleInput = document.getElementById('editTitle');
+        const editDescriptionInput = document.getElementById('editDescription');
+        const closeModalBtn = document.getElementById('closeModal');
+        const cancelEditBtn = document.getElementById('cancelEdit');
+
+        // 初始化应用
+        function init() {
+            loadTodos();
+            renderTodos();
+            updateStats();
+            setupEventListeners();
+        }
+
+        // 加载待办事项
+        function loadTodos() {
+            const savedTodos = localStorage.getItem('todos');
+            if (savedTodos) {
+                todos = JSON.parse(savedTodos);
+            }
+        }
+
+        // 保存待办事项
+        function saveTodos() {
+            localStorage.setItem('todos', JSON.stringify(todos));
+        }
+
+        // 设置事件监听器
+        function setupEventListeners() {
+            addTodoBtn.addEventListener('click', addTodo);
+            newTodoTitleInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    addTodo();
+                }
+            });
+
+            filterBtns.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    filterBtns.forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    currentFilter = e.target.dataset.filter;
+                    renderTodos();
+                });
+            });
+
+            closeModalBtn.addEventListener('click', closeModal);
+            cancelEditBtn.addEventListener('click', closeModal);
+            editModal.addEventListener('click', (e) => {
+                if (e.target === editModal) {
+                    closeModal();
+                }
+            });
+
+            editTodoForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                updateTodo();
+            });
+        }
+
+        // 添加新任务
+        function addTodo() {
+            const title = newTodoTitleInput.value.trim();
+            if (!title) {
+                return;
+            }
+
+            const newTodo = {
+                id: Date.now().toString(),
+                title: title,
+                description: '',
+                completed: false,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+
+            todos.push(newTodo);
+            saveTodos();
+            newTodoTitleInput.value = '';
+            renderTodos();
+            updateStats();
+        }
+
+        // 过滤任务
+        function filterTodos() {
+            switch (currentFilter) {
+                case 'active':
+                    return todos.filter(todo => !todo.completed);
+                case 'completed':
+                    return todos.filter(todo => todo.completed);
+                default:
+                    return todos;
+            }
+        }
+
+        // 渲染任务列表
+        function renderTodos() {
+            const filteredTodos = filterTodos();
+
+            if (filteredTodos.length === 0) {
+                todoListElement.innerHTML = `
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M9 11l3 3L22 4" />
+                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                        </svg>
+                        <h3>暂无任务</h3>
+                        <p>添加您的第一个任务，开始提高效率吧！</p>
+                    </div>
+                `;
+                return;
+            }
+
+            todoListElement.innerHTML = filteredTodos.map(todo => `
+                <div class="todo-item ${todo.completed ? 'completed' : ''}" data-id="${todo.id}">
+                    <input type="checkbox" class="todo-checkbox" ${todo.completed ? 'checked' : ''} data-id="${todo.id}">
+                    <div class="todo-content">
+                        <div class="todo-title">${escapeHtml(todo.title)}</div>
+                        ${todo.description ? `<div class="todo-description">${escapeHtml(todo.description)}</div>` : ''}
+                        <div class="todo-meta">
+                            <span>创建于 ${formatDate(todo.createdAt)}</span>
+                            ${todo.updatedAt !== todo.createdAt ? `<span>更新于 ${formatDate(todo.updatedAt)}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="todo-actions">
+                        <button class="action-btn edit-btn" data-id="${todo.id}">编辑</button>
+                        <button class="action-btn delete-btn" data-id="${todo.id}">删除</button>
+                    </div>
+                </div>
+            `).join('');
+
+            // 绑定事件
+            document.querySelectorAll('.todo-checkbox').forEach(checkbox => {
+                checkbox.addEventListener('change', toggleTodo);
+            });
+
+            document.querySelectorAll('.edit-btn').forEach(btn => {
+                btn.addEventListener('click', openEditModal);
+            });
+
+            document.querySelectorAll('.delete-btn').forEach(btn => {
+                btn.addEventListener('click', deleteTodo);
+            });
+        }
+
+        // 切换任务完成状态
+        function toggleTodo(e) {
+            const todoId = e.target.dataset.id;
+            const todo = todos.find(t => t.id === todoId);
+            if (todo) {
+                todo.completed = e.target.checked;
+                todo.updatedAt = new Date().toISOString();
+                saveTodos();
+                renderTodos();
+                updateStats();
+            }
+        }
+
+        // 打开编辑模态框
+        function openEditModal(e) {
+            const todoId = e.target.dataset.id;
+            const todo = todos.find(t => t.id === todoId);
+            if (todo) {
+                editingTodoId = todoId;
+                editTitleInput.value = todo.title;
+                editDescriptionInput.value = todo.description;
+                editModal.classList.add('active');
+            }
+        }
+
+        // 关闭模态框
+        function closeModal() {
+            editModal.classList.remove('active');
+            editingTodoId = null;
+        }
+
+        // 更新任务
+        function updateTodo() {
+            if (!editingTodoId) {
+                return;
+            }
+
+            const todo = todos.find(t => t.id === editingTodoId);
+            if (todo) {
+                todo.title = editTitleInput.value.trim();
+                todo.description = editDescriptionInput.value.trim();
+                todo.updatedAt = new Date().toISOString();
+                saveTodos();
+                renderTodos();
+                updateStats();
+                closeModal();
+            }
+        }
+
+        // 删除任务
+        function deleteTodo(e) {
+            const todoId = e.target.dataset.id;
+            if (confirm('确定要删除这个任务吗？')) {
+                todos = todos.filter(t => t.id !== todoId);
+                saveTodos();
+                renderTodos();
+                updateStats();
+            }
+        }
+
+        // 更新统计数据
+        function updateStats() {
+            const total = todos.length;
+            const active = todos.filter(t => !t.completed).length;
+            const completed = todos.filter(t => t.completed).length;
+
+            totalTasksElement.textContent = total;
+            activeTasksElement.textContent = active;
+            completedTasksElement.textContent = completed;
+        }
+
+        // 辅助函数
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+
+            return text.replace(/[&<>"]/g, function(m) { return map[m]; });
+        }
+
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            const now = new Date();
+            const diff = now - date;
+            const minutes = Math.floor(diff / 60000);
+            const hours = Math.floor(diff / 3600000);
+            const days = Math.floor(diff / 86400000);
+
+            if (minutes < 60) {
+                return `${minutes}分钟前`;
+            } else if (hours < 24) {
+                return `${hours}小时前`;
+            } else if (days < 7) {
+                return `${days}天前`;
+            } else {
+                return date.toLocaleDateString('zh-CN', {
+                    month: 'short',
+                    day: 'numeric'
+                });
+            }
+        }
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
