@@ -51,6 +51,7 @@
     "chokidar": "^5.0.0",
     "cli-boxes": "^4.0.1",
     "color-diff-napi": "^0.0.1",
+    "croner": "^10.0.1",
     "diff": "^8.0.4",
     "dingtalk-stream": "^2.1.6-beta.1",
     "emoji-regex": "^10.6.0",

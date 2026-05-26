@@ -19,6 +19,7 @@ import {
   KeyRound,
   ChevronRight,
   ListChecks,
+  Clock,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -66,6 +67,12 @@ const menuItems: NavItem[] = [
     url: '/sessions',
     icon: MessageSquare,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
+  },
+  {
+    title: '定时任务',
+    url: '/cron',
+    icon: Clock,
+    requiredScope: 'admin:cron',
   },
   {
     title: 'IM管理',

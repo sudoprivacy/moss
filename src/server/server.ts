@@ -83,6 +83,8 @@ import './sources/wecomDrive.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
 import { createSecretsApi } from './api/secrets.js'
+import { createCronApi } from './api/cron.js'
+import { CronService } from './services/cron/CronService.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
@@ -771,6 +773,27 @@ export function startServer(
     } catch { return undefined }
   }) : null
 
+  // Cron Service - scheduled task execution engine
+  const cronService = new CronService(runtime.store.db, {
+    runtimeService: runtime,
+    workspace: config.workspace,
+    getUserAuth: async (userId: string, orgId: string) => {
+      try {
+        const user = authService.getUserOrNull(userId, orgId)
+        if (!user) return null
+        return {
+          role: user.role,
+          scopes: user.scopes || [],
+        }
+      } catch {
+        return null
+      }
+    },
+  })
+
+  // Cron API - for scheduled tasks management
+  const cronApi = createCronApi(runtime.store.db, { cronService })
+
   function refreshAuthProxyRules() {
     const ap = runtime.authProxy
     if (!ap) return
@@ -840,6 +863,11 @@ export function startServer(
     },
   )
   sourceSyncWorker.start()
+
+  // Start cron service for scheduled task execution
+  cronService.start().catch(err => {
+    console.error('[server] Failed to start cron service:', err)
+  })
 
   // Initialize ChannelManager and PairingService with database
   // 初始化 ChannelManager 和 PairingService
@@ -2691,6 +2719,115 @@ export function startServer(
         return
       }
 
+      // ==================== Cron Jobs ====================
+      // List all cron jobs for current user
+      if (req.method === 'GET' && pathname === '/api/v1/cron/jobs') {
+        const result = await cronApi.listJobs(auth)
+        writeJson(res, 200, result)
+        return
+      }
+
+      // Create a new cron job
+      if (req.method === 'POST' && pathname === '/api/v1/cron/jobs') {
+        const body = await readJsonBody(req)
+        const result = await cronApi.createJob(auth, {
+          name: String(body.name || ''),
+          enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
+          schedule: {
+            kind: String((body.schedule as any)?.kind || 'cron'),
+            value: String((body.schedule as any)?.value || ''),
+            tz: typeof (body.schedule as any)?.tz === 'string' ? (body.schedule as any).tz : undefined,
+            description: typeof (body.schedule as any)?.description === 'string' ? (body.schedule as any).description : undefined,
+          },
+          payloadMessage: String(body.payloadMessage || ''),
+          conversationMode: String(body.conversationMode || 'new') as 'new' | 'reuse',
+          boundSessionId: typeof body.boundSessionId === 'string' ? body.boundSessionId : undefined,
+          assistantId: typeof body.assistantId === 'string' ? body.assistantId : undefined,
+          assistantName: typeof body.assistantName === 'string' ? body.assistantName : undefined,
+          workspace: typeof body.workspace === 'string' ? body.workspace : undefined,
+          runtimeJson: typeof body.runtimeJson === 'string' ? body.runtimeJson : undefined,
+          maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined,
+        })
+        writeJson(res, 200, result)
+        return
+      }
+
+      // Single cron job operations
+      const cronJobMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)$/)
+      if (cronJobMatch) {
+        const jobId = cronJobMatch[1]
+
+        // Get a single cron job
+        if (req.method === 'GET') {
+          const result = await cronApi.getJob(auth, jobId)
+          writeJson(res, 200, result)
+          return
+        }
+
+        // Update a cron job
+        if (req.method === 'PATCH') {
+          const body = await readJsonBody(req)
+          const updates: any = {}
+          if (body.name !== undefined) updates.name = String(body.name)
+          if (body.enabled !== undefined) updates.enabled = Boolean(body.enabled)
+          if (body.schedule !== undefined) {
+            updates.schedule = {
+              kind: String((body.schedule as any)?.kind || 'cron'),
+              value: String((body.schedule as any)?.value || ''),
+              tz: typeof (body.schedule as any)?.tz === 'string' ? (body.schedule as any).tz : undefined,
+              description: typeof (body.schedule as any)?.description === 'string' ? (body.schedule as any).description : undefined,
+            }
+          }
+          if (body.payloadMessage !== undefined) updates.payloadMessage = String(body.payloadMessage)
+          if (body.conversationMode !== undefined) updates.conversationMode = String(body.conversationMode)
+          if (body.boundSessionId !== undefined) updates.boundSessionId = body.boundSessionId
+          if (body.assistantId !== undefined) updates.assistantId = body.assistantId
+          if (body.assistantName !== undefined) updates.assistantName = body.assistantName
+          if (body.workspace !== undefined) updates.workspace = body.workspace
+          if (body.runtimeJson !== undefined) updates.runtimeJson = body.runtimeJson
+          if (body.maxRetries !== undefined) updates.maxRetries = body.maxRetries
+
+          const result = await cronApi.updateJob(auth, jobId, updates)
+          writeJson(res, 200, result)
+          return
+        }
+
+        // Delete a cron job (soft delete)
+        if (req.method === 'DELETE') {
+          const result = await cronApi.deleteJob(auth, jobId)
+          writeJson(res, 200, result)
+          return
+        }
+      }
+
+      // Trigger a job immediately
+      const cronTriggerMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/trigger$/)
+      if (req.method === 'POST' && cronTriggerMatch) {
+        const jobId = cronTriggerMatch[1]
+        const result = await cronApi.triggerJob(auth, jobId)
+        writeJson(res, 200, result)
+        return
+      }
+
+      // List runs for a job
+      const cronRunsMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/runs$/)
+      if (req.method === 'GET' && cronRunsMatch) {
+        const jobId = cronRunsMatch[1]
+        const limitRaw = url.searchParams.get('limit')
+        const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
+        const result = await cronApi.listRuns(auth, jobId, Number.isFinite(limit) ? limit : 50)
+        writeJson(res, 200, result)
+        return
+      }
+
+      // Admin: List all cron jobs in org
+      if (req.method === 'GET' && pathname === '/api/v1/admin/cron/jobs') {
+        authService.requireAnyScope(auth, ['admin:cron', 'cron:list:any'])
+        const result = await cronApi.adminListJobs(auth)
+        writeJson(res, 200, result)
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/upload/logo') {
         authService.requireScope(auth, 'admin:settings')
         const buffer = await readRawBody(req)
@@ -4095,11 +4232,26 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/sessions') {
         authService.requireAnyScope(auth, ['sessions:list', 'sessions:list:any'])
         const activeOnly = url.searchParams.get('active_only') === 'true'
-        const sessions = runtime.listSessions({
+        const source = url.searchParams.get('source') || undefined
+        let sessions = runtime.listSessions({
           orgId: auth.orgId,
           userId: hasScope(auth.scopes, 'sessions:list:any') ? undefined : auth.userId,
           activeOnly,
         })
+
+        // Filter by source if provided
+        if (source) {
+          sessions = sessions.filter(session => {
+            if (!session.source) return false
+            try {
+              const sourceData = JSON.parse(session.source)
+              return sourceData.source === source
+            } catch {
+              return session.source === source
+            }
+          })
+        }
+
         writeJson(res, 200, { sessions })
         return
       }
@@ -4479,6 +4631,7 @@ export function startServer(
     stop: async () => {
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()
+      cronService.stop()
       wss.close()
       await new Promise<void>((resolveClose, reject) => {
         server.close(error => {

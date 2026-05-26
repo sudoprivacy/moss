@@ -23,6 +23,7 @@ const DepartmentPoliciesPage = lazy(() => import('./pages/secrets/department-pol
 const UserCredentialsPage = lazy(() => import('./pages/secrets/user-credentials-page'))
 const AuditLogPage = lazy(() => import('./pages/secrets/audit-log-page'))
 const RotationAlertsPage = lazy(() => import('./pages/secrets/rotation-alerts-page'))
+const CronJobsPage = lazy(() => import('./pages/cron-jobs-page'))
 const SessionDetailPage = lazy(() =>
   import('./pages/session-detail-page').then((module) => ({
     default: module.SessionDetailPage,
@@ -222,6 +223,15 @@ export default function App() {
           element={
             <SuspendedRoute>
               <RotationAlertsPage />
+            </SuspendedRoute>
+          }
+        />
+        {/* Cron Jobs Management */}
+        <Route
+          path="/cron"
+          element={
+            <SuspendedRoute>
+              <CronJobsPage />
             </SuspendedRoute>
           }
         />

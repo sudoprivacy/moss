@@ -668,7 +668,84 @@ export class DirectConnectStore {
         ON secret_audit_log (action, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_namespace
         ON secret_audit_log (namespace, key);
+
+      -- ============================================================
+      -- Cron Jobs: scheduled task management
+      -- ============================================================
+      CREATE TABLE IF NOT EXISTS cron_jobs (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        deleted_at INTEGER,
+
+        schedule_kind TEXT NOT NULL,
+        schedule_value TEXT NOT NULL,
+        schedule_tz TEXT,
+        schedule_description TEXT,
+
+        payload_message TEXT NOT NULL,
+
+        conversation_mode TEXT NOT NULL,
+        bound_session_id TEXT,
+        last_session_id TEXT,
+
+        assistant_id TEXT,
+        assistant_name TEXT,
+        workspace TEXT,
+        runtime_json TEXT,
+
+        next_run_at INTEGER,
+        lease_until INTEGER,
+        last_run_at INTEGER,
+        last_status TEXT,
+        last_error TEXT,
+        run_count INTEGER DEFAULT 0,
+        retry_count INTEGER DEFAULT 0,
+        max_retries INTEGER DEFAULT 3,
+
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cron_jobs_org_user
+        ON cron_jobs (org_id, user_id);
+      CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run
+        ON cron_jobs (next_run_at) WHERE enabled = 1 AND deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_cron_jobs_lease
+        ON cron_jobs (lease_until) WHERE enabled = 1 AND deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_cron_jobs_bound_session
+        ON cron_jobs (bound_session_id);
+      CREATE INDEX IF NOT EXISTS idx_cron_jobs_last_session
+        ON cron_jobs (last_session_id);
+
+      CREATE TABLE IF NOT EXISTS cron_job_runs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        org_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+
+        session_id TEXT,
+        status TEXT NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER,
+        error TEXT,
+        summary TEXT,
+
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cron_job_runs_job
+        ON cron_job_runs (job_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_cron_job_runs_session
+        ON cron_job_runs (session_id);
     `)
+
+    try {
+      this.db.exec(`ALTER TABLE cron_jobs ADD COLUMN lease_until INTEGER;`)
+    } catch {}
   }
 
   close(): void {

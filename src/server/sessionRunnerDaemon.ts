@@ -356,6 +356,7 @@ export class SessionRunnerDaemon {
         process.stderr.write(`[SessionRunnerDaemon] Handle not ready, buffering message (${this.#pendingStdin.length} pending)\n`)
         this.#pendingStdin.push(parsed.data)
       }
+      this.#send(socket, { type: 'stdin_ack' })
     }
   }
 

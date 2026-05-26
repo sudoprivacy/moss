@@ -1,11 +1,11 @@
 import { randomUUID } from 'crypto'
-import { existsSync } from 'fs'
+import { accessSync, constants, existsSync } from 'fs'
 import { mkdir, readFile, writeFile, open } from 'fs/promises'
 import net from 'net'
 import os from 'os'
-import { dirname, join } from 'path'
+import { delimiter, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 import { loadBudgetStats } from './budgetStats.js'
 import { DirectConnectStore, mergeRuntime, openDirectConnectStore, toSessionSummary } from './db.js'
 import { AuthService } from './auth/service.js'
@@ -62,6 +62,79 @@ function resolveRunnerPath(): string {
     }
   }
   throw new Error('Missing direct-connect-session-runner.mjs. Run bun run build:node first.')
+}
+
+function isExecutableFile(candidate: string): boolean {
+  try {
+    if (!candidate || !existsSync(candidate)) return false
+    accessSync(candidate, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function resolveFromPath(command: string): string | null {
+  const pathValue = process.env.PATH ?? ''
+  const extensions = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : ['']
+  for (const dir of pathValue.split(delimiter)) {
+    if (!dir) continue
+    for (const extension of extensions) {
+      const candidate = join(dir, `${command}${extension}`)
+      if (isExecutableFile(candidate)) {
+        return candidate
+      }
+    }
+  }
+  return null
+}
+
+function resolveRunnerRuntimePath(): string {
+  const candidates = [
+    process.env.MOSS_NODE_PATH,
+    process.env.NODE_BINARY,
+    process.execPath,
+    process.argv[0],
+    resolveFromPath('node'),
+    resolveFromPath('bun'),
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    '/usr/bin/node',
+    join(os.homedir(), '.bun', 'bin', 'bun'),
+  ]
+
+  for (const candidate of candidates) {
+    if (candidate && isExecutableFile(candidate)) {
+      return candidate
+    }
+  }
+
+  throw new Error(
+    `Failed to find a usable Node.js runtime for session runner. ` +
+      `Set MOSS_NODE_PATH to a valid node executable. process.execPath=${process.execPath}`,
+  )
+}
+
+async function spawnSessionRunner(
+  command: string,
+  args: string[],
+  options: Parameters<typeof spawn>[2],
+): Promise<ChildProcess> {
+  return await new Promise<ChildProcess>((resolve, reject) => {
+    const child = spawn(command, args, options)
+
+    child.once('error', error => {
+      reject(new Error(`Failed to spawn session runner with ${command}: ${errorMessage(error)}`))
+    })
+    child.once('spawn', () => {
+      child.on('error', error => {
+        process.stderr.write(
+          `[RuntimeService] session runner process error (pid=${child.pid ?? 'unknown'}): ${errorMessage(error)}\n`,
+        )
+      })
+      resolve(child)
+    })
+  })
 }
 
 async function readRunnerFailure(
@@ -724,6 +797,7 @@ export class RuntimeService {
     }
 
     const runnerPath = resolveRunnerPath()
+    const runtimePath = resolveRunnerRuntimePath()
     const cwd = (existsSync(session.cwd) ? session.cwd : process.cwd())
     const safeCwd = cwd === '/' ? os.homedir() : cwd
 
@@ -731,10 +805,10 @@ export class RuntimeService {
     const stdoutFd = await open(stdoutLogPath, 'a')
     const stderrFd = await open(stderrLogPath, 'a')
 
-    const child = spawn(process.execPath, [runnerPath, manifestPath], {
+    const child = await spawnSessionRunner(runtimePath, [runnerPath, manifestPath], {
       detached: true,
       stdio: ['ignore', stdoutFd, stderrFd],
-      cwd: session.cwd,
+      cwd: safeCwd,
       env: runnerEnv,
     })
     child.unref()
