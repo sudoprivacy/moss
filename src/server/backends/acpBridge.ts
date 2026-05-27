@@ -56,9 +56,27 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let currentTurnAssistantUuid: string | null = null
   let currentModel = model  // Track current model for dynamic switching
   const toolResultIdByToolCallId = new Map<string, string>()
+  // Track tool calls in current turn for completion status
+  const currentTurnToolCalls = new Map<string, { toolCallId: string; name: string }>()
 
   // Pending RPC requests waiting for response
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
+
+  // Pending AskUserQuestion requests waiting for user answer
+  // Maps tool_call_id -> { requestId, questionData, resolve, reject }
+  const pendingAskUserQuestions = new Map<string, {
+    requestId: string
+    toolCallId: string
+    questionData: any
+    resolve: (value: any) => void
+    reject: (error: Error) => void
+  }>()
+
+  // Map from session/update tool_use uuid to _scode/ask_user_question requestId
+  // This is needed because scode sends AskUserQuestion twice:
+  // 1. Via session/update (tool_call) - frontend uses this uuid as parent_tool_use_id
+  // 2. Via _scode/ask_user_question RPC - needs RPC response with this requestId
+  const askUserQuestionUuidToRequestId = new Map<string, string>()
 
   // 新增：首次消息标记
   let isFirstMessage = true
@@ -142,6 +160,69 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
     const trimmedText = typeof cleanText === 'string' ? cleanText.trim() : String(cleanText)
     const acpToolUseId = parentToolUseId ? (toolResultIdByToolCallId.get(parentToolUseId) || parentToolUseId) : null
+
+    // Check if this is a response to an AskUserQuestion
+    // If so, we need to send RPC response instead of session/prompt
+    // First, check if parentToolUseId is directly in pendingAskUserQuestions
+    // If not, check if it's in the uuid->requestId mapping (for session/update -> _scode/ask_user_question linking)
+    let pendingQuestionKey = parentToolUseId
+    if (parentToolUseId && !pendingAskUserQuestions.has(parentToolUseId)) {
+      // Check if this uuid maps to a requestId
+      const mappedRequestId = askUserQuestionUuidToRequestId.get(parentToolUseId)
+      if (mappedRequestId) {
+        process.stderr.write(`[AcpBridge] Found AskUserQuestion mapping: uuid=${parentToolUseId} -> requestId=${mappedRequestId}\n`)
+        pendingQuestionKey = mappedRequestId
+      }
+    }
+
+    if (pendingQuestionKey && pendingAskUserQuestions.has(pendingQuestionKey)) {
+      const pendingQuestion = pendingAskUserQuestions.get(pendingQuestionKey)!
+      pendingAskUserQuestions.delete(pendingQuestionKey)
+      // Also clean up the mapping
+      askUserQuestionUuidToRequestId.delete(parentToolUseId!)
+
+      process.stderr.write(`[AcpBridge] Processing AskUserQuestion response for toolCallId=${pendingQuestionKey}, answer=${trimmedText}\n`)
+
+      // Build the answer payload for scode
+      // The answer format expected by scode: { answers: [{ id, value, label }] }
+      const answerPayload = {
+        answers: [{
+          id: pendingQuestion.questionData.questions?.[0]?.id || 'answer',
+          value: trimmedText,
+          label: trimmedText,
+        }]
+      }
+
+      // Send RPC response to scode
+      const responseMsg = {
+        jsonrpc: '2.0',
+        id: pendingQuestion.requestId,
+        result: answerPayload,
+      }
+      const raw = JSON.stringify(responseMsg) + '\n'
+      process.stderr.write(`[AcpBridge] Sending AskUserQuestion RPC response: ${raw}\n`)
+      child.stdin!.write(raw)
+
+      // Also emit user message to transcript for record
+      const userEvent = {
+        type: 'user',
+        sessionId,
+        uuid: userUuid,
+        parentUuid: lastPersistedUuid,
+        isSidechain: false,
+        timestamp: new Date().toISOString(),
+        cwd,
+        userType: 'external',
+        version: 'unknown',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: trimmedText }],
+        },
+      }
+      void writeTranscript(userEvent)
+      lastPersistedUuid = userUuid
+      return
+    }
 
     if (parentToolUseId && !structuredContent?.some(block => block?.type === 'tool_result')) {
       structuredContent = [{
@@ -342,6 +423,29 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)
           currentTurnAssistantUuid = null // Reset UUID for the next turn
 
+          // Emit tool completion status for all tools in current turn
+          // This is needed because scode doesn't send individual tool completion events
+          for (const [toolCallId, toolInfo] of currentTurnToolCalls) {
+            const toolCompleteEvent = {
+              type: 'tool_use',
+              sessionId,
+              uuid: toolCallId,
+              parentUuid: lastPersistedUuid,
+              isSidechain: false,
+              name: toolInfo.name,
+              tool_use_id: toolCallId,
+              status: 'completed',
+              timestamp: new Date().toISOString(),
+              cwd,
+              userType: 'external',
+              version: 'unknown',
+            }
+            process.stderr.write(`[AcpBridge] EMITTING TOOL_COMPLETE EVENT for ${toolCallId}\n`)
+            emitStdout(JSON.stringify(toolCompleteEvent) + '\n')
+          }
+          // Clear tracked tool calls for next turn
+          currentTurnToolCalls.clear()
+
           const rawUsage = parsed.result.usage || {}
           const usage = {
             input_tokens: rawUsage.inputTokens || 0,
@@ -426,8 +530,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
           if (sessionUpdate === 'tool_call' && update) {
             const toolUuid = randomUUID()
-            if (update.toolCallId) {
-              toolResultIdByToolCallId.set(update.toolCallId, toolUuid)
+            const toolCallId = update.toolCallId
+            const toolName = update.title || update.rawInput?.path || 'tool'
+            if (toolCallId) {
+              toolResultIdByToolCallId.set(toolCallId, toolUuid)
+              // Track this tool call for completion status
+              currentTurnToolCalls.set(toolCallId, {
+                toolCallId,
+                name: toolName,
+              })
             }
             const toolEvent = {
               type: 'tool_use',
@@ -435,8 +546,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               uuid: toolUuid,
               parentUuid: lastPersistedUuid,
               isSidechain: false,
-              name: update.title || update.rawInput?.path || 'tool',
-              tool_use_id: update.toolCallId,
+              name: toolName,
+              tool_use_id: toolCallId,
               input: JSON.stringify(update.rawInput || {}),
               timestamp: new Date().toISOString(),
               cwd,
@@ -447,6 +558,101 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             emitStdout(JSON.stringify(toolEvent) + '\n')
             void writeTranscript(toolEvent)
             lastPersistedUuid = toolUuid
+
+            // If this is an AskUserQuestion via session/update, store the uuid
+            // so we can link it to the _scode/ask_user_question RPC request that follows
+            // The frontend uses this uuid as parent_tool_use_id when responding
+            if (toolName === 'AskUserQuestion') {
+              process.stderr.write(`[AcpBridge] AskUserQuestion via session/update, uuid=${toolUuid}, toolCallId=${toolCallId}\n`)
+              // Store the uuid temporarily - when _scode/ask_user_question arrives,
+              // we'll create a mapping: uuid -> requestId
+              askUserQuestionUuidToRequestId.set(toolUuid, '')
+            }
+          }
+        }
+
+        // Handle _scode/ask_user_question RPC request from scode
+        // This is sent when scode needs user input for AskUserQuestion tool
+        if (parsed.method === '_scode/ask_user_question' && parsed.params && parsed.id) {
+          const requestId = parsed.id
+          const params = parsed.params
+          const toolCallId = params.tool_call_id || params.toolCallId
+
+          process.stderr.write(`[AcpBridge] Received _scode/ask_user_question request: requestId=${requestId}, toolCallId=${toolCallId}\n`)
+
+          // Emit tool_use event to frontend for UI display
+          // Use toolCallId directly as uuid so frontend can match it correctly
+          if (toolCallId) {
+            toolResultIdByToolCallId.set(toolCallId, toolCallId)
+          }
+
+          // Build question data from params
+          const questionData = {
+            title: params.title || params.description || 'Question',
+            description: params.description,
+            questions: params.questions || [],
+          }
+
+          // Check if there's a pending AskUserQuestion uuid from session/update
+          // If so, link the requestId to that uuid
+          // The frontend uses the uuid from session/update as parent_tool_use_id when responding
+          let linkedUuid: string | null = null
+          for (const [uuid, existingRequestId] of askUserQuestionUuidToRequestId) {
+            if (existingRequestId === '') {
+              // This uuid from session/update needs to be linked to this requestId
+              linkedUuid = uuid
+              askUserQuestionUuidToRequestId.set(uuid, requestId)
+              process.stderr.write(`[AcpBridge] Linking session/update uuid=${uuid} to _scode/ask_user_question requestId=${requestId}\n`)
+              break
+            }
+          }
+
+          // Store pending question for later response
+          // Key by requestId since that's what we need to respond with
+          pendingAskUserQuestions.set(requestId, {
+            requestId,
+            toolCallId: toolCallId || requestId,
+            questionData,
+            resolve: () => {}, // Will be set when user responds
+            reject: () => {},
+          })
+
+          // If we found a linked uuid, also store under that key for easier lookup
+          if (linkedUuid) {
+            pendingAskUserQuestions.set(linkedUuid, {
+              requestId,
+              toolCallId: toolCallId || requestId,
+              questionData,
+              resolve: () => {},
+              reject: () => {},
+            })
+          }
+
+          // Only emit tool_use event if we didn't find a linked uuid from session/update
+          // If session/update already emitted one, we don't want to duplicate
+          if (!linkedUuid) {
+            const toolEvent = {
+              type: 'tool_use',
+              sessionId,
+              uuid: toolCallId || requestId, // Use toolCallId as uuid for consistent matching
+              parentUuid: lastPersistedUuid,
+              isSidechain: false,
+              name: 'AskUserQuestion',
+              tool_use_id: toolCallId,
+              input: JSON.stringify(questionData),
+              timestamp: new Date().toISOString(),
+              cwd,
+              userType: 'external',
+              version: 'unknown',
+              // Add requestId so frontend can send response back
+              _request_id: requestId,
+            }
+            process.stderr.write(`[AcpBridge] EMITTING AskUserQuestion EVENT (no prior session/update): ${JSON.stringify(toolEvent)}\n`)
+            emitStdout(JSON.stringify(toolEvent) + '\n')
+            void writeTranscript(toolEvent)
+            lastPersistedUuid = toolCallId || requestId
+          } else {
+            process.stderr.write(`[AcpBridge] Skipping duplicate AskUserQuestion event - session/update already emitted one with uuid=${linkedUuid}\n`)
           }
         }
       } catch {
