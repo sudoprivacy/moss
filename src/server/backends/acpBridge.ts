@@ -55,6 +55,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let isHandshakeComplete = false
   let currentTurnAssistantUuid: string | null = null
   let currentModel = model  // Track current model for dynamic switching
+  const toolResultIdByToolCallId = new Map<string, string>()
 
   // Pending RPC requests waiting for response
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
@@ -117,10 +118,14 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     let cleanText = data
     let userUuid = randomUUID()
     let structuredContent: any[] | null = null
+    let parentToolUseId: string | null = null
     try {
       const parsed = JSON.parse(data)
       if (parsed.type === 'user') {
         const content = parsed.message?.content || data
+        if (typeof parsed.parent_tool_use_id === 'string' && parsed.parent_tool_use_id.trim()) {
+          parentToolUseId = parsed.parent_tool_use_id.trim()
+        }
         if (Array.isArray(content)) {
           structuredContent = content
         }
@@ -136,12 +141,40 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
 
     const trimmedText = typeof cleanText === 'string' ? cleanText.trim() : String(cleanText)
+    const acpToolUseId = parentToolUseId ? (toolResultIdByToolCallId.get(parentToolUseId) || parentToolUseId) : null
+
+    if (parentToolUseId && !structuredContent?.some(block => block?.type === 'tool_result')) {
+      structuredContent = [{
+        type: 'tool_result',
+        tool_use_id: acpToolUseId,
+        content: trimmedText,
+      }]
+    }
 
     const hasToolResult =
       Array.isArray(structuredContent)
       && structuredContent.some(block => block?.type === 'tool_result')
 
     if (hasToolResult) {
+      const userEvent = {
+        type: 'user',
+        sessionId,
+        uuid: userUuid,
+        parentUuid: lastPersistedUuid,
+        isSidechain: false,
+        timestamp: new Date().toISOString(),
+        cwd,
+        userType: 'external',
+        version: 'unknown',
+        message: {
+          role: 'user',
+          content: structuredContent,
+        },
+        parent_tool_use_id: acpToolUseId,
+      }
+      void writeTranscript(userEvent)
+      lastPersistedUuid = userUuid
+
       sendRpc('session/prompt', {
         sessionId: acpSessionId,
         prompt: structuredContent,
@@ -393,6 +426,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
           if (sessionUpdate === 'tool_call' && update) {
             const toolUuid = randomUUID()
+            if (update.toolCallId) {
+              toolResultIdByToolCallId.set(update.toolCallId, toolUuid)
+            }
             const toolEvent = {
               type: 'tool_use',
               sessionId,

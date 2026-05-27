@@ -229,6 +229,7 @@ export class CronService {
       }
 
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `job ${job.id}`)
+      this.markRunSessionStarted(job, run, sessionId)
 
       await this.sendCronMessage(sessionId, job.payloadMessage)
 
@@ -518,34 +519,13 @@ export class CronService {
       }
 
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `manual trigger of job ${job.id}`)
+      this.markRunSessionStarted(job, run, sessionId)
 
-      await this.sendCronMessage(sessionId, job.payloadMessage)
-
-      this.store.updateRunStatus(run.id, {
-        status: 'ok',
-        sessionId,
-        summary: `Cron job "${job.name}" triggered manually`,
-      })
-
-      this.store.updateRunResult(job.id, {
-        lastSessionId: sessionId,
-        lastStatus: 'ok',
-      })
+      void this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`)
 
       return this.store.getRunById(run.id)!
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
-
-      this.store.updateRunStatus(run.id, {
-        status: 'error',
-        error: errorMsg,
-      })
-
-      this.store.updateRunResult(job.id, {
-        lastStatus: 'error',
-        lastError: errorMsg,
-      })
-
+      this.markRunFailed(job, run, error)
       throw error
     }
   }
@@ -555,5 +535,51 @@ export class CronService {
    */
   getStore(): CronStore {
     return this.store
+  }
+
+  private markRunSessionStarted(job: CronJob, run: CronJobRun, sessionId: string): void {
+    this.store.updateRunStatus(run.id, {
+      status: 'running',
+      sessionId,
+    })
+
+    this.store.updateRunResult(job.id, {
+      lastSessionId: sessionId,
+      lastStatus: 'running',
+      runCountIncrement: 0,
+    })
+  }
+
+  private async completeRunInSession(job: CronJob, run: CronJobRun, sessionId: string, summary: string): Promise<void> {
+    try {
+      await this.sendCronMessage(sessionId, job.payloadMessage)
+
+      this.store.updateRunStatus(run.id, {
+        status: 'ok',
+        sessionId,
+        summary,
+      })
+
+      this.store.updateRunResult(job.id, {
+        lastSessionId: sessionId,
+        lastStatus: 'ok',
+      })
+    } catch (error) {
+      this.markRunFailed(job, run, error)
+    }
+  }
+
+  private markRunFailed(job: CronJob, run: CronJobRun, error: unknown): void {
+    const errorMsg = error instanceof Error ? error.message : String(error)
+
+    this.store.updateRunStatus(run.id, {
+      status: 'error',
+      error: errorMsg,
+    })
+
+    this.store.updateRunResult(job.id, {
+      lastStatus: 'error',
+      lastError: errorMsg,
+    })
   }
 }
