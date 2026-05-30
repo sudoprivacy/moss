@@ -1280,10 +1280,6 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                         <Input placeholder="https://example.com/health" value={formData.health_check_url || ''} onChange={(e) => setFormData({ ...formData, health_check_url: e.target.value })} />
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Switch checked={formData.use_proxy || false} onCheckedChange={(v) => setFormData({ ...formData, use_proxy: v })} />
-                      <Label>使用代理</Label>
-                    </div>
                   </div>
                 )}
 
@@ -1344,10 +1340,6 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                         <Label>健康检查地址</Label>
                         <Input placeholder="https://example.com/health" value={formData.health_check_url || ''} onChange={(e) => setFormData({ ...formData, health_check_url: e.target.value })} />
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Switch checked={formData.use_proxy || false} onCheckedChange={(v) => setFormData({ ...formData, use_proxy: v })} />
-                      <Label>使用代理</Label>
                     </div>
                   </>
                 )}
