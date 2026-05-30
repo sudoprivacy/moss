@@ -346,6 +346,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
           user_id: auth.userId,
           user_name: getUserName(auth.userId),
           mcp_server_id: server.id,
+          mcp_server_snapshot: JSON.stringify(sanitizeForUser(server as unknown as Record<string, unknown>)),
         })
         const sanitized = sanitizeForUser({ ...server, status: 'pending' } as unknown as Record<string, unknown>)
         return { success: true, data: { ...sanitized, _requires_approval: true } }

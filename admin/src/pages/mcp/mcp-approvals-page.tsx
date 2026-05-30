@@ -58,6 +58,19 @@ function TypeBadge({ mcpType }: { mcpType?: string }) {
   return <Badge variant="outline">{labels[mcpType] || mcpType}</Badge>
 }
 
+function parseSnapshot(raw: string | null): { displayName: string; name: string; mcpType: string; description: string } | null {
+  if (!raw) return null
+  try {
+    const s = JSON.parse(raw)
+    return {
+      displayName: s.display_name || s.name || '',
+      name: s.name || '',
+      mcpType: s.mcp_type || '',
+      description: s.description || '',
+    }
+  } catch { return null }
+}
+
 function formatDateTime(timestamp: number): string {
   const d = new Date(timestamp)
   const pad = (n: number) => n.toString().padStart(2, '0')
@@ -220,22 +233,21 @@ export default function McpApprovalsPage() {
             ) : (
               filteredApprovals.map((request) => {
                 const server = serverLookup.get(request.mcp_server_id)
+                const snapshot = parseSnapshot(request.mcp_server_snapshot)
+                const info = snapshot || (server ? { displayName: server.display_name || server.name, name: server.name } : null)
                 return (
                   <TableRow key={request.id}>
                     <TableCell className="font-medium">{request.user_name || request.user_id}</TableCell>
                     <TableCell className="text-sm">
-                      {server ? (
-                        <div>
-                          <div className="font-medium">{server.display_name || server.name}</div>
-                          <div className="text-xs text-muted-foreground">{server.name}</div>
-                        </div>
+                      {info ? (
+                        <div className="font-medium">{info.displayName}</div>
                       ) : (
                         <span className="font-mono text-xs text-muted-foreground" title={request.mcp_server_id}>
                           {request.mcp_server_id.substring(0, 8)}…
                         </span>
                       )}
                     </TableCell>
-                    <TableCell><TypeBadge mcpType={server?.mcp_type} /></TableCell>
+                    <TableCell><TypeBadge mcpType={snapshot?.mcpType || server?.mcp_type} /></TableCell>
                     <TableCell className="text-sm">{formatDateTime(request.created_at)}</TableCell>
                     <TableCell><StatusBadge status={request.status} /></TableCell>
                     <TableCell className="text-right">
@@ -272,20 +284,24 @@ export default function McpApprovalsPage() {
           </DialogHeader>
           {detailDialog && (() => {
             const server = serverLookup.get(detailDialog.mcp_server_id)
+            const snapshot = parseSnapshot(detailDialog.mcp_server_snapshot)
+            const info = snapshot || (server ? { displayName: server.display_name || server.name, name: server.name, mcpType: server.mcp_type, description: server.description } : null)
             return (
             <div className="space-y-3 text-sm">
               <div className="grid grid-cols-2 gap-3">
                 <div><span className="text-muted-foreground">申请人：</span>{detailDialog.user_name || detailDialog.user_id}</div>
                 <div><span className="text-muted-foreground">状态：</span><StatusBadge status={detailDialog.status} /></div>
               </div>
-              {server && (
+              {info ? (
                 <>
-                  <div><span className="text-muted-foreground">MCP 名称：</span>{server.display_name || server.name} <span className="text-xs text-muted-foreground">({server.name})</span></div>
-                  <div className="flex items-center gap-2"><span className="text-muted-foreground">类型：</span><TypeBadge mcpType={server.mcp_type} /></div>
-                  {server.description && (
-                    <div><span className="text-muted-foreground">描述：</span>{server.description}</div>
+                  <div><span className="text-muted-foreground">MCP 名称：</span>{info.displayName} <span className="text-xs text-muted-foreground">({info.name})</span></div>
+                  <div className="flex items-center gap-2"><span className="text-muted-foreground">类型：</span><TypeBadge mcpType={info.mcpType} /></div>
+                  {info.description && (
+                    <div><span className="text-muted-foreground">描述：</span>{info.description}</div>
                   )}
                 </>
+              ) : (
+                <div><span className="text-muted-foreground">MCP 名称：</span><span className="text-muted-foreground">（服务已删除）</span></div>
               )}
               <div><span className="text-muted-foreground">MCP 服务 ID：</span><code className="rounded bg-muted px-1.5 py-0.5 text-xs">{detailDialog.mcp_server_id}</code></div>
               <div><span className="text-muted-foreground">提交时间：</span>{formatDateTime(detailDialog.created_at)}</div>

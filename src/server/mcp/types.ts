@@ -43,7 +43,7 @@ export interface McpServer {
   redact_sensitive_fields: boolean
   allow_user_disable: boolean
 
-  status: 'pending' | 'enabled' | 'disabled' | 'error'
+  status: 'pending' | 'enabled' | 'disabled' | 'error' | 'deleted'
   enabled: boolean
   last_invocation_at: number | null
 
@@ -111,6 +111,7 @@ export interface McpApprovalRequest {
   user_id: string
   user_name: string | null
   mcp_server_id: string
+  mcp_server_snapshot: string | null
   status: 'pending' | 'approved' | 'rejected'
   reviewed_by: string | null
   reviewer_name: string | null
@@ -190,7 +191,7 @@ export interface McpPolicyInput {
 export interface McpServerListFilter {
   scope?: 'org' | 'department' | 'user'
   department_id?: string
-  status?: 'enabled' | 'disabled' | 'error' | 'pending'
+  status?: 'enabled' | 'disabled' | 'error' | 'pending' | 'deleted'
   risk_level?: 'low' | 'medium' | 'high'
   mcp_type?: 'http' | 'sse' | 'stdio'
   audit_enabled?: boolean

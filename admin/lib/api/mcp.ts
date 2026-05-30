@@ -40,7 +40,7 @@ export interface McpServer {
   redact_sensitive_fields: boolean
   allow_user_disable: boolean
   enabled: boolean
-  status: 'enabled' | 'pending' | 'disabled' | 'error'
+  status: 'enabled' | 'pending' | 'disabled' | 'error' | 'deleted'
   last_invocation_at: number | null
   created_by: string
   updated_by: string | null
@@ -93,6 +93,7 @@ export interface McpApprovalRequest {
   user_id: string
   user_name: string | null
   mcp_server_id: string
+  mcp_server_snapshot: string | null
   status: 'pending' | 'approved' | 'rejected'
   reviewed_by: string | null
   reviewer_name: string | null

@@ -118,6 +118,7 @@ function mapMcpApprovalRequest(row: SqlRow): McpApprovalRequest {
     user_id: row.user_id as string,
     user_name: row.user_name as string | null,
     mcp_server_id: row.mcp_server_id as string,
+    mcp_server_snapshot: row.mcp_server_snapshot as string | null,
     status: (row.status as string) as McpApprovalRequest['status'],
     reviewed_by: row.reviewed_by as string | null,
     reviewer_name: row.reviewer_name as string | null,
@@ -323,6 +324,9 @@ export class McpStore {
     // Migration: add template_id column to mcp_servers
     try { this.db.exec('ALTER TABLE mcp_servers ADD COLUMN template_id TEXT') } catch { /* column already exists */ }
 
+    // Migration: add mcp_server_snapshot column to mcp_approval_requests
+    try { this.db.exec('ALTER TABLE mcp_approval_requests ADD COLUMN mcp_server_snapshot TEXT') } catch { /* column already exists */ }
+
     // Per-user disable records — tracks which MCP servers each user has disabled for themselves.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_user_disabled (
@@ -349,7 +353,7 @@ export class McpStore {
       conditions.push('owner_id = ?')
       params.push(filter.department_id)
     }
-    if (filter?.status) {
+    if (filter?.status && filter.status !== 'deleted') {
       switch (filter.status) {
         case 'enabled':
           conditions.push('enabled = 1 AND status = ?')
@@ -367,6 +371,11 @@ export class McpStore {
           params.push('pending')
           break
       }
+      conditions.push("status != 'deleted'")
+    } else if (filter?.status === 'deleted') {
+      conditions.push("status = 'deleted'")
+    } else {
+      conditions.push("status != 'deleted'")
     }
     if (filter?.risk_level) {
       conditions.push('risk_level = ?')
@@ -414,14 +423,14 @@ export class McpStore {
 
   getMcpServer(orgId: string, id: string): McpServer | null {
     const row = this.db.prepare(
-      'SELECT * FROM mcp_servers WHERE org_id = ? AND id = ?'
+      "SELECT * FROM mcp_servers WHERE org_id = ? AND id = ? AND status != 'deleted'"
     ).get(orgId, id) as SqlRow | undefined
     return row ? mapMcpServer(row) : null
   }
 
   getMcpServerByName(orgId: string, name: string): McpServer | null {
     const row = this.db.prepare(
-      'SELECT * FROM mcp_servers WHERE org_id = ? AND name = ?'
+      "SELECT * FROM mcp_servers WHERE org_id = ? AND name = ? AND status != 'deleted'"
     ).get(orgId, name) as SqlRow | undefined
     return row ? mapMcpServer(row) : null
   }
@@ -549,10 +558,20 @@ export class McpStore {
   }
 
   deleteMcpServer(orgId: string, id: string): boolean {
+    const ts = now()
     const result = this.db.prepare(
-      'DELETE FROM mcp_servers WHERE org_id = ? AND id = ?'
-    ).run(orgId, id)
+      "UPDATE mcp_servers SET status = 'deleted', name = name || '__deleted_' || ?, enabled = 0, updated_at = ? WHERE org_id = ? AND id = ? AND status != 'deleted'"
+    ).run(String(ts), ts, orgId, id)
     return result.changes > 0
+  }
+
+  restoreMcpServer(orgId: string, id: string, newName: string): McpServer | null {
+    const ts = now()
+    const result = this.db.prepare(
+      "UPDATE mcp_servers SET status = 'pending', name = ?, enabled = 1, updated_at = ? WHERE org_id = ? AND id = ? AND status = 'deleted'"
+    ).run(newName, ts, orgId, id)
+    if (result.changes === 0) return null
+    return this.getMcpServer(orgId, id)
   }
 
   setMcpServerEnabled(orgId: string, id: string, enabled: boolean, updatedBy: string): McpServer | null {
@@ -608,7 +627,7 @@ export class McpStore {
 
   hasUserInstalledTemplate(orgId: string, userId: string, templateId: string): boolean {
     const row = this.db.prepare(
-      "SELECT 1 FROM mcp_servers WHERE org_id = ? AND template_id = ? AND owner_id = ? AND scope = 'user' LIMIT 1"
+      "SELECT 1 FROM mcp_servers WHERE org_id = ? AND template_id = ? AND owner_id = ? AND scope = 'user' AND status != 'deleted' LIMIT 1"
     ).get(orgId, templateId, userId) as SqlRow | undefined
     return !!row
   }
@@ -836,13 +855,14 @@ export class McpStore {
     user_id: string
     user_name?: string | null
     mcp_server_id: string
+    mcp_server_snapshot?: string | null
   }): McpApprovalRequest {
     const ts = now()
     const id = randomUUID()
     this.db.prepare(`
-      INSERT INTO mcp_approval_requests (id, org_id, user_id, user_name, mcp_server_id, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?)
-    `).run(id, entry.org_id, entry.user_id, entry.user_name ?? null, entry.mcp_server_id, ts)
+      INSERT INTO mcp_approval_requests (id, org_id, user_id, user_name, mcp_server_id, mcp_server_snapshot, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(id, entry.org_id, entry.user_id, entry.user_name ?? null, entry.mcp_server_id, entry.mcp_server_snapshot ?? null, ts)
     return this.getMcpApprovalRequest(id)!
   }
 
