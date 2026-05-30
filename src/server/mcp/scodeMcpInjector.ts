@@ -3,7 +3,7 @@ import type { McpStore } from './db.js'
 import type { McpServer } from './types.js'
 import type { McpUserConfigApi } from '../api/mcpUserConfig.js'
 import { isVisibleTo, type VisibilityFilter } from '../visibilityFilter.js'
-import { parseHeaders } from './testConnection.js'
+import { resolveAuthHeaders, resolveSecretRefHeaders, type McpAuthSecretsApi } from './authResolver.js'
 
 /**
  * Resolve the scode-format MCP settings for a session, to be written as
@@ -18,6 +18,7 @@ import { parseHeaders } from './testConnection.js'
 export async function resolveScodeMcpSettings(options: {
   mcpStore: McpStore
   mcpUserConfig: McpUserConfigApi
+  secretsApi?: McpAuthSecretsApi
   orgId: string
   userId: string
   departmentId: string | null
@@ -49,7 +50,18 @@ export async function resolveScodeMcpSettings(options: {
     async server => {
       try {
         const { env, headers } = await mcpUserConfig.getResolvedEnvAndHeaders(server, userId)
-        return { server, env, headers }
+
+        // secret_ref 解析：与 resolvedHeaders 合并
+        let secretRefHeaders: Record<string, string> = {}
+        if (server.auth_type === 'secret_ref' && server.secret_ref && options.secretsApi) {
+          secretRefHeaders = await resolveSecretRefHeaders(
+            server.secret_ref,
+            (pinyin) => options.secretsApi!.getConfigItemByPinyin(pinyin),
+            (ns, subject) => options.secretsApi!.listSecrets(ns, subject),
+          )
+        }
+
+        return { server, env, headers: { ...headers, ...secretRefHeaders } }
       } catch (err) {
         process.stderr.write(`[ScodeMcpInjector] resolve env failed for MCP ${server.id}: ${err}\n`)
         return null
@@ -120,7 +132,7 @@ function toScodeMcpEntry(
     }
     case 'http': {
       if (!server.url) return null
-      const baseHeaders = parseHeaders(server.auth_config_json) ?? {}
+      const baseHeaders = resolveAuthHeaders(server.auth_type, server.auth_config_json)
       return {
         type: 'http',
         url: server.url,
@@ -129,7 +141,7 @@ function toScodeMcpEntry(
     }
     case 'sse': {
       if (!server.url) return null
-      const baseHeaders = parseHeaders(server.auth_config_json) ?? {}
+      const baseHeaders = resolveAuthHeaders(server.auth_type, server.auth_config_json)
       return {
         type: 'sse',
         url: server.url,

@@ -73,6 +73,7 @@ import { getInstalledAgents } from '@/lib/api/agent-hub'
 import { getInstalledSkills } from '@/lib/api/skill-store'
 import type { AuthUser, AuthDepartment } from '@/lib/api/types'
 import { useAuth } from '@/lib/hooks/use-auth'
+import { AuthConfigForm } from './auth-config-form'
 
 // ===== Helper components =====
 
@@ -112,7 +113,8 @@ function getCredentialSource(secretRef: string | null): string {
   if (!secretRef) return '未配置'
   if (secretRef.startsWith('system:')) return 'system'
   if (secretRef.startsWith('user:')) return 'user'
-  return '未知'
+  // 新格式：纯 pinyin，来自 Secret Center 企业凭据
+  return 'system'
 }
 
 function formatLastInvocation(ts: number | null): string {
@@ -320,15 +322,7 @@ function parseEnvJson(raw: string | null | undefined): Record<string, string> {
 }
 
 // 鉴权方式选项（Step 3 下拉，stdio 禁用态与正常态共用，避免重复）
-const AUTH_TYPE_OPTIONS: { value: string; label: string }[] = [
-  { value: 'none', label: '无鉴权' },
-  { value: 'api_key', label: 'API Key' },
-  { value: 'bearer', label: 'Bearer Token' },
-  { value: 'basic', label: 'Basic Auth' },
-  { value: 'oauth', label: 'OAuth' },
-  { value: 'custom_header', label: '自定义 Header' },
-  { value: 'secret_ref', label: 'Secret Center 引用' },
-]
+
 
 // ===== Main page component =====
 
@@ -362,8 +356,6 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
   const [formData, setFormData] = useState<McpServerFormData>({})
   const [argsList, setArgsList] = useState<string[]>([])
   const [envMap, setEnvMap] = useState<Record<string, string>>({})
-  // Plan §9 Step 3: auth_config_json — Key-Value pairs for non secret_ref auth types
-  const [authConfigMap, setAuthConfigMap] = useState<Record<string, string>>({})
   // JSON 配置模式相关状态
   const [configMode, setConfigMode] = useState<'json' | 'form'>('json')
   const [jsonConfig, setJsonConfig] = useState<string>('{}')
@@ -572,7 +564,6 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
     }))
     if (result.args_json) setArgsList(parseArgsJson(result.args_json))
     if (result.env_json) setEnvMap(parseEnvJson(result.env_json))
-    if (result.auth_config_json) setAuthConfigMap(parseEnvJson(result.auth_config_json))
   }, [])
 
   const handleModeSwitch = useCallback((mode: 'json' | 'form') => {
@@ -617,7 +608,6 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
     })
     setArgsList([])
     setEnvMap({})
-    setAuthConfigMap({})
     setConfigMode('json')
     setJsonConfig('{}')
     setParseResult(null)
@@ -664,7 +654,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
     })
     setArgsList(parseArgsJson(server.args_json))
     setEnvMap(parseEnvJson(server.env_json))
-    setAuthConfigMap(parseEnvJson(server.auth_config_json))
+    // auth_config_json 通过 formData 传递给 AuthConfigForm 组件处理
     // 编辑场景：用表单模式（已有数据），用户可切换到 JSON 模式查看/编辑
     setConfigMode('form')
     setJsonConfig('{}')
@@ -714,21 +704,17 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
           auth_config_json: Object.keys(parsedAuth).length > 0 ? JSON.stringify(parsedAuth) : null,
         }
       } else {
-        // 表单模式：原有逻辑
+        // 表单模式：env 序列化仍在此处理，auth_config_json 由 AuthConfigForm 组件内部序列化
         const cleanedEnv: Record<string, string> = {}
         for (const [k, v] of Object.entries(envMap)) {
           if (k.trim()) cleanedEnv[k.trim()] = v
-        }
-        const cleanedAuth: Record<string, string> = {}
-        for (const [k, v] of Object.entries(authConfigMap)) {
-          if (k.trim()) cleanedAuth[k.trim()] = v
         }
         payload = {
           ...formData,
           display_name: formData.name || formData.display_name,
           args_json: argsList.length > 0 ? JSON.stringify(argsList) : null,
           env_json: Object.keys(cleanedEnv).length > 0 ? JSON.stringify(cleanedEnv) : null,
-          auth_config_json: Object.keys(cleanedAuth).length > 0 ? JSON.stringify(cleanedAuth) : null,
+          // auth_config_json 直接使用 formData 中的值（由 AuthConfigForm 组件维护）
         }
       }
 
@@ -1292,8 +1278,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                         const next = v as 'http' | 'sse' | 'stdio'
                         // 按传输类型隔离：切到 stdio 清空鉴权并重置鉴权方式；切到 http/sse 清空环境变量
                         if (next === 'stdio') {
-                          setAuthConfigMap({})
-                          setFormData({ ...formData, mcp_type: next, auth_type: 'none', secret_ref: '' })
+                          setFormData({ ...formData, mcp_type: next, auth_type: 'none', secret_ref: '', auth_config_json: null })
                         } else {
                           setEnvMap({})
                           setFormData({ ...formData, mcp_type: next })
@@ -1349,51 +1334,17 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
             {/* Step 3: 鉴权配置 */}
             {currentStep === 2 && (
               <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label>鉴权方式</Label>
-                  {isStdio ? (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <div className="cursor-not-allowed">
-                          <Select value={formData.auth_type || 'none'} disabled>
-                            <SelectTrigger><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              {AUTH_TYPE_OPTIONS.map((o) => (
-                                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent>STDIO 通过环境变量鉴权，请在「连接配置」的环境变量中传入密钥</TooltipContent>
-                    </Tooltip>
-                  ) : (
-                    <Select value={formData.auth_type || 'none'} onValueChange={(v) => setFormData({ ...formData, auth_type: v as any })}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {AUTH_TYPE_OPTIONS.map((o) => (
-                          <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                </div>
-                {!isStdio && formData.auth_type === 'secret_ref' && (
-                  <div className="space-y-2">
-                    <Label>Secret Center 凭据引用</Label>
-                    <Input placeholder="system:secret_name" value={formData.secret_ref || ''} onChange={(e) => setFormData({ ...formData, secret_ref: e.target.value })} />
-                  </div>
-                )}
-                {!isStdio && formData.auth_type && formData.auth_type !== 'none' && formData.auth_type !== 'secret_ref' && (
-                  <div className="space-y-2">
-                    <Label>额外配置</Label>
-                    <KVEditor value={authConfigMap} onChange={setAuthConfigMap} />
-                    <p className="text-xs text-muted-foreground">Key-Value 形式，例如 header_name=X-API-Key 等。敏感值请改用 Secret Center 引用。</p>
-                  </div>
-                )}
-                <div className="rounded-md bg-muted/50 p-3 text-sm text-muted-foreground">
-                  MCP 配置不直接保存明文密钥，只保存 Secret 引用。
-                </div>
+                <AuthConfigForm
+                  authType={formData.auth_type}
+                  authConfigJson={formData.auth_config_json}
+                  secretRef={formData.secret_ref}
+                  scope={formData.scope}
+                  departmentId={formData.owner_id}
+                  isStdio={isStdio}
+                  onChange={(authType, authConfigJson, secretRef) =>
+                    setFormData(prev => ({ ...prev, auth_type: authType, auth_config_json: authConfigJson, secret_ref: secretRef }))
+                  }
+                />
               </div>
             )}
 

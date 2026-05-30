@@ -346,3 +346,32 @@ export function subscribeMcpEvents(handlers: {
     es?.close()
   }
 }
+
+// ============================================================
+// 鉴权配置类型（与后端 authResolver.ts 中的类型保持一致）
+// ============================================================
+
+export interface BearerAuthConfig {
+  header_name: string
+  prefix: string
+  token: string
+}
+
+export interface BasicAuthConfig {
+  header_name: string
+  username: string
+  password: string
+}
+
+export interface ApiKeyAuthConfig {
+  header_name: string
+  api_key: string
+}
+
+export interface OAuthAuthConfig {
+  client_id: string
+  client_secret: string
+  authorization_url: string
+  token_url: string
+  scopes?: string
+}

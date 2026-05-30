@@ -3,6 +3,7 @@ import type { AuthContext } from '../auth/token.js'
 import type { AuthService } from '../auth/service.js'
 import type { McpServerInput, McpPolicyInput, McpServerListFilter, McpAuditLogFilter, McpTemplateListFilter, McpTemplateInput } from '../mcp/types.js'
 import { testMcpConnection } from '../mcp/testConnection.js'
+import { validateAuthConfig } from '../mcp/authResolver.js'
 import { broadcastMcpEvent } from './mcpEvents.js'
 
 interface McpAdminDeps {
@@ -178,6 +179,10 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         resolvedInput.visible_to = { department_ids: [resolvedInput.owner_id] }
       }
 
+      // 鉴权配置结构校验
+      const authError = validateAuthConfig(resolvedInput.auth_type ?? 'none', resolvedInput.auth_config_json ?? null, resolvedInput.secret_ref ?? null)
+      if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
+
       const server = mcpStore.createMcpServer(auth.orgId, resolvedInput, auth.userId)
       writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { name: input.name }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
@@ -209,6 +214,13 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
           throw err
         }
       }
+
+      // 鉴权配置结构校验（仅当 auth 相关字段被更新时）
+      const effectiveAuthType = input.auth_type ?? existing.auth_type
+      const effectiveAuthConfigJson = input.auth_config_json !== undefined ? input.auth_config_json : existing.auth_config_json
+      const effectiveSecretRef = input.secret_ref !== undefined ? input.secret_ref : existing.secret_ref
+      const authError = validateAuthConfig(effectiveAuthType, effectiveAuthConfigJson ?? null, effectiveSecretRef ?? null)
+      if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
 
       const server = mcpStore.updateMcpServer(auth.orgId, id, input, auth.userId)
 
