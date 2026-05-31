@@ -535,7 +535,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
   const pageTitle = fixedScope === 'org' ? '企业服务' : fixedScope === 'department' ? '部门服务' : 'MCP 服务'
   const pageDesc = fixedScope === 'org' ? '管理企业级 MCP 服务配置' : fixedScope === 'department' ? '管理部门级 MCP 服务配置' : '管理企业级和部门级 MCP 服务配置'
 
-  const steps = ['基础信息', '连接配置', '鉴权配置', '权限范围', '安全策略']
+  const steps = ['基础信息', '连接配置', '权限范围', '鉴权配置', '安全策略']
 
   // 有效传输类型：JSON 模式以解析结果为准，表单模式以 formData 为准（JSON 模式下 formData.mcp_type 是过期默认值）
   const effectiveType = configMode === 'json' ? parseResult?.mcp_type : formData.mcp_type
@@ -634,6 +634,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
       health_check_url: server.health_check_url || '',
       use_proxy: server.use_proxy,
       auth_type: server.auth_type,
+      auth_config_json: server.auth_config_json || null,
       secret_ref: server.secret_ref || '',
       scope: fixedScope ?? server.scope,
       owner_type: server.owner_type,
@@ -1331,25 +1332,8 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
               </div>
             )}
 
-            {/* Step 3: 鉴权配置 */}
+            {/* Step 3: 权限范围 */}
             {currentStep === 2 && (
-              <div className="space-y-4">
-                <AuthConfigForm
-                  authType={formData.auth_type}
-                  authConfigJson={formData.auth_config_json}
-                  secretRef={formData.secret_ref}
-                  scope={formData.scope}
-                  departmentId={formData.owner_id}
-                  isStdio={isStdio}
-                  onChange={(authType, authConfigJson, secretRef) =>
-                    setFormData(prev => ({ ...prev, auth_type: authType, auth_config_json: authConfigJson, secret_ref: secretRef }))
-                  }
-                />
-              </div>
-            )}
-
-            {/* Step 4: 权限范围 */}
-            {currentStep === 3 && (
               <div className="space-y-4">
                 {!fixedScope && (
                   <div className="space-y-2">
@@ -1462,6 +1446,23 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                     </div>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* Step 4: 鉴权配置 */}
+            {currentStep === 3 && (
+              <div className="space-y-4">
+                <AuthConfigForm
+                  authType={formData.auth_type}
+                  authConfigJson={formData.auth_config_json}
+                  secretRef={formData.secret_ref}
+                  scope={formData.scope}
+                  departmentId={formData.owner_id}
+                  isStdio={isStdio}
+                  onChange={(authType, authConfigJson, secretRef) =>
+                    setFormData(prev => ({ ...prev, auth_type: authType, auth_config_json: authConfigJson, secret_ref: secretRef }))
+                  }
+                />
               </div>
             )}
 
