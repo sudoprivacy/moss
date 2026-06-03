@@ -2641,6 +2641,40 @@ export class DirectConnectStore {
     return this.db.prepare('SELECT * FROM config_items WHERE status = 1').all() as SqlRow[]
   }
 
+  /**
+   * Ensure default config items exist (e.g., ShareOne for user-level key storage)
+   */
+  ensureDefaultConfigItems(): void {
+    const ts = now()
+
+    // ShareOne config item for user-level API key storage
+    const shareoneExists = this.getConfigItemByPinyin('shareone')
+    if (!shareoneExists) {
+      const result = this.db.prepare(`
+        INSERT INTO config_items (name, description, icon, pinyin, scope, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'ShareOne',
+        'ShareOne 分享服务 API Key，用于发布分享内容',
+        null,
+        'shareone',
+        'user',
+        1,
+        ts,
+        ts,
+      )
+      const configItemId = Number(result.lastInsertRowid)
+
+      // Add the shareone_key entry
+      this.db.prepare(`
+        INSERT INTO config_entries (config_item_id, config_key, name, config_desc, required, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(configItemId, 'shareone_key', 'ShareOne Key', 'ShareOne API Key 用于认证分享发布', 1, ts, ts)
+
+      console.log('[DB] Created default ShareOne config item')
+    }
+  }
+
   createConfigItem(row: {
     name: string
     description?: string

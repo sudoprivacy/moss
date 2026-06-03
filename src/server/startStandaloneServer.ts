@@ -10,7 +10,6 @@ import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
-import { InMemorySecretsStore } from './nexus/inMemorySecretsStore.js'
 import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.js'
 import { TokenMinter } from './authProxy/tokenMinter.js'
 import { setSecretsApiDependencies } from './authProxy/secretsApi.js'
@@ -38,31 +37,18 @@ export async function startStandaloneDirectConnectServer(
   })
   await ensureServerDirectories(config)
 
-  // Start Nexus subprocess for secrets storage (optional, falls back to in-memory store)
+  // Start Nexus subprocess for secrets storage (required, no fallback)
   const nexusManager = new NexusManager()
-  let nexusClient: NexusClientType | undefined
-  let inMemoryStore: InMemorySecretsStore | undefined
+  let nexusClient: NexusClientType
 
-  // Create a wrapper that mimics NexusClient interface for in-memory store
-  const createInMemoryClient = (store: InMemorySecretsStore): NexusClientType => ({
-    putSecret: store.putSecret.bind(store),
-    getSecret: store.getSecret.bind(store),
-    deleteSecret: store.deleteSecret.bind(store),
-    enableSecret: store.enableSecret.bind(store),
-    disableSecret: store.disableSecret.bind(store),
-    listSecrets: store.listSecrets.bind(store),
-  })
+  // Start nexus - must succeed, no in-memory fallback
+  await nexusManager.start()
+  nexusClient = new NexusClient(nexusManager.grpcUrl)
+  console.log('[Startup] Nexus started successfully for secrets management (gRPC mode)')
 
-  try {
-    await nexusManager.start()
-    nexusClient = new NexusClient(nexusManager.baseUrl)
-    console.log('[Startup] Nexus started successfully for secrets management')
-  } catch (error) {
-    console.warn('[Startup] Nexus not available, falling back to in-memory secrets store:', error instanceof Error ? error.message : error)
-    console.warn('[Startup] Note: Secrets will NOT persist across server restarts')
-    inMemoryStore = new InMemorySecretsStore()
-    nexusClient = createInMemoryClient(inMemoryStore)
-  }
+  // Initialize store and ensure default config items exist before Auth Proxy starts
+  const store = openDirectConnectStore(config)
+  store.ensureDefaultConfigItems()
 
   // Start Auth Proxy (create instance, will load rules after DB is ready)
   const authProxy = new AuthProxyServer()
@@ -77,7 +63,6 @@ export async function startStandaloneDirectConnectServer(
     process.exit(1)
   }
 
-  const store = openDirectConnectStore(config)
   const { service: authService, bootstrap } = await createAuthService({
     db: store.db,
     dbPath: config.dbPath,
@@ -103,7 +88,7 @@ export async function startStandaloneDirectConnectServer(
   }
   authProxy.setPolicyProvider(policyProvider)
   setSecretsApiDependencies(
-    nexusClient!,
+    nexusClient,
     policyProvider,
     () => store.getAllActiveConfigItems() as unknown as Array<{ id: number; scope: string; pinyin: string }>,
   )
