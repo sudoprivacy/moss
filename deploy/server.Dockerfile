@@ -64,8 +64,14 @@ RUN for i in 1 2 3; do \
 
 # 下载 scode
 # 安装 LibreOffice 和 PDF 工具 (直接从 apt 安装，确保依赖完整)
+# 同样用重试循环包裹，避免镜像源代理瞬时故障导致整层失败 (见上方 apt 配置)。
 RUN apt-get update \
-    && apt-get install -y libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk --no-install-recommends \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk \
+         && break || { echo "libreoffice install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v soffice >/dev/null || (echo "libreoffice not installed after retries" && exit 1) \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
