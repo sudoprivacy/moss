@@ -66,7 +66,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # 3. 从 GitHub 下载 scode 引擎并赋予执行权限
 # 通过构建参数指定版本，默认为 v0.1.8
 # 根据 TARGETARCH 自动选择对应架构的二进制文件
-ARG SCODE_VERSION=v0.1.9
+ARG SCODE_VERSION=v0.1.10
 ARG TARGETARCH
 RUN ARCH=$(echo ${TARGETARCH} | sed 's/amd64/x64/' | sed 's/arm64/arm64/') && \
     curl -fsSL https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/scode-linux-${ARCH}.tar.gz | tar -xz -C /tmp && \
