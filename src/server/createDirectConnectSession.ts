@@ -47,7 +47,9 @@ async function formatErrorResponse(
         detail = text.trim()
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[DirectConnect] Failed to read error response body:', errorMessage(err))
+  }
   return detail
     ? `${prefix}: ${resp.status} ${resp.statusText}: ${detail}`
     : `${prefix}: ${resp.status} ${resp.statusText}`

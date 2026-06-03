@@ -15,6 +15,10 @@ const DEFAULT_HUB_API_BASE_URL = 'https://sudoclawhub.sudoprivacy.com/api'
 const HUB_AUTHORIZATION =
   String(process.env.MOSS_HUB_AUTHORIZATION || 'sud0@sudo').trim() || 'sud0@sudo'
 
+// TTL cache for findInstalledSkillPath (30 seconds)
+const SKILL_PATH_CACHE_TTL_MS = 30_000
+const skillPathCache = new Map<string, { result: string | null; expiry: number }>()
+
 function normalizeHubApiBaseUrl(rawValue: unknown): string {
   const trimmed = String(rawValue || '')
     .trim()
@@ -472,13 +476,12 @@ async function findSkillDirWithSkillMd(rootDir: string): Promise<string | null> 
     return null
   }
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const nested = await findSkillDirWithSkillMd(path.join(rootDir, entry.name))
-    if (nested) return nested
-  }
+  const directories = entries.filter(entry => entry.isDirectory())
+  const results = await Promise.all(
+    directories.map(entry => findSkillDirWithSkillMd(path.join(rootDir, entry.name)))
+  )
 
-  return null
+  return results.find(result => result !== null) ?? null
 }
 
 async function extractSkillZip(
@@ -627,11 +630,20 @@ async function installImportedSkillFromTemp(
 async function findInstalledSkillPath(
   skillName: string,
 ): Promise<string | null> {
+  // Check cache first
+  const cacheKey = skillName
+  const cached = skillPathCache.get(cacheKey)
+  const now = Date.now()
+  if (cached && cached.expiry > now) {
+    return cached.result
+  }
+
   for (const baseDir of MANAGED_SKILL_SEARCH_DIRS) {
     const candidate = path.join(baseDir, skillName)
     try {
       const candidateStat = await stat(candidate)
       if (candidateStat.isDirectory()) {
+        skillPathCache.set(cacheKey, { result: candidate, expiry: now + SKILL_PATH_CACHE_TTL_MS })
         return candidate
       }
     } catch {
@@ -639,6 +651,8 @@ async function findInstalledSkillPath(
     }
   }
 
+  // Cache negative result too
+  skillPathCache.set(cacheKey, { result: null, expiry: now + SKILL_PATH_CACHE_TTL_MS })
   return null
 }
 

@@ -70,7 +70,9 @@ async function readRunnerFailure(
         statusError = `Runner failed before attach (code=${parsed.code ?? 'null'}, signal=${parsed.signal ?? 'null'})`
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[RuntimeService] Failed to read runner status:', errorMessage(err))
+  }
 
   let stderrTail: string | null = null
   try {
@@ -81,7 +83,9 @@ async function readRunnerFailure(
         stderrTail = lines.slice(-20).join('\n').trim() || null
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[RuntimeService] Failed to read runner stderr log:', errorMessage(err))
+  }
 
   if (statusError && stderrTail) {
     return `${statusError}\n${stderrTail}`

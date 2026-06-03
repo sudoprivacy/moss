@@ -13,6 +13,10 @@ const DEFAULT_HUB_API_BASE_URL = 'https://sudoclawhub.sudoprivacy.com/api'
 const HUB_AUTHORIZATION =
   String(process.env.MOSS_HUB_AUTHORIZATION || 'sud0@sudo').trim() || 'sud0@sudo'
 
+// TTL cache for findAssistantDir (30 seconds)
+const ASSISTANT_DIR_CACHE_TTL_MS = 30_000
+const assistantDirCache = new Map<string, { result: AssistantSearchResult | null; expiry: number }>()
+
 // Support MOSS_HOME environment variable for Docker/container environments
 const MOSS_HOME = process.env.MOSS_HOME || path.join(os.homedir(), '.moss')
 const MOSS_ASSISTANTS_DIR = path.join(MOSS_HOME, 'assistants')
@@ -508,6 +512,14 @@ async function findAssistantDir(
     return null
   }
 
+  // Check cache first
+  const cacheKey = normalizedAssistantName
+  const cached = assistantDirCache.get(cacheKey)
+  const now = Date.now()
+  if (cached && cached.expiry > now) {
+    return cached.result
+  }
+
   const searchDirs: Array<{
     dir: string
     category: AssistantSearchResult['category']
@@ -528,7 +540,9 @@ async function findAssistantDir(
       try {
         const entryStat = await stat(assistantDir)
         if (entryStat.isDirectory()) {
-          return { dir: assistantDir, category }
+          const result = { dir: assistantDir, category }
+          assistantDirCache.set(cacheKey, { result, expiry: now + ASSISTANT_DIR_CACHE_TTL_MS })
+          return result
         }
       } catch {
         // Continue searching.
@@ -544,7 +558,9 @@ async function findAssistantDir(
         const candidateDir = path.join(dir, entry.name)
         const meta = await readAssistantMeta(candidateDir)
         if (meta?.name === normalizedAssistantName) {
-          return { dir: candidateDir, category }
+          const result = { dir: candidateDir, category }
+          assistantDirCache.set(cacheKey, { result, expiry: now + ASSISTANT_DIR_CACHE_TTL_MS })
+          return result
         }
       }
     } catch {
@@ -552,6 +568,8 @@ async function findAssistantDir(
     }
   }
 
+  // Cache negative result too
+  assistantDirCache.set(cacheKey, { result: null, expiry: now + ASSISTANT_DIR_CACHE_TTL_MS })
   return null
 }
 
