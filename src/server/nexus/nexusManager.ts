@@ -1,30 +1,42 @@
 import { spawn, type ChildProcess } from 'child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, statSync, writeFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import runtimeVersions from './runtime-versions.json' with { type: 'json' }
 
 const NEXUS_VERSION = runtimeVersions.nexus
-const NEXUS_DEFAULT_PORT = Number(process.env.MOSS_NEXUS_PORT) || 12012
+const NEXUS_DEFAULT_GRPC_PORT = Number(process.env.MOSS_NEXUS_GRPC_PORT) || 2126
 const NEXUS_POLL_INTERVAL_MS = 200
 const NEXUS_HEALTH_TIMEOUT_MS = 30_000
+
+// Rust version (0.10.0+) uses gRPC only, no HTTP API
+// We detect the binary type by checking if it's a small binary (< 20MB = Rust, > 30MB = Python)
+const RUST_BINARY_MAX_SIZE = 20 * 1024 * 1024 // 20MB
 
 export class NexusManager {
   private child: ChildProcess | null = null
   private readonly nexusDir: string
   private readonly binDir: string
-  private readonly port: number
-  private readonly dbPath: string
+  private readonly grpcPort: number
+  private isRustBinary = false
 
   constructor() {
     this.nexusDir = join(homedir(), '.moss', 'nexus')
     this.binDir = join(this.nexusDir, 'bin')
-    this.port = NEXUS_DEFAULT_PORT
-    this.dbPath = join(this.nexusDir, 'nexus_record_store.db')
+    this.grpcPort = NEXUS_DEFAULT_GRPC_PORT
   }
 
   get baseUrl(): string {
-    return `http://127.0.0.1:${this.port}`
+    // Keep for backwards compatibility, but Rust version doesn't have HTTP
+    return `http://127.0.0.1:12012`
+  }
+
+  get grpcUrl(): string {
+    return `http://127.0.0.1:${this.grpcPort}`
+  }
+
+  get isRust(): boolean {
+    return this.isRustBinary
   }
 
   async start(): Promise<void> {
@@ -40,10 +52,15 @@ export class NexusManager {
       }
     }
 
+    // Detect binary type (Rust vs Python)
+    const resolvedBin = this.resolveBinary()!
+    const binStat = statSync(resolvedBin)
+    this.isRustBinary = binStat.size < RUST_BINARY_MAX_SIZE
+    console.log(`[NexusManager] Binary size: ${binStat.size}, isRust: ${this.isRustBinary}`)
+
     mkdirSync(this.nexusDir, { recursive: true })
 
     // Clean stale PID files to prevent OSError on Windows
-    // Nexus checks both the data dir and the default ~/.nexus/ dir
     const pidLocations = [
       join(this.nexusDir, 'nexusd.pid'),
       join(homedir(), '.nexus', 'nexusd.pid'),
@@ -54,24 +71,27 @@ export class NexusManager {
       }
     }
 
-    const dbUrl = `sqlite:///${this.dbPath.replace(/\\/g, '/')}`
+    const dataDir = join(this.nexusDir, 'data')
 
-    console.log(`[NexusManager] Starting nexus on port ${this.port}...`)
-    this.child = spawn(
-      this.resolveBinary()!,
-      ['--host', 'localhost', '--profile', 'cluster', '--auth-type', 'none', '--port', String(this.port)],
-      {
-        stdio: 'pipe',
-        env: {
-          ...process.env,
-          NEXUS_DATABASE_URL: dbUrl,
-        },
+    // Build args for Rust version
+    const args = [
+      '--bind-addr', `127.0.0.1:${this.grpcPort}`,
+      '--data-dir', dataDir,
+      '--no-tls',
+      '--bootstrap-mode', 'static',
+    ]
+
+    console.log(`[NexusManager] Starting nexus (Rust version) on gRPC port ${this.grpcPort}...`)
+    this.child = spawn(this.resolveBinary()!, args, {
+      stdio: 'pipe',
+      env: {
+        ...process.env,
       },
-    )
+    })
 
     this.child.stdout?.on('data', (data: Buffer) => {
       const msg = data.toString().trim()
-      if (msg && !msg.includes('HTTP/1.1') && msg.length < 200) {
+      if (msg && msg.length < 200) {
         console.log(`[Nexus] ${msg}`)
       }
     })
@@ -88,9 +108,9 @@ export class NexusManager {
       this.child = null
     })
 
-    await this.waitForHealthy()
+    await this.waitForGrpcReady()
     this.writeReadyFile()
-    console.log(`[NexusManager] Nexus started on port ${this.port}`)
+    console.log(`[NexusManager] Nexus started (gRPC on ${this.grpcPort})`)
   }
 
   async stop(): Promise<void> {
@@ -130,54 +150,85 @@ export class NexusManager {
     const sudoworkBinary = process.platform === 'win32'
       ? join(sudoworkBinDir, 'nexusd.exe')
       : join(sudoworkBinDir, 'nexusd')
-    if (!existsSync(sudoworkBinary)) return false
 
     mkdirSync(this.binDir, { recursive: true })
-    // Copy the entire bin directory (including _internal for Python runtime)
-    const { cpSync, existsSync: exists } = require('fs')
+    const { copyFileSync, existsSync: exists, statSync } = require('fs')
+
     try {
-      // Copy _internal directory if it exists (Python runtime files)
-      const internalDir = join(sudoworkBinDir, '_internal')
-      if (exists(internalDir)) {
-        cpSync(internalDir, join(this.binDir, '_internal'), { recursive: true })
-        console.log(`[NexusManager] Copied _internal directory`)
+      // Check if sudowork binary exists
+      if (exists(sudoworkBinary)) {
+        const srcStat = statSync(sudoworkBinary)
+        const isRustBinary = srcStat.size < RUST_BINARY_MAX_SIZE
+
+        if (isRustBinary) {
+          // Rust binary - just copy the single file
+          copyFileSync(sudoworkBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
+          console.log(`[NexusManager] Copied Rust nexus binary from ${sudoworkBinary}`)
+          return true
+        }
+
+        // Python binary - need to copy _internal directory too
+        const { cpSync } = require('fs')
+        const internalDir = join(sudoworkBinDir, '_internal')
+        if (exists(internalDir)) {
+          cpSync(internalDir, join(this.binDir, '_internal'), { recursive: true })
+          console.log(`[NexusManager] Copied _internal directory`)
+        }
+        copyFileSync(sudoworkBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
+        const mcporter = join(sudoworkBinDir, process.platform === 'win32' ? 'mcporter.cmd' : 'mcporter')
+        if (exists(mcporter)) {
+          copyFileSync(mcporter, join(this.binDir, process.platform === 'win32' ? 'mcporter.cmd' : 'mcporter'))
+        }
+        console.log(`[NexusManager] Copied Python nexus binary from ${sudoworkBinDir}`)
+        return true
       }
-      // Copy nexusd binary
-      const { copyFileSync } = require('fs')
-      copyFileSync(sudoworkBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
-      // Copy mcporter if exists (needed by nexusd)
-      const mcporter = join(sudoworkBinDir, process.platform === 'win32' ? 'mcporter.cmd' : 'mcporter')
-      if (exists(mcporter)) {
-        copyFileSync(mcporter, join(this.binDir, process.platform === 'win32' ? 'mcporter.cmd' : 'mcporter'))
+
+      // Try sudowork resources directory (for bundled binaries)
+      const resourcesDir = join(homedir(), 'repo', 'sudowork', 'resources')
+      const versionedBinary = process.platform === 'win32'
+        ? join(resourcesDir, `v${NEXUS_VERSION}-nexusd-cluster-windows-x86_64.exe`)
+        : process.platform === 'darwin' && process.arch === 'arm64'
+        ? join(resourcesDir, `v${NEXUS_VERSION}-nexusd-cluster-macos-arm64`)
+        : join(resourcesDir, `v${NEXUS_VERSION}-nexusd-cluster-${process.platform}-${process.arch}`)
+
+      if (exists(versionedBinary)) {
+        copyFileSync(versionedBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
+        console.log(`[NexusManager] Copied bundled nexus binary from ${versionedBinary}`)
+        return true
       }
-      console.log(`[NexusManager] Copied nexus binary from ${sudoworkBinDir}`)
-      return true
+
+      console.log(`[NexusManager] No nexus binary found in sudowork locations`)
+      return false
     } catch (error) {
       console.error(`[NexusManager] Failed to copy nexus: ${error}`)
       return false
     }
   }
 
-  private async waitForHealthy(): Promise<void> {
+  private async waitForGrpcReady(): Promise<void> {
     const start = Date.now()
     while (Date.now() - start < NEXUS_HEALTH_TIMEOUT_MS) {
       if (this.child?.exitCode !== null) {
         throw new Error(`Nexus exited prematurely with code ${this.child?.exitCode}`)
       }
-      try {
-        const res = await fetch(`http://127.0.0.1:${this.port}/health`, {
-          signal: AbortSignal.timeout(1000),
-        })
-        if (res.ok) {
-          const body = await res.json() as { status?: string }
-          if (body.status === 'healthy') return
+      // For Rust version, just wait a bit for the process to settle
+      // gRPC server starts very fast in Rust
+      await new Promise(r => setTimeout(r, 500))
+      if (this.child?.exitCode === null) {
+        // Try a simple gRPC write/read to verify it's ready
+        try {
+          const { NexusGrpcClient } = require('../../../native/nexus-napi')
+          const testClient = new NexusGrpcClient(`http://127.0.0.1:${this.grpcPort}`)
+          // Rust version doesn't have ping, use write/read instead
+          testClient.write('/health/check.json', Buffer.from('{}'), '')
+          testClient.read('/health/check.json', '')
+          return
+        } catch {
+          // Not ready yet, continue waiting
         }
-      } catch {
-        // Not ready yet
       }
-      await new Promise(r => setTimeout(r, NEXUS_POLL_INTERVAL_MS))
     }
-    throw new Error(`Nexus health check timed out after ${NEXUS_HEALTH_TIMEOUT_MS}ms`)
+    throw new Error(`Nexus gRPC startup timed out after ${NEXUS_HEALTH_TIMEOUT_MS}ms`)
   }
 
   private writeReadyFile(): void {

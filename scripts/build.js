@@ -113,6 +113,10 @@ build('admin/dist', [
   'build',
 ])
 
+const external = [
+  '--external=better-sqlite3',
+]
+
 // bin/moss-server.mjs（统一服务端入口）
 build('bin/moss-server.mjs', [
   'build', 'src/server/serverCli.ts',
@@ -121,6 +125,7 @@ build('bin/moss-server.mjs', [
   '--format=esm',
   ...aliases,
   ...defines,
+  ...external,
 ])
 sanitizePaths('bin/moss-server.mjs')
 
