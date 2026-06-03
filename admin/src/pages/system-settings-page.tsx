@@ -107,6 +107,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
       enabled: settings.oauth2.enabled,
       authorizeUrlTemplate: settings.oauth2.authorizeUrlTemplate,
       scriptPath: settings.oauth2.scriptPath,
+      requireState: settings.oauth2.requireState,
     },
   }
 }
@@ -173,6 +174,9 @@ function buildSystemSettingsPatch(
   }
   if (draft.oauth2.scriptPath !== settings.oauth2.scriptPath) {
     oauth2Patch.scriptPath = draft.oauth2.scriptPath
+  }
+  if (draft.oauth2.requireState !== settings.oauth2.requireState) {
+    oauth2Patch.requireState = draft.oauth2.requireState
   }
   if (Object.keys(oauth2Patch).length > 0) {
     patch.oauth2 = oauth2Patch
