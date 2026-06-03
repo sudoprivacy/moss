@@ -1,31 +1,42 @@
 FROM node:22.14.0-slim
+# 让 apt 对镜像源的瞬时故障 (例如代理偶发 502/连接超时) 自动重试，并强制串行单连接下载，
+# 避免并发把脆弱的代理打挂导致整层构建失败。
+RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
 # 安装 Docker CLI + LibreOffice 依赖
-RUN apt-get update && apt-get install -y \
-    curl \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    unzip \
-    # LibreOffice 依赖
-    libxinerama1 \
-    libcairo2 \
-    libcups2 \
-    libxrandr2 \
-    libxdamage1 \
-    libxtst6 \
-    libgtk-3-0 \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libsm6 \
-    libice6 \
-    libxrender1 \
-    libfontconfig1 \
-    libdbus-1-3 \
-    libxi6 \
-    # LibreOffice 26.2 需要 OpenSSL 3 和 NSS
-    libssl3 \
-    libnss3 \
-    libnspr4 \
+# 镜像源代理偶发 502/连接超时，单次 apt-get install 任一包失败即整层失败。用重试循环包裹安装：
+# apt 的下载缓存在同一 RUN 内保留，每次重试只补拉仍缺失的包，最终收敛。jq 供 OAuth2 凭证脚本解析 JSON。
+RUN apt-get update \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           curl \
+           ca-certificates \
+           gnupg \
+           lsb-release \
+           unzip \
+           jq \
+           # LibreOffice 依赖
+           libxinerama1 \
+           libcairo2 \
+           libcups2 \
+           libxrandr2 \
+           libxdamage1 \
+           libxtst6 \
+           libgtk-3-0 \
+           libgl1-mesa-glx \
+           libglib2.0-0 \
+           libsm6 \
+           libice6 \
+           libxrender1 \
+           libfontconfig1 \
+           libdbus-1-3 \
+           libxi6 \
+           # LibreOffice 26.2 需要 OpenSSL 3 和 NSS
+           libssl3 \
+           libnss3 \
+           libnspr4 \
+         && break || { echo "apt install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v jq >/dev/null || (echo "jq not installed after retries" && exit 1) \
     # LibreOffice looks for libssl3.so, but Debian provides libssl.so.3
     && ln -sf /lib/x86_64-linux-gnu/libssl.so.3 /lib/x86_64-linux-gnu/libssl3.so \
     && ln -sf /lib/x86_64-linux-gnu/libcrypto.so.3 /lib/x86_64-linux-gnu/libcrypto3.so \
@@ -55,8 +66,14 @@ RUN for i in 1 2 3; do \
 
 # 下载 scode
 # 安装 LibreOffice 和 PDF 工具 (直接从 apt 安装，确保依赖完整)
+# 同样用重试循环包裹，避免镜像源代理瞬时故障导致整层失败 (见上方 apt 配置)。
 RUN apt-get update \
-    && apt-get install -y libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk --no-install-recommends \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk \
+         && break || { echo "libreoffice install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v soffice >/dev/null || (echo "libreoffice not installed after retries" && exit 1) \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
