@@ -14,6 +14,7 @@ RUN apt-get update \
            lsb-release \
            unzip \
            jq \
+           # LibreOffice 依赖
            libxinerama1 \
            libcairo2 \
            libcups2 \
@@ -29,6 +30,7 @@ RUN apt-get update \
            libfontconfig1 \
            libdbus-1-3 \
            libxi6 \
+           # LibreOffice 26.2 需要 OpenSSL 3 和 NSS
            libssl3 \
            libnss3 \
            libnspr4 \
