@@ -300,8 +300,11 @@ function buildSkillMetaFromFrontmatter(
   return {
     id: '',
     name: skillName,
+    // Prefer an explicit displayName for the card label (allows non-ASCII /
+    // Chinese titles); fall back to frontmatter.name, then the skill id.
+    // Note: `name` above is the invocation key and is unaffected by this.
     display_name:
-      frontmatter.name || frontmatter.displayName || skillName,
+      frontmatter.displayName || frontmatter.name || skillName,
     description: frontmatter.description || '',
     icon: frontmatter.icon || '',
     emoji: frontmatter.emoji || null,
