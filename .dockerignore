@@ -1,0 +1,30 @@
+# Dependencies — installed inside the image; including them collides with the
+# in-image `bun install` (overlay file-vs-dir conflict) and bloats the context.
+node_modules
+admin/node_modules
+**/node_modules
+
+# Rust build output (rebuilt in the napi stage)
+native/nexus-napi/target
+**/target
+
+# JS/Go build outputs (rebuilt in the image)
+bin
+out
+dist
+admin/dist
+
+# VCS / local tooling
+.git
+.github
+.vscode
+.idea
+
+# Logs / scratch
+*.log
+.DS_Store
+
+# Deploy-local scratch that must NOT be excluded:
+#   .sudocode-build-context/  (the napi stage COPYs it — keep it)
+# Everything else (src, vendor, cli, native/nexus-napi/src, admin source,
+# scripts, assistants, package.json, lockfiles) is kept.
