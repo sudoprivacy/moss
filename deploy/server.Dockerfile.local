@@ -1,0 +1,209 @@
+# =============================================================================
+# server.Dockerfile.local — fully self-contained moss server image
+# =============================================================================
+# Unlike deploy/server.Dockerfile (which only COPYs prebuilt artifacts produced
+# by CI / a prior local `bun run build:node`), this variant BUILDS EVERYTHING
+# from source inside the image, so a single `docker build` yields a correct
+# linux/amd64 image with no host-side preparation:
+#
+#   - moss-server.mjs / direct-connect-session-runner.mjs / admin/dist  (bun)
+#   - bin/wiki, bin/corpapp                                            (Go, linux/amd64)
+#   - native/nexus-napi/nexus-napi.node                                (Rust, x86_64-unknown-linux-gnu)
+#   - bin/nexus/nexusd, bin/scode                                      (downloaded)
+#
+# The nexus-napi addon depends on the PRIVATE crate `nexus-vfs-client` from
+# github.com/sudoprivacy/sudocode. To avoid baking a GitHub token into the
+# build, this Dockerfile expects a LOCAL clone of that repo staged into the
+# build context at ./.sudocode-build-context, and Cargo `[patch]`es the git
+# dependency to that local path. Use deploy/build-server-local.sh, which
+# clones/updates ~/sudocode and stages it automatically.
+#
+# Build:  deploy/build-server-local.sh [image-tag]
+# =============================================================================
+
+# --- Stage 1: JS/TS bundles + admin frontend (bun) ---------------------------
+FROM oven/bun:1 AS js-builder
+WORKDIR /src
+# Install root + admin deps first (better layer caching), then build.
+COPY package.json bun.lock ./
+COPY admin/package.json admin/bun.lock ./admin/
+# vendor/ is copied by postinstall (copy-vendor.js); bring it in before install.
+COPY vendor ./vendor
+COPY scripts ./scripts
+RUN bun install --frozen-lockfile || bun install
+RUN cd admin && (bun install --frozen-lockfile || bun install)
+# Now the full source and run the build (admin/dist + bin/*.mjs).
+COPY . .
+RUN bun run build:node
+# build:node also builds Go CLIs for the BUILD host arch (wrong for the image);
+# the Go stage below rebuilds wiki/corpapp for linux/amd64 and overrides them.
+
+# --- Stage 2: Go CLIs cross-compiled for linux/amd64 -------------------------
+FROM golang:1.22-alpine AS go-builder
+WORKDIR /src
+COPY cli ./cli
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+RUN cd cli/wiki && go build -ldflags="-s -w" -o /out/wiki . \
+    && cd /src/cli/corpapp && go build -ldflags="-s -w" -o /out/corpapp .
+
+# --- Stage 3: nexus-napi (Rust) for x86_64-unknown-linux-gnu -----------------
+# Uses the locally-staged sudocode clone (./.sudocode-build-context) via a Cargo
+# [patch], so no GitHub token is needed for the private nexus-vfs-client dep.
+# Base on rust:1-bookworm — Rust/cargo are preinstalled, so no rustup toolchain
+# download (static.rust-lang.org) is needed. We build the addon with plain
+# `cargo build` (the crate is crate-type=["cdylib"]; build.rs runs
+# napi_build::setup()) and rename the resulting .so to nexus-napi.node — this
+# avoids needing Node/npm/@napi-rs/cli at all, removing every flaky external
+# download from this stage except the unavoidable crates.io fetch (hardened via
+# the sparse protocol + retries below).
+FROM rust:1-bookworm AS napi-builder
+WORKDIR /src
+# Cargo network resilience: sparse crates.io protocol (plain HTTPS, no git index
+# clone) + built-in retries survive the transient TLS drops the mirror throws.
+ENV CARGO_NET_RETRY=10 CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse CARGO_HTTP_MULTIPLEXING=false
+# Local sudocode clone (staged by build-server-local.sh).
+COPY .sudocode-build-context /sudocode
+# The napi crate sources.
+COPY native/nexus-napi ./native/nexus-napi
+# Redirect the git dependency to the local sudocode checkout. Cargo applies this
+# [patch] to the `nexus-vfs-client` git dep regardless of its pinned rev, so the
+# build uses whatever sudocode HEAD was staged into the context.
+RUN printf '\n[patch."https://github.com/sudoprivacy/sudocode"]\nnexus-vfs-client = { path = "/sudocode/rust/crates/nexus-vfs-client" }\n' \
+      >> native/nexus-napi/Cargo.toml
+# Retry loop on top of CARGO_NET_RETRY: a full TLS handshake drop to crates.io
+# can still abort a run; retrying converges (cargo caches what it fetched).
+# napi-rs cdylib output is lib<crate>.so → rename to <binaryName>.node.
+RUN cd native/nexus-napi \
+    && for i in 1 2 3 4 5; do \
+         cargo build --release --target x86_64-unknown-linux-gnu && break \
+         || { echo "cargo build attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && cp target/x86_64-unknown-linux-gnu/release/libnexus_napi.so nexus-napi.node \
+    && test -f nexus-napi.node || (echo "napi build failed after retries" && exit 1)
+# Output: native/nexus-napi/nexus-napi.node (ELF x86-64)
+
+# --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
+FROM debian:bookworm-slim AS dl
+ARG NEXUS_VFS_VERSION=v0.1.0
+ARG SCODE_VERSION=latest
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /dl
+# nexusd-cluster (Rust nexus daemon). Archive ships nexusd-cluster-linux-x86_64/nexusd-cluster.
+RUN curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/${NEXUS_VFS_VERSION}/nexusd-cluster-linux-x86_64.tar.gz" -o nexus.tar.gz \
+    && tar -xzf nexus.tar.gz \
+    && mkdir -p /out/bin/nexus \
+    && mv nexusd-cluster-linux-x86_64/nexusd-cluster /out/bin/nexus/nexusd \
+    && chmod +x /out/bin/nexus/nexusd
+# scode (resolve "latest" tag when not pinned).
+RUN set -e; \
+    V="${SCODE_VERSION}"; \
+    if [ "$V" = "latest" ]; then \
+      V=$(curl -sI "https://github.com/sudoprivacy/sudocode/releases/latest" | grep -i "location:" | sed 's/.*tag\///' | tr -d '\r\n'); \
+    fi; \
+    echo "scode version: $V"; \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${V}/scode-linux-x64.tar.gz" -o scode.tar.gz; \
+    tar -xzf scode.tar.gz; \
+    mv scode-linux-x64/scode /out/bin/scode; \
+    chmod +x /out/bin/scode
+
+# --- Stage 5: runtime image --------------------------------------------------
+# Use Debian trixie (glibc 2.41) rather than bookworm (glibc 2.36): current
+# scode releases (v0.1.10+) are linked against GLIBC_2.39 and fail to run on
+# bookworm with "version `GLIBC_2.39' not found". Node 22 line is unchanged.
+FROM node:22-trixie-slim
+# Let apt auto-retry transient mirror failures and download serially so a flaky
+# proxy doesn't fail the whole layer.
+RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
+# Docker CLI + LibreOffice deps. Retry loop converges past transient mirror 502s
+# (apt cache persists within the RUN). jq is required by the OAuth2 credential script.
+RUN apt-get update \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           curl \
+           ca-certificates \
+           gnupg \
+           lsb-release \
+           unzip \
+           jq \
+           # LibreOffice 依赖
+           libxinerama1 \
+           libcairo2 \
+           libcups2 \
+           libxrandr2 \
+           libxdamage1 \
+           libxtst6 \
+           libgtk-3-0 \
+           libgl1 \
+           libglib2.0-0 \
+           libsm6 \
+           libice6 \
+           libxrender1 \
+           libfontconfig1 \
+           libdbus-1-3 \
+           libxi6 \
+           # LibreOffice 26.2 需要 OpenSSL 3 和 NSS
+           libssl3 \
+           libnss3 \
+           libnspr4 \
+         && break || { echo "apt install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v jq >/dev/null || (echo "jq not installed after retries" && exit 1) \
+    && ln -sf /lib/x86_64-linux-gnu/libssl.so.3 /lib/x86_64-linux-gnu/libssl3.so \
+    && ln -sf /lib/x86_64-linux-gnu/libcrypto.so.3 /lib/x86_64-linux-gnu/libcrypto3.so \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI (retry + domestic mirror fallback)
+RUN for i in 1 2 3; do \
+        if curl -fsSL --connect-timeout 30 https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
+            break; \
+        elif curl -fsSL --connect-timeout 30 https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
+            break; \
+        else \
+            echo "Retry $i: Failed to download Docker GPG key, waiting..."; sleep 5; \
+        fi; \
+    done \
+    && [ -f /usr/share/keyrings/docker-archive-keyring.gpg ] || { echo "ERROR: Docker GPG key download failed"; exit 1; } \
+    && DISTRO_CODENAME=$(/usr/bin/lsb_release -cs) \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DISTRO_CODENAME} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+# LibreOffice + PDF tools (retry loop, same rationale as above)
+RUN apt-get update \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk \
+         && break || { echo "libreoffice install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v soffice >/dev/null || (echo "libreoffice not installed after retries" && exit 1) \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LIBREOFFICE_BIN=/usr/bin/soffice
+
+WORKDIR /app
+
+# Built JS/TS artifacts + admin frontend + assistants (from js-builder).
+COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
+COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
+COPY --from=js-builder /src/admin/dist/ ./admin/dist/
+COPY --from=js-builder /src/assistants/ ./assistants/
+# nexus-napi loader + the linux/amd64 native addon (from napi-builder).
+COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/index.d.ts ./native/nexus-napi/
+COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./native/nexus-napi/
+# Go CLIs cross-compiled for linux/amd64 (from go-builder).
+COPY --from=go-builder /out/wiki ./bin/wiki
+COPY --from=go-builder /out/corpapp ./bin/corpapp
+# Downloaded binaries (from dl).
+# nexusd lives in /app/bin/nexus/ (NOT /root/.moss/nexus/bin/) because
+# docker-compose mounts the host ./.moss over /root/.moss and would shadow it;
+# NexusManager.resolveBinary() falls back to <cwd>/bin/nexus/nexusd (cwd=/app).
+COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
+COPY --from=dl /out/bin/scode ./bin/scode
+
+RUN chmod +x ./bin/wiki ./bin/corpapp ./bin/scode ./bin/nexus/nexusd
+
+EXPOSE 43127
+
+CMD ["node", "bin/moss-server.mjs", "start"]
