@@ -5744,10 +5744,14 @@ export function startServer(
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
+        // Non-blocking: if the runtime is dead we kick off the respawn in the
+        // background and return immediately, so opening an old session never
+        // hangs on a cold Docker container start. The client connects via
+        // ws_url and sees status flip to 'active' once the runtime is back.
         const ready =
           session.desiredState === 'active'
-            ? await runtime.ensureSessionReady(sessionId)
-            : { session, attempt: null }
+            ? await runtime.ensureSessionReadyNonBlocking(sessionId)
+            : { session }
         writeJson(res, 200, {
           session: serializeSession(ready.session),
           ws_url: buildWsUrl(server, config, ready.session.sessionId),

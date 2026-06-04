@@ -493,6 +493,63 @@ export class RuntimeService {
     return { session: this.store.getSession(sessionId) ?? session, attempt }
   }
 
+  /**
+   * Non-blocking variant of ensureSessionReady used by the session-detail GET.
+   *
+   * For a Docker runtime, respawning a dead session means a cold `docker run`
+   * (container create + scode boot inside) that can take many seconds — far
+   * longer than the runner-ready timeout in some cases. Awaiting that on the
+   * HTTP request makes opening an old session "hang for a long time, if not
+   * forever". Instead we:
+   *   - probe the existing attach socket quickly; if it's live, return active.
+   *   - otherwise mark the session 'creating', kick the respawn off in the
+   *     background (deduped via pendingEnsures, same as ensureAttempt), and
+   *     return immediately. The client then connects/polls the ws_url and the
+   *     status flips to 'active' once the runtime is back.
+   */
+  async ensureSessionReadyNonBlocking(
+    sessionId: string,
+  ): Promise<{ session: SessionRecord }> {
+    const session = this.store.getSession(sessionId)
+    if (!session) {
+      throw new Error('Session not found')
+    }
+
+    const existing = session.currentAttemptId
+      ? this.store.getAttempt(session.currentAttemptId)
+      : null
+    if (existing?.attachPath) {
+      const healthy = await probeAttachPath(
+        existing.attachPath,
+        // Fast probe only — never block the GET on a slow/dead socket.
+        Math.min(this.options.config.reattachProbeTimeoutMs, 500),
+      )
+      if (healthy) {
+        this.store.setSessionLifecycle(
+          session.sessionId,
+          'active',
+          session.desiredState,
+        )
+        return { session: this.store.getSession(sessionId) ?? session }
+      }
+    }
+
+    // Runtime is missing/dead — schedule a background respawn unless one is
+    // already in flight, and reflect the transitional state to the client.
+    if (!this.pendingEnsures.has(session.sessionId)) {
+      this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
+      void this.ensureAttempt(session).catch(error => {
+        this.store.addEvent(
+          session.sessionId,
+          session.currentAttemptId,
+          'reconcile_failed',
+          { error: errorMessage(error) },
+        )
+      })
+    }
+    return { session: this.store.getSession(sessionId) ?? session }
+  }
+
   async reconcileOnStartup(): Promise<void> {
     const sessions = this.store.listSessionsToRecover()
     for (const session of sessions) {
