@@ -22,6 +22,7 @@ import {
   fetchAgentHubCategories,
   fetchAgentHubSkillDetailsByIds,
   getInstalledAssistants,
+  resolveAssistantDisplayName,
   getHubInstalledAssistants,
   installHubAssistant,
   type AgentHubAssistant,
@@ -5776,22 +5777,13 @@ export function startServer(
             ? body.assistant_name.trim()
             : undefined
 
-        // Resolve assistant display name from UUID or name
-        // The assistant_name from client may be UUID, we need to find the actual display name
-        let assistantDisplayName = rawAssistantName
-        if (rawAssistantName) {
-          try {
-            const installedAssistants = await getInstalledAssistants()
-            // Try to find by id (UUID) first, then by name (directory name)
-            const assistant = installedAssistants.find(a => a.id === rawAssistantName) ||
-              installedAssistants.find(a => a.name === rawAssistantName)
-            if (assistant && assistant.displayName) {
-              assistantDisplayName = assistant.displayName
-            }
-          } catch {
-            // If lookup fails, use the raw name
-          }
-        }
+        // Resolve assistant display name from UUID or name.
+        // The assistant_name from client may be a UUID; the runtime injects this
+        // string verbatim as the agent identity, so we resolve it to the display
+        // name (shared with the cron path via resolveAssistantDisplayName).
+        const assistantDisplayName = rawAssistantName
+          ? await resolveAssistantDisplayName(rawAssistantName)
+          : rawAssistantName
 
         const created = await runtime.createSession({
           cwd,

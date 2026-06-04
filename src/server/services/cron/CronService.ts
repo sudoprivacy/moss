@@ -287,6 +287,14 @@ export class CronService {
       agentMode: 'remote',
     }
 
+    // Resolve assistant_name (may be stored as a UUID) to the display name, so
+    // scheduled runs get the same agent identity as interactive sessions. The
+    // POST /sessions handler does the same via resolveAssistantDisplayName.
+    const { resolveAssistantDisplayName } = await import('../../agentStore.js')
+    const assistantName = job.assistantName
+      ? await resolveAssistantDisplayName(job.assistantName)
+      : undefined
+
     // Create session via RuntimeService
     const session = await this.config.runtimeService.createSession({
       cwd: this.config.workspace || '/tmp/cron',
@@ -295,7 +303,7 @@ export class CronService {
       orgId: job.orgId,
       role: userAuth.role,
       scopes: userAuth.scopes,
-      assistantName: job.assistantName || undefined,
+      assistantName,
       source: JSON.stringify(cronMetadata),
     })
 
