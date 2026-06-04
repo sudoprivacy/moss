@@ -733,6 +733,34 @@ export async function getInstalledAssistants(): Promise<InstalledAssistantInfo[]
 }
 
 /**
+ * Resolve an incoming `assistant_name` (which may be a UUID `id`, a directory
+ * `name`, or already a display name) to the assistant's display name.
+ *
+ * The runtime injects this string verbatim as the agent's identity
+ * (buildIdentityBlock / MOSS_ASSISTANT_NAME), so callers must pass the display
+ * name — not a UUID — or the agent will announce itself as the raw id. Both the
+ * interactive `POST /sessions` handler and the cron executor funnel through here
+ * so the two paths cannot drift. Falls back to the input unchanged when no
+ * match is found (e.g. lookup failure), preserving prior behavior.
+ */
+export async function resolveAssistantDisplayName(
+  assistantName: string,
+): Promise<string> {
+  try {
+    const installed = await getInstalledAssistants()
+    const match =
+      installed.find(a => a.id === assistantName) ||
+      installed.find(a => a.name === assistantName)
+    if (match?.displayName) {
+      return match.displayName
+    }
+  } catch {
+    // Fall back to the raw name on any lookup failure.
+  }
+  return assistantName
+}
+
+/**
  * Get only hub-installed assistants (installed by admin from Hub).
  * Used by /api/v1/agents/installed endpoint for client sync.
  */
