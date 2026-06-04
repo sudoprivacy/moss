@@ -82,7 +82,9 @@ export function createSecretsApi(db: {
         const enriched = systemSecrets.map(s => {
           const pinyin = s.namespace.replace('system:', '')
           // We don't look up config items here for performance, frontend handles it
-          return { ...s, config_item: { pinyin } }
+          // Expose a normalized `enabled` boolean alongside the raw `status` so
+          // clients don't have to know the internal 'enabled'/'disabled' string.
+          return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
         })
         return { success: true, data: enriched }
       } catch {
@@ -253,7 +255,11 @@ export function createSecretsApi(db: {
       try {
         const secrets = await nexus.listSecrets(undefined, userId)
         const userSecrets = secrets.filter(s => s.namespace.startsWith(`user:${userId}:`))
-        return { success: true, data: userSecrets }
+        // Expose a normalized `enabled` boolean alongside the raw `status`.
+        // nexus stores enablement as status: 'enabled'|'disabled'; clients toggle
+        // on a boolean, so derive it here to keep the contract explicit.
+        const withEnabled = userSecrets.map(s => ({ ...s, enabled: s.status === 'enabled' }))
+        return { success: true, data: withEnabled }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
       }
