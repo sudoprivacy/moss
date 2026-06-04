@@ -4935,7 +4935,10 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/skills/installed') {
         const filter = authService.buildVisibilityFilter(auth)
-        const all = await getHubInstalledSkills()
+        // Scan all managed skill dirs (hub/system/custom/tenant), not just hub,
+        // so tenant + custom skills are linkable by assistants and appear in the
+        // Skills page's custom/local groups. Visibility is still enforced below.
+        const all = await getInstalledSkills()
         writeJson(res, 200, all.filter(s => isVisibleTo(s.visibleTo, filter)))
         return
       }
