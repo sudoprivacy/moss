@@ -1,9 +1,11 @@
 import type { McpStore } from '../mcp/db.js'
 import type { AuthContext } from '../auth/token.js'
 import type { AuthService } from '../auth/service.js'
-import type { McpServerInput, McpPolicyInput, McpServerListFilter, McpAuditLogFilter, McpTemplateListFilter, McpTemplateInput } from '../mcp/types.js'
+import type { McpServerInput, McpPolicyInput, McpServerListFilter, McpAuditLogFilter, McpTemplateListFilter, McpTemplateInput, TemplateAuthConfig } from '../mcp/types.js'
+import type { VisibleTo } from '../visibilityFilter.js'
 import { testMcpConnection } from '../mcp/testConnection.js'
 import { validateAuthConfig } from '../mcp/authResolver.js'
+import { convertTemplateAuthToServerAuth, validateRequiredCredentials } from '../mcp/templateAuthConverter.js'
 import { broadcastMcpEvent } from './mcpEvents.js'
 
 interface McpAdminDeps {
@@ -95,6 +97,85 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       if (!item.name || typeof item.name !== 'string') return { ok: false, message: `user_config_items[${i}].name 必填` }
       if (!item.target || (item.target !== 'env' && item.target !== 'headers')) return { ok: false, message: `user_config_items[${i}].target 必须是 env 或 headers` }
       if (!item.key || typeof item.key !== 'string' || !keyRegex.test(item.key as string)) return { ok: false, message: `user_config_items[${i}].key 必须匹配 ${keyRegex.source}` }
+    }
+    return { ok: true }
+  }
+
+  const VALID_AUTH_TYPES = new Set(['none', 'bearer', 'basic', 'api_key', 'oauth', 'custom_header', 'secret_ref'])
+
+  function validateAuthConfigJson(authConfigJson: string | null): { ok: boolean; message?: string } {
+    if (!authConfigJson) return { ok: true }
+    let parsed: unknown
+    try { parsed = JSON.parse(authConfigJson) } catch { return { ok: false, message: 'auth_config_json 不是合法 JSON' } }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { ok: false, message: 'auth_config_json 必须是对象' }
+    const config = parsed as Record<string, unknown>
+    if (!config.auth_type || typeof config.auth_type !== 'string' || !VALID_AUTH_TYPES.has(config.auth_type as string)) {
+      return { ok: false, message: 'auth_config_json.auth_type 必须是有效的鉴权方式' }
+    }
+    const authType = config.auth_type as string
+    // Validate per-type requirements
+    if (authType === 'secret_ref') {
+      if (!config.secret_ref || typeof config.secret_ref !== 'string') {
+        return { ok: false, message: 'secret_ref 模式必须提供 secret_ref 字段' }
+      }
+    }
+    if (authType === 'bearer' || authType === 'basic' || authType === 'api_key') {
+      if (config.pre_filled !== undefined && config.pre_filled !== null) {
+        if (typeof config.pre_filled !== 'object' || Array.isArray(config.pre_filled)) {
+          return { ok: false, message: 'pre_filled 必须是对象' }
+        }
+      }
+    }
+    if (authType === 'oauth') {
+      if (config.oauth_fields !== undefined && config.oauth_fields !== null) {
+        if (!Array.isArray(config.oauth_fields)) return { ok: false, message: 'oauth_fields 必须是数组' }
+        const keys = (config.oauth_fields as Array<Record<string, unknown>>).map(f => f.key)
+        if (!keys.includes('authorization_url')) return { ok: false, message: 'oauth_fields 必须包含 authorization_url' }
+        if (!keys.includes('token_url')) return { ok: false, message: 'oauth_fields 必须包含 token_url' }
+      }
+    }
+    return { ok: true }
+  }
+
+  function validateVisibleToJson(visibleToJson: string | null): { ok: boolean; message?: string } {
+    if (!visibleToJson) return { ok: true }
+    let parsed: unknown
+    try { parsed = JSON.parse(visibleToJson) } catch { return { ok: false, message: 'visible_to_json 不是合法 JSON' } }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { ok: false, message: 'visible_to_json 必须是对象' }
+    const obj = parsed as Record<string, unknown>
+    if (obj.department_ids !== undefined) {
+      if (!Array.isArray(obj.department_ids)) return { ok: false, message: 'department_ids 必须是数组' }
+      for (const id of obj.department_ids as unknown[]) {
+        if (typeof id !== 'string') return { ok: false, message: 'department_ids 中的元素必须是字符串' }
+      }
+    }
+    if (obj.user_ids !== undefined) {
+      if (!Array.isArray(obj.user_ids)) return { ok: false, message: 'user_ids 必须是数组' }
+      for (const id of obj.user_ids as unknown[]) {
+        if (typeof id !== 'string') return { ok: false, message: 'user_ids 中的元素必须是字符串' }
+      }
+    }
+    return { ok: true }
+  }
+
+  function validateBoundJson(boundJson: string | null, fieldName: string): { ok: boolean; message?: string } {
+    if (!boundJson) return { ok: true }
+    let parsed: unknown
+    try { parsed = JSON.parse(boundJson) } catch { return { ok: false, message: `${fieldName} 不是合法 JSON` } }
+    if (!Array.isArray(parsed)) return { ok: false, message: `${fieldName} 必须是数组` }
+    return { ok: true }
+  }
+
+  function validateSecurityPolicyJson(json: string | null): { ok: boolean; message?: string } {
+    if (!json) return { ok: true }
+    let parsed: unknown
+    try { parsed = JSON.parse(json) } catch { return { ok: false, message: 'security_policy_json 不是合法 JSON' } }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { ok: false, message: 'security_policy_json 必须是对象' }
+    const obj = parsed as Record<string, unknown>
+    const allowedKeys = new Set(['allow_read', 'allow_write', 'require_confirmation_for_write', 'allow_read_sensitive_fields', 'allow_outbound_network', 'allow_scheduled_task', 'audit_request', 'audit_response_summary', 'redact_sensitive_fields'])
+    for (const [k, v] of Object.entries(obj)) {
+      if (!allowedKeys.has(k)) return { ok: false, message: `security_policy_json 包含未知字段: ${k}` }
+      if (typeof v !== 'boolean') return { ok: false, message: `security_policy_json.${k} 必须是布尔值` }
     }
     return { ok: true }
   }
@@ -408,6 +489,44 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
           throw err
         }
       }
+      // Validate new fields
+      const authConfigValidation = validateAuthConfigJson(input.auth_config_json ?? null)
+      if (!authConfigValidation.ok) {
+        const err = new Error(authConfigValidation.message!)
+        Object.assign(err, { statusCode: 400 })
+        throw err
+      }
+      const visibleToValidation = validateVisibleToJson(input.visible_to_json ?? null)
+      if (!visibleToValidation.ok) {
+        const err = new Error(visibleToValidation.message!)
+        Object.assign(err, { statusCode: 400 })
+        throw err
+      }
+      const boundAssistantsValidation = validateBoundJson(input.bound_assistants_json ?? null, 'bound_assistants_json')
+      if (!boundAssistantsValidation.ok) {
+        const err = new Error(boundAssistantsValidation.message!)
+        Object.assign(err, { statusCode: 400 })
+        throw err
+      }
+      const boundSkillsValidation = validateBoundJson(input.bound_skills_json ?? null, 'bound_skills_json')
+      if (!boundSkillsValidation.ok) {
+        const err = new Error(boundSkillsValidation.message!)
+        Object.assign(err, { statusCode: 400 })
+        throw err
+      }
+      const securityPolicyValidation = validateSecurityPolicyJson(input.security_policy_json ?? null)
+      if (!securityPolicyValidation.ok) {
+        const err = new Error(securityPolicyValidation.message!)
+        Object.assign(err, { statusCode: 400 })
+        throw err
+      }
+      // auth_type dual-write sync: extract auth_type from auth_config_json
+      if (input.auth_config_json) {
+        try {
+          const parsed = JSON.parse(input.auth_config_json) as TemplateAuthConfig
+          if (parsed.auth_type) input.auth_type = parsed.auth_type
+        } catch { /* ignore parse errors, already validated */ }
+      }
       const template = mcpStore.createTemplate(auth.orgId, input, auth.userId)
       writeAudit(auth.orgId, auth.userId, 'create_template', template.id, template.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
@@ -438,6 +557,34 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
           throw err
         }
       }
+      // Validate new fields
+      if (input.auth_config_json !== undefined) {
+        const v = validateAuthConfigJson(input.auth_config_json)
+        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+      }
+      if (input.visible_to_json !== undefined) {
+        const v = validateVisibleToJson(input.visible_to_json)
+        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+      }
+      if (input.bound_assistants_json !== undefined) {
+        const v = validateBoundJson(input.bound_assistants_json, 'bound_assistants_json')
+        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+      }
+      if (input.bound_skills_json !== undefined) {
+        const v = validateBoundJson(input.bound_skills_json, 'bound_skills_json')
+        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+      }
+      if (input.security_policy_json !== undefined) {
+        const v = validateSecurityPolicyJson(input.security_policy_json)
+        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+      }
+      // auth_type dual-write sync: extract auth_type from auth_config_json
+      if (input.auth_config_json) {
+        try {
+          const parsed = JSON.parse(input.auth_config_json) as TemplateAuthConfig
+          if (parsed.auth_type) input.auth_type = parsed.auth_type
+        } catch { /* ignore parse errors, already validated */ }
+      }
       const template = mcpStore.updateTemplate(auth.orgId, id, input)
       writeAudit(auth.orgId, auth.userId, 'update_template', template.id, template.name, { updated_fields: Object.keys(input).filter(k => (input as Record<string, unknown>)[k] !== undefined) }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
@@ -458,10 +605,47 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       return { success: true }
     },
 
-    installTemplate(auth: AuthContext, templateId: string, overrides?: Partial<McpServerInput>, ip?: string) {
+    installTemplate(auth: AuthContext, templateId: string, overrides?: Partial<McpServerInput> & { auth_credentials?: Record<string, string> }, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
       const template = mcpStore.getTemplate(auth.orgId, templateId)
       if (!template) return { success: false, error: { code: 'not_found', message: '模板不存在' } }
+
+      // Auth config format conversion: template layered → McpServer flat
+      const authCredentials = (overrides as Record<string, unknown> | undefined)?.auth_credentials as Record<string, string> | undefined ?? {}
+      const authConversion = convertTemplateAuthToServerAuth(template.auth_config_json ?? null, authCredentials)
+
+      // Validate auth credentials
+      const missingAuth = validateRequiredCredentials(template.auth_config_json ?? null, authCredentials)
+      if (missingAuth.length > 0) {
+        return { success: false, error: { code: 'missing_auth_credentials', message: `缺少必填鉴权凭据: ${missingAuth.join(', ')}` } }
+      }
+
+      // Security policy mapping: JSON → 9 boolean columns
+      const sp: Record<string, boolean> = {}
+      if (template.security_policy_json) {
+        try {
+          const policyObj = JSON.parse(template.security_policy_json) as Record<string, unknown>
+          for (const [k, v] of Object.entries(policyObj)) {
+            if (typeof v === 'boolean') sp[k] = v
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Parse visible_to_json → visible_to object
+      let visibleTo: Record<string, unknown> | null = null
+      if (template.visible_to_json) {
+        try { visibleTo = JSON.parse(template.visible_to_json) } catch { /* ignore */ }
+      }
+
+      // Parse bound_assistants_json / bound_skills_json
+      let boundAssistants: string[] | null = null
+      if (template.bound_assistants_json) {
+        try { boundAssistants = JSON.parse(template.bound_assistants_json) } catch { /* ignore */ }
+      }
+      let boundSkills: string[] | null = null
+      if (template.bound_skills_json) {
+        try { boundSkills = JSON.parse(template.bound_skills_json) } catch { /* ignore */ }
+      }
 
       // Build MCP server input from template
       const serverInput: McpServerInput = {
@@ -471,6 +655,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         icon: overrides?.icon ?? template.icon,
         category: overrides?.category ?? template.category,
         risk_level: overrides?.risk_level ?? template.risk_level,
+        responsible_person: template.responsible_person ?? null,
         scope: overrides?.scope ?? template.scope,
         owner_type: overrides?.owner_type ?? (template.scope === 'org' ? 'system' : 'department'),
         owner_id: overrides?.owner_id ?? (template.scope === 'org' ? auth.orgId : getUserDepartmentId(auth.userId) ?? ''),
@@ -481,7 +666,23 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         env_json: overrides?.env_json ?? template.env_json,
         timeout_ms: overrides?.timeout_ms ?? template.timeout_ms,
         auth_type: overrides?.auth_type ?? template.auth_type,
+        auth_config_json: authConversion.auth_config_json,
+        secret_ref: authConversion.secret_ref,
+        visible_to: visibleTo as VisibleTo,
+        bound_assistants: boundAssistants,
+        bound_skills: boundSkills,
         template_id: templateId,
+        allow_user_disable: true,
+        // Security policy
+        ...(sp.allow_read !== undefined ? { allow_read: sp.allow_read } : {}),
+        ...(sp.allow_write !== undefined ? { allow_write: sp.allow_write } : {}),
+        ...(sp.require_confirmation_for_write !== undefined ? { require_confirmation_for_write: sp.require_confirmation_for_write } : {}),
+        ...(sp.allow_read_sensitive_fields !== undefined ? { allow_read_sensitive_fields: sp.allow_read_sensitive_fields } : {}),
+        ...(sp.allow_outbound_network !== undefined ? { allow_outbound_network: sp.allow_outbound_network } : {}),
+        ...(sp.allow_scheduled_task !== undefined ? { allow_scheduled_task: sp.allow_scheduled_task } : {}),
+        ...(sp.audit_request !== undefined ? { audit_request: sp.audit_request } : {}),
+        ...(sp.audit_response_summary !== undefined ? { audit_response_summary: sp.audit_response_summary } : {}),
+        ...(sp.redact_sensitive_fields !== undefined ? { redact_sensitive_fields: sp.redact_sensitive_fields } : {}),
       }
 
       // Check name uniqueness

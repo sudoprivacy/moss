@@ -125,6 +125,12 @@ export interface McpTemplate {
   created_by: string
   created_at: number
   updated_at: number
+  responsible_person?: string | null
+  visible_to_json?: string | null
+  bound_assistants_json?: string | null
+  bound_skills_json?: string | null
+  auth_config_json?: string | null
+  security_policy_json?: string | null
 }
 
 export type McpServerFormData = Partial<Omit<McpServer, 'id' | 'org_id' | 'created_by' | 'created_at' | 'updated_at' | 'status' | 'last_invocation_at'>>

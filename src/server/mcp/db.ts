@@ -152,6 +152,12 @@ function mapMcpTemplate(row: SqlRow): McpTemplate {
     created_by: row.created_by as string,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
+    responsible_person: row.responsible_person as string | null,
+    visible_to_json: row.visible_to_json as string | null,
+    bound_assistants_json: row.bound_assistants_json as string | null,
+    bound_skills_json: row.bound_skills_json as string | null,
+    auth_config_json: row.auth_config_json as string | null,
+    security_policy_json: row.security_policy_json as string | null,
   }
 }
 
@@ -326,6 +332,14 @@ export class McpStore {
 
     // Migration: add mcp_server_snapshot column to mcp_approval_requests
     try { this.db.exec('ALTER TABLE mcp_approval_requests ADD COLUMN mcp_server_snapshot TEXT') } catch { /* column already exists */ }
+
+    // Migration: add new columns for template market overhaul
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN responsible_person TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN visible_to_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_assistants_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_skills_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN auth_config_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN security_policy_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
 
     // Per-user disable records — tracks which MCP servers each user has disabled for themselves.
     this.db.exec(`
@@ -948,11 +962,14 @@ export class McpStore {
         id, org_id, name, description, icon, category, tags_json,
         mcp_type, url, command, args_json, env_json, timeout_ms, auth_type,
         scope, risk_level, config_json,
+        responsible_person, visible_to_json, bound_assistants_json,
+        bound_skills_json, auth_config_json, security_policy_json,
         created_by, created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
         ?, ?, ?
       )
     `).run(
@@ -964,6 +981,12 @@ export class McpStore {
       input.auth_type ?? 'none',
       input.scope ?? 'org', input.risk_level ?? 'low',
       input.config_json ?? null,
+      input.responsible_person ?? null,
+      input.visible_to_json ?? null,
+      input.bound_assistants_json ?? null,
+      input.bound_skills_json ?? null,
+      input.auth_config_json ?? null,
+      input.security_policy_json ?? null,
       createdBy, ts, ts,
     )
     return this.getTemplate(orgId, id)!
@@ -1002,6 +1025,12 @@ export class McpStore {
     setIfDefined('scope', input.scope)
     setIfDefined('risk_level', input.risk_level)
     setIfDefined('config_json', input.config_json)
+    setIfDefined('responsible_person', input.responsible_person)
+    setIfDefined('visible_to_json', input.visible_to_json)
+    setIfDefined('bound_assistants_json', input.bound_assistants_json)
+    setIfDefined('bound_skills_json', input.bound_skills_json)
+    setIfDefined('auth_config_json', input.auth_config_json)
+    setIfDefined('security_policy_json', input.security_policy_json)
 
     sets.push('updated_at = ?')
     params.push(now())
