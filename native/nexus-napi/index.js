@@ -3,7 +3,18 @@
 // before the native binary is built.
 
 const { existsSync } = require('fs');
-const { join } = require('path');
+const { dirname, join, resolve } = require('path');
+
+const candidateDirs = [
+  // Standalone server images run from /app and place the native addon here.
+  join(process.cwd(), 'native', 'nexus-napi'),
+  // If launched from bin/moss-server.mjs, resolve ../native/nexus-napi.
+  typeof process.argv[1] === 'string'
+    ? resolve(dirname(process.argv[1]), '..', 'native', 'nexus-napi')
+    : null,
+  // Unbundled development/test execution.
+  typeof __filename === 'string' ? dirname(__filename) : __dirname,
+].filter(Boolean);
 
 // napi-rs convention: platform-specific binary next to index.js
 const candidates = [
@@ -12,18 +23,23 @@ const candidates = [
 ];
 
 let nativeBinding;
-for (const name of candidates) {
-  const path = join(__dirname, name);
-  if (existsSync(path)) {
-    nativeBinding = require(path);
-    break;
+let searched = [];
+for (const dir of candidateDirs) {
+  for (const name of candidates) {
+    const path = join(dir, name);
+    searched.push(path);
+    if (existsSync(path)) {
+      nativeBinding = require(path);
+      break;
+    }
   }
+  if (nativeBinding) break;
 }
 
 if (!nativeBinding) {
   throw new Error(
     `Failed to load nexus-napi native module. Run \`bun run build:native\` first.\n` +
-    `Looked for: ${candidates.join(', ')} in ${__dirname}`
+    `Looked for: ${searched.join(', ')}`
   );
 }
 

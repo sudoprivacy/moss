@@ -207,6 +207,7 @@ export class NexusManager {
 
   private async waitForGrpcReady(): Promise<void> {
     const start = Date.now()
+    let lastError: unknown = null
     while (Date.now() - start < NEXUS_HEALTH_TIMEOUT_MS) {
       if (this.child?.exitCode !== null) {
         throw new Error(`Nexus exited prematurely with code ${this.child?.exitCode}`)
@@ -223,12 +224,14 @@ export class NexusManager {
           testClient.write('/health/check.json', Buffer.from('{}'), '')
           testClient.read('/health/check.json', '')
           return
-        } catch {
+        } catch (error) {
+          lastError = error
           // Not ready yet, continue waiting
         }
       }
     }
-    throw new Error(`Nexus gRPC startup timed out after ${NEXUS_HEALTH_TIMEOUT_MS}ms`)
+    const reason = lastError instanceof Error ? lastError.message : String(lastError)
+    throw new Error(`Nexus gRPC startup timed out after ${NEXUS_HEALTH_TIMEOUT_MS}ms. Last health check error: ${reason}`)
   }
 
   private writeReadyFile(): void {
