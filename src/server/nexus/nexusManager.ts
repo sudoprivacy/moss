@@ -40,23 +40,30 @@ export class NexusManager {
   }
 
   async start(): Promise<void> {
-    const binPath = this.resolveBinary()
-    if (!binPath) {
-      // Try to copy from sudowork installation
+    let binPath = this.resolveBinary()
+    if (!binPath || !this.isRustBinaryFile(binPath)) {
+      if (binPath) {
+        console.log(`[NexusManager] Replacing non-Rust nexus binary at ${binPath}`)
+      }
       const copied = this.copyFromSudowork()
       if (!copied) {
         throw new Error(
-          `Nexus binary not found. Expected at ${this.binDir}/nexusd or ${this.binDir}/nexusd.exe. ` +
+          `Rust Nexus binary not found. Expected at ${this.binDir}/nexusd or ${this.binDir}/nexusd.exe. ` +
           `Please download Nexus v${NEXUS_VERSION} and place it there.`,
         )
       }
+      binPath = this.resolveBinary()
     }
 
     // Detect binary type (Rust vs Python)
-    const resolvedBin = this.resolveBinary()!
+    const resolvedBin = binPath!
     const binStat = statSync(resolvedBin)
-    this.isRustBinary = binStat.size < RUST_BINARY_MAX_SIZE
+    this.isRustBinary = this.isRustBinaryFile(resolvedBin)
+    console.log(`[NexusManager] Binary path: ${resolvedBin}`)
     console.log(`[NexusManager] Binary size: ${binStat.size}, isRust: ${this.isRustBinary}`)
+    if (!this.isRustBinary) {
+      throw new Error(`Expected Rust nexus binary, got non-Rust binary at ${resolvedBin}`)
+    }
 
     mkdirSync(this.nexusDir, { recursive: true })
 
@@ -73,7 +80,6 @@ export class NexusManager {
 
     const dataDir = join(this.nexusDir, 'data')
 
-    // Build args for Rust version
     const args = [
       '--bind-addr', `127.0.0.1:${this.grpcPort}`,
       '--data-dir', dataDir,
@@ -82,7 +88,7 @@ export class NexusManager {
     ]
 
     console.log(`[NexusManager] Starting nexus (Rust version) on gRPC port ${this.grpcPort}...`)
-    this.child = spawn(this.resolveBinary()!, args, {
+    this.child = spawn(resolvedBin, args, {
       stdio: 'pipe',
       env: {
         ...process.env,
@@ -132,7 +138,7 @@ export class NexusManager {
 
   private resolveBinary(): string | null {
     const paths = [
-      // 1. User-installed nexus in ~/.moss/nexus/bin/
+      // 1. Moss-local nexus cache. This should contain the Rust nexus binary.
       join(this.binDir, 'nexusd.exe'),
       join(this.binDir, 'nexusd'),
       // 2. Bundled nexus in bin/nexus/ (relative to moss-server.mjs)
@@ -145,42 +151,36 @@ export class NexusManager {
     return null
   }
 
+  private isRustBinaryFile(path: string): boolean {
+    return statSync(path).size < RUST_BINARY_MAX_SIZE
+  }
+
   private copyFromSudowork(): boolean {
     const sudoworkBinDir = join(homedir(), '.nexus', 'bin')
-    const sudoworkBinary = process.platform === 'win32'
-      ? join(sudoworkBinDir, 'nexusd.exe')
-      : join(sudoworkBinDir, 'nexusd')
+    const candidateBinaries = [
+      process.platform === 'win32'
+        ? join(sudoworkBinDir, 'nexusd.exe')
+        : join(sudoworkBinDir, 'nexusd'),
+      join(process.cwd(), 'bin', 'nexus', process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'),
+    ]
 
     mkdirSync(this.binDir, { recursive: true })
     const { copyFileSync, existsSync: exists, statSync } = require('fs')
 
     try {
-      // Check if sudowork binary exists
-      if (exists(sudoworkBinary)) {
-        const srcStat = statSync(sudoworkBinary)
+      for (const sourceBinary of candidateBinaries) {
+        if (!exists(sourceBinary)) continue
+
+        const srcStat = statSync(sourceBinary)
         const isRustBinary = srcStat.size < RUST_BINARY_MAX_SIZE
 
-        if (isRustBinary) {
-          // Rust binary - just copy the single file
-          copyFileSync(sudoworkBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
-          console.log(`[NexusManager] Copied Rust nexus binary from ${sudoworkBinary}`)
+        if (!isRustBinary) {
+          console.log(`[NexusManager] Skipping non-Rust nexus binary at ${sourceBinary}`)
+        } else {
+          copyFileSync(sourceBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
+          console.log(`[NexusManager] Copied Rust nexus binary from ${sourceBinary}`)
           return true
         }
-
-        // Python binary - need to copy _internal directory too
-        const { cpSync } = require('fs')
-        const internalDir = join(sudoworkBinDir, '_internal')
-        if (exists(internalDir)) {
-          cpSync(internalDir, join(this.binDir, '_internal'), { recursive: true })
-          console.log(`[NexusManager] Copied _internal directory`)
-        }
-        copyFileSync(sudoworkBinary, join(this.binDir, process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'))
-        const mcporter = join(sudoworkBinDir, process.platform === 'win32' ? 'mcporter.cmd' : 'mcporter')
-        if (exists(mcporter)) {
-          copyFileSync(mcporter, join(this.binDir, process.platform === 'win32' ? 'mcporter.cmd' : 'mcporter'))
-        }
-        console.log(`[NexusManager] Copied Python nexus binary from ${sudoworkBinDir}`)
-        return true
       }
 
       // Try sudowork resources directory (for bundled binaries)

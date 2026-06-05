@@ -108,6 +108,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Stage sudocode for server image
+        uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/sudocode
+          path: .sudocode-build-context
+          token: ${{ secrets.SUDOCODE_REPO_TOKEN || github.token }}
+
       # 5. 构建 Runtime 镜像 (会话容器)
       - name: Build Runtime Docker Image
         env:
@@ -122,9 +129,13 @@ jobs:
       - name: Build Server Docker Image
         env:
           IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+          SCODE_VERSION: ${{ steps.scode-version.outputs.version }}
         run: |
           echo "Building server image with tag: $IMAGE_TAG"
-          docker build -t my-moss-server:$IMAGE_TAG -f deploy/server.Dockerfile .
+          docker build \
+            --build-arg SCODE_VERSION="$SCODE_VERSION" \
+            -t my-moss-server:$IMAGE_TAG \
+            -f deploy/server.Dockerfile.local .
           docker save my-moss-server:$IMAGE_TAG | gzip > my-moss-server-$IMAGE_TAG.tar.gz
           echo "Server image size: $(ls -lh my-moss-server-$IMAGE_TAG.tar.gz)"
 
