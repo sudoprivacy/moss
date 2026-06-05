@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto'
 import type { McpStore } from '../mcp/db.js'
 import type { AuthContext } from '../auth/token.js'
 import type { McpServer, McpServerInput, McpTemplate, McpTemplateListFilter } from '../mcp/types.js'
+import { extractAuthUserItems, convertTemplateAuthToServerAuth, validateRequiredCredentials } from '../mcp/templateAuthConverter.js'
 import { isVisibleTo, buildVisibilityFilter } from '../visibilityFilter.js'
 import type { AuthService } from '../auth/service.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
@@ -95,9 +96,11 @@ function sanitizeTemplateForUser(t: McpTemplate) {
     mcp_type: t.mcp_type,
     scope: t.scope,
     risk_level: t.risk_level,
+    responsible_person: t.responsible_person ?? null,
     downloads: t.downloads,
     rating: t.rating,
     user_config_items: parseTemplateUserConfigItems(t.config_json),
+    auth_user_items: extractAuthUserItems(t.auth_config_json ?? null),
     created_at: t.created_at,
     updated_at: t.updated_at,
   }
@@ -150,13 +153,34 @@ export function createMcpUserApi(deps: McpUserDeps) {
       if (!policy.allow_personal_mcp) {
         return { success: true, data: [], total: 0, page: filter?.page ?? 1, page_size: filter?.page_size ?? 20 }
       }
-      const result = mcpStore.listTemplates(auth.orgId, filter)
+      // Fetch all templates without pagination for visibility filtering
+      const result = mcpStore.listTemplates(auth.orgId, { ...filter, page: 1, page_size: 9999 })
+
+      // Build visibility filter
+      const visFilter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+
+      // Filter by visibility
+      const visibleItems = result.items.filter(template => {
+        let visibleTo: Record<string, unknown> | null = null
+        if (template.visible_to_json) {
+          try { visibleTo = JSON.parse(template.visible_to_json) } catch { /* treat as null */ }
+        }
+        return isVisibleTo(visibleTo as Parameters<typeof isVisibleTo>[0], visFilter)
+      })
+
+      // Re-compute pagination after filtering
+      const page = filter?.page ?? 1
+      const pageSize = filter?.page_size ?? 20
+      const total = visibleItems.length
+      const start = (page - 1) * pageSize
+      const pagedItems = visibleItems.slice(start, start + pageSize)
+
       return {
         success: true,
-        data: result.items.map(sanitizeTemplateForUser),
-        total: result.total,
-        page: filter?.page ?? 1,
-        page_size: filter?.page_size ?? 20,
+        data: pagedItems.map(sanitizeTemplateForUser),
+        total,
+        page,
+        page_size: pageSize,
       }
     },
 
@@ -346,6 +370,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
           user_id: auth.userId,
           user_name: getUserName(auth.userId),
           mcp_server_id: server.id,
+          mcp_server_snapshot: JSON.stringify(sanitizeForUser(server as unknown as Record<string, unknown>)),
         })
         const sanitized = sanitizeForUser({ ...server, status: 'pending' } as unknown as Record<string, unknown>)
         return { success: true, data: { ...sanitized, _requires_approval: true } }
@@ -468,7 +493,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
     async installFromTemplate(
       auth: AuthContext,
       templateId: string,
-      body: { config_values?: Record<string, string>; display_name?: string },
+      body: { config_values?: Record<string, string>; auth_credentials?: Record<string, string>; display_name?: string },
       ip?: string,
     ) {
       const policy = mcpStore.getMcpPolicy(auth.orgId)
@@ -479,6 +504,16 @@ export function createMcpUserApi(deps: McpUserDeps) {
       const template = mcpStore.getTemplate(auth.orgId, templateId)
       if (!template) {
         return { success: false, error: { code: 'not_found', message: '模板不存在' } }
+      }
+
+      // Visibility check
+      const visFilter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+      let templateVisibleTo: Parameters<typeof isVisibleTo>[0] = null
+      if (template.visible_to_json) {
+        try { templateVisibleTo = JSON.parse(template.visible_to_json) } catch { /* treat as null */ }
+      }
+      if (!isVisibleTo(templateVisibleTo, visFilter)) {
+        return { success: false, error: { code: 'not_found', message: '该模板不可用' } }
       }
 
       if (template.mcp_type === 'stdio' && !policy.allow_stdio_mcp) {
@@ -515,6 +550,20 @@ export function createMcpUserApi(deps: McpUserDeps) {
         }
       }
 
+      // Validate auth credentials
+      const authCredentials = body.auth_credentials ?? {}
+      const missingAuth = validateRequiredCredentials(template.auth_config_json ?? null, authCredentials)
+      if (missingAuth.length > 0) {
+        return {
+          success: false,
+          error: {
+            code: 'missing_auth_credentials',
+            message: `缺少必填鉴权凭据: ${missingAuth.join(', ')}`,
+            missing_keys: missingAuth,
+          },
+        }
+      }
+
       const declaredKeys = new Set(schema.map(s => s.key))
       const valuesToWrite: Array<{ key: string; value: string }> = []
       for (const [k, v] of Object.entries(providedValues)) {
@@ -542,6 +591,20 @@ export function createMcpUserApi(deps: McpUserDeps) {
         return { success: false, error: { code: 'name_conflict', message: '生成唯一名称失败，请重试' } }
       }
 
+      // Auth config format conversion: template layered → McpServer flat
+      const authConversion = convertTemplateAuthToServerAuth(template.auth_config_json ?? null, authCredentials)
+
+      // Security policy mapping: JSON → 9 boolean columns
+      const sp: Record<string, boolean> = {}
+      if (template.security_policy_json) {
+        try {
+          const policyObj = JSON.parse(template.security_policy_json) as Record<string, unknown>
+          for (const [k, v] of Object.entries(policyObj)) {
+            if (typeof v === 'boolean') sp[k] = v
+          }
+        } catch { /* ignore */ }
+      }
+
       const serverInput: McpServerInput = {
         name: serverName,
         display_name: body.display_name ?? template.name,
@@ -549,6 +612,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
         icon: template.icon,
         category: template.category,
         risk_level: template.risk_level,
+        responsible_person: template.responsible_person ?? null,
         scope: 'user',
         owner_type: 'user',
         owner_id: auth.userId,
@@ -560,7 +624,23 @@ export function createMcpUserApi(deps: McpUserDeps) {
         env_json: template.env_json,
         timeout_ms: template.timeout_ms,
         auth_type: template.auth_type,
+        auth_config_json: authConversion.auth_config_json,
+        secret_ref: authConversion.secret_ref,
         template_id: templateId,
+        allow_user_disable: true,
+        // Copy bound assistants/skills from template
+        bound_assistants: (() => { try { return template.bound_assistants_json ? JSON.parse(template.bound_assistants_json) : null } catch { return null } })(),
+        bound_skills: (() => { try { return template.bound_skills_json ? JSON.parse(template.bound_skills_json) : null } catch { return null } })(),
+        // Security policy
+        ...(sp.allow_read !== undefined ? { allow_read: sp.allow_read } : {}),
+        ...(sp.allow_write !== undefined ? { allow_write: sp.allow_write } : {}),
+        ...(sp.require_confirmation_for_write !== undefined ? { require_confirmation_for_write: sp.require_confirmation_for_write } : {}),
+        ...(sp.allow_read_sensitive_fields !== undefined ? { allow_read_sensitive_fields: sp.allow_read_sensitive_fields } : {}),
+        ...(sp.allow_outbound_network !== undefined ? { allow_outbound_network: sp.allow_outbound_network } : {}),
+        ...(sp.allow_scheduled_task !== undefined ? { allow_scheduled_task: sp.allow_scheduled_task } : {}),
+        ...(sp.audit_request !== undefined ? { audit_request: sp.audit_request } : {}),
+        ...(sp.audit_response_summary !== undefined ? { audit_response_summary: sp.audit_response_summary } : {}),
+        ...(sp.redact_sensitive_fields !== undefined ? { redact_sensitive_fields: sp.redact_sensitive_fields } : {}),
       }
 
       const server = mcpStore.createMcpServer(auth.orgId, serverInput, auth.userId)

@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { McpServer, McpConnectionTestResult } from './types.js'
+import { resolveAuthHeaders } from './authResolver.js'
 
 const CLIENT_INFO = { name: 'moss-mcp-connection-test', version: '1.0.0' }
 
@@ -22,7 +23,7 @@ export async function testMcpConnection(server: McpServer): Promise<McpConnectio
 
     if (server.mcp_type === 'http') {
       if (!server.url) return fail('URL 未配置', start)
-      const headers = parseHeaders(server.auth_config_json)
+      const headers = resolveAuthHeaders(server.auth_type, server.auth_config_json)
       return await runHandshake(
         () => new StreamableHTTPClientTransport(new URL(server.url as string), { requestInit: { headers } }),
         server.timeout_ms,
@@ -32,7 +33,7 @@ export async function testMcpConnection(server: McpServer): Promise<McpConnectio
 
     if (server.mcp_type === 'sse') {
       if (!server.url) return fail('URL 未配置', start)
-      const headers = parseHeaders(server.auth_config_json)
+      const headers = resolveAuthHeaders(server.auth_type, server.auth_config_json)
       return await runHandshake(
         () => new SSEClientTransport(new URL(server.url as string), { requestInit: { headers } }),
         server.timeout_ms,
@@ -133,21 +134,6 @@ async function runHandshake(
     if (timer) clearTimeout(timer)
     try { await client.close() } catch { /* ignore close error */ }
   }
-}
-
-export function parseHeaders(authConfigJson: string | null): Record<string, string> | undefined {
-  if (!authConfigJson) return undefined
-  try {
-    const parsed = JSON.parse(authConfigJson)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const headers: Record<string, string> = {}
-      for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v === 'string') headers[k] = v
-      }
-      return Object.keys(headers).length > 0 ? headers : undefined
-    }
-  } catch { /* ignore malformed headers */ }
-  return undefined
 }
 
 function classifyError(err: unknown): string {

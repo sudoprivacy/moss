@@ -43,7 +43,7 @@ export interface McpServer {
   redact_sensitive_fields: boolean
   allow_user_disable: boolean
 
-  status: 'pending' | 'enabled' | 'disabled' | 'error'
+  status: 'pending' | 'enabled' | 'disabled' | 'error' | 'deleted'
   enabled: boolean
   last_invocation_at: number | null
 
@@ -111,6 +111,7 @@ export interface McpApprovalRequest {
   user_id: string
   user_name: string | null
   mcp_server_id: string
+  mcp_server_snapshot: string | null
   status: 'pending' | 'approved' | 'rejected'
   reviewed_by: string | null
   reviewer_name: string | null
@@ -190,7 +191,7 @@ export interface McpPolicyInput {
 export interface McpServerListFilter {
   scope?: 'org' | 'department' | 'user'
   department_id?: string
-  status?: 'enabled' | 'disabled' | 'error' | 'pending'
+  status?: 'enabled' | 'disabled' | 'error' | 'pending' | 'deleted'
   risk_level?: 'low' | 'medium' | 'high'
   mcp_type?: 'http' | 'sse' | 'stdio'
   audit_enabled?: boolean
@@ -240,6 +241,12 @@ export interface McpTemplate {
   created_by: string
   created_at: number
   updated_at: number
+  responsible_person?: string | null
+  visible_to_json?: string | null
+  bound_assistants_json?: string | null
+  bound_skills_json?: string | null
+  auth_config_json?: string | null
+  security_policy_json?: string | null
 }
 
 /** Input for creating an MCP Template */
@@ -259,6 +266,12 @@ export interface McpTemplateInput {
   scope?: 'org' | 'department'
   risk_level?: 'low' | 'medium' | 'high'
   config_json?: string | null
+  responsible_person?: string | null
+  visible_to_json?: string | null
+  bound_assistants_json?: string | null
+  bound_skills_json?: string | null
+  auth_config_json?: string | null
+  security_policy_json?: string | null
 }
 
 /** List filter for MCP Templates */
@@ -267,6 +280,57 @@ export interface McpTemplateListFilter {
   search?: string
   page?: number
   page_size?: number
+}
+
+// ==================== Template Auth Config Types ====================
+
+/** A user-fillable config item in template auth config */
+export interface TemplateAuthConfigItem {
+  name: string
+  key: string
+  description?: string
+  required: boolean
+}
+
+/** An OAuth admin pre-fill field (custom label/key/default_value) */
+export interface TemplateOauthField {
+  label: string
+  key: string
+  default_value?: string
+}
+
+/** Template-layered auth config (stored in auth_config_json column) */
+export interface TemplateAuthConfig {
+  auth_type: 'none' | 'bearer' | 'basic' | 'api_key' | 'oauth' | 'custom_header' | 'secret_ref'
+  pre_filled?: Record<string, string>
+  user_items?: TemplateAuthConfigItem[]
+  oauth_fields?: TemplateOauthField[]
+  custom_header_items?: TemplateAuthConfigItem[]
+  secret_ref?: string | null
+}
+
+/** Template security policy (stored in security_policy_json column) */
+export interface TemplateSecurityPolicy {
+  allow_read?: boolean
+  allow_write?: boolean
+  require_confirmation_for_write?: boolean
+  allow_read_sensitive_fields?: boolean
+  allow_outbound_network?: boolean
+  allow_scheduled_task?: boolean
+  audit_request?: boolean
+  audit_response_summary?: boolean
+  redact_sensitive_fields?: boolean
+}
+
+/** Auth credentials provided by user/admin during template installation */
+export type AuthCredentials = Record<string, string>
+
+/** User-facing auth user item schema (exposed via sanitizeTemplateForUser) */
+export interface AuthUserItem {
+  name: string
+  key: string
+  description?: string
+  required: boolean
 }
 
 /** Connection test result */

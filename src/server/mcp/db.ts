@@ -118,6 +118,7 @@ function mapMcpApprovalRequest(row: SqlRow): McpApprovalRequest {
     user_id: row.user_id as string,
     user_name: row.user_name as string | null,
     mcp_server_id: row.mcp_server_id as string,
+    mcp_server_snapshot: row.mcp_server_snapshot as string | null,
     status: (row.status as string) as McpApprovalRequest['status'],
     reviewed_by: row.reviewed_by as string | null,
     reviewer_name: row.reviewer_name as string | null,
@@ -151,6 +152,12 @@ function mapMcpTemplate(row: SqlRow): McpTemplate {
     created_by: row.created_by as string,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
+    responsible_person: row.responsible_person as string | null,
+    visible_to_json: row.visible_to_json as string | null,
+    bound_assistants_json: row.bound_assistants_json as string | null,
+    bound_skills_json: row.bound_skills_json as string | null,
+    auth_config_json: row.auth_config_json as string | null,
+    security_policy_json: row.security_policy_json as string | null,
   }
 }
 
@@ -323,6 +330,17 @@ export class McpStore {
     // Migration: add template_id column to mcp_servers
     try { this.db.exec('ALTER TABLE mcp_servers ADD COLUMN template_id TEXT') } catch { /* column already exists */ }
 
+    // Migration: add mcp_server_snapshot column to mcp_approval_requests
+    try { this.db.exec('ALTER TABLE mcp_approval_requests ADD COLUMN mcp_server_snapshot TEXT') } catch { /* column already exists */ }
+
+    // Migration: add new columns for template market overhaul
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN responsible_person TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN visible_to_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_assistants_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_skills_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN auth_config_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN security_policy_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+
     // Per-user disable records — tracks which MCP servers each user has disabled for themselves.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_user_disabled (
@@ -349,7 +367,7 @@ export class McpStore {
       conditions.push('owner_id = ?')
       params.push(filter.department_id)
     }
-    if (filter?.status) {
+    if (filter?.status && filter.status !== 'deleted') {
       switch (filter.status) {
         case 'enabled':
           conditions.push('enabled = 1 AND status = ?')
@@ -367,6 +385,11 @@ export class McpStore {
           params.push('pending')
           break
       }
+      conditions.push("status != 'deleted'")
+    } else if (filter?.status === 'deleted') {
+      conditions.push("status = 'deleted'")
+    } else {
+      conditions.push("status != 'deleted'")
     }
     if (filter?.risk_level) {
       conditions.push('risk_level = ?')
@@ -414,14 +437,14 @@ export class McpStore {
 
   getMcpServer(orgId: string, id: string): McpServer | null {
     const row = this.db.prepare(
-      'SELECT * FROM mcp_servers WHERE org_id = ? AND id = ?'
+      "SELECT * FROM mcp_servers WHERE org_id = ? AND id = ? AND status != 'deleted'"
     ).get(orgId, id) as SqlRow | undefined
     return row ? mapMcpServer(row) : null
   }
 
   getMcpServerByName(orgId: string, name: string): McpServer | null {
     const row = this.db.prepare(
-      'SELECT * FROM mcp_servers WHERE org_id = ? AND name = ?'
+      "SELECT * FROM mcp_servers WHERE org_id = ? AND name = ? AND status != 'deleted'"
     ).get(orgId, name) as SqlRow | undefined
     return row ? mapMcpServer(row) : null
   }
@@ -549,10 +572,20 @@ export class McpStore {
   }
 
   deleteMcpServer(orgId: string, id: string): boolean {
+    const ts = now()
     const result = this.db.prepare(
-      'DELETE FROM mcp_servers WHERE org_id = ? AND id = ?'
-    ).run(orgId, id)
+      "UPDATE mcp_servers SET status = 'deleted', name = name || '__deleted_' || ?, enabled = 0, updated_at = ? WHERE org_id = ? AND id = ? AND status != 'deleted'"
+    ).run(String(ts), ts, orgId, id)
     return result.changes > 0
+  }
+
+  restoreMcpServer(orgId: string, id: string, newName: string): McpServer | null {
+    const ts = now()
+    const result = this.db.prepare(
+      "UPDATE mcp_servers SET status = 'pending', name = ?, enabled = 1, updated_at = ? WHERE org_id = ? AND id = ? AND status = 'deleted'"
+    ).run(newName, ts, orgId, id)
+    if (result.changes === 0) return null
+    return this.getMcpServer(orgId, id)
   }
 
   setMcpServerEnabled(orgId: string, id: string, enabled: boolean, updatedBy: string): McpServer | null {
@@ -608,7 +641,7 @@ export class McpStore {
 
   hasUserInstalledTemplate(orgId: string, userId: string, templateId: string): boolean {
     const row = this.db.prepare(
-      "SELECT 1 FROM mcp_servers WHERE org_id = ? AND template_id = ? AND owner_id = ? AND scope = 'user' LIMIT 1"
+      "SELECT 1 FROM mcp_servers WHERE org_id = ? AND template_id = ? AND owner_id = ? AND scope = 'user' AND status != 'deleted' LIMIT 1"
     ).get(orgId, templateId, userId) as SqlRow | undefined
     return !!row
   }
@@ -836,13 +869,14 @@ export class McpStore {
     user_id: string
     user_name?: string | null
     mcp_server_id: string
+    mcp_server_snapshot?: string | null
   }): McpApprovalRequest {
     const ts = now()
     const id = randomUUID()
     this.db.prepare(`
-      INSERT INTO mcp_approval_requests (id, org_id, user_id, user_name, mcp_server_id, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?)
-    `).run(id, entry.org_id, entry.user_id, entry.user_name ?? null, entry.mcp_server_id, ts)
+      INSERT INTO mcp_approval_requests (id, org_id, user_id, user_name, mcp_server_id, mcp_server_snapshot, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(id, entry.org_id, entry.user_id, entry.user_name ?? null, entry.mcp_server_id, entry.mcp_server_snapshot ?? null, ts)
     return this.getMcpApprovalRequest(id)!
   }
 
@@ -928,11 +962,14 @@ export class McpStore {
         id, org_id, name, description, icon, category, tags_json,
         mcp_type, url, command, args_json, env_json, timeout_ms, auth_type,
         scope, risk_level, config_json,
+        responsible_person, visible_to_json, bound_assistants_json,
+        bound_skills_json, auth_config_json, security_policy_json,
         created_by, created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
         ?, ?, ?
       )
     `).run(
@@ -944,6 +981,12 @@ export class McpStore {
       input.auth_type ?? 'none',
       input.scope ?? 'org', input.risk_level ?? 'low',
       input.config_json ?? null,
+      input.responsible_person ?? null,
+      input.visible_to_json ?? null,
+      input.bound_assistants_json ?? null,
+      input.bound_skills_json ?? null,
+      input.auth_config_json ?? null,
+      input.security_policy_json ?? null,
       createdBy, ts, ts,
     )
     return this.getTemplate(orgId, id)!
@@ -982,6 +1025,12 @@ export class McpStore {
     setIfDefined('scope', input.scope)
     setIfDefined('risk_level', input.risk_level)
     setIfDefined('config_json', input.config_json)
+    setIfDefined('responsible_person', input.responsible_person)
+    setIfDefined('visible_to_json', input.visible_to_json)
+    setIfDefined('bound_assistants_json', input.bound_assistants_json)
+    setIfDefined('bound_skills_json', input.bound_skills_json)
+    setIfDefined('auth_config_json', input.auth_config_json)
+    setIfDefined('security_policy_json', input.security_policy_json)
 
     sets.push('updated_at = ?')
     params.push(now())

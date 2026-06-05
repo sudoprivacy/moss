@@ -40,7 +40,7 @@ export interface McpServer {
   redact_sensitive_fields: boolean
   allow_user_disable: boolean
   enabled: boolean
-  status: 'enabled' | 'pending' | 'disabled' | 'error'
+  status: 'enabled' | 'pending' | 'disabled' | 'error' | 'deleted'
   last_invocation_at: number | null
   created_by: string
   updated_by: string | null
@@ -93,6 +93,7 @@ export interface McpApprovalRequest {
   user_id: string
   user_name: string | null
   mcp_server_id: string
+  mcp_server_snapshot: string | null
   status: 'pending' | 'approved' | 'rejected'
   reviewed_by: string | null
   reviewer_name: string | null
@@ -124,6 +125,12 @@ export interface McpTemplate {
   created_by: string
   created_at: number
   updated_at: number
+  responsible_person?: string | null
+  visible_to_json?: string | null
+  bound_assistants_json?: string | null
+  bound_skills_json?: string | null
+  auth_config_json?: string | null
+  security_policy_json?: string | null
 }
 
 export type McpServerFormData = Partial<Omit<McpServer, 'id' | 'org_id' | 'created_by' | 'created_at' | 'updated_at' | 'status' | 'last_invocation_at'>>
@@ -344,4 +351,33 @@ export function subscribeMcpEvents(handlers: {
   return () => {
     es?.close()
   }
+}
+
+// ============================================================
+// 鉴权配置类型（与后端 authResolver.ts 中的类型保持一致）
+// ============================================================
+
+export interface BearerAuthConfig {
+  header_name: string
+  prefix: string
+  token: string
+}
+
+export interface BasicAuthConfig {
+  header_name: string
+  username: string
+  password: string
+}
+
+export interface ApiKeyAuthConfig {
+  header_name: string
+  api_key: string
+}
+
+export interface OAuthAuthConfig {
+  client_id: string
+  client_secret: string
+  authorization_url: string
+  token_url: string
+  scopes?: string
 }

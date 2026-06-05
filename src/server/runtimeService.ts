@@ -45,9 +45,39 @@ import type { NexusClient } from './nexus/nexusClient.js'
 import { McpStore } from './mcp/db.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
 import { resolveScodeMcpSettings } from './mcp/scodeMcpInjector.js'
+import { type McpAuthSecretsApi, type ConfigItemLike } from './mcp/authResolver.js'
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * 创建 McpAuthSecretsApi 实现，用于 secret_ref 运行时凭据解析。
+ * 复用 DirectConnectStore 已有的 getConfigItemByPinyin / getConfigEntries 方法
+ * 和 NexusClient 的 listSecrets 能力。
+ */
+function createMcpAuthSecretsApi(
+  store: DirectConnectStore,
+  nexusClient: { listSecrets(namespace: string, subject: string): Promise<Array<{ key: string; value: string | null; namespace: string; status: string; version: number }>> },
+): McpAuthSecretsApi {
+  return {
+    getConfigItemByPinyin(pinyin: string): ConfigItemLike | null {
+      const row = store.db.getConfigItemByPinyin(pinyin)
+      if (!row) return null
+      const entries = store.db.getConfigEntries(row.id as number)
+        .map((e: Record<string, unknown>) => ({ config_key: e.config_key as string }))
+      return {
+        pinyin: row.pinyin as string,
+        scheme: row.scheme as ConfigItemLike['scheme'],
+        bearer_prefix: row.bearer_prefix as string | null,
+        entries,
+      }
+    },
+    async listSecrets(namespace: string, subject: string) {
+      const all = await nexusClient.listSecrets(namespace, subject)
+      return all.map(({ key, value }) => ({ key, value }))
+    },
+  }
 }
 
 function resolveRunnerPath(): string {
@@ -852,9 +882,13 @@ export class RuntimeService {
     let mcpSettings: { mcpServers: Record<string, unknown> } | undefined
     if (session.userId && visibilityFilter && this.mcpStore && this.mcpUserConfig) {
       try {
+        const secretsApi = this.store && this.options.nexusClient
+          ? createMcpAuthSecretsApi(this.store, this.options.nexusClient)
+          : undefined
         const resolvedMcp = await resolveScodeMcpSettings({
           mcpStore: this.mcpStore,
           mcpUserConfig: this.mcpUserConfig,
+          secretsApi,
           orgId: session.orgId,
           userId: session.userId,
           departmentId: visibilityFilter.departmentId,
