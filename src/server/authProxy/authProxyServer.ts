@@ -15,6 +15,10 @@ export interface AuthProxyRule {
   urlPattern: string
   scheme: string
   bearerPrefix: string
+  // 'user' | 'system'. User-scoped credentials are authorized by possession of
+  // the secret itself, so they are NOT subject to the department policy gate;
+  // only system (enterprise) credentials are.
+  scope: string
   secretNamespace: string
   entries: Array<{ configKey: string; name: string; required: boolean }>
   // Login-type services: when authType is set and not 'static', the stored
@@ -42,6 +46,7 @@ export function configItemToRule(
     urlPattern: (item.url_pattern as string) || '',
     scheme: (item.scheme as string) || '',
     bearerPrefix: (item.bearer_prefix as string) || '',
+    scope: (item.scope as string) || 'system',
     secretNamespace: item.scope === 'user' ? `user:{userId}:${item.pinyin}` : `system:${item.pinyin}`,
     entries: (getEntries(id) || []).map(e => ({
       configKey: e.config_key as string,
@@ -299,8 +304,11 @@ export class AuthProxyServer {
         return
       }
 
-      // 4. Department policy check
-      if (tokenEntry.departmentId && this.policyProvider) {
+      // 4. Department policy check — only for system (enterprise) credentials.
+      // User-scoped credentials are authorized by possession of the secret
+      // itself (the user configured their own username/password), so they must
+      // not be gated by department policy.
+      if (match.scope !== 'user' && tokenEntry.departmentId && this.policyProvider) {
         const authorizedIds = this.policyProvider.getAuthorizedConfigItemIds(tokenEntry.departmentId)
         if (!authorizedIds.includes(match.configItemId)) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
