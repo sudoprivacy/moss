@@ -196,7 +196,7 @@ export async function deleteConfigItem(id: number): Promise<void> {
   await dcClient.delete(`/api/v1/config-items/${id}`)
 }
 
-export async function uploadConfigItemIcon(file: File): Promise<{ icon: string }> {
+export async function uploadConfigItemIcon(file: File): Promise<{ url: string }> {
   const buffer = await file.arrayBuffer()
   const res = await fetch('/api/v1/config-items/icon', {
     method: 'POST',
@@ -208,7 +208,7 @@ export async function uploadConfigItemIcon(file: File): Promise<{ icon: string }
   })
   if (!res.ok) throw new Error('上传图标失败')
   const data = await res.json()
-  return { icon: data.icon }
+  return { url: data.url }
 }
 
 // ============================================================

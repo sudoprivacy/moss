@@ -8,6 +8,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
 import type { ServerConfig, SessionRecord } from './types.js'
+import { saveUploadedIcon } from './utils/iconUpload.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
 import { hasScope, type AuthContext } from './auth/token.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
@@ -1591,11 +1592,65 @@ export function startServer(
         return
       }
 
+      // ---- Static file serving: /uploads/config-items/* (no auth required) ----
+      const configIconMatch = pathname.match(/^\/uploads\/config-items\/(.+)$/)
+      if (configIconMatch && req.method === 'GET') {
+        const filename = basename(configIconMatch[1])
+        const filePath = join(config.runtimeDir, 'uploads', 'config-items', filename)
+        try {
+          const fileContent = await readFile(filePath)
+          const ext = extname(filename).slice(1).toLowerCase()
+          const contentTypeMap: Record<string, string> = {
+            png: 'image/png',
+            jpg: 'image/jpeg',
+            jpeg: 'image/jpeg',
+            webp: 'image/webp',
+            svg: 'image/svg+xml',
+          }
+          const ct = contentTypeMap[ext] || 'image/png'
+          res.writeHead(200, {
+            'content-type': ct,
+            'cache-control': 'public, max-age=31536000',
+          })
+          res.end(fileContent)
+          return
+        } catch {
+          throw new HttpError(404, 'File not found')
+        }
+      }
+
+      // ---- Static file serving: /uploads/mcp-icons/* (no auth required) ----
+      const uploadMatch = pathname.match(/^\/uploads\/mcp-icons\/(.+)$/)
+      if (uploadMatch && req.method === 'GET') {
+        const filename = basename(uploadMatch[1])
+        const filePath = join(config.runtimeDir, 'uploads', 'mcp-icons', filename)
+        try {
+          const fileContent = await readFile(filePath)
+          const ext = extname(filename).slice(1).toLowerCase()
+          const contentTypeMap: Record<string, string> = {
+            png: 'image/png',
+            jpg: 'image/jpeg',
+            jpeg: 'image/jpeg',
+            webp: 'image/webp',
+            svg: 'image/svg+xml',
+          }
+          const contentType = contentTypeMap[ext] || 'image/png'
+          res.writeHead(200, {
+            'content-type': contentType,
+            'cache-control': 'public, max-age=31536000',
+          })
+          res.end(fileContent)
+          return
+        } catch {
+          throw new HttpError(404, 'File not found')
+        }
+      }
+
       // Public: Config Items (JWT auth, no admin scope)
       if (req.method === 'GET' && pathname === '/api/v1/config/items') {
         const auth = authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
-        writeJson(res, 200, configItemsApi.listPublic())
+        writeJson(res, 200, configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId)))
         return
       }
 
@@ -3454,10 +3509,8 @@ export function startServer(
         const chunks: Buffer[] = []
         for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
         const raw = Buffer.concat(chunks)
-        const contentType = req.headers['content-type'] || 'image/png'
-        const base64 = raw.toString('base64')
-        const icon = `data:${contentType};base64,${base64}`
-        writeJson(res, 200, { success: true, icon })
+        const url = await saveUploadedIcon(config.runtimeDir, raw, req.headers['content-type'], 'config-items')
+        writeJson(res, 200, { success: true, url })
         return
       }
 
@@ -4145,24 +4198,8 @@ export function startServer(
         authService.requireScope(auth, 'admin:mcp')
         const buffer = await readRawBody(req)
 
-        const headerCt = req.headers['content-type']
-        let mime = 'image/png'
-        if (typeof headerCt === 'string') {
-          const parsed = headerCt.split(';')[0].trim().toLowerCase()
-          if (
-            parsed === 'image/png' ||
-            parsed === 'image/jpeg' ||
-            parsed === 'image/webp' ||
-            parsed === 'image/svg+xml'
-          ) {
-            mime = parsed
-          } else if (parsed === 'image/jpg') {
-            mime = 'image/jpeg'
-          }
-        }
-
-        const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`
-        writeJson(res, 200, { success: true, data: { url: dataUrl } })
+        const url = await saveUploadedIcon(config.runtimeDir, buffer, req.headers['content-type'], 'mcp-icons')
+        writeJson(res, 200, { success: true, data: { url } })
         return
       }
 
@@ -5806,33 +5843,6 @@ export function startServer(
           runtime: created.runtime,
         })
         return
-      }
-
-      // ---- Static file serving: /uploads/mcp-icons/* ----
-      const uploadMatch = pathname.match(/^\/uploads\/mcp-icons\/(.+)$/)
-      if (uploadMatch && req.method === 'GET') {
-        const filename = uploadMatch[1]
-        const filePath = join(config.runtimeDir, 'uploads', 'mcp-icons', filename)
-        try {
-          const fileContent = await readFile(filePath)
-          const ext = extname(filename).slice(1).toLowerCase()
-          const contentTypeMap: Record<string, string> = {
-            png: 'image/png',
-            jpg: 'image/jpeg',
-            jpeg: 'image/jpeg',
-            webp: 'image/webp',
-            svg: 'image/svg+xml',
-          }
-          const contentType = contentTypeMap[ext] || 'image/png'
-          res.writeHead(200, {
-            'content-type': contentType,
-            'cache-control': 'public, max-age=31536000',
-          })
-          res.end(fileContent)
-          return
-        } catch {
-          throw new HttpError(404, 'File not found')
-        }
       }
 
       throw new HttpError(404, 'Not found')

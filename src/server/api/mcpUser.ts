@@ -33,7 +33,7 @@ const USER_VISIBLE_FIELDS = [
   'allow_outbound_network', 'allow_scheduled_task',
   'audit_request', 'audit_response_summary',
   'redact_sensitive_fields', 'allow_user_disable',
-  'enabled', 'status',
+  'enabled', 'status', 'template_id',
 ] as const
 
 function sanitizeForUser(server: Record<string, unknown>) {

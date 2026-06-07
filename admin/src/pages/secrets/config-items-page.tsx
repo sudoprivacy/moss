@@ -28,7 +28,7 @@ import {
   Search, Plus, Pencil, Trash2, RefreshCw, Loader2, X, GripVertical, Shield,
 } from 'lucide-react'
 import {
-  getConfigItems, createConfigItem, updateConfigItem, deleteConfigItem, updateConfigItemStatus,
+  getConfigItems, createConfigItem, updateConfigItem, deleteConfigItem, updateConfigItemStatus, uploadConfigItemIcon,
   type ConfigItem, type ConfigEntry,
 } from '@/lib/api/secrets'
 
@@ -140,6 +140,7 @@ export default function ConfigItemsPage() {
   const [editingItem, setEditingItem] = useState<ConfigItem | null>(null)
   const [form, setForm] = useState<ConfigItemForm>({ ...emptyForm })
   const [isSaving, setIsSaving] = useState(false)
+  const [isUploadingIcon, setIsUploadingIcon] = useState(false)
 
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<ConfigItem | null>(null)
@@ -473,18 +474,24 @@ export default function ConfigItemsPage() {
                     type="file"
                     accept="image/png,image/jpeg,image/svg+xml"
                     className="flex-1 text-sm"
-                    onChange={e => {
+                    disabled={isUploadingIcon}
+                    onChange={async e => {
                       const file = e.target.files?.[0]
                       if (!file) return
                       if (file.size > 500 * 1024) {
                         toast.error('图标文件不能超过 500KB')
                         return
                       }
-                      const reader = new FileReader()
-                      reader.onload = () => {
-                        setForm(f => ({ ...f, icon: reader.result as string }))
+                      setIsUploadingIcon(true)
+                      try {
+                        const response = await uploadConfigItemIcon(file)
+                        setForm(f => ({ ...f, icon: response.url }))
+                        toast.success('图标上传成功')
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : '图标上传失败')
+                      } finally {
+                        setIsUploadingIcon(false)
                       }
-                      reader.readAsDataURL(file)
                     }}
                   />
                   {form.icon && (
