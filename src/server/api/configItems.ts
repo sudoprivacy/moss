@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'crypto'
 import { textToPinyin } from '../utils/pinyin.js'
+import { resolveIconUrl } from '../utils/iconUrl.js'
+import { hasScope } from '../auth/token.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -56,7 +58,7 @@ function mapConfigItem(row: SqlRow) {
     id: row.id as number,
     name: row.name as string,
     description: row.description as string | null,
-    icon: row.icon as string | null,
+    icon: resolveIconUrl(row.icon as string | null, 'config-items'),
     pinyin: row.pinyin as string,
     scope: row.scope as string,
     url_pattern: row.url_pattern as string | null,
@@ -95,6 +97,7 @@ export function createConfigItemsApi(db: {
   getConfigEntries: (configItemId: number) => SqlRow[]
   replaceConfigEntries: (configItemId: number, entries: { config_key: string; name: string; config_desc?: string; required?: boolean }[]) => void
   getAllActiveConfigItems: () => SqlRow[]
+  getDepartmentPolicies: (departmentId: string) => SqlRow[]
 }) {
   const api = {
     list(orgId: string, userId: string, params: {
@@ -294,16 +297,25 @@ export function createConfigItemsApi(db: {
       return { success: true }
     },
 
-    /** Public endpoint: returns all active config items (for sudowork client compatibility) */
-    listPublic() {
-      const items = db.getAllActiveConfigItems()
-      const mapped = items.map(item => {
+    /** Public endpoint: returns config items visible to the caller.
+     *  - admin: all active items
+     *  - non-admin with department: scope=user items + department-authorized scope=system items
+     *  - non-admin without department: scope=user items only
+     */
+    listPublic(
+      auth: { role: string; scopes: string[]; userId: string },
+      getUserById: (userId: string) => { status: string; departmentId: string | null } | null,
+    ) {
+      const allItems = db.getAllActiveConfigItems()
+
+      // Helper: map a raw item row to the public DTO
+      const mapItem = (item: SqlRow) => {
         const entries = db.getConfigEntries(item.id as number)
         return {
           id: item.id as number,
           name: item.name as string,
-          icon: item.icon as string | null,
-          icon_url: item.icon as string | null,
+          icon: resolveIconUrl(item.icon as string | null, 'config-items'),
+          icon_url: resolveIconUrl(item.icon as string | null, 'config-items'),
           pinyin: item.pinyin as string,
           scope: item.scope as string,
           url_pattern: item.url_pattern as string | null,
@@ -312,8 +324,31 @@ export function createConfigItemsApi(db: {
           description: item.description as string | null,
           entries: entries.map(mapConfigEntry),
         }
+      }
+
+      // Rule 1: admin sees everything (excluding items with no entries)
+      if (auth.role === 'admin' || hasScope(auth.scopes, '*')) {
+        return { success: true, data: allItems.map(mapItem).filter(item => item.entries.length > 0) }
+      }
+
+      // Rule 2: non-admin — determine department-authorized system config item IDs
+      let authorizedSystemIds: Set<number> = new Set()
+      const user = getUserById(auth.userId)
+      const deptId = user?.departmentId ?? null
+      if (deptId) {
+        const policies = db.getDepartmentPolicies(deptId)
+        authorizedSystemIds = new Set(policies.map(p => p.config_item_id as number))
+      }
+
+      // Rule 3: scope=user always visible; scope=system only if department-authorized
+      const filtered = allItems.filter(item => {
+        const scope = item.scope as string
+        if (scope === 'user') return true
+        if (scope === 'system') return authorizedSystemIds.has(item.id as number)
+        return false
       })
-      return { success: true, data: mapped }
+
+      return { success: true, data: filtered.map(mapItem).filter(item => item.entries.length > 0) }
     },
   }
   return api

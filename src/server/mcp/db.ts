@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { McpServer, McpPolicy, McpAuditLog, McpApprovalRequest, McpTemplate, McpServerInput, McpPolicyInput, McpTemplateInput, McpServerListFilter, McpAuditLogFilter, McpTemplateListFilter } from './types.js'
 import type { VisibleTo } from '../visibilityFilter.js'
+import { resolveIconUrl } from '../utils/iconUrl.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -21,7 +22,7 @@ function mapMcpServer(row: SqlRow): McpServer {
     name: row.name as string,
     display_name: row.display_name as string | null,
     description: row.description as string | null,
-    icon: row.icon as string | null,
+    icon: resolveIconUrl(row.icon as string | null, 'mcp-icons'),
     category: row.category as string | null,
     risk_level: (row.risk_level as string) as McpServer['risk_level'],
     responsible_person: row.responsible_person as string | null,
@@ -134,7 +135,7 @@ function mapMcpTemplate(row: SqlRow): McpTemplate {
     org_id: row.org_id as string,
     name: row.name as string,
     description: row.description as string | null,
-    icon: row.icon as string,
+    icon: resolveIconUrl(row.icon as string, 'mcp-icons')!,
     category: row.category as string | null,
     tags_json: parseNullableJson(row.tags_json) as string[] | null,
     mcp_type: (row.mcp_type as string) as McpTemplate['mcp_type'],

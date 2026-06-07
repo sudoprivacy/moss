@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import { secretSubject, SYSTEM_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import { resolveIconUrl } from '../utils/iconUrl.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -232,8 +233,8 @@ export function createSecretsApi(db: {
             id: item.id as number,
             name: item.name as string,
             description: item.description as string | null,
-            icon: item.icon as string | null,
-            icon_url: item.icon as string | null,
+            icon: resolveIconUrl(item.icon as string | null, 'config-items'),
+            icon_url: resolveIconUrl(item.icon as string | null, 'config-items'),
             pinyin: item.pinyin as string,
             scope: item.scope as string,
             url_pattern: item.url_pattern as string | null,
