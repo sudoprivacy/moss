@@ -942,19 +942,11 @@ export default function SystemSettingsPage() {
 
           <SettingField
             label="凭证脚本路径"
-            description="服务器上可执行脚本的绝对路径，调用时传入 resolve / refresh 参数解析用户身份。"
+            description="用于解析用户身份的服务器端可执行脚本路径。该项需由系统管理员在服务器 settings.json 中配置 oauth2.scriptPath，无法在此修改。如需调整，请联系系统管理员。"
           >
-            <Input
-              value={draft.oauth2.scriptPath}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? { ...current, oauth2: { ...current.oauth2, scriptPath: event.target.value } }
-                    : current,
-                )
-              }
-              placeholder="/opt/moss/oauth2-resolve.sh"
-            />
+            <p className="min-h-10 break-all rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+              请联系系统管理员在 settings.json 中配置 oauth2.scriptPath
+            </p>
           </SettingField>
 
           <SettingField
