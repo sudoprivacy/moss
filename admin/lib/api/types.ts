@@ -465,6 +465,11 @@ export interface EnterpriseConfig {
   about_name: string;
   app_company_name: string;
   login_desp: string;
+  /**
+   * Whether enterprise client (sudowork) users can use the cron / scheduled
+   * task feature. null = unset → treated as enabled. Admin/super_admin only.
+   */
+  client_cron_enabled: boolean | null;
 }
 
 export interface EnterpriseConfigResponse {

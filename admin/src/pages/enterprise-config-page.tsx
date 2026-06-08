@@ -13,6 +13,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { getEnterpriseConfig, updateEnterpriseConfig, uploadLogo } from '@/lib/api/enterprise'
 import type { EnterpriseConfig } from '@/lib/api/types'
 import {
@@ -276,6 +277,18 @@ export default function EnterpriseConfigPage() {
               value={config?.login_desp || ''}
               onChange={(e) => handleInputChange('login_desp', e.target.value)}
               placeholder="请输入登录页描述"
+            />
+          </SettingField>
+
+          <SettingField
+            label="客户端定时任务 (client_cron_enabled)"
+            description="是否允许企业版客户端用户使用定时任务（cron）功能。关闭后，客户端将隐藏定时任务菜单及运行记录列表。仅对企业模式生效。"
+          >
+            <Switch
+              checked={config?.client_cron_enabled !== false}
+              onCheckedChange={(checked) =>
+                setConfig(prev => (prev ? { ...prev, client_cron_enabled: checked } : null))
+              }
             />
           </SettingField>
 

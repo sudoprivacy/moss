@@ -302,6 +302,13 @@ export type EnterpriseRecord = {
   about_name: string | null
   app_company_name: string | null
   login_desp: string | null
+  /**
+   * Whether the client-side cron (scheduled task) feature is available to
+   * enterprise users. Stored as 0/1 in SQLite; null on rows predating the
+   * column is treated as enabled (default on). Managed by admin/super_admin
+   * only and surfaced to the client via GET /api/v1/tenant/config.
+   */
+  client_cron_enabled: boolean | null
   created_at: number
   updated_at: number
 }
