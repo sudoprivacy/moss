@@ -1653,8 +1653,7 @@ export function startServer(
         const result = configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId))
         if (result.success && nexusClient) {
           try {
-            const allSecrets = await nexusClient.listSecrets()
-            const configuredNs = new Set(allSecrets.filter(s => s.value !== null).map(s => s.namespace))
+            const configuredNs = nexusClient.listConfiguredNamespaces()
             result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
               const ns = item.scope === 'system' ? `system:${item.pinyin}`
                 : item.scope === 'department' ? `role:${item.pinyin}`
@@ -3693,8 +3692,7 @@ export function startServer(
               ...allDeptItems.filter(i => authorizedDeptIds.has(i.id as number))
             ]
             if (nexusClient) {
-              const allSecrets = await nexusClient.listSecrets()
-              const configuredNs = new Set(allSecrets.filter(s => s.value !== null).map(s => s.namespace))
+              const configuredNs = nexusClient.listConfiguredNamespaces()
               visible = visible.filter(i => {
                 const ns = (i.scope as string) === 'department' ? `role:${i.pinyin}` : `system:${i.pinyin}`
                 return configuredNs.has(ns)

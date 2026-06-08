@@ -82,11 +82,9 @@ export function createSecretsApi(db: {
 
     async listEnterpriseSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets(undefined, SYSTEM_SECRET_SUBJECT)
-        // Filter to system:* namespace
-        const systemSecrets = secrets.filter(s => s.namespace.startsWith('system:'))
+        const secrets = await nexus.listSecrets('system')
         // Enrich with config item data
-        const enriched = systemSecrets.map(s => {
+        const enriched = secrets.map(s => {
           const pinyin = s.namespace.replace('system:', '')
           // We don't look up config items here for performance, frontend handles it
           // Expose a normalized `enabled` boolean alongside the raw `status` so
@@ -103,10 +101,8 @@ export function createSecretsApi(db: {
 
     async listDepartmentSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets(undefined, DEPT_SECRET_SUBJECT)
-        // Filter to role:* namespace
-        const deptSecrets = secrets.filter(s => s.namespace.startsWith('role:'))
-        const enriched = deptSecrets.map(s => {
+        const secrets = await nexus.listSecrets('role')
+        const enriched = secrets.map(s => {
           const pinyin = s.namespace.replace('role:', '')
           return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
         })
@@ -285,12 +281,11 @@ export function createSecretsApi(db: {
 
     async listUserSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets(undefined, userId)
-        const userSecrets = secrets.filter(s => s.namespace.startsWith(`user:${userId}:`))
+        const secrets = await nexus.listSecrets(`user:${userId}`)
         // Expose a normalized `enabled` boolean alongside the raw `status`.
         // nexus stores enablement as status: 'enabled'|'disabled'; clients toggle
         // on a boolean, so derive it here to keep the contract explicit.
-        const withEnabled = userSecrets.map(s => ({ ...s, enabled: s.status === 'enabled' }))
+        const withEnabled = secrets.map(s => ({ ...s, enabled: s.status === 'enabled' }))
         return { success: true, data: withEnabled }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
