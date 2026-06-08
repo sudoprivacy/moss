@@ -120,7 +120,7 @@ const menuItems: NavItem[] = [
     children: [
       { title: '配置项列表', url: '/secrets/config-items', icon: KeyRound },
       { title: '企业凭据', url: '/secrets/enterprise', icon: KeyRound },
-      { title: '部门授权', url: '/secrets/department-policies', icon: KeyRound },
+      { title: '部门凭据', url: '/secrets/department', icon: KeyRound },
       { title: '用户凭据', url: '/secrets/user-credentials', icon: KeyRound },
       { title: '审计日志', url: '/secrets/audit-log', icon: KeyRound },
       { title: '轮换告警', url: '/secrets/rotation-alerts', icon: KeyRound },

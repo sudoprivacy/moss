@@ -20,7 +20,7 @@ const ExternalSourcesPage = lazy(() => import('./pages/external-sources-page'))
 const BuildJobsPage = lazy(() => import('./pages/build-jobs-page'))
 const ConfigItemsPage = lazy(() => import('./pages/secrets/config-items-page'))
 const EnterpriseSecretsPage = lazy(() => import('./pages/secrets/enterprise-secrets-page'))
-const DepartmentPoliciesPage = lazy(() => import('./pages/secrets/department-policies-page'))
+const DepartmentSecretsPage = lazy(() => import('./pages/secrets/department-secrets-page'))
 const UserCredentialsPage = lazy(() => import('./pages/secrets/user-credentials-page'))
 const AuditLogPage = lazy(() => import('./pages/secrets/audit-log-page'))
 const RotationAlertsPage = lazy(() => import('./pages/secrets/rotation-alerts-page'))
@@ -211,10 +211,10 @@ export default function App() {
           }
         />
         <Route
-          path="/secrets/department-policies"
+          path="/secrets/department"
           element={
             <SuspendedRoute>
-              <DepartmentPoliciesPage />
+              <DepartmentSecretsPage />
             </SuspendedRoute>
           }
         />

@@ -2870,6 +2870,18 @@ export class DirectConnectStore {
     this.db.prepare('DELETE FROM department_secret_policies WHERE config_item_id = ?').run(configItemId)
   }
 
+  replaceConfigItemDepartments(configItemId: number, departmentIds: string[]): void {
+    const ts = now()
+    this.db.prepare('DELETE FROM department_secret_policies WHERE config_item_id = ?').run(configItemId)
+    const stmt = this.db.prepare(`
+      INSERT INTO department_secret_policies (department_id, config_item_id, created_at)
+      VALUES (?, ?, ?)
+    `)
+    for (const deptId of departmentIds) {
+      stmt.run(deptId, configItemId, ts)
+    }
+  }
+
   // --- Secret Audit Log ---
 
   insertAuditLog(row: {

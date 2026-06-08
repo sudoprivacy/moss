@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { NexusClient } from '../nexus/nexusClient.js'
-import { secretSubject, SYSTEM_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import { secretSubject, SYSTEM_SECRET_SUBJECT, DEPT_SECRET_SUBJECT } from '../secrets/secretSubject.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 
 type SqlRow = Record<string, unknown>
@@ -23,7 +23,9 @@ function mapConfigEntry(row: SqlRow) {
 }
 
 function buildNamespace(scope: string, pinyin: string): string {
-  return scope === 'system' ? `system:${pinyin}` : `user:{userId}:${pinyin}`
+  if (scope === 'system') return `system:${pinyin}`
+  if (scope === 'department') return `role:${pinyin}`
+  return `user:{userId}:${pinyin}`
 }
 
 export function createSecretsApi(db: {
@@ -43,6 +45,10 @@ export function createSecretsApi(db: {
   const resolveConfigItemId = (namespace: string): number | undefined => {
     const parts = namespace.split(':')
     if (parts[0] === 'system') {
+      const item = db.getConfigItemByPinyin(parts.slice(1).join(':'))
+      return item ? (item.id as number) : undefined
+    }
+    if (parts[0] === 'role') {
       const item = db.getConfigItemByPinyin(parts.slice(1).join(':'))
       return item ? (item.id as number) : undefined
     }
@@ -85,6 +91,23 @@ export function createSecretsApi(db: {
           // We don't look up config items here for performance, frontend handles it
           // Expose a normalized `enabled` boolean alongside the raw `status` so
           // clients don't have to know the internal 'enabled'/'disabled' string.
+          return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
+        })
+        return { success: true, data: enriched }
+      } catch {
+        return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
+      }
+    },
+
+    // --- Department Secrets (role scope) ---
+
+    async listDepartmentSecrets(orgId: string, userId: string) {
+      try {
+        const secrets = await nexus.listSecrets(undefined, DEPT_SECRET_SUBJECT)
+        // Filter to role:* namespace
+        const deptSecrets = secrets.filter(s => s.namespace.startsWith('role:'))
+        const enriched = deptSecrets.map(s => {
+          const pinyin = s.namespace.replace('role:', '')
           return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
         })
         return { success: true, data: enriched }

@@ -15,9 +15,9 @@ export interface AuthProxyRule {
   urlPattern: string
   scheme: string
   bearerPrefix: string
-  // 'user' | 'system'. User-scoped credentials are authorized by possession of
+  // 'user' | 'system' | 'department'. User-scoped credentials are authorized by possession of
   // the secret itself, so they are NOT subject to the department policy gate;
-  // only system (enterprise) credentials are.
+  // only department credentials are. Enterprise (system) credentials are visible to all users.
   scope: string
   secretNamespace: string
   entries: Array<{ configKey: string; name: string; required: boolean }>
@@ -47,7 +47,11 @@ export function configItemToRule(
     scheme: (item.scheme as string) || '',
     bearerPrefix: (item.bearer_prefix as string) || '',
     scope: (item.scope as string) || 'system',
-    secretNamespace: item.scope === 'user' ? `user:{userId}:${item.pinyin}` : `system:${item.pinyin}`,
+    secretNamespace: item.scope === 'user'
+      ? `user:{userId}:${item.pinyin}`
+      : item.scope === 'department'
+        ? `role:${item.pinyin}`
+        : `system:${item.pinyin}`,
     entries: (getEntries(id) || []).map(e => ({
       configKey: e.config_key as string,
       name: e.name as string,
@@ -274,8 +278,8 @@ export class AuthProxyServer {
     const explicitScheme = req.headers['x-secret-scheme'] as string || req.headers['x-auth-scheme'] as string
 
     if (explicitNs && explicitKey && this.nexusClient) {
-      // 显式头路径不允许消费企业凭据：缺少部门策略门，避免越权
-      if (explicitNs.startsWith('system:')) {
+      // 显式头路径不允许消费企业凭据和部门凭据：缺少策略门，避免越权
+      if (explicitNs.startsWith('system:') || explicitNs.startsWith('role:')) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
           error: 'forbidden_namespace',
@@ -304,11 +308,10 @@ export class AuthProxyServer {
         return
       }
 
-      // 4. Department policy check — only for system (enterprise) credentials.
-      // User-scoped credentials are authorized by possession of the secret
-      // itself (the user configured their own username/password), so they must
-      // not be gated by department policy.
-      if (match.scope !== 'user' && tokenEntry.departmentId && this.policyProvider) {
+      // 4. Department policy check — only for department credentials.
+      // Enterprise (system) credentials are now visible to all users;
+      // user-scoped credentials are authorized by possession of the secret itself.
+      if (match.scope === 'department' && tokenEntry.departmentId && this.policyProvider) {
         const authorizedIds = this.policyProvider.getAuthorizedConfigItemIds(tokenEntry.departmentId)
         if (!authorizedIds.includes(match.configItemId)) {
           res.writeHead(403, { 'Content-Type': 'application/json' })

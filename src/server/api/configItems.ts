@@ -299,8 +299,8 @@ export function createConfigItemsApi(db: {
 
     /** Public endpoint: returns config items visible to the caller.
      *  - admin: all active items
-     *  - non-admin with department: scope=user items + department-authorized scope=system items
-     *  - non-admin without department: scope=user items only
+     *  - non-admin: scope=system items (all) + scope=user items (all) + scope=department items (department-authorized only)
+     *  - non-admin without department: scope=system items (all) + scope=user items (all)
      */
     listPublic(
       auth: { role: string; scopes: string[]; userId: string },
@@ -331,20 +331,21 @@ export function createConfigItemsApi(db: {
         return { success: true, data: allItems.map(mapItem).filter(item => item.entries.length > 0) }
       }
 
-      // Rule 2: non-admin — determine department-authorized system config item IDs
-      let authorizedSystemIds: Set<number> = new Set()
+      // Rule 2: non-admin — determine department-authorized config item IDs
+      let authorizedDeptIds: Set<number> = new Set()
       const user = getUserById(auth.userId)
       const deptId = user?.departmentId ?? null
       if (deptId) {
         const policies = db.getDepartmentPolicies(deptId)
-        authorizedSystemIds = new Set(policies.map(p => p.config_item_id as number))
+        authorizedDeptIds = new Set(policies.map(p => p.config_item_id as number))
       }
 
-      // Rule 3: scope=user always visible; scope=system only if department-authorized
+      // Rule 3: scope=user always visible; scope=system always visible; scope=department needs authorization
       const filtered = allItems.filter(item => {
         const scope = item.scope as string
         if (scope === 'user') return true
-        if (scope === 'system') return authorizedSystemIds.has(item.id as number)
+        if (scope === 'system') return true
+        if (scope === 'department') return authorizedDeptIds.has(item.id as number)
         return false
       })
 

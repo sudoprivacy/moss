@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http'
 import type { URL } from 'url'
 import type { NexusClient } from '../nexus/nexusClient.js'
-import { SYSTEM_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import { SYSTEM_SECRET_SUBJECT, DEPT_SECRET_SUBJECT } from '../secrets/secretSubject.js'
 
 interface DepartmentPolicyProvider {
   getAuthorizedConfigItemIds(departmentId: string): number[]
@@ -98,25 +98,32 @@ async function handleList(res: ServerResponse, context: SecretsApiContext): Prom
     const personalPrefix = `user:${context.userId}:`
     const personal = allMeta.filter(s => s.namespace.startsWith(personalPrefix))
 
-    let enterprise: SecretSummary[] = []
+    // Enterprise (system) secrets: visible to all users, no department filtering
+    const enterpriseRaw = await nexusClient!.listSecrets(undefined, SYSTEM_SECRET_SUBJECT)
+    const enterprise = enterpriseRaw
+      .filter(s => s.namespace.startsWith('system:'))
+      .map(s => ({ namespace: s.namespace, key: s.key, status: s.status, version: s.version }))
+
+    // Department (role) secrets: filtered by department policy
+    let department: SecretSummary[] = []
     if (context.departmentId) {
       const authorizedIds = policyProvider!.getAuthorizedConfigItemIds(context.departmentId)
       if (authorizedIds.length > 0) {
         const items = getAllActiveConfigItemsFn!()
         const authorizedPinyins = new Set<string>()
         for (const item of items) {
-          if (item.scope === 'system' && authorizedIds.includes(item.id) && typeof item.pinyin === 'string') {
+          if (item.scope === 'department' && authorizedIds.includes(item.id) && typeof item.pinyin === 'string') {
             authorizedPinyins.add(item.pinyin)
           }
         }
-        const enterpriseRaw = await nexusClient!.listSecrets(undefined, SYSTEM_SECRET_SUBJECT)
-        enterprise = enterpriseRaw
-          .filter(s => s.namespace.startsWith('system:') && authorizedPinyins.has(s.namespace.slice('system:'.length)))
+        const deptRaw = await nexusClient!.listSecrets(undefined, DEPT_SECRET_SUBJECT)
+        department = deptRaw
+          .filter(s => s.namespace.startsWith('role:') && authorizedPinyins.has(s.namespace.slice('role:'.length)))
           .map(s => ({ namespace: s.namespace, key: s.key, status: s.status, version: s.version }))
       }
     }
 
-    respond(res, 200, { success: true, data: [...personal, ...enterprise] })
+    respond(res, 200, { success: true, data: [...personal, ...enterprise, ...department] })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     respond(res, 502, { error: 'nexus_error', message })

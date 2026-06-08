@@ -223,16 +223,21 @@ function SecretRefSelect({
     async function load() {
       setLoading(true)
       try {
-        // 获取所有企业 ConfigItem
-        const res = await getConfigItems({ scope: 'system', status: '1', page_size: 999 })
-        let items = res.items
+        // 获取企业 + 部门 ConfigItem
+        const [systemRes, deptRes] = await Promise.all([
+          getConfigItems({ scope: 'system', status: '1', page_size: 999 }),
+          getConfigItems({ scope: 'department', status: '1', page_size: 999 }),
+        ])
+        let items = [...systemRes.items, ...deptRes.items]
 
         // 部门级：按部门策略过滤
         if (scope === 'department' && departmentId) {
           const policies = await getDepartmentPolicies(departmentId)
           if (policies?.config_item_ids) {
             const authorizedIds = new Set(policies.config_item_ids)
-            items = items.filter((item) => authorizedIds.has(item.id))
+            items = items.filter((item) => item.scope === 'system' || authorizedIds.has(item.id))
+          } else {
+            items = items.filter((item) => item.scope === 'system')
           }
         }
 
