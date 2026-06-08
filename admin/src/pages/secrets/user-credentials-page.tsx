@@ -87,6 +87,12 @@ export default function UserCredentialsPage() {
 
   const handleSave = async () => {
     if (!editItem || !currentUser) return
+    for (const entry of editItem.entries) {
+      if (entry.required && !(editValues[entry.config_key]?.trim())) {
+        toast.error(`请填写必填项：${entry.name}`)
+        return
+      }
+    }
     setIsSaving(true)
     try {
       const namespace = `user:${currentUser.id}:${editItem.pinyin}`

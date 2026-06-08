@@ -1650,7 +1650,20 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/config/items') {
         const auth = authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
-        writeJson(res, 200, configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId)))
+        const result = configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId))
+        if (result.success && nexusClient) {
+          try {
+            const allSecrets = await nexusClient.listSecrets()
+            const configuredNs = new Set(allSecrets.filter(s => s.value !== null).map(s => s.namespace))
+            result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
+              const ns = item.scope === 'system' ? `system:${item.pinyin}`
+                : item.scope === 'department' ? `role:${item.pinyin}`
+                : `user:${auth.userId}:${item.pinyin}`
+              return configuredNs.has(ns)
+            })
+          } catch { /* nexus unavailable — return unfiltered */ }
+        }
+        writeJson(res, 200, result)
         return
       }
 
@@ -3675,10 +3688,18 @@ export function startServer(
               const policies = runtime.store.getDepartmentPolicies(deptId)
               authorizedDeptIds = new Set(policies.map(p => p.config_item_id as number))
             }
-            const visible = [
+            let visible = [
               ...allSystemItems,
               ...allDeptItems.filter(i => authorizedDeptIds.has(i.id as number))
             ]
+            if (nexusClient) {
+              const allSecrets = await nexusClient.listSecrets()
+              const configuredNs = new Set(allSecrets.filter(s => s.value !== null).map(s => s.namespace))
+              visible = visible.filter(i => {
+                const ns = (i.scope as string) === 'department' ? `role:${i.pinyin}` : `system:${i.pinyin}`
+                return configuredNs.has(ns)
+              })
+            }
             writeJson(res, 200, { success: true, data: visible })
           } catch {
             writeJson(res, 200, { success: true, data: [] })

@@ -129,6 +129,14 @@ export function createSecretsApi(db: {
 
     async putSecret(orgId: string, userId: string, namespace: string, key: string, value: string, metadata?: { expires_at?: number | null }, ip?: string) {
       try {
+        const configItemId = resolveConfigItemId(namespace)
+        if (configItemId) {
+          const entries = db.getConfigEntries(configItemId)
+          const matched = entries.find(e => (e.config_key as string) === key)
+          if (matched && (matched.required as number) === 1 && (!value || !value.trim())) {
+            return { success: false, error: { code: 'validation_error', message: `必填项"${matched.name as string}"不能为空` } }
+          }
+        }
         const existing = await nexus.getSecret(namespace, key, secretSubject(namespace, userId)).catch(() => null)
         const action = existing && existing.version > 0 ? 'updated' : 'created'
         await nexus.putSecret(namespace, key, value, secretSubject(namespace, userId))

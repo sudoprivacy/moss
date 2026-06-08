@@ -169,6 +169,16 @@ export default function DepartmentSecretsPage() {
 
   const handleSave = async () => {
     if (!editItem) return
+    for (const entry of editItem.entries) {
+      if (entry.required && !(editValues[entry.config_key]?.trim())) {
+        toast.error(`请填写必填项：${entry.name}`)
+        return
+      }
+    }
+    if (selectedDeptIds.length === 0) {
+      toast.error('请至少选择一个授权部门')
+      return
+    }
     setIsSaving(true)
     try {
       const namespace = `role:${editItem.pinyin}`

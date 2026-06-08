@@ -86,6 +86,12 @@ export default function EnterpriseSecretsPage() {
 
   const handleSave = async () => {
     if (!editItem) return
+    for (const entry of editItem.entries) {
+      if (entry.required && !(editValues[entry.config_key]?.trim())) {
+        toast.error(`请填写必填项：${entry.name}`)
+        return
+      }
+    }
     setIsSaving(true)
     try {
       const namespace = `system:${editItem.pinyin}`
