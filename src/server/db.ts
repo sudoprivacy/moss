@@ -197,6 +197,7 @@ export class DirectConnectStore {
         about_name TEXT,
         app_company_name TEXT,
         login_desp TEXT,
+        client_cron_enabled INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -288,6 +289,13 @@ export class DirectConnectStore {
     if (!channelPluginsColumns.some(col => col.name === 'org_id')) {
       this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN org_id TEXT`)
       console.log('[DB] Added org_id column to channel_plugins')
+    }
+
+    // Migration: add client_cron_enabled to enterprises (null = enabled by default)
+    const enterprisesColumns = this.db.prepare(`PRAGMA table_info(enterprises)`).all() as { name: string }[]
+    if (!enterprisesColumns.some(col => col.name === 'client_cron_enabled')) {
+      this.db.exec(`ALTER TABLE enterprises ADD COLUMN client_cron_enabled INTEGER`)
+      console.log('[DB] Added client_cron_enabled column to enterprises')
     }
 
     // Migration: add user_id to channel_pairing_requests
@@ -1296,6 +1304,12 @@ export class DirectConnectStore {
       about_name: typeof row.about_name === 'string' ? row.about_name : null,
       app_company_name: typeof row.app_company_name === 'string' ? row.app_company_name : null,
       login_desp: typeof row.login_desp === 'string' ? row.login_desp : null,
+      // null (column never set) is preserved so the client applies its
+      // default-on behaviour; 0/1 map to false/true.
+      client_cron_enabled:
+        row.client_cron_enabled === null || row.client_cron_enabled === undefined
+          ? null
+          : Number(row.client_cron_enabled) !== 0,
       created_at: Number(row.created_at),
       updated_at: Number(row.updated_at),
     }
@@ -1306,7 +1320,11 @@ export class DirectConnectStore {
     if (entries.length === 0) return
 
     const sets = entries.map(([key]) => `${key} = ?`).join(', ')
-    const values = entries.map(([, value]) => value ?? null)
+    // SQLite has no boolean type — coerce booleans to 0/1 so INTEGER columns
+    // (e.g. client_cron_enabled) bind correctly; everything else passes through.
+    const values = entries.map(([, value]) =>
+      typeof value === 'boolean' ? (value ? 1 : 0) : value ?? null,
+    )
     const ts = now()
 
     this.db.prepare(`
