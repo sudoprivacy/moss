@@ -62,9 +62,9 @@ function createMcpAuthSecretsApi(
 ): McpAuthSecretsApi {
   return {
     getConfigItemByPinyin(pinyin: string): ConfigItemLike | null {
-      const row = store.db.getConfigItemByPinyin(pinyin)
+      const row = store.getConfigItemByPinyin(pinyin)
       if (!row) return null
-      const entries = store.db.getConfigEntries(row.id as number)
+      const entries = store.getConfigEntries(row.id as number)
         .map((e: Record<string, unknown>) => ({ config_key: e.config_key as string }))
       return {
         pinyin: row.pinyin as string,
