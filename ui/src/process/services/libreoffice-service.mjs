@@ -59,7 +59,7 @@ export class LibreOfficeService {
 
   getDownloadUrl() {
     const { file } = getArchNames();
-    const base = 'https://sudowork-1309794936.cos.ap-beijing.myqcloud.com/sudowork';
+    const base = 'https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com/sudowork';
     if (process.platform === 'darwin') {
       return `${base}/LibreOffice_${LIBREOFFICE_VERSION}_MacOS_${file}.dmg`;
     }

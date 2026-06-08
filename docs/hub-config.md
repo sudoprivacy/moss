@@ -16,7 +16,7 @@ export MOSS_HUB_BASE_URL="https://sudoworkhub.sudoprivacy.com"
 export MOSS_HUB_AUTHORIZATION="sud0@sudo"
 
 # COS 对象存储基础 URL（用于技能/智能体图标等资源）
-export MOSS_COS_BASE_URL="https://sudowork-1309794936.cos.ap-beijing.myqcloud.com"
+export MOSS_COS_BASE_URL="https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com"
 ```
 
 ### 2. 配置文件
@@ -28,7 +28,7 @@ export MOSS_COS_BASE_URL="https://sudowork-1309794936.cos.ap-beijing.myqcloud.co
   "hub": {
     "apiBaseUrl": "https://sudoworkhub.sudoprivacy.com/api",
     "authorization": "sud0@sudo",
-    "cosBaseUrl": "https://sudowork-1309794936.cos.ap-beijing.myqcloud.com"
+    "cosBaseUrl": "https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com"
   }
 }
 ```
@@ -39,7 +39,7 @@ export MOSS_COS_BASE_URL="https://sudowork-1309794936.cos.ap-beijing.myqcloud.co
 
 ```bash
 # .env 文件
-VITE_COS_BASE_URL=https://sudowork-1309794936.cos.ap-beijing.myqcloud.com
+VITE_COS_BASE_URL=https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com
 ```
 
 或在构建时传入：
@@ -56,7 +56,7 @@ VITE_COS_BASE_URL=https://your-cos-url.com pnpm build
 |--------|--------|
 | Hub API URL | `https://sudoworkhub.sudoprivacy.com/api` |
 | Hub Authorization | `sud0@sudo` |
-| COS Base URL | `https://sudowork-1309794936.cos.ap-beijing.myqcloud.com` |
+| COS Base URL | `https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com` |
 
 ## 配置优先级
 
@@ -74,7 +74,7 @@ COS Base URL 用于解析技能和智能体的图标路径。当 Hub 返回的�
 
 示例：
 - 输入路径: `skill-hub/b07a3fcd-5051-4c33-b6ba-e9797a779c63/icon.png`
-- 输出 URL: `https://sudowork-1309794936.cos.ap-beijing.myqcloud.com/skill-hub/b07a3fcd-5051-4c33-b6ba-e9797a779c63/icon.png`
+- 输出 URL: `https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com/skill-hub/b07a3fcd-5051-4c33-b6ba-e9797a779c63/icon.png`
 
 ### Hub API Base URL
 

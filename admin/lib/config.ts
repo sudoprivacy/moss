@@ -4,7 +4,7 @@
  */
 export const COS_BASE_URL =
   import.meta.env.VITE_COS_BASE_URL ||
-  'https://sudowork-1309794936.cos.ap-beijing.myqcloud.com'
+  'https://sudoworkhub-1309794936.cos.ap-beijing.myqcloud.com'
 
 /**
  * Build full URL for COS assets
