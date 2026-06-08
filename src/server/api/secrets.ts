@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { NexusClient } from '../nexus/nexusClient.js'
-import { secretSubject, SYSTEM_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import { secretSubject, SYSTEM_SECRET_SUBJECT, DEPT_SECRET_SUBJECT } from '../secrets/secretSubject.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 
 type SqlRow = Record<string, unknown>
@@ -23,7 +23,9 @@ function mapConfigEntry(row: SqlRow) {
 }
 
 function buildNamespace(scope: string, pinyin: string): string {
-  return scope === 'system' ? `system:${pinyin}` : `user:{userId}:${pinyin}`
+  if (scope === 'system') return `system:${pinyin}`
+  if (scope === 'department') return `role:${pinyin}`
+  return `user:{userId}:${pinyin}`
 }
 
 export function createSecretsApi(db: {
@@ -43,6 +45,10 @@ export function createSecretsApi(db: {
   const resolveConfigItemId = (namespace: string): number | undefined => {
     const parts = namespace.split(':')
     if (parts[0] === 'system') {
+      const item = db.getConfigItemByPinyin(parts.slice(1).join(':'))
+      return item ? (item.id as number) : undefined
+    }
+    if (parts[0] === 'role') {
       const item = db.getConfigItemByPinyin(parts.slice(1).join(':'))
       return item ? (item.id as number) : undefined
     }
@@ -76,15 +82,28 @@ export function createSecretsApi(db: {
 
     async listEnterpriseSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets(undefined, SYSTEM_SECRET_SUBJECT)
-        // Filter to system:* namespace
-        const systemSecrets = secrets.filter(s => s.namespace.startsWith('system:'))
+        const secrets = await nexus.listSecrets('system')
         // Enrich with config item data
-        const enriched = systemSecrets.map(s => {
+        const enriched = secrets.map(s => {
           const pinyin = s.namespace.replace('system:', '')
           // We don't look up config items here for performance, frontend handles it
           // Expose a normalized `enabled` boolean alongside the raw `status` so
           // clients don't have to know the internal 'enabled'/'disabled' string.
+          return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
+        })
+        return { success: true, data: enriched }
+      } catch {
+        return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
+      }
+    },
+
+    // --- Department Secrets (role scope) ---
+
+    async listDepartmentSecrets(orgId: string, userId: string) {
+      try {
+        const secrets = await nexus.listSecrets('role')
+        const enriched = secrets.map(s => {
+          const pinyin = s.namespace.replace('role:', '')
           return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
         })
         return { success: true, data: enriched }
@@ -106,6 +125,14 @@ export function createSecretsApi(db: {
 
     async putSecret(orgId: string, userId: string, namespace: string, key: string, value: string, metadata?: { expires_at?: number | null }, ip?: string) {
       try {
+        const configItemId = resolveConfigItemId(namespace)
+        if (configItemId) {
+          const entries = db.getConfigEntries(configItemId)
+          const matched = entries.find(e => (e.config_key as string) === key)
+          if (matched && (matched.required as number) === 1 && (!value || !value.trim())) {
+            return { success: false, error: { code: 'validation_error', message: `必填项"${matched.name as string}"不能为空` } }
+          }
+        }
         const existing = await nexus.getSecret(namespace, key, secretSubject(namespace, userId)).catch(() => null)
         const action = existing && existing.version > 0 ? 'updated' : 'created'
         await nexus.putSecret(namespace, key, value, secretSubject(namespace, userId))
@@ -254,12 +281,11 @@ export function createSecretsApi(db: {
 
     async listUserSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets(undefined, userId)
-        const userSecrets = secrets.filter(s => s.namespace.startsWith(`user:${userId}:`))
+        const secrets = await nexus.listSecrets(`user:${userId}`)
         // Expose a normalized `enabled` boolean alongside the raw `status`.
         // nexus stores enablement as status: 'enabled'|'disabled'; clients toggle
         // on a boolean, so derive it here to keep the contract explicit.
-        const withEnabled = userSecrets.map(s => ({ ...s, enabled: s.status === 'enabled' }))
+        const withEnabled = secrets.map(s => ({ ...s, enabled: s.status === 'enabled' }))
         return { success: true, data: withEnabled }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }

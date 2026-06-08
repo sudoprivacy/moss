@@ -275,4 +275,23 @@ export class NexusClient {
 
     return results
   }
+
+  /**
+   * List namespaces that have at least one secret record.
+   * Only queries the local SQLite index — no VFS reads.
+   */
+  listConfiguredNamespaces(prefix?: string): Set<string> {
+    const d = getDb()
+    let rows: Array<{ namespace: string }>
+    if (prefix) {
+      rows = d.prepare(
+        'SELECT DISTINCT namespace FROM secrets WHERE namespace = ? OR namespace LIKE ?'
+      ).all(prefix, `${prefix}:%`) as Array<{ namespace: string }>
+    } else {
+      rows = d.prepare(
+        'SELECT DISTINCT namespace FROM secrets'
+      ).all() as Array<{ namespace: string }>
+    }
+    return new Set(rows.map(r => r.namespace))
+  }
 }

@@ -5,26 +5,86 @@ import { DashboardLayout } from '@/components/dashboard-layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { toast } from 'sonner'
+import { Link } from 'react-router-dom'
 import {
-  Shield, Eye, EyeOff, Loader2, AlertTriangle, Clock, Ban, CheckCircle,
+  Shield, Eye, EyeOff, Loader2, AlertTriangle, Clock, ExternalLink, Ban, CheckCircle,
+  ChevronRight, ChevronDown, FolderTree,
 } from 'lucide-react'
 import {
-  getUserSecrets, getSecretMetadata, getConfigItems,
-  putUserSecret, enableUserSecret, disableUserSecret, updateSecretMetadata,
+  getDepartmentSecrets, getSecretMetadata, getConfigItems, putSecret,
+  enableSecret, disableSecret, updateSecretMetadata,
+  getConfigItemDepartments, updateConfigItemDepartments,
   type SecretEntry, type ConfigItem, type SecretMetadata,
 } from '@/lib/api/secrets'
-import { useAuth } from '@/lib/hooks/use-auth'
+import {
+  getDepartments as getAuthDepartments,
+  getOrganizations,
+} from '@/lib/api/auth'
+import type { AuthDepartment, AuthOrgWithCounts } from '@/lib/api/types'
 
-function UserSecretsSkeleton() {
+// ============================================================
+// Department tree types (reused from old department-policies-page)
+// ============================================================
+
+type TreeNode = {
+  id: string
+  name: string
+  parent_id: string | null
+  kind: 'org' | 'dept'
+  orgId?: string
+  children?: TreeNode[]
+}
+
+function buildOrgFirstTree(depts: AuthDepartment[], orgs: AuthOrgWithCounts[]): TreeNode[] {
+  const deptMap = new Map<string, TreeNode>()
+  for (const d of depts) {
+    deptMap.set(d.id, {
+      id: d.id,
+      name: d.name,
+      parent_id: d.parentId,
+      children: [],
+      kind: 'dept',
+      orgId: d.orgId,
+    })
+  }
+  const orgRoots = new Map<string, TreeNode>()
+  for (const org of orgs) {
+    orgRoots.set(org.id, {
+      id: `org:${org.id}`,
+      name: org.name,
+      parent_id: null,
+      children: [],
+      kind: 'org',
+      orgId: org.id,
+    })
+  }
+  for (const d of depts) {
+    const node = deptMap.get(d.id)!
+    if (d.parentId && deptMap.has(d.parentId)) {
+      deptMap.get(d.parentId)!.children!.push(node)
+    } else if (orgRoots.has(d.orgId)) {
+      orgRoots.get(d.orgId)!.children!.push(node)
+    }
+  }
+  return Array.from(orgRoots.values())
+}
+
+// ============================================================
+// Skeleton
+// ============================================================
+
+function DepartmentSkeleton() {
   return (
     <div className="space-y-3">
-      {[...Array(3)].map((_, i) => (
+      {[...Array(6)].map((_, i) => (
         <div key={i} className="flex items-center gap-4 p-4 border rounded-lg">
           <Skeleton className="size-10 rounded-lg shrink-0" />
           <div className="flex-1 space-y-2">
@@ -38,8 +98,11 @@ function UserSecretsSkeleton() {
   )
 }
 
-export default function UserCredentialsPage() {
-  const { user: currentUser } = useAuth()
+// ============================================================
+// Main component
+// ============================================================
+
+export default function DepartmentSecretsPage() {
   const [configItems, setConfigItems] = useState<ConfigItem[]>([])
   const [secrets, setSecrets] = useState<(SecretEntry & { config_item: ConfigItem })[]>([])
   const [metadata, setMetadata] = useState<(SecretMetadata & { config_item: ConfigItem })[]>([])
@@ -52,19 +115,24 @@ export default function UserCredentialsPage() {
   const [showValues, setShowValues] = useState<Record<string, boolean>>({})
   const [isSaving, setIsSaving] = useState(false)
 
+  // Department tree
+  const [tree, setTree] = useState<TreeNode[]>([])
+  const [expandedDepts, setExpandedDepts] = useState<Set<string>>(new Set())
+  const [selectedDeptIds, setSelectedDeptIds] = useState<string[]>([])
+
   const fetchData = useCallback(async () => {
     try {
-      const itemsRes = await getConfigItems({ scope: 'user', status: '1' })
-      const userItems = itemsRes.items
+      const itemsRes = await getConfigItems({ scope: 'department', status: '1' })
+      const deptItems = itemsRes.items
       const [secretsRes, metaRes] = await Promise.all([
-        getUserSecrets(userItems),
-        getSecretMetadata(userItems),
+        getDepartmentSecrets(deptItems),
+        getSecretMetadata(deptItems),
       ])
-      setConfigItems(userItems)
+      setConfigItems(deptItems)
       setSecrets(secretsRes)
       setMetadata(metaRes)
     } catch {
-      toast.error('获取用户凭据失败')
+      toast.error('获取部门凭据失败')
     } finally {
       setIsLoading(false)
     }
@@ -75,7 +143,7 @@ export default function UserCredentialsPage() {
   const getSecretsForItem = (itemId: number) => secrets.filter(s => s.config_item.id === itemId)
   const getMetadataForItem = (itemId: number) => metadata.find(m => m.config_item_id === itemId)
 
-  const handleConfigure = (item: ConfigItem) => {
+  const handleConfigure = async (item: ConfigItem) => {
     setEditItem(item)
     const vals: Record<string, string> = {}
     item.entries.forEach(e => { vals[e.config_key] = '' })
@@ -83,30 +151,49 @@ export default function UserCredentialsPage() {
     const meta = getMetadataForItem(item.id)
     setEditExpires(meta?.expires_at ? new Date(meta.expires_at).toISOString().slice(0, 10) : '')
     setShowValues({})
+
+    // Load department tree and current associations
+    try {
+      const [deptsRes, orgsRes, currentDepts] = await Promise.all([
+        getAuthDepartments(),
+        getOrganizations(),
+        getConfigItemDepartments(item.id),
+      ])
+      setTree(buildOrgFirstTree(deptsRes.departments, orgsRes.organizations))
+      setSelectedDeptIds(currentDepts)
+    } catch {
+      setTree([])
+      setSelectedDeptIds([])
+    }
   }
 
   const handleSave = async () => {
-    if (!editItem || !currentUser) return
+    if (!editItem) return
     for (const entry of editItem.entries) {
       if (entry.required && !(editValues[entry.config_key]?.trim())) {
         toast.error(`请填写必填项：${entry.name}`)
         return
       }
     }
+    if (selectedDeptIds.length === 0) {
+      toast.error('请至少选择一个授权部门')
+      return
+    }
     setIsSaving(true)
     try {
-      const namespace = `user:${currentUser.id}:${editItem.pinyin}`
+      const namespace = `role:${editItem.pinyin}`
       for (const entry of editItem.entries) {
         const val = editValues[entry.config_key]
         if (val && val.trim()) {
-          await putUserSecret(namespace, entry.config_key, val)
+          await putSecret(namespace, entry.config_key, val)
         }
       }
       if (editExpires !== undefined) {
         const expiresAt = editExpires ? new Date(editExpires).getTime() : null
         await updateSecretMetadata(editItem.id, expiresAt)
       }
-      toast.success('凭据已保存')
+      await updateConfigItemDepartments(editItem.id, selectedDeptIds)
+      toast.success('部门凭据已保存')
       setEditItem(null)
       fetchData()
     } catch (err) {
@@ -122,15 +209,14 @@ export default function UserCredentialsPage() {
   }
 
   const handleToggleSecretStatus = async (item: ConfigItem) => {
-    if (!currentUser) return
     const disabled = isItemDisabled(item)
     try {
-      const namespace = `user:${currentUser.id}:${item.pinyin}`
+      const namespace = `role:${item.pinyin}`
       for (const entry of item.entries) {
         if (disabled) {
-          await enableUserSecret(namespace, entry.config_key)
+          await enableSecret(namespace, entry.config_key)
         } else {
-          await disableUserSecret(namespace, entry.config_key)
+          await disableSecret(namespace, entry.config_key)
         }
       }
       toast.success(`已${disabled ? '启用' : '禁用'}「${item.name}」的凭据`)
@@ -150,12 +236,77 @@ export default function UserCredentialsPage() {
     return { text: `${hours}小时后过期`, urgent: true }
   }
 
+  const toggleExpanded = (deptId: string) => {
+    setExpandedDepts(prev => {
+      const next = new Set(prev)
+      if (next.has(deptId)) next.delete(deptId)
+      else next.add(deptId)
+      return next
+    })
+  }
+
+  const toggleDeptSelection = (deptId: string) => {
+    setSelectedDeptIds(prev =>
+      prev.includes(deptId) ? prev.filter(id => id !== deptId) : [...prev, deptId]
+    )
+  }
+
+  const renderTree = (nodes: TreeNode[], level = 0) => (
+    <ul className="space-y-0.5">
+      {nodes.map(node => {
+        const hasChildren = node.children && node.children.length > 0
+        const isExpanded = expandedDepts.has(node.id)
+        const isSelected = selectedDeptIds.includes(node.id)
+        const isOrg = node.kind === 'org'
+        return (
+          <li key={node.id}>
+            <div
+              className={`flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-colors ${
+                isSelected && !isOrg
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'hover:bg-accent text-foreground'
+              } ${isOrg ? 'font-semibold' : ''}`}
+              style={{ paddingLeft: `${level * 16 + 8}px` }}
+            >
+              {!isOrg && (
+                <Checkbox
+                  checked={isSelected}
+                  onCheckedChange={() => toggleDeptSelection(node.id)}
+                  className="shrink-0"
+                />
+              )}
+              <button
+                onClick={() => {
+                  if (hasChildren) toggleExpanded(node.id)
+                }}
+                className="flex items-center gap-2 flex-1 text-left"
+              >
+                {hasChildren ? (
+                  isExpanded ? (
+                    <ChevronDown className="size-3.5 shrink-0" />
+                  ) : (
+                    <ChevronRight className="size-3.5 shrink-0" />
+                  )
+                ) : (
+                  <span className="w-3.5 shrink-0" />
+                )}
+                <FolderTree className={`size-3.5 shrink-0 ${isOrg ? 'text-primary' : 'text-muted-foreground'}`} />
+                <span className="truncate">{node.name}</span>
+              </button>
+            </div>
+            {hasChildren && isExpanded && renderTree(node.children!, level + 1)}
+          </li>
+        )
+      })}
+    </ul>
+  )
+
   if (isLoading) {
-    return <DashboardLayout title="用户凭据" description="管理用户级别的凭据"><UserSecretsSkeleton /></DashboardLayout>
+    return <DashboardLayout title="部门凭据" description="管理按部门授权的共享凭据"><DepartmentSkeleton /></DashboardLayout>
   }
 
   return (
-    <DashboardLayout title="用户凭据" description="管理用户级别的凭据">
+    <DashboardLayout title="部门凭据" description="管理按部门授权的共享凭据">
       <div className="space-y-3">
         {configItems.map(item => {
           const itemSecrets = getSecretsForItem(item.id)
@@ -221,13 +372,20 @@ export default function UserCredentialsPage() {
                   {isConfigured ? '编辑' : '配置'}
                 </Button>
                 {isConfigured && (
-                  <Button variant="ghost" size="sm" onClick={() => handleToggleSecretStatus(item)} title={isItemDisabled(item) ? '启用凭据' : '禁用凭据'}>
-                    {isItemDisabled(item) ? (
-                      <><CheckCircle className="size-3 mr-1" />启用</>
-                    ) : (
-                      <><Ban className="size-3 mr-1" />禁用</>
-                    )}
-                  </Button>
+                  <>
+                    <Button variant="ghost" size="sm" onClick={() => handleToggleSecretStatus(item)} title={isItemDisabled(item) ? '启用凭据' : '禁用凭据'}>
+                      {isItemDisabled(item) ? (
+                        <><CheckCircle className="size-3 mr-1" />启用</>
+                      ) : (
+                        <><Ban className="size-3 mr-1" />禁用</>
+                      )}
+                    </Button>
+                    <Button variant="ghost" size="sm" asChild>
+                      <Link to={`/secrets/audit-log?config_item_id=${item.id}`}>
+                        <ExternalLink className="size-3 mr-1" />审计
+                      </Link>
+                    </Button>
+                  </>
                 )}
               </div>
             </div>
@@ -237,23 +395,24 @@ export default function UserCredentialsPage() {
         {configItems.length === 0 && (
           <div className="flex flex-col items-center py-16 text-muted-foreground">
             <Shield className="size-12 mb-3 opacity-30" />
-            <p>暂无用户凭据配置项</p>
-            <p className="text-xs mt-1">请先在「配置项列表」中创建 scope 为用户凭据的配置项</p>
+            <p>暂无部门凭据配置项</p>
+            <p className="text-xs mt-1">请先在「配置项列表」中创建 scope 为部门凭据的配置项</p>
           </div>
         )}
       </div>
 
       {/* Edit Dialog */}
       <Dialog open={!!editItem} onOpenChange={open => !open && setEditItem(null)}>
-        <DialogContent className="sm:max-w-[480px]">
+        <DialogContent className="sm:max-w-[600px]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Shield className="size-5" />
-              {editItem?.name ?? ''} — {editItem && getSecretsForItem(editItem.id).some(s => s.value !== null) ? '编辑凭据' : '配置凭据'}
+              {editItem?.name ?? ''} — {getSecretsForItem(editItem?.id ?? 0).some(s => s.value !== null) ? '编辑凭据' : '配置凭据'}
             </DialogTitle>
           </DialogHeader>
           {editItem && (
             <div className="space-y-4 py-2">
+              {/* Credential values */}
               {editItem.entries.map(entry => (
                 <div key={entry.id} className="space-y-1.5">
                   <Label>{entry.name} {entry.required ? <span className="text-destructive">*</span> : ''}</Label>
@@ -266,6 +425,8 @@ export default function UserCredentialsPage() {
                   {entry.config_desc && <p className="text-xs text-muted-foreground">{entry.config_desc}</p>}
                 </div>
               ))}
+
+              {/* Expiry */}
               <div className="space-y-1.5 pt-2 border-t">
                 <Label>过期时间</Label>
                 <div className="flex gap-2">
@@ -273,6 +434,25 @@ export default function UserCredentialsPage() {
                   {editExpires && <Button variant="ghost" size="sm" onClick={() => setEditExpires('')}>清除</Button>}
                 </div>
                 <p className="text-xs text-muted-foreground">留空表示永久不过期</p>
+              </div>
+
+              {/* Associated departments */}
+              <div className="space-y-1.5 pt-2 border-t">
+                <Label>关联部门</Label>
+                <p className="text-xs text-muted-foreground">选择可访问此凭据的部门</p>
+                <div className="border rounded-md max-h-[240px] overflow-auto">
+                  <ScrollArea className="h-[240px]">
+                    <div className="p-2">
+                      {renderTree(tree)}
+                      {tree.length === 0 && (
+                        <p className="text-sm text-muted-foreground text-center py-4">暂无部门数据</p>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+                {selectedDeptIds.length > 0 && (
+                  <p className="text-xs text-muted-foreground">已选择 {selectedDeptIds.length} 个部门</p>
+                )}
               </div>
             </div>
           )}
@@ -284,6 +464,7 @@ export default function UserCredentialsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
     </DashboardLayout>
   )
 }

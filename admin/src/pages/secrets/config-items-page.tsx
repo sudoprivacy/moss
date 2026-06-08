@@ -41,6 +41,7 @@ const schemeLabels: Record<string, string> = {
 
 const scopeLabels: Record<string, { label: string; color: string }> = {
   system: { label: '企业凭据', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
+  department: { label: '部门凭据', color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
   user: { label: '用户凭据', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' },
 }
 
@@ -78,7 +79,7 @@ interface ConfigItemForm {
   pinyin: string
   description: string
   icon: string
-  scope: 'system' | 'user'
+  scope: 'system' | 'department' | 'user'
   url_pattern: string
   authMode: AuthMode
   scheme: '' | 'bearer' | 'basic' | 'header' | 'query'
@@ -337,6 +338,7 @@ export default function ConfigItemsPage() {
               <SelectContent>
                 <SelectItem value="all">全部分类</SelectItem>
                 <SelectItem value="system">企业凭据</SelectItem>
+                <SelectItem value="department">部门凭据</SelectItem>
                 <SelectItem value="user">用户凭据</SelectItem>
               </SelectContent>
             </Select>
@@ -450,10 +452,11 @@ export default function ConfigItemsPage() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>分类 <span className="text-destructive">*</span></Label>
-                <Select value={form.scope} onValueChange={v => setForm(f => ({ ...f, scope: v as 'system' | 'user' }))}>
+                <Select value={form.scope} onValueChange={v => setForm(f => ({ ...f, scope: v as 'system' | 'department' | 'user' }))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="system">企业凭据</SelectItem>
+                    <SelectItem value="department">部门凭据</SelectItem>
                     <SelectItem value="user">用户凭据</SelectItem>
                   </SelectContent>
                 </Select>

@@ -24,7 +24,7 @@ export interface ConfigItem {
   icon: string | null
   icon_url: string | null
   pinyin: string
-  scope: 'system' | 'user'
+  scope: 'system' | 'department' | 'user'
   url_pattern: string | null
   scheme: 'bearer' | 'basic' | 'header' | 'query' | null
   bearer_prefix: string | null
@@ -153,7 +153,7 @@ export async function createConfigItem(data: {
   pinyin?: string
   description?: string
   icon?: string
-  scope: 'system' | 'user'
+  scope: 'system' | 'department' | 'user'
   url_pattern?: string
   scheme?: string
   bearer_prefix?: string
@@ -172,7 +172,7 @@ export async function updateConfigItem(id: number, data: {
   name?: string
   description?: string
   icon?: string
-  scope?: 'system' | 'user'
+  scope?: 'system' | 'department' | 'user'
   pinyin?: string
   url_pattern?: string
   scheme?: string
@@ -393,4 +393,34 @@ export async function getAuthorizedSystemConfigs(): Promise<ConfigItem[]> {
 export async function getPublicConfigItems(): Promise<ConfigItem[]> {
   const res = await dcClient.get<{ success: boolean; data?: ConfigItem[] }>('/api/v1/config/items')
   return res.data ?? []
+}
+
+// ============================================================
+// Department Secrets API
+// ============================================================
+
+export async function getDepartmentSecrets(preloadedConfigItems?: ConfigItem[]): Promise<(SecretEntry & { config_item: ConfigItem })[]> {
+  const [secretsRes, itemsRes] = await Promise.all([
+    dcClient.get<{ success: boolean; data?: BackendSecret[] }>('/api/v1/department-secrets'),
+    preloadedConfigItems
+      ? Promise.resolve(preloadedConfigItems)
+      : dcClient.get<{ success: boolean; data?: ConfigItem[] }>('/api/v1/config/items').then(r => r.data ?? []),
+  ])
+  const secrets = secretsRes.data ?? []
+  const configItems = preloadedConfigItems ?? itemsRes as ConfigItem[]
+  return secrets.map(s => {
+    const pinyin = s.namespace.replace('role:', '')
+    const configItem = configItems.find(c => c.pinyin === pinyin)
+    if (!configItem) return null
+    return { ...mapSecretEntry(s), config_item: configItem }
+  }).filter((s): s is SecretEntry & { config_item: ConfigItem } => s !== null)
+}
+
+export async function getConfigItemDepartments(configItemId: number): Promise<string[]> {
+  const res = await dcClient.get<{ success: boolean; data?: string[] }>(`/api/v1/config-items/${configItemId}/authorized-departments`)
+  return res.data ?? []
+}
+
+export async function updateConfigItemDepartments(configItemId: number, departmentIds: string[]): Promise<void> {
+  await dcClient.put(`/api/v1/config-items/${configItemId}/authorized-departments`, { department_ids: departmentIds })
 }

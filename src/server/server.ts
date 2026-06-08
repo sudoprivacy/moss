@@ -1650,7 +1650,19 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/config/items') {
         const auth = authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
-        writeJson(res, 200, configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId)))
+        const result = configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId))
+        if (result.success && nexusClient) {
+          try {
+            const configuredNs = nexusClient.listConfiguredNamespaces()
+            result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
+              const ns = item.scope === 'system' ? `system:${item.pinyin}`
+                : item.scope === 'department' ? `role:${item.pinyin}`
+                : `user:${auth.userId}:${item.pinyin}`
+              return configuredNs.has(ns)
+            })
+          } catch { /* nexus unavailable — return unfiltered */ }
+        }
+        writeJson(res, 200, result)
         return
       }
 
@@ -3503,6 +3515,26 @@ export function startServer(
         return
       }
 
+      // Config item authorized departments (for department-scope items)
+      const configItemDeptsMatch = pathname.match(/^\/api\/v1\/config-items\/(\d+)\/authorized-departments$/)
+      if (configItemDeptsMatch) {
+        const itemId = Number(configItemDeptsMatch[1])
+        if (req.method === 'GET') {
+          authService.requireScope(auth, 'admin:secrets')
+          const rows = runtime.store.getConfigItemAuthorizedDepartments(itemId)
+          const deptIds = rows.map((r: Record<string, unknown>) => r.department_id as string)
+          writeJson(res, 200, { success: true, data: deptIds })
+          return
+        }
+        if (req.method === 'PUT') {
+          authService.requireScope(auth, 'admin:secrets:write')
+          const body = await readJsonBody(req)
+          runtime.store.replaceConfigItemDepartments(itemId, body.department_ids ?? [])
+          writeJson(res, 200, { success: true })
+          return
+        }
+      }
+
       // Config item icon upload
       if (req.method === 'POST' && pathname === '/api/v1/config-items/icon') {
         authService.requireScope(auth, 'admin:secrets:write')
@@ -3520,6 +3552,13 @@ export function startServer(
         if (req.method === 'GET' && pathname === '/api/v1/secrets') {
           authService.requireScope(auth, 'admin:secrets')
           writeJson(res, 200, await secretsApi.listEnterpriseSecrets(auth.orgId, auth.userId))
+          return
+        }
+
+        // Department secrets: list
+        if (req.method === 'GET' && pathname === '/api/v1/department-secrets') {
+          authService.requireScope(auth, 'admin:secrets')
+          writeJson(res, 200, await secretsApi.listDepartmentSecrets(auth.orgId, auth.userId))
           return
         }
 
@@ -3638,17 +3677,28 @@ export function startServer(
           return
         }
         if (req.method === 'GET' && pathname === '/api/v1/me/authorized-system-configs') {
-          const allItems = runtime.store.getAllActiveConfigItems().filter(i => (i.scope as string) === 'system')
           try {
+            const allSystemItems = runtime.store.getAllActiveConfigItems().filter(i => (i.scope as string) === 'system')
+            const allDeptItems = runtime.store.getAllActiveConfigItems().filter(i => (i.scope as string) === 'department')
             const user = authService.getUserById(auth.userId)
             const deptId = user?.departmentId ?? null
+            let authorizedDeptIds: Set<number> = new Set()
             if (deptId) {
               const policies = runtime.store.getDepartmentPolicies(deptId)
-              const authorizedIds = new Set(policies.map(p => p.config_item_id as number))
-              writeJson(res, 200, { success: true, data: allItems.filter(i => authorizedIds.has(i.id as number)) })
-            } else {
-              writeJson(res, 200, { success: true, data: [] })
+              authorizedDeptIds = new Set(policies.map(p => p.config_item_id as number))
             }
+            let visible = [
+              ...allSystemItems,
+              ...allDeptItems.filter(i => authorizedDeptIds.has(i.id as number))
+            ]
+            if (nexusClient) {
+              const configuredNs = nexusClient.listConfiguredNamespaces()
+              visible = visible.filter(i => {
+                const ns = (i.scope as string) === 'department' ? `role:${i.pinyin}` : `system:${i.pinyin}`
+                return configuredNs.has(ns)
+              })
+            }
+            writeJson(res, 200, { success: true, data: visible })
           } catch {
             writeJson(res, 200, { success: true, data: [] })
           }
