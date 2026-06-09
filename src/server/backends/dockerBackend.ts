@@ -21,6 +21,8 @@ import {
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { buildAllModelsConfig } from '../modelListCache.js'
 import { reapInUserContainer } from '../runtime/reaper.js'
+import { toHostPath } from '../runtime/dockerPathMap.js'
+import { logRuntimeEvent, logRuntimeMetric } from '../runtime/runtimeMetrics.js'
 
 type DockerBackendDefaults = {
   image?: string
@@ -33,45 +35,6 @@ type DockerBackendDefaults = {
   execKillGraceMs?: number
   network?: string
   labels?: Record<string, string>
-}
-
-/**
- * 将容器内路径转换为宿主机路径
- * 用于 moss-server 运行在 Docker 容器中时，正确挂载目录到会话容器
- *
- * 环境变量 MOSS_HOST_PATH_MAP 格式: JSON 对象，key 为宿主机路径，value 为容器内路径
- * 例如: MOSS_HOST_PATH_MAP='{"./data":"/app/data","./workspace":"/workspace"}'
- *
- * 注意：key 是宿主机路径（可以是相对路径或绝对路径），value 是容器内路径
- */
-function toHostPath(containerPath: string): string {
-  const mapJson = process.env.MOSS_HOST_PATH_MAP
-  if (!mapJson) return containerPath
-
-  let hostPathMap: Record<string, string>
-  try {
-    hostPathMap = JSON.parse(mapJson)
-  } catch {
-    process.stderr.write(`[DockerBackend] Invalid MOSS_HOST_PATH_MAP: ${mapJson}\n`)
-    return containerPath
-  }
-
-  // 找到最长的匹配路径前缀
-  let bestMatch = ''
-  let bestHostPath = ''
-  for (const [hostPrefix, containerPrefix] of Object.entries(hostPathMap)) {
-    if (containerPath.startsWith(containerPrefix) && containerPrefix.length > bestMatch.length) {
-      bestMatch = containerPrefix
-      bestHostPath = hostPrefix
-    }
-  }
-
-  if (bestMatch) {
-    const result = containerPath.replace(bestMatch, bestHostPath)
-    process.stderr.write(`[DockerBackend] Path mapping: ${containerPath} -> ${result}\n`)
-    return result
-  }
-  return containerPath
 }
 
 function uniqueMounts(paths: string[]): string[] {
@@ -422,8 +385,14 @@ export class DockerBackend implements SessionBackend {
       if (!force && handle.persistInProgressTurn) {
         try {
           await handle.persistInProgressTurn()
+          logRuntimeMetric('session_persist_in_progress_ok', {})
         } catch (err) {
           process.stderr.write(`[DockerBackend] persistInProgressTurn failed: ${err}\n`)
+          logRuntimeMetric('session_persist_in_progress_failed', { reason: 'exception' })
+          logRuntimeEvent('session_persist_in_progress_failed', {
+            sessionId: options.sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
 
@@ -435,6 +404,25 @@ export class DockerBackend implements SessionBackend {
           sessionId: options.sessionId,
           graceMs,
         })
+        if (outcome.ok) {
+          logRuntimeMetric('session_reap_ok', {})
+        } else if (outcome.timedOut) {
+          logRuntimeMetric('session_reap_timeout', { reason: 'grace_timeout' })
+          logRuntimeEvent('session_reap_timeout', {
+            sessionId: options.sessionId,
+            containerName: userContainerName,
+            graceMs,
+          })
+        } else {
+          logRuntimeMetric('session_reap_failed', { reason: 'exec_error' })
+          logRuntimeEvent('session_reap_failed', {
+            sessionId: options.sessionId,
+            containerName: userContainerName,
+            graceMs,
+            code: outcome.code,
+            stderr: outcome.stderr.trim().slice(0, 200),
+          })
+        }
         if (!outcome.ok) {
           process.stderr.write(
             `[DockerBackend] reap failed sid=${options.sessionId} timedOut=${outcome.timedOut} code=${outcome.code} stderr=${outcome.stderr.trim()}\n`,
@@ -454,6 +442,11 @@ export class DockerBackend implements SessionBackend {
       if (child.exitCode === null && !child.killed) {
         try { child.stdin?.end() } catch {}
         try { child.kill('SIGKILL') } catch {}
+        logRuntimeMetric('session_host_exec_force_kill', {})
+        logRuntimeEvent('session_host_exec_force_kill', {
+          sessionId: options.sessionId,
+          containerName: userContainerName,
+        })
       }
 
       // Step 4: per-session disk cleanup. Transcript is intentionally NOT

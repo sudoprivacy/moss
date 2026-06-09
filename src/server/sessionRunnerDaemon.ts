@@ -4,6 +4,7 @@ import { dirname } from 'path'
 import { RuntimeBackend } from './backends/runtimeBackend.js'
 import { DirectConnectStore } from './db.js'
 import { getTranscriptPath, isNamedPipePath } from './runtimePaths.js'
+import { logRuntimeEvent, logRuntimeMetric } from './runtime/runtimeMetrics.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import type { RunnerClientMessage, RunnerServerMessage } from './runnerProtocol.js'
 import type { RunnerManifest } from './types.js'
@@ -536,6 +537,11 @@ export class SessionRunnerDaemon {
         'attempt_idle_busy_timeout',
         { maxDetachedBusyMs },
       )
+      logRuntimeMetric('session_idle_busy_timeout', {})
+      logRuntimeEvent('session_idle_busy_timeout', {
+        sessionId: this.manifest.session.sessionId,
+        maxDetachedBusyMs,
+      })
       const persistP = this.#handle?.persistInProgressTurn
         ? this.#handle.persistInProgressTurn().catch(err => {
             process.stderr.write(`[SessionRunnerDaemon] persistInProgressTurn failed: ${err}\n`)

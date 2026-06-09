@@ -24,6 +24,8 @@ import { spawn } from 'child_process'
 import { MOSS_HOME } from '../../utils/skills/localSkillDirectories.js'
 import type { ServerConfig } from '../types.js'
 import { PerKeyMutex } from './perKeyMutex.js'
+import { toHostPath } from './dockerPathMap.js'
+import { logRuntimeEvent, logRuntimeMetric } from './runtimeMetrics.js'
 
 export type UserContainerState = 'starting' | 'running' | 'draining' | 'dead'
 
@@ -144,6 +146,13 @@ async function doCreate(
   })
   rec.imageDigest = image
 
+  // moss-server may itself be running inside a container; in that case
+  // config.runtimeDir is the container-internal path that the Docker daemon
+  // does NOT know how to mount. Translate via MOSS_HOST_PATH_MAP. If
+  // moss-server is on the host, toHostPath is a no-op.
+  const runtimeDirHost = toHostPath(config.runtimeDir)
+  const mossHomeHost = toHostPath(MOSS_HOME)
+
   const args = [
     'run', '-d',
     '--name', rec.containerName,
@@ -159,8 +168,8 @@ async function doCreate(
     '--label', `moss.user=${ctx.userId}`,
     '--label', `moss.image=${image}`,
     '--label', `moss.runtime.config.hash=${rec.configHash}`,
-    '-v', `${config.runtimeDir}:${config.runtimeDir}`,
-    '-v', `${MOSS_HOME}:${MOSS_HOME}`,
+    '-v', `${runtimeDirHost}:${config.runtimeDir}`,
+    '-v', `${mossHomeHost}:${MOSS_HOME}`,
     '-e', `MOSS_HOME=${MOSS_HOME}`,
     '-e', `MOSS_RUNTIME_DIR=${config.runtimeDir}`,
     '-e', `MOSS_SESSION_USER_ID=${ctx.userId}`,
@@ -190,6 +199,14 @@ async function doCreate(
   rec.containerId = result.stdout.trim()
   rec.createdAt = Date.now()
   rec.lastActiveAt = rec.createdAt
+  logRuntimeEvent('user_container_ensure_ok', {
+    org: ctx.orgId,
+    userId: ctx.userId,
+    containerName: rec.containerName,
+    containerId: rec.containerId,
+    runtimeDirHost,
+    mossHomeHost,
+  })
 }
 
 /**
@@ -206,9 +223,11 @@ export async function ensureUserContainer(
     if (rec) {
       if (rec.state === 'running') {
         if (await dockerInspectAlive(rec.containerName)) {
+          logRuntimeMetric('user_container_reused', { org: ctx.orgId })
           return rec
         }
         // Container vanished externally.
+        logRuntimeMetric('user_container_external_vanished', { org: ctx.orgId })
         rec.state = 'dead'
         registry.delete(k)
         rec = undefined
@@ -236,12 +255,22 @@ export async function ensureUserContainer(
         pendingRebuild: false,
       }
       registry.set(k, rec)
+      logRuntimeMetric('user_container_ensure_started', { org: ctx.orgId })
       try {
         await doCreate(config, ctx, rec)
         rec.state = 'running'
       } catch (err) {
         rec.state = 'dead'
         registry.delete(k)
+        logRuntimeMetric('user_container_ensure_failed', {
+          org: ctx.orgId,
+          reason: 'docker_run_error',
+        })
+        logRuntimeEvent('user_container_ensure_failed', {
+          org: ctx.orgId,
+          userId: ctx.userId,
+          error: err instanceof Error ? err.message : String(err),
+        })
         throw err
       }
     }
@@ -289,6 +318,14 @@ export async function acquireSession(
       cancelIdleTimer(rec)
     }
     rec.lastActiveAt = Date.now()
+    logRuntimeMetric('session_acquire', { org: orgId })
+    logRuntimeEvent('session_acquire', {
+      org: orgId,
+      userId,
+      sessionId,
+      containerName: rec.containerName,
+      activeCount: rec.activeSessionIds.size,
+    })
   })
 }
 
@@ -306,6 +343,14 @@ export async function releaseSession(
     if (rec.activeSessionIds.size === 0) {
       resetIdleTimer(rec, config)
     }
+    logRuntimeMetric('session_release', { org: orgId })
+    logRuntimeEvent('session_release', {
+      org: orgId,
+      userId,
+      sessionId,
+      containerName: rec.containerName,
+      activeCount: rec.activeSessionIds.size,
+    })
   })
 }
 
@@ -316,13 +361,28 @@ async function onIdleFire(k: string, config: ServerConfig): Promise<void> {
     if (rec.state !== 'running') return
     if (rec.activeSessionIds.size > 0) return // resurrected just before fire
     rec.state = 'draining'
+    logRuntimeMetric('user_container_reclaim_started', { reason: 'idle' })
+    logRuntimeEvent('user_container_reclaim_started', {
+      containerName: rec.containerName,
+      reason: 'idle',
+    })
     const stopTimeout = config.dockerStopTimeoutSec ?? 10
+    let failed = false
     try {
-      await runDocker(['stop', '--time', String(stopTimeout), rec.containerName])
-      await runDocker(['rm', rec.containerName])
+      const stop = await runDocker(['stop', '--time', String(stopTimeout), rec.containerName])
+      if (stop.code !== 0) failed = true
+      const rm = await runDocker(['rm', rec.containerName])
+      if (rm.code !== 0 && !rm.stderr.includes('No such container')) failed = true
+    } catch {
+      failed = true
     } finally {
       rec.state = 'dead'
       registry.delete(k)
+      if (failed) {
+        logRuntimeMetric('user_container_reclaim_failed', { reason: 'docker_error' })
+      } else {
+        logRuntimeMetric('user_container_reclaim_ok', { reason: 'idle' })
+      }
     }
   })
 }
@@ -339,6 +399,7 @@ export async function shutdownAll(config: ServerConfig): Promise<void> {
       if (!rec) return
       cancelIdleTimer(rec)
       rec.state = 'draining'
+      logRuntimeMetric('user_container_force_drain', { reason: 'shutdown' })
       try {
         await runDocker(['stop', '--time', String(config.dockerStopTimeoutSec ?? 10), rec.containerName])
         await runDocker(['rm', rec.containerName])
@@ -406,6 +467,13 @@ export async function reconcile(): Promise<void> {
       idleTimer: null,
       state: 'running',
       pendingRebuild: false,
+    })
+    logRuntimeMetric('reconcile_user_container_seen', {})
+    logRuntimeEvent('reconcile_user_container_seen', {
+      org: orgId,
+      userId,
+      containerName: name,
+      containerId: id,
     })
   }
 }

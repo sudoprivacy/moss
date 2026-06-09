@@ -660,17 +660,31 @@ export class RuntimeService {
               this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_orphan_scode', {
                 userContainer: runtimeAny.userContainerName,
               })
+              const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+              logRuntimeMetric('reconcile_orphan_scode', {})
+              logRuntimeEvent('reconcile_orphan_scode', {
+                sessionId: session.sessionId,
+                containerName: runtimeAny.userContainerName,
+              })
             } else if (probe.kind === 'stale_pid_reuse') {
               this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_pid_reuse', {
                 pid: probe.pid,
                 recordedStartTicks: probe.recordedStartTicks,
                 currentStartTicks: probe.currentStartTicks,
               })
+              const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+              logRuntimeMetric('reconcile_pid_reuse', {})
+              logRuntimeEvent('reconcile_pid_reuse', {
+                sessionId: session.sessionId,
+                pid: probe.pid,
+              })
             }
           } catch (probeErr) {
             this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_probe_failed', {
               error: errorMessage(probeErr),
             })
+            const { logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+            logRuntimeMetric('reconcile_probe_failed', { reason: 'exception' })
           }
         }
         await this.ensureAttempt(session)
@@ -1191,6 +1205,10 @@ export class RuntimeService {
       child.once('close', () => {
         void import('./runtime/userContainerRegistry.js').then(({ releaseSession }) =>
           releaseSession(releaseKey.orgId, releaseKey.userId, releaseKey.sid, this.options.config),
+        ).then(() =>
+          import('./runtime/runtimeMetrics.js').then(({ logRuntimeMetric }) =>
+            logRuntimeMetric('release_session_via_child_close', {}),
+          ),
         ).catch(err => {
           process.stderr.write(
             `[RuntimeService] releaseSession failed for ${releaseKey.sid}: ${errorMessage(err)}\n`,
