@@ -498,7 +498,7 @@ function DepartmentTreeRow({
 }
 
 export default function UsersPage() {
-  const { user: currentUser, scopes } = useAuth()
+  const { user: currentUser, scopes, activeOrgId } = useAuth()
   const canManageUsers = hasScope(scopes, 'admin:users')
   const isSuperAdmin = currentUser?.role === 'super_admin'
   // super_admin is a superset of admin — it gets every org-admin capability.
@@ -683,9 +683,10 @@ export default function UsersPage() {
         email: '',
         password: '',
         role: 'user',
-        // Normal admins don't get the org list (super_admin-only) → default to
-        // their own org so user/dept creation stays scoped correctly.
-        orgId: organizations[0]?.id ?? currentUser?.orgId ?? '',
+        // Default to the org currently being managed (activeOrgId reflects a
+        // super_admin's switched org). Backend pins creation to auth.orgId
+        // regardless, so this is purely the displayed default.
+        orgId: activeOrgId ?? organizations[0]?.id ?? currentUser?.orgId ?? '',
         departmentId: null,
         extUserId: '',
       })
@@ -697,17 +698,17 @@ export default function UsersPage() {
       email: userDialog.user?.email ?? '',
       password: '',
       role: userDialog.user?.role ?? 'user',
-      orgId: userDialog.user?.orgId ?? organizations[0]?.id ?? currentUser?.orgId ?? '',
+      orgId: userDialog.user?.orgId ?? activeOrgId ?? organizations[0]?.id ?? currentUser?.orgId ?? '',
       departmentId: userDialog.user?.departmentId ?? null,
       extUserId: userDialog.user?.extUserId ?? '',
     })
-  }, [userDialog, userForm, organizations, currentUser])
+  }, [userDialog, userForm, organizations, currentUser, activeOrgId])
 
   useEffect(() => {
     if (!departmentDialog.open) {
       departmentForm.reset({
         name: '',
-        orgId: organizations[0]?.id ?? currentUser?.orgId ?? '',
+        orgId: activeOrgId ?? organizations[0]?.id ?? currentUser?.orgId ?? '',
         parentId: null,
         extDeptId: '',
       })
@@ -719,14 +720,14 @@ export default function UsersPage() {
       orgId:
         departmentDialog.department?.orgId ??
         departmentDialog.parent?.orgId ??
-        organizations[0]?.id ?? currentUser?.orgId ?? '',
+        activeOrgId ?? organizations[0]?.id ?? currentUser?.orgId ?? '',
       parentId:
         departmentDialog.department?.parentId ??
         departmentDialog.parent?.id ??
         null,
       extDeptId: departmentDialog.department?.extDeptId ?? '',
     })
-  }, [departmentDialog, departmentForm, organizations, currentUser])
+  }, [departmentDialog, departmentForm, organizations, currentUser, activeOrgId])
 
   useEffect(() => {
     if (!organizationDialog.open) {

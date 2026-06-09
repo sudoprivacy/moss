@@ -3,6 +3,9 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 const TOKEN_KEY = 'moss_access_token'
 const REFRESH_TOKEN_KEY = 'moss_refresh_token'
 const TOKEN_EXPIRES_KEY = 'moss_token_expires_at'
+// Super-admin's last selected org. Persisted across logins (NOT cleared on
+// logout) so the same admin returns to the org they were managing.
+const PREFERRED_ORG_KEY = 'moss_preferred_org_id'
 export const UNAUTHORIZED_EVENT = 'moss:unauthorized'
 
 export function getToken(): string | null {
@@ -41,6 +44,18 @@ export function removeToken(): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
   localStorage.removeItem(TOKEN_EXPIRES_KEY)
+  // Deliberately keep PREFERRED_ORG_KEY so a super_admin's org selection
+  // survives logout/login.
+}
+
+export function getPreferredOrgId(): string | null {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem(PREFERRED_ORG_KEY)
+}
+
+export function setPreferredOrgId(orgId: string): void {
+  if (typeof window === 'undefined') return
+  localStorage.setItem(PREFERRED_ORG_KEY, orgId)
 }
 
 let refreshPromise: Promise<string | null> | null = null

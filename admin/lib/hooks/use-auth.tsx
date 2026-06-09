@@ -1,13 +1,17 @@
 'use client'
 
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { getMe, login as apiLogin, loginWithApiKey, logout as apiLogout, isAuthenticated } from '@/lib/api/auth'
-import { UNAUTHORIZED_EVENT, removeToken } from '@/lib/api/client'
+import { getMe, login as apiLogin, loginWithApiKey, logout as apiLogout, isAuthenticated, switchOrg } from '@/lib/api/auth'
+import { UNAUTHORIZED_EVENT, removeToken, getPreferredOrgId, setPreferredOrgId } from '@/lib/api/client'
 import type { AuthUser } from '@/lib/api/types'
 
 interface AuthContextType {
   user: AuthUser | null
   scopes: string[]
+  /** The org the session is currently scoped to. For a super_admin this
+   *  reflects the org they've switched into (which differs from user.orgId,
+   *  the actor's home org). For everyone else it equals user.orgId. */
+  activeOrgId: string | null
   isLoading: boolean
   isAuthenticated: boolean
   login: (username: string, password: string) => Promise<void>
@@ -20,24 +24,45 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [scopes, setScopes] = useState<string[]>([])
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   const checkAuth = useCallback(async () => {
     if (!isAuthenticated()) {
       setUser(null)
       setScopes([])
+      setActiveOrgId(null)
       setIsLoading(false)
       return
     }
 
     try {
-      const response = await getMe()
+      let response = await getMe()
+      // Restore a super_admin's last-selected org if the current session is
+      // scoped elsewhere. Runs once per fresh session (e.g. after login);
+      // switchOrg re-issues the token, then we re-read /me.
+      const preferred = getPreferredOrgId()
+      if (
+        response.isSuperAdmin &&
+        preferred &&
+        response.organization &&
+        preferred !== response.organization.id
+      ) {
+        try {
+          await switchOrg(preferred)
+          response = await getMe()
+        } catch {
+          // Preferred org no longer exists/accessible — fall back to current.
+        }
+      }
       setUser(response.user)
       setScopes(response.scopes)
+      setActiveOrgId(response.organization?.id ?? response.user?.orgId ?? null)
     } catch {
       removeToken()
       setUser(null)
       setScopes([])
+      setActiveOrgId(null)
     } finally {
       setIsLoading(false)
     }
@@ -59,21 +84,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const login = async (username: string, password: string) => {
-    const response = await apiLogin(username, password)
-    setUser(response.user)
-    setScopes(response.scopes)
+    await apiLogin(username, password)
+    // checkAuth applies the preferred-org restore + sets activeOrgId.
+    await checkAuth()
   }
 
   const loginWithKey = async (apiKey: string) => {
-    const response = await loginWithApiKey(apiKey)
-    setUser(response.user)
-    setScopes(response.scopes)
+    await loginWithApiKey(apiKey)
+    await checkAuth()
   }
 
   const logout = async () => {
     await apiLogout()
     setUser(null)
     setScopes([])
+    setActiveOrgId(null)
   }
 
   return (
@@ -81,6 +106,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         user,
         scopes,
+        activeOrgId,
         isLoading,
         isAuthenticated: !!user,
         login,
