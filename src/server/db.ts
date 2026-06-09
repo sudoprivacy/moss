@@ -1218,6 +1218,21 @@ export class DirectConnectStore {
     `).run(status, desiredState, ts, sessionId)
   }
 
+  /**
+   * Reactivate a session that was previously idle-killed (status=ended,
+   * desired=active, ended_at set). Clears ended_at and resets status/desired
+   * to 'active' so the row reads as a live session again after respawn.
+   */
+  reactivateSession(sessionId: string): void {
+    const ts = now()
+    this.db.prepare(`
+      UPDATE sessions
+      SET status = 'active', desired_state = 'active', ended_at = NULL,
+          last_active_at = ?
+      WHERE session_id = ?
+    `).run(ts, sessionId)
+  }
+
   markSessionEnded(
     sessionId: string,
     status: SessionStatus,
@@ -1347,6 +1362,22 @@ export class DirectConnectStore {
       stopReason: 'runner_unavailable',
       errorText,
     })
+  }
+
+  /**
+   * Returns every attempt whose runtime_state column says it is still
+   * starting/running/detached (i.e. has not been written terminal yet).
+   * Used by reconcileOnStartup to clean stale rows whose runner_pid is no
+   * longer alive on the host.
+   */
+  listAttemptsByRuntimeState(states: AttemptRuntimeState[]): AttemptRecord[] {
+    if (states.length === 0) return []
+    const placeholders = states.map(() => '?').join(',')
+    const rows = this.db.prepare(`
+      SELECT * FROM session_attempts
+      WHERE runtime_state IN (${placeholders})
+    `).all(...states) as SqlRow[]
+    return rows.map(mapAttempt)
   }
 
   listSessionRecords(filter: SessionListFilter): SessionRecord[] {

@@ -569,10 +569,59 @@ reschedule(record):
 ### 参数默认建议
 
 ```text
-session.idleTimeoutMs              = 10 分钟
-session.maxDetachedBusyMs          = 2 小时
-docker.userContainerIdleTimeoutMs  = 20 分钟
+runtimeDefaults.idleTimeoutMs      = 10 分钟    # scode 进程级 idle (detached && !busy)
+session.maxDetachedBusyMs          = 2 小时    # detached + 持续 busy 兜底
+docker.userContainerIdleTimeoutMs  = 20 分钟    # 用户容器 idle 回收
+docker.maxSessionsPerUser          = 5         # 单用户并发 scode 上限
+docker.execKillGraceMs             = 5000      # reaper SIGTERM->SIGKILL 等待
 ```
+
+> `runtimeDefaults.idleTimeoutMs` 在 `server.json` 里的 key 即 `runtimeDefaults.idleTimeoutMs`，
+> 经由 `config.ts` 映射到 `ServerConfig.idleTimeoutMs`，runner 通过 manifest 取
+> `manifest.config.idleTimeoutMs`。`session.maxDetachedBusyMs` 是 `ServerConfig.session?.maxDetachedBusyMs`，
+> 默认在 `config.ts` 注入 2h；自定义需在配置里显式覆盖。
+
+### Sudowork detach vs Moss terminate（必须严格区分）
+
+Sudowork 客户端的 idle 策略只会断开 WebSocket，不会调用 `/terminate`。删除会话才会调用
+`/terminate`。Moss 服务端必须照此实现：
+
+```text
+WS close                     -> runner socket close
+                             -> #clients.size 减 1, 触发 reschedule()
+                             -> setSessionLifecycle(detached, active)
+                             -> 进入 idle 计时；NOT a terminate
+
+idle/busy ceiling fires      -> handle.destroy(true)
+                             -> scode 退出
+                             -> runner onExit:
+                                  status='ended', desired_state='active' (resumable)
+                                  ended_at = now (informational)
+                             -> 主进程 child.once('close') -> releaseSession
+                             -> activeCount-- ; 0 时容器 idle 计时
+
+/api/v1/sessions/:id/resume  -> ensureSessionReady
+   或 /ws/sessions/:id           probe attach (fail) -> markAttemptLost
+                             -> spawnAttempt(resumeTranscriptSessionId)
+                             -> reactivateSession: 清 ended_at, status='active'
+                             -> 新 runner + 新 attempt, transcriptPath 不变
+
+/api/v1/sessions/:id/terminate -> setSessionLifecycle(terminated, terminated)
+                              -> SIGTERM runnerPid
+                              -> markAttemptStopped(stopped, reason='terminated')
+                                 (无条件执行；runner 自己 onExit 也会写同样终态)
+                              -> runner onExit: status='terminated', desired_state='terminated'
+                              -> release / 容器 idle 计时同上
+```
+
+要点：
+- `markSessionEnded(ended, ended)` 仅用于 scode 自然 code=0 退出 (`!stopping && code===0`)，
+  代表 "scode 自己跑完且没人再用了"。客户端 idle 触发的关闭走 `(ended, active)` 而不是这条。
+- `(failed, active)` 用于非主动停止时的 code≠0 退出，让客户端可以选择 retry。
+- `reactivateSession()` 在 respawn 时清 `ended_at`，避免 row 同时显示 "active + ended_at=过去时间"。
+- 服务端 `reconcileOnStartup` 兜底扫 `session_attempts` 里仍处于 `starting/running/detached`
+  且 `runner_pid` 在主机上不存在的行，标 `runtime_state='stopped', stop_reason='stale_on_startup'`，
+  避免 DB 长期残留脏 attempt（site 现场重现过：删除会话后 attempt 仍为 `running, runner_pid=86`）。
 
 ## 销毁时机
 

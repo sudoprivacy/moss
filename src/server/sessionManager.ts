@@ -426,6 +426,24 @@ export class SessionManager {
       return
     }
 
+    // Sudowork-style detach: WS close ≠ terminate. If the backend reports
+    // busy (mid-turn), do NOT destroy on idle. Wait for the next attach,
+    // or — if the channel session needs a ceiling — that's the runner's
+    // busyCeilingTimer's responsibility, not this manager's.
+    if (record.handle.isBusy?.() === true) {
+      this.#clearTimeout(record)
+      const unsubscribe = record.handle.onBusyChange?.(busy => {
+        if (!busy && record.sockets.size === 0) {
+          // Re-arm with a fresh full timeout once we go idle.
+          this.#armIdleTimeout(record)
+        }
+        if (busy === false) {
+          unsubscribe?.()
+        }
+      })
+      return
+    }
+
     this.#clearTimeout(record)
     record.timeout = setTimeout(() => {
       this.destroySession(record.id, true)

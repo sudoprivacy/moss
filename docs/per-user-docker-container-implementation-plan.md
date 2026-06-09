@@ -257,8 +257,58 @@ src/server/sessionRunnerDaemon.ts:
 #### A2-5. 配置新增
 
 ```text
-session.maxDetachedBusyMs    default 2 * 60 * 60 * 1000   (2 小时)
-session.idleTimeoutMs        现有, default 10 * 60 * 1000  (10 分钟)
+runtimeDefaults.idleTimeoutMs     现有, default 10 * 60 * 1000  (10 分钟)
+                                  scode 进程级 idle: detached && !busy 起算
+session.maxDetachedBusyMs         default 2 * 60 * 60 * 1000   (2 小时)
+                                  detached && busy 兜底
+docker.userContainerIdleTimeoutMs default 20 * 60 * 1000        (20 分钟)
+                                  用户容器 idle (activeSessionIds.size === 0) 起算
+docker.maxSessionsPerUser         default 5
+                                  单用户并发 scode 上限
+docker.execKillGraceMs            default 5000
+                                  reaper SIGTERM → SIGKILL 等待
+```
+
+> 配置入口都在 `server.json`/环境变量；`config.ts::readServerConfig` 映射到
+> `ServerConfig`。runner 通过 manifest 拿 `idleTimeoutMs` 和 `session.maxDetachedBusyMs`，
+> 主进程拿 `docker.*` 控制 UserContainerRegistry。
+
+#### A2-5b. Sudowork detach vs Moss terminate 语义
+
+新增 Sudowork 客户端"idle detach"行为：客户端只断 WS，不调用 `/terminate`；只有
+删除会话才调用 `/terminate`。Moss 必须严格区分：
+
+```text
+WS close (detach):
+  - runner #clients 减 1 → reschedule()
+  - status='detached', desired_state='active'
+  - 不调 terminateSession，不 markSessionEnded(terminated, ...)
+
+idle/busy ceiling fires (scode 被 server 端 idle 杀):
+  - markSessionEnded(status='ended', desired_state='active')
+                                          ^^^^^^^^^ key: 可 resume
+  - ended_at = now (informational)
+  - 主进程 child.once('close') → registry.releaseSession
+  - listSessionsToRecover 自动跳过 status='ended' 行 (不重启 scode)
+
+POST /api/v1/sessions/:id/resume 或 WS reattach:
+  - ensureSessionReady → ensureAttempt → probe fail → spawnAttempt
+  - reactivateSession(): ended_at=NULL, status='active', desired='active'
+  - 新 attempt, transcriptPath 不变, 新 generation
+
+POST /api/v1/sessions/:id/terminate (客户端删除会话):
+  - setSessionLifecycle(terminated, terminated)
+  - SIGTERM runnerPid
+  - 无条件 markAttemptStopped(stopped, reason='terminated')
+    (即便 SIGTERM 成功，runner 自己的 onExit 写终态是异步的；若 runner 之后
+     SIGKILL 或崩溃，主进程这边的 markAttemptStopped 已经把 row 写到终态)
+  - runner onExit: status='terminated', desired_state='terminated'
+
+reconcileOnStartup 兜底:
+  - listAttemptsByRuntimeState(['starting','running','detached'])
+  - runner_pid 为空或 process.kill(pid, 0) 失败 →
+      markAttemptStopped(stopped, reason='stale_on_startup')
+  - 防止 DB 长期残留脏 attempt
 ```
 
 #### A2-6. 修改文件清单

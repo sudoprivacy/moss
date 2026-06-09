@@ -276,25 +276,43 @@ export class SessionRunnerDaemon {
           stopReason: this.#stopping ? this.#stopReason : 'runtime_exit',
           errorText,
         })
+        // Lifecycle marks:
+        //   terminate (client-initiated delete)    -> status=terminated, desired=terminated
+        //   idle / busy-ceiling kill (server-side) -> status=ended, desired=ACTIVE
+        //     The Sudowork client treats WS close as "detach": session stays
+        //     alive on the server, scode may be killed after idleTimeoutMs /
+        //     maxDetachedBusyMs, but the user still wants the session and may
+        //     come back via /api/v1/sessions/:id/resume or /ws/sessions/:id.
+        //     desired_state stays 'active' so ensureSessionReady will respawn.
+        //     status='ended' is excluded from listSessionsToRecover (no
+        //     auto-respawn on moss-server restart) but explicit resume works.
+        //   natural exit code=0 (no stopping)     -> status=ended, desired=ended
+        //   non-zero exit (no stopping)           -> status=failed, desired=active
+        //     keeps last user intent active so client can retry.
         const idleish =
           this.#stopReason === 'idle_timeout' ||
           this.#stopReason === 'idle_busy_timeout'
+        let nextStatus: 'ended' | 'failed' | 'terminated'
+        let nextDesired: 'active' | 'ended' | 'terminated'
+        if (this.#stopping) {
+          if (idleish) {
+            nextStatus = 'ended'
+            nextDesired = 'active'
+          } else {
+            nextStatus = 'terminated'
+            nextDesired = 'terminated'
+          }
+        } else if (code === 0) {
+          nextStatus = 'ended'
+          nextDesired = 'ended'
+        } else {
+          nextStatus = 'failed'
+          nextDesired = 'active'
+        }
         this.#store.markSessionEnded(
           this.manifest.session.sessionId,
-          this.#stopping
-            ? idleish
-              ? 'ended'
-              : 'terminated'
-            : code === 0
-              ? 'ended'
-              : 'failed',
-          this.#stopping
-            ? idleish
-              ? 'ended'
-              : 'terminated'
-            : code === 0
-              ? 'ended'
-              : 'active',
+          nextStatus,
+          nextDesired,
         )
         this.#store.addEvent(
           this.manifest.session.sessionId,
