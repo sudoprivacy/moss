@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http'
 import type { URL } from 'url'
 import type { NexusClient } from '../nexus/nexusClient.js'
-import { SYSTEM_SECRET_SUBJECT, DEPT_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import { secretSubject, orgNamespacePrefix } from '../secrets/secretSubject.js'
 
 interface DepartmentPolicyProvider {
   getAuthorizedConfigItemIds(departmentId: string): number[]
@@ -16,6 +16,7 @@ interface ConfigItemRow {
 
 interface SecretsApiContext {
   userId: string
+  orgId: string
   departmentId: string | null
 }
 
@@ -98,27 +99,39 @@ async function handleList(res: ServerResponse, context: SecretsApiContext): Prom
     const personalPrefix = `user:${context.userId}:`
     const personal = allMeta.filter(s => s.namespace.startsWith(personalPrefix))
 
-    // Enterprise (system) secrets: visible to all users, no department filtering
-    const enterpriseRaw = await nexusClient!.listSecrets(undefined, SYSTEM_SECRET_SUBJECT)
+    const orgPrefix = orgNamespacePrefix(context.orgId)
+    // Enterprise (system) secrets are org-bound: list under this org's subject
+    // and namespace only. Namespaces look like `org:{orgId}:system:{pinyin}`.
+    const enterpriseRaw = await nexusClient!.listSecrets(
+      undefined,
+      secretSubject(`${orgPrefix}system:`, context.userId),
+    )
     const enterprise = enterpriseRaw
-      .filter(s => s.namespace.startsWith('system:'))
+      .filter(s => s.namespace.startsWith(`${orgPrefix}system:`))
       .map(s => ({ namespace: s.namespace, key: s.key, status: s.status, version: s.version }))
 
-    // Department (role) secrets: filtered by department policy
+    // Department (role) secrets: org-bound + filtered by department policy.
     let department: SecretSummary[] = []
     if (context.departmentId) {
       const authorizedIds = policyProvider!.getAuthorizedConfigItemIds(context.departmentId)
       if (authorizedIds.length > 0) {
-        const items = getAllActiveConfigItemsFn!()
+        // Only this org's department config items (user-scope excluded anyway).
+        const items = getAllActiveConfigItemsFn!().filter(
+          i => (i as { org_id?: string | null }).org_id == null || (i as { org_id?: string | null }).org_id === context.orgId,
+        )
         const authorizedPinyins = new Set<string>()
         for (const item of items) {
           if (item.scope === 'department' && authorizedIds.includes(item.id) && typeof item.pinyin === 'string') {
             authorizedPinyins.add(item.pinyin)
           }
         }
-        const deptRaw = await nexusClient!.listSecrets(undefined, DEPT_SECRET_SUBJECT)
+        const deptRaw = await nexusClient!.listSecrets(
+          undefined,
+          secretSubject(`${orgPrefix}role:`, context.userId),
+        )
+        const deptNsPrefix = `${orgPrefix}role:`
         department = deptRaw
-          .filter(s => s.namespace.startsWith('role:') && authorizedPinyins.has(s.namespace.slice('role:'.length)))
+          .filter(s => s.namespace.startsWith(deptNsPrefix) && authorizedPinyins.has(s.namespace.slice(deptNsPrefix.length)))
           .map(s => ({ namespace: s.namespace, key: s.key, status: s.status, version: s.version }))
       }
     }

@@ -1,5 +1,5 @@
 // Moss auth/admin types
-export type UserRole = 'admin' | 'dept_admin' | 'user'
+export type UserRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
 
 export interface AuthUser {
   id: string
@@ -73,6 +73,7 @@ export interface MeResponse {
   scopes: string[]
   role: string
   key_id: string
+  isSuperAdmin: boolean
 }
 
 export interface UsersListResponse {

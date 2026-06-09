@@ -9,7 +9,7 @@
  *   新：testConnection → authResolver（单向）
  */
 
-import { SYSTEM_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import { orgScopedNamespace, secretSubject } from '../secrets/secretSubject.js'
 
 // ============================================================
 // 类型定义
@@ -159,6 +159,7 @@ export async function resolveSecretRefHeaders(
   secretRef: string,
   getConfigItemByPinyin: (pinyin: string) => ConfigItemLike | null,
   listSecrets: (namespace: string, subject: string) => Promise<{ key: string; value: string | null }[]>,
+  orgId?: string,
 ): Promise<Record<string, string>> {
   if (!secretRef) return {}
 
@@ -167,8 +168,11 @@ export async function resolveSecretRefHeaders(
   const configItem = getConfigItemByPinyin(pinyin)
   if (!configItem) return {}
 
-  const namespace = `system:${configItem.pinyin}`
-  const secrets = await listSecrets(namespace, SYSTEM_SECRET_SUBJECT)
+  // Org-scope the enterprise namespace + subject so a session only reads its
+  // own org's secret (system creds are org-bound in multi-org mode).
+  const namespace = orgScopedNamespace(`system:${configItem.pinyin}`, orgId ?? '')
+  const subject = secretSubject(namespace, '')
+  const secrets = await listSecrets(namespace, subject)
   const valueMap: Record<string, string> = {}
   for (const s of secrets) {
     if (s.value !== null) valueMap[s.key] = s.value

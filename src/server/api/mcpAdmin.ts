@@ -25,7 +25,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
    * - Can only modify/delete MCPs where owner_type=department and owner_id is their department
    */
   function assertCanManageMcp(auth: AuthContext, input: { scope: string; owner_type: string; owner_id: string }, operation: string): void {
-    if (auth.role === 'admin') return // admin has * scope, no restriction
+    if (auth.role === 'admin' || auth.role === 'super_admin') return // admin has * scope, no restriction
 
     if (auth.role === 'dept_admin') {
       const deptId = getUserDepartmentId(auth.userId)
@@ -44,7 +44,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
   }
 
   function assertCanManageExistingMcp(auth: AuthContext, server: { scope: string; owner_type: string; owner_id: string }): void {
-    if (auth.role === 'admin') return
+    if (auth.role === 'admin' || auth.role === 'super_admin') return
 
     if (auth.role === 'dept_admin') {
       const deptId = getUserDepartmentId(auth.userId)
