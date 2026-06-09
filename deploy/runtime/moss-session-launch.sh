@@ -6,7 +6,9 @@
 # sending SIGKILL.
 #
 # setsid puts the scode tree in its own process group so kill -PGID can
-# clean up forked children (bash, mcp, tmux) atomically.
+# clean up forked children (bash, mcp, tmux) atomically. --wait keeps a
+# stable parent process attached to docker exec until scode exits, avoiding
+# stdio/parent watchdog shutdown inside scode acp.
 
 set -e
 
@@ -35,7 +37,7 @@ echo "$SID" > "$META/scode.session_id"
 # replaces itself with scode. exec keeps the PID and starttime constant so
 # the reaper's /proc/<pid>/stat field 22 (starttime in clock ticks since
 # boot) matches what we just wrote here.
-exec setsid sh -c '
+exec setsid --wait sh -c '
   PID=$$
   echo "$PID" > "'"$META"'/scode.pid"
   awk "{print \$22}" "/proc/$PID/stat" > "'"$META"'/scode.start_ticks"

@@ -98,6 +98,7 @@ RUN chmod +x /usr/local/bin/moss-session-launch /usr/local/bin/moss-session-reap
 #    fails the build if a future base image switch (Alpine, distroless) drops
 #    any of them.
 RUN command -v setsid >/dev/null \
+ && setsid --wait true \
  && sleep 0.001 \
  && command -v awk >/dev/null \
  && [ -r /proc/self/stat ] \

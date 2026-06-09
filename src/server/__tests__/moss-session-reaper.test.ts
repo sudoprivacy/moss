@@ -130,6 +130,38 @@ describe('moss-session reaper script', () => {
     await new Promise<void>(r => child.once('close', () => r()))
     await rm(rt, { recursive: true, force: true })
   })
+
+  it('launcher keeps a stable parent while child process runs', async () => {
+    const rt = await mkdtemp(path.join(tmpdir(), 'moss-launch-parent-'))
+    const sid = 'session-parent'
+    const child = spawn('/bin/sh', [LAUNCH, sid, '--', '/bin/sh', '-c', 'sleep 2'], {
+      env: { ...process.env, MOSS_RUNTIME_DIR: rt },
+    })
+
+    const meta = path.join(rt, 'sessions', sid, 'runtime')
+    const pidfile = path.join(meta, 'scode.pid')
+    const ticksfile = path.join(meta, 'scode.start_ticks')
+    for (let i = 0; i < 50; i += 1) {
+      if (existsSync(pidfile) && existsSync(ticksfile)) break
+      await new Promise(r => setTimeout(r, 20))
+    }
+
+    expect(existsSync(pidfile)).toBe(true)
+    const pid = Number((await readFile(pidfile, 'utf8')).trim())
+    expect(pid).toBeGreaterThan(1)
+
+    await new Promise(r => setTimeout(r, 500))
+    const status = await readFile(`/proc/${pid}/status`, 'utf8')
+    const ppid = Number(status.match(/^PPid:\s+(\d+)$/m)?.[1] ?? '0')
+
+    expect(ppid).toBeGreaterThan(1)
+    expect(ppid).not.toBe(pid)
+
+    const out = await run('/bin/sh', [REAP, sid, '500'], { MOSS_RUNTIME_DIR: rt })
+    expect(out.code).toBe(0)
+    await waitForClose(child)
+    await rm(rt, { recursive: true, force: true })
+  })
 })
 
 async function spawnAndWaitMkdir(p: string): Promise<void> {
@@ -137,6 +169,11 @@ async function spawnAndWaitMkdir(p: string): Promise<void> {
     const c = spawn('mkdir', ['-p', p])
     c.on('close', code => (code === 0 ? resolve() : reject(new Error(`mkdir exit ${code}`))))
   })
+}
+
+async function waitForClose(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  await new Promise<void>(resolve => child.once('close', () => resolve()))
 }
 
 void stat
