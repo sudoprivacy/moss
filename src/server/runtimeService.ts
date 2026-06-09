@@ -59,10 +59,13 @@ function wait(ms: number): Promise<void> {
 function createMcpAuthSecretsApi(
   store: DirectConnectStore,
   nexusClient: { listSecrets(namespace: string, subject: string): Promise<Array<{ key: string; value: string | null; namespace: string; status: string; version: number }>> },
+  orgId: string,
 ): McpAuthSecretsApi {
   return {
     getConfigItemByPinyin(pinyin: string): ConfigItemLike | null {
-      const row = store.getConfigItemByPinyin(pinyin)
+      // Org-scope the lookup so a session only resolves its own org's
+      // (non-user) config items; user-scope defs remain global.
+      const row = store.getConfigItemByPinyin(pinyin, orgId)
       if (!row) return null
       const entries = store.getConfigEntries(row.id as number)
         .map((e: Record<string, unknown>) => ({ config_key: e.config_key as string }))
@@ -861,7 +864,10 @@ export class RuntimeService {
     // Build visibility filter context for skill filtering
     let visibilityFilter: VisibilityFilterContext | null = null
     if (session.userId) {
-      const isAdmin = session.role === 'admin' || hasScope(session.scopes, '*')
+      const isAdmin =
+        session.role === 'admin' ||
+        session.role === 'super_admin' ||
+        hasScope(session.scopes, '*')
       if (isAdmin) {
         visibilityFilter = { isAdmin: true, userId: session.userId, departmentId: null, visibleDepartmentIds: null }
       } else {
@@ -883,7 +889,7 @@ export class RuntimeService {
     if (session.userId && visibilityFilter && this.mcpStore && this.mcpUserConfig) {
       try {
         const secretsApi = this.store && this.options.nexusClient
-          ? createMcpAuthSecretsApi(this.store, this.options.nexusClient)
+          ? createMcpAuthSecretsApi(this.store, this.options.nexusClient, session.orgId)
           : undefined
         const resolvedMcp = await resolveScodeMcpSettings({
           mcpStore: this.mcpStore,
@@ -1028,7 +1034,7 @@ export class RuntimeService {
         entry.pid = child.pid
         const tokenUser = this.authService.getUserById(session.userId)
         const deptId = tokenUser?.departmentId ?? null
-        this.authProxy.registerToken(entry.token, session.userId, deptId, child.pid)
+        this.authProxy.registerToken(entry.token, session.userId, session.orgId, deptId, child.pid)
       }
     }
 

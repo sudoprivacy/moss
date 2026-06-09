@@ -58,6 +58,7 @@ export async function resolveScodeMcpSettings(options: {
             server.secret_ref,
             (pinyin) => options.secretsApi!.getConfigItemByPinyin(pinyin),
             (ns, subject) => options.secretsApi!.listSecrets(ns, subject),
+            options.orgId,
           )
         }
 

@@ -1411,6 +1411,22 @@ export function startServer(
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/auth/switch-org') {
+        const auth = authenticateRequest(req, authService)
+        if (!auth) {
+          throw new HttpError(401, 'Unauthorized')
+        }
+        const body = await readJsonBody(req).catch(() => ({}))
+        const targetOrgId =
+          typeof body.org_id === 'string' ? body.org_id.trim() : ''
+        if (!targetOrgId) {
+          throw new HttpError(400, 'Missing org_id')
+        }
+        // switchOrg self-gates on super_admin and validates the target org.
+        writeJson(res, 200, authService.switchOrg(auth, targetOrgId))
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/user/profile') {
         const auth = authenticateRequest(req, authService)
         if (!auth) {
@@ -1654,9 +1670,11 @@ export function startServer(
         if (result.success && nexusClient) {
           try {
             const configuredNs = nexusClient.listConfiguredNamespaces()
+            const orgPrefix = `org:${auth.orgId}:`
             result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
-              const ns = item.scope === 'system' ? `system:${item.pinyin}`
-                : item.scope === 'department' ? `role:${item.pinyin}`
+              // Non-user namespaces are org-scoped in Nexus.
+              const ns = item.scope === 'system' ? `${orgPrefix}system:${item.pinyin}`
+                : item.scope === 'department' ? `${orgPrefix}role:${item.pinyin}`
                 : `user:${auth.userId}:${item.pinyin}`
               return configuredNs.has(ns)
             })
@@ -1706,12 +1724,12 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/departments') {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
-        const targetOrgId = typeof body.org_id === 'string' && body.org_id.trim() ? body.org_id.trim() : auth.orgId
+        // Org pinned to caller's current org (no cross-org via body.org_id).
         writeJson(
           res,
           200,
           authService.createDepartment({
-            orgId: targetOrgId,
+            orgId: auth.orgId,
             name: typeof body.name === 'string' ? body.name : '',
             parentId:
               body.parent_id === null || typeof body.parent_id === 'string'
@@ -1721,7 +1739,7 @@ export function startServer(
               body.ext_dept_id === null || typeof body.ext_dept_id === 'string'
                 ? body.ext_dept_id
                 : undefined,
-          }),
+          }, auth),
         )
         return
       }
@@ -1731,12 +1749,11 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const departmentId = departmentMatch[1] || ''
         const body = await readJsonBody(req)
-        const targetOrgId = typeof body.org_id === 'string' && body.org_id.trim() ? body.org_id.trim() : auth.orgId
         writeJson(
           res,
           200,
           authService.updateDepartment({
-            orgId: targetOrgId,
+            orgId: auth.orgId,
             departmentId,
             name: typeof body.name === 'string' ? body.name : undefined,
             parentId:
@@ -1747,7 +1764,7 @@ export function startServer(
               body.ext_dept_id === null || typeof body.ext_dept_id === 'string'
                 ? body.ext_dept_id
                 : undefined,
-          }),
+          }, auth),
         )
         return
       }
@@ -1755,15 +1772,13 @@ export function startServer(
       if (req.method === 'DELETE' && departmentMatch) {
         authService.requireScope(auth, 'admin:users')
         const departmentId = departmentMatch[1] || ''
-        const body = await readJsonBody(req).catch(() => ({} as JsonBody))
-        const targetOrgId = typeof body.org_id === 'string' && body.org_id.trim() ? body.org_id.trim() : auth.orgId
         writeJson(
           res,
           200,
           authService.deleteDepartment({
-            orgId: targetOrgId,
+            orgId: auth.orgId,
             departmentId,
-          }),
+          }, auth),
         )
         return
       }
@@ -1776,13 +1791,15 @@ export function startServer(
       // ============================================================
 
       if (req.method === 'GET' && pathname === '/api/v1/organizations') {
-        authService.requireScope(auth, 'admin:settings')
+        // Cross-org: only super_admin may enumerate all organizations (powers
+        // the org switcher). A normal admin is confined to its own org.
+        authService.requireSuperAdmin(auth)
         writeJson(res, 200, authService.listAllOrganizations())
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/organizations') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         writeJson(
           res,
@@ -1800,7 +1817,7 @@ export function startServer(
 
       const organizationMatch = pathname.match(/^\/api\/v1\/organizations\/([^/]+)$/)
       if (req.method === 'PATCH' && organizationMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireSuperAdmin(auth)
         const orgId = organizationMatch[1] || ''
         const body = await readJsonBody(req)
         writeJson(
@@ -1819,7 +1836,7 @@ export function startServer(
       }
 
       if (req.method === 'DELETE' && organizationMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireSuperAdmin(auth)
         const orgId = organizationMatch[1] || ''
         writeJson(res, 200, authService.deleteOrganization({ orgId }))
         return
@@ -3175,12 +3192,14 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
-        const targetOrgId = typeof body.org_id === 'string' && body.org_id.trim() ? body.org_id.trim() : auth.orgId
+        // Org is pinned to the caller's current org — never trust body.org_id.
+        // A super_admin targets another org by switching into it (switchOrg),
+        // which makes auth.orgId that org; this blocks cross-org user creation.
         writeJson(
           res,
           200,
           authService.createUser({
-            orgId: targetOrgId,
+            orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
             departmentId:
@@ -3214,8 +3233,7 @@ export function startServer(
           role: typeof body.role === 'string' ? body.role : undefined,
           status:
             typeof body.status === 'string' ? body.status : undefined,
-          targetOrgId:
-            typeof body.target_org_id === 'string' ? body.target_org_id : undefined,
+          // Organization is immutable (req 3): never forward an org move.
           extUserId:
             body.ext_user_id === null || typeof body.ext_user_id === 'string'
               ? body.ext_user_id
@@ -3579,14 +3597,18 @@ export function startServer(
         // Department policies
         const deptPolicyMatch = pathname.match(/^\/api\/v1\/departments\/([^/]+)\/secret-policies$/)
         if (deptPolicyMatch) {
-          const deptId = deptPolicyMatch[1]
+          const deptId = deptPolicyMatch[1] || ''
           if (req.method === 'GET') {
             authService.requireScope(auth, 'admin:secrets')
+            // A dept_admin may only read policies for departments in their
+            // subtree; admins are unrestricted within the org.
+            authService.requireDepartmentInScope(auth.orgId, deptId, auth)
             writeJson(res, 200, secretsApi.getDepartmentPolicies(auth.orgId, auth.userId, deptId))
             return
           }
           if (req.method === 'PUT') {
             authService.requireScope(auth, 'admin:secrets:write')
+            authService.requireDepartmentInScope(auth.orgId, deptId, auth)
             const body = await readJsonBody(req)
             writeJson(res, 200, secretsApi.updateDepartmentPolicies(auth.orgId, auth.userId, deptId, body.config_item_ids ?? []))
             return
@@ -3624,7 +3646,9 @@ export function startServer(
           if (!ap) { writeJson(res, 503, { success: false, error: { code: 'auth_proxy_unavailable' } }); return }
           const testToken = body?.token || randomUUID()
           const testUserId = body?.user_id || auth.userId
-          ap.registerToken(testToken, testUserId, body?.department_id || null, null)
+          // Scope the test token to the caller's org so proxy rule matching is
+          // org-correct (matches production registerToken semantics).
+          ap.registerToken(testToken, testUserId, auth.orgId, body?.department_id || null, null)
           writeJson(res, 200, { success: true, token: testToken })
           return
         }
@@ -3678,13 +3702,15 @@ export function startServer(
         }
         if (req.method === 'GET' && pathname === '/api/v1/me/authorized-system-configs') {
           try {
-            const allSystemItems = runtime.store.getAllActiveConfigItems().filter(i => (i.scope as string) === 'system')
-            const allDeptItems = runtime.store.getAllActiveConfigItems().filter(i => (i.scope as string) === 'department')
+            // Org-scope: only this org's system/department config items.
+            const orgActiveItems = runtime.store.getAllActiveConfigItems(auth.orgId)
+            const allSystemItems = orgActiveItems.filter(i => (i.scope as string) === 'system')
+            const allDeptItems = orgActiveItems.filter(i => (i.scope as string) === 'department')
             const user = authService.getUserById(auth.userId)
             const deptId = user?.departmentId ?? null
             let authorizedDeptIds: Set<number> = new Set()
             if (deptId) {
-              const policies = runtime.store.getDepartmentPolicies(deptId)
+              const policies = runtime.store.getDepartmentPolicies(deptId, auth.orgId)
               authorizedDeptIds = new Set(policies.map(p => p.config_item_id as number))
             }
             let visible = [
@@ -3693,9 +3719,10 @@ export function startServer(
             ]
             if (nexusClient) {
               const configuredNs = nexusClient.listConfiguredNamespaces()
+              const orgPrefix = `org:${auth.orgId}:`
               visible = visible.filter(i => {
-                const ns = (i.scope as string) === 'department' ? `role:${i.pinyin}` : `system:${i.pinyin}`
-                return configuredNs.has(ns)
+                const base = (i.scope as string) === 'department' ? `role:${i.pinyin}` : `system:${i.pinyin}`
+                return configuredNs.has(`${orgPrefix}${base}`)
               })
             }
             writeJson(res, 200, { success: true, data: visible })
@@ -4586,7 +4613,7 @@ export function startServer(
       // GET /api/v1/agents/tenant - List tenant assistants
       if (req.method === 'GET' && pathname === '/api/v1/agents/tenant') {
         const status = url.searchParams.get('status') || undefined
-        const allRows = runtime.store.listTenantAssistants(status)
+        const allRows = runtime.store.listTenantAssistants(status, auth.orgId)
         // Filter by visibility for non-admin users
         const filter = authService.buildVisibilityFilter(auth)
         const isAdmin = hasScope(auth.scopes, 'admin:settings')
@@ -4652,8 +4679,8 @@ export function startServer(
           throw new HttpError(400, 'name is required')
         }
 
-        // Check if name already exists
-        const existingAssistant = runtime.store.getTenantAssistantByName(name)
+        // Check if name already exists (within this org)
+        const existingAssistant = runtime.store.getTenantAssistantByName(name, auth.orgId)
         if (existingAssistant) {
           throw new HttpError(400, `智能体名称 "${name}" 已存在，请使用其他名称`)
         }
@@ -4720,6 +4747,7 @@ export function startServer(
           memory_mode: meta.memory_mode,
           visible_to: meta.visible_to ? JSON.stringify(meta.visible_to) : null,
           enabled: 1,
+          org_id: auth.orgId,
         })
 
         const result = runtime.store.getTenantAssistant(assistantId)
@@ -4798,6 +4826,7 @@ export function startServer(
           author_name: authorName,
           status: 'pending',
           file_path: assistantResult.dir, // Store source directory path for approval
+          org_id: auth.orgId,
         })
         writeJson(res, 200, { id: assistantId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
@@ -5229,7 +5258,7 @@ export function startServer(
       // GET /api/v1/skills/tenant - List tenant skills
       if (req.method === 'GET' && pathname === '/api/v1/skills/tenant') {
         const status = url.searchParams.get('status') || undefined
-        const allRows = runtime.store.listTenantSkills(status)
+        const allRows = runtime.store.listTenantSkills(status, auth.orgId)
         // Filter by visibility for non-admin users
         const filter = authService.buildVisibilityFilter(auth)
         const isAdmin = hasScope(auth.scopes, 'admin:settings')
@@ -5301,6 +5330,7 @@ export function startServer(
             author_name: authorName,
             status: 'approved',
             enabled: 1,
+            org_id: auth.orgId,
           })
 
           writeJson(res, 200, result)
@@ -5334,6 +5364,7 @@ export function startServer(
             author_name: authorName,
             status: 'approved',
             enabled: 1,
+            org_id: auth.orgId,
           })
 
           writeJson(res, 200, result)
@@ -5380,6 +5411,7 @@ export function startServer(
           author_id: auth.userId,
           author_name: authorName,
           status: 'pending',
+          org_id: auth.orgId,
         })
         writeJson(res, 200, { id, skillId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return

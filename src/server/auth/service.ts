@@ -22,7 +22,20 @@ import {
   verifyPassword,
 } from '../authCenter/db.js'
 
-export type AuthRole = 'admin' | 'dept_admin' | 'user'
+export type AuthRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
+
+/**
+ * Roles that carry full administrative capability (wildcard scope, cross-org
+ * actor resolution, no department-visibility filtering). `super_admin` is a
+ * strict superset of `admin`: it additionally may switch its effective org and
+ * mint/edit other `super_admin` accounts. Everything that previously checked
+ * `role === 'admin'` for *capability* should check membership here instead.
+ */
+const ADMIN_ROLES = new Set<string>(['admin', 'super_admin'])
+
+function isSuperAdmin(role: string): boolean {
+  return role === 'super_admin'
+}
 
 export type AuthServiceOptions = {
   db: DatabaseSync
@@ -77,7 +90,7 @@ function withExtIdConflict<T>(fn: () => T): T {
 }
 
 function defaultScopesForRole(role: string): string[] {
-  if (role === 'admin') {
+  if (role === 'admin' || role === 'super_admin') {
     return ['*']
   }
   if (role === 'dept_admin') {
@@ -110,7 +123,12 @@ async function initializeStore(
 }
 
 function isAuthRole(value: string): value is AuthRole {
-  return value === 'admin' || value === 'dept_admin' || value === 'user'
+  return (
+    value === 'super_admin' ||
+    value === 'admin' ||
+    value === 'dept_admin' ||
+    value === 'user'
+  )
 }
 
 function isUserStatus(value: string): value is 'active' | 'disabled' {
@@ -677,14 +695,51 @@ export class AuthService {
     scopes: string[]
     role: string
     key_id: string
+    isSuperAdmin: boolean
   } {
+    // Resolve the actor by id so a super_admin who has switched into a foreign
+    // org still returns their own profile. `organization` reflects the
+    // currently-selected org (auth.orgId), which is what the UI should show.
+    const actor = this.db.getUserById(auth.userId)
     return {
-      user: this.getUserOrNull(auth.userId, auth.orgId),
+      user: actor ? sanitizeUser(actor) : null,
       organization: this.db.getOrganization(auth.orgId),
       scopes: auth.scopes,
       role: auth.role,
       key_id: auth.keyId,
+      isSuperAdmin: isSuperAdmin(actor?.role ?? auth.role),
     }
+  }
+
+  /**
+   * Super-admin-only: re-issue this actor's tokens scoped to a different org so
+   * every org-scoped endpoint (which reads auth.orgId) serves the selected
+   * org's resources. The actor identity (sub) and role/scopes are unchanged;
+   * only org_id moves. Returns the same shape as a login response.
+   */
+  switchOrg(auth: AuthContext, targetOrgId: string): {
+    access_token: string
+    refresh_token: string
+    token_type: 'Bearer'
+    expires_in: number
+    user: SanitizedAuthCenterUser
+    organization: { id: string; name: string; createdAt: number } | null
+    scopes: string[]
+  } {
+    const actor = this.requireAuthUser(auth)
+    if (!isSuperAdmin(actor.role)) {
+      throw new AuthServiceError(403, 'Only a super admin can switch organization')
+    }
+    const orgId = targetOrgId.trim()
+    if (!orgId || !this.db.getOrganization(orgId)) {
+      throw new AuthServiceError(400, 'Unknown target organization')
+    }
+    return this.issueToken({
+      user: actor,
+      scopes: auth.scopes,
+      keyId: auth.keyId,
+      orgIdOverride: orgId,
+    })
   }
 
   listUsers(
@@ -850,6 +905,12 @@ export class AuthService {
     return {
       roles: [
         {
+          id: 'super_admin',
+          name: '超级管理员',
+          description: '可跨组织查看与管理资源，并指定其他超级管理员。',
+          scopes: ['*'],
+        },
+        {
           id: 'admin',
           name: '系统管理员',
           description: '可管理整个组织、部门、用户、会话和系统设置。',
@@ -926,6 +987,8 @@ export class AuthService {
     if (departmentId && !this.db.getDepartmentByIdAndOrg(departmentId, input.orgId)) {
       throw new AuthServiceError(400, 'Unknown department_id')
     }
+    // Only a super_admin may create a super_admin (req 5).
+    this.assertCanManageSuperAdminTarget(null, role, auth)
     this.assertCanManageUserMutation(
       input.orgId,
       {
@@ -988,7 +1051,6 @@ export class AuthService {
 
     const patch: {
       name?: string
-      orgId?: string
       departmentId?: string | null
       role?: AuthRole
       status?: 'active' | 'disabled'
@@ -1016,17 +1078,14 @@ export class AuthService {
       patch.role = role
     }
 
-    // Org move: validated below alongside department, since the dept must
-    // belong to the new org if both change.
-    let nextOrgId = user.orgId
+    // A user's organization is immutable: no role may move a user between orgs
+    // (req 3). Reject any attempt that names a different org rather than
+    // silently ignoring it, so callers get clear feedback.
+    const nextOrgId = user.orgId
     if (typeof input.targetOrgId === 'string') {
       const targetOrgId = input.targetOrgId.trim()
       if (targetOrgId && targetOrgId !== user.orgId) {
-        if (!this.db.getOrganization(targetOrgId)) {
-          throw new AuthServiceError(400, 'Unknown target organization')
-        }
-        patch.orgId = targetOrgId
-        nextOrgId = targetOrgId
+        throw new AuthServiceError(400, 'Organization cannot be changed')
       }
     }
 
@@ -1039,10 +1098,6 @@ export class AuthService {
         throw new AuthServiceError(400, 'Unknown department_id for target organization')
       }
       patch.departmentId = departmentId
-    } else if (patch.orgId !== undefined && user.departmentId !== null) {
-      // Moving the user to a new org makes their old dept reference dangling —
-      // clear it. Caller should re-set if they want a specific dept.
-      patch.departmentId = null
     }
     if (typeof input.status === 'string') {
       const status = input.status.trim()
@@ -1062,6 +1117,10 @@ export class AuthService {
     if (nextRole === 'dept_admin' && !nextDepartmentId) {
       throw new AuthServiceError(400, 'Department admin must be assigned to a department')
     }
+    // Only a super_admin may edit an existing super_admin or set a target's
+    // role to super_admin (req 5). Runs before the generic mutation check so a
+    // normal admin can't promote/demote/alter super admins.
+    this.assertCanManageSuperAdminTarget(user.role, nextRole, auth)
     this.assertCanManageExistingUser(user, auth)
     this.assertCanManageUserMutation(
       nextOrgId,
@@ -1074,7 +1133,6 @@ export class AuthService {
 
     if (
       patch.name === undefined &&
-      patch.orgId === undefined &&
       patch.departmentId === undefined &&
       patch.role === undefined &&
       patch.status === undefined &&
@@ -1126,6 +1184,7 @@ export class AuthService {
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
+    this.assertCanManageDepartment(input.orgId, department.id, auth)
     this.db.setDepartmentTokenLimit(input.departmentId, input.tokenLimit)
     return { ok: true }
   }
@@ -1228,7 +1287,7 @@ export class AuthService {
     name: string
     parentId?: string | null
     extDeptId?: string | null
-  }): {
+  }, auth?: AuthContext): {
     department: SanitizedAuthCenterDepartment
   } {
     const name = input.name.trim()
@@ -1241,6 +1300,9 @@ export class AuthService {
     if (parentId && !this.db.getDepartmentByIdAndOrg(parentId, input.orgId)) {
       throw new AuthServiceError(400, 'Unknown parent department')
     }
+    // A dept_admin may only create sub-departments under a department they
+    // manage; creating a top-level department (parentId null) is admin-only.
+    this.assertCanManageDepartment(input.orgId, parentId, auth)
 
     const existingSibling = this.findSiblingDepartment(input.orgId, parentId, name)
     if (existingSibling) {
@@ -1275,13 +1337,15 @@ export class AuthService {
     name?: string
     parentId?: string | null
     extDeptId?: string | null
-  }): {
+  }, auth?: AuthContext): {
     department: SanitizedAuthCenterDepartment
   } {
     const department = this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
+    // Must manage the target department...
+    this.assertCanManageDepartment(input.orgId, department.id, auth)
 
     const patch: {
       name?: string
@@ -1308,6 +1372,9 @@ export class AuthService {
       if (parentId && this.isDepartmentDescendant(input.orgId, department.id, parentId)) {
         throw new AuthServiceError(400, 'Department cannot be moved under its descendant')
       }
+      // ...and the new parent must also be within the actor's managed scope
+      // (moving to org-root, parentId null, is admin-only).
+      this.assertCanManageDepartment(input.orgId, parentId, auth)
       patch.parentId = parentId
     }
 
@@ -1341,11 +1408,12 @@ export class AuthService {
   deleteDepartment(input: {
     orgId: string
     departmentId: string
-  }): { ok: true } {
+  }, auth?: AuthContext): { ok: true } {
     const department = this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
+    this.assertCanManageDepartment(input.orgId, department.id, auth)
 
     const hasChildren = this.db
       .listDepartmentsByOrg(input.orgId)
@@ -1383,6 +1451,29 @@ export class AuthService {
     }
   }
 
+  /**
+   * Gate cross-org operations to super_admin. Resolves the actor by id (so it
+   * works regardless of the token's current org) and verifies the real role —
+   * scopes alone aren't enough since a normal admin also holds `*`. Used by the
+   * organization-management endpoints (list/create/update/delete orgs), which
+   * are inherently cross-org and must not be reachable by a normal admin.
+   */
+  requireSuperAdmin(auth: AuthContext): void {
+    const actor = this.requireAuthUser(auth)
+    if (!isSuperAdmin(actor.role)) {
+      throw new AuthServiceError(403, 'Only a super admin can manage organizations')
+    }
+  }
+
+  /**
+   * Public guard for department-targeted operations handled outside this class
+   * (e.g. secret-policy routes in server.ts). admin/super_admin: unrestricted
+   * in-org; dept_admin: only their subtree; throws otherwise.
+   */
+  requireDepartmentInScope(orgId: string, departmentId: string, auth: AuthContext): void {
+    this.assertCanManageDepartment(orgId, departmentId, auth)
+  }
+
   private issueToken(input: {
     user: AuthCenterUser
     scopes: string[]
@@ -1390,6 +1481,10 @@ export class AuthService {
     /** Override the access-token TTL (seconds). Used by OAuth2 to bound the
      *  wrapper JWT to the provider's token lifetime. */
     accessTtlSec?: number
+    /** Override the token's org_id without changing the actor identity (sub).
+     *  Used by switchOrg so a super_admin can scope every org-scoped endpoint
+     *  to a different org while remaining themselves. */
+    orgIdOverride?: string
   }): {
     access_token: string
     refresh_token: string
@@ -1399,11 +1494,12 @@ export class AuthService {
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
   } {
+    const orgId = input.orgIdOverride ?? input.user.orgId
     const access = issueAccessToken(
       {
         iss: this.db.getIssuer(),
         sub: input.user.id,
-        org_id: input.user.orgId,
+        org_id: orgId,
         role: input.user.role,
         scopes: input.scopes,
         key_id: input.keyId,
@@ -1417,7 +1513,7 @@ export class AuthService {
       {
         iss: this.db.getIssuer(),
         sub: input.user.id,
-        org_id: input.user.orgId,
+        org_id: orgId,
         role: input.user.role,
         scopes: input.scopes,
         key_id: input.keyId,
@@ -1433,7 +1529,7 @@ export class AuthService {
       token_type: 'Bearer',
       expires_in: access.expiresAt - Math.floor(Date.now() / 1000),
       user: sanitizeUser(input.user),
-      organization: this.db.getOrganization(input.user.orgId),
+      organization: this.db.getOrganization(orgId),
       scopes: input.scopes,
     }
   }
@@ -1550,7 +1646,7 @@ export class AuthService {
     }
 
     const actor = this.requireAuthUser(auth)
-    if (actor.role === 'admin') {
+    if (ADMIN_ROLES.has(actor.role)) {
       return null
     }
     if (actor.role !== 'dept_admin' || !actor.departmentId) {
@@ -1582,8 +1678,15 @@ export class AuthService {
   }
 
   private requireAuthUser(auth: AuthContext): AuthCenterUser {
-    const user = this.db.getUserByIdAndOrg(auth.userId, auth.orgId)
+    // Resolve the actor by id (globally unique). A super_admin may have switched
+    // their effective org (auth.orgId points at a foreign org), so their own
+    // record won't be found via getUserByIdAndOrg — accept it regardless of org.
+    // Every other role stays pinned to its home org to preserve isolation.
+    const user = this.db.getUserById(auth.userId)
     if (!user || user.status !== 'active') {
+      throw new AuthServiceError(403, 'Current user is not allowed to manage users')
+    }
+    if (!isSuperAdmin(user.role) && user.orgId !== auth.orgId) {
       throw new AuthServiceError(403, 'Current user is not allowed to manage users')
     }
     return user
@@ -1618,6 +1721,33 @@ export class AuthService {
     }
   }
 
+  /**
+   * Gate a department-targeted mutation to the actor's managed scope.
+   * - admin/super_admin: unrestricted within the org.
+   * - dept_admin: only departments inside their own subtree (self + descendants).
+   * - others / no auth: unrestricted (auth omitted = internal/IdP path).
+   * `departmentId` null means "no specific department" (e.g. creating a
+   * top-level department) — only admins may target the org root.
+   */
+  private assertCanManageDepartment(
+    orgId: string,
+    departmentId: string | null,
+    auth?: AuthContext,
+  ): void {
+    if (!auth) {
+      return
+    }
+    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+    if (visibleDepartmentIds === null) {
+      return // admin / super_admin
+    }
+    // dept_admin (or a role with an empty visible set): must target a dept
+    // inside the managed subtree. A null target (org-root op) is admin-only.
+    if (!departmentId || !visibleDepartmentIds.has(departmentId)) {
+      throw new AuthServiceError(403, 'Target department is outside your managed scope')
+    }
+  }
+
   private assertCanManageUserMutation(
     orgId: string,
     input: {
@@ -1631,7 +1761,7 @@ export class AuthService {
     }
 
     const actor = this.requireAuthUser(auth)
-    if (actor.role === 'admin') {
+    if (ADMIN_ROLES.has(actor.role)) {
       return
     }
 
@@ -1648,6 +1778,31 @@ export class AuthService {
     }
   }
 
+  /**
+   * Gate any mutation that touches a super_admin account (req 5):
+   * - editing an existing super_admin (currentRole === 'super_admin'), or
+   * - assigning the super_admin role to a target (nextRole === 'super_admin')
+   * is allowed only when the actor is itself a super_admin. This blocks a
+   * normal admin from promoting anyone (including themselves) to super_admin,
+   * and from demoting/altering an existing super_admin.
+   */
+  private assertCanManageSuperAdminTarget(
+    currentRole: string | null,
+    nextRole: string,
+    auth?: AuthContext,
+  ): void {
+    if (!auth) {
+      return
+    }
+    if (currentRole !== 'super_admin' && nextRole !== 'super_admin') {
+      return
+    }
+    const actor = this.requireAuthUser(auth)
+    if (!isSuperAdmin(actor.role)) {
+      throw new AuthServiceError(403, 'Only a super admin can manage super admin accounts')
+    }
+  }
+
   private assertCanManageApiKeyScopes(
     scopes: string[],
     auth?: AuthContext,
@@ -1657,7 +1812,7 @@ export class AuthService {
     }
 
     const actor = this.requireAuthUser(auth)
-    if (actor.role === 'admin') {
+    if (ADMIN_ROLES.has(actor.role)) {
       return
     }
 
@@ -1698,7 +1853,7 @@ export class AuthService {
 
   getUserDepartmentAncestorIds(userId: string, orgId: string): Set<string> | null {
     const user = this.db.getUserByIdAndOrg(userId, orgId)
-    if (!user || user.role === 'admin') return null
+    if (!user || ADMIN_ROLES.has(user.role)) return null
     return getUserAncestorIds(
       userId,
       orgId,

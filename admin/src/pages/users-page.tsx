@@ -142,18 +142,21 @@ const NONE_VALUE = '__none__'
 const ROOT_VALUE = '__root__'
 
 const ROLE_LABELS: Record<UserRole, string> = {
+  super_admin: '超级管理员',
   admin: '管理员',
   dept_admin: '部门管理员',
   user: '普通用户',
 }
 
 const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
+  super_admin: '可跨组织查看与管理资源，并指定其他超级管理员。',
   admin: '负责整个组织的部门、用户、角色和系统设置。',
   dept_admin: '负责部门内成员日常管理和 API Key 代发。',
   user: '基础使用角色，可创建并接入自己的会话。',
 }
 
 const DEFAULT_SCOPES_BY_ROLE: Record<UserRole, string[]> = {
+  super_admin: ['*'],
   admin: ['*'],
   dept_admin: [
     'sessions:create',
@@ -166,6 +169,12 @@ const DEFAULT_SCOPES_BY_ROLE: Record<UserRole, string[]> = {
 }
 
 const FALLBACK_ROLES: RoleDefinition[] = [
+  {
+    id: 'super_admin',
+    name: '超级管理员',
+    description: ROLE_DESCRIPTIONS.super_admin,
+    scopes: DEFAULT_SCOPES_BY_ROLE.super_admin,
+  },
   {
     id: 'admin',
     name: '系统管理员',
@@ -214,7 +223,7 @@ const userFormSchema = z.object({
   name: z.string().trim().min(2, '用户名至少 2 个字符'),
   email: z.union([z.literal(''), z.string().trim().email('请输入有效的邮箱地址')]),
   password: z.union([z.literal(''), z.string().min(6, '密码至少 6 位')]),
-  role: z.enum(['admin', 'dept_admin', 'user']),
+  role: z.enum(['super_admin', 'admin', 'dept_admin', 'user']),
   orgId: z.string().optional(),
   departmentId: z.string().nullable().optional(),
   extUserId: z.string().optional(),
@@ -491,7 +500,9 @@ function DepartmentTreeRow({
 export default function UsersPage() {
   const { user: currentUser, scopes } = useAuth()
   const canManageUsers = hasScope(scopes, 'admin:users')
-  const isOrgAdmin = currentUser?.role === 'admin'
+  const isSuperAdmin = currentUser?.role === 'super_admin'
+  // super_admin is a superset of admin — it gets every org-admin capability.
+  const isOrgAdmin = currentUser?.role === 'admin' || isSuperAdmin
 
   const [users, setUsers] = useState<AuthUser[]>([])
   const [departments, setDepartments] = useState<AuthDepartment[]>([])
@@ -672,7 +683,9 @@ export default function UsersPage() {
         email: '',
         password: '',
         role: 'user',
-        orgId: organizations[0]?.id ?? '',
+        // Normal admins don't get the org list (super_admin-only) → default to
+        // their own org so user/dept creation stays scoped correctly.
+        orgId: organizations[0]?.id ?? currentUser?.orgId ?? '',
         departmentId: null,
         extUserId: '',
       })
@@ -684,17 +697,17 @@ export default function UsersPage() {
       email: userDialog.user?.email ?? '',
       password: '',
       role: userDialog.user?.role ?? 'user',
-      orgId: userDialog.user?.orgId ?? organizations[0]?.id ?? '',
+      orgId: userDialog.user?.orgId ?? organizations[0]?.id ?? currentUser?.orgId ?? '',
       departmentId: userDialog.user?.departmentId ?? null,
       extUserId: userDialog.user?.extUserId ?? '',
     })
-  }, [userDialog, userForm, organizations])
+  }, [userDialog, userForm, organizations, currentUser])
 
   useEffect(() => {
     if (!departmentDialog.open) {
       departmentForm.reset({
         name: '',
-        orgId: organizations[0]?.id ?? '',
+        orgId: organizations[0]?.id ?? currentUser?.orgId ?? '',
         parentId: null,
         extDeptId: '',
       })
@@ -706,14 +719,14 @@ export default function UsersPage() {
       orgId:
         departmentDialog.department?.orgId ??
         departmentDialog.parent?.orgId ??
-        organizations[0]?.id ?? '',
+        organizations[0]?.id ?? currentUser?.orgId ?? '',
       parentId:
         departmentDialog.department?.parentId ??
         departmentDialog.parent?.id ??
         null,
       extDeptId: departmentDialog.department?.extDeptId ?? '',
     })
-  }, [departmentDialog, departmentForm, organizations])
+  }, [departmentDialog, departmentForm, organizations, currentUser])
 
   useEffect(() => {
     if (!organizationDialog.open) {
@@ -831,9 +844,9 @@ export default function UsersPage() {
         })
         toast.success('用户创建成功')
       } else if (userDialog.user) {
+        // Organization is immutable (req 3) — never send target_org_id on edit.
         await updateUser(userDialog.user.id, {
           name: values.name,
-          target_org_id: values.orgId && values.orgId !== userDialog.user.orgId ? values.orgId : undefined,
           department_id: values.departmentId ?? null,
           role: values.role,
           ext_user_id: extUserId,
@@ -1167,7 +1180,8 @@ export default function UsersPage() {
             <TabsList>
               <TabsTrigger value="users">用户管理</TabsTrigger>
               {isOrgAdmin ? <TabsTrigger value="departments">部门管理</TabsTrigger> : null}
-              {isOrgAdmin ? <TabsTrigger value="organizations">组织管理</TabsTrigger> : null}
+              {/* Org management is cross-org → super_admin only (backend enforces too). */}
+              {isSuperAdmin ? <TabsTrigger value="organizations">组织管理</TabsTrigger> : null}
               {isOrgAdmin ? <TabsTrigger value="roles">角色管理</TabsTrigger> : null}
             </TabsList>
             <div className="flex flex-wrap items-center gap-2">
@@ -1204,7 +1218,7 @@ export default function UsersPage() {
                   新建部门
                 </Button>
               ) : null}
-              {activeTab === 'organizations' && isOrgAdmin ? (
+              {activeTab === 'organizations' && isSuperAdmin ? (
                 <Button
                   onClick={() =>
                     setOrganizationDialog({ open: true, mode: 'create', organization: null })
@@ -1451,7 +1465,7 @@ export default function UsersPage() {
             </TabsContent>
           ) : null}
 
-          {isOrgAdmin ? (
+          {isSuperAdmin ? (
             <TabsContent value="organizations" className="space-y-6">
               <Card>
                 <CardHeader>
@@ -1650,15 +1664,28 @@ export default function UsersPage() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          {roleCatalog.map(role => (
-                            <SelectItem
-                              key={role.id}
-                              value={role.id}
-                              disabled={!isOrgAdmin && role.id !== 'user'}
-                            >
-                              {ROLE_LABELS[role.id]}
-                            </SelectItem>
-                          ))}
+                          {roleCatalog
+                            // Only a super_admin may see/assign the super_admin
+                            // role (req 5). Keep it visible when editing a user
+                            // who already is one so the current value renders,
+                            // but a non-super actor can't pick it.
+                            .filter(role =>
+                              role.id !== 'super_admin' ||
+                              isSuperAdmin ||
+                              userDialog.user?.role === 'super_admin',
+                            )
+                            .map(role => (
+                              <SelectItem
+                                key={role.id}
+                                value={role.id}
+                                disabled={
+                                  (!isOrgAdmin && role.id !== 'user') ||
+                                  (role.id === 'super_admin' && !isSuperAdmin)
+                                }
+                              >
+                                {ROLE_LABELS[role.id]}
+                              </SelectItem>
+                            ))}
                         </SelectContent>
                       </Select>
                       <FormMessage />
@@ -1709,14 +1736,27 @@ export default function UsersPage() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>所属组织</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value || ''}>
+                    <Select
+                      onValueChange={field.onChange}
+                      value={field.value || ''}
+                      // Organization is immutable for an existing user (req 3):
+                      // read-only in edit mode. In create mode, only a
+                      // super_admin (who has the org list) may choose the org;
+                      // a normal admin is fixed to their own org.
+                      disabled={userDialog.mode === 'edit' || !isSuperAdmin}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder="选择组织" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        {organizations.map(org => (
+                        {(organizations.length > 0
+                          ? organizations
+                          : currentUser?.orgId
+                            ? [{ id: currentUser.orgId, name: '本组织', extOrgId: null as string | null }]
+                            : []
+                        ).map(org => (
                           <SelectItem key={org.id} value={org.id}>
                             {org.name}
                             {org.extOrgId ? ` (${org.extOrgId})` : ''}
@@ -1725,7 +1765,11 @@ export default function UsersPage() {
                       </SelectContent>
                     </Select>
                     <FormDescription>
-                      切换组织后，请重新选择该组织下的部门。
+                      {userDialog.mode === 'edit'
+                        ? '用户的所属组织不可修改。'
+                        : isSuperAdmin
+                          ? '切换组织后，请重新选择该组织下的部门。'
+                          : '新用户将创建在您所属的组织。'}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

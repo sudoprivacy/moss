@@ -360,12 +360,14 @@ export class DirectConnectStore {
         reviewed_at INTEGER,
         enabled INTEGER DEFAULT 1,
         visible_to TEXT,
+        org_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_tenant_skills_author ON tenant_skills (author_id);
       CREATE INDEX IF NOT EXISTS idx_tenant_skills_status ON tenant_skills (status);
+      CREATE INDEX IF NOT EXISTS idx_tenant_skills_org ON tenant_skills (org_id);
     `)
 
     // Create tenant_assistants table for enterprise exclusive assistants
@@ -391,12 +393,14 @@ export class DirectConnectStore {
         reviewed_at INTEGER,
         enabled INTEGER DEFAULT 1,
         visible_to TEXT,
+        org_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_tenant_assistants_author ON tenant_assistants (author_id);
       CREATE INDEX IF NOT EXISTS idx_tenant_assistants_status ON tenant_assistants (status);
+      CREATE INDEX IF NOT EXISTS idx_tenant_assistants_org ON tenant_assistants (org_id);
     `)
 
     // Migration: Add agent_type column to tenant_assistants if it doesn't exist
@@ -423,6 +427,17 @@ export class DirectConnectStore {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN workflow TEXT`)
     }
 
+    // Multi-org: add org_id to tenant skills/assistants (backfilled to the
+    // default org later via backfillOrgScoping()).
+    for (const table of ['tenant_skills', 'tenant_assistants']) {
+      const tcols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
+      if (!tcols.includes('org_id')) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN org_id TEXT`)
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
+        console.log(`[DB] Added org_id column to ${table}`)
+      }
+    }
+
     // Migration: config_items mint/auth columns. createConfigItem/updateConfigItem
     // have long referenced these columns in their INSERT/UPDATE, but the CREATE
     // TABLE never defined them — so those writes throw against an unmigrated DB.
@@ -431,21 +446,26 @@ export class DirectConnectStore {
     // 'script' values enable per-(user,service) token minting (token_url +
     // token_request_json recipe, or mint_script fallback).
     const configItemsColumns = this.db.prepare(`PRAGMA table_info(config_items)`).all() as { name: string }[]
-    const columnsToAdd = [
-      ['auth_type', 'auth_type TEXT'],
-      ['auth_url', 'auth_url TEXT'],
-      ['token_url', 'token_url TEXT'],
-      ['client_id', 'client_id TEXT'],
-      ['client_secret_key', 'client_secret_key TEXT'],
-      ['refresh_token_key', 'refresh_token_key TEXT'],
-      ['default_scopes', 'default_scopes TEXT'],
-      ['token_request_json', 'token_request_json TEXT'],
-      ['mint_script', 'mint_script TEXT'],
-    ] as const
-    for (const [colName, colDef] of columnsToAdd) {
-      if (!configItemsColumns.some(col => col.name === colName)) {
-        this.db.exec(`ALTER TABLE config_items ADD COLUMN ${colDef}`)
-        console.log(`[DB] Added ${colName} column to config_items`)
+    // Skip on a fresh DB where config_items hasn't been created yet (its CREATE
+    // TABLE runs later in the secrets block, already with all columns). Only
+    // pre-existing DBs need these ALTERs.
+    if (configItemsColumns.length > 0) {
+      const columnsToAdd = [
+        ['auth_type', 'auth_type TEXT'],
+        ['auth_url', 'auth_url TEXT'],
+        ['token_url', 'token_url TEXT'],
+        ['client_id', 'client_id TEXT'],
+        ['client_secret_key', 'client_secret_key TEXT'],
+        ['refresh_token_key', 'refresh_token_key TEXT'],
+        ['default_scopes', 'default_scopes TEXT'],
+        ['token_request_json', 'token_request_json TEXT'],
+        ['mint_script', 'mint_script TEXT'],
+      ] as const
+      for (const [colName, colDef] of columnsToAdd) {
+        if (!configItemsColumns.some(col => col.name === colName)) {
+          this.db.exec(`ALTER TABLE config_items ADD COLUMN ${colDef}`)
+          console.log(`[DB] Added ${colName} column to config_items`)
+        }
       }
     }
 
@@ -668,23 +688,46 @@ export class DirectConnectStore {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS config_items (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        name          TEXT NOT NULL UNIQUE,
+        name          TEXT NOT NULL,
         description   TEXT,
         icon          TEXT,
-        pinyin        TEXT UNIQUE,
+        pinyin        TEXT,
         scope         TEXT NOT NULL DEFAULT 'system',
         url_pattern   TEXT,
         scheme        TEXT,
         bearer_prefix TEXT,
         status        INTEGER DEFAULT 1,
+        org_id        TEXT,
         created_at    INTEGER NOT NULL,
-        updated_at    INTEGER NOT NULL
+        updated_at    INTEGER NOT NULL,
+        auth_type          TEXT,
+        auth_url           TEXT,
+        token_url          TEXT,
+        client_id          TEXT,
+        client_secret_key  TEXT,
+        refresh_token_key  TEXT,
+        default_scopes     TEXT,
+        token_request_json TEXT,
+        mint_script        TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_config_items_scope_status
         ON config_items (scope, status);
       CREATE INDEX IF NOT EXISTS idx_config_items_status
         ON config_items (status);
+      CREATE INDEX IF NOT EXISTS idx_config_items_org
+        ON config_items (org_id);
+      -- Non-user-scope config items are org-bound: name/pinyin must be unique
+      -- per org. User-scope definitions stay global (org_id NULL) and keep a
+      -- single global-uniqueness guarantee.
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_org_pinyin
+        ON config_items (org_id, pinyin) WHERE scope != 'user';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_org_name
+        ON config_items (org_id, name) WHERE scope != 'user';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_user_pinyin
+        ON config_items (pinyin) WHERE scope = 'user';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_user_name
+        ON config_items (name) WHERE scope = 'user';
 
       CREATE TABLE IF NOT EXISTS config_entries (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -705,6 +748,7 @@ export class DirectConnectStore {
       CREATE TABLE IF NOT EXISTS secret_metadata (
         id              TEXT PRIMARY KEY,
         config_item_id  INTEGER NOT NULL UNIQUE,
+        org_id          TEXT,
         expires_at      INTEGER,
         created_at      INTEGER NOT NULL,
         updated_at      INTEGER NOT NULL,
@@ -718,6 +762,7 @@ export class DirectConnectStore {
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
         department_id  TEXT NOT NULL,
         config_item_id INTEGER NOT NULL,
+        org_id         TEXT,
         created_at     INTEGER NOT NULL,
         FOREIGN KEY (config_item_id) REFERENCES config_items(id) ON DELETE CASCADE,
         UNIQUE(department_id, config_item_id)
@@ -734,6 +779,7 @@ export class DirectConnectStore {
         actor_name      TEXT,
         action          TEXT NOT NULL,
         config_item_id  INTEGER,
+        org_id          TEXT,
         namespace       TEXT NOT NULL,
         key             TEXT NOT NULL,
         detail          TEXT,
@@ -835,6 +881,150 @@ export class DirectConnectStore {
 
     // MCP Management tables
     McpStore.ensureTables(this.db)
+
+    // Multi-org: add org_id to credential/secret tables and replace the global
+    // UNIQUE(name)/UNIQUE(pinyin) on config_items with per-org partial uniques.
+    // (Backfill of org_id values runs later via backfillOrgScoping(), once the
+    // organizations table — created by AuthCenterDb on the same DB file — exists.)
+    this.migrateConfigItemsOrgScoping()
+  }
+
+  /**
+   * Migrate an existing config_items table that still carries the legacy global
+   * UNIQUE on name/pinyin. SQLite can't drop a column-level constraint in place,
+   * so recreate the table preserving every existing column (discovered via
+   * PRAGMA so we don't have to hard-code the migrated column set), then add the
+   * org_id column + per-org partial unique indexes. Idempotent.
+   */
+  private migrateConfigItemsOrgScoping(): void {
+    try {
+      const createSql = (this.db
+        .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='config_items'`)
+        .get() as SqlRow | undefined)?.sql as string | undefined
+      // Recreate only if the legacy column-level UNIQUE is still present.
+      if (createSql && /\bUNIQUE\b/i.test(createSql)) {
+        const cols = (this.db.prepare(`PRAGMA table_info(config_items)`).all() as { name: string }[])
+          .map(c => c.name)
+        const hasOrg = cols.includes('org_id')
+        const colList = cols.join(', ')
+        // New table without the column-level UNIQUE; keep org_id if already added.
+        this.db.exec(`
+          CREATE TABLE config_items_new (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL,
+            description   TEXT,
+            icon          TEXT,
+            pinyin        TEXT,
+            scope         TEXT NOT NULL DEFAULT 'system',
+            url_pattern   TEXT,
+            scheme        TEXT,
+            bearer_prefix TEXT,
+            status        INTEGER DEFAULT 1,
+            org_id        TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL,
+            auth_type TEXT, auth_url TEXT, token_url TEXT, client_id TEXT,
+            client_secret_key TEXT, refresh_token_key TEXT, default_scopes TEXT,
+            token_request_json TEXT, mint_script TEXT
+          );
+        `)
+        // Copy the intersection of old columns and the new table's columns.
+        const newCols = new Set([
+          'id', 'name', 'description', 'icon', 'pinyin', 'scope', 'url_pattern',
+          'scheme', 'bearer_prefix', 'status', 'org_id', 'created_at', 'updated_at',
+          'auth_type', 'auth_url', 'token_url', 'client_id', 'client_secret_key',
+          'refresh_token_key', 'default_scopes', 'token_request_json', 'mint_script',
+        ])
+        const shared = cols.filter(c => newCols.has(c)).join(', ')
+        this.db.exec(`INSERT INTO config_items_new (${shared}) SELECT ${shared} FROM config_items;`)
+        this.db.exec(`DROP TABLE config_items;`)
+        this.db.exec(`ALTER TABLE config_items_new RENAME TO config_items;`)
+        void hasOrg
+        void colList
+        console.log('[DB] Recreated config_items without global UNIQUE (per-org uniqueness)')
+      } else {
+        // Fresh/already-migrated table: just ensure org_id exists.
+        const cols = (this.db.prepare(`PRAGMA table_info(config_items)`).all() as { name: string }[])
+          .map(c => c.name)
+        if (!cols.includes('org_id')) {
+          this.db.exec(`ALTER TABLE config_items ADD COLUMN org_id TEXT`)
+        }
+      }
+      // (Re)create indexes — partial uniques enforce per-org isolation for
+      // non-user scope while keeping user-scope definitions globally unique.
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_config_items_scope_status ON config_items (scope, status);
+        CREATE INDEX IF NOT EXISTS idx_config_items_status ON config_items (status);
+        CREATE INDEX IF NOT EXISTS idx_config_items_org ON config_items (org_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_org_pinyin
+          ON config_items (org_id, pinyin) WHERE scope != 'user';
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_org_name
+          ON config_items (org_id, name) WHERE scope != 'user';
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_user_pinyin
+          ON config_items (pinyin) WHERE scope = 'user';
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_config_items_user_name
+          ON config_items (name) WHERE scope = 'user';
+      `)
+    } catch (error) {
+      console.error('[DB] config_items org-scoping migration failed:', error)
+    }
+
+    // Add org_id to the dependent secret tables (ALTER is safe — no constraints).
+    for (const [table] of [['secret_metadata'], ['department_secret_policies'], ['secret_audit_log']]) {
+      try {
+        const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
+        if (!cols.includes('org_id')) {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN org_id TEXT`)
+          console.log(`[DB] Added org_id column to ${table}`)
+        }
+      } catch (error) {
+        console.error(`[DB] Failed to add org_id to ${table}:`, error)
+      }
+    }
+  }
+
+  /**
+   * Backfill org_id on pre-existing credential/secret/channel rows to the
+   * default (first) organization. Must run AFTER the organizations table is
+   * populated (i.e. after auth bootstrap). Non-user-scope config items get the
+   * default org; user-scope definitions stay global (org_id NULL). Idempotent —
+   * only touches NULL org_id rows. `defaultOrgId` is the org to assign.
+   */
+  backfillOrgScoping(defaultOrgId: string): void {
+    if (!defaultOrgId) return
+    try {
+      this.db.prepare(
+        `UPDATE config_items SET org_id = ? WHERE org_id IS NULL AND scope != 'user'`,
+      ).run(defaultOrgId)
+      // secret_metadata inherits its config item's org.
+      this.db.exec(`
+        UPDATE secret_metadata
+        SET org_id = (SELECT ci.org_id FROM config_items ci WHERE ci.id = secret_metadata.config_item_id)
+        WHERE org_id IS NULL
+      `)
+      this.db.prepare(
+        `UPDATE department_secret_policies SET org_id = ? WHERE org_id IS NULL`,
+      ).run(defaultOrgId)
+      this.db.prepare(
+        `UPDATE secret_audit_log SET org_id = ? WHERE org_id IS NULL`,
+      ).run(defaultOrgId)
+      // Tenant skills/assistants: stranded global rows go to the default org.
+      this.db.prepare(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`).run(defaultOrgId)
+      this.db.prepare(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`).run(defaultOrgId)
+      // Channels: backfill from the owning user's org where resolvable, else default.
+      this.db.exec(`
+        UPDATE channel_plugins
+        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id), '${defaultOrgId}')
+        WHERE org_id IS NULL OR org_id = ''
+      `)
+      this.db.exec(`
+        UPDATE channel_users
+        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id), '${defaultOrgId}')
+        WHERE org_id IS NULL OR org_id = ''
+      `)
+    } catch (error) {
+      console.error('[DB] backfillOrgScoping failed:', error)
+    }
   }
 
   close(): void {
@@ -1570,18 +1760,24 @@ export class DirectConnectStore {
 
   // ==================== Tenant Skills ====================
 
-  listTenantSkills(status?: string): SqlRow[] {
-    if (status) {
-      return this.db.prepare(`SELECT * FROM tenant_skills WHERE status = ? ORDER BY created_at DESC`).all(status) as SqlRow[]
-    }
-    return this.db.prepare(`SELECT * FROM tenant_skills ORDER BY created_at DESC`).all() as SqlRow[]
+  listTenantSkills(status?: string, orgId?: string): SqlRow[] {
+    const conds: string[] = []
+    const params: unknown[] = []
+    if (status) { conds.push('status = ?'); params.push(status) }
+    // Org isolation: a NULL org_id row is legacy/global and stays visible.
+    if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
+    return this.db.prepare(`SELECT * FROM tenant_skills ${where} ORDER BY created_at DESC`).all(...params) as SqlRow[]
   }
 
   getTenantSkill(id: string): SqlRow | null {
     return (this.db.prepare(`SELECT * FROM tenant_skills WHERE id = ?`).get(id) as SqlRow) ?? null
   }
 
-  getTenantSkillByName(name: string): SqlRow | null {
+  getTenantSkillByName(name: string, orgId?: string): SqlRow | null {
+    if (orgId) {
+      return (this.db.prepare(`SELECT * FROM tenant_skills WHERE name = ? AND (org_id = ? OR org_id IS NULL)`).get(name, orgId) as SqlRow) ?? null
+    }
     return (this.db.prepare(`SELECT * FROM tenant_skills WHERE name = ?`).get(name) as SqlRow) ?? null
   }
 
@@ -1600,13 +1796,14 @@ export class DirectConnectStore {
     publish_note?: string | null
     enabled?: number
     visible_to?: string | null
+    org_id?: string | null
   }): void {
     const ts = now()
     this.db.prepare(`
       INSERT INTO tenant_skills (
         id, name, display_name, description, version, author_id, author_name, status,
-        source_url, checksum, file_path, publish_note, enabled, visible_to, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_url, checksum, file_path, publish_note, enabled, visible_to, org_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.name,
@@ -1622,6 +1819,7 @@ export class DirectConnectStore {
       row.publish_note ?? null,
       row.enabled ?? 1,
       row.visible_to ?? null,
+      row.org_id ?? null,
       ts,
       ts,
     )
@@ -1673,18 +1871,23 @@ export class DirectConnectStore {
 
   // ==================== Tenant Assistants ====================
 
-  listTenantAssistants(status?: string): SqlRow[] {
-    if (status) {
-      return this.db.prepare(`SELECT * FROM tenant_assistants WHERE status = ? ORDER BY created_at DESC`).all(status) as SqlRow[]
-    }
-    return this.db.prepare(`SELECT * FROM tenant_assistants ORDER BY created_at DESC`).all() as SqlRow[]
+  listTenantAssistants(status?: string, orgId?: string): SqlRow[] {
+    const conds: string[] = []
+    const params: unknown[] = []
+    if (status) { conds.push('status = ?'); params.push(status) }
+    if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
+    return this.db.prepare(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`).all(...params) as SqlRow[]
   }
 
   getTenantAssistant(id: string): SqlRow | null {
     return (this.db.prepare(`SELECT * FROM tenant_assistants WHERE id = ?`).get(id) as SqlRow) ?? null
   }
 
-  getTenantAssistantByName(name: string): SqlRow | null {
+  getTenantAssistantByName(name: string, orgId?: string): SqlRow | null {
+    if (orgId) {
+      return (this.db.prepare(`SELECT * FROM tenant_assistants WHERE name = ? AND (org_id = ? OR org_id IS NULL)`).get(name, orgId) as SqlRow) ?? null
+    }
     return (this.db.prepare(`SELECT * FROM tenant_assistants WHERE name = ?`).get(name) as SqlRow) ?? null
   }
 
@@ -1709,13 +1912,14 @@ export class DirectConnectStore {
     enabled?: number
     visible_to?: string | null
     workflow?: string | null
+    org_id?: string | null
   }): void {
     const ts = now()
     this.db.prepare(`
       INSERT INTO tenant_assistants (
         id, name, display_name, description, version, author_id, author_name, status,
-        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, workflow, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, workflow, org_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.name,
@@ -1737,6 +1941,7 @@ export class DirectConnectStore {
       row.visible_to ?? null,
       row.enabled_wikis ?? null,
       row.workflow ?? null,
+      row.org_id ?? null,
       ts,
       ts,
     )
@@ -2613,9 +2818,16 @@ export class DirectConnectStore {
     status?: string
     page?: number
     pageSize?: number
+    /** When set, restrict non-user-scope items to this org; user-scope
+     *  definitions are global and always included. */
+    orgId?: string
   }): { items: SqlRow[]; total: number } {
     const conditions: string[] = []
     const params: unknown[] = []
+    if (opts.orgId) {
+      conditions.push(`(scope = 'user' OR org_id = ?)`)
+      params.push(opts.orgId)
+    }
     if (opts.name) {
       conditions.push('(name LIKE ? OR pinyin LIKE ?)')
       params.push(`%${opts.name}%`, `%${opts.name}%`)
@@ -2640,22 +2852,55 @@ export class DirectConnectStore {
     return { items, total }
   }
 
-  getConfigItem(id: number): SqlRow | null {
-    return (this.db.prepare('SELECT * FROM config_items WHERE id = ?').get(id) as SqlRow) ?? null
+  getConfigItem(id: number, orgId?: string): SqlRow | null {
+    const row = (this.db.prepare('SELECT * FROM config_items WHERE id = ?').get(id) as SqlRow) ?? null
+    // Org guard: a non-user-scope item only resolves within its own org.
+    if (row && orgId && row.scope !== 'user' && row.org_id !== orgId) {
+      return null
+    }
+    return row
   }
 
-  getConfigItemByPinyin(pinyin: string): SqlRow | null {
+  getConfigItemByPinyin(pinyin: string, orgId?: string): SqlRow | null {
+    // User-scope definitions are global and globally unique by pinyin. Non-user
+    // pinyins are unique per org, so resolve within the caller's org.
+    if (orgId) {
+      const scoped = this.db
+        .prepare(`SELECT * FROM config_items WHERE pinyin = ? AND scope != 'user' AND org_id = ?`)
+        .get(pinyin, orgId) as SqlRow | undefined
+      if (scoped) return scoped
+      return (
+        (this.db
+          .prepare(`SELECT * FROM config_items WHERE pinyin = ? AND scope = 'user'`)
+          .get(pinyin) as SqlRow) ?? null
+      )
+    }
     return (this.db.prepare('SELECT * FROM config_items WHERE pinyin = ?').get(pinyin) as SqlRow) ?? null
   }
 
-  getConfigItemsByScope(scope: string, status?: number): SqlRow[] {
+  getConfigItemsByScope(scope: string, status?: number, orgId?: string): SqlRow[] {
+    const conds = ['scope = ?']
+    const params: unknown[] = [scope]
     if (status !== undefined) {
-      return this.db.prepare('SELECT * FROM config_items WHERE scope = ? AND status = ?').all(scope, status) as SqlRow[]
+      conds.push('status = ?')
+      params.push(status)
     }
-    return this.db.prepare('SELECT * FROM config_items WHERE scope = ?').all(scope) as SqlRow[]
+    // Org filter applies only to non-user scope; user-scope is global.
+    if (orgId && scope !== 'user') {
+      conds.push('org_id = ?')
+      params.push(orgId)
+    }
+    return this.db
+      .prepare(`SELECT * FROM config_items WHERE ${conds.join(' AND ')}`)
+      .all(...params) as SqlRow[]
   }
 
-  getAllActiveConfigItems(): SqlRow[] {
+  getAllActiveConfigItems(orgId?: string): SqlRow[] {
+    if (orgId) {
+      return this.db
+        .prepare(`SELECT * FROM config_items WHERE status = 1 AND (scope = 'user' OR org_id = ?)`)
+        .all(orgId) as SqlRow[]
+    }
     return this.db.prepare('SELECT * FROM config_items WHERE status = 1').all() as SqlRow[]
   }
 
@@ -2703,6 +2948,9 @@ export class DirectConnectStore {
     scheme?: string
     bearer_prefix?: string
     status?: number
+    /** Owning org for non-user-scope items. User-scope definitions are global
+     *  (pass null/undefined). */
+    org_id?: string | null
     auth_type?: string
     auth_url?: string
     token_url?: string
@@ -2714,14 +2962,16 @@ export class DirectConnectStore {
     mint_script?: string
   }): number {
     const ts = now()
+    // User-scope definitions stay global regardless of any org passed in.
+    const orgId = row.scope === 'user' ? null : (row.org_id ?? null)
     const result = this.db.prepare(`
       INSERT INTO config_items (
-        name, description, icon, pinyin, scope, url_pattern, scheme, bearer_prefix, status,
+        name, description, icon, pinyin, scope, url_pattern, scheme, bearer_prefix, status, org_id,
         auth_type, auth_url, token_url, client_id, client_secret_key, refresh_token_key, default_scopes,
         token_request_json, mint_script,
         created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.name,
       row.description ?? null,
@@ -2732,6 +2982,7 @@ export class DirectConnectStore {
       row.scheme ?? null,
       row.bearer_prefix ?? null,
       row.status ?? 1,
+      orgId,
       row.auth_type ?? null,
       row.auth_url ?? null,
       row.token_url ?? null,
@@ -2765,8 +3016,9 @@ export class DirectConnectStore {
     default_scopes?: string
     token_request_json?: string | null
     mint_script?: string | null
-  }): void {
-    const existing = this.getConfigItem(id)
+  }, orgId?: string): void {
+    // Org guard: a non-user-scope item can only be updated within its own org.
+    const existing = this.getConfigItem(id, orgId)
     if (!existing) return
     const ts = now()
     this.db.prepare(`
@@ -2801,7 +3053,12 @@ export class DirectConnectStore {
     )
   }
 
-  deleteConfigItem(id: number): void {
+  deleteConfigItem(id: number, orgId?: string): void {
+    // Org guard: don't let one org delete another org's config item.
+    if (orgId) {
+      const existing = this.getConfigItem(id, orgId)
+      if (!existing) return
+    }
     this.db.prepare('DELETE FROM config_items WHERE id = ?').run(id)
   }
 
@@ -2834,25 +3091,38 @@ export class DirectConnectStore {
     return (this.db.prepare('SELECT * FROM secret_metadata WHERE config_item_id = ?').get(configItemId) as SqlRow) ?? null
   }
 
-  getAllSecretMetadata(): SqlRow[] {
+  getAllSecretMetadata(orgId?: string): SqlRow[] {
+    if (orgId) {
+      return this.db
+        .prepare('SELECT * FROM secret_metadata WHERE org_id = ? OR org_id IS NULL')
+        .all(orgId) as SqlRow[]
+    }
     return this.db.prepare('SELECT * FROM secret_metadata').all() as SqlRow[]
   }
 
-  upsertSecretMetadata(configItemId: number, expiresAt: number | null): void {
+  upsertSecretMetadata(configItemId: number, expiresAt: number | null, orgId?: string | null): void {
     const ts = now()
+    // Denormalize the owning org from the config item when not supplied.
+    const resolvedOrg =
+      orgId !== undefined ? orgId : ((this.getConfigItem(configItemId)?.org_id as string | null) ?? null)
     const existing = this.getSecretMetadata(configItemId)
     if (existing) {
-      this.db.prepare('UPDATE secret_metadata SET expires_at = ?, updated_at = ? WHERE config_item_id = ?')
-        .run(expiresAt, ts, configItemId)
+      this.db.prepare('UPDATE secret_metadata SET expires_at = ?, org_id = ?, updated_at = ? WHERE config_item_id = ?')
+        .run(expiresAt, resolvedOrg, ts, configItemId)
     } else {
       this.db.prepare(`
-        INSERT INTO secret_metadata (id, config_item_id, expires_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(randomUUID(), configItemId, expiresAt, ts, ts)
+        INSERT INTO secret_metadata (id, config_item_id, org_id, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(randomUUID(), configItemId, resolvedOrg, expiresAt, ts, ts)
     }
   }
 
-  getExpiringSecretMetadata(beforeTs: number): SqlRow[] {
+  getExpiringSecretMetadata(beforeTs: number, orgId?: string): SqlRow[] {
+    if (orgId) {
+      return this.db.prepare(
+        'SELECT * FROM secret_metadata WHERE expires_at IS NOT NULL AND expires_at < ? AND (org_id = ? OR org_id IS NULL)',
+      ).all(beforeTs, orgId) as SqlRow[]
+    }
     return this.db.prepare(
       'SELECT * FROM secret_metadata WHERE expires_at IS NOT NULL AND expires_at < ?',
     ).all(beforeTs) as SqlRow[]
@@ -2860,21 +3130,27 @@ export class DirectConnectStore {
 
   // --- Department Secret Policies ---
 
-  getDepartmentPolicies(departmentId: string): SqlRow[] {
+  getDepartmentPolicies(departmentId: string, orgId?: string): SqlRow[] {
+    // department_id is globally unique, but filter by org for defense-in-depth.
+    if (orgId) {
+      return this.db.prepare(
+        'SELECT * FROM department_secret_policies WHERE department_id = ? AND org_id = ?',
+      ).all(departmentId, orgId) as SqlRow[]
+    }
     return this.db.prepare(
       'SELECT * FROM department_secret_policies WHERE department_id = ?',
     ).all(departmentId) as SqlRow[]
   }
 
-  replaceDepartmentPolicies(departmentId: string, configItemIds: number[]): void {
+  replaceDepartmentPolicies(departmentId: string, configItemIds: number[], orgId?: string | null): void {
     const ts = now()
     this.db.prepare('DELETE FROM department_secret_policies WHERE department_id = ?').run(departmentId)
     const stmt = this.db.prepare(`
-      INSERT INTO department_secret_policies (department_id, config_item_id, created_at)
-      VALUES (?, ?, ?)
+      INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)
+      VALUES (?, ?, ?, ?)
     `)
     for (const cid of configItemIds) {
-      stmt.run(departmentId, cid, ts)
+      stmt.run(departmentId, cid, orgId ?? null, ts)
     }
   }
 
@@ -2908,17 +3184,18 @@ export class DirectConnectStore {
     actor_name?: string
     action: string
     config_item_id?: number
+    org_id?: string | null
     namespace: string
     key: string
     detail?: string
     ip_address?: string
   }): void {
     this.db.prepare(`
-      INSERT INTO secret_audit_log (id, actor_id, actor_name, action, config_item_id, namespace, key, detail, ip_address, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO secret_audit_log (id, actor_id, actor_name, action, config_item_id, org_id, namespace, key, detail, ip_address, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id, row.actor_id, row.actor_name ?? null, row.action,
-      row.config_item_id ?? null, row.namespace, row.key,
+      row.config_item_id ?? null, row.org_id ?? null, row.namespace, row.key,
       row.detail ?? null, row.ip_address ?? null, now(),
     )
   }
@@ -2931,9 +3208,16 @@ export class DirectConnectStore {
     until?: number
     page?: number
     pageSize?: number
+    orgId?: string
   }): { items: SqlRow[]; total: number } {
     const conditions: string[] = []
     const params: unknown[] = []
+    // Org filter: a NULL org_id row is legacy/global and remains visible so
+    // pre-migration audit history isn't hidden; everything else is org-bound.
+    if (opts.orgId) {
+      conditions.push('(org_id = ? OR org_id IS NULL)')
+      params.push(opts.orgId)
+    }
     if (opts.actor_id) {
       conditions.push('actor_id = ?')
       params.push(opts.actor_id)

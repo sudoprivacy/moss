@@ -63,7 +63,10 @@ export function buildVisibilityFilter(
     orgId: string,
   ) => Array<{ id: string; parentId: string | null }>,
 ): VisibilityFilter {
-  const isAdmin = auth.role === 'admin' || hasScope(auth.scopes, '*')
+  const isAdmin =
+    auth.role === 'admin' ||
+    auth.role === 'super_admin' ||
+    hasScope(auth.scopes, '*')
   if (isAdmin) {
     return { isAdmin: true, userId: auth.userId, departmentId: null, visibleDepartmentIds: null }
   }

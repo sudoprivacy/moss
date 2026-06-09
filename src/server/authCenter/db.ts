@@ -986,7 +986,10 @@ export class AuthCenterDb {
         email: resolvedAdmin.email,
         name: resolvedAdmin.username,
         departmentId: null,
-        role: 'admin',
+        // The seeded bootstrap admin is the platform root-of-trust: it gets the
+        // super_admin role so it can promote other super admins and switch
+        // across organizations. Normal admins cannot mint super admins.
+        role: 'super_admin',
         status: 'active',
         localAuth: true,
         tokenLimit: null,
@@ -1015,7 +1018,21 @@ export class AuthCenterDb {
   }
 
   ensureBootstrapAdmin(config: BootstrapAdminConfig = { username: 'admin' }): AuthCenterBootstrap {
-    if (this.listUsersByRole('admin').length > 0) {
+    // A super_admin already exists → nothing to do.
+    if (this.listUsersByRole('super_admin').length > 0) {
+      return { created: false }
+    }
+
+    // Upgrade path for systems bootstrapped before super_admin existed: if there
+    // is no super_admin but at least one admin, promote the earliest-created
+    // admin (the original bootstrap root-of-trust) to super_admin so org
+    // switching and super_admin management work after upgrade. listUsersByRole
+    // orders by created_at ASC, so [0] is that original account.
+    const admins = this.listUsersByRole('admin')
+    if (admins.length > 0) {
+      const root = admins[0]
+      this.updateUser(root.id, { role: 'super_admin' })
+      console.log(`[DB] Promoted existing bootstrap admin "${root.name}" to super_admin`)
       return { created: false }
     }
 
@@ -1055,7 +1072,8 @@ export class AuthCenterDb {
         email: resolvedAdmin.email,
         name: resolvedAdmin.username,
         departmentId: null,
-        role: 'admin',
+        // Seeded root-of-trust account — see bootstrap() for rationale.
+        role: 'super_admin',
         status: 'active',
         localAuth: true,
         tokenLimit: null,

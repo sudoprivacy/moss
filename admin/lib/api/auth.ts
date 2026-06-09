@@ -81,6 +81,19 @@ export async function getMe(): Promise<MeResponse> {
   return authClient.get<MeResponse>('/api/v1/auth/me')
 }
 
+/**
+ * Super-admin only: re-issue this actor's tokens scoped to a different org and
+ * persist them, so subsequent requests serve the selected org's resources.
+ * Caller is expected to reload the page afterwards.
+ */
+export async function switchOrg(orgId: string): Promise<LoginResponse> {
+  const response = await authClient.post<LoginResponse>('/api/v1/auth/switch-org', {
+    org_id: orgId,
+  })
+  storeLoginResponse(response)
+  return response
+}
+
 export async function getUsers(): Promise<UsersListResponse> {
   return authClient.get<UsersListResponse>('/api/v1/users')
 }

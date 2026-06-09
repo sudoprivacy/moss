@@ -1,6 +1,13 @@
 import { randomUUID } from 'crypto'
 import type { NexusClient } from '../nexus/nexusClient.js'
-import { secretSubject, SYSTEM_SECRET_SUBJECT, DEPT_SECRET_SUBJECT } from '../secrets/secretSubject.js'
+import {
+  secretSubject,
+  SYSTEM_SECRET_SUBJECT,
+  DEPT_SECRET_SUBJECT,
+  orgScopedNamespace,
+  orgNamespacePrefix,
+  stripOrgPrefix,
+} from '../secrets/secretSubject.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 
 type SqlRow = Record<string, unknown>
@@ -22,51 +29,56 @@ function mapConfigEntry(row: SqlRow) {
   }
 }
 
-function buildNamespace(scope: string, pinyin: string): string {
-  if (scope === 'system') return `system:${pinyin}`
-  if (scope === 'department') return `role:${pinyin}`
-  return `user:{userId}:${pinyin}`
+function buildNamespace(scope: string, pinyin: string, orgId?: string): string {
+  // Non-user (system/role) namespaces are org-bound; user namespaces already
+  // isolated by userId. orgScopedNamespace() applies the org prefix when given.
+  const base =
+    scope === 'system' ? `system:${pinyin}`
+      : scope === 'department' ? `role:${pinyin}`
+        : `user:{userId}:${pinyin}`
+  return orgId ? orgScopedNamespace(base, orgId) : base
 }
 
 export function createSecretsApi(db: {
-  getConfigItem: (id: number) => SqlRow | null
-  getConfigItemByPinyin: (pinyin: string) => SqlRow | null
+  getConfigItem: (id: number, orgId?: string) => SqlRow | null
+  getConfigItemByPinyin: (pinyin: string, orgId?: string) => SqlRow | null
   getConfigEntries: (configItemId: number) => SqlRow[]
-  upsertSecretMetadata: (configItemId: number, expiresAt: number | null) => void
+  upsertSecretMetadata: (configItemId: number, expiresAt: number | null, orgId?: string | null) => void
   getSecretMetadata: (configItemId: number) => SqlRow | null
-  getAllSecretMetadata: () => SqlRow[]
-  getExpiringSecretMetadata: (beforeTs: number) => SqlRow[]
-  insertAuditLog: (row: { id: string; actor_id: string; actor_name?: string; action: string; config_item_id?: number; namespace: string; key: string; detail?: string; ip_address?: string }) => void
-  queryAuditLog: (opts: { actor_id?: string; config_item_id?: number; action?: string; since?: number; until?: number; page?: number; pageSize?: number }) => { items: SqlRow[]; total: number }
-  getDepartmentPolicies: (departmentId: string) => SqlRow[]
-  replaceDepartmentPolicies: (departmentId: string, configItemIds: number[]) => void
+  getAllSecretMetadata: (orgId?: string) => SqlRow[]
+  getExpiringSecretMetadata: (beforeTs: number, orgId?: string) => SqlRow[]
+  insertAuditLog: (row: { id: string; actor_id: string; actor_name?: string; action: string; config_item_id?: number; org_id?: string | null; namespace: string; key: string; detail?: string; ip_address?: string }) => void
+  queryAuditLog: (opts: { actor_id?: string; config_item_id?: number; action?: string; since?: number; until?: number; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
+  getDepartmentPolicies: (departmentId: string, orgId?: string) => SqlRow[]
+  replaceDepartmentPolicies: (departmentId: string, configItemIds: number[], orgId?: string | null) => void
 }, nexus: NexusClient, getUserName: (userId: string) => string | undefined) {
 
-  const resolveConfigItemId = (namespace: string): number | undefined => {
-    const parts = namespace.split(':')
-    if (parts[0] === 'system') {
-      const item = db.getConfigItemByPinyin(parts.slice(1).join(':'))
-      return item ? (item.id as number) : undefined
-    }
-    if (parts[0] === 'role') {
-      const item = db.getConfigItemByPinyin(parts.slice(1).join(':'))
+  // Resolve a config item id from a (possibly org-prefixed) namespace, scoping
+  // the pinyin lookup to the namespace's org so two orgs' same-pinyin items
+  // don't collide.
+  const resolveConfigItemId = (namespace: string, orgId?: string): number | undefined => {
+    const base = stripOrgPrefix(namespace)
+    const parts = base.split(':')
+    if (parts[0] === 'system' || parts[0] === 'role') {
+      const item = db.getConfigItemByPinyin(parts.slice(1).join(':'), orgId)
       return item ? (item.id as number) : undefined
     }
     if (parts[0] === 'user' && parts.length >= 3) {
-      const item = db.getConfigItemByPinyin(parts.slice(2).join(':'))
+      const item = db.getConfigItemByPinyin(parts.slice(2).join(':'), orgId)
       return item ? (item.id as number) : undefined
     }
     return undefined
   }
 
-  const writeAudit = (actorId: string, actorName: string | undefined, action: string, configItemId: number | undefined, namespace: string, key: string, detail?: Record<string, unknown>, ip?: string) => {
+  const writeAudit = (actorId: string, actorName: string | undefined, action: string, configItemId: number | undefined, namespace: string, key: string, detail?: Record<string, unknown>, ip?: string, orgId?: string) => {
     try {
       db.insertAuditLog({
         id: randomUUID(),
         actor_id: actorId,
         actor_name: actorName ?? getUserName(actorId),
         action,
-        config_item_id: configItemId ?? resolveConfigItemId(namespace),
+        config_item_id: configItemId ?? resolveConfigItemId(namespace, orgId),
+        org_id: orgId ?? null,
         namespace,
         key,
         detail: detail ? JSON.stringify(detail) : undefined,
@@ -82,10 +94,11 @@ export function createSecretsApi(db: {
 
     async listEnterpriseSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets('system')
+        // Enterprise secrets are org-bound: list only this org's namespace.
+        const secrets = await nexus.listSecrets(`${orgNamespacePrefix(orgId)}system`)
         // Enrich with config item data
         const enriched = secrets.map(s => {
-          const pinyin = s.namespace.replace('system:', '')
+          const pinyin = stripOrgPrefix(s.namespace).replace('system:', '')
           // We don't look up config items here for performance, frontend handles it
           // Expose a normalized `enabled` boolean alongside the raw `status` so
           // clients don't have to know the internal 'enabled'/'disabled' string.
@@ -101,9 +114,10 @@ export function createSecretsApi(db: {
 
     async listDepartmentSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets('role')
+        // Department secrets are org-bound: list only this org's namespace.
+        const secrets = await nexus.listSecrets(`${orgNamespacePrefix(orgId)}role`)
         const enriched = secrets.map(s => {
-          const pinyin = s.namespace.replace('role:', '')
+          const pinyin = stripOrgPrefix(s.namespace).replace('role:', '')
           return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
         })
         return { success: true, data: enriched }
@@ -114,9 +128,10 @@ export function createSecretsApi(db: {
 
     async getSecret(orgId: string, userId: string, namespace: string, key: string, ip?: string) {
       try {
-        const secret = await nexus.getSecret(namespace, key, secretSubject(namespace, userId))
+        const ns = orgScopedNamespace(namespace, orgId)
+        const secret = await nexus.getSecret(ns, key, secretSubject(ns, userId))
         if (!secret) return { success: false, error: { code: 'not_found', message: '凭据不存在' } }
-        writeAudit(userId, undefined, 'read', undefined, namespace, key, undefined, ip)
+        writeAudit(userId, undefined, 'read', undefined, ns, key, undefined, ip, orgId)
         return { success: true, data: secret }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -125,7 +140,8 @@ export function createSecretsApi(db: {
 
     async putSecret(orgId: string, userId: string, namespace: string, key: string, value: string, metadata?: { expires_at?: number | null }, ip?: string) {
       try {
-        const configItemId = resolveConfigItemId(namespace)
+        const ns = orgScopedNamespace(namespace, orgId)
+        const configItemId = resolveConfigItemId(ns, orgId)
         if (configItemId) {
           const entries = db.getConfigEntries(configItemId)
           const matched = entries.find(e => (e.config_key as string) === key)
@@ -133,17 +149,10 @@ export function createSecretsApi(db: {
             return { success: false, error: { code: 'validation_error', message: `必填项"${matched.name as string}"不能为空` } }
           }
         }
-        const existing = await nexus.getSecret(namespace, key, secretSubject(namespace, userId)).catch(() => null)
+        const existing = await nexus.getSecret(ns, key, secretSubject(ns, userId)).catch(() => null)
         const action = existing && existing.version > 0 ? 'updated' : 'created'
-        await nexus.putSecret(namespace, key, value, secretSubject(namespace, userId))
-        writeAudit(userId, undefined, action, undefined, namespace, key, { value_length: value.length }, ip)
-        // Handle metadata if provided
-        if (metadata && metadata.expires_at !== undefined) {
-          // Extract config item from namespace
-          const parts = namespace.split(':')
-          const pinyin = parts.slice(1).join(':')
-          // Find config item by pinyin - not available here, handled by route
-        }
+        await nexus.putSecret(ns, key, value, secretSubject(ns, userId))
+        writeAudit(userId, undefined, action, undefined, ns, key, { value_length: value.length }, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -152,8 +161,9 @@ export function createSecretsApi(db: {
 
     async deleteSecret(orgId: string, userId: string, namespace: string, key: string, ip?: string) {
       try {
-        await nexus.deleteSecret(namespace, key, secretSubject(namespace, userId))
-        writeAudit(userId, undefined, 'deleted', undefined, namespace, key, undefined, ip)
+        const ns = orgScopedNamespace(namespace, orgId)
+        await nexus.deleteSecret(ns, key, secretSubject(ns, userId))
+        writeAudit(userId, undefined, 'deleted', undefined, ns, key, undefined, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -162,8 +172,9 @@ export function createSecretsApi(db: {
 
     async enableSecret(orgId: string, userId: string, namespace: string, key: string, ip?: string) {
       try {
-        await nexus.enableSecret(namespace, key, secretSubject(namespace, userId))
-        writeAudit(userId, undefined, 'enabled', undefined, namespace, key, undefined, ip)
+        const ns = orgScopedNamespace(namespace, orgId)
+        await nexus.enableSecret(ns, key, secretSubject(ns, userId))
+        writeAudit(userId, undefined, 'enabled', undefined, ns, key, undefined, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -172,8 +183,9 @@ export function createSecretsApi(db: {
 
     async disableSecret(orgId: string, userId: string, namespace: string, key: string, ip?: string) {
       try {
-        await nexus.disableSecret(namespace, key, secretSubject(namespace, userId))
-        writeAudit(userId, undefined, 'disabled', undefined, namespace, key, undefined, ip)
+        const ns = orgScopedNamespace(namespace, orgId)
+        await nexus.disableSecret(ns, key, secretSubject(ns, userId))
+        writeAudit(userId, undefined, 'disabled', undefined, ns, key, undefined, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -183,7 +195,7 @@ export function createSecretsApi(db: {
     // --- Secret Metadata (expiry) ---
 
     listMetadata(orgId: string, userId: string) {
-      const rows = db.getAllSecretMetadata()
+      const rows = db.getAllSecretMetadata(orgId)
       const data = rows.map(r => ({
         config_item_id: r.config_item_id as number,
         expires_at: r.expires_at as number | null,
@@ -192,20 +204,23 @@ export function createSecretsApi(db: {
     },
 
     updateMetadata(orgId: string, userId: string, configItemId: number, expiresAt: number | null) {
-      db.upsertSecretMetadata(configItemId, expiresAt)
+      // Org guard: only touch metadata for a config item the caller's org owns.
+      const item = db.getConfigItem(configItemId, orgId)
+      if (!item) return { success: false, error: { code: 'not_found', message: '配置项不存在' } }
+      db.upsertSecretMetadata(configItemId, expiresAt, orgId)
       return { success: true }
     },
 
     // --- Department Policies ---
 
     getDepartmentPolicies(orgId: string, userId: string, departmentId: string) {
-      const rows = db.getDepartmentPolicies(departmentId)
+      const rows = db.getDepartmentPolicies(departmentId, orgId)
       const configItemIds = rows.map(r => r.config_item_id as number)
       return { success: true, data: { department_id: departmentId, config_item_ids: configItemIds } }
     },
 
     updateDepartmentPolicies(orgId: string, userId: string, departmentId: string, configItemIds: number[]) {
-      db.replaceDepartmentPolicies(departmentId, configItemIds)
+      db.replaceDepartmentPolicies(departmentId, configItemIds, orgId)
       return { success: true }
     },
 
@@ -228,6 +243,7 @@ export function createSecretsApi(db: {
         until: params.until,
         page: params.page,
         pageSize: params.page_size,
+        orgId,
       })
       const mapped = items.map(r => ({
         id: r.id as string,
@@ -248,10 +264,10 @@ export function createSecretsApi(db: {
 
     listRotationAlerts(orgId: string, userId: string) {
       const oneDayFromNow = Date.now() + 86400000
-      const rows = db.getExpiringSecretMetadata(oneDayFromNow)
+      const rows = db.getExpiringSecretMetadata(oneDayFromNow, orgId)
       const data = rows.map(r => {
         const itemId = r.config_item_id as number
-        const item = db.getConfigItem(itemId)
+        const item = db.getConfigItem(itemId, orgId)
         const entries = item ? db.getConfigEntries(itemId) : []
         return {
           config_item_id: itemId,

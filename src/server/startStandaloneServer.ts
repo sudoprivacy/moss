@@ -71,6 +71,14 @@ export async function startStandaloneDirectConnectServer(
   })
   const instance = store.registerServerInstance(config.host)
 
+  // Multi-org backfill: now that organizations exist (auth bootstrap ran), assign
+  // a default org to any pre-existing credential/secret/channel rows so they
+  // aren't stranded global. Idempotent (only NULL org_id rows are touched).
+  const defaultOrgId = authService.listAllOrganizations().organizations[0]?.id
+  if (defaultOrgId) {
+    store.backfillOrgScoping(defaultOrgId)
+  }
+
   // Token minter for login-type 凭据 (mints + caches a per-user access_token
   // from the user's stored credential), backed by the encrypted
   // minted_service_tokens cache via AuthService.

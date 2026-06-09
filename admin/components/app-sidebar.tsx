@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ComponentType } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
@@ -28,8 +28,17 @@ import {
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { hasAnyScope, hasScope } from '@/lib/api/client'
+import { getOrganizations, switchOrg } from '@/lib/api/auth'
+import type { AuthOrgWithCounts } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
 
 type NavItem = {
@@ -43,6 +52,7 @@ type NavItem = {
 }
 
 const roleLabels: Record<string, string> = {
+  super_admin: '超级管理员',
   admin: '管理员',
   dept_admin: '部门管理员',
   user: '普通用户',
@@ -169,6 +179,39 @@ export function AppSidebar() {
   const navigate = useNavigate()
   const { user, scopes, logout } = useAuth()
   const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set())
+
+  // Super-admin org switcher: lists all orgs and re-scopes the session to the
+  // selected one. Only super admins may switch across organizations.
+  const isSuperAdmin = user?.role === 'super_admin'
+  const [organizations, setOrganizations] = useState<AuthOrgWithCounts[]>([])
+  const [switchingOrg, setSwitchingOrg] = useState(false)
+
+  useEffect(() => {
+    if (!isSuperAdmin) return
+    let cancelled = false
+    getOrganizations()
+      .then((res) => {
+        if (!cancelled) setOrganizations(res.organizations)
+      })
+      .catch(() => {
+        if (!cancelled) setOrganizations([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isSuperAdmin])
+
+  const handleSwitchOrg = async (orgId: string) => {
+    if (!orgId || orgId === user?.orgId || switchingOrg) return
+    setSwitchingOrg(true)
+    try {
+      await switchOrg(orgId)
+      // Reload so every page re-fetches against the newly selected org.
+      window.location.reload()
+    } catch {
+      setSwitchingOrg(false)
+    }
+  }
 
   const visibleMenuItems = menuItems.filter((item) => {
     if ('requiredScope' in item && item.requiredScope) {
@@ -347,13 +390,34 @@ export function AppSidebar() {
   return (
     <aside className="w-64 border-r bg-card flex flex-col h-full">
       {/* Header */}
-      <div className="h-14 border-b px-4 flex items-center gap-3">
-        <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-          <Shield className="size-5" />
+      <div className="border-b px-4 py-3 flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <Shield className="size-5" />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold">moss 中控平台</span>
+          </div>
         </div>
-        <div className="flex flex-col">
-          <span className="text-sm font-semibold">moss 中控平台</span>
-        </div>
+        {isSuperAdmin ? (
+          <Select
+            value={user?.orgId ?? ''}
+            onValueChange={(value) => void handleSwitchOrg(value)}
+            disabled={switchingOrg}
+          >
+            <SelectTrigger className="h-8 text-xs" aria-label="切换组织">
+              <Building2 className="size-3.5 shrink-0 text-muted-foreground" />
+              <SelectValue placeholder="选择组织" />
+            </SelectTrigger>
+            <SelectContent>
+              {organizations.map((org) => (
+                <SelectItem key={org.id} value={org.id}>
+                  {org.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : null}
       </div>
 
       {/* Navigation */}

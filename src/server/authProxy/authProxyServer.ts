@@ -5,7 +5,7 @@ import { URL } from 'url'
 import { validateRemoteUrl } from './ssrfGuard.js'
 import { injectAuth, injectMultiAuth, type InjectAuthResult } from './authInjectors.js'
 import { handleSecretsRequest } from './secretsApi.js'
-import { secretSubject } from '../secrets/secretSubject.js'
+import { secretSubject, orgScopedNamespace } from '../secrets/secretSubject.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { TokenMinter } from './tokenMinter.js'
 
@@ -19,6 +19,10 @@ export interface AuthProxyRule {
   // the secret itself, so they are NOT subject to the department policy gate;
   // only department credentials are. Enterprise (system) credentials are visible to all users.
   scope: string
+  // Owning org for non-user (system/department) rules; null for user-scope
+  // definitions which are global. A request only matches rules whose orgId is
+  // its own org (or null), so two orgs' identical URL patterns never collide.
+  orgId: string | null
   secretNamespace: string
   entries: Array<{ configKey: string; name: string; required: boolean }>
   // Login-type services: when authType is set and not 'static', the stored
@@ -40,18 +44,26 @@ export function configItemToRule(
   getEntries: (configItemId: number) => Array<Record<string, unknown>>,
 ): AuthProxyRule {
   const id = item.id as number
+  const scope = (item.scope as string) || 'system'
+  const orgId = (item.org_id as string | null) ?? null
+  // Non-user namespaces are org-scoped so each org's enterprise/department
+  // secret lives under a distinct Nexus namespace; user namespaces are global.
+  const baseNamespace = scope === 'user'
+    ? `user:{userId}:${item.pinyin}`
+    : scope === 'department'
+      ? `role:${item.pinyin}`
+      : `system:${item.pinyin}`
   return {
     configItemId: id,
     name: item.name as string,
     urlPattern: (item.url_pattern as string) || '',
     scheme: (item.scheme as string) || '',
     bearerPrefix: (item.bearer_prefix as string) || '',
-    scope: (item.scope as string) || 'system',
-    secretNamespace: item.scope === 'user'
-      ? `user:{userId}:${item.pinyin}`
-      : item.scope === 'department'
-        ? `role:${item.pinyin}`
-        : `system:${item.pinyin}`,
+    scope,
+    orgId: scope === 'user' ? null : orgId,
+    secretNamespace: scope === 'user' || !orgId
+      ? baseNamespace
+      : orgScopedNamespace(baseNamespace, orgId),
     entries: (getEntries(id) || []).map(e => ({
       configKey: e.config_key as string,
       name: e.name as string,
@@ -66,6 +78,7 @@ export function configItemToRule(
 
 interface TokenEntry {
   userId: string
+  orgId: string
   departmentId: string | null
   pid: number | null
   registeredAt: number
@@ -122,8 +135,8 @@ export class AuthProxyServer {
     }
   }
 
-  registerToken(token: string, userId: string, departmentId: string | null, pid: number | null): void {
-    this.tokenRegistry.set(token, { userId, departmentId, pid, registeredAt: Date.now() })
+  registerToken(token: string, userId: string, orgId: string, departmentId: string | null, pid: number | null): void {
+    this.tokenRegistry.set(token, { userId, orgId, departmentId, pid, registeredAt: Date.now() })
   }
 
   revokeToken(token: string): void {
@@ -223,6 +236,7 @@ export class AuthProxyServer {
       const tokenEntry = this.tokenRegistry.get(token)!
       await handleSecretsRequest(req, res, parsedUrl.pathname, parsedUrl, {
         userId: tokenEntry.userId,
+        orgId: tokenEntry.orgId,
         departmentId: tokenEntry.departmentId,
       })
       return
@@ -299,8 +313,9 @@ export class AuthProxyServer {
         }
       }
     } else {
-      // Priority 2: URL pattern matching (longest path first)
-      const match = this.findRuleForUrl(remoteUrl)
+      // Priority 2: URL pattern matching (longest path first), scoped to the
+      // requester's org so credentials never leak across organizations.
+      const match = this.findRuleForUrl(remoteUrl, tokenEntry.orgId)
       if (!match) {
         // No matching rule found — reject request
         res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -449,13 +464,17 @@ export class AuthProxyServer {
    * Uses longest-path-first matching: among all matching rules, the one with
    * the longest urlPattern string wins (most specific match).
    */
-  private findRuleForUrl(url: string): AuthProxyRule | null {
+  private findRuleForUrl(url: string, orgId: string): AuthProxyRule | null {
     let bestMatch: AuthProxyRule | null = null
     let bestLength = -1
     let bestId = -1
 
     for (const rule of this.rules.values()) {
       if (!rule.urlPattern) continue
+      // Org isolation: only consider rules belonging to the requester's org, or
+      // global (user-scope) rules (orgId === null). This is what prevents one
+      // org's credential from matching another org's identical URL pattern.
+      if (rule.orgId !== null && rule.orgId !== orgId) continue
       if (this.matchUrl(rule.urlPattern, url)) {
         if (rule.urlPattern.length > bestLength || (rule.urlPattern.length === bestLength && rule.configItemId > bestId)) {
           bestMatch = rule
