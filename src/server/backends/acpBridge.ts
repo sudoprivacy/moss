@@ -92,6 +92,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let lastPersistedUuid: string | null = null
   let isHandshakeComplete = false
   let currentTurnAssistantUuid: string | null = null
+  let currentTurnUsedSendUserMessage = false
   let currentModel = model  // Track current model for dynamic switching
   const toolResultIdByToolCallId = new Map<string, string>()
   // Track tool calls in current turn for completion status
@@ -118,6 +119,20 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   // 新增：首次消息标记
   let isFirstMessage = true
+
+  const getSendUserMessageText = (rawInput: unknown): string | null => {
+    let input = rawInput
+    if (typeof input === 'string') {
+      try {
+        input = JSON.parse(input)
+      } catch {
+        return null
+      }
+    }
+    if (!input || typeof input !== 'object') return null
+    const message = (input as { message?: unknown }).message
+    return typeof message === 'string' && message.trim() ? message : null
+  }
 
   const writeTranscript = async (event: any) => {
     if (!transcriptPath) return
@@ -508,7 +523,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           }
           const assistantUuid = randomUUID()
 
-          if (currentAssistantText) {
+          if (currentAssistantText && !currentTurnUsedSendUserMessage) {
             const assistantEvent = {
               type: 'assistant',
               sessionId,
@@ -546,6 +561,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             })
 
           currentAssistantText = ''
+          currentTurnUsedSendUserMessage = false
           // A2: stopReason is the authoritative "turn done" signal from scode.
           // Re-evaluate busy here; setBusy(false) only if no question / stdin
           // is pending.
@@ -565,7 +581,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               text = content.text || (Array.isArray(content) ? content[0]?.text : content?.text) || ''
             }
 
-            if (text) {
+            if (text && !currentTurnUsedSendUserMessage) {
               process.stderr.write(`[AcpBridge] Received chunk: ${text.slice(0, 20)}...\n`)
               currentAssistantText += text
 
@@ -595,6 +611,38 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             const toolUuid = randomUUID()
             const toolCallId = update.toolCallId
             const toolName = update.title || update.rawInput?.path || 'tool'
+            const sendUserMessageText = toolName === 'SendUserMessage'
+              ? getSendUserMessageText(update.rawInput)
+              : null
+
+            if (sendUserMessageText) {
+              currentTurnUsedSendUserMessage = true
+              currentAssistantText = ''
+              const assistantUuid = randomUUID()
+              const assistantEvent = {
+                type: 'assistant',
+                session_id: sessionId,
+                sessionId,
+                uuid: assistantUuid,
+                parentUuid: lastPersistedUuid,
+                isSidechain: false,
+                timestamp: new Date().toISOString(),
+                cwd,
+                userType: 'external',
+                version: 'unknown',
+                message: {
+                  role: 'assistant',
+                  content: [{ type: 'text', text: sendUserMessageText }],
+                  model,
+                },
+              }
+              process.stderr.write(`[AcpBridge] EMITTING SendUserMessage AS ASSISTANT EVENT: ${JSON.stringify(assistantEvent)}\n`)
+              emitStdout(JSON.stringify(assistantEvent) + '\n')
+              void writeTranscript(assistantEvent)
+              lastPersistedUuid = assistantUuid
+              continue
+            }
+
             if (toolCallId) {
               toolResultIdByToolCallId.set(toolCallId, toolUuid)
               // Track this tool call for completion status

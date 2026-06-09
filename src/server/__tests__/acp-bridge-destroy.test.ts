@@ -2,6 +2,9 @@ import { describe, expect, it } from 'bun:test'
 import { EventEmitter } from 'events'
 import { PassThrough } from 'stream'
 import type { ChildProcess } from 'child_process'
+import { mkdtemp, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import path from 'path'
 
 import { createAcpBridgeHandle } from '../backends/acpBridge.js'
 import type { SessionRuntimeInfo } from '../sessionManager.js'
@@ -15,6 +18,8 @@ function makeFakeChild(): {
   child: ChildProcess
   killCalls: NodeJS.Signals[]
   stdinEnded: { value: boolean }
+  stdin: PassThrough
+  stdout: PassThrough
 } {
   const ee = new EventEmitter() as unknown as ChildProcess & EventEmitter
   const stdin = new PassThrough()
@@ -37,7 +42,7 @@ function makeFakeChild(): {
     ;(ee as any).killed = true
     return true
   }
-  return { child: ee, killCalls, stdinEnded }
+  return { child: ee, killCalls, stdinEnded, stdin, stdout }
 }
 
 const userRuntime: SessionRuntimeInfo = {
@@ -120,4 +125,101 @@ describe('AcpBridge.destroy (C2 dispatch)', () => {
     expect(handle.isBusy!()).toBe(true)
     expect(received).toEqual([true])
   })
+
+  it('maps SendUserMessage to assistant output and suppresses fallback chunks', async () => {
+    const { child, stdin, stdout } = makeFakeChild()
+    const cwd = await mkdtemp(path.join(tmpdir(), 'moss-acp-bridge-'))
+    const lines: string[] = []
+    const stdinWrites: string[] = []
+    stdin.on('data', chunk => { stdinWrites.push(chunk.toString('utf8')) })
+    try {
+      const handle = createAcpBridgeHandle({
+        child,
+        sessionId: 'sid',
+        cwd,
+        model: 'proxy/fake',
+        runtime: userRuntime,
+        containerMode: 'user',
+      })
+      handle.onStdoutLine(line => lines.push(line.trim()))
+
+      await waitTick()
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-init', result: {} })
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-session-new', result: { sessionId: 'acp-sid' } })
+      await waitTick()
+
+      handle.writeStdin(JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: '你好' }] },
+        uuid: 'user-1',
+      }) + '\n')
+      await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/prompt"')))
+
+      writeJsonLine(stdout, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionUpdate: 'tool_call',
+          update: {
+            toolCallId: 'call-1',
+            title: 'SendUserMessage',
+            rawInput: { message: '正确中文回复', status: 'normal' },
+          },
+        },
+      })
+      writeJsonLine(stdout, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionUpdate: 'agent_message_chunk',
+          update: { content: { text: 'wrong fallback text' } },
+        },
+      })
+      writeJsonLine(stdout, {
+        jsonrpc: '2.0',
+        id: 'm-1',
+        result: {
+          stopReason: 'end_turn',
+          usage: { inputTokens: 1, outputTokens: 1 },
+        },
+      })
+      await waitTick()
+
+      const events = lines
+        .map(line => {
+          try { return JSON.parse(line) } catch { return null }
+        })
+        .filter(Boolean)
+      const assistantTexts = events
+        .filter(event => event.type === 'assistant')
+        .flatMap(event => event.message?.content ?? [])
+        .map(block => block.text)
+        .filter(Boolean)
+      const toolNames = events
+        .filter(event => event.type === 'tool_use')
+        .map(event => event.name)
+
+      expect(assistantTexts).toContain('正确中文回复')
+      expect(assistantTexts).not.toContain('wrong fallback text')
+      expect(toolNames).not.toContain('SendUserMessage')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
 })
+
+function writeJsonLine(stdout: PassThrough, value: unknown): void {
+  stdout.write(`${JSON.stringify(value)}\n`)
+}
+
+async function waitTick(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 0))
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('condition was not met')
+}
