@@ -41,9 +41,11 @@ import path from 'node:path'
 import { getTranscriptPath } from '../src/server/runtimePaths.js'
 
 /**
- * Minimal DB handle. Production wires up node:sqlite (lazy imported below so
- * bun can build this file without resolving the Node-only module); tests
- * pass a bun:sqlite-backed shim with the same surface.
+ * Minimal DB handle. The default adapter (openBunSqlite, defined below) uses
+ * bun:sqlite to match the script's shebang/usage; tests can swap in their
+ * own adapter via runMigration({ openDb }). bun:sqlite reads the same
+ * SQLite/WAL file the moss-server runtime writes via node:sqlite, so the
+ * migration job can operate on the live DB while moss-server is offline.
  */
 export type DbHandle = {
   prepareAll: <T = unknown>(sql: string, params: unknown[]) => T[]
@@ -51,12 +53,16 @@ export type DbHandle = {
   close: () => void
 }
 
-async function openNodeSqlite(dbPath: string): Promise<DbHandle> {
-  // Dynamic import keeps the bun bundler happy; node:sqlite resolves at run
-  // time on Node 22+. If you point this script at older Node, install
-  // better-sqlite3 and swap implementations here.
-  const mod = (await import('node:sqlite')) as {
-    DatabaseSync: new (p: string) => {
+async function openBunSqlite(dbPath: string): Promise<DbHandle> {
+  // This script's shebang/usage targets bun, so the default DB adapter
+  // uses bun:sqlite. Production moss-server runs the DB layer through
+  // node:sqlite, but the migration is a one-shot job invoked via
+  // `bun run scripts/migrate-transcript-paths.ts ...`; bun can open the
+  // same SQLite file the moss-server runtime writes; the WAL format is
+  // compatible. The dynamic import keeps bun bundler / non-bun callers
+  // from blowing up at module-load time.
+  const mod = (await import('bun:sqlite')) as {
+    Database: new (p: string) => {
       prepare: (sql: string) => {
         all: (...args: unknown[]) => unknown[]
         run: (...args: unknown[]) => unknown
@@ -64,7 +70,7 @@ async function openNodeSqlite(dbPath: string): Promise<DbHandle> {
       close: () => void
     }
   }
-  const db = new mod.DatabaseSync(dbPath)
+  const db = new mod.Database(dbPath)
   return {
     prepareAll: <T = unknown>(sql: string, params: unknown[]) =>
       db.prepare(sql).all(...params) as T[],
@@ -314,7 +320,7 @@ export async function runMigration(args: RunMigrationArgs): Promise<Summary> {
   if (!existsSync(args.db)) throw new Error(`db not found: ${args.db}`)
   if (!statSync(args.db).isFile()) throw new Error(`db is not a file: ${args.db}`)
 
-  const openDb = args.openDb ?? openNodeSqlite
+  const openDb = args.openDb ?? openBunSqlite
   const db = await openDb(args.db)
   const summary: Summary = {
     totalSessions: 0,
