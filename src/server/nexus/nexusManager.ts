@@ -236,6 +236,7 @@ export class NexusManager {
 
   private writeReadyFile(): void {
     const readyPath = join(this.binDir, '.nexus-bin-ready')
+    mkdirSync(this.binDir, { recursive: true })
     writeFileSync(readyPath, NEXUS_VERSION, 'utf8')
   }
 }
