@@ -28,6 +28,9 @@ import {
   getRuntimeStdoutLogPath,
   getSessionConfigDir,
   getSessionWorkspaceDir,
+  getSessionScodeHomeDir,
+  getSessionTmpDir,
+  getInContainerPidFile,
   getTranscriptPath,
 } from './runtimePaths.js'
 import { errorMessage } from '../utils/errors.js'
@@ -49,6 +52,15 @@ import { type McpAuthSecretsApi, type ConfigItemLike } from './mcp/authResolver.
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function safeKill0(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -468,10 +480,11 @@ export class RuntimeService {
           : runtime.hostMode || 'session',
       )
     const transcriptPath = getTranscriptPath(
-      this.options.config.transcriptDir || runtime.configDir,
-      workspaceDir,
+      this.options.config.runtimeDir,
+      sessionId,
       sessionId,
     )
+    await mkdir(dirname(transcriptPath), { recursive: true })
     const created = this.store.createSession({
       sessionId,
       transcriptSessionId: sessionId,
@@ -584,9 +597,82 @@ export class RuntimeService {
   }
 
   async reconcileOnStartup(): Promise<void> {
+    // Rebuild UserContainerRegistry from `docker ps` before touching sessions
+    // so ensureAttempt() reuses existing user containers rather than spawning
+    // duplicates. Silent on error — Docker may not be available in this
+    // process and that's fine for non-docker sessions.
+    try {
+      const reg = await import('./runtime/userContainerRegistry.js')
+      await reg.reconcile()
+
+      // Optional rollback hatch: force-drain all user containers on startup.
+      if (process.env.MOSS_FORCE_DRAIN_USER_CONTAINERS === 'true') {
+        process.stderr.write(
+          '[RuntimeService] MOSS_FORCE_DRAIN_USER_CONTAINERS=true — draining all user containers\n',
+        )
+        await reg.shutdownAll(this.options.config)
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[RuntimeService] userContainerRegistry reconcile failed: ${errorMessage(err)}\n`,
+      )
+    }
+
     const sessions = this.store.listSessionsToRecover()
     for (const session of sessions) {
       try {
+        // Per-user container mode: probe scode in the container and reap
+        // orphan processes before resuming. runner-alive cases reattach via
+        // ensureAttempt; runner-dead cases need a clean kill so the next
+        // attempt can fresh-spawn.
+        const runtimeAny = session.runtime as {
+          containerMode?: 'session' | 'user'
+          userContainerName?: string
+        }
+        if (
+          runtimeAny.containerMode === 'user' &&
+          runtimeAny.userContainerName &&
+          this.options.config.runtimeDir
+        ) {
+          const attempt = session.currentAttemptId
+            ? this.store.getAttempt(session.currentAttemptId)
+            : null
+          const runnerAlive = attempt?.runnerPid
+            ? safeKill0(attempt.runnerPid)
+            : false
+          try {
+            const { probeContainerSession } = await import(
+              './runtime/probeContainerSession.js'
+            )
+            const probe = await probeContainerSession({
+              userContainerName: runtimeAny.userContainerName,
+              sessionId: session.sessionId,
+              runtimeDirInContainer: this.options.config.runtimeDir,
+            })
+            if (!runnerAlive && probe.kind === 'alive') {
+              // Orphan scode — runner died with stdio. Reap before resume.
+              const { reapInUserContainer } = await import('./runtime/reaper.js')
+              await reapInUserContainer({
+                userContainerName: runtimeAny.userContainerName,
+                sessionId: session.sessionId,
+                graceMs: 0,
+              })
+              this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_orphan_scode', {
+                userContainer: runtimeAny.userContainerName,
+              })
+            } else if (probe.kind === 'stale_pid_reuse') {
+              this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_pid_reuse', {
+                pid: probe.pid,
+                recordedStartTicks: probe.recordedStartTicks,
+                currentStartTicks: probe.currentStartTicks,
+              })
+            }
+          } catch (probeErr) {
+            this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_probe_failed', {
+              error: errorMessage(probeErr),
+            })
+          }
+        }
         await this.ensureAttempt(session)
       } catch (error) {
         this.store.addEvent(session.sessionId, session.currentAttemptId, 'reconcile_failed', {
@@ -909,6 +995,59 @@ export class RuntimeService {
       }
     }
 
+    // A1: every session gets its own SUDO_CODE_CONFIG_HOME under runtimeDir so
+    // sudocode.json / settings.json never write into a shared configDir.
+    const scodeHomeDir = getSessionScodeHomeDir(
+      this.options.config.runtimeDir,
+      session.sessionId,
+    )
+    await mkdir(scodeHomeDir, { recursive: true })
+
+    // C2: when containerMode='user' the runner uses `docker exec` into a
+    // long-lived user container. Resolve the user container name + per-session
+    // helper paths here so the runner can build the exec command without
+    // touching UserContainerRegistry (which lives only in the main process).
+    const containerMode: 'session' | 'user' =
+      (session.runtime as { containerMode?: 'session' | 'user' }).containerMode
+      || this.options.config.docker?.containerMode
+      || 'session'
+
+    let userContainerName: string | undefined
+    let inContainerPidFile: string | undefined
+    let tmpDirInContainer: string | undefined
+
+    if (session.runtime.type === 'docker' && containerMode === 'user') {
+      const { ensureUserContainer, acquireSession, buildUserContainerName } =
+        await import('./runtime/userContainerRegistry.js')
+      userContainerName = buildUserContainerName(session.orgId, session.userId)
+      inContainerPidFile = getInContainerPidFile(
+        this.options.config.runtimeDir,
+        session.sessionId,
+      )
+      tmpDirInContainer = getSessionTmpDir(
+        this.options.config.runtimeDir,
+        session.sessionId,
+      )
+      await mkdir(tmpDirInContainer, { recursive: true })
+      await mkdir(dirname(inContainerPidFile), { recursive: true })
+
+      try {
+        await ensureUserContainer(this.options.config, {
+          orgId: session.orgId,
+          userId: session.userId,
+          role: session.role,
+          scopes: session.scopes,
+          image: session.runtime.dockerImage,
+        })
+        await acquireSession(session.orgId, session.userId, session.sessionId)
+      } catch (err) {
+        process.stderr.write(
+          `[RuntimeService] ensureUserContainer failed for ${session.userId}: ${errorMessage(err)}\n`,
+        )
+        throw err
+      }
+    }
+
     const manifest: RunnerManifest = {
       config: this.options.config,
       session: {
@@ -939,8 +1078,13 @@ export class RuntimeService {
         ...(mcpSettings ? { mcpSettings } : {}),
         runtime: {
           ...session.runtime,
+          containerMode,
+          scodeHomeDir,
+          ...(userContainerName ? { userContainerName } : {}),
+          ...(inContainerPidFile ? { inContainerPidFile } : {}),
+          ...(tmpDirInContainer ? { tmpDirInContainer } : {}),
           containerName:
-            session.runtime.type === 'docker'
+            session.runtime.type === 'docker' && containerMode === 'session'
               ? `moss-session-${session.sessionId.slice(0, 12)}-g${generation}`
               : session.runtime.containerName,
         },
@@ -1039,6 +1183,22 @@ export class RuntimeService {
     }
 
     this.store.updateAttemptRunner(attempt.attemptId, child.pid)
+
+    // Release the per-user container session refcount when the runner exits.
+    // Only applies in containerMode='user' — session mode never acquired one.
+    if (containerMode === 'user') {
+      const releaseKey = { orgId: session.orgId, userId: session.userId, sid: session.sessionId }
+      child.once('close', () => {
+        void import('./runtime/userContainerRegistry.js').then(({ releaseSession }) =>
+          releaseSession(releaseKey.orgId, releaseKey.userId, releaseKey.sid, this.options.config),
+        ).catch(err => {
+          process.stderr.write(
+            `[RuntimeService] releaseSession failed for ${releaseKey.sid}: ${errorMessage(err)}\n`,
+          )
+        })
+      })
+    }
+
     await waitForRunnerReady(attachPath, statusPath, stderrLogPath, 5_000)
     this.store.setSessionLifecycle(session.sessionId, 'active', 'active')
     this.store.addEvent(session.sessionId, attempt.attemptId, 'attempt_spawned', {

@@ -13,6 +13,8 @@ type RuntimeBackendOptions = {
   docker?: {
     image?: string
     mode?: 'session' | 'user'
+    containerMode?: 'session' | 'user'
+    execKillGraceMs?: number
     network?: string
     labels?: Record<string, string>
   }

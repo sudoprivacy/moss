@@ -12,8 +12,30 @@ export type SessionRuntimeOptions = {
   model?: string
   dockerImage?: string
   dockerMode?: 'session' | 'user'
+  /**
+   * Controls container reuse boundary. 'session' = legacy `docker run --rm`
+   * per session. 'user' = long-lived per-user container + `docker exec` per
+   * session. Independent of `dockerMode` (which controls configDir / shared
+   * memory). Defaults to 'session' to preserve backward compatibility.
+   */
+  containerMode?: 'session' | 'user'
   configDir?: string
   containerName?: string
+  /**
+   * User-level container name (e.g. moss-user-<hash>). Set by main process
+   * when containerMode='user'. The session-level `containerName` may still
+   * be set in user mode for diagnostics but is not used for cleanup.
+   */
+  userContainerName?: string
+  /** Path of scode pidfile written by moss-session-launch inside the container. */
+  inContainerPidFile?: string
+  /** Per-session TMPDIR mounted/visible inside the container. */
+  tmpDirInContainer?: string
+  /**
+   * Per-session SUDO_CODE_CONFIG_HOME so sudocode.json / settings.json never
+   * write into a shared configDir (A1).
+   */
+  scodeHomeDir?: string
   hostMode?: 'session' | 'user'
 }
 
@@ -23,7 +45,12 @@ export type SessionRuntimeInfo = {
   model?: string
   dockerImage?: string
   dockerMode?: 'session' | 'user'
+  containerMode?: 'session' | 'user'
   containerName?: string
+  userContainerName?: string
+  inContainerPidFile?: string
+  tmpDirInContainer?: string
+  scodeHomeDir?: string
   configDir?: string
   hostMode?: 'session' | 'user'
 }
@@ -111,7 +138,22 @@ export type BackendHandle = {
   onStdoutLine: (listener: (line: string) => void) => () => void
   onStderrLine: (listener: (line: string) => void) => () => void
   onExit: (listener: (code: number | null, signal: NodeJS.Signals | null) => void) => () => void
-  destroy: (force?: boolean) => void
+  destroy: (force?: boolean) => void | Promise<void>
+  /**
+   * Busy = scode is mid-turn (writeStdin called and no stopReason yet, or an
+   * AskUserQuestion is awaiting a user answer). Optional for backends that
+   * don't surface turn state.
+   */
+  isBusy?: () => boolean
+  /**
+   * Subscribe to busy state transitions. Returns an unsubscribe.
+   */
+  onBusyChange?: (listener: (busy: boolean) => void) => () => void
+  /**
+   * Persist the currently-buffered assistant text and a 'killed_by_idle_busy_timeout'
+   * event to the transcript before a force kill. No-op if no buffered text.
+   */
+  persistInProgressTurn?: () => Promise<void>
 }
 
 export interface SessionBackend {

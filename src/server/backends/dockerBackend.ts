@@ -2,7 +2,7 @@ import { spawn } from 'child_process'
 import { writeFileSync } from 'fs'
 import { mkdir, rm } from 'fs/promises'
 import os from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { MOSS_HOME } from '../../utils/skills/localSkillDirectories.js'
 import { syncWorkspaceSkills } from '../../utils/scodeBridge.js'
 import type {
@@ -20,10 +20,17 @@ import {
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { buildAllModelsConfig } from '../modelListCache.js'
+import { reapInUserContainer } from '../runtime/reaper.js'
 
 type DockerBackendDefaults = {
   image?: string
   mode?: 'session' | 'user'
+  /**
+   * Container reuse boundary fallback when manifest didn't pin it. Defaults
+   * to 'session' (legacy behavior).
+   */
+  containerMode?: 'session' | 'user'
+  execKillGraceMs?: number
   network?: string
   labels?: Record<string, string>
 }
@@ -114,7 +121,17 @@ export class DockerBackend implements SessionBackend {
     // scodePath: use runtime config or fallback to default
     const scodePath = runtime?.scodePath || '/usr/local/bin/scode'
 
-    const safeCwd = options.cwd === '/' ? os.homedir() : options.cwd
+    // C2: containerMode controls whether we `docker run` per session (legacy)
+    // or `docker exec` into a long-lived per-user container.
+    const containerMode: 'session' | 'user' =
+      runtime?.containerMode || this.defaults.containerMode || 'session'
+
+    // safeCwd: prefer workspace dir under runtimeDir if the requested cwd is
+    // '/' because in user-container mode the moss-server home is not mounted.
+    const fallbackCwd = runtime?.tmpDirInContainer
+      ? dirname(runtime.tmpDirInContainer)
+      : os.homedir()
+    const safeCwd = options.cwd === '/' ? fallbackCwd : options.cwd
 
     // 同步技能到工作空间目录（新方案）
     // 在工作空间的 .nexus/sudocode/skills/ 目录创建符号链接
@@ -130,8 +147,17 @@ export class DockerBackend implements SessionBackend {
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
 
+    // In session mode the session-level container name is used for `docker run`.
+    // In user mode the *user* container name is used for `docker exec` and the
+    // session-level containerName is only diagnostic.
+    const userContainerName = runtime?.userContainerName
     const containerName =
       runtime?.containerName || `moss-session-${options.sessionId.slice(0, 12)}`
+    if (containerMode === 'user' && !userContainerName) {
+      throw new Error(
+        'containerMode=user requires runtime.userContainerName to be set by the main process',
+      )
+    }
 
     const passthroughEnvKeys = [
       'MOSS_SESSION_USER_ID',
@@ -158,15 +184,21 @@ export class DockerBackend implements SessionBackend {
       ...(options.sessionToken ? { SESSION_TOKEN: options.sessionToken } : {}),
     })
 
-    const dotNexusDir = join(configDir, '.nexus', 'sudocode')
-    await mkdir(dotNexusDir, { recursive: true })
+    // A1: per-session SUDO_CODE_CONFIG_HOME (always — even in session mode the
+    // shared user-mode configDir caused write collisions on concurrent runs).
+    // Falls back to the legacy <configDir>/.nexus/sudocode path when the main
+    // process did not populate scodeHomeDir (e.g. very old manifests).
+    const scodeHomeDir = runtime?.scodeHomeDir || join(configDir, '.nexus', 'sudocode')
+    await mkdir(scodeHomeDir, { recursive: true })
 
-    // 创建 skill symlinks
-    if (enabledSkills.length > 0) {
+    // Skill symlinks: only useful in legacy session mode where each session
+    // has its own configDir / .claude/commands. In user-container mode we
+    // rely on syncWorkspaceSkills (workspace is per-session) instead.
+    if (enabledSkills.length > 0 && containerMode === 'session') {
       await createSkillSymlinks(configDir, enabledSkills)
     }
 
-    const dummySudocodePath = join(dotNexusDir, 'sudocode.json')
+    const dummySudocodePath = join(scodeHomeDir, 'sudocode.json')
 
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
@@ -200,25 +232,25 @@ export class DockerBackend implements SessionBackend {
       process.stderr.write(`[DockerBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
 
-    // Write user-visible MCP servers as settings.json (same dir as sudocode.json)
-    // so scode loads them on startup. mcpSettings is resolved in the main process
-    // and passed via the runner manifest; here we only write the file. The
-    // configDir is mounted into the container, so the file is visible to scode.
+    // Write user-visible MCP servers as settings.json. Lives in scode-home
+    // (per-session) so concurrent sessions in the same dockerMode=user
+    // configDir don't overwrite each other.
     if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
       try {
-        writeFileSync(join(dotNexusDir, 'settings.json'), JSON.stringify(options.mcpSettings, null, 2), 'utf8')
+        writeFileSync(join(scodeHomeDir, 'settings.json'), JSON.stringify(options.mcpSettings, null, 2), 'utf8')
         process.stderr.write(`[DockerBackend] Wrote ${Object.keys(options.mcpSettings.mcpServers).length} MCP server(s) to settings.json\n`)
       } catch (e) {
         process.stderr.write(`[DockerBackend] Failed to write settings.json: ${e}\n`)
       }
     }
 
-    // 挂载列表：工作空间、配置目录、Moss 安装目录
+    // 挂载列表：工作空间、配置目录、Moss 安装目录、scode-home
     // MOSS_HOME 需要挂载，因为符号链接指向这里
     const mounts = uniqueMounts([
       safeCwd,
       configDir,
       MOSS_HOME,
+      ...(scodeHomeDir ? [scodeHomeDir] : []),
     ]).filter(p => p !== '/')
 
     // Use model from env (which includes user preference), or fallback
@@ -228,57 +260,100 @@ export class DockerBackend implements SessionBackend {
     }
     console.log(`[DockerBackend] Model for session ${options.sessionId}: ${model} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})`)
 
-    const args = ['run', '--rm', '-i', '--name', containerName]
-    // Add security options to allow Tokio runtime to spawn threads and sandbox to work
-    // Without this, scode fails with "OS can't spawn worker thread: Operation not permitted"
-    // and sandbox unshare fails with "Permission denied"
-    args.push('--security-opt', 'seccomp=unconfined')
-    args.push('--cap-add', 'SYS_ADMIN')
-    const dockerUser = resolveDockerUser()
-    if (dockerUser) {
-      args.push('--user', dockerUser)
-    }
-    if (this.defaults.network) {
-      args.push('--network', this.defaults.network)
-    }
-    for (const [key, value] of Object.entries(this.defaults.labels || {})) {
-      args.push('--label', `${key}=${value}`)
-    }
-    for (const mount of mounts) {
-      const hostPath = toHostPath(mount)
-      args.push('-v', `${hostPath}:${mount}`)
-    }
-
-    args.push('-w', safeCwd)
-    for (const key of passthroughEnvKeys) {
-      if (env[key]) {
-        args.push('-e', `${key}=${env[key]}`)
+    let args: string[]
+    if (containerMode === 'user') {
+      // docker exec into long-lived user container. moss-session-launch writes
+      // pid + start_ticks for the reaper.
+      args = ['exec', '-i', '-w', safeCwd]
+      for (const key of passthroughEnvKeys) {
+        if (env[key]) {
+          args.push('-e', `${key}=${env[key]}`)
+        }
       }
+      args.push('-e', `HOME=${configDir}`)
+      args.push('-e', `MOSS_HOME=${MOSS_HOME}`)
+      args.push('-e', `SUDO_CODE_CONFIG_HOME=${scodeHomeDir}`)
+      args.push('-e', `CLAUDE_CONFIG_DIR=${configDir}`)
+      args.push('-e', `CLAUDE_CODE_REMOTE_MEMORY_DIR=${configDir}`)
+      args.push('-e', `MOSS_SESSION_ID=${options.sessionId}`)
+      if (runtime?.tmpDirInContainer) {
+        args.push('-e', `TMPDIR=${runtime.tmpDirInContainer}`)
+        args.push('-e', `TMP=${runtime.tmpDirInContainer}`)
+        args.push('-e', `TEMP=${runtime.tmpDirInContainer}`)
+      }
+      args.push(userContainerName!)
+      args.push('/usr/local/bin/moss-session-launch', options.sessionId, '--')
+      args.push(
+        scodePath,
+        'acp',
+        '--output-format', 'json',
+        '--permission-mode', 'danger-full-access',
+        '--auth', 'proxy',
+        '--model', model,
+      )
+
+      process.stderr.write(`\n[DockerBackend] docker exec into user container:\n`)
+      process.stderr.write(`  userContainer: ${userContainerName}\n`)
+      process.stderr.write(`  scode: ${scodePath}\n`)
+      process.stderr.write(`  CWD: ${safeCwd}\n`)
+      process.stderr.write(`  configDir: ${configDir}\n`)
+      process.stderr.write(`  scodeHomeDir: ${scodeHomeDir}\n`)
+      process.stderr.write(`  mode: ${mode}\n`)
+      process.stderr.write(`  containerMode: user\n`)
+      process.stderr.write(`  enabledSkills: ${enabledSkills.join(', ') || 'none'}\n`)
+      process.stderr.write(`  Model: ${model}\n\n`)
+    } else {
+      // Legacy `docker run --rm` per session.
+      args = ['run', '--rm', '-i', '--name', containerName]
+      args.push('--security-opt', 'seccomp=unconfined')
+      args.push('--cap-add', 'SYS_ADMIN')
+      const dockerUser = resolveDockerUser()
+      if (dockerUser) {
+        args.push('--user', dockerUser)
+      }
+      if (this.defaults.network) {
+        args.push('--network', this.defaults.network)
+      }
+      for (const [key, value] of Object.entries(this.defaults.labels || {})) {
+        args.push('--label', `${key}=${value}`)
+      }
+      for (const mount of mounts) {
+        const hostPath = toHostPath(mount)
+        args.push('-v', `${hostPath}:${mount}`)
+      }
+      args.push('-w', safeCwd)
+      for (const key of passthroughEnvKeys) {
+        if (env[key]) {
+          args.push('-e', `${key}=${env[key]}`)
+        }
+      }
+      args.push('-e', `HOME=${configDir}`)
+      args.push('-e', `MOSS_HOME=${MOSS_HOME}`)
+      args.push('-e', `SUDO_CODE_CONFIG_HOME=${scodeHomeDir}`)
+      args.push('-e', `CLAUDE_CONFIG_DIR=${configDir}`)
+      args.push('-e', `CLAUDE_CODE_REMOTE_MEMORY_DIR=${configDir}`)
+      args.push(
+        image,
+        scodePath,
+        'acp',
+        '--output-format', 'json',
+        '--permission-mode', 'danger-full-access',
+        '--auth', 'proxy',
+        '--model', model,
+      )
+
+      process.stderr.write(`\n[DockerBackend] Spawning scode engine inside Docker:\n`)
+      process.stderr.write(`  Image: ${image}\n`)
+      process.stderr.write(`  scode: ${scodePath}\n`)
+      process.stderr.write(`  CWD: ${safeCwd}\n`)
+      process.stderr.write(`  configDir: ${configDir}\n`)
+      process.stderr.write(`  scodeHomeDir: ${scodeHomeDir}\n`)
+      process.stderr.write(`  mode: ${mode}\n`)
+      process.stderr.write(`  containerMode: session\n`)
+      process.stderr.write(`  enabledSkills: ${enabledSkills.join(', ') || 'none'}\n`)
+      process.stderr.write(`  Model: ${model}\n`)
+      process.stderr.write(`  Mounts: ${mounts.join(', ')}\n\n`)
     }
-    args.push('-e', `HOME=${configDir}`)
-    args.push('-e', `MOSS_HOME=${MOSS_HOME}`)
-    args.push('-e', `CLAUDE_CONFIG_DIR=${configDir}`)
-    args.push('-e', `CLAUDE_CODE_REMOTE_MEMORY_DIR=${configDir}`)
-
-    args.push(
-      image,
-      scodePath,
-      'acp',
-      '--output-format', 'json',
-      '--permission-mode', 'danger-full-access',
-      '--auth', 'proxy',
-      '--model', model,
-    )
-
-    process.stderr.write(`\n[DockerBackend] Spawning scode engine inside Docker:\n`)
-    process.stderr.write(`  Image: ${image}\n`)
-    process.stderr.write(`  scode: ${scodePath}\n`)
-    process.stderr.write(`  CWD: ${safeCwd}\n`)
-    process.stderr.write(`  configDir: ${configDir}\n`)
-    process.stderr.write(`  mode: ${mode}\n`)
-    process.stderr.write(`  enabledSkills: ${enabledSkills.join(', ') || 'none'}\n`)
-    process.stderr.write(`  Model: ${model}\n`)
-    process.stderr.write(`  Mounts: ${mounts.join(', ')}\n\n`)
 
     const child = spawn('docker', args, {
       cwd: safeCwd,
@@ -292,8 +367,13 @@ export class DockerBackend implements SessionBackend {
       engine: 'scode',
       dockerImage: image,
       dockerMode: mode,
+      containerMode,
       containerName,
+      userContainerName,
       configDir,
+      scodeHomeDir,
+      inContainerPidFile: runtime?.inContainerPidFile,
+      tmpDirInContainer: runtime?.tmpDirInContainer,
     }
 
     const handle = createAcpBridgeHandle({
@@ -302,7 +382,7 @@ export class DockerBackend implements SessionBackend {
       cwd: safeCwd,
       model,
       transcriptPath: (options as any).transcriptPath,
-      // 新方案：传递智能体名称和启用的技能列表
+      containerMode,
       assistantName: options.assistantName,
       enabledSkillNames: enabledSkills,
       availableWikis: options.availableWikis,
@@ -313,14 +393,12 @@ export class DockerBackend implements SessionBackend {
     handle.availableSkills = availableSkills
 
     let cleanedUp = false
-    const cleanupRuntimeArtifacts = () => {
-      if (cleanedUp) {
-        return
-      }
+    const cleanupSessionMode = () => {
+      if (cleanedUp) return
       cleanedUp = true
 
-      // Best-effort extra cleanup for cases where `docker run --rm`
-      // doesn't reap the container promptly after the runtime exits.
+      // Legacy: best-effort backup `docker rm -f` because `--rm` sometimes
+      // misses reaping if the container died abnormally.
       const cleanup = spawn('docker', ['rm', '-f', containerName], {
         stdio: 'ignore',
         windowsHide: true,
@@ -328,22 +406,105 @@ export class DockerBackend implements SessionBackend {
       cleanup.unref()
 
       if (mode === 'session' && configDir) {
-        rm(configDir, { recursive: true, force: true }).catch(() => {
-          // 忽略清理错误
-        })
+        rm(configDir, { recursive: true, force: true }).catch(() => {})
+      }
+      // A1: scode-home is per-session in all modes — always safe to clear.
+      if (scodeHomeDir) {
+        rm(scodeHomeDir, { recursive: true, force: true }).catch(() => {})
       }
     }
 
-    child.once('close', () => {
-      cleanupRuntimeArtifacts()
-    })
+    const cleanupUserMode = async (force: boolean) => {
+      if (cleanedUp) return
+      cleanedUp = true
+
+      // Step 1: persist partial assistant text on graceful destroy.
+      if (!force && handle.persistInProgressTurn) {
+        try {
+          await handle.persistInProgressTurn()
+        } catch (err) {
+          process.stderr.write(`[DockerBackend] persistInProgressTurn failed: ${err}\n`)
+        }
+      }
+
+      // Step 2: real kill inside the container via reaper.
+      const graceMs = force ? 0 : (this.defaults.execKillGraceMs ?? 5000)
+      if (userContainerName) {
+        const outcome = await reapInUserContainer({
+          userContainerName,
+          sessionId: options.sessionId,
+          graceMs,
+        })
+        if (!outcome.ok) {
+          process.stderr.write(
+            `[DockerBackend] reap failed sid=${options.sessionId} timedOut=${outcome.timedOut} code=${outcome.code} stderr=${outcome.stderr.trim()}\n`,
+          )
+        }
+      }
+
+      // Step 3: best-effort host fd cleanup. scode is already dead; the host
+      // docker exec CLI usually exits on its own. Only SIGKILL if still alive
+      // after a short grace.
+      const waitForExit = new Promise<void>(resolve => {
+        if (child.exitCode !== null) return resolve()
+        const timer = setTimeout(() => resolve(), 3000)
+        child.once('close', () => { clearTimeout(timer); resolve() })
+      })
+      await waitForExit
+      if (child.exitCode === null && !child.killed) {
+        try { child.stdin?.end() } catch {}
+        try { child.kill('SIGKILL') } catch {}
+      }
+
+      // Step 4: per-session disk cleanup. Transcript is intentionally NOT
+      // touched (A3 — preserved for /sessions/:id/context).
+      if (runtime?.tmpDirInContainer) {
+        rm(runtime.tmpDirInContainer, { recursive: true, force: true }).catch(() => {})
+      }
+      if (runtime?.inContainerPidFile) {
+        // The reaper already removed pidfile + start_ticks. Removing the
+        // runtime dir is harmless and cleans up session_id stub.
+        const runtimeMeta = dirname(runtime.inContainerPidFile)
+        rm(runtimeMeta, { recursive: true, force: true }).catch(() => {})
+      }
+      if (scodeHomeDir) {
+        rm(scodeHomeDir, { recursive: true, force: true }).catch(() => {})
+      }
+      if (mode === 'session' && configDir) {
+        rm(configDir, { recursive: true, force: true }).catch(() => {})
+      }
+      // Step 5 (registry.releaseSession) NOT done here — main process
+      // child.once('close') handler triggers it.
+    }
+
+    if (containerMode === 'user') {
+      child.once('close', () => {
+        // If the runner exited without an explicit destroy(), still run the
+        // reaper to clean orphaned scode trees.
+        void cleanupUserMode(false).catch(() => {})
+      })
+    } else {
+      child.once('close', () => {
+        cleanupSessionMode()
+      })
+    }
 
     const originalDestroy = handle.destroy.bind(handle)
-    handle.destroy = (force = false) => {
-      originalDestroy(force)
+    handle.destroy = async (force = false) => {
+      // Call AcpBridge's destroy first so it can:
+      //  - session mode: send signal to docker run process
+      //  - user mode: just end stdin (no signal — would be ignored by daemon)
+      const destroyResult = originalDestroy(force)
+      if (destroyResult instanceof Promise) {
+        await destroyResult.catch(() => {})
+      }
 
-      if (force) {
-        cleanupRuntimeArtifacts()
+      if (containerMode === 'user') {
+        await cleanupUserMode(force).catch(err => {
+          process.stderr.write(`[DockerBackend] cleanupUserMode error: ${err}\n`)
+        })
+      } else if (force) {
+        cleanupSessionMode()
       }
     }
 

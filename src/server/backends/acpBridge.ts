@@ -18,6 +18,13 @@ type AcpBridgeOptions = {
   model: string
   transcriptPath?: string
   runtime: SessionRuntimeInfo
+  /**
+   * Per-user container mode. 'session' (default) sends signals to the child
+   * docker run process on destroy. 'user' only closes stdin on destroy — the
+   * real kill is performed by DockerBackend invoking moss-session-reap inside
+   * the long-lived user container.
+   */
+  containerMode?: 'session' | 'user'
   // 新增参数：首次消息注入
   assistantName?: string
   enabledSkillNames?: string[]
@@ -39,7 +46,35 @@ type AcpBridgeOptions = {
 
 export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle {
   const { child, sessionId, cwd, model, runtime } = options
+  const containerMode = options.containerMode ?? runtime.containerMode ?? 'session'
   const transcriptPath = options.transcriptPath
+
+  // A2: busy state machine
+  let busy = false
+  const busyListeners = new Set<(b: boolean) => void>()
+  const setBusy = (next: boolean): void => {
+    if (next === busy) return
+    busy = next
+    for (const l of busyListeners) {
+      try { l(next) } catch (err) {
+        process.stderr.write(`[AcpBridge] busy listener error: ${err}\n`)
+      }
+    }
+  }
+  const reevaluateBusy = (): void => {
+    // Busy = false only when stopReason arrived AND no buffered stdin AND no
+    // pending AskUserQuestion. Anything pending keeps busy=true.
+    if (pendingAskUserQuestions.size > 0) {
+      setBusy(true)
+      return
+    }
+    if (pendingStdin.length > 0) {
+      // Stdin still queued -> the engine has a turn coming. Treat as busy.
+      setBusy(true)
+      return
+    }
+    setBusy(false)
+  }
 
   if (!child.stdin || !child.stdout) {
     throw new Error('Failed to start scode process pipes')
@@ -99,7 +134,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
-    child.stdin!.write(raw)
+    if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+      child.stdin.write(raw)
+    }
   }
 
   // Send RPC and wait for response (for model switching)
@@ -108,7 +145,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
-    child.stdin!.write(raw)
+    if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+      child.stdin.write(raw)
+    }
 
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
@@ -183,6 +222,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       pendingAskUserQuestions.delete(pendingQuestionKey)
       // Also clean up the mapping
       askUserQuestionUuidToRequestId.delete(parentToolUseId!)
+      // A2: user answered -> question no longer pending. Busy is still true
+      // because the engine will run another turn from this answer; the next
+      // stopReason will flip it back to false.
 
       process.stderr.write(`[AcpBridge] Processing AskUserQuestion response for toolCallId=${pendingQuestionKey}, answer=${trimmedText}\n`)
 
@@ -204,7 +246,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
       const raw = JSON.stringify(responseMsg) + '\n'
       process.stderr.write(`[AcpBridge] Sending AskUserQuestion RPC response: ${raw}\n`)
-      child.stdin!.write(raw)
+      if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+      child.stdin.write(raw)
+    }
 
       // Also emit user message to transcript for record
       const userEvent = {
@@ -502,6 +546,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             })
 
           currentAssistantText = ''
+          // A2: stopReason is the authoritative "turn done" signal from scode.
+          // Re-evaluate busy here; setBusy(false) only if no question / stdin
+          // is pending.
+          reevaluateBusy()
         }
 
         if (parsed.method === 'session/update' && parsed.params) {
@@ -631,6 +679,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             resolve: () => {}, // Will be set when user responds
             reject: () => {},
           })
+          // A2: AskUserQuestion in flight => busy until user replies.
+          setBusy(true)
 
           // If we found a linked uuid, also store under that key for easier lookup
           if (linkedUuid) {
@@ -706,6 +756,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
 
   child.on('close', (code, signal) => {
+    setBusy(false)
     for (const l of exitListeners) l(code, signal)
   })
 
@@ -718,6 +769,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         process.stderr.write(`[AcpBridge] writeStdin: stdin destroyed, ignoring\n`)
         return
       }
+      // A2: user kicked off a turn. Stays busy until stopReason or destroy.
+      setBusy(true)
 
       // Handle control_request for model switching (async)
       try {
@@ -789,17 +842,76 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     },
     onStdoutLine(l) { stdoutListeners.add(l); return () => stdoutListeners.delete(l) },
     onStderrLine(l) { stderrListeners.add(l); return () => stderrListeners.delete(l) },
-    onExit(l) { exitListeners.add(l); return () => exitListeners.delete(l) },
+    onExit(l) {
+      exitListeners.add(l)
+      return () => exitListeners.delete(l)
+    },
+    isBusy: () => busy,
+    onBusyChange: (listener: (b: boolean) => void) => {
+      busyListeners.add(listener)
+      return () => { busyListeners.delete(listener) }
+    },
+    persistInProgressTurn: async () => {
+      // Called by the runner just before a force kill when (detached && busy)
+      // exceeds maxDetachedBusyMs. Flush whatever assistant text is buffered
+      // so the user sees the partial answer on next reattach.
+      if (!transcriptPath) return
+      try {
+        if (currentAssistantText) {
+          const assistantUuid = randomUUID()
+          await writeTranscript({
+            type: 'assistant',
+            sessionId,
+            uuid: assistantUuid,
+            parentUuid: lastPersistedUuid,
+            isSidechain: false,
+            timestamp: new Date().toISOString(),
+            cwd,
+            userType: 'external',
+            version: 'unknown',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'text', text: currentAssistantText }],
+              partial: true,
+            },
+          })
+          lastPersistedUuid = assistantUuid
+          currentAssistantText = ''
+        }
+        await writeTranscript({
+          type: 'system',
+          subtype: 'killed_by_idle_busy_timeout',
+          sessionId,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        process.stderr.write(`[AcpBridge] persistInProgressTurn error: ${err}\n`)
+      }
+    },
     destroy(force = false) {
       if (child.killed) return
+
+      if (containerMode === 'user') {
+        // User container mode: don't signal the docker exec CLI — that won't
+        // propagate to scode inside the container. The real kill is performed
+        // by DockerBackend.cleanupSessionArtifactsForUserContainer via the
+        // moss-session-reap script. Just close stdin so scode's read loop
+        // sees EOF if it polls.
+        try { child.stdin?.end() } catch {}
+        setBusy(false)
+        return
+      }
+
+      // Legacy session mode: signal the docker run / host child directly.
       child.kill(force ? 'SIGKILL' : 'SIGTERM')
 
-      // Host 模式 Session 模式清理 configDir
+      // Host mode session mode cleans configDir.
       if (runtime.type === 'host' && runtime.hostMode === 'session' && runtime.configDir) {
         rm(runtime.configDir, { recursive: true, force: true }).catch(() => {
-          // 忽略清理错误
+          // ignore cleanup error
         })
       }
+      setBusy(false)
     },
   }
 }

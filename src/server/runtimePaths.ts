@@ -1,6 +1,5 @@
 import { createHash } from 'crypto'
 import { join } from 'path'
-import { sanitizePath } from '../utils/sessionStoragePortable.js'
 import type { ServerConfig } from './types.js'
 
 export function isNamedPipePath(path: string): boolean {
@@ -78,10 +77,59 @@ export function getSessionConfigDir(
   return join(config.runtimeDir, 'sessions', sessionId, 'config')
 }
 
+/**
+ * Transcript path is anchored to the session runtime directory so it survives
+ * configDir cleanup at session destroy. Layout:
+ *   <runtimeDir>/sessions/<sessionId>/transcript/<transcriptSessionId>.jsonl
+ *
+ * sessionId already provides per-session isolation, so cwd is no longer part
+ * of the path.
+ */
 export function getTranscriptPath(
-  configDir: string,
-  cwd: string,
+  runtimeDir: string,
+  sessionId: string,
+  transcriptSessionId: string,
+): string {
+  return join(
+    runtimeDir,
+    'sessions',
+    sessionId,
+    'transcript',
+    `${transcriptSessionId}.jsonl`,
+  )
+}
+
+export function getSessionTranscriptDir(
+  runtimeDir: string,
   sessionId: string,
 ): string {
-  return join(configDir, 'projects', sanitizePath(cwd), `${sessionId}.jsonl`)
+  return join(runtimeDir, 'sessions', sessionId, 'transcript')
+}
+
+export function getSessionRuntimeMetaDir(
+  runtimeDir: string,
+  sessionId: string,
+): string {
+  return join(runtimeDir, 'sessions', sessionId, 'runtime')
+}
+
+export function getSessionTmpDir(
+  runtimeDir: string,
+  sessionId: string,
+): string {
+  return join(runtimeDir, 'sessions', sessionId, 'tmp')
+}
+
+export function getSessionScodeHomeDir(
+  runtimeDir: string,
+  sessionId: string,
+): string {
+  return join(runtimeDir, 'sessions', sessionId, 'scode-home', '.nexus', 'sudocode')
+}
+
+export function getInContainerPidFile(
+  runtimeDir: string,
+  sessionId: string,
+): string {
+  return join(runtimeDir, 'sessions', sessionId, 'runtime', 'scode.pid')
 }

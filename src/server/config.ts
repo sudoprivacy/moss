@@ -113,6 +113,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     dockerNetwork: raw.docker.network,
     dockerStopTimeoutSec: raw.docker.stopTimeoutSec,
     dockerLabels: raw.docker.labels,
+    docker: {
+      containerMode: raw.docker.containerMode,
+      maxSessionsPerUser: raw.docker.maxSessionsPerUser,
+      userContainerIdleTimeoutMs: raw.docker.userContainerIdleTimeoutMs,
+      execKillGraceMs: raw.docker.execKillGraceMs,
+      user: raw.docker.user,
+    },
+    session: {
+      maxDetachedBusyMs: 2 * 60 * 60 * 1000,
+    },
     startupPolicy: raw.recovery.startupPolicy,
     heartbeatTimeoutMs: raw.recovery.heartbeatTimeoutMs,
     reattachProbeTimeoutMs: raw.recovery.reattachProbeTimeoutMs,
