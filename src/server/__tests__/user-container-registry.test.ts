@@ -137,6 +137,7 @@ describe('UserContainerRegistry', () => {
     const log = await readFile(docker.logFile, 'utf8')
     const runs = log.split('\n').filter(line => line.startsWith('run '))
     expect(runs.length).toBe(1)
+    expect(runs[0]).toContain('--init')
   })
 
   it('arms idle timer when count drops to 0; cancels when it goes back up', async () => {

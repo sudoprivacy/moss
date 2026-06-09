@@ -460,9 +460,9 @@ export class DockerBackend implements SessionBackend {
         const runtimeMeta = dirname(runtime.inContainerPidFile)
         rm(runtimeMeta, { recursive: true, force: true }).catch(() => {})
       }
-      if (scodeHomeDir) {
-        rm(scodeHomeDir, { recursive: true, force: true }).catch(() => {})
-      }
+      // scodeHomeDir is session-scoped, not attempt-scoped. Do not remove it
+      // here: reconnects can create the next attempt while this async cleanup
+      // is still running, racing with sudocode.json creation.
       if (mode === 'session' && configDir) {
         rm(configDir, { recursive: true, force: true }).catch(() => {})
       }

@@ -155,6 +155,7 @@ async function doCreate(
 
   const args = [
     'run', '-d',
+    '--init',
     '--name', rec.containerName,
     '--restart=no',
     '--pids-limit', String(userResources.pidsLimit),
