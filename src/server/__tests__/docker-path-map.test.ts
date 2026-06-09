@@ -162,4 +162,17 @@ describe('UserContainerRegistry uses toHostPath for -v mounts', () => {
     const log = await readFile(docker.logFile, 'utf8')
     expect(log).toContain('-v /app/data/runtime:/app/data/runtime')
   })
+
+  it('passes docker.network to user container creation', async () => {
+    const config = { ...baseConfig(), dockerNetwork: 'moss-network' }
+    await ensureUserContainer(config, {
+      orgId: 'orgZ',
+      userId: 'userZ',
+      role: 'user',
+      scopes: [],
+      image: 'fake:test',
+    })
+    const log = await readFile(docker.logFile, 'utf8')
+    expect(log).toContain('--network moss-network')
+  })
 })

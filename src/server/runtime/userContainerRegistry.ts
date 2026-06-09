@@ -178,6 +178,10 @@ async function doCreate(
     '-e', `MOSS_SESSION_SCOPES=${ctx.scopes.join(',')}`,
   ]
 
+  if (config.dockerNetwork) {
+    args.push('--network', config.dockerNetwork)
+  }
+
   // Pass through container-level env (shared across all execs).
   for (const k of CONTAINER_ENV_KEYS) {
     const v = process.env[k]
