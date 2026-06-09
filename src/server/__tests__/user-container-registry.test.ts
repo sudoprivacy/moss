@@ -145,7 +145,7 @@ describe('UserContainerRegistry', () => {
     })
     const ctx = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:test' }
     await ensureUserContainer(config, ctx)
-    await acquireSession('org', 'u', 's1')
+    await acquireSession('org', 'u', 's1', config)
     const rec1 = _getRecordForTests('org', 'u')!
     expect(rec1.idleTimer).toBeNull()
     expect(rec1.activeSessionIds.size).toBe(1)
@@ -156,9 +156,29 @@ describe('UserContainerRegistry', () => {
     expect(rec2.idleTimer).not.toBeNull()
 
     // Re-acquire cancels the timer.
-    await acquireSession('org', 'u', 's2')
+    await acquireSession('org', 'u', 's2', config)
     const rec3 = _getRecordForTests('org', 'u')!
     expect(rec3.idleTimer).toBeNull()
+  })
+
+  it('enforces maxSessionsPerUser for concurrent sessions', async () => {
+    const config = makeConfig({
+      docker: { ...makeConfig().docker!, maxSessionsPerUser: 2 },
+    })
+    const ctx = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:test' }
+    await ensureUserContainer(config, ctx)
+    await acquireSession('org', 'u', 's1', config)
+    await acquireSession('org', 'u', 's2', config)
+
+    await expect(acquireSession('org', 'u', 's3', config)).rejects.toThrow(
+      'maxSessionsPerUser exceeded',
+    )
+    const rec = _getRecordForTests('org', 'u')!
+    expect([...rec.activeSessionIds].sort()).toEqual(['s1', 's2'])
+
+    // Re-acquiring the same session is idempotent and should not trip the cap.
+    await acquireSession('org', 'u', 's2', config)
+    expect(rec.activeSessionIds.size).toBe(2)
   })
 
   it('reclaims the container after idle timeout', async () => {
@@ -167,7 +187,7 @@ describe('UserContainerRegistry', () => {
     })
     const ctx = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:test' }
     await ensureUserContainer(config, ctx)
-    await acquireSession('org', 'u', 's1')
+    await acquireSession('org', 'u', 's1', config)
     await releaseSession('org', 'u', 's1', config)
 
     expect(_getRecordForTests('org', 'u')).toBeDefined()
@@ -185,11 +205,11 @@ describe('UserContainerRegistry', () => {
     })
     const ctx = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:test' }
     await ensureUserContainer(config, ctx)
-    await acquireSession('org', 'u', 's1')
+    await acquireSession('org', 'u', 's1', config)
     await releaseSession('org', 'u', 's1', config)
     // Re-acquire immediately to win the race. The acquire goes through the
     // mutex with the idle timer; the timer's onIdleFire double-checks count.
-    await acquireSession('org', 'u', 's2')
+    await acquireSession('org', 'u', 's2', config)
 
     // Wait past the original timer.
     await new Promise(r => setTimeout(r, 150))

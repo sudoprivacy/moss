@@ -1053,7 +1053,12 @@ export class RuntimeService {
           scopes: session.scopes,
           image: session.runtime.dockerImage,
         })
-        await acquireSession(session.orgId, session.userId, session.sessionId)
+        await acquireSession(
+          session.orgId,
+          session.userId,
+          session.sessionId,
+          this.options.config,
+        )
       } catch (err) {
         process.stderr.write(
           `[RuntimeService] ensureUserContainer failed for ${session.userId}: ${errorMessage(err)}\n`,

@@ -306,12 +306,34 @@ export async function acquireSession(
   orgId: string,
   userId: string,
   sessionId: string,
+  config: ServerConfig,
 ): Promise<void> {
   const k = key(orgId, userId)
   return mutex.run(k, async () => {
     const rec = registry.get(k)
     if (!rec) {
       throw new Error(`acquireSession called before ensureUserContainer: ${k}`)
+    }
+    const maxSessionsPerUser = config.docker?.maxSessionsPerUser ?? 5
+    if (
+      !rec.activeSessionIds.has(sessionId) &&
+      rec.activeSessionIds.size >= maxSessionsPerUser
+    ) {
+      logRuntimeMetric('session_acquire_rejected', {
+        org: orgId,
+        reason: 'max_sessions_per_user',
+      })
+      logRuntimeEvent('session_acquire_rejected', {
+        org: orgId,
+        userId,
+        sessionId,
+        containerName: rec.containerName,
+        activeCount: rec.activeSessionIds.size,
+        maxSessionsPerUser,
+      })
+      throw new Error(
+        `maxSessionsPerUser exceeded for ${k}: ${rec.activeSessionIds.size}/${maxSessionsPerUser}`,
+      )
     }
     rec.activeSessionIds.add(sessionId)
     if (rec.activeSessionIds.size === 1) {
@@ -486,4 +508,3 @@ export function getRecordSnapshot(orgId: string, userId: string): UserContainerR
   if (!r) return undefined
   return { ...r, activeSessionIds: new Set(r.activeSessionIds) }
 }
-

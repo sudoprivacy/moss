@@ -30,6 +30,7 @@ export type RuntimeMetricEvent =
   | 'user_container_reclaim_failed'
   | 'user_container_force_drain'
   | 'session_acquire'
+  | 'session_acquire_rejected'
   | 'session_release'
   | 'session_reap_ok'
   | 'session_reap_failed'
