@@ -332,6 +332,13 @@ function inferLocalSkillMetaDefaults(skillDir: string): Partial<SkillStoreMeta> 
     }
   }
 
+  if (isPathInsideDir(MOSS_SKILLS_TENANT_DIR, skillDir)) {
+    return {
+      source_type: 'tenant',
+      is_builtin: false,
+    }
+  }
+
   if (isPathInsideDir(MOSS_SKILLS_SYSTEM_DIR, skillDir)) {
     return {
       is_builtin: true,
@@ -374,6 +381,11 @@ function toInstalledSkillInfo(params: {
   frontmatter: Record<string, string> | null
 }): InstalledSkillInfo {
   const { skillDir, skillName, meta, version, frontmatter } = params
+  // Dir-based defaults so tenant/custom/hub skills are classified even when the
+  // on-disk meta lacks source_type (the meta is authoritative when present).
+  const dirDefaults = inferLocalSkillMetaDefaults(skillDir)
+  const effectiveSourceType: SkillStoreMeta['source_type'] | undefined =
+    meta?.source_type ?? dirDefaults.source_type
   // Trim skill name to avoid leading/trailing spaces
   const trimmedSkillName = skillName.trim()
   const displayName =
@@ -410,12 +422,19 @@ function toInstalledSkillInfo(params: {
         ? meta.category
         : frontmatter?.category || '',
     categories,
-    isBuiltin: meta?.is_builtin === true,
-    isHubInstalled: meta?.source_type === 'hub',
-    isUploaded: meta?.source_type === 'upload',
+    isBuiltin: meta?.is_builtin === true || dirDefaults.is_builtin === true,
+    isHubInstalled: effectiveSourceType === 'hub',
+    isUploaded: effectiveSourceType === 'upload',
     enabled: meta?.enabled !== false,
     source: skillDir,
-    meta,
+    // Surface the dir-inferred source_type so callers (e.g. the Skills page
+    // tab badges) can classify tenant/custom skills even when the on-disk meta
+    // predates source_type being written.
+    meta: meta
+      ? { ...meta, source_type: effectiveSourceType ?? meta.source_type }
+      : effectiveSourceType
+        ? ({ source_type: effectiveSourceType } as SkillStoreMeta)
+        : meta,
     visibleTo: meta?.visible_to ?? null,
   }
 }

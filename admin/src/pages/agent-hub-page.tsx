@@ -1635,10 +1635,27 @@ export default function AgentHubPage() {
 
   const customAgents = useMemo(() => {
     return installedAgents.filter(agent => {
+      // Exclude tenant/hub-dir agents so buckets are mutually exclusive (no
+      // double counting in badges/total).
+      if (agent.category === 'tenant' || agent.category === 'hub') return false
       const sourceType = agent.meta?.source_type
       return sourceType === 'upload' || sourceType === 'custom'
     })
   }, [installedAgents])
+
+  // Installed-by-type buckets that map to the tabs, so badges + total reconcile.
+  // category is dir-based (reliable); meta.source_type is the secondary signal.
+  const hubAgents = useMemo(
+    () => installedAgents.filter(a => !a.isBuiltin && (a.isHubInstalled || a.category === 'hub')),
+    [installedAgents],
+  )
+  const tenantAgents = useMemo(
+    () =>
+      installedAgents.filter(
+        a => !a.isBuiltin && (a.category === 'tenant' || a.meta?.source_type === 'tenant'),
+      ),
+    [installedAgents],
+  )
 
   // Filter tenant assistants by search query, type and visibility
   const filteredTenantAssistants = useMemo(() => {
@@ -1813,7 +1830,7 @@ export default function AgentHubPage() {
             {/* <Badge variant={tenantId ? 'secondary' : 'outline'}>
               {tenantId ? `专属技能租户: ${tenantId}` : '未配置专属技能租户 ID'}
             </Badge> */}
-            <Badge variant="secondary">已安装 {installedAgents.length} 个智能体</Badge>
+            <Badge variant="secondary">已安装 {hubAgents.length + tenantAgents.length + customAgents.length} 个智能体</Badge>
           </div>
 
           <div className="flex items-center gap-2">
@@ -1851,17 +1868,17 @@ export default function AgentHubPage() {
                 <TabsList>
                   <TabsTrigger value="store">
                     智能体库
-                    {installedAgents.filter(a => a.isHubInstalled).length > 0 ? (
+                    {hubAgents.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {installedAgents.filter(a => a.isHubInstalled).length}
+                        {hubAgents.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
                   <TabsTrigger value="exclusive">
                     专属智能体
-                    {tenantAssistants.filter(t => t.status === 'approved').length > 0 ? (
+                    {tenantAgents.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {tenantAssistants.filter(t => t.status === 'approved').length}
+                        {tenantAgents.length}
                       </span>
                     ) : null}
                   </TabsTrigger>

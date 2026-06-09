@@ -41,7 +41,7 @@ export interface InstalledAgentMeta {
   emoji?: string | null
   category?: string
   categories?: string[]
-  source_type?: 'hub' | 'upload' | 'custom'
+  source_type?: 'hub' | 'upload' | 'custom' | 'tenant'
   tag?: string
   is_builtin?: boolean
   enabled?: boolean

@@ -52,7 +52,7 @@ export interface InstalledSkillMeta {
   core_features?: unknown
   homepage?: string | null
   author_id?: string
-  source_type?: 'hub' | 'upload'
+  source_type?: 'hub' | 'upload' | 'custom' | 'tenant'
   is_builtin?: boolean
   enabled?: boolean
   installed_version?: string
