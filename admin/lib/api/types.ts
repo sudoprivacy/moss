@@ -205,6 +205,8 @@ export interface SystemSettings {
   image: SystemSettingsImage
   skillStore: SystemSettingsSkillStore
   oauth2: SystemSettingsOAuth2
+  /** Whether enterprise clients may use the cron feature. Stored in settings.json. */
+  clientCronEnabled: boolean
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
@@ -222,6 +224,7 @@ export interface UpdateSystemSettingsRequest {
   image?: Partial<SystemSettingsImage>
   skillStore?: Partial<SystemSettingsSkillStore>
   oauth2?: Partial<SystemSettingsOAuth2>
+  clientCronEnabled?: boolean
 }
 
 // Direct Connect Server Types

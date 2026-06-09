@@ -46,6 +46,10 @@ export type SystemSettingsPayload = {
   image: SystemSettingsImage
   skillStore: SystemSettingsSkillStore
   oauth2: SystemSettingsOAuth2
+  /** Whether enterprise client (sudowork) users may use the cron / scheduled
+   *  task feature. Stored in settings.json; surfaced to clients via
+   *  GET /api/v1/tenant/config. */
+  clientCronEnabled: boolean
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
@@ -88,6 +92,7 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
     scriptPath: '',
     requireState: true,
   },
+  clientCronEnabled: true,
 })
 
 type SystemSettingsState = {
@@ -139,6 +144,12 @@ function normalizeSystemSettings(
     result.bypassPermissions = Boolean(source.bypassPermissions)
   } else if (result.bypassPermissions === undefined) {
     result.bypassPermissions = DEFAULT_SYSTEM_SETTINGS.bypassPermissions
+  }
+
+  if (source.clientCronEnabled !== undefined) {
+    result.clientCronEnabled = Boolean(source.clientCronEnabled)
+  } else if (result.clientCronEnabled === undefined) {
+    result.clientCronEnabled = DEFAULT_SYSTEM_SETTINGS.clientCronEnabled
   }
 
   if (source.thinkingMode !== undefined) {
@@ -314,6 +325,7 @@ function toSystemSettingsPayload(
     image: state.value.image,
     skillStore: state.value.skillStore,
     oauth2: state.value.oauth2,
+    clientCronEnabled: state.value.clientCronEnabled ?? DEFAULT_SYSTEM_SETTINGS.clientCronEnabled,
     settingsPath: state.path,
     settingsExists: state.exists,
     settingsLoaded: state.loaded,
@@ -389,6 +401,7 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
     image: nextSettings.image,
     skillStore: nextSettings.skillStore,
     oauth2: nextSettings.oauth2,
+    clientCronEnabled: nextSettings.clientCronEnabled,
     settingsPath: SYSTEM_SETTINGS_PATH,
     settingsExists: true,
     settingsLoaded: true,

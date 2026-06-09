@@ -36,7 +36,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useAuth } from '@/lib/hooks/use-auth'
-import { hasAnyScope, hasScope } from '@/lib/api/client'
+import { hasAnyScope, hasScope, setPreferredOrgId } from '@/lib/api/client'
 import { getOrganizations, switchOrg } from '@/lib/api/auth'
 import type { AuthOrgWithCounts } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
@@ -177,7 +177,7 @@ const systemItems: NavItem[] = [
 export function AppSidebar() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
-  const { user, scopes, logout } = useAuth()
+  const { user, scopes, activeOrgId, logout } = useAuth()
   const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set())
 
   // Super-admin org switcher: lists all orgs and re-scopes the session to the
@@ -202,10 +202,12 @@ export function AppSidebar() {
   }, [isSuperAdmin])
 
   const handleSwitchOrg = async (orgId: string) => {
-    if (!orgId || orgId === user?.orgId || switchingOrg) return
+    if (!orgId || orgId === activeOrgId || switchingOrg) return
     setSwitchingOrg(true)
     try {
       await switchOrg(orgId)
+      // Remember the selection so it persists across logins.
+      setPreferredOrgId(orgId)
       // Reload so every page re-fetches against the newly selected org.
       window.location.reload()
     } catch {
@@ -401,7 +403,7 @@ export function AppSidebar() {
         </div>
         {isSuperAdmin ? (
           <Select
-            value={user?.orgId ?? ''}
+            value={activeOrgId ?? ''}
             onValueChange={(value) => void handleSwitchOrg(value)}
             disabled={switchingOrg}
           >

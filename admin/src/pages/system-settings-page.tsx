@@ -37,8 +37,10 @@ import {
   Image as ImageIcon,
   KeyRound,
   Loader2,
+  MonitorSmartphone,
   Package,
   RefreshCw,
+  Save,
   Shield,
   Sparkles,
   TriangleAlert,
@@ -109,6 +111,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
       scriptPath: settings.oauth2.scriptPath,
       requireState: settings.oauth2.requireState,
     },
+    clientCronEnabled: settings.clientCronEnabled,
   }
 }
 
@@ -246,6 +249,80 @@ function SettingsSkeleton() {
         </Card>
       ))}
     </div>
+  )
+}
+
+/**
+ * Client-facing settings. clientCronEnabled is persisted in settings.json via
+ * the system-settings API. Self-contained load/save so it doesn't entangle the
+ * page's primary auto-save flow.
+ */
+function ClientSettingsSection() {
+  const [cronEnabled, setCronEnabled] = useState(true)
+  const [loaded, setLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    getSystemSettings()
+      .then((res) => {
+        if (cancelled) return
+        setCronEnabled(res.clientCronEnabled !== false)
+        setLoaded(true)
+      })
+      .catch(() => {
+        if (!cancelled) setLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await updateSystemSettings({ clientCronEnabled: cronEnabled })
+      setDirty(false)
+      toast.success('客户端设置已保存')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存客户端设置失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <SettingSection
+      icon={MonitorSmartphone}
+      title="客户端设置"
+      description="控制企业版客户端（sudowork）用户可使用的功能。仅对企业模式生效。"
+    >
+      <SettingField
+        label="客户端定时任务"
+        description="是否允许客户端用户使用定时任务（cron）功能。关闭后，客户端将隐藏定时任务菜单及运行记录列表。"
+      >
+        <Switch
+          checked={cronEnabled}
+          disabled={!loaded || saving}
+          onCheckedChange={(checked) => {
+            setCronEnabled(checked)
+            setDirty(true)
+          }}
+        />
+      </SettingField>
+
+      <div className="flex justify-end pt-2">
+        <Button onClick={() => void handleSave()} disabled={!loaded || saving || !dirty}>
+          {saving ? (
+            <Loader2 className="mr-2 size-4 animate-spin" />
+          ) : (
+            <Save className="mr-2 size-4" />
+          )}
+          保存
+        </Button>
+      </div>
+    </SettingSection>
   )
 }
 
@@ -958,6 +1035,8 @@ export default function SystemSettingsPage() {
             </p>
           </SettingField>
         </SettingSection>
+
+        <ClientSettingsSection />
       </div>
     </DashboardLayout>
   )
