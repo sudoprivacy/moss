@@ -29,7 +29,18 @@
   },
   "docker": {
     "stopTimeoutSec": 10,
-    "labels": {}
+    "labels": {},
+    "network": "moss-network",
+    "containerMode": "user",
+    "maxSessionsPerUser": 5,
+    "userContainerIdleTimeoutMs": 1200000,
+    "execKillGraceMs": 5000,
+    "user": {
+      "pidsLimit": 512,
+      "memory": "4g",
+      "cpus": "2",
+      "nofile": 4096
+    }
   },
   "recovery": {
     "startupPolicy": "reattach-or-resume",
