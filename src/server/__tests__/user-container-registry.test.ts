@@ -140,6 +140,50 @@ describe('UserContainerRegistry', () => {
     expect(runs[0]).toContain('--init')
   })
 
+  it('reclaims and recreates an idle user container when image changes', async () => {
+    const config = makeConfig()
+    const ctxOld = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:old' }
+    const ctxNew = { ...ctxOld, image: 'fake:new' }
+
+    const first = await ensureUserContainer(config, ctxOld)
+    expect(first.imageDigest).toBe('fake:old')
+
+    const second = await ensureUserContainer(config, ctxNew)
+    expect(second).not.toBe(first)
+    expect(second.imageDigest).toBe('fake:new')
+
+    const log = await readFile(docker.logFile, 'utf8')
+    const runs = log.split('\n').filter(line => line.startsWith('run '))
+    expect(runs.length).toBe(2)
+    expect(log).toContain('stop --time')
+    expect(log).toContain('rm moss-user-')
+  })
+
+  it('defers image-change rebuild until active sessions release', async () => {
+    const config = makeConfig()
+    const ctxOld = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:old' }
+    const ctxNew = { ...ctxOld, image: 'fake:new' }
+
+    const first = await ensureUserContainer(config, ctxOld)
+    await acquireSession('org', 'u', 's1', config)
+
+    const stillActive = await ensureUserContainer(config, ctxNew)
+    expect(stillActive).toBe(first)
+    expect(stillActive.pendingRebuild).toBe(true)
+    expect(stillActive.imageDigest).toBe('fake:old')
+
+    await releaseSession('org', 'u', 's1', config)
+    expect(_getRecordForTests('org', 'u')).toBeUndefined()
+
+    const rebuilt = await ensureUserContainer(config, ctxNew)
+    expect(rebuilt.imageDigest).toBe('fake:new')
+
+    const log = await readFile(docker.logFile, 'utf8')
+    const runs = log.split('\n').filter(line => line.startsWith('run '))
+    expect(runs.length).toBe(2)
+    expect(log).toContain('stop --time')
+  })
+
   it('arms idle timer when count drops to 0; cancels when it goes back up', async () => {
     const config = makeConfig({
       docker: { ...makeConfig().docker!, userContainerIdleTimeoutMs: 60 },

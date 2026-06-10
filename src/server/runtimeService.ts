@@ -63,6 +63,10 @@ function safeKill0(pid: number): boolean {
   }
 }
 
+function isTerminalAttemptState(state: AttemptRecord['runtimeState']): boolean {
+  return state === 'stopped' || state === 'failed' || state === 'lost'
+}
+
 /**
  * 创建 McpAuthSecretsApi 实现，用于 secret_ref 运行时凭据解析。
  * 复用 DirectConnectStore 已有的 getConfigItemByPinyin / getConfigEntries 方法
@@ -564,7 +568,7 @@ export class RuntimeService {
     const existing = session.currentAttemptId
       ? this.store.getAttempt(session.currentAttemptId)
       : null
-    if (existing?.attachPath) {
+    if (existing?.attachPath && !isTerminalAttemptState(existing.runtimeState)) {
       const healthy = await probeAttachPath(
         existing.attachPath,
         // Fast probe only — never block the GET on a slow/dead socket.

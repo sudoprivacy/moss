@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { EventEmitter } from 'events'
 import { PassThrough } from 'stream'
 import type { ChildProcess } from 'child_process'
-import { mkdtemp, rm } from 'fs/promises'
+import { mkdtemp, readFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 
@@ -126,6 +126,75 @@ describe('AcpBridge.destroy (C2 dispatch)', () => {
     expect(received).toEqual([true])
   })
 
+  it('persists the scode ACP session id after session/new', async () => {
+    const { child, stdin, stdout } = makeFakeChild()
+    const cwd = await mkdtemp(path.join(tmpdir(), 'moss-acp-bridge-'))
+    const sessionIdPath = path.join(cwd, '.moss', 'scode-session-id')
+    const stdinWrites: string[] = []
+    stdin.on('data', chunk => { stdinWrites.push(chunk.toString('utf8')) })
+    try {
+      createAcpBridgeHandle({
+        child,
+        sessionId: 'sid',
+        cwd,
+        model: 'proxy/fake',
+        runtime: userRuntime,
+        containerMode: 'user',
+        scodeSessionIdPath: sessionIdPath,
+      })
+
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-init', result: {} })
+      await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/new"')))
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-session-new', result: { sessionId: 'acp-sid' } })
+      await waitUntil(async () => {
+        try {
+          return (await readFile(sessionIdPath, 'utf8')).trim() === 'acp-sid'
+        } catch {
+          return false
+        }
+      })
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('loads the persisted scode ACP session id on resume', async () => {
+    const { child, stdin, stdout } = makeFakeChild()
+    const cwd = await mkdtemp(path.join(tmpdir(), 'moss-acp-bridge-'))
+    const stdinWrites: string[] = []
+    stdin.on('data', chunk => { stdinWrites.push(chunk.toString('utf8')) })
+    try {
+      const handle = createAcpBridgeHandle({
+        child,
+        sessionId: 'sid',
+        cwd,
+        model: 'proxy/fake',
+        runtime: userRuntime,
+        containerMode: 'user',
+        resumeSessionId: 'acp-existing',
+        scodeSessionIdPath: path.join(cwd, '.moss', 'scode-session-id'),
+      })
+
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-init', result: {} })
+      await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/load"')))
+      expect(stdinWrites.some(line => line.includes('"sessionId":"acp-existing"'))).toBe(true)
+      expect(stdinWrites.some(line => line.includes('"method":"session/new"'))).toBe(false)
+
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-session-load', result: {} })
+      await waitTick()
+      handle.writeStdin(JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: '继续' }] },
+        uuid: 'user-1',
+      }) + '\n')
+      await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/prompt"')))
+      const promptLine = stdinWrites.find(line => line.includes('"method":"session/prompt"'))!
+      expect(promptLine).toContain('"sessionId":"acp-existing"')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('maps SendUserMessage to assistant output and suppresses fallback chunks', async () => {
     const { child, stdin, stdout } = makeFakeChild()
     const cwd = await mkdtemp(path.join(tmpdir(), 'moss-acp-bridge-'))
@@ -216,9 +285,9 @@ async function waitTick(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0))
 }
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
+async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
   for (let i = 0; i < 50; i += 1) {
-    if (predicate()) return
+    if (await predicate()) return
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error('condition was not met')

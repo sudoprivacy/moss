@@ -91,6 +91,35 @@ function configHash(input: {
   return createHash('sha256').update(payload).digest('hex').slice(0, 16)
 }
 
+function desiredContainerSpec(config: ServerConfig, ctx: EnsureContext): {
+  image: string
+  configHash: string
+} {
+  const image = ctx.image || config.dockerImage
+  if (!image) {
+    throw new Error('docker.image not configured; cannot create user container')
+  }
+  const userResources = config.docker?.user ?? {
+    pidsLimit: 512, memory: '4g', cpus: '2', nofile: 4096,
+  }
+  return {
+    image,
+    configHash: configHash({
+      mossHome: MOSS_HOME,
+      runtimeDir: config.runtimeDir,
+      containerEnvKeys: CONTAINER_ENV_KEYS,
+      resources: userResources,
+    }),
+  }
+}
+
+function isDesiredContainer(rec: UserContainerRecord, desired: {
+  image: string
+  configHash: string
+}): boolean {
+  return rec.imageDigest === desired.image && rec.configHash === desired.configHash
+}
+
 function runDocker(args: string[]): Promise<DockerExecResult> {
   return new Promise(resolve => {
     const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -130,20 +159,12 @@ async function doCreate(
   ctx: EnsureContext,
   rec: UserContainerRecord,
 ): Promise<void> {
-  const image = ctx.image || config.dockerImage
-  if (!image) {
-    throw new Error('docker.image not configured; cannot create user container')
-  }
-
+  const desired = desiredContainerSpec(config, ctx)
+  const image = desired.image
   const userResources = config.docker?.user ?? {
     pidsLimit: 512, memory: '4g', cpus: '2', nofile: 4096,
   }
-  rec.configHash = configHash({
-    mossHome: MOSS_HOME,
-    runtimeDir: config.runtimeDir,
-    containerEnvKeys: CONTAINER_ENV_KEYS,
-    resources: userResources,
-  })
+  rec.configHash = desired.configHash
   rec.imageDigest = image
 
   // moss-server may itself be running inside a container; in that case
@@ -214,6 +235,38 @@ async function doCreate(
   })
 }
 
+async function reclaimRecordAssumingLocked(
+  rec: UserContainerRecord,
+  config: ServerConfig,
+  reason: 'idle' | 'config_mismatch' | 'shutdown',
+): Promise<void> {
+  cancelIdleTimer(rec)
+  rec.state = 'draining'
+  logRuntimeMetric('user_container_reclaim_started', { reason })
+  logRuntimeEvent('user_container_reclaim_started', {
+    containerName: rec.containerName,
+    reason,
+  })
+  const stopTimeout = config.dockerStopTimeoutSec ?? 10
+  let failed = false
+  try {
+    const stop = await runDocker(['stop', '--time', String(stopTimeout), rec.containerName])
+    if (stop.code !== 0) failed = true
+    const rm = await runDocker(['rm', rec.containerName])
+    if (rm.code !== 0 && !rm.stderr.includes('No such container')) failed = true
+  } catch {
+    failed = true
+  } finally {
+    rec.state = 'dead'
+    registry.delete(rec.key)
+    if (failed) {
+      logRuntimeMetric('user_container_reclaim_failed', { reason: 'docker_error' })
+    } else {
+      logRuntimeMetric('user_container_reclaim_ok', { reason })
+    }
+  }
+}
+
 /**
  * Create or reuse the user container. Always called under per-key mutex.
  */
@@ -224,18 +277,49 @@ export async function ensureUserContainer(
   const k = key(ctx.orgId, ctx.userId)
   return mutex.run(k, async () => {
     let rec = registry.get(k)
+    const desired = desiredContainerSpec(config, ctx)
 
     if (rec) {
       if (rec.state === 'running') {
         if (await dockerInspectAlive(rec.containerName)) {
-          logRuntimeMetric('user_container_reused', { org: ctx.orgId })
-          return rec
+          if (!isDesiredContainer(rec, desired)) {
+            rec.pendingRebuild = true
+            logRuntimeMetric('user_container_config_mismatch', { org: ctx.orgId })
+            logRuntimeEvent('user_container_config_mismatch', {
+              org: ctx.orgId,
+              userId: ctx.userId,
+              containerName: rec.containerName,
+              activeCount: rec.activeSessionIds.size,
+              currentImage: rec.imageDigest,
+              desiredImage: desired.image,
+              currentConfigHash: rec.configHash,
+              desiredConfigHash: desired.configHash,
+            })
+            if (rec.activeSessionIds.size === 0) {
+              await reclaimRecordAssumingLocked(rec, config, 'config_mismatch')
+              rec = undefined
+            } else {
+              logRuntimeMetric('user_container_config_mismatch_deferred', { org: ctx.orgId })
+              return rec
+            }
+          } else {
+            rec.pendingRebuild = false
+          }
+          if (!rec) {
+            // Reclaimed a stale idle container; fall through and create one
+            // with the currently configured image/runtime settings.
+          } else {
+            logRuntimeMetric('user_container_reused', { org: ctx.orgId })
+            return rec
+          }
         }
-        // Container vanished externally.
-        logRuntimeMetric('user_container_external_vanished', { org: ctx.orgId })
-        rec.state = 'dead'
-        registry.delete(k)
-        rec = undefined
+        if (rec) {
+          // Container vanished externally.
+          logRuntimeMetric('user_container_external_vanished', { org: ctx.orgId })
+          rec.state = 'dead'
+          registry.delete(k)
+          rec = undefined
+        }
       } else if (rec.state === 'draining' || rec.state === 'dead') {
         // Under the mutex we shouldn't see 'starting' or 'draining' since
         // those transitions are short-lived; treat as anomaly and rebuild.
@@ -368,7 +452,11 @@ export async function releaseSession(
     if (!rec) return
     rec.activeSessionIds.delete(sessionId)
     if (rec.activeSessionIds.size === 0) {
-      resetIdleTimer(rec, config)
+      if (rec.pendingRebuild) {
+        await reclaimRecordAssumingLocked(rec, config, 'config_mismatch')
+      } else {
+        resetIdleTimer(rec, config)
+      }
     }
     logRuntimeMetric('session_release', { org: orgId })
     logRuntimeEvent('session_release', {
@@ -387,30 +475,7 @@ async function onIdleFire(k: string, config: ServerConfig): Promise<void> {
     if (!rec) return
     if (rec.state !== 'running') return
     if (rec.activeSessionIds.size > 0) return // resurrected just before fire
-    rec.state = 'draining'
-    logRuntimeMetric('user_container_reclaim_started', { reason: 'idle' })
-    logRuntimeEvent('user_container_reclaim_started', {
-      containerName: rec.containerName,
-      reason: 'idle',
-    })
-    const stopTimeout = config.dockerStopTimeoutSec ?? 10
-    let failed = false
-    try {
-      const stop = await runDocker(['stop', '--time', String(stopTimeout), rec.containerName])
-      if (stop.code !== 0) failed = true
-      const rm = await runDocker(['rm', rec.containerName])
-      if (rm.code !== 0 && !rm.stderr.includes('No such container')) failed = true
-    } catch {
-      failed = true
-    } finally {
-      rec.state = 'dead'
-      registry.delete(k)
-      if (failed) {
-        logRuntimeMetric('user_container_reclaim_failed', { reason: 'docker_error' })
-      } else {
-        logRuntimeMetric('user_container_reclaim_ok', { reason: 'idle' })
-      }
-    }
+    await reclaimRecordAssumingLocked(rec, config, 'idle')
   })
 }
 

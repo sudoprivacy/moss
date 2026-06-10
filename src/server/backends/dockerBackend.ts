@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { writeFileSync } from 'fs'
-import { mkdir, rm } from 'fs/promises'
+import { mkdir, readFile, rm } from 'fs/promises'
 import os from 'os'
 import { dirname, join } from 'path'
 import { MOSS_HOME } from '../../utils/skills/localSkillDirectories.js'
@@ -46,6 +46,15 @@ function resolveDockerUser(): string | null {
     return null
   }
   return `${process.getuid()}:${process.getgid()}`
+}
+
+async function readScodeSessionId(filePath: string): Promise<string | undefined> {
+  try {
+    const value = (await readFile(filePath, 'utf8')).trim()
+    return value || undefined
+  } catch {
+    return undefined
+  }
 }
 
 export class DockerBackend implements SessionBackend {
@@ -338,6 +347,10 @@ export class DockerBackend implements SessionBackend {
       inContainerPidFile: runtime?.inContainerPidFile,
       tmpDirInContainer: runtime?.tmpDirInContainer,
     }
+    const scodeSessionIdPath = join(safeCwd, '.moss', 'scode-session-id')
+    const resumeSessionId = options.resumeSessionId
+      ? await readScodeSessionId(scodeSessionIdPath)
+      : undefined
 
     const handle = createAcpBridgeHandle({
       child,
@@ -345,6 +358,8 @@ export class DockerBackend implements SessionBackend {
       cwd: safeCwd,
       model,
       transcriptPath: (options as any).transcriptPath,
+      resumeSessionId,
+      scodeSessionIdPath,
       containerMode,
       assistantName: options.assistantName,
       enabledSkillNames: enabledSkills,

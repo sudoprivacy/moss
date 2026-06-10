@@ -1,5 +1,5 @@
 import { createInterface } from 'readline'
-import { appendFile, mkdir, rm } from 'fs/promises'
+import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
 import { dirname } from 'path'
 import { randomUUID } from 'crypto'
 import type { ChildProcess } from 'child_process'
@@ -18,6 +18,8 @@ type AcpBridgeOptions = {
   model: string
   transcriptPath?: string
   runtime: SessionRuntimeInfo
+  resumeSessionId?: string
+  scodeSessionIdPath?: string
   /**
    * Per-user container mode. 'session' (default) sends signals to the child
    * docker run process on destroy. 'user' only closes stdin on destroy — the
@@ -144,6 +146,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
   }
 
+  const persistScodeSessionId = (id: string | null | undefined): void => {
+    if (!id || !options.scodeSessionIdPath) return
+    void mkdir(dirname(options.scodeSessionIdPath), { recursive: true })
+      .then(() => writeFile(options.scodeSessionIdPath!, id, 'utf8'))
+      .catch(err => {
+        process.stderr.write(`[AcpBridge] Failed to persist scode session id: ${String(err)}\n`)
+      })
+  }
+
   const sendRpc = (method: string, params: any, customId?: string) => {
     const id = customId || `m-${rpcId++}`
     const msg = { jsonrpc: '2.0', id, method, params }
@@ -152,6 +163,23 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
       child.stdin.write(raw)
     }
+  }
+
+  const sendNewSession = (): void => {
+    const sessionParams: any = {
+      cwd,
+      // Scode ACP requires mcpServers even when no MCP servers are configured.
+      mcpServers: [],
+    }
+    process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=[]\n`)
+    sendRpc('session/new', sessionParams, 'm-session-new')
+  }
+
+  const completeHandshake = (): void => {
+    isHandshakeComplete = true
+    process.stderr.write(`[AcpBridge] Handshake complete, flushing buffers (Stdout: ${pendingStdout.length}, Stdin: ${pendingStdin.length})\n`)
+    flushStdout()
+    flushPending()
   }
 
   // Send RPC and wait for response (for model switching)
@@ -444,26 +472,39 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         const parsed = JSON.parse(line)
 
         if (parsed.id === 'm-init') {
-          process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)
-          const sessionParams: any = {
-            cwd,
-            // Scode ACP 要求 mcpServers 字段，即使为空数组
-            mcpServers: [],
+          if (options.resumeSessionId) {
+            process.stderr.write(`[AcpBridge] Initialization complete, loading session ${options.resumeSessionId}...\n`)
+            sendRpc('session/load', {
+              sessionId: options.resumeSessionId,
+              cwd,
+            }, 'm-session-load')
+          } else {
+            process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)
+            sendNewSession()
           }
-          // 技能和智能体信息通过首次消息注入
-          process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=[]\n`)
-          sendRpc('session/new', sessionParams, 'm-session-new')
           continue
         }
 
         if (parsed.id === 'm-session-new') {
           process.stderr.write(`[AcpBridge] session/new response: ${JSON.stringify(parsed)}\n`)
           acpSessionId = parsed.result?.sessionId || parsed.result?.id || parsed.result?.session_id
+          persistScodeSessionId(acpSessionId)
           process.stderr.write(`[AcpBridge] ACP Session Ready: ${acpSessionId}\n`)
-          isHandshakeComplete = true
-          process.stderr.write(`[AcpBridge] Handshake complete, flushing buffers (Stdout: ${pendingStdout.length}, Stdin: ${pendingStdin.length})\n`)
-          flushStdout()
-          flushPending()
+          completeHandshake()
+          continue
+        }
+
+        if (parsed.id === 'm-session-load') {
+          process.stderr.write(`[AcpBridge] session/load response: ${JSON.stringify(parsed)}\n`)
+          if (parsed.error) {
+            process.stderr.write(`[AcpBridge] session/load failed, falling back to session/new: ${JSON.stringify(parsed.error)}\n`)
+            sendNewSession()
+            continue
+          }
+          acpSessionId = parsed.result?.sessionId || parsed.result?.id || parsed.result?.session_id || options.resumeSessionId || null
+          persistScodeSessionId(acpSessionId)
+          process.stderr.write(`[AcpBridge] ACP Session Loaded: ${acpSessionId}\n`)
+          completeHandshake()
           continue
         }
 
