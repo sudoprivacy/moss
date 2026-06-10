@@ -136,6 +136,16 @@ export async function startStandaloneDirectConnectServer(
     stopped = true
     clearInterval(heartbeatTimer)
     authService.destroy()
+    if (config.docker?.containerMode === 'user') {
+      try {
+        const reg = await import('./runtime/userContainerRegistry.js')
+        await reg.shutdownAll(config)
+      } catch (err) {
+        process.stderr.write(
+          `[Startup] failed to drain user containers during shutdown: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+      }
+    }
     await server.stop()
     await authProxy.stop()
     // Only stop nexusManager if it was started (not in fallback mode)
