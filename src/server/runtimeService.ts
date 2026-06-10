@@ -895,6 +895,27 @@ export class RuntimeService {
     // Force sync global engine config into session runtime for manifest
     session.runtime.engine = this.options.config.engine
     session.runtime.scodePath = this.options.config.scodePath
+    if (
+      session.runtime.type === 'docker'
+      && this.options.config.dockerImage
+      && session.runtime.dockerImage !== this.options.config.dockerImage
+    ) {
+      const previousDockerImage = session.runtime.dockerImage
+      session.runtime.dockerImage = this.options.config.dockerImage
+      this.store.updateSessionRuntimeImage(
+        session.sessionId,
+        this.options.config.dockerImage,
+      )
+      this.store.addEvent(
+        session.sessionId,
+        attempt.attemptId,
+        'session_runtime_image_updated',
+        {
+          previousDockerImage,
+          dockerImage: this.options.config.dockerImage,
+        },
+      )
+    }
 
     // Document Center v2: pre-sign a wiki session token so the
     // in-container `wiki` CLI can authenticate to /api/v1/agent/wikis*.

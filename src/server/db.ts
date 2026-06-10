@@ -1300,6 +1300,14 @@ export class DirectConnectStore {
     )
   }
 
+  updateSessionRuntimeImage(sessionId: string, dockerImage: string): void {
+    this.db.prepare(`
+      UPDATE sessions
+      SET docker_image = ?
+      WHERE session_id = ?
+    `).run(dockerImage, sessionId)
+  }
+
   deleteSession(sessionId: string): void {
     this.db.prepare(`
       UPDATE sessions
