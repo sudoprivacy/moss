@@ -477,6 +477,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             sendRpc('session/load', {
               sessionId: options.resumeSessionId,
               cwd,
+              // Scode ACP LoadSessionRequest also requires mcpServers.
+              mcpServers: [],
             }, 'm-session-load')
           } else {
             process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)

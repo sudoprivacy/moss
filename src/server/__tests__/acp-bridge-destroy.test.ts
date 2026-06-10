@@ -178,6 +178,7 @@ describe('AcpBridge.destroy (C2 dispatch)', () => {
       writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-init', result: {} })
       await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/load"')))
       expect(stdinWrites.some(line => line.includes('"sessionId":"acp-existing"'))).toBe(true)
+      expect(stdinWrites.some(line => line.includes('"mcpServers":[]'))).toBe(true)
       expect(stdinWrites.some(line => line.includes('"method":"session/new"'))).toBe(false)
 
       writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-session-load', result: {} })
