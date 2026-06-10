@@ -6000,36 +6000,55 @@ export function startServer(
 
         const ready = await runtime.ensureSessionReady(sessionId)
         wss.handleUpgrade(req, socket, head, ws => {
-          void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
-            let buffer = ''
-            const sendToRunner = (payload: Record<string, unknown>) => {
-              if (!runnerSocket.destroyed) {
-                process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
-                runnerSocket.write(`${jsonStringify(payload)}\n`)
-              } else {
-                process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
-              }
+          const pendingMessages: string[] = []
+          let runnerSocket: net.Socket | null = null
+          let runnerClosed = false
+          let buffer = ''
+          const sendToRunner = (payload: Record<string, unknown>) => {
+            const line = `${jsonStringify(payload)}\n`
+            if (runnerSocket && !runnerSocket.destroyed) {
+              process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
+              runnerSocket.write(line)
+              return
+            }
+            if (!runnerClosed) {
+              process.stderr.write(`[WS Message] Runner not ready, buffering message\n`)
+              pendingMessages.push(line)
+              return
+            }
+            process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+          }
+
+          ws.on('message', data => {
+            const text =
+              typeof data === 'string'
+                ? data
+                : Buffer.from(data).toString('utf8')
+            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            sendToRunner({
+              type: 'stdin',
+              data: text.endsWith('\n') ? text : `${text}\n`,
+            })
+          })
+          ws.on('close', () => {
+            runnerSocket?.destroy()
+          })
+          ws.on('error', () => {
+            runnerSocket?.destroy()
+          })
+
+          void runtime.connectToAttempt(ready.attempt).then((connectedRunner: net.Socket) => {
+            runnerSocket = connectedRunner
+            if (ws.readyState !== ws.OPEN) {
+              runnerClosed = true
+              connectedRunner.destroy()
+              return
+            }
+            while (pendingMessages.length > 0 && !runnerSocket.destroyed) {
+              runnerSocket.write(pendingMessages.shift()!)
             }
 
-            ws.on('message', data => {
-              const text =
-                typeof data === 'string'
-                  ? data
-                  : Buffer.from(data).toString('utf8')
-              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
-              sendToRunner({
-                type: 'stdin',
-                data: text.endsWith('\n') ? text : `${text}\n`,
-              })
-            })
-            ws.on('close', () => {
-              runnerSocket.destroy()
-            })
-            ws.on('error', () => {
-              runnerSocket.destroy()
-            })
-
-            runnerSocket.on('data', chunk => {
+            connectedRunner.on('data', chunk => {
               buffer += Buffer.from(chunk).toString('utf8')
               while (true) {
                 const idx = buffer.indexOf('\n')
@@ -6060,12 +6079,14 @@ export function startServer(
               }
             })
 
-            runnerSocket.on('close', () => {
+            connectedRunner.on('close', () => {
+              runnerClosed = true
               if (ws.readyState === ws.OPEN) {
                 ws.close()
               }
             })
-            runnerSocket.on('error', () => {
+            connectedRunner.on('error', () => {
+              runnerClosed = true
               if (ws.readyState === ws.OPEN) {
                 ws.close()
               }

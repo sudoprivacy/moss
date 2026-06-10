@@ -86,7 +86,25 @@ COPY --from=corpauth-builder /out/corpauth /usr/local/bin/corpauth
 COPY --from=fetchurl-builder /out/fetchurl /usr/local/bin/fetchurl
 RUN chmod +x /usr/local/bin/wiki /usr/local/bin/corpapp /usr/local/bin/corpauth /usr/local/bin/fetchurl
 
-# 6. 设置工作目录（Moss 创建会话容器时通常会挂载这里）
+# 6. moss-session-launch / moss-session-reap (per-user container mode)
+#    Launcher records pid + start_ticks (USER_HZ since boot, /proc/<pid>/stat
+#    field 22) so the reaper can detect PID reuse before SIGKILL.
+COPY deploy/runtime/moss-session-launch.sh /usr/local/bin/moss-session-launch
+COPY deploy/runtime/moss-session-reap.sh   /usr/local/bin/moss-session-reap
+RUN chmod +x /usr/local/bin/moss-session-launch /usr/local/bin/moss-session-reap
+
+# 7. Image dependency assertion: launcher/reaper require setsid, awk, fractional
+#    sleep, and /proc/<pid>/stat. Ubuntu 24.04 has these by default; this RUN
+#    fails the build if a future base image switch (Alpine, distroless) drops
+#    any of them.
+RUN command -v setsid >/dev/null \
+ && setsid --wait true \
+ && sleep 0.001 \
+ && command -v awk >/dev/null \
+ && [ -r /proc/self/stat ] \
+ && echo 'moss-runtime image deps ok'
+
+# 8. 设置工作目录（Moss 创建会话容器时通常会挂载这里）
 WORKDIR /workspace
 
 # 默认命令（仅用于测试）

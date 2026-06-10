@@ -4,6 +4,7 @@ import { dirname } from 'path'
 import { RuntimeBackend } from './backends/runtimeBackend.js'
 import { DirectConnectStore } from './db.js'
 import { getTranscriptPath, isNamedPipePath } from './runtimePaths.js'
+import { logRuntimeEvent, logRuntimeMetric } from './runtime/runtimeMetrics.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import type { RunnerClientMessage, RunnerServerMessage } from './runnerProtocol.js'
 import type { RunnerManifest } from './types.js'
@@ -70,8 +71,14 @@ export class SessionRunnerDaemon {
   #handle: BackendHandle | null = null
   #state: 'starting' | 'running' | 'stopped' | 'failed' = 'starting'
   #stopping = false
-  #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' = 'runtime_exit'
+  #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' = 'runtime_exit'
   #idleTimer: NodeJS.Timeout | null = null
+  #busyCeilingTimer: NodeJS.Timeout | null = null
+  #busyUnsubscribe: (() => void) | null = null
+  #busy = false
+  #detachedSince: number | null = null
+  #notBusySince: number | null = null
+  #detachedBusySince: number | null = null
   #finalized = false
   #recentStderr: string[] = []
   #pendingStdin: string[] = []  // Buffer for messages arriving before handle is ready
@@ -85,6 +92,8 @@ export class SessionRunnerDaemon {
       docker: {
         image: manifest.session.runtime.dockerImage,
         mode: manifest.session.runtime.dockerMode,
+        containerMode: manifest.session.runtime.containerMode || manifest.config.docker?.containerMode,
+        execKillGraceMs: manifest.config.docker?.execKillGraceMs,
         network: manifest.config.dockerNetwork,
         labels: manifest.config.dockerLabels,
       },
@@ -150,6 +159,45 @@ export class SessionRunnerDaemon {
       this.#handle = handle
       this.manifest.session.runtime.containerName = handle.runtime.containerName
       this.manifest.session.runtime.configDir = handle.runtime.configDir
+      if (handle.runtime.containerMode) {
+        this.manifest.session.runtime.containerMode = handle.runtime.containerMode
+      }
+      if (handle.runtime.userContainerName) {
+        this.manifest.session.runtime.userContainerName = handle.runtime.userContainerName
+      }
+      if (handle.runtime.scodeHomeDir) {
+        this.manifest.session.runtime.scodeHomeDir = handle.runtime.scodeHomeDir
+      }
+      if (handle.runtime.inContainerPidFile) {
+        this.manifest.session.runtime.inContainerPidFile = handle.runtime.inContainerPidFile
+      }
+      if (handle.runtime.tmpDirInContainer) {
+        this.manifest.session.runtime.tmpDirInContainer = handle.runtime.tmpDirInContainer
+      }
+
+      // A2: subscribe to busy transitions so reschedule() can flip between
+      // idle and busy-ceiling timers correctly.
+      if (handle.onBusyChange) {
+        this.#busyUnsubscribe = handle.onBusyChange(next => {
+          if (next === this.#busy) return
+          this.#busy = next
+          const now = Date.now()
+          if (next) {
+            // busy true→false→true elsewhere: reset notBusySince
+            this.#notBusySince = null
+            if (this.#detachedSince !== null && this.#detachedBusySince === null) {
+              this.#detachedBusySince = now
+            }
+          } else {
+            this.#notBusySince = now
+            this.#detachedBusySince = null
+          }
+          this.#reschedule()
+        })
+      }
+      if (handle.isBusy) {
+        this.#busy = handle.isBusy()
+      }
       this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
@@ -228,22 +276,43 @@ export class SessionRunnerDaemon {
           stopReason: this.#stopping ? this.#stopReason : 'runtime_exit',
           errorText,
         })
+        // Lifecycle marks:
+        //   terminate (client-initiated delete)    -> status=terminated, desired=terminated
+        //   idle / busy-ceiling kill (server-side) -> status=ended, desired=ACTIVE
+        //     The Sudowork client treats WS close as "detach": session stays
+        //     alive on the server, scode may be killed after idleTimeoutMs /
+        //     maxDetachedBusyMs, but the user still wants the session and may
+        //     come back via /api/v1/sessions/:id/resume or /ws/sessions/:id.
+        //     desired_state stays 'active' so ensureSessionReady will respawn.
+        //     status='ended' is excluded from listSessionsToRecover (no
+        //     auto-respawn on moss-server restart) but explicit resume works.
+        //   natural exit code=0 (no stopping)     -> status=ended, desired=ended
+        //   non-zero exit (no stopping)           -> status=failed, desired=active
+        //     keeps last user intent active so client can retry.
+        const idleish =
+          this.#stopReason === 'idle_timeout' ||
+          this.#stopReason === 'idle_busy_timeout'
+        let nextStatus: 'ended' | 'failed' | 'terminated'
+        let nextDesired: 'active' | 'ended' | 'terminated'
+        if (this.#stopping) {
+          if (idleish) {
+            nextStatus = 'ended'
+            nextDesired = 'active'
+          } else {
+            nextStatus = 'terminated'
+            nextDesired = 'terminated'
+          }
+        } else if (code === 0) {
+          nextStatus = 'ended'
+          nextDesired = 'ended'
+        } else {
+          nextStatus = 'failed'
+          nextDesired = 'active'
+        }
         this.#store.markSessionEnded(
           this.manifest.session.sessionId,
-          this.#stopping
-            ? this.#stopReason === 'idle_timeout'
-              ? 'ended'
-              : 'terminated'
-            : code === 0
-              ? 'ended'
-              : 'failed',
-          this.#stopping
-            ? this.#stopReason === 'idle_timeout'
-              ? 'ended'
-              : 'terminated'
-            : code === 0
-              ? 'ended'
-              : 'active',
+          nextStatus,
+          nextDesired,
         )
         this.#store.addEvent(
           this.manifest.session.sessionId,
@@ -264,12 +333,12 @@ export class SessionRunnerDaemon {
       process.once('SIGTERM', () => {
         this.#stopping = true
         this.#stopReason = 'terminated'
-        this.#handle?.destroy(true)
+        void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
       process.once('SIGINT', () => {
         this.#stopping = true
         this.#stopReason = 'terminated'
-        this.#handle?.destroy(true)
+        void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
     } catch (error) {
       await this.#fail(error, 'startup_failed')
@@ -282,6 +351,14 @@ export class SessionRunnerDaemon {
     if (this.#idleTimer) {
       clearTimeout(this.#idleTimer)
       this.#idleTimer = null
+    }
+    if (this.#busyCeilingTimer) {
+      clearTimeout(this.#busyCeilingTimer)
+      this.#busyCeilingTimer = null
+    }
+    if (this.#busyUnsubscribe) {
+      try { this.#busyUnsubscribe() } catch {}
+      this.#busyUnsubscribe = null
     }
     for (const client of this.#clients) {
       try {
@@ -394,30 +471,105 @@ export class SessionRunnerDaemon {
       clearTimeout(this.#idleTimer)
       this.#idleTimer = null
     }
+    if (this.#busyCeilingTimer) {
+      clearTimeout(this.#busyCeilingTimer)
+      this.#busyCeilingTimer = null
+    }
   }
 
   #armIdleTimer(): void {
-    this.#clearIdleTimer()
-    if (this.#clients.size > 0 || this.manifest.config.idleTimeoutMs <= 0 || !this.#store.isOpen()) {
+    this.#reschedule()
+  }
+
+  /**
+   * A2: single source of truth for idle / busy-ceiling timers.
+   *
+   * Invariants:
+   *   - sockets > 0          -> no timer.
+   *   - detached && !busy    -> idleTimer, base = max(detachedSince, notBusySince).
+   *   - detached && busy     -> busyCeilingTimer, base = detachedBusySince.
+   *   - busy true↔false flip -> swap timers (never accumulate both).
+   */
+  #reschedule(): void {
+    if (this.#idleTimer) {
+      clearTimeout(this.#idleTimer)
+      this.#idleTimer = null
+    }
+    if (this.#busyCeilingTimer) {
+      clearTimeout(this.#busyCeilingTimer)
+      this.#busyCeilingTimer = null
+    }
+    if (this.#clients.size > 0) {
+      this.#detachedSince = null
+      this.#detachedBusySince = null
       return
+    }
+    if (!this.#store.isOpen()) return
+
+    const idleMs = this.manifest.config.idleTimeoutMs
+    const maxDetachedBusyMs =
+      this.manifest.config.session?.maxDetachedBusyMs ?? 2 * 60 * 60 * 1000
+    const now = Date.now()
+    if (this.#detachedSince === null) {
+      this.#detachedSince = now
+      if (this.#busy) this.#detachedBusySince = now
     }
     this.#store.setSessionLifecycle(
       this.manifest.session.sessionId,
       'detached',
       'active',
     )
-    this.#idleTimer = setTimeout(() => {
+
+    if (!this.#busy) {
+      if (idleMs <= 0) return
+      const base = Math.max(
+        this.#detachedSince ?? now,
+        this.#notBusySince ?? this.#detachedSince ?? now,
+      )
+      const remaining = Math.max(0, idleMs - (now - base))
+      this.#idleTimer = setTimeout(() => {
+        this.#stopping = true
+        this.#stopReason = 'idle_timeout'
+        this.#store.addEvent(
+          this.manifest.session.sessionId,
+          this.manifest.attempt.attemptId,
+          'attempt_idle_timeout',
+          { idleTimeoutMs: idleMs },
+        )
+        void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
+      }, remaining)
+      this.#idleTimer.unref?.()
+      return
+    }
+
+    // sockets===0 && busy: only the busy ceiling timer arms.
+    if (maxDetachedBusyMs <= 0) return
+    const since = this.#detachedBusySince ?? now
+    const remaining = Math.max(0, maxDetachedBusyMs - (now - since))
+    this.#busyCeilingTimer = setTimeout(() => {
       this.#stopping = true
-      this.#stopReason = 'idle_timeout'
+      this.#stopReason = 'idle_busy_timeout'
       this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
-        'attempt_idle_timeout',
-        { idleTimeoutMs: this.manifest.config.idleTimeoutMs },
+        'attempt_idle_busy_timeout',
+        { maxDetachedBusyMs },
       )
-      this.#handle?.destroy(true)
-    }, this.manifest.config.idleTimeoutMs)
-    this.#idleTimer.unref?.()
+      logRuntimeMetric('session_idle_busy_timeout', {})
+      logRuntimeEvent('session_idle_busy_timeout', {
+        sessionId: this.manifest.session.sessionId,
+        maxDetachedBusyMs,
+      })
+      const persistP = this.#handle?.persistInProgressTurn
+        ? this.#handle.persistInProgressTurn().catch(err => {
+            process.stderr.write(`[SessionRunnerDaemon] persistInProgressTurn failed: ${err}\n`)
+          })
+        : Promise.resolve()
+      void persistP.then(() => {
+        void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
+      })
+    }, remaining)
+    this.#busyCeilingTimer.unref?.()
   }
 
   #rememberStderr(line: string): void {
@@ -453,10 +605,11 @@ export class SessionRunnerDaemon {
       return
     }
     const currentTranscriptPath = this.manifest.session.transcriptPath
-    const nextTranscriptPath = this.manifest.session.runtime.configDir
+    const runtimeDir = this.manifest.config.runtimeDir
+    const nextTranscriptPath = runtimeDir
       ? getTranscriptPath(
-          this.manifest.session.runtime.configDir,
-          this.manifest.session.cwd,
+          runtimeDir,
+          this.manifest.session.sessionId,
           nextTranscriptSessionId,
         )
       : currentTranscriptPath

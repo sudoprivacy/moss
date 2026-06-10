@@ -28,6 +28,9 @@ import {
   getRuntimeStdoutLogPath,
   getSessionConfigDir,
   getSessionWorkspaceDir,
+  getSessionScodeHomeDir,
+  getSessionTmpDir,
+  getInContainerPidFile,
   getTranscriptPath,
 } from './runtimePaths.js'
 import { errorMessage } from '../utils/errors.js'
@@ -49,6 +52,19 @@ import { type McpAuthSecretsApi, type ConfigItemLike } from './mcp/authResolver.
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function safeKill0(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function isTerminalAttemptState(state: AttemptRecord['runtimeState']): boolean {
+  return state === 'stopped' || state === 'failed' || state === 'lost'
 }
 
 /**
@@ -468,10 +484,11 @@ export class RuntimeService {
           : runtime.hostMode || 'session',
       )
     const transcriptPath = getTranscriptPath(
-      this.options.config.transcriptDir || runtime.configDir,
-      workspaceDir,
+      this.options.config.runtimeDir,
+      sessionId,
       sessionId,
     )
+    await mkdir(dirname(transcriptPath), { recursive: true })
     const created = this.store.createSession({
       sessionId,
       transcriptSessionId: sessionId,
@@ -551,7 +568,7 @@ export class RuntimeService {
     const existing = session.currentAttemptId
       ? this.store.getAttempt(session.currentAttemptId)
       : null
-    if (existing?.attachPath) {
+    if (existing?.attachPath && !isTerminalAttemptState(existing.runtimeState)) {
       const healthy = await probeAttachPath(
         existing.attachPath,
         // Fast probe only — never block the GET on a slow/dead socket.
@@ -584,9 +601,132 @@ export class RuntimeService {
   }
 
   async reconcileOnStartup(): Promise<void> {
+    // Rebuild UserContainerRegistry from `docker ps` before touching sessions
+    // so ensureAttempt() reuses existing user containers rather than spawning
+    // duplicates. Silent on error — Docker may not be available in this
+    // process and that's fine for non-docker sessions.
+    try {
+      const reg = await import('./runtime/userContainerRegistry.js')
+      await reg.reconcile()
+
+      // Optional rollback hatch: force-drain all user containers on startup.
+      if (process.env.MOSS_FORCE_DRAIN_USER_CONTAINERS === 'true') {
+        process.stderr.write(
+          '[RuntimeService] MOSS_FORCE_DRAIN_USER_CONTAINERS=true — draining all user containers\n',
+        )
+        await reg.shutdownAll(this.options.config)
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[RuntimeService] userContainerRegistry reconcile failed: ${errorMessage(err)}\n`,
+      )
+    }
+
+    // Clean stale attempt rows. An attempt sitting in 'starting/running/
+    // detached' whose runner_pid is no longer alive on this host means the
+    // runner died (or was killed) without its onExit handler completing the
+    // DB write. The site repro showed `runtime_state=running, runner_pid=86`
+    // surviving a terminate while host `ps -p 86` returned no such process.
+    try {
+      const candidates = this.store.listAttemptsByRuntimeState(['starting', 'running', 'detached'])
+      let cleaned = 0
+      for (const att of candidates) {
+        // No PID at all → cannot have been running.
+        // PID present but not alive → runner crashed silently.
+        if (att.runnerPid !== null && safeKill0(att.runnerPid)) continue
+        this.store.markAttemptStopped(att.attemptId, {
+          runtimeState: 'stopped',
+          stopReason: 'stale_on_startup',
+          errorText: att.runnerPid === null
+            ? 'attempt had no runner_pid recorded'
+            : `runner_pid=${att.runnerPid} no longer alive`,
+        })
+        this.store.addEvent(att.sessionId, att.attemptId, 'attempt_stale_marked_stopped', {
+          runnerPid: att.runnerPid,
+          previousState: att.runtimeState,
+        })
+        cleaned += 1
+      }
+      if (cleaned > 0) {
+        process.stderr.write(
+          `[RuntimeService] reconcileOnStartup: marked ${cleaned} stale attempt(s) stopped\n`,
+        )
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[RuntimeService] stale attempt cleanup failed: ${errorMessage(err)}\n`,
+      )
+    }
+
     const sessions = this.store.listSessionsToRecover()
     for (const session of sessions) {
       try {
+        // Per-user container mode: probe scode in the container and reap
+        // orphan processes before resuming. runner-alive cases reattach via
+        // ensureAttempt; runner-dead cases need a clean kill so the next
+        // attempt can fresh-spawn.
+        const runtimeAny = session.runtime as {
+          containerMode?: 'session' | 'user'
+          userContainerName?: string
+        }
+        if (
+          runtimeAny.containerMode === 'user' &&
+          runtimeAny.userContainerName &&
+          this.options.config.runtimeDir
+        ) {
+          const attempt = session.currentAttemptId
+            ? this.store.getAttempt(session.currentAttemptId)
+            : null
+          const runnerAlive = attempt?.runnerPid
+            ? safeKill0(attempt.runnerPid)
+            : false
+          try {
+            const { probeContainerSession } = await import(
+              './runtime/probeContainerSession.js'
+            )
+            const probe = await probeContainerSession({
+              userContainerName: runtimeAny.userContainerName,
+              sessionId: session.sessionId,
+              runtimeDirInContainer: this.options.config.runtimeDir,
+            })
+            if (!runnerAlive && probe.kind === 'alive') {
+              // Orphan scode — runner died with stdio. Reap before resume.
+              const { reapInUserContainer } = await import('./runtime/reaper.js')
+              await reapInUserContainer({
+                userContainerName: runtimeAny.userContainerName,
+                sessionId: session.sessionId,
+                graceMs: 0,
+              })
+              this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_orphan_scode', {
+                userContainer: runtimeAny.userContainerName,
+              })
+              const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+              logRuntimeMetric('reconcile_orphan_scode', {})
+              logRuntimeEvent('reconcile_orphan_scode', {
+                sessionId: session.sessionId,
+                containerName: runtimeAny.userContainerName,
+              })
+            } else if (probe.kind === 'stale_pid_reuse') {
+              this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_pid_reuse', {
+                pid: probe.pid,
+                recordedStartTicks: probe.recordedStartTicks,
+                currentStartTicks: probe.currentStartTicks,
+              })
+              const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+              logRuntimeMetric('reconcile_pid_reuse', {})
+              logRuntimeEvent('reconcile_pid_reuse', {
+                sessionId: session.sessionId,
+                pid: probe.pid,
+              })
+            }
+          } catch (probeErr) {
+            this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_probe_failed', {
+              error: errorMessage(probeErr),
+            })
+            const { logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+            logRuntimeMetric('reconcile_probe_failed', { reason: 'exception' })
+          }
+        }
         await this.ensureAttempt(session)
       } catch (error) {
         this.store.addEvent(session.sessionId, session.currentAttemptId, 'reconcile_failed', {
@@ -610,15 +750,34 @@ export class RuntimeService {
     }
     this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
     this.store.addEvent(sessionId, attempt?.attemptId ?? null, 'session_terminate_requested', {})
+
     if (attempt?.runnerPid) {
       try {
         process.kill(attempt.runnerPid, 'SIGTERM')
       } catch (err) {
-        // Process may have already exited or doesn't exist
+        // ESRCH = no such process; the runner already exited and our
+        // termination signal has nothing to deliver. Other codes are real
+        // failures and worth logging.
         if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ESRCH') {
           console.warn('[RuntimeService] Failed to terminate runner process:', err)
         }
       }
+    }
+
+    // Always mark the current attempt stopped on terminate. The runner's
+    // own onExit handler will also try to mark it; markAttemptStopped is an
+    // UPDATE so a second write from the runner side just overwrites with
+    // the same terminal state. This covers three failure modes:
+    //   - runner already dead (ESRCH on SIGTERM, onExit never runs)
+    //   - runner SIGKILL'd before reaching its onExit
+    //   - moss-server crashes between SIGTERM and the runner's DB write
+    // Without this, DB carries stale runtime_state='running' rows pointing
+    // at PIDs that no longer exist (the site repro showed exactly this).
+    if (attempt && attempt.runtimeState !== 'stopped' && attempt.runtimeState !== 'failed' && attempt.runtimeState !== 'lost') {
+      this.store.markAttemptStopped(attempt.attemptId, {
+        runtimeState: 'stopped',
+        stopReason: 'terminated',
+      })
     }
   }
 
@@ -722,9 +881,41 @@ export class RuntimeService {
     })
     this.store.setCurrentAttempt(session.sessionId, attempt.attemptId)
 
+    // Resume path: if the session was previously idle-killed (status=ended,
+    // desired_state=active, ended_at set), clear those terminal markers so
+    // the row reads as a live session again.
+    if (session.endedAt !== null || session.status === 'ended' || session.status === 'failed' || session.status === 'lost') {
+      this.store.reactivateSession(session.sessionId)
+      this.store.addEvent(session.sessionId, attempt.attemptId, 'session_reactivated', {
+        previousStatus: session.status,
+        previousEndedAt: session.endedAt,
+      })
+    }
+
     // Force sync global engine config into session runtime for manifest
     session.runtime.engine = this.options.config.engine
     session.runtime.scodePath = this.options.config.scodePath
+    if (
+      session.runtime.type === 'docker'
+      && this.options.config.dockerImage
+      && session.runtime.dockerImage !== this.options.config.dockerImage
+    ) {
+      const previousDockerImage = session.runtime.dockerImage
+      session.runtime.dockerImage = this.options.config.dockerImage
+      this.store.updateSessionRuntimeImage(
+        session.sessionId,
+        this.options.config.dockerImage,
+      )
+      this.store.addEvent(
+        session.sessionId,
+        attempt.attemptId,
+        'session_runtime_image_updated',
+        {
+          previousDockerImage,
+          dockerImage: this.options.config.dockerImage,
+        },
+      )
+    }
 
     // Document Center v2: pre-sign a wiki session token so the
     // in-container `wiki` CLI can authenticate to /api/v1/agent/wikis*.
@@ -909,6 +1100,84 @@ export class RuntimeService {
       }
     }
 
+    // A1: every session gets its own SUDO_CODE_CONFIG_HOME under runtimeDir so
+    // sudocode.json / settings.json never write into a shared configDir.
+    const scodeHomeDir = getSessionScodeHomeDir(
+      this.options.config.runtimeDir,
+      session.sessionId,
+    )
+    await mkdir(scodeHomeDir, { recursive: true })
+
+    // C2: when containerMode='user' the runner uses `docker exec` into a
+    // long-lived user container. Resolve the user container name + per-session
+    // helper paths here so the runner can build the exec command without
+    // touching UserContainerRegistry (which lives only in the main process).
+    const containerMode: 'session' | 'user' =
+      (session.runtime as { containerMode?: 'session' | 'user' }).containerMode
+      || this.options.config.docker?.containerMode
+      || 'session'
+
+    let userContainerName: string | undefined
+    let inContainerPidFile: string | undefined
+    let tmpDirInContainer: string | undefined
+
+    // Track whether we successfully acquired a refcount for the user
+    // container so we can release it on any spawn-side failure between here
+    // and the child.once('close') registration below.
+    let userContainerAcquired = false
+    if (session.runtime.type === 'docker' && containerMode === 'user') {
+      const { ensureUserContainer, acquireSession, buildUserContainerName } =
+        await import('./runtime/userContainerRegistry.js')
+      userContainerName = buildUserContainerName(session.orgId, session.userId)
+      inContainerPidFile = getInContainerPidFile(
+        this.options.config.runtimeDir,
+        session.sessionId,
+      )
+      tmpDirInContainer = getSessionTmpDir(
+        this.options.config.runtimeDir,
+        session.sessionId,
+      )
+      await mkdir(tmpDirInContainer, { recursive: true })
+      await mkdir(dirname(inContainerPidFile), { recursive: true })
+
+      try {
+        await ensureUserContainer(this.options.config, {
+          orgId: session.orgId,
+          userId: session.userId,
+          role: session.role,
+          scopes: session.scopes,
+          image: session.runtime.dockerImage,
+        })
+        await acquireSession(
+          session.orgId,
+          session.userId,
+          session.sessionId,
+          this.options.config,
+        )
+        userContainerAcquired = true
+      } catch (err) {
+        process.stderr.write(
+          `[RuntimeService] ensureUserContainer failed for ${session.userId}: ${errorMessage(err)}\n`,
+        )
+        throw err
+      }
+    }
+
+    const releaseGuard = async (reason: string): Promise<void> => {
+      if (!userContainerAcquired) return
+      userContainerAcquired = false
+      try {
+        const { releaseSession } = await import('./runtime/userContainerRegistry.js')
+        await releaseSession(session.orgId, session.userId, session.sessionId, this.options.config)
+        const { logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+        logRuntimeMetric('release_session_via_child_close', { reason })
+      } catch (err) {
+        process.stderr.write(
+          `[RuntimeService] releaseGuard(${reason}) failed for ${session.sessionId}: ${errorMessage(err)}\n`,
+        )
+      }
+    }
+
     const manifest: RunnerManifest = {
       config: this.options.config,
       session: {
@@ -939,8 +1208,13 @@ export class RuntimeService {
         ...(mcpSettings ? { mcpSettings } : {}),
         runtime: {
           ...session.runtime,
+          containerMode,
+          scodeHomeDir,
+          ...(userContainerName ? { userContainerName } : {}),
+          ...(inContainerPidFile ? { inContainerPidFile } : {}),
+          ...(tmpDirInContainer ? { tmpDirInContainer } : {}),
           containerName:
-            session.runtime.type === 'docker'
+            session.runtime.type === 'docker' && containerMode === 'session'
               ? `moss-session-${session.sessionId.slice(0, 12)}-g${generation}`
               : session.runtime.containerName,
         },
@@ -1013,17 +1287,31 @@ export class RuntimeService {
     const safeCwd = cwd === '/' ? os.homedir() : cwd
 
     // Open log files for runner output
-    const stdoutFd = await open(stdoutLogPath, 'a')
-    const stderrFd = await open(stderrLogPath, 'a')
+    let stdoutFd: Awaited<ReturnType<typeof open>>
+    let stderrFd: Awaited<ReturnType<typeof open>>
+    try {
+      stdoutFd = await open(stdoutLogPath, 'a')
+      stderrFd = await open(stderrLogPath, 'a')
+    } catch (err) {
+      await releaseGuard('log_open_failed')
+      throw err
+    }
 
-    const child = await spawnSessionRunner(runtimePath, [runnerPath, manifestPath], {
-      detached: true,
-      stdio: ['ignore', stdoutFd, stderrFd],
-      cwd: safeCwd,
-      env: runnerEnv,
-    })
+    let child: ChildProcess
+    try {
+      child = await spawnSessionRunner(runtimePath, [runnerPath, manifestPath], {
+        detached: true,
+        stdio: ['ignore', stdoutFd, stderrFd],
+        cwd: safeCwd,
+        env: runnerEnv,
+      })
+    } catch (err) {
+      await releaseGuard('runner_spawn_failed')
+      throw err
+    }
     child.unref()
     if (!child.pid) {
+      await releaseGuard('runner_no_pid')
       throw new Error('Failed to spawn session runner')
     }
 
@@ -1039,7 +1327,25 @@ export class RuntimeService {
     }
 
     this.store.updateAttemptRunner(attempt.attemptId, child.pid)
-    await waitForRunnerReady(attachPath, statusPath, stderrLogPath, 5_000)
+
+    // Release the per-user container session refcount when the runner exits.
+    // Only applies in containerMode='user' — session mode never acquired one.
+    // releaseGuard is a single-shot, so this fires once whether the runner
+    // exits via SIGTERM/idle/busy-ceiling/natural exit/crash.
+    if (containerMode === 'user') {
+      child.once('close', () => {
+        void releaseGuard('child_close')
+      })
+    }
+
+    try {
+      await waitForRunnerReady(attachPath, statusPath, stderrLogPath, 5_000)
+    } catch (err) {
+      // Runner failed to come up. Its child.once('close') will still fire
+      // (the process is going to exit), so releaseGuard runs once. We just
+      // propagate the error.
+      throw err
+    }
     this.store.setSessionLifecycle(session.sessionId, 'active', 'active')
     this.store.addEvent(session.sessionId, attempt.attemptId, 'attempt_spawned', {
       runnerPid: child.pid,

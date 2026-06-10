@@ -438,6 +438,37 @@ export class DirectConnectStore {
       }
     }
 
+    // Secrets base table must exist before column migrations below. On a fresh
+    // DB, PRAGMA table_info(nonexistent) returns an empty list, and ALTER TABLE
+    // would otherwise fail with "no such table: config_items" before the main
+    // Secrets Management schema block runs later in this constructor.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS config_items (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL,
+        description   TEXT,
+        icon          TEXT,
+        pinyin        TEXT,
+        scope         TEXT NOT NULL DEFAULT 'system',
+        url_pattern   TEXT,
+        scheme        TEXT,
+        bearer_prefix TEXT,
+        status        INTEGER DEFAULT 1,
+        org_id        TEXT,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        auth_type          TEXT,
+        auth_url           TEXT,
+        token_url          TEXT,
+        client_id          TEXT,
+        client_secret_key  TEXT,
+        refresh_token_key  TEXT,
+        default_scopes     TEXT,
+        token_request_json TEXT,
+        mint_script        TEXT
+      );
+    `)
+
     // Migration: config_items mint/auth columns. createConfigItem/updateConfigItem
     // have long referenced these columns in their INSERT/UPDATE, but the CREATE
     // TABLE never defined them — so those writes throw against an unmigrated DB.
@@ -446,9 +477,8 @@ export class DirectConnectStore {
     // 'script' values enable per-(user,service) token minting (token_url +
     // token_request_json recipe, or mint_script fallback).
     const configItemsColumns = this.db.prepare(`PRAGMA table_info(config_items)`).all() as { name: string }[]
-    // Skip on a fresh DB where config_items hasn't been created yet (its CREATE
-    // TABLE runs later in the secrets block, already with all columns). Only
-    // pre-existing DBs need these ALTERs.
+    // Fresh DBs use the complete schema above; pre-existing DBs may still need
+    // these ALTERs.
     if (configItemsColumns.length > 0) {
       const columnsToAdd = [
         ['auth_type', 'auth_type TEXT'],
@@ -1188,6 +1218,21 @@ export class DirectConnectStore {
     `).run(status, desiredState, ts, sessionId)
   }
 
+  /**
+   * Reactivate a session that was previously idle-killed (status=ended,
+   * desired=active, ended_at set). Clears ended_at and resets status/desired
+   * to 'active' so the row reads as a live session again after respawn.
+   */
+  reactivateSession(sessionId: string): void {
+    const ts = now()
+    this.db.prepare(`
+      UPDATE sessions
+      SET status = 'active', desired_state = 'active', ended_at = NULL,
+          last_active_at = ?
+      WHERE session_id = ?
+    `).run(ts, sessionId)
+  }
+
   markSessionEnded(
     sessionId: string,
     status: SessionStatus,
@@ -1255,6 +1300,14 @@ export class DirectConnectStore {
     )
   }
 
+  updateSessionRuntimeImage(sessionId: string, dockerImage: string): void {
+    this.db.prepare(`
+      UPDATE sessions
+      SET docker_image = ?
+      WHERE session_id = ?
+    `).run(dockerImage, sessionId)
+  }
+
   deleteSession(sessionId: string): void {
     this.db.prepare(`
       UPDATE sessions
@@ -1317,6 +1370,22 @@ export class DirectConnectStore {
       stopReason: 'runner_unavailable',
       errorText,
     })
+  }
+
+  /**
+   * Returns every attempt whose runtime_state column says it is still
+   * starting/running/detached (i.e. has not been written terminal yet).
+   * Used by reconcileOnStartup to clean stale rows whose runner_pid is no
+   * longer alive on the host.
+   */
+  listAttemptsByRuntimeState(states: AttemptRuntimeState[]): AttemptRecord[] {
+    if (states.length === 0) return []
+    const placeholders = states.map(() => '?').join(',')
+    const rows = this.db.prepare(`
+      SELECT * FROM session_attempts
+      WHERE runtime_state IN (${placeholders})
+    `).all(...states) as SqlRow[]
+    return rows.map(mapAttempt)
   }
 
   listSessionRecords(filter: SessionListFilter): SessionRecord[] {

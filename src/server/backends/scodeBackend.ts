@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { writeFileSync } from 'fs'
-import { mkdir } from 'fs/promises'
+import { mkdir, readFile } from 'fs/promises'
 import { join } from 'path'
 import {
   buildSessionEnv,
@@ -18,6 +18,15 @@ import type {
   BackendSpawnOptions,
   SessionBackend,
 } from '../sessionManager.js'
+
+async function readScodeSessionId(filePath: string): Promise<string | undefined> {
+  try {
+    const value = (await readFile(filePath, 'utf8')).trim()
+    return value || undefined
+  } catch {
+    return undefined
+  }
+}
 
 export class ScodeBackend implements SessionBackend {
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
@@ -155,6 +164,10 @@ export class ScodeBackend implements SessionBackend {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
+    const scodeSessionIdPath = join(options.cwd, '.moss', 'scode-session-id')
+    const resumeSessionId = options.resumeSessionId
+      ? await readScodeSessionId(scodeSessionIdPath)
+      : undefined
 
     const handle = createAcpBridgeHandle({
       child,
@@ -162,6 +175,8 @@ export class ScodeBackend implements SessionBackend {
       cwd: options.cwd,
       model: scodeModel,
       transcriptPath: (options as any).transcriptPath,
+      resumeSessionId,
+      scodeSessionIdPath,
       // 新方案：传递智能体名称和启用的技能列表
       assistantName: options.assistantName,
       enabledSkillNames: enabledSkills,

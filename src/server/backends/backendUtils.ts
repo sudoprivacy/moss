@@ -268,6 +268,19 @@ export function buildConfigDir(
 }
 
 /**
+ * Build the per-session SUDO_CODE_CONFIG_HOME path. Always per-session even when
+ * dockerMode='user' (which shares configDir for shared memory) — keeps
+ * sudocode.json / settings.json out of the shared configDir and prevents
+ * concurrent write collisions.
+ */
+export function buildSessionScodeHomeDir(
+  runtimeDir: string,
+  sessionId: string,
+): string {
+  return path.join(runtimeDir, 'sessions', sessionId, 'scode-home', '.nexus', 'sudocode')
+}
+
+/**
  * 获取所有可用的 skill 名称列表
  *
  * 从所有 skill 目录中收集已启用且有效的 skill 名称

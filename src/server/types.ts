@@ -96,9 +96,40 @@ export const serverFileConfigSchema = lazySchema(() =>
       network: z.string().optional(),
       stopTimeoutSec: z.number().int().min(1).default(10),
       labels: z.record(z.string(), z.string()).default({}),
+      /**
+       * Container reuse boundary. 'session' (default) preserves legacy
+       * `docker run --rm` per session. 'user' activates per-user long-lived
+       * containers with `docker exec` per session.
+       */
+      containerMode: z.enum(['session', 'user']).default('session'),
+      maxSessionsPerUser: z.number().int().min(1).default(5),
+      userContainerIdleTimeoutMs: z.number().int().min(60_000).default(20 * 60_000),
+      execKillGraceMs: z.number().int().min(0).default(5_000),
+      /** Per-user container resource gates (only relevant when containerMode='user'). */
+      user: z.object({
+        pidsLimit: z.number().int().min(64).default(512),
+        memory: z.string().default('4g'),
+        cpus: z.string().default('2'),
+        nofile: z.number().int().min(256).default(4096),
+      }).default({
+        pidsLimit: 512,
+        memory: '4g',
+        cpus: '2',
+        nofile: 4096,
+      }),
     }).default({
       stopTimeoutSec: 10,
       labels: {},
+      containerMode: 'session',
+      maxSessionsPerUser: 5,
+      userContainerIdleTimeoutMs: 20 * 60_000,
+      execKillGraceMs: 5_000,
+      user: {
+        pidsLimit: 512,
+        memory: '4g',
+        cpus: '2',
+        nofile: 4096,
+      },
     }),
     recovery: z.object({
       startupPolicy: z.enum(['reattach-or-resume']).default('reattach-or-resume'),
@@ -160,6 +191,29 @@ export type ServerConfig = {
   dockerNetwork?: string
   dockerStopTimeoutSec: number
   dockerLabels: Record<string, string>
+  /**
+   * Per-user docker container settings. `containerMode='session'` is the
+   * default and preserves legacy `docker run --rm` per-session behavior. Set
+   * `containerMode='user'` to activate long-lived per-user containers + per-
+   * session `docker exec`. `session.maxDetachedBusyMs` controls the upper
+   * bound on detached + busy sessions before persistInProgressTurn + force
+   * destroy.
+   */
+  docker?: {
+    containerMode: 'session' | 'user'
+    maxSessionsPerUser: number
+    userContainerIdleTimeoutMs: number
+    execKillGraceMs: number
+    user: {
+      pidsLimit: number
+      memory: string
+      cpus: string
+      nofile: number
+    }
+  }
+  session?: {
+    maxDetachedBusyMs: number
+  }
   startupPolicy: 'reattach-or-resume'
   heartbeatTimeoutMs: number
   reattachProbeTimeoutMs: number
