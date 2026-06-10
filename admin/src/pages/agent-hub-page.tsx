@@ -58,7 +58,7 @@ import {
   installAgent,
   uninstallAgent,
   updateInstalledAgentMeta,
-  createCustomAssistant,
+  createTenantAssistant,
   getAgentSyncStatus,
   getTenantAssistants,
   approveTenantAssistant,
@@ -1310,21 +1310,25 @@ export default function AgentHubPage() {
           }
         : null
 
-      await createCustomAssistant({
+      // Creating on moss authors a TENANT (org-shared) assistant — the org's
+      // internal library. Custom assistants are client-authored and synced up,
+      // so they are not created here (mirrors how tenant vs custom skills work).
+      await createTenantAssistant({
         name,
-        displayName,
+        display_name: displayName,
         description: createDescription.trim() || undefined,
         avatar: createAvatar.trim() || undefined,
         emoji: createEmoji.trim() || undefined,
         rules: createRules,
         skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
-        enabledWikis: createSelectedWikis.length > 0 ? createSelectedWikis : undefined,
+        enabled_skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
+        enabled_wikis: createSelectedWikis.length > 0 ? createSelectedWikis : undefined,
         agent_type: createAgentType,
         memory_mode: createAgentType === 'chat' ? createMemoryMode : undefined,
         visible_to,
         workflow,
       })
-      toast.success(`已创建智能体 ${displayName}`)
+      toast.success(`已创建专属智能体 ${displayName}`)
       setCreateOpen(false)
       setCreateName('')
       setCreateDisplayName('')
@@ -1345,14 +1349,16 @@ export default function AgentHubPage() {
       setCreateWorkflowOutputTargets([])
       setCreateSelectedSkills([])
       setCreateSelectedWikis([])
-      setActiveTab('custom')
-      await fetchInstalledState(false)
+      // The new assistant is a tenant (专属) item — land on that tab and refresh
+      // both the tenant list and the installed list (it appears in both).
+      setActiveTab('exclusive')
+      await Promise.all([fetchTenantAssistants(), fetchInstalledState(false)])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '创建智能体失败')
+      toast.error(error instanceof Error ? error.message : '创建专属智能体失败')
     } finally {
       setCreatingAssistant(false)
     }
-  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, fetchInstalledState])
+  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, fetchInstalledState, fetchTenantAssistants])
 
   const handleApproveTenantAssistant = useCallback(async (approved: boolean) => {
     if (!approvingAssistant) return
@@ -1834,10 +1840,6 @@ export default function AgentHubPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="mr-2 size-4" />
-              创建智能体
-            </Button>
             <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
               {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
               批量同步
@@ -1904,6 +1906,13 @@ export default function AgentHubPage() {
                   />
                 </div>
               </div>
+
+              {activeTab === 'exclusive' ? (
+                <Button onClick={() => setCreateOpen(true)}>
+                  <Plus className="mr-2 size-4" />
+                  创建专属智能体
+                </Button>
+              ) : null}
             </div>
 
             {activeTab === 'store' ? (
@@ -3133,9 +3142,9 @@ export default function AgentHubPage() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>创建自定义智能体</DialogTitle>
+            <DialogTitle>创建专属智能体</DialogTitle>
             <DialogDescription>
-              创建一个新的自定义智能体，将在 server 上生成智能体目录和配置文件。
+              创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。
             </DialogDescription>
           </DialogHeader>
 
