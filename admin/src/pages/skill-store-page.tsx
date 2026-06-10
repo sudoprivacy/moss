@@ -1640,7 +1640,7 @@ export default function SkillStorePage() {
               {activeTab === 'exclusive' ? (
                 <Button onClick={() => setImportDialogOpen(true)}>
                   <Upload className="mr-2 size-4" />
-                  上传技能
+                  上传专属技能
                 </Button>
               ) : null}
             </div>
@@ -2103,7 +2103,7 @@ export default function SkillStorePage() {
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>上传技能</DialogTitle>
+            <DialogTitle>上传专属技能</DialogTitle>
             <DialogDescription>
               {activeTab === 'exclusive'
                 ? '上传技能到专属技能，自动审批通过后全员可见。支持 ZIP 压缩包或本地技能目录。'
