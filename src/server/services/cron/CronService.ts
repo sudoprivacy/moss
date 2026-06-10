@@ -5,17 +5,63 @@
  */
 
 import { Cron } from 'croner'
+import path from 'path'
 import type { DatabaseSync } from 'node:sqlite'
 import { CronStore, type CronJob, type CronJobRun } from './CronStore.js'
 import type { RuntimeService } from '../runtimeService.js'
+import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
 
 const CRON_RUN_TIMEOUT_MS = Number(process.env.MOSS_CRON_RUN_TIMEOUT_MS) || 30 * 60 * 1000
 
 export interface CronServiceConfig {
   runtimeService: RuntimeService
+  runtimeDir: string
+  defaultRuntime: 'host' | 'docker'
+  dockerContainerMode: 'session' | 'user'
   workspace?: string
   /** Get user auth context (role, scopes) for session creation */
   getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[] } | null>
+}
+
+function isPathInside(base: string, candidate: string): boolean {
+  const resolvedBase = path.resolve(base)
+  const resolvedCandidate = path.resolve(candidate)
+  const relative = path.relative(resolvedBase, resolvedCandidate)
+  return relative === '' || (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+export function isVisibleInUserContainer(candidate: string, runtimeDir: string, mossHome: string = MOSS_HOME): boolean {
+  return isPathInside(runtimeDir, candidate) || isPathInside(mossHome, candidate)
+}
+
+export function resolveCronWorkspace(input: {
+  jobId: string
+  jobWorkspace?: string | null
+  serviceWorkspace?: string
+  runtimeDir: string
+  defaultRuntime: 'host' | 'docker'
+  dockerContainerMode: 'session' | 'user'
+  mossHome?: string
+}): string {
+  const configuredWorkspace = input.jobWorkspace?.trim() || input.serviceWorkspace?.trim()
+  const workspace = configuredWorkspace
+    ? path.resolve(configuredWorkspace)
+    : path.join(input.runtimeDir, 'cron', input.jobId, 'workspace')
+
+  const isUserContainerMode =
+    input.defaultRuntime === 'docker' && input.dockerContainerMode === 'user'
+  if (
+    configuredWorkspace &&
+    isUserContainerMode &&
+    !isVisibleInUserContainer(workspace, input.runtimeDir, input.mossHome)
+  ) {
+    throw new Error(
+      `Cron workspace "${workspace}" is not mounted in docker user-container mode. ` +
+      `Use a path under "${input.runtimeDir}" or "${input.mossHome ?? MOSS_HOME}".`,
+    )
+  }
+
+  return workspace
 }
 
 /**
@@ -296,8 +342,16 @@ export class CronService {
       : undefined
 
     // Create session via RuntimeService
+    const cwd = resolveCronWorkspace({
+      jobId: job.id,
+      jobWorkspace: job.workspace,
+      serviceWorkspace: this.config.workspace,
+      runtimeDir: this.config.runtimeDir,
+      defaultRuntime: this.config.defaultRuntime,
+      dockerContainerMode: this.config.dockerContainerMode,
+    })
     const session = await this.config.runtimeService.createSession({
-      cwd: this.config.workspace || '/tmp/cron',
+      cwd,
       dangerouslySkipPermissions: false,
       userId: job.userId,
       orgId: job.orgId,
