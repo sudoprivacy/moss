@@ -367,7 +367,6 @@ export class DirectConnectStore {
 
       CREATE INDEX IF NOT EXISTS idx_tenant_skills_author ON tenant_skills (author_id);
       CREATE INDEX IF NOT EXISTS idx_tenant_skills_status ON tenant_skills (status);
-      CREATE INDEX IF NOT EXISTS idx_tenant_skills_org ON tenant_skills (org_id);
     `)
 
     // Create tenant_assistants table for enterprise exclusive assistants
@@ -400,7 +399,6 @@ export class DirectConnectStore {
 
       CREATE INDEX IF NOT EXISTS idx_tenant_assistants_author ON tenant_assistants (author_id);
       CREATE INDEX IF NOT EXISTS idx_tenant_assistants_status ON tenant_assistants (status);
-      CREATE INDEX IF NOT EXISTS idx_tenant_assistants_org ON tenant_assistants (org_id);
     `)
 
     // Migration: Add agent_type column to tenant_assistants if it doesn't exist
@@ -433,9 +431,9 @@ export class DirectConnectStore {
       const tcols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
       if (!tcols.includes('org_id')) {
         this.db.exec(`ALTER TABLE ${table} ADD COLUMN org_id TEXT`)
-        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
         console.log(`[DB] Added org_id column to ${table}`)
       }
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
     }
 
     // Secrets base table must exist before column migrations below. On a fresh
@@ -481,6 +479,7 @@ export class DirectConnectStore {
     // these ALTERs.
     if (configItemsColumns.length > 0) {
       const columnsToAdd = [
+        ['org_id', 'org_id TEXT'],
         ['auth_type', 'auth_type TEXT'],
         ['auth_url', 'auth_url TEXT'],
         ['token_url', 'token_url TEXT'],
