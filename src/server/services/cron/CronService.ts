@@ -10,6 +10,8 @@ import type { DatabaseSync } from 'node:sqlite'
 import { CronStore, type CronJob, type CronJobRun } from './CronStore.js'
 import type { RuntimeService } from '../runtimeService.js'
 import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
+import { getSystemSettings } from '../../systemSettings.js'
+import { isCronAdminCapable } from '../../auth/token.js'
 
 const CRON_RUN_TIMEOUT_MS = Number(process.env.MOSS_CRON_RUN_TIMEOUT_MS) || 30 * 60 * 1000
 
@@ -273,6 +275,23 @@ export class CronService {
       const userAuth = await this.config.getUserAuth(job.userId, job.orgId)
       if (!userAuth) {
         throw new Error(`User auth not found for ${job.userId}`)
+      }
+
+      // clientCronEnabled pauses user-owned jobs while admin-owned automations
+      // keep running. The owner's CURRENT capability decides (promotions and
+      // demotions take effect at the next fire), and the schedule still
+      // advances so the job resumes cleanly when the flag is re-enabled.
+      // Manual triggers are unaffected — triggerJob() is a separate path
+      // behind the admin-bypassed API route. (#83)
+      if (!getSystemSettings().clientCronEnabled && !isCronAdminCapable(userAuth)) {
+        this.store.updateRunStatus(run.id, {
+          status: 'skipped',
+          summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',
+        })
+        this.store.updateRunResult(job.id, { lastStatus: 'skipped' })
+        console.log(`[CronService] Job ${job.id} skipped: clientCronEnabled=false and owner lacks admin capability`)
+        this.calculateNextRun(this.store.getById(job.id) ?? job)
+        return
       }
 
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `job ${job.id}`)

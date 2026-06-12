@@ -224,3 +224,13 @@ export function hasScope(scopes: string[], requiredScope: string): boolean {
   }
   return false
 }
+
+/**
+ * Admin capability for cron gating: admin/super_admin roles or the admin:cron
+ * scope. clientCronEnabled gates client-issued cron actions only — actors with
+ * this capability bypass the gate on both the API routes and the scheduler's
+ * owner check (#83).
+ */
+export function isCronAdminCapable(auth: { role: string; scopes?: string[] }): boolean {
+  return auth.role === 'admin' || auth.role === 'super_admin' || hasScope(auth.scopes ?? [], 'admin:cron')
+}
