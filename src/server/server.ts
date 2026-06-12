@@ -10,7 +10,7 @@ import { WebSocketServer } from 'ws'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
-import { hasScope, type AuthContext } from './auth/token.js'
+import { hasScope, isCronAdminCapable, type AuthContext } from './auth/token.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService } from './runtimeService.js'
@@ -4137,6 +4137,17 @@ export function startServer(
       }
 
       // ==================== Cron Jobs ====================
+      // clientCronEnabled gates client-issued cron actions only: requests with
+      // admin capability (admin/super_admin role or admin:cron scope) pass so
+      // org admins keep managing and firing jobs while the client feature is
+      // off. Covers every /api/v1/cron/* route, reads included; the separate
+      // /api/v1/admin/cron/* surface is intentionally untouched. (#83)
+      if (pathname.startsWith('/api/v1/cron/') && !getSystemSettings().clientCronEnabled) {
+        if (!isCronAdminCapable(auth)) {
+          throw new HttpError(403, 'cron_disabled_by_org')
+        }
+      }
+
       // List all cron jobs for current user
       if (req.method === 'GET' && pathname === '/api/v1/cron/jobs') {
         const result = await cronApi.listJobs(auth)
