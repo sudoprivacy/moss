@@ -50,6 +50,11 @@ export type SystemSettingsPayload = {
    *  task feature. Stored in settings.json; surfaced to clients via
    *  GET /api/v1/tenant/config. */
   clientCronEnabled: boolean
+  /** Default for whether the enterprise client (sudowork) shows tool calls in
+   *  the chat stream. This is only a default — client users may override it
+   *  locally. Stored in settings.json; surfaced to clients via
+   *  GET /api/v1/tenant/config. */
+  clientShowToolCalls: boolean
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
@@ -93,6 +98,7 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
     requireState: true,
   },
   clientCronEnabled: true,
+  clientShowToolCalls: true,
 })
 
 type SystemSettingsState = {
@@ -150,6 +156,12 @@ function normalizeSystemSettings(
     result.clientCronEnabled = Boolean(source.clientCronEnabled)
   } else if (result.clientCronEnabled === undefined) {
     result.clientCronEnabled = DEFAULT_SYSTEM_SETTINGS.clientCronEnabled
+  }
+
+  if (source.clientShowToolCalls !== undefined) {
+    result.clientShowToolCalls = Boolean(source.clientShowToolCalls)
+  } else if (result.clientShowToolCalls === undefined) {
+    result.clientShowToolCalls = DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls
   }
 
   if (source.thinkingMode !== undefined) {
@@ -326,6 +338,7 @@ function toSystemSettingsPayload(
     skillStore: state.value.skillStore,
     oauth2: state.value.oauth2,
     clientCronEnabled: state.value.clientCronEnabled ?? DEFAULT_SYSTEM_SETTINGS.clientCronEnabled,
+    clientShowToolCalls: state.value.clientShowToolCalls ?? DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls,
     settingsPath: state.path,
     settingsExists: state.exists,
     settingsLoaded: state.loaded,
@@ -402,6 +415,7 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
     skillStore: nextSettings.skillStore,
     oauth2: nextSettings.oauth2,
     clientCronEnabled: nextSettings.clientCronEnabled,
+    clientShowToolCalls: nextSettings.clientShowToolCalls,
     settingsPath: SYSTEM_SETTINGS_PATH,
     settingsExists: true,
     settingsLoaded: true,

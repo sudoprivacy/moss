@@ -207,6 +207,9 @@ export interface SystemSettings {
   oauth2: SystemSettingsOAuth2
   /** Whether enterprise clients may use the cron feature. Stored in settings.json. */
   clientCronEnabled: boolean
+  /** Default for whether enterprise clients show tool calls in the chat stream.
+   *  Client users may override locally. Stored in settings.json. */
+  clientShowToolCalls: boolean
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
@@ -225,6 +228,7 @@ export interface UpdateSystemSettingsRequest {
   skillStore?: Partial<SystemSettingsSkillStore>
   oauth2?: Partial<SystemSettingsOAuth2>
   clientCronEnabled?: boolean
+  clientShowToolCalls?: boolean
 }
 
 // Direct Connect Server Types
@@ -474,6 +478,11 @@ export interface EnterpriseConfig {
    * task feature. null = unset → treated as enabled. Admin/super_admin only.
    */
   client_cron_enabled: boolean | null;
+  /**
+   * Default for whether enterprise client (sudowork) users see tool calls in
+   * the chat stream. Client users may override locally. null = unset → shown.
+   */
+  client_show_tool_calls: boolean | null;
 }
 
 export interface EnterpriseConfigResponse {

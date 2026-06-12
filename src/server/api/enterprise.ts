@@ -7,8 +7,9 @@ export function createEnterpriseApi(db: DirectConnectStore, runtimeDir: string) 
   const api = {
     /**
      * Get enterprise configuration. Branding fields come from the DB
-     * (enterprises table); client_cron_enabled is sourced from settings.json
-     * (clientCronEnabled) — the source of truth for the client cron toggle.
+     * (enterprises table); client_cron_enabled / client_show_tool_calls are
+     * sourced from settings.json (clientCronEnabled / clientShowToolCalls) —
+     * the source of truth for the client-facing toggles.
      */
     getConfig: async () => {
       try {
@@ -29,12 +30,14 @@ export function createEnterpriseApi(db: DirectConnectStore, runtimeDir: string) 
           }
         }
 
+        const systemSettings = getSystemSettings()
         return {
           success: true,
           data: {
             ...enterprise,
             logo: logoBase64,
-            client_cron_enabled: getSystemSettings().clientCronEnabled,
+            client_cron_enabled: systemSettings.clientCronEnabled,
+            client_show_tool_calls: systemSettings.clientShowToolCalls,
           },
         }
       } catch (err) {
@@ -48,14 +51,22 @@ export function createEnterpriseApi(db: DirectConnectStore, runtimeDir: string) 
 
     /**
      * Update enterprise configuration. Branding fields persist to the DB;
-     * client_cron_enabled is routed to settings.json (clientCronEnabled).
+     * client_cron_enabled / client_show_tool_calls are routed to settings.json
+     * (clientCronEnabled / clientShowToolCalls).
      */
     updateConfig: async (patch: any) => {
       try {
-        if (patch && typeof patch === 'object' && 'client_cron_enabled' in patch) {
-          const { client_cron_enabled, ...rest } = patch
+        if (patch && typeof patch === 'object') {
+          const { client_cron_enabled, client_show_tool_calls, ...rest } = patch
+          const settingsPatch: Record<string, unknown> = {}
           if (client_cron_enabled !== undefined) {
-            updateSystemSettings({ clientCronEnabled: Boolean(client_cron_enabled) })
+            settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
+          }
+          if (client_show_tool_calls !== undefined) {
+            settingsPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
+          }
+          if (Object.keys(settingsPatch).length > 0) {
+            updateSystemSettings(settingsPatch)
           }
           if (Object.keys(rest).length > 0) {
             db.updateEnterprise(rest)
