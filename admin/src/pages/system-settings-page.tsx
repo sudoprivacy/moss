@@ -112,6 +112,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
       requireState: settings.oauth2.requireState,
     },
     clientCronEnabled: settings.clientCronEnabled,
+    clientShowToolCalls: settings.clientShowToolCalls,
   }
 }
 
@@ -253,12 +254,13 @@ function SettingsSkeleton() {
 }
 
 /**
- * Client-facing settings. clientCronEnabled is persisted in settings.json via
- * the system-settings API. Self-contained load/save so it doesn't entangle the
- * page's primary auto-save flow.
+ * Client-facing settings. clientCronEnabled / clientShowToolCalls are persisted
+ * in settings.json via the system-settings API. Self-contained load/save so it
+ * doesn't entangle the page's primary auto-save flow.
  */
 function ClientSettingsSection() {
   const [cronEnabled, setCronEnabled] = useState(true)
+  const [showToolCalls, setShowToolCalls] = useState(true)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -269,6 +271,7 @@ function ClientSettingsSection() {
       .then((res) => {
         if (cancelled) return
         setCronEnabled(res.clientCronEnabled !== false)
+        setShowToolCalls(res.clientShowToolCalls !== false)
         setLoaded(true)
       })
       .catch(() => {
@@ -282,7 +285,7 @@ function ClientSettingsSection() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      await updateSystemSettings({ clientCronEnabled: cronEnabled })
+      await updateSystemSettings({ clientCronEnabled: cronEnabled, clientShowToolCalls: showToolCalls })
       setDirty(false)
       toast.success('客户端设置已保存')
     } catch (error) {
@@ -307,6 +310,20 @@ function ClientSettingsSection() {
           disabled={!loaded || saving}
           onCheckedChange={(checked) => {
             setCronEnabled(checked)
+            setDirty(true)
+          }}
+        />
+      </SettingField>
+
+      <SettingField
+        label="显示工具调用"
+        description="客户端对话流中是否默认显示工具调用详情。此项为默认值，客户端用户可在本地设置中覆盖。"
+      >
+        <Switch
+          checked={showToolCalls}
+          disabled={!loaded || saving}
+          onCheckedChange={(checked) => {
+            setShowToolCalls(checked)
             setDirty(true)
           }}
         />
