@@ -87,3 +87,39 @@ export async function enableCronJob(jobId: string): Promise<{ success: boolean; 
     { enabled: true }
   )
 }
+
+export interface CronJobFormInput {
+  name: string
+  /** Cron expression (kind is fixed to 'cron' for console-created jobs) */
+  scheduleValue: string
+  scheduleDescription?: string
+  payloadMessage: string
+}
+
+/** Create an admin-owned job — it runs under the creating admin's identity,
+ * so it keeps firing even while client cron is disabled (#83/#85). */
+export async function createCronJob(input: CronJobFormInput): Promise<{ success: boolean; data?: CronJob; message?: string }> {
+  return dcClient.post<{ success: boolean; data?: CronJob; message?: string }>('/api/v1/cron/jobs', {
+    name: input.name,
+    enabled: true,
+    schedule: { kind: 'cron', value: input.scheduleValue, description: input.scheduleDescription || undefined },
+    payloadMessage: input.payloadMessage,
+    conversationMode: 'new',
+  })
+}
+
+export async function updateCronJob(jobId: string, input: CronJobFormInput): Promise<{ success: boolean; data?: CronJob; message?: string }> {
+  return dcClient.patch<{ success: boolean; data?: CronJob; message?: string }>(`/api/v1/cron/jobs/${jobId}`, {
+    name: input.name,
+    schedule: { kind: 'cron', value: input.scheduleValue, description: input.scheduleDescription || undefined },
+    payloadMessage: input.payloadMessage,
+  })
+}
+
+export async function deleteCronJob(jobId: string): Promise<{ success: boolean; message?: string }> {
+  return dcClient.delete<{ success: boolean; message?: string }>(`/api/v1/cron/jobs/${jobId}`)
+}
+
+export async function triggerCronJob(jobId: string): Promise<{ success: boolean; data?: CronJobRun; message?: string }> {
+  return dcClient.post<{ success: boolean; data?: CronJobRun; message?: string }>(`/api/v1/cron/jobs/${jobId}/trigger`)
+}

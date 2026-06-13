@@ -77,12 +77,15 @@ function mapRunWithSessionToResponse(run: CronJobRunWithSession) {
   }
 }
 
-function canReadJob(auth: { orgId: string; userId: string; scopes?: string[] }, job: CronJob): boolean {
+export function canReadJob(auth: { orgId: string; userId: string; scopes?: string[] }, job: CronJob): boolean {
   const scopes = auth.scopes ?? []
   return job.orgId === auth.orgId && (job.userId === auth.userId || hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:list:any'))
 }
 
-function canDisableJob(auth: { orgId: string; userId: string; scopes?: string[] }, job: CronJob): boolean {
+// Management capability (update/delete/trigger): the owner, or an admin actor.
+// Needed so the admin console can manage org jobs while clientCronEnabled=false
+// leaves admins as the only actors who can (#85).
+export function canManageJob(auth: { orgId: string; userId: string; scopes?: string[] }, job: CronJob): boolean {
   const scopes = auth.scopes ?? []
   return job.orgId === auth.orgId && (job.userId === auth.userId || hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:disable:any'))
 }
@@ -117,13 +120,13 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Get a single cron job by ID
      */
-    getJob: async (auth: { orgId: string; userId: string }, jobId: string) => {
+    getJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string) => {
       try {
         const job = store.getById(jobId)
         if (!job) {
           return { success: false, message: 'Job not found' }
         }
-        if (job.orgId !== auth.orgId || job.userId !== auth.userId) {
+        if (!canReadJob(auth, job)) {
           return { success: false, message: 'Access denied' }
         }
         return {
@@ -174,7 +177,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         }
         const isOwner = existing.orgId === auth.orgId && existing.userId === auth.userId
         if (!isOwner) {
-          if (!canDisableJob(auth, existing)) {
+          if (!canManageJob(auth, existing)) {
             return { success: false, message: 'Access denied' }
           }
           const updateKeys = Object.keys(updates)
@@ -207,13 +210,13 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Delete (soft) a cron job
      */
-    deleteJob: async (auth: { orgId: string; userId: string }, jobId: string) => {
+    deleteJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string) => {
       try {
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        if (existing.orgId !== auth.orgId || existing.userId !== auth.userId) {
+        if (!canManageJob(auth, existing)) {
           return { success: false, message: 'Access denied' }
         }
 
@@ -232,13 +235,13 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Trigger a job immediately
      */
-    triggerJob: async (auth: { orgId: string; userId: string }, jobId: string) => {
+    triggerJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string) => {
       try {
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        if (existing.orgId !== auth.orgId || existing.userId !== auth.userId) {
+        if (!canManageJob(auth, existing)) {
           return { success: false, message: 'Access denied' }
         }
 
