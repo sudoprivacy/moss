@@ -94,6 +94,12 @@ export interface CronJobFormInput {
   scheduleValue: string
   scheduleDescription?: string
   payloadMessage: string
+  /** 'new' spawns a fresh conversation each run; 'reuse' appends to a bound session */
+  conversationMode: 'new' | 'reuse'
+  /** Optional session to bind to in 'reuse' mode */
+  boundSessionId?: string
+  /** Assistant to run the task as (stable name/id; '' = default) */
+  assistantName?: string
 }
 
 /** Create an admin-owned job — it runs under the creating admin's identity,
@@ -104,7 +110,12 @@ export async function createCronJob(input: CronJobFormInput): Promise<{ success:
     enabled: true,
     schedule: { kind: 'cron', value: input.scheduleValue, description: input.scheduleDescription || undefined },
     payloadMessage: input.payloadMessage,
-    conversationMode: 'new',
+    conversationMode: input.conversationMode,
+    boundSessionId: input.conversationMode === 'reuse' && input.boundSessionId ? input.boundSessionId : undefined,
+    // assistantId and assistantName both carry the assistant's stable name; the
+    // server resolves it (name or UUID) to a display name at execution time.
+    assistantId: input.assistantName || undefined,
+    assistantName: input.assistantName || undefined,
   })
 }
 
@@ -113,6 +124,11 @@ export async function updateCronJob(jobId: string, input: CronJobFormInput): Pro
     name: input.name,
     schedule: { kind: 'cron', value: input.scheduleValue, description: input.scheduleDescription || undefined },
     payloadMessage: input.payloadMessage,
+    conversationMode: input.conversationMode,
+    // Clear the binding when not in reuse mode; null explicitly unsets it server-side.
+    boundSessionId: input.conversationMode === 'reuse' ? (input.boundSessionId || null) : null,
+    assistantId: input.assistantName || '',
+    assistantName: input.assistantName || '',
   })
 }
 

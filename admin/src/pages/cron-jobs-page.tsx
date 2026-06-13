@@ -42,6 +42,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { getAdminCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
 import { getUsers } from '@/lib/api/auth'
+import { getInstalledAgents, type InstalledAgentInfo } from '@/lib/api/agent-hub'
 import type { AuthUser } from '@/lib/api/types'
 import { Search, RefreshCw, Clock, Pause, Play, History, Loader2, ExternalLink, Plus, Pencil, Trash2, Zap } from 'lucide-react'
 import { toast } from 'sonner'
@@ -89,7 +90,8 @@ export default function CronJobsPage() {
   const [triggeringJobId, setTriggeringJobId] = useState<string | null>(null)
 
   // Create/edit form dialog
-  const emptyForm: CronJobFormInput = { name: '', scheduleValue: '', scheduleDescription: '', payloadMessage: '' }
+  const emptyForm: CronJobFormInput = { name: '', scheduleValue: '', scheduleDescription: '', payloadMessage: '', conversationMode: 'new', boundSessionId: '', assistantName: '' }
+  const [agents, setAgents] = useState<InstalledAgentInfo[]>([])
   const [formOpen, setFormOpen] = useState(false)
   const [editingJob, setEditingJob] = useState<CronJob | null>(null)
   const [form, setForm] = useState<CronJobFormInput>(emptyForm)
@@ -101,14 +103,16 @@ export default function CronJobsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [jobsRes, usersRes] = await Promise.all([
+      const [jobsRes, usersRes, agentsRes] = await Promise.all([
         getAdminCronJobs(),
         getUsers().catch(() => ({ users: [] })),
+        getInstalledAgents().catch(() => [] as InstalledAgentInfo[]),
       ])
       if (jobsRes.success && jobsRes.data) {
         setJobs(jobsRes.data)
       }
       setUsers(usersRes.users)
+      setAgents(agentsRes)
     } catch (error) {
       console.error('Failed to fetch cron jobs:', error)
       toast.error('获取定时任务列表失败')
@@ -191,6 +195,9 @@ export default function CronJobsPage() {
       scheduleValue: job.schedule.value,
       scheduleDescription: job.schedule.description || '',
       payloadMessage: job.payloadMessage,
+      conversationMode: job.conversationMode,
+      boundSessionId: job.boundSessionId || '',
+      assistantName: job.assistantName || '',
     })
     setFormOpen(true)
   }
@@ -379,6 +386,9 @@ export default function CronJobsPage() {
                       <div className="flex items-center gap-2">
                         <Clock className="h-4 w-4 text-muted-foreground" />
                         <span className="text-sm">{formatSchedule(job)}</span>
+                      </div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        {(job.assistantName || '默认智能体')} · {job.conversationMode === 'reuse' ? '复用会话' : '新建会话'}
                       </div>
                     </TableCell>
                     <TableCell>{formatNextRun(job.nextRunAt)}</TableCell>
@@ -573,6 +583,55 @@ export default function CronJobsPage() {
                 rows={4}
               />
             </div>
+            <div className="space-y-2">
+              <Label>智能体</Label>
+              <Select
+                value={form.assistantName || '__default__'}
+                onValueChange={(v) => setForm({ ...form, assistantName: v === '__default__' ? '' : v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="默认智能体" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">默认智能体</SelectItem>
+                  {agents.map((a) => (
+                    <SelectItem key={a.id} value={a.name}>
+                      {a.displayName || a.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>运行模式</Label>
+              <Select
+                value={form.conversationMode}
+                onValueChange={(v) => setForm({ ...form, conversationMode: v as 'new' | 'reuse' })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="new">每次新建会话</SelectItem>
+                  <SelectItem value="reuse">复用已有会话</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {form.conversationMode === 'new' ? '每次触发都会创建一个新的会话' : '将消息追加到绑定的会话中'}
+              </p>
+            </div>
+            {form.conversationMode === 'reuse' && (
+              <div className="space-y-2">
+                <Label htmlFor="cron-session">绑定会话 ID（可选）</Label>
+                <Input
+                  id="cron-session"
+                  value={form.boundSessionId}
+                  onChange={(e) => setForm({ ...form, boundSessionId: e.target.value })}
+                  placeholder="留空则首次运行时自动创建并绑定"
+                  className="font-mono"
+                />
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFormOpen(false)} disabled={saving}>
