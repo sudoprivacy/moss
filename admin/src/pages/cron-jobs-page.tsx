@@ -24,12 +24,27 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { getAdminCronJobs, getCronJobRuns, disableCronJob, type CronJob, type CronJobRun } from '@/lib/api/cron'
-import { getUsers, type AuthUser } from '@/lib/api/auth'
-import { Search, RefreshCw, Clock, Pause, History, Loader2, ExternalLink } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { getAdminCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
+import { getUsers } from '@/lib/api/auth'
+import { getInstalledAgents, type InstalledAgentInfo } from '@/lib/api/agent-hub'
+import type { AuthUser } from '@/lib/api/types'
+import { Search, RefreshCw, Clock, Pause, Play, History, Loader2, ExternalLink, Plus, Pencil, Trash2, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 import { format } from 'date-fns'
 import { Link } from 'react-router-dom'
@@ -72,17 +87,32 @@ export default function CronJobsPage() {
   const [runs, setRuns] = useState<CronJobRun[]>([])
   const [runsLoading, setRunsLoading] = useState(false)
   const [togglingJobId, setTogglingJobId] = useState<string | null>(null)
+  const [triggeringJobId, setTriggeringJobId] = useState<string | null>(null)
+
+  // Create/edit form dialog
+  const emptyForm: CronJobFormInput = { name: '', scheduleValue: '', scheduleDescription: '', payloadMessage: '', conversationMode: 'new', boundSessionId: '', assistantName: '' }
+  const [agents, setAgents] = useState<InstalledAgentInfo[]>([])
+  const [formOpen, setFormOpen] = useState(false)
+  const [editingJob, setEditingJob] = useState<CronJob | null>(null)
+  const [form, setForm] = useState<CronJobFormInput>(emptyForm)
+  const [saving, setSaving] = useState(false)
+
+  // Delete confirmation
+  const [deletingJob, setDeletingJob] = useState<CronJob | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
 
   const fetchData = useCallback(async () => {
     try {
-      const [jobsRes, usersRes] = await Promise.all([
+      const [jobsRes, usersRes, agentsRes] = await Promise.all([
         getAdminCronJobs(),
         getUsers().catch(() => ({ users: [] })),
+        getInstalledAgents().catch(() => [] as InstalledAgentInfo[]),
       ])
       if (jobsRes.success && jobsRes.data) {
         setJobs(jobsRes.data)
       }
       setUsers(usersRes.users)
+      setAgents(agentsRes)
     } catch (error) {
       console.error('Failed to fetch cron jobs:', error)
       toast.error('获取定时任务列表失败')
@@ -118,16 +148,98 @@ export default function CronJobsPage() {
   }
 
   const handleToggleJob = async (job: CronJob) => {
-    if (!job.enabled) return
     setTogglingJobId(job.id)
     try {
-      await disableCronJob(job.id)
-      toast.success('任务已禁用')
-      setJobs(jobs.map(j => j.id === job.id ? { ...j, enabled: false } : j))
+      if (job.enabled) {
+        await disableCronJob(job.id)
+        toast.success('任务已禁用')
+        setJobs(jobs.map(j => j.id === job.id ? { ...j, enabled: false } : j))
+      } else {
+        await enableCronJob(job.id)
+        toast.success('任务已启用')
+        setJobs(jobs.map(j => j.id === job.id ? { ...j, enabled: true } : j))
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '操作失败')
     } finally {
       setTogglingJobId(null)
+    }
+  }
+
+  const handleTriggerJob = async (job: CronJob) => {
+    setTriggeringJobId(job.id)
+    try {
+      const res = await triggerCronJob(job.id)
+      if (res.success) {
+        toast.success('已手动触发任务')
+      } else {
+        toast.error(res.message || '触发失败')
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '触发失败')
+    } finally {
+      setTriggeringJobId(null)
+    }
+  }
+
+  const openCreateForm = () => {
+    setEditingJob(null)
+    setForm(emptyForm)
+    setFormOpen(true)
+  }
+
+  const openEditForm = (job: CronJob) => {
+    setEditingJob(job)
+    setForm({
+      name: job.name,
+      scheduleValue: job.schedule.value,
+      scheduleDescription: job.schedule.description || '',
+      payloadMessage: job.payloadMessage,
+      conversationMode: job.conversationMode,
+      boundSessionId: job.boundSessionId || '',
+      assistantName: job.assistantName || '',
+    })
+    setFormOpen(true)
+  }
+
+  const handleSaveForm = async () => {
+    if (!form.name.trim() || !form.scheduleValue.trim() || !form.payloadMessage.trim()) {
+      toast.error('请填写任务名称、调度表达式和消息内容')
+      return
+    }
+    setSaving(true)
+    try {
+      const res = editingJob ? await updateCronJob(editingJob.id, form) : await createCronJob(form)
+      if (res.success) {
+        toast.success(editingJob ? '任务已更新' : '任务已创建')
+        setFormOpen(false)
+        fetchData()
+      } else {
+        toast.error(res.message || '保存失败')
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleConfirmDelete = async () => {
+    if (!deletingJob) return
+    setDeleteBusy(true)
+    try {
+      const res = await deleteCronJob(deletingJob.id)
+      if (res.success) {
+        toast.success('任务已删除')
+        setJobs(jobs.filter(j => j.id !== deletingJob.id))
+        setDeletingJob(null)
+      } else {
+        toast.error(res.message || '删除失败')
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除失败')
+    } finally {
+      setDeleteBusy(false)
     }
   }
 
@@ -207,10 +319,16 @@ export default function CronJobsPage() {
               </SelectContent>
             </Select>
           </div>
-          <Button onClick={handleRefresh} disabled={isRefreshing}>
-            <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-            刷新
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleRefresh} disabled={isRefreshing}>
+              <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              刷新
+            </Button>
+            <Button onClick={openCreateForm}>
+              <Plus className="mr-2 h-4 w-4" />
+              新建任务
+            </Button>
+          </div>
         </div>
 
         {/* Stats */}
@@ -269,6 +387,9 @@ export default function CronJobsPage() {
                         <Clock className="h-4 w-4 text-muted-foreground" />
                         <span className="text-sm">{formatSchedule(job)}</span>
                       </div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        {(job.assistantName || '默认智能体')} · {job.conversationMode === 'reuse' ? '复用会话' : '新建会话'}
+                      </div>
                     </TableCell>
                     <TableCell>{formatNextRun(job.nextRunAt)}</TableCell>
                     <TableCell>
@@ -285,23 +406,49 @@ export default function CronJobsPage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => handleViewRuns(job)}
+                          onClick={() => handleTriggerJob(job)}
+                          disabled={triggeringJobId === job.id}
+                          title="立即触发"
                         >
-                          <History className="mr-1 h-4 w-4" />
-                          记录
+                          {triggeringJobId === job.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Zap className="h-4 w-4" />
+                          )}
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => openEditForm(job)} title="编辑">
+                          <Pencil className="h-4 w-4" />
                         </Button>
                         <Button
-                          variant={job.enabled ? 'destructive' : 'secondary'}
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleViewRuns(job)}
+                          title="执行记录"
+                        >
+                          <History className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant={job.enabled ? 'secondary' : 'default'}
                           size="sm"
                           onClick={() => handleToggleJob(job)}
-                          disabled={!job.enabled || togglingJobId === job.id}
+                          disabled={togglingJobId === job.id}
+                          title={job.enabled ? '禁用' : '启用'}
                         >
                           {togglingJobId === job.id ? (
-                            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : job.enabled ? (
+                            <Pause className="h-4 w-4" />
                           ) : (
-                            <Pause className="mr-1 h-4 w-4" />
+                            <Play className="h-4 w-4" />
                           )}
-                          {job.enabled ? '禁用' : '已禁用'}
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setDeletingJob(job)}
+                          title="删除"
+                        >
+                          <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
                     </TableCell>
@@ -389,6 +536,140 @@ export default function CronJobsPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Create / Edit Dialog */}
+      <Dialog open={formOpen} onOpenChange={(open) => !saving && setFormOpen(open)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{editingJob ? '编辑定时任务' : '新建定时任务'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="cron-name">任务名称</Label>
+              <Input
+                id="cron-name"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="例如：每日早报"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cron-expr">调度表达式 (Cron)</Label>
+              <Input
+                id="cron-expr"
+                value={form.scheduleValue}
+                onChange={(e) => setForm({ ...form, scheduleValue: e.target.value })}
+                placeholder="0 9 * * *"
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">分 时 日 月 周，例如 0 9 * * * 表示每天 9:00</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cron-desc">调度说明（可选）</Label>
+              <Input
+                id="cron-desc"
+                value={form.scheduleDescription}
+                onChange={(e) => setForm({ ...form, scheduleDescription: e.target.value })}
+                placeholder="每天 9:00"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cron-msg">消息内容</Label>
+              <Textarea
+                id="cron-msg"
+                value={form.payloadMessage}
+                onChange={(e) => setForm({ ...form, payloadMessage: e.target.value })}
+                placeholder="任务触发时发送给智能体的消息"
+                rows={4}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>智能体</Label>
+              <Select
+                value={form.assistantName || '__default__'}
+                onValueChange={(v) => setForm({ ...form, assistantName: v === '__default__' ? '' : v })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="默认智能体" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">默认智能体</SelectItem>
+                  {agents.map((a) => (
+                    <SelectItem key={a.id} value={a.name}>
+                      {a.displayName || a.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>运行模式</Label>
+              <Select
+                value={form.conversationMode}
+                onValueChange={(v) => setForm({ ...form, conversationMode: v as 'new' | 'reuse' })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="new">每次新建会话</SelectItem>
+                  <SelectItem value="reuse">复用已有会话</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {form.conversationMode === 'new' ? '每次触发都会创建一个新的会话' : '将消息追加到绑定的会话中'}
+              </p>
+            </div>
+            {form.conversationMode === 'reuse' && (
+              <div className="space-y-2">
+                <Label htmlFor="cron-session">绑定会话 ID（可选）</Label>
+                <Input
+                  id="cron-session"
+                  value={form.boundSessionId}
+                  onChange={(e) => setForm({ ...form, boundSessionId: e.target.value })}
+                  placeholder="留空则首次运行时自动创建并绑定"
+                  className="font-mono"
+                />
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFormOpen(false)} disabled={saving}>
+              取消
+            </Button>
+            <Button onClick={handleSaveForm} disabled={saving}>
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {editingJob ? '保存' : '创建'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation */}
+      <AlertDialog open={!!deletingJob} onOpenChange={(open) => !deleteBusy && !open && setDeletingJob(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除定时任务</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除任务「{deletingJob?.name}」吗？此操作无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteBusy}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                handleConfirmDelete()
+              }}
+              disabled={deleteBusy}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteBusy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </DashboardLayout>
   )
 }

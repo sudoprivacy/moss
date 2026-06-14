@@ -87,3 +87,55 @@ export async function enableCronJob(jobId: string): Promise<{ success: boolean; 
     { enabled: true }
   )
 }
+
+export interface CronJobFormInput {
+  name: string
+  /** Cron expression (kind is fixed to 'cron' for console-created jobs) */
+  scheduleValue: string
+  scheduleDescription?: string
+  payloadMessage: string
+  /** 'new' spawns a fresh conversation each run; 'reuse' appends to a bound session */
+  conversationMode: 'new' | 'reuse'
+  /** Optional session to bind to in 'reuse' mode */
+  boundSessionId?: string
+  /** Assistant to run the task as (stable name/id; '' = default) */
+  assistantName?: string
+}
+
+/** Create an admin-owned job — it runs under the creating admin's identity,
+ * so it keeps firing even while client cron is disabled (#83/#85). */
+export async function createCronJob(input: CronJobFormInput): Promise<{ success: boolean; data?: CronJob; message?: string }> {
+  return dcClient.post<{ success: boolean; data?: CronJob; message?: string }>('/api/v1/cron/jobs', {
+    name: input.name,
+    enabled: true,
+    schedule: { kind: 'cron', value: input.scheduleValue, description: input.scheduleDescription || undefined },
+    payloadMessage: input.payloadMessage,
+    conversationMode: input.conversationMode,
+    boundSessionId: input.conversationMode === 'reuse' && input.boundSessionId ? input.boundSessionId : undefined,
+    // assistantId and assistantName both carry the assistant's stable name; the
+    // server resolves it (name or UUID) to a display name at execution time.
+    assistantId: input.assistantName || undefined,
+    assistantName: input.assistantName || undefined,
+  })
+}
+
+export async function updateCronJob(jobId: string, input: CronJobFormInput): Promise<{ success: boolean; data?: CronJob; message?: string }> {
+  return dcClient.patch<{ success: boolean; data?: CronJob; message?: string }>(`/api/v1/cron/jobs/${jobId}`, {
+    name: input.name,
+    schedule: { kind: 'cron', value: input.scheduleValue, description: input.scheduleDescription || undefined },
+    payloadMessage: input.payloadMessage,
+    conversationMode: input.conversationMode,
+    // Clear the binding when not in reuse mode; null explicitly unsets it server-side.
+    boundSessionId: input.conversationMode === 'reuse' ? (input.boundSessionId || null) : null,
+    assistantId: input.assistantName || '',
+    assistantName: input.assistantName || '',
+  })
+}
+
+export async function deleteCronJob(jobId: string): Promise<{ success: boolean; message?: string }> {
+  return dcClient.delete<{ success: boolean; message?: string }>(`/api/v1/cron/jobs/${jobId}`)
+}
+
+export async function triggerCronJob(jobId: string): Promise<{ success: boolean; data?: CronJobRun; message?: string }> {
+  return dcClient.post<{ success: boolean; data?: CronJobRun; message?: string }>(`/api/v1/cron/jobs/${jobId}/trigger`)
+}
