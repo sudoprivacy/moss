@@ -483,7 +483,7 @@ export default function CronJobsPage() {
                   <TableHead>时间</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead>会话</TableHead>
-                  <TableHead>错误</TableHead>
+                  <TableHead>详情</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
