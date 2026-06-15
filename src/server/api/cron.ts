@@ -7,7 +7,38 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { CronStore, type CronJob, type CronJobRun, type CronJobRunWithSession, type CreateCronJobInput, type UpdateCronJobInput } from '../services/cron/CronStore.js'
 import { CronService } from '../services/cron/CronService.js'
-import { hasScope } from '../auth/token.js'
+import { hasScope, isCronAdminCapable } from '../auth/token.js'
+import { getSystemSettings } from '../systemSettings.js'
+
+/**
+ * Auth shape carrying the fields needed for the clientCronEnabled gate.
+ * createJob historically typed auth as { orgId, userId }, but the route always
+ * passes the full AuthContext (with role/scopes), so widen it here.
+ */
+type CronAuth = { orgId: string; userId: string; role?: string; scopes?: string[] }
+
+/**
+ * Pure org-policy decision for client-issued cron mutations (#83/#85): is the
+ * mutation blocked? Blocked when client cron is disabled and the actor is not
+ * admin-capable. Exported for unit testing.
+ */
+export function isCronMutationBlocked(clientCronEnabled: boolean, auth: CronAuth): boolean {
+  return !clientCronEnabled && !isCronAdminCapable(auth)
+}
+
+/**
+ * Org-policy gate for client-issued cron mutations (#83/#85). Enforced INSIDE
+ * the api methods — not only on the HTTP route — so any caller (HTTP route, a
+ * future in-session agent tool, internal code) is gated regardless of how it is
+ * wired. Admins bypass, matching the route-level and scheduler checks. Returns
+ * an error result when blocked so callers surface a clean message.
+ */
+function cronDisabledError(auth: CronAuth): { success: false; message: string } | null {
+  if (isCronMutationBlocked(getSystemSettings().clientCronEnabled, auth)) {
+    return { success: false, message: 'cron_disabled_by_org' }
+  }
+  return null
+}
 
 type SqlRow = Record<string, unknown>
 
@@ -145,8 +176,10 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Create a new cron job
      */
-    createJob: async (auth: { orgId: string; userId: string }, input: Omit<CreateCronJobInput, 'orgId' | 'userId'>) => {
+    createJob: async (auth: CronAuth, input: Omit<CreateCronJobInput, 'orgId' | 'userId'>) => {
       try {
+        const blocked = cronDisabledError(auth)
+        if (blocked) return blocked
         const job = store.insert({
           ...input,
           orgId: auth.orgId,
@@ -169,8 +202,10 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Update a cron job
      */
-    updateJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string, updates: UpdateCronJobInput) => {
+    updateJob: async (auth: CronAuth, jobId: string, updates: UpdateCronJobInput) => {
       try {
+        const blocked = cronDisabledError(auth)
+        if (blocked) return blocked
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
@@ -210,8 +245,10 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Delete (soft) a cron job
      */
-    deleteJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string) => {
+    deleteJob: async (auth: CronAuth, jobId: string) => {
       try {
+        const blocked = cronDisabledError(auth)
+        if (blocked) return blocked
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
@@ -235,8 +272,10 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Trigger a job immediately
      */
-    triggerJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string) => {
+    triggerJob: async (auth: CronAuth, jobId: string) => {
       try {
+        const blocked = cronDisabledError(auth)
+        if (blocked) return blocked
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
