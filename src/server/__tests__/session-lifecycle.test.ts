@@ -169,6 +169,59 @@ describe('SQL: listSessionsToRecover excludes idle-killed but includes failed', 
   })
 })
 
+describe('SQL: reconcile retires sessions with no live runtime', () => {
+  // Mirrors reconcileOnStartup's retirement branch: a recoverable session
+  // whose runner_pid is dead (and, for user containers, no live scode) is
+  // marked status=ended/desired=ended via markSessionEnded instead of being
+  // respawned. This is the natural-exit terminal state — excluded from
+  // listSessionsToRecover and not auto-respawned by the GET route, yet still
+  // resumable via /resume — and it stops abandoned sessions from re-occupying
+  // the per-user / global session caps across restarts.
+  function retireUnrecoverable(db: Database, sid: string): void {
+    const ts = Date.now()
+    db.prepare(`
+      UPDATE sessions
+      SET status = 'ended', desired_state = 'ended', ended_at = ?, last_active_at = ?
+      WHERE session_id = ?
+    `).run(ts, ts, sid)
+  }
+
+  it('retired session drops out of the recover set and the active count', () => {
+    const db = makeDb()
+    // Dead-runner detached session (the abandoned-after-restart case).
+    insertSession(db, 's-dead', 'detached', 'active', null)
+    // Live-runner detached session that should survive reconcile.
+    insertSession(db, 's-live', 'detached', 'active', null)
+
+    retireUnrecoverable(db, 's-dead')
+
+    // listSessionsToRecover no longer returns the retired one.
+    const recoverable = db.prepare(`
+      SELECT session_id FROM sessions
+      WHERE desired_state = 'active'
+        AND deleted_at IS NULL
+        AND status IN ('creating', 'active', 'detached', 'lost', 'failed')
+    `).all() as Array<{ session_id: string }>
+    const ids = recoverable.map(r => r.session_id)
+    expect(ids).toEqual(['s-live'])
+    expect(ids).not.toContain('s-dead')
+
+    // countActiveSessions (status in creating/active/detached) no longer counts it.
+    const active = db.prepare(`
+      SELECT COUNT(*) AS c FROM sessions
+      WHERE deleted_at IS NULL AND status IN ('creating', 'active', 'detached')
+    `).get() as { c: number }
+    expect(active.c).toBe(1)
+
+    // Row still exists with terminal markers so /sessions/:id/resume can revive it.
+    const row = db.prepare(`SELECT status, desired_state, ended_at FROM sessions WHERE session_id = 's-dead'`)
+      .get() as { status: string; desired_state: string; ended_at: number | null }
+    expect(row.status).toBe('ended')
+    expect(row.desired_state).toBe('ended')
+    expect(row.ended_at).not.toBeNull()
+  })
+})
+
 describe('SQL: reactivateSession on respawn', () => {
   it('clears ended_at and sets status/desired back to active', () => {
     const db = makeDb()

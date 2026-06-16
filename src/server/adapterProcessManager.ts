@@ -115,6 +115,11 @@ export class AdapterProcessManager {
 
     child.unref()
 
+    // The child inherited (dup'd) the log fds; close the parent's copies so
+    // they aren't left for GC, which throws ERR_INVALID_STATE on Node >=26.
+    await stdoutFd.close().catch(() => {})
+    await stderrFd.close().catch(() => {})
+
     const pid = child.pid ?? 0
     this.processes.set(key, child)
     this.states.set(key, {
@@ -145,12 +150,6 @@ export class AdapterProcessManager {
         startedAt: null,
       })
     })
-
-    // Close log fds after child has inherited them
-    setTimeout(async () => {
-      await stdoutFd.close()
-      await stderrFd.close()
-    }, 5000)
   }
 
   async stop(adapter: AdapterName, orgId: string, userId: string): Promise<void> {
