@@ -421,6 +421,9 @@ export class DirectConnectStore {
     if (!assistantColumns.some(col => col.name === 'enabled_wikis')) {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN enabled_wikis TEXT`)
     }
+    if (!assistantColumns.some(col => col.name === 'enabled_corp_apps')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN enabled_corp_apps TEXT`)
+    }
     if (!assistantColumns.some(col => col.name === 'workflow')) {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN workflow TEXT`)
     }
@@ -1973,6 +1976,7 @@ export class DirectConnectStore {
     file_path?: string | null
     enabled_skills?: string | null
     enabled_wikis?: string | null
+    enabled_corp_apps?: string | null
     skills?: string | null
     memory_mode?: string
     agent_type?: string
@@ -1986,8 +1990,8 @@ export class DirectConnectStore {
     this.db.prepare(`
       INSERT INTO tenant_assistants (
         id, name, display_name, description, version, author_id, author_name, status,
-        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, workflow, org_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, enabled_corp_apps, workflow, org_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.name,
@@ -2008,6 +2012,7 @@ export class DirectConnectStore {
       row.enabled ?? 1,
       row.visible_to ?? null,
       row.enabled_wikis ?? null,
+      row.enabled_corp_apps ?? null,
       row.workflow ?? null,
       row.org_id ?? null,
       ts,
@@ -2035,6 +2040,7 @@ export class DirectConnectStore {
     agent_type?: string
     memory_mode?: string
     enabled_wikis?: string | null
+    enabled_corp_apps?: string | null
     skills?: string | null
     workflow?: string | null
   }): void {
@@ -2052,13 +2058,14 @@ export class DirectConnectStore {
     const agentType = updates.agent_type ?? existing.agent_type
     const memoryMode = updates.memory_mode ?? existing.memory_mode
     const enabledWikis = updates.enabled_wikis !== undefined ? updates.enabled_wikis : (existing.enabled_wikis as string | null)
+    const enabledCorpApps = updates.enabled_corp_apps !== undefined ? updates.enabled_corp_apps : (existing.enabled_corp_apps as string | null)
     const skills = updates.skills !== undefined ? updates.skills : (existing.skills as string | null)
     const workflow = updates.workflow !== undefined ? updates.workflow : (existing.workflow as string | null)
 
     this.db.prepare(`
       UPDATE tenant_assistants
       SET display_name = ?, description = ?, enabled = ?, visible_to = ?, enabled_skills = ?,
-          avatar = ?, emoji = ?, agent_type = ?, memory_mode = ?, enabled_wikis = ?, skills = ?, workflow = ?,
+          avatar = ?, emoji = ?, agent_type = ?, memory_mode = ?, enabled_wikis = ?, enabled_corp_apps = ?, skills = ?, workflow = ?,
           updated_at = ?
       WHERE id = ?
     `).run(
@@ -2072,6 +2079,7 @@ export class DirectConnectStore {
       agentType as string,
       memoryMode as string,
       enabledWikis,
+      enabledCorpApps,
       skills,
       workflow,
       ts,
