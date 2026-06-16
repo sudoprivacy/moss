@@ -587,6 +587,7 @@ export default function AgentHubPage() {
   const [tenantEditSkills, setTenantEditSkills] = useState<string[]>([])
   const [tenantEditEnabledSkills, setTenantEditEnabledSkills] = useState<string[]>([])
   const [tenantEditEnabledWikis, setTenantEditEnabledWikis] = useState<string[]>([])
+  const [tenantEditEnabledCorpApps, setTenantEditEnabledCorpApps] = useState<string[]>([])
   const [tenantEditRules, setTenantEditRules] = useState('')
   const [tenantEditWorkflow, setTenantEditWorkflow] = useState<TenantAssistantInfo['workflow']>(null)
   const [savingTenantEdit, setSavingTenantEdit] = useState(false)
@@ -1438,6 +1439,7 @@ export default function AgentHubPage() {
     setTenantEditSkills(assistant.skills || [])
     setTenantEditEnabledSkills(assistant.enabled_skills || [])
     setTenantEditEnabledWikis(assistant.enabled_wikis || [])
+    setTenantEditEnabledCorpApps(assistant.enabled_corp_apps || [])
     setTenantEditRules('')
     setTenantEditWorkflow(assistant.workflow || null)
     // Reset skill-related states
@@ -1467,6 +1469,7 @@ export default function AgentHubPage() {
     setTenantEditVisibleUserIds(userIds || [])
 
     void loadAvailableWikis()
+    void loadAvailableCorpApps()
 
     void (async () => {
       try {
@@ -1533,7 +1536,7 @@ export default function AgentHubPage() {
     }
 
     setTenantEditOpen(true)
-  }, [installedSkills, loadAvailableWikis])
+  }, [installedSkills, loadAvailableWikis, loadAvailableCorpApps])
 
   const handleSaveTenantEdit = useCallback(async () => {
     if (!editingTenantAgent) return
@@ -1560,6 +1563,7 @@ export default function AgentHubPage() {
         visible_to,
         enabledSkills: tenantEditEnabledSkills,
         enabledWikis: tenantEditEnabledWikis,
+        enabledCorpApps: tenantEditEnabledCorpApps,
         skills: tenantEditSkills,
         workflow: tenantEditWorkflow,
       })
@@ -1575,7 +1579,7 @@ export default function AgentHubPage() {
     }
   }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditEmoji, tenantEditRules,
       tenantEditAgentType, tenantEditMemoryMode, tenantEditVisibilityMode, tenantEditVisibleTo,
-      tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditSkills,
+      tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
       tenantEditWorkflow, fetchTenantAssistants])
 
   const handleSaveTenantVisibility = useCallback(async () => {
@@ -4453,6 +4457,64 @@ export default function AgentHubPage() {
                                 {wiki.description}
                               </p>
                             )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ---------- 企业应用管理: Corp App associations ---------- */}
+              <div className="space-y-2 pt-4 border-t">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium">关联企业应用</div>
+                  <Badge variant="outline">{tenantEditEnabledCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  勾选后,该助手可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                </p>
+                {availableCorpApps.length === 0 ? (
+                  <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+                    暂无可用企业应用。请先在「企业应用管理」中配置。
+                  </div>
+                ) : (
+                  <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
+                    {availableCorpApps.map(app => {
+                      const isEnabled = tenantEditEnabledCorpApps.includes(app.id)
+                      const toggle = () => {
+                        setTenantEditEnabledCorpApps(prev =>
+                          prev.includes(app.id)
+                            ? prev.filter(id => id !== app.id)
+                            : Array.from(new Set([...prev, app.id])),
+                        )
+                      }
+                      return (
+                        <div
+                          key={app.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={toggle}
+                          onKeyDown={(e) => {
+                            if (e.key === ' ' || e.key === 'Enter') {
+                              e.preventDefault()
+                              toggle()
+                            }
+                          }}
+                          className="flex items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent cursor-pointer"
+                        >
+                          <Checkbox
+                            checked={isEnabled}
+                            tabIndex={-1}
+                            aria-hidden="true"
+                            className="mt-0.5 pointer-events-none"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate">{app.name}</span>
+                              <Badge variant="outline" className="text-xs">{app.type}</Badge>
+                            </div>
+                            <p className="text-xs text-muted-foreground line-clamp-1">{app.appKey}</p>
                           </div>
                         </div>
                       )

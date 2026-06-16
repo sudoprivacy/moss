@@ -4647,6 +4647,7 @@ export function startServer(
             skills: typeof row.skills === 'string' ? JSON.parse(row.skills) : row.skills ?? [],
             enabled_skills: typeof row.enabled_skills === 'string' ? JSON.parse(row.enabled_skills) : row.enabled_skills ?? [],
             enabled_wikis: typeof row.enabled_wikis === 'string' ? JSON.parse(row.enabled_wikis) : row.enabled_wikis ?? [],
+            enabled_corp_apps: typeof row.enabled_corp_apps === 'string' ? JSON.parse(row.enabled_corp_apps) : row.enabled_corp_apps ?? [],
             workflow: typeof row.workflow === 'string' ? JSON.parse(row.workflow) : row.workflow ?? null,
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
           }
@@ -4757,6 +4758,7 @@ export function startServer(
           skills: meta.skills && meta.skills.length > 0 ? JSON.stringify(meta.skills) : null,
           enabled_skills: meta.enabledSkills && meta.enabledSkills.length > 0 ? JSON.stringify(meta.enabledSkills) : null,
           enabled_wikis: meta.enabledWikis && meta.enabledWikis.length > 0 ? JSON.stringify(meta.enabledWikis) : null,
+          enabled_corp_apps: meta.enabledCorpApps && meta.enabledCorpApps.length > 0 ? JSON.stringify(meta.enabledCorpApps) : null,
           agent_type: meta.agent_type,
           memory_mode: meta.memory_mode,
           visible_to: meta.visible_to ? JSON.stringify(meta.visible_to) : null,
@@ -4921,6 +4923,9 @@ export function startServer(
         }
         if (Array.isArray(body.enabledWikis)) {
           updates.enabled_wikis = JSON.stringify(body.enabledWikis.filter((s: unknown) => typeof s === 'string'))
+        }
+        if (Array.isArray(body.enabledCorpApps)) {
+          updates.enabled_corp_apps = JSON.stringify(body.enabledCorpApps.filter((s: unknown) => typeof s === 'string'))
         }
         if (typeof body.rules === 'string') {
           updates.rules = body.rules
