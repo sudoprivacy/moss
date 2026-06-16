@@ -669,17 +669,21 @@ export class RuntimeService {
           containerMode?: 'session' | 'user'
           userContainerName?: string
         }
+        const attempt = session.currentAttemptId
+          ? this.store.getAttempt(session.currentAttemptId)
+          : null
+        const runnerAlive = attempt?.runnerPid
+          ? safeKill0(attempt.runnerPid)
+          : false
+        // Whether any live runtime backs this session. For user containers we
+        // also accept an orphan scode (runner died but scode lives → reapable
+        // and resumable). Defaults to runnerAlive for non-container sessions.
+        let recoverable = runnerAlive
         if (
           runtimeAny.containerMode === 'user' &&
           runtimeAny.userContainerName &&
           this.options.config.runtimeDir
         ) {
-          const attempt = session.currentAttemptId
-            ? this.store.getAttempt(session.currentAttemptId)
-            : null
-          const runnerAlive = attempt?.runnerPid
-            ? safeKill0(attempt.runnerPid)
-            : false
           try {
             const { probeContainerSession } = await import(
               './runtime/probeContainerSession.js'
@@ -691,6 +695,7 @@ export class RuntimeService {
             })
             if (!runnerAlive && probe.kind === 'alive') {
               // Orphan scode — runner died with stdio. Reap before resume.
+              recoverable = true
               const { reapInUserContainer } = await import('./runtime/reaper.js')
               await reapInUserContainer({
                 userContainerName: runtimeAny.userContainerName,
@@ -727,6 +732,32 @@ export class RuntimeService {
             logRuntimeMetric('reconcile_probe_failed', { reason: 'exception' })
           }
         }
+
+        if (!recoverable) {
+          // No live runner and no live scode to reattach to. Resurrecting this
+          // session would respawn a fresh runner and re-occupy a per-user/global
+          // session slot for what is effectively an abandoned session — the
+          // root cause of "maxSessionsPerUser exceeded" after restarts. Retire
+          // it to the natural-exit terminal state (status=ended, desired=ended)
+          // instead: excluded from listSessionsToRecover() so it won't be
+          // re-picked, and desired!='active' so the session-detail GET won't
+          // silently auto-respawn it — yet POST /sessions/:id/resume still
+          // revives it on demand (that route doesn't gate on desired_state).
+          this.store.markSessionEnded(session.sessionId, 'ended', 'ended')
+          this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_retired_unrecoverable', {
+            runnerPid: attempt?.runnerPid ?? null,
+            previousStatus: session.status,
+            containerMode: runtimeAny.containerMode ?? null,
+          })
+          const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
+          logRuntimeMetric('reconcile_retired_unrecoverable', {})
+          logRuntimeEvent('reconcile_retired_unrecoverable', {
+            sessionId: session.sessionId,
+            previousStatus: session.status,
+          })
+          continue
+        }
+
         await this.ensureAttempt(session)
       } catch (error) {
         this.store.addEvent(session.sessionId, session.currentAttemptId, 'reconcile_failed', {
@@ -1291,8 +1322,15 @@ export class RuntimeService {
     let stderrFd: Awaited<ReturnType<typeof open>>
     try {
       stdoutFd = await open(stdoutLogPath, 'a')
+    } catch (err) {
+      await releaseGuard('log_open_failed')
+      throw err
+    }
+    try {
       stderrFd = await open(stderrLogPath, 'a')
     } catch (err) {
+      // stdout opened but stderr failed — close stdout so it isn't GC-leaked.
+      await stdoutFd.close().catch(() => {})
       await releaseGuard('log_open_failed')
       throw err
     }
@@ -1306,9 +1344,18 @@ export class RuntimeService {
         env: runnerEnv,
       })
     } catch (err) {
+      // Close our copies of the log handles before bailing — the child never
+      // inherited them. Leaking a FileHandle to GC is fatal on Node >=26.
+      await stdoutFd.close().catch(() => {})
+      await stderrFd.close().catch(() => {})
       await releaseGuard('runner_spawn_failed')
       throw err
     }
+    // The spawned child has inherited (dup'd) the log fds; close the parent's
+    // copies so they aren't left for GC to close, which throws ERR_INVALID_STATE
+    // on Node >=26 and crashes the server.
+    await stdoutFd.close().catch(() => {})
+    await stderrFd.close().catch(() => {})
     child.unref()
     if (!child.pid) {
       await releaseGuard('runner_no_pid')
