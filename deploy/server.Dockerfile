@@ -14,6 +14,7 @@ RUN apt-get update \
            lsb-release \
            unzip \
            jq \
+           tzdata \
            # LibreOffice 依赖
            libxinerama1 \
            libcairo2 \
@@ -41,6 +42,12 @@ RUN apt-get update \
     && ln -sf /lib/x86_64-linux-gnu/libssl.so.3 /lib/x86_64-linux-gnu/libssl3.so \
     && ln -sf /lib/x86_64-linux-gnu/libcrypto.so.3 /lib/x86_64-linux-gnu/libcrypto3.so \
     && rm -rf /var/lib/apt/lists/*
+
+# 整个服务运行在中国时间（Asia/Shanghai）：日志、时间戳、cron 墙钟均为 CST。
+# 默认 UTC 会导致 cron "9-17" 在 UTC 9-17（即中国傍晚）触发。tzdata 已在上面安装。
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo 'Asia/Shanghai' > /etc/timezone
 
 # 安装 Docker CLI (使用重试 + 国内镜像备用)
 RUN for i in 1 2 3; do \

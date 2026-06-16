@@ -47,13 +47,20 @@ FROM ubuntu:24.04
 # 设置非交互模式（防止安装过程弹出时区选择）
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 1. 安装基础依赖和常用工具
+# 0. 时区：会话容器内一律使用中国时间（Asia/Shanghai），使 agent 观察到的
+#    时间、日志、scode 时间戳均为 CST，与服务端保持一致（默认 UTC 会导致时间偏差）。
+ENV TZ=Asia/Shanghai
+
+# 1. 安装基础依赖和常用工具（含 tzdata 以提供时区数据库）
 RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     git \
     python3 \
     bash \
+    tzdata \
+    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo 'Asia/Shanghai' > /etc/timezone \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
