@@ -15,6 +15,18 @@ import { isCronAdminCapable } from '../../auth/token.js'
 
 const CRON_RUN_TIMEOUT_MS = Number(process.env.MOSS_CRON_RUN_TIMEOUT_MS) || 30 * 60 * 1000
 
+// Default timezone for cron expressions when a job has no explicit schedule.tz.
+// Without this, croner falls back to the process timezone — which is UTC in the
+// deployed container, so "9-17" would fire 9-17 UTC (= evening in China). The UI
+// does not yet collect a per-job timezone, so we anchor to Asia/Shanghai (the
+// deployment's expected wall-clock) and allow an env override.
+const DEFAULT_CRON_TZ = process.env.MOSS_CRON_DEFAULT_TZ || 'Asia/Shanghai'
+
+// A job's effective timezone: its own schedule.tz if set, else the default.
+function resolveCronTz(tz?: string): string {
+  return tz && tz.trim() ? tz : DEFAULT_CRON_TZ
+}
+
 export interface CronServiceConfig {
   runtimeService: RuntimeService
   runtimeDir: string
@@ -167,7 +179,7 @@ export class CronService {
     this.stopTimer(job.id)
 
     try {
-      const timer = new Cron(job.schedule.value, { timezone: job.schedule.tz }, () => {
+      const timer = new Cron(job.schedule.value, { timezone: resolveCronTz(job.schedule.tz) }, () => {
         this.executeDueJob(job.id).catch(error => {
           console.error(`[CronService] Error executing cron job ${job.id}:`, error)
         })
@@ -511,9 +523,10 @@ export class CronService {
         if (nextRun) {
           this.store.updateNextRunAt(job.id, nextRun.getTime())
         } else {
-          // Timer might have been stopped, try to parse manually
+          // Timer might have been stopped, try to parse manually. Use the same
+          // resolved timezone as the live timer so next_run_at stays consistent.
           try {
-            const cron = new Cron(job.schedule.value)
+            const cron = new Cron(job.schedule.value, { timezone: resolveCronTz(job.schedule.tz) })
             const next = cron.nextRun()
             if (next) {
               this.store.updateNextRunAt(job.id, next.getTime())
