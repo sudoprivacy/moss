@@ -878,6 +878,17 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
+    // Effective assistant for this attempt. Callers that *create* a session
+    // pass `options.assistantName`, but relaunch/reuse paths (e.g. a reused
+    // cron session — spawnAttempt is reached via ensureRuntime with only
+    // `resumeTranscriptSessionId`) do not. Fall back to the assistant stored
+    // on the session record so the pre-signed wiki/corp-app token carries the
+    // right `assistant_id`, and the wiki / corp-app / shared-memory resolution
+    // below still runs. Without this, a reused session signs a token with
+    // `assistant_id: null`, which makes every assistant-gated agent endpoint
+    // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
+    const effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+
     const generation = this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)
     const attachPath = getAttachPath(this.options.config, session.sessionId, generation)
@@ -960,7 +971,7 @@ export class RuntimeService {
         orgId: session.orgId,
         role: session.role,
         scopes: session.scopes,
-        assistantName: options.assistantName ?? null,
+        assistantName: effectiveAssistantName ?? null,
       })
       sessionToken = signed.token
     } catch (err) {
@@ -978,10 +989,10 @@ export class RuntimeService {
     let availableWikis: Array<{ id: string; name: string; description?: string | null }> | undefined
     let availableCorpApps: Array<{ id: string; name: string; type: string; key: string }> | undefined
     let sharedMemory: string | null = null
-    if (options.assistantName) {
+    if (effectiveAssistantName) {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
-        const found = await findAssistantDir(options.assistantName)
+        const found = await findAssistantDir(effectiveAssistantName)
         if (found) {
           const meta = await readAssistantMeta(found.dir)
           const ids = Array.isArray(meta?.enabledWikis)
@@ -1048,28 +1059,28 @@ export class RuntimeService {
             if (userProfileMemory) {
               await appendSharedAgentMemory({
                 configDir: session.runtime.configDir,
-                assistantName: options.assistantName,
+                assistantName: effectiveAssistantName,
                 content: userProfileMemory,
                 source: 'profile',
               }).catch(() => {})
             }
             sharedMemory = await readSharedAgentMemory(
               session.runtime.configDir,
-              options.assistantName,
+              effectiveAssistantName,
             )
           }
 
           if (session.runtime.configDir) {
             await writeAssistantOverrideAgentsMd({
               configDir: session.runtime.configDir,
-              assistantName: options.assistantName,
+              assistantName: effectiveAssistantName,
               assistantRules: await import('./agentStore.js').then(m =>
-                m.getAssistantSystemPrompt(options.assistantName!),
+                m.getAssistantSystemPrompt(effectiveAssistantName!),
               ),
               sharedMemory,
             }).catch(err => {
               console.warn(
-                `[RuntimeService] failed to write assistant override AGENTS.md for ${options.assistantName}:`,
+                `[RuntimeService] failed to write assistant override AGENTS.md for ${effectiveAssistantName}:`,
                 err,
               )
             })
@@ -1077,7 +1088,7 @@ export class RuntimeService {
         }
       } catch (err) {
         console.warn(
-          `[RuntimeService] failed to resolve availableWikis for ${options.assistantName}:`,
+          `[RuntimeService] failed to resolve availableWikis for ${effectiveAssistantName}:`,
           err,
         )
       }
@@ -1224,7 +1235,7 @@ export class RuntimeService {
         scopes: session.scopes,
         dangerouslySkipPermissions:
           options.dangerouslySkipPermissions === true,
-        assistantName: options.assistantName,
+        assistantName: effectiveAssistantName,
         sessionToken,
         availableWikis,
         availableCorpApps,
