@@ -200,6 +200,26 @@ export class WikiJobExecutor {
         throw new Error('build finished but WIKI.md was not produced')
       }
 
+      // Stage 4.5: soft-validate image captioning. Any image referenced in a
+      // chunk but absent from _moss_images.md is logged as a warning — we do
+      // NOT fail the build (a build with some uncaptioned images is still
+      // useful, and decorative images are intentionally left out). Surfaces
+      // the common failure mode where a non-vision model produced no captions.
+      try {
+        const uncaptioned = await findUncaptionedImages(stageDir)
+        if (uncaptioned.length > 0) {
+          console.warn(
+            `[WikiJobExecutor] job ${job.id}: ${uncaptioned.length} image(s) ` +
+              `referenced without a caption entry in _moss_images.md: ${uncaptioned.join(', ')}`,
+          )
+          this.docStore.updateBuildJob(job.id, {
+            currentStep: `构建完成(${uncaptioned.length} 张图片未配文)`,
+          })
+        }
+      } catch (e) {
+        console.warn(`[WikiJobExecutor] job ${job.id}: caption validation skipped:`, e)
+      }
+
       // Stage 5: write _moss_meta.json into the staging dir so wikiCli and
       // tooling can inspect the wiki without re-scanning the directory each
       // time. Includes the page list (WIKI.md + chunk-*.md) with type/title.
@@ -246,15 +266,19 @@ export class WikiJobExecutor {
    * Document Center v2: write `_moss_meta.json` summarizing the built
    * wiki. Format:
    *   {
-   *     version: 1,
+   *     version: 2,
    *     wikiId, name, description,
    *     startedAt (epoch ms — when this build started; publishStaged
    *                compares it to the live wiki's to avoid clobbering a
    *                newer build),
    *     builtAt (epoch ms),
    *     sourceDocumentIds: [...],
-   *     pages: [{ file, type: 'index'|'chunk', title }]
+   *     pages: [{ file, type: 'index'|'chunk', title }],
+   *     images: [{ id, chunk, caption }]   // v2: from _moss_images.md;
+   *                                        // caption only (detail stays in
+   *                                        // the sidecar, fetched on demand)
    *   }
+   * Readers must tolerate `images` being absent (v1 wikis / no figures).
    *
    * Title is extracted from each markdown's first `# ` heading; falls
    * back to the file name (sans `.md`). wikiCli reads this file to
@@ -305,8 +329,14 @@ export class WikiJobExecutor {
       pages.push({ file, type, title, ...(topic ? { topic } : {}) })
     }
 
+    // Document Center v2: parse the agent-written image sidecar
+    // (_moss_images.md) into a lightweight index. Caption only (not the full
+    // detail) so meta stays small; detail is fetched on demand from the
+    // sidecar itself. Absent sidecar → empty images[].
+    const images = await parseImageSidecar(dir)
+
     const meta = {
-      version: 1 as const,
+      version: 2 as const,
       wikiId: wiki.id,
       name: wiki.name,
       description: wiki.description,
@@ -314,6 +344,7 @@ export class WikiJobExecutor {
       builtAt: Date.now(),
       sourceDocumentIds: wiki.sourceDocumentIds,
       pages,
+      images,
     }
     await writeFile(
       path.join(dir, '_moss_meta.json'),
@@ -641,6 +672,88 @@ export class WikiJobExecutor {
       lastBuildError: message,
     })
   }
+}
+
+export type WikiImageEntry = { id: string; chunk: string; caption: string }
+
+/**
+ * Parse the agent-written `_moss_images.md` sidecar into a lightweight index.
+ * Strict format (one block per image), as specified in the wiki-builder
+ * prompt:
+ *
+ *   ## <id>
+ *   - chunk: <chunk file>
+ *   - caption: <short caption>
+ *   - detail: <2-5 sentences>      // not indexed here; stays in the sidecar
+ *
+ * Returns caption-only entries (`detail` is intentionally dropped to keep
+ * `_moss_meta.json` small). Missing/blank fields fall back to empty strings;
+ * a missing sidecar yields []. Never throws.
+ */
+export async function parseImageSidecar(dir: string): Promise<WikiImageEntry[]> {
+  let raw: string
+  try {
+    raw = await readFile(path.join(dir, '_moss_images.md'), 'utf-8')
+  } catch {
+    return []
+  }
+  const entries: WikiImageEntry[] = []
+  // Split on level-2 headings; each `## <id>` starts a new image block.
+  const blocks = raw.split(/^##\s+/m).slice(1)
+  for (const block of blocks) {
+    const lines = block.split('\n')
+    const id = (lines[0] ?? '').trim()
+    if (!id) continue
+    let chunk = ''
+    let caption = ''
+    for (const line of lines.slice(1)) {
+      const m = line.match(/^\s*-\s*(chunk|caption)\s*:\s*(.+?)\s*$/)
+      if (!m) continue
+      if (m[1] === 'chunk') chunk = m[2]
+      else if (m[1] === 'caption') caption = m[2]
+    }
+    entries.push({ id, chunk, caption })
+  }
+  return entries
+}
+
+/**
+ * Soft-validate image captioning: list every `![](images/...)` reference in
+ * the built chunk `.md` files that lacks a matching entry in the image
+ * sidecar (`_moss_images.md`). Decorative images the agent chose not to
+ * caption will surface here too — this is a warning signal, not a hard
+ * failure (we cannot reliably distinguish "skipped decorative" from
+ * "missed figure" without re-running vision). Never throws.
+ */
+export async function findUncaptionedImages(dir: string): Promise<string[]> {
+  const sidecar = await parseImageSidecar(dir)
+  const captioned = new Set(sidecar.map((e) => e.id))
+  let files: string[]
+  try {
+    files = (await readdir(dir, { withFileTypes: true }))
+      .filter((e) => e.isFile() && e.name.endsWith('.md') && e.name !== '_moss_images.md')
+      .map((e) => e.name)
+  } catch {
+    return []
+  }
+  const missing = new Set<string>()
+  // ![alt](images/<name>.ext) — capture the basename sans extension as the id.
+  const imgRe = /!\[[^\]]*\]\(images\/([^)]+?)\)/g
+  for (const file of files) {
+    let content: string
+    try {
+      content = await readFile(path.join(dir, file), 'utf-8')
+    } catch {
+      continue
+    }
+    let m: RegExpExecArray | null
+    while ((m = imgRe.exec(content)) !== null) {
+      const ref = m[1] ?? ''
+      const base = path.posix.basename(ref).replace(/\.[^.]+$/, '')
+      if (base && !captioned.has(base)) missing.add(base)
+    }
+  }
+  return [...missing]
 }
 
 // Helper: map row to record (avoids importing private mappers from documentStore)
