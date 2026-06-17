@@ -1,7 +1,7 @@
 import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
-import { existsSync, cpSync, rmSync } from 'fs'
+import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
 import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir } from 'fs/promises'
 import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
@@ -10,7 +10,7 @@ import { WebSocketServer } from 'ws'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
-import { hasScope, isCronAdminCapable, type AuthContext } from './auth/token.js'
+import { hasScope, type AuthContext } from './auth/token.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService } from './runtimeService.js'
@@ -458,8 +458,16 @@ async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> 
  * `$MOSS_HOME/assistants/system/<name>/` on server boot.
  *
  * Behavior:
- *   - Only copies dirs that don't already exist on disk (so client edits
- *     to `wiki-builder.md` etc. survive server restarts).
+ *   - First install (target dir absent): copy it.
+ *   - Already present: compare the bundled `installed_version` in
+ *     `_moss_meta.json` against the on-disk copy's. If the bundled version is
+ *     NEWER, re-seed: move the existing dir aside to
+ *     `<name>.bak-<oldVersion>-<ts>` (so client edits are recoverable, never
+ *     auto-merged) and copy the new files in. If versions are equal/older or
+ *     either lacks a version, skip (preserves client edits across restarts).
+ *     This applies to all bundled builtins (wiki-builder, app-builder, …);
+ *     a prompt change ships by bumping `installed_version` in that
+ *     assistant's bundled `_moss_meta.json`.
  *   - Source dir search order: cwd/assistants → server-bundle-relative
  *     ../assistants → ../../assistants. Allows both dev (cwd in repo root)
  *     and packaged (`bin/moss-server.mjs` + `assistants/` next to it)
@@ -498,27 +506,106 @@ async function seedBuiltinSystemAssistants(): Promise<void> {
   }
 
   let seeded = 0
+  let upgraded = 0
   let skipped = 0
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const sourceDir = join(sourceRoot, entry.name)
     const targetDir = join(systemDir, entry.name)
-    if (existsSync(targetDir)) {
+
+    // First install: just copy.
+    if (!existsSync(targetDir)) {
+      try {
+        cpSync(sourceDir, targetDir, { recursive: true })
+        seeded++
+      } catch (err) {
+        console.warn(`[seedBuiltinSystemAssistants] copy failed for ${entry.name}:`, err)
+      }
+      continue
+    }
+
+    // Already present: re-seed only when the bundled version is strictly
+    // newer than what's on disk. Unknown versions on either side → skip
+    // (don't risk clobbering client edits without a clear upgrade signal).
+    const bundledVer = readAssistantInstalledVersion(join(sourceDir, '_moss_meta.json'))
+    const installedVer = readAssistantInstalledVersion(join(targetDir, '_moss_meta.json'))
+    if (
+      bundledVer === null ||
+      installedVer === null ||
+      compareSemver(bundledVer, installedVer) <= 0
+    ) {
       skipped++
       continue
     }
+
+    // Upgrade: back up the existing dir (preserves any client edits, which
+    // we never auto-merge), then copy the new files in. The backup name is
+    // prefixed with `_` so assistant discovery (scanAssistantDirs /
+    // findAssistantDir, which skip `_`-prefixed dirs) never surfaces the
+    // backup as a live assistant.
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    const backupDir = join(systemDir, `_${entry.name}.bak-${installedVer}-${ts}`)
     try {
+      renameSync(targetDir, backupDir)
       cpSync(sourceDir, targetDir, { recursive: true })
-      seeded++
+      upgraded++
+      console.log(
+        `[seedBuiltinSystemAssistants] upgraded ${entry.name} ${installedVer} → ${bundledVer} ` +
+          `(previous version backed up to ${backupDir})`,
+      )
     } catch (err) {
-      console.warn(`[seedBuiltinSystemAssistants] copy failed for ${entry.name}:`, err)
+      console.warn(`[seedBuiltinSystemAssistants] upgrade failed for ${entry.name}:`, err)
+      // Best-effort restore so we never leave the assistant missing.
+      if (!existsSync(targetDir) && existsSync(backupDir)) {
+        try {
+          renameSync(backupDir, targetDir)
+        } catch (restoreErr) {
+          console.error(
+            `[seedBuiltinSystemAssistants] CRITICAL: failed to restore ${entry.name} from ${backupDir}:`,
+            restoreErr,
+          )
+        }
+      }
     }
   }
-  if (seeded > 0 || skipped > 0) {
+  if (seeded > 0 || upgraded > 0 || skipped > 0) {
     console.log(
-      `[seedBuiltinSystemAssistants] seeded ${seeded} new, ${skipped} already present at ${systemDir}`,
+      `[seedBuiltinSystemAssistants] seeded ${seeded} new, upgraded ${upgraded}, ` +
+        `${skipped} already present at ${systemDir}`,
     )
   }
+}
+
+/**
+ * Read `installed_version` from an assistant's `_moss_meta.json`. Returns
+ * null if the file is missing, unparseable, or has no string version.
+ */
+function readAssistantInstalledVersion(metaPath: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(metaPath, 'utf-8')) as { installed_version?: unknown }
+    return typeof parsed.installed_version === 'string' && parsed.installed_version.trim()
+      ? parsed.installed_version.trim()
+      : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Compare two dotted numeric version strings (e.g. "1.2.0" vs "1.10.0").
+ * Returns >0 if a>b, <0 if a<b, 0 if equal. Missing components count as 0;
+ * non-numeric components compare as 0 (best-effort — builtin versions are
+ * plain numeric semver).
+ */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0)
+  const pb = b.split('.').map((x) => parseInt(x, 10) || 0)
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
 }
 
 /**
@@ -1085,9 +1172,6 @@ export function startServer(
   // Cron Service - scheduled task execution engine
   const cronService = new CronService(runtime.store.db, {
     runtimeService: runtime,
-    runtimeDir: config.runtimeDir,
-    defaultRuntime: config.defaultRuntime,
-    dockerContainerMode: config.docker?.containerMode ?? 'session',
     workspace: config.workspace,
     getUserAuth: async (userId: string, orgId: string) => {
       try {
@@ -4137,17 +4221,6 @@ export function startServer(
       }
 
       // ==================== Cron Jobs ====================
-      // clientCronEnabled gates client-issued cron actions only: requests with
-      // admin capability (admin/super_admin role or admin:cron scope) pass so
-      // org admins keep managing and firing jobs while the client feature is
-      // off. Covers every /api/v1/cron/* route, reads included; the separate
-      // /api/v1/admin/cron/* surface is intentionally untouched. (#83)
-      if (pathname.startsWith('/api/v1/cron/') && !getSystemSettings().clientCronEnabled) {
-        if (!isCronAdminCapable(auth)) {
-          throw new HttpError(403, 'cron_disabled_by_org')
-        }
-      }
-
       // List all cron jobs for current user
       if (req.method === 'GET' && pathname === '/api/v1/cron/jobs') {
         const result = await cronApi.listJobs(auth)
@@ -4647,7 +4720,6 @@ export function startServer(
             skills: typeof row.skills === 'string' ? JSON.parse(row.skills) : row.skills ?? [],
             enabled_skills: typeof row.enabled_skills === 'string' ? JSON.parse(row.enabled_skills) : row.enabled_skills ?? [],
             enabled_wikis: typeof row.enabled_wikis === 'string' ? JSON.parse(row.enabled_wikis) : row.enabled_wikis ?? [],
-            enabled_corp_apps: typeof row.enabled_corp_apps === 'string' ? JSON.parse(row.enabled_corp_apps) : row.enabled_corp_apps ?? [],
             workflow: typeof row.workflow === 'string' ? JSON.parse(row.workflow) : row.workflow ?? null,
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
           }
@@ -4758,7 +4830,6 @@ export function startServer(
           skills: meta.skills && meta.skills.length > 0 ? JSON.stringify(meta.skills) : null,
           enabled_skills: meta.enabledSkills && meta.enabledSkills.length > 0 ? JSON.stringify(meta.enabledSkills) : null,
           enabled_wikis: meta.enabledWikis && meta.enabledWikis.length > 0 ? JSON.stringify(meta.enabledWikis) : null,
-          enabled_corp_apps: meta.enabledCorpApps && meta.enabledCorpApps.length > 0 ? JSON.stringify(meta.enabledCorpApps) : null,
           agent_type: meta.agent_type,
           memory_mode: meta.memory_mode,
           visible_to: meta.visible_to ? JSON.stringify(meta.visible_to) : null,
@@ -4923,9 +4994,6 @@ export function startServer(
         }
         if (Array.isArray(body.enabledWikis)) {
           updates.enabled_wikis = JSON.stringify(body.enabledWikis.filter((s: unknown) => typeof s === 'string'))
-        }
-        if (Array.isArray(body.enabledCorpApps)) {
-          updates.enabled_corp_apps = JSON.stringify(body.enabledCorpApps.filter((s: unknown) => typeof s === 'string'))
         }
         if (typeof body.rules === 'string') {
           updates.rules = body.rules
@@ -6019,55 +6087,36 @@ export function startServer(
 
         const ready = await runtime.ensureSessionReady(sessionId)
         wss.handleUpgrade(req, socket, head, ws => {
-          const pendingMessages: string[] = []
-          let runnerSocket: net.Socket | null = null
-          let runnerClosed = false
-          let buffer = ''
-          const sendToRunner = (payload: Record<string, unknown>) => {
-            const line = `${jsonStringify(payload)}\n`
-            if (runnerSocket && !runnerSocket.destroyed) {
-              process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
-              runnerSocket.write(line)
-              return
+          void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
+            let buffer = ''
+            const sendToRunner = (payload: Record<string, unknown>) => {
+              if (!runnerSocket.destroyed) {
+                process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
+                runnerSocket.write(`${jsonStringify(payload)}\n`)
+              } else {
+                process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+              }
             }
-            if (!runnerClosed) {
-              process.stderr.write(`[WS Message] Runner not ready, buffering message\n`)
-              pendingMessages.push(line)
-              return
-            }
-            process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
-          }
 
-          ws.on('message', data => {
-            const text =
-              typeof data === 'string'
-                ? data
-                : Buffer.from(data).toString('utf8')
-            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
-            sendToRunner({
-              type: 'stdin',
-              data: text.endsWith('\n') ? text : `${text}\n`,
+            ws.on('message', data => {
+              const text =
+                typeof data === 'string'
+                  ? data
+                  : Buffer.from(data).toString('utf8')
+              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+              sendToRunner({
+                type: 'stdin',
+                data: text.endsWith('\n') ? text : `${text}\n`,
+              })
             })
-          })
-          ws.on('close', () => {
-            runnerSocket?.destroy()
-          })
-          ws.on('error', () => {
-            runnerSocket?.destroy()
-          })
+            ws.on('close', () => {
+              runnerSocket.destroy()
+            })
+            ws.on('error', () => {
+              runnerSocket.destroy()
+            })
 
-          void runtime.connectToAttempt(ready.attempt).then((connectedRunner: net.Socket) => {
-            runnerSocket = connectedRunner
-            if (ws.readyState !== ws.OPEN) {
-              runnerClosed = true
-              connectedRunner.destroy()
-              return
-            }
-            while (pendingMessages.length > 0 && !runnerSocket.destroyed) {
-              runnerSocket.write(pendingMessages.shift()!)
-            }
-
-            connectedRunner.on('data', chunk => {
+            runnerSocket.on('data', chunk => {
               buffer += Buffer.from(chunk).toString('utf8')
               while (true) {
                 const idx = buffer.indexOf('\n')
@@ -6098,14 +6147,12 @@ export function startServer(
               }
             })
 
-            connectedRunner.on('close', () => {
-              runnerClosed = true
+            runnerSocket.on('close', () => {
               if (ws.readyState === ws.OPEN) {
                 ws.close()
               }
             })
-            connectedRunner.on('error', () => {
-              runnerClosed = true
+            runnerSocket.on('error', () => {
               if (ws.readyState === ws.OPEN) {
                 ws.close()
               }

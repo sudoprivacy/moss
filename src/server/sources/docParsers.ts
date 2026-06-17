@@ -96,20 +96,23 @@ export async function parseDocument(
   // Content sniff overrides extension when they disagree.
   const magic = await sniffMagic(filePath)
   if (magic === 'zip') {
-    // Try mammoth first (.docx), fall through to libreoffice for xlsx/pptx
+    // Try mammoth first (.docx — extracts images itself). For other OOXML
+    // (xlsx/pptx), fall through to libreoffice for text then attach images
+    // pulled straight from the zip's media/ folder.
     const r = await parseDocxWithMammoth(filePath).catch(() => null)
     if (r) return r
-    return parseWithLibreOffice(filePath, fileName).catch(() => null)
+    const text = await parseWithLibreOffice(filePath, fileName).catch(() => null)
+    return withOoxmlImages(filePath, text)
   }
   if (magic === 'pdf') {
     const r = await parsePdfWithPdfParse(filePath).catch(() => null)
-    if (r) return r
+    if (r) return withPdfImages(filePath, r)
     const r2 = await parsePdfWithPdftotext(filePath).catch(() => null)
-    if (r2) return r2
-    return parseWithLibreOffice(filePath, fileName).catch(() => null)
+    if (r2) return withPdfImages(filePath, r2)
+    return withPdfImages(filePath, await parseWithLibreOffice(filePath, fileName).catch(() => null))
   }
   if (magic === 'ole') {
-    // legacy .doc / .xls / .ppt — libreoffice handles
+    // legacy .doc / .xls / .ppt — libreoffice handles (text only, no images)
     return parseWithLibreOffice(filePath, fileName).catch(() => null)
   }
 
@@ -127,14 +130,19 @@ export async function parseDocument(
 
   if (ext === '.pdf') {
     const r = await parsePdfWithPdfParse(filePath).catch(() => null)
-    if (r) return r
+    if (r) return withPdfImages(filePath, r)
     const r2 = await parsePdfWithPdftotext(filePath).catch(() => null)
-    if (r2) return r2
+    if (r2) return withPdfImages(filePath, r2)
   }
 
   // Generic libreoffice fallback handles .doc/.xlsx/.pptx/.odt/.rtf and
-  // also serves as the second-attempt path for .docx/.pdf above.
-  return parseWithLibreOffice(filePath, fileName).catch(() => null)
+  // also serves as the second-attempt path for .docx/.pdf above. For OOXML
+  // zips reaching here, attach any images found in the zip's media/ folder.
+  const fallback = await parseWithLibreOffice(filePath, fileName).catch(() => null)
+  if (fallback && (ext === '.xlsx' || ext === '.pptx' || ext === '.docx')) {
+    return withOoxmlImages(filePath, fallback)
+  }
+  return fallback
 }
 
 function docImageExtension(contentType: string | undefined): string {
@@ -201,6 +209,166 @@ async function parseDocxWithMammoth(filePath: string): Promise<ParseResult | nul
     attachments: attachments.length > 0 ? attachments : undefined,
     via: 'mammoth',
   }
+}
+
+/**
+ * Append an image-reference section to a text-only ParseResult.
+ *
+ * Mammoth inlines `![](images/...)` at each image's exact position, but the
+ * pdf/ooxml extractors below have no positional anchor — they recover the
+ * image *bytes* without knowing where in the prose each one belonged. So we
+ * stage the bytes under `images/` and list them in a trailing
+ * "## 文档图片" section, giving the wiki-builder agent visible refs to read
+ * and caption. Returns the result unchanged when there are no images.
+ */
+function appendImageSection(
+  base: ParseResult,
+  attachments: Array<{ name: string; bytes: Buffer }>,
+): ParseResult {
+  if (attachments.length === 0) return base
+  const refs = attachments
+    .map((a) => `![](${a.name})`)
+    .join('\n\n')
+  const markdown = `${base.markdown.trimEnd()}\n\n## 文档图片\n\n${refs}\n`
+  return {
+    ...base,
+    markdown,
+    attachments: [...(base.attachments ?? []), ...attachments],
+  }
+}
+
+/**
+ * Augment a PDF ParseResult with raster images extracted via `pdfimages`
+ * (Poppler). Best-effort: if `pdfimages` is missing or fails, the text-only
+ * result is returned unchanged. Vector-drawn diagrams (no embedded raster
+ * XObject) yield nothing — a known limitation.
+ */
+async function withPdfImages(
+  filePath: string,
+  base: ParseResult | null,
+): Promise<ParseResult | null> {
+  if (!base) return base
+  const images = await extractPdfImages(filePath).catch(() => [])
+  return appendImageSection(base, images)
+}
+
+/**
+ * Augment an OOXML (xlsx/pptx/docx) ParseResult with images pulled from the
+ * zip container's media folder. Best-effort and never throws past here.
+ */
+async function withOoxmlImages(
+  filePath: string,
+  base: ParseResult | null,
+): Promise<ParseResult | null> {
+  if (!base) return base
+  const images = await extractOoxmlImages(filePath).catch(() => [])
+  return appendImageSection(base, images)
+}
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|bmp|tiff?|webp|svg|emf|wmf)$/i
+
+/**
+ * Extract embedded raster images from a PDF using `pdfimages -png -j`
+ * (Poppler). Returns `images/<base>-NNN.<ext>` attachments, or [] when the
+ * binary is unavailable or no images are found. Self-contained temp dir so
+ * concurrent jobs don't collide.
+ */
+async function extractPdfImages(
+  filePath: string,
+): Promise<Array<{ name: string; bytes: Buffer }>> {
+  const workDir = path.join(tmpdir(), `moss-pdfimg-${randomUUID()}`)
+  await mkdir(workDir, { recursive: true })
+  const baseName = docImageBaseName(filePath)
+  try {
+    // `-png` emits PNGs, `-j` keeps DCT (JPEG) streams as .jpg — covers the
+    // common cases without re-encoding. Prefix groups all outputs together.
+    await execFileAsync(
+      'pdfimages',
+      ['-png', '-j', filePath, path.join(workDir, 'img')],
+      { timeout: 60_000 },
+    )
+  } catch {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {})
+    return [] // pdfimages missing or failed — text-only, no hard dependency
+  }
+  return collectImageDir(workDir, baseName).finally(() => {
+    void rm(workDir, { recursive: true, force: true }).catch(() => {})
+  })
+}
+
+/**
+ * Extract images from an OOXML zip (xlsx/pptx/docx). Images live under
+ * `word/media/`, `xl/media/`, `ppt/media/`, or a generic `media/`. Uses
+ * jszip (already a direct dependency via mammoth's needs) so there is no
+ * system-binary requirement.
+ */
+async function extractOoxmlImages(
+  filePath: string,
+): Promise<Array<{ name: string; bytes: Buffer }>> {
+  let JSZip: typeof import('jszip')
+  try {
+    JSZip = (await import('jszip')).default as typeof import('jszip')
+  } catch {
+    return []
+  }
+  const buf = await readFile(filePath)
+  const zip = await JSZip.loadAsync(buf)
+  const baseName = docImageBaseName(filePath)
+  const out: Array<{ name: string; bytes: Buffer }> = []
+  let index = 0
+
+  const mediaPaths = Object.keys(zip.files)
+    .filter((p) => /(^|\/)media\//i.test(p) && IMAGE_EXT_RE.test(p))
+    .sort()
+
+  for (const p of mediaPaths) {
+    const file = zip.files[p]
+    if (!file || file.dir) continue
+    index += 1
+    const ext = (p.match(IMAGE_EXT_RE)?.[1] ?? 'bin').toLowerCase()
+    const bytes = await file.async('nodebuffer')
+    out.push({
+      name: path.posix.join(
+        'images',
+        `${baseName}-${String(index).padStart(3, '0')}.${ext}`,
+      ),
+      bytes,
+    })
+  }
+  return out
+}
+
+/**
+ * Read every image file in `dir` and return them as `images/<base>-NNN.<ext>`
+ * attachments, sorted by filename so ordering is stable across runs.
+ */
+async function collectImageDir(
+  dir: string,
+  baseName: string,
+): Promise<Array<{ name: string; bytes: Buffer }>> {
+  const { readdir } = await import('fs/promises')
+  let names: string[]
+  try {
+    names = (await readdir(dir)).filter((n) => IMAGE_EXT_RE.test(n)).sort()
+  } catch {
+    return []
+  }
+  const out: Array<{ name: string; bytes: Buffer }> = []
+  let index = 0
+  for (const n of names) {
+    index += 1
+    const ext = (n.match(IMAGE_EXT_RE)?.[1] ?? 'png').toLowerCase()
+    const bytes = await readFile(path.join(dir, n)).catch(() => null)
+    if (!bytes) continue
+    out.push({
+      name: path.posix.join(
+        'images',
+        `${baseName}-${String(index).padStart(3, '0')}.${ext}`,
+      ),
+      bytes,
+    })
+  }
+  return out
 }
 
 async function parsePdfWithPdfParse(filePath: string): Promise<ParseResult | null> {

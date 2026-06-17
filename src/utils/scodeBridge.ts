@@ -312,6 +312,7 @@ export async function prepareFirstMessageForScode(
     lines.push('  wiki list                          # refresh the list above')
     lines.push('  wiki read <wikiId>                 # read WIKI.md (overview + chunk index)')
     lines.push('  wiki read <wikiId> --file <path>   # read a specific chunk')
+    lines.push('  wiki read <wikiId> --file _moss_images.md   # descriptions of figures/screenshots (read for image detail)')
     lines.push('  wiki search <wikiId> <query>       # full-text grep (recommended for large wikis)')
     lines.push('  wiki metadata <wikiId>             # build time / chunk count / etc.')
     instructions.push(lines.join('\n'))
