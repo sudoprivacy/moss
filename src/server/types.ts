@@ -153,6 +153,18 @@ export const serverFileConfigSchema = lazySchema(() =>
       authorization: z.string().optional(),
       cosBaseUrl: z.string().optional(),
     }).default({}),
+    wikiIndex: z.object({
+      enabled: z.boolean().default(true),
+      modelId: z.string().default('Xenova/multilingual-e5-small'),
+      modelMirror: z.string().url().optional(),
+      maxPassagesPerWiki: z.number().int().min(100).default(20_000),
+      topKVector: z.number().int().min(1).max(200).default(50),
+    }).default({
+      enabled: true,
+      modelId: 'Xenova/multilingual-e5-small',
+      maxPassagesPerWiki: 20_000,
+      topKVector: 50,
+    }),
   }),
 )
 
@@ -223,6 +235,20 @@ export type ServerConfig = {
   hubApiBaseUrl?: string
   hubAuthorization?: string
   cosBaseUrl?: string
+  /**
+   * Local vector index for wiki semantic search. When `enabled=true`,
+   * WikiJobExecutor builds a Float32 embedding sidecar at wiki publish time
+   * and the agent search route falls back to grep+vec RRF fusion. Model
+   * absence is non-fatal: build degrades to grep-only, runtime warns once
+   * per process. Env override: MOSS_WIKI_INDEX_DISABLED=1 force-disables.
+   */
+  wikiIndex: {
+    enabled: boolean
+    modelId: string
+    modelMirror?: string
+    maxPassagesPerWiki: number
+    topKVector: number
+  }
 }
 
 export type SessionStatus =

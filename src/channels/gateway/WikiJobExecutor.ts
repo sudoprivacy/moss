@@ -20,7 +20,8 @@ import path from 'path'
 import { RuntimeService } from '../../server/runtimeService.js'
 import { DocumentStore, type DocumentRecord, type WikiBuildJob, type WikiRecord } from '../../server/documentStore.js'
 import type { DirectConnectStore } from '../../server/db.js'
-import { MOSS_WIKIS_DIR } from '../../utils/wikis/localWikiDirectories.js'
+import { MOSS_WIKIS_DIR, MOSS_MODELS_DIR } from '../../utils/wikis/localWikiDirectories.js'
+import { buildVectorIndex } from '../../server/wikiIndex/build.js'
 
 // Each build runs in its own private staging dir under wikis/.stage/ (same
 // filesystem as wikis/, so the publish rename is atomic). The wiki's live
@@ -56,6 +57,13 @@ type JobState = {
   startedAt: number
 }
 
+export interface WikiVectorIndexOptions {
+  enabled: boolean
+  modelId: string
+  modelMirror?: string
+  maxPassagesPerWiki: number
+}
+
 export class WikiJobExecutor {
   private running = new Map<string, JobState>()
   private timer: NodeJS.Timeout | null = null
@@ -65,6 +73,11 @@ export class WikiJobExecutor {
     private runtime: RuntimeService,
     private docStore: DocumentStore,
     private db: DirectConnectStore,
+    private vectorIndex: WikiVectorIndexOptions = {
+      enabled: false,
+      modelId: 'Xenova/multilingual-e5-small',
+      maxPassagesPerWiki: 20_000,
+    },
   ) {}
 
   /** Start polling for queued jobs. Idempotent. */
@@ -218,6 +231,39 @@ export class WikiJobExecutor {
         }
       } catch (e) {
         console.warn(`[WikiJobExecutor] job ${job.id}: caption validation skipped:`, e)
+      }
+
+      // Stage 4.6: best-effort vector index for semantic search. Failures
+      // are non-fatal — the wiki is still publishable with grep-only
+      // retrieval. Model absence is common in offline private deployments,
+      // so we degrade rather than block the build.
+      if (this.vectorIndex.enabled) {
+        try {
+          const result = await buildVectorIndex({
+            stageDir,
+            modelId: this.vectorIndex.modelId,
+            modelMirror: this.vectorIndex.modelMirror,
+            maxPassages: this.vectorIndex.maxPassagesPerWiki,
+            cacheDir: MOSS_MODELS_DIR,
+          })
+          if (!result.ok) {
+            console.warn(
+              `[WikiJobExecutor] vector index skipped for wiki=${wiki.id}: ${result.reason}`,
+            )
+            this.docStore.updateBuildJob(job.id, {
+              currentStep: '向量索引降级（grep-only）',
+            })
+          } else {
+            console.log(
+              `[WikiJobExecutor] vector index built for wiki=${wiki.id}: ${result.count} passages`,
+            )
+            this.docStore.updateBuildJob(job.id, {
+              currentStep: `向量索引已建（${result.count} 段）`,
+            })
+          }
+        } catch (err) {
+          console.warn(`[WikiJobExecutor] vector index error (non-fatal):`, err)
+        }
       }
 
       // Stage 5: write _moss_meta.json into the staging dir so wikiCli and

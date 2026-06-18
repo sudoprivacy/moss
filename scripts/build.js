@@ -115,6 +115,13 @@ build('admin/dist', [
 
 const external = [
   '--external=better-sqlite3',
+  // @xenova/transformers (and its onnxruntime-node native dep) ships its
+  // own ONNX runtime + tokenizer assets. Bundling them produces a broken
+  // import for the .node binding and ~50MB of wasted code. Resolve from
+  // node_modules at runtime instead.
+  '--external=@xenova/transformers',
+  '--external=onnxruntime-node',
+  '--external=sharp',
 ]
 
 // bin/moss-server.mjs（统一服务端入口）

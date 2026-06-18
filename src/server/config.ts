@@ -66,6 +66,12 @@ export function getDefaultServerConfig(): ServerFileConfig {
       level: 'info',
     },
     hub: {},
+    wikiIndex: {
+      enabled: true,
+      modelId: 'Xenova/multilingual-e5-small',
+      maxPassagesPerWiki: 20_000,
+      topKVector: 50,
+    },
   }
 }
 
@@ -136,6 +142,13 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       : undefined,
     hubAuthorization: raw.hub?.authorization?.trim() || undefined,
     cosBaseUrl: raw.hub?.cosBaseUrl?.trim() || undefined,
+    wikiIndex: {
+      enabled: raw.wikiIndex.enabled && process.env.MOSS_WIKI_INDEX_DISABLED !== '1',
+      modelId: raw.wikiIndex.modelId,
+      modelMirror: process.env.MOSS_MODEL_MIRROR || raw.wikiIndex.modelMirror,
+      maxPassagesPerWiki: raw.wikiIndex.maxPassagesPerWiki,
+      topKVector: raw.wikiIndex.topKVector,
+    },
   }
 }
 

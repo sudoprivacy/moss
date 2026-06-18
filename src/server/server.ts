@@ -78,6 +78,9 @@ import { getChannelManager } from '../channels/core/ChannelManager.js'
 import { getPairingService } from '../channels/pairing/PairingService.js'
 import { MossActionExecutor } from '../channels/gateway/MossActionExecutor.js'
 import { WikiJobExecutor } from '../channels/gateway/WikiJobExecutor.js'
+import { loadIndex, vectorSearch, rrfFuse, createQuerySemaphore, runWikiGrep } from './wikiIndex/query.js'
+import { ensureEmbedder } from './wikiIndex/embedder.js'
+import { MOSS_MODELS_DIR } from '../utils/wikis/localWikiDirectories.js'
 import { SourceSyncWorker } from './sources/syncWorker.js'
 import { storeSecret, deleteSecret } from './sources/secrets.js'
 // Connector implementations register themselves on import.
@@ -162,6 +165,10 @@ const WORKSPACE_TREE_MAX_ENTRIES_PER_DIR = 500
 const WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES = 2 * 1024 * 1024
 const WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES = 20 * 1024 * 1024
 const WORKSPACE_TREE_SKIP_DIRS = new Set(['.git', 'node_modules'])
+
+// Cap concurrent wiki vector queries per process. onnxruntime-node is
+// single-session and benefits more from low contention than fan-out.
+const wikiVectorQuerySemaphore = createQuerySemaphore(2)
 
 const WORKSPACE_TEXT_EXTENSIONS = new Set([
   '.c', '.cc', '.conf', '.cpp', '.css', '.csv', '.go', '.h', '.hpp', '.html',
@@ -1268,7 +1275,12 @@ export function startServer(
   // Document Center: start the wiki build worker. Polls wiki_build_jobs
   // and runs each queued job through RuntimeService with the system
   // `wiki-builder` assistant.
-  const wikiJobExecutor = new WikiJobExecutor(runtime, documentStore, runtime.store)
+  const wikiJobExecutor = new WikiJobExecutor(runtime, documentStore, runtime.store, {
+    enabled: config.wikiIndex.enabled,
+    modelId: config.wikiIndex.modelId,
+    modelMirror: config.wikiIndex.modelMirror,
+    maxPassagesPerWiki: config.wikiIndex.maxPassagesPerWiki,
+  })
   wikiJobExecutor.start()
 
   // Document Center v2: start the external source sync worker. Polls
@@ -2909,23 +2921,44 @@ export function startServer(
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
         }
-        // P0: simple grep across .md files in wiki dir
+        // Hybrid retrieval: literal grep + (best-effort) semantic vector
+        // search, fused with RRF. The vector path is opt-in via
+        // `config.wikiIndex.enabled`; missing index files or model failure
+        // silently degrade to grep-only — old wikis built before the
+        // sidecar existed work unchanged.
         try {
-          const entries = await readdir(wiki.storagePath, { withFileTypes: true })
-          const matches: Array<{ file: string; line_no: number; line: string }> = []
-          const qLower = query.toLowerCase()
-          for (const e of entries) {
-            if (!e.isFile() || !e.name.endsWith('.md')) continue
-            const content = await readFile(resolve(wiki.storagePath, e.name), 'utf-8')
-            const lines = content.split(/\r?\n/)
-            for (let i = 0; i < lines.length; i++) {
-              if (lines[i].toLowerCase().includes(qLower)) {
-                matches.push({ file: e.name, line_no: i + 1, line: lines[i] })
-                if (matches.length >= 100) break
+          const grepHits = await runWikiGrep(wiki.storagePath, query)
+
+          let vecHits: ReturnType<typeof vectorSearch> = []
+          if (config.wikiIndex.enabled) {
+            const idx = await loadIndex(wiki.storagePath)
+            if (idx) {
+              const emb = await ensureEmbedder({
+                modelId: config.wikiIndex.modelId,
+                cacheDir: MOSS_MODELS_DIR,
+                mirror: config.wikiIndex.modelMirror,
+              })
+              if (emb) {
+                try {
+                  vecHits = await wikiVectorQuerySemaphore(async () => {
+                    const qVec = await emb.query(query)
+                    return vectorSearch(idx, qVec, config.wikiIndex.topKVector)
+                  })
+                } catch (err) {
+                  console.warn('[wikiIndex] query embed failed, grep-only:', err)
+                }
               }
             }
-            if (matches.length >= 100) break
           }
+
+          const fused = vecHits.length === 0
+            ? grepHits.slice(0, 100)
+            : rrfFuse(grepHits, vecHits).slice(0, 100)
+          const matches = fused.map((h) => ({
+            file: h.file,
+            line_no: h.line_no,
+            line: h.line,
+          }))
           writeJson(res, 200, { wiki_id: wikiId, query, matches })
         } catch (err) {
           writeJson(res, 200, { wiki_id: wikiId, query, matches: [] })
