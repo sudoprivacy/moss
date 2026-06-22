@@ -6,6 +6,7 @@ import type {
   CabinMessageRole,
   CabinMessageSource,
   CabinPassengerContext,
+  CabinToolCall,
 } from './types.js'
 import { buildConversationKey } from './auth.js'
 
@@ -46,6 +47,26 @@ function parseObjectJson(value: unknown): Record<string, unknown> | null {
   }
 }
 
+function parseToolCallsJson(value: unknown): CabinToolCall[] | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return null
+    const toolCalls = parsed.filter(item => (
+      item &&
+      typeof item === 'object' &&
+      typeof (item as { id?: unknown }).id === 'string' &&
+      typeof (item as { name?: unknown }).name === 'string' &&
+      (item as { arguments?: unknown }).arguments &&
+      typeof (item as { arguments?: unknown }).arguments === 'object' &&
+      !Array.isArray((item as { arguments?: unknown }).arguments)
+    )) as CabinToolCall[]
+    return toolCalls.length ? toolCalls : null
+  } catch {
+    return null
+  }
+}
+
 function mapMessage(row: Row): CabinMessage {
   return {
     id: String(row.id),
@@ -55,6 +76,7 @@ function mapMessage(row: Row): CabinMessage {
     content: String(row.content),
     intent: row.intent == null ? null : String(row.intent),
     slots: parseObjectJson(row.slots_json),
+    toolCalls: parseToolCallsJson(row.tool_calls_json),
     createdAt: Number(row.created_at),
   }
 }
@@ -92,6 +114,7 @@ export function ensureCabinTables(db: DatabaseSync): void {
       content TEXT NOT NULL,
       intent TEXT,
       slots_json TEXT,
+      tool_calls_json TEXT,
       created_at INTEGER NOT NULL
     );
 
@@ -110,6 +133,10 @@ export function ensureCabinTables(db: DatabaseSync): void {
       created_at INTEGER NOT NULL
     );
   `)
+  const messageColumns = db.prepare('PRAGMA table_info(cabin_messages)').all() as Row[]
+  if (!messageColumns.some(column => column.name === 'tool_calls_json')) {
+    db.exec('ALTER TABLE cabin_messages ADD COLUMN tool_calls_json TEXT')
+  }
 }
 
 export class CabinStore {
@@ -117,8 +144,10 @@ export class CabinStore {
     ensureCabinTables(db)
   }
 
-  getConversationByKey(conversationKey: string): CabinConversation | null {
-    const row = this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ?').get(conversationKey) as Row | undefined
+  getConversationByKey(conversationKey: string, options: { includeReset?: boolean } = {}): CabinConversation | null {
+    const row = options.includeReset
+      ? this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ?').get(conversationKey) as Row | undefined
+      : this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ? AND status = ?').get(conversationKey, 'active') as Row | undefined
     return row ? mapConversation(row) : null
   }
 
@@ -126,26 +155,48 @@ export class CabinStore {
     const timestamp = now()
     const conversationKey = buildConversationKey(input)
     const id = randomUUID()
-    this.db.prepare(`
-      INSERT INTO cabin_conversations (
-        id, conversation_key, passenger_id, passenger_ref, passenger_name,
-        flight_id, flight_date, seat_id, tablet_id, moss_session_id,
-        status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-    `).run(
-      id,
-      conversationKey,
-      input.passengerId ?? null,
-      input.passengerRef ?? null,
-      input.passengerName ?? null,
-      input.flightId,
-      input.flightDate,
-      input.seatId ?? null,
-      input.tabletId,
-      input.mossSessionId,
-      timestamp,
-      timestamp,
-    )
+    const existing = this.getConversationByKey(conversationKey, { includeReset: true })
+    if (existing) {
+      this.db.prepare(`
+        UPDATE cabin_conversations
+        SET passenger_id = ?, passenger_ref = ?, passenger_name = ?,
+            flight_id = ?, flight_date = ?, seat_id = ?, tablet_id = ?,
+            moss_session_id = ?, status = 'active', updated_at = ?
+        WHERE id = ?
+      `).run(
+        input.passengerId ?? null,
+        input.passengerRef ?? null,
+        input.passengerName ?? null,
+        input.flightId,
+        input.flightDate,
+        input.seatId ?? null,
+        input.tabletId,
+        input.mossSessionId,
+        timestamp,
+        existing.id,
+      )
+    } else {
+      this.db.prepare(`
+        INSERT INTO cabin_conversations (
+          id, conversation_key, passenger_id, passenger_ref, passenger_name,
+          flight_id, flight_date, seat_id, tablet_id, moss_session_id,
+          status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      `).run(
+        id,
+        conversationKey,
+        input.passengerId ?? null,
+        input.passengerRef ?? null,
+        input.passengerName ?? null,
+        input.flightId,
+        input.flightDate,
+        input.seatId ?? null,
+        input.tabletId,
+        input.mossSessionId,
+        timestamp,
+        timestamp,
+      )
+    }
     const created = this.getConversationByKey(conversationKey)
     if (!created) throw new Error('Failed to create cabin conversation')
     return created
@@ -163,13 +214,14 @@ export class CabinStore {
     content: string
     intent?: string | null
     slots?: Record<string, unknown> | null
+    toolCalls?: CabinToolCall[] | null
   }): CabinMessage {
     const id = randomUUID()
     const createdAt = now()
     this.db.prepare(`
       INSERT INTO cabin_messages (
-        id, conversation_id, role, source, content, intent, slots_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, conversation_id, role, source, content, intent, slots_json, tool_calls_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.conversationId,
@@ -178,6 +230,7 @@ export class CabinStore {
       input.content,
       input.intent ?? null,
       input.slots ? JSON.stringify(input.slots) : null,
+      input.toolCalls?.length ? JSON.stringify(input.toolCalls) : null,
       createdAt,
     )
     this.touchConversation(input.conversationId)
@@ -186,13 +239,32 @@ export class CabinStore {
     return mapMessage(row)
   }
 
-  listMessages(conversationId: string, limit: number): CabinMessage[] {
+  listMessages(conversationId: string, limit: number, options: { beforeId?: string; afterId?: string } = {}): CabinMessage[] {
+    const params: unknown[] = [conversationId]
+    let cursorClause = ''
+    if (options.beforeId) {
+      const cursor = this.db.prepare('SELECT created_at FROM cabin_messages WHERE id = ? AND conversation_id = ?')
+        .get(options.beforeId, conversationId) as Row | undefined
+      if (cursor) {
+        cursorClause = 'AND created_at < ?'
+        params.push(Number(cursor.created_at))
+      }
+    } else if (options.afterId) {
+      const cursor = this.db.prepare('SELECT created_at FROM cabin_messages WHERE id = ? AND conversation_id = ?')
+        .get(options.afterId, conversationId) as Row | undefined
+      if (cursor) {
+        cursorClause = 'AND created_at > ?'
+        params.push(Number(cursor.created_at))
+      }
+    }
+    params.push(Math.max(1, Math.min(limit, 200)))
     const rows = this.db.prepare(`
       SELECT * FROM cabin_messages
       WHERE conversation_id = ?
+      ${cursorClause}
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(conversationId, Math.max(1, Math.min(limit, 200))) as Row[]
+    `).all(...params) as Row[]
     return rows.reverse().map(mapMessage)
   }
 

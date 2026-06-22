@@ -43,7 +43,14 @@ export type CabinMessage = {
   content: string
   intent: string | null
   slots: Record<string, unknown> | null
+  toolCalls: CabinToolCall[] | null
   createdAt: number
+}
+
+export type CabinToolCall = {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
 }
 
 export type CabinTokenPayload = {

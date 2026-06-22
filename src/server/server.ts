@@ -1786,6 +1786,7 @@ export function startServer(
             content: message.content,
             intent: message.intent,
             slots: message.slots,
+            tool_calls: message.toolCalls,
             created_at: message.createdAt,
           })),
         })

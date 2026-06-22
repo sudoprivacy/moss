@@ -2,7 +2,7 @@ import http from 'http'
 import { randomUUID } from 'crypto'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
-import { issueCabinToken, verifyCabinToken } from './auth.js'
+import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
 import { CabinServices } from './service.js'
 import { CabinStore } from './store.js'
 import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
@@ -29,6 +29,20 @@ class CabinHttpError extends Error {
   ) {
     super(message)
   }
+}
+
+function mapServiceError(error: unknown): CabinHttpError {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/ASR response missing text/i.test(message)) {
+    return new CabinHttpError(400, 'ASR_NO_SPEECH', 'No valid speech was detected in the audio')
+  }
+  if (/ASR request failed/i.test(message)) {
+    return new CabinHttpError(500, 'ASR_FAILED', message)
+  }
+  if (/LLM request failed|Moss session|runner|socket/i.test(message)) {
+    return new CabinHttpError(500, 'AGENT_FAILED', message)
+  }
+  return new CabinHttpError(500, 'INTERNAL_ERROR', message)
 }
 
 function writeJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -74,9 +88,13 @@ function requireCabinToken(req: http.IncomingMessage, config: ServerConfig['cabi
   if (!token) {
     throw new CabinHttpError(401, 'MISSING_AUTHORIZATION', 'Authorization bearer token is required')
   }
-  const payload = verifyCabinToken(token, { secret: config.tokenSecret })
+  const result = verifyCabinTokenDetailed(token, { secret: config.tokenSecret })
+  const payload = result.payload
   if (!payload) {
-    throw new CabinHttpError(403, 'INVALID_AUTHORIZATION', 'Invalid or expired cabin token')
+    if (result.reason === 'expired') {
+      throw new CabinHttpError(401, 'TOKEN_EXPIRED', 'Cabin token expired')
+    }
+    throw new CabinHttpError(403, 'INVALID_AUTHORIZATION', 'Invalid cabin token')
   }
   return payload
 }
@@ -281,6 +299,16 @@ async function fetchPassengerContext(
     throw new CabinHttpError(502, 'PASSENGER_INFO_FAILED', `Passenger info request failed: ${response.status}`)
   }
   const envelope = await response.json() as unknown
+  if (envelope && typeof envelope === 'object' && !Array.isArray(envelope)) {
+    const code = (envelope as Record<string, unknown>).code
+    const msg = (envelope as Record<string, unknown>).msg
+    if (code !== undefined && code !== 0 && code !== '0') {
+      const message = typeof msg === 'string' && msg.trim()
+        ? msg.trim()
+        : 'Invalid tablet token'
+      throw new CabinHttpError(401, 'INVALID_TABLET_TOKEN', message)
+    }
+  }
   const data = objectField(envelope, 'data') || (envelope && typeof envelope === 'object' ? envelope as Record<string, unknown> : null)
   if (!data) {
     throw new CabinHttpError(502, 'PASSENGER_INFO_INVALID', 'Passenger info response missing data')
@@ -373,12 +401,17 @@ export function createCabinApi(options: {
     const language = validateLanguage(form.fields.language)
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
-    const result = await services.transcribe({
-      audio: file.data,
-      filename: file.filename,
-      contentType: file.contentType,
-      language: language === 'auto' ? undefined : language,
-    })
+    let result: Awaited<ReturnType<CabinServices['transcribe']>>
+    try {
+      result = await services.transcribe({
+        audio: file.data,
+        filename: file.filename,
+        contentType: file.contentType,
+        language: language === 'auto' ? undefined : language,
+      })
+    } catch (error) {
+      throw mapServiceError(error)
+    }
     const message = store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
@@ -418,6 +451,7 @@ export function createCabinApi(options: {
       source,
       content: text,
     })
+    const inferredTool = services.inferToolCall({ context, text })
 
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -425,22 +459,40 @@ export function createCabinApi(options: {
       connection: 'keep-alive',
     })
     writeSse(res, 'start', { status: 'ok' })
-    const reply = cabinConfig.createMossSession
-      ? await services.generateReplyWithMossSession({
-          mossSessionId: conversation.mossSessionId,
-          text,
-          onDelta: delta => writeSse(res, 'delta', { content: delta }),
-        })
-      : await services.generateReply({
-          context,
-          messages: store.listMessages(conversation.id, 30),
-          text,
-        })
+    if (inferredTool) {
+      writeSse(res, 'tool_call', inferredTool.toolCall)
+    }
+    let reply: string
+    try {
+      reply = cabinConfig.createMossSession
+        ? await services.generateReplyWithMossSession({
+            mossSessionId: conversation.mossSessionId,
+            text,
+            onDelta: delta => writeSse(res, 'delta', { content: delta }),
+          })
+        : await services.generateReply({
+            context,
+            messages: store.listMessages(conversation.id, 30),
+            text,
+          })
+    } catch (error) {
+      const mapped = mapServiceError(error)
+      writeSse(res, 'error', {
+        code: mapped.code,
+        message: mapped.message,
+        retriable: mapped.statusCode >= 500,
+      })
+      res.end()
+      return
+    }
     const assistantMessage = store.appendMessage({
       conversationId: conversation.id,
       role: 'assistant',
       source: 'agent',
       content: reply,
+      intent: inferredTool?.intent,
+      slots: inferredTool?.slots,
+      toolCalls: inferredTool ? [inferredTool.toolCall] : null,
     })
     if (!cabinConfig.createMossSession) {
       writeSse(res, 'delta', { content: reply })
@@ -459,7 +511,11 @@ export function createCabinApi(options: {
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
     const limit = Number.parseInt(url.searchParams.get('limit') || '20', 10)
-    const messages = store.listMessages(conversation.id, Number.isFinite(limit) ? limit : 50)
+    const normalizedLimit = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 20, 100))
+    const messages = store.listMessages(conversation.id, normalizedLimit, {
+      beforeId: url.searchParams.get('before_id') || undefined,
+      afterId: url.searchParams.get('after_id') || undefined,
+    })
     writeJson(res, 200, {
       status: 'ok',
       mode: 'CABIN_AI_CHAT',
@@ -472,9 +528,10 @@ export function createCabinApi(options: {
           source: message.source,
           ...(message.intent ? { intent: message.intent } : {}),
           ...(message.slots ? { slots: message.slots } : {}),
+          ...(message.toolCalls ? { tool_calls: message.toolCalls } : {}),
           create_time: formatCabinTime(message.createdAt),
         })),
-      next_cursor: messages.length >= Math.max(1, Math.min(Number.isFinite(limit) ? limit : 20, 100))
+      next_cursor: messages.length >= normalizedLimit
         ? messages[0]?.id || null
         : null,
     })
@@ -563,10 +620,11 @@ export function createCabinApi(options: {
           })
           return true
         }
-        writeJson(res, 500, {
+        const mapped = mapServiceError(error)
+        writeJson(res, mapped.statusCode, {
           status: 'error',
-          code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : String(error),
+          code: mapped.code,
+          message: mapped.message,
         })
         return true
       }

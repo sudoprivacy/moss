@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto'
 import { createInterface } from 'readline'
 import type net from 'net'
-import type { CabinConfig, CabinMessage, CabinPassengerContext } from './types.js'
+import type { CabinConfig, CabinMessage, CabinPassengerContext, CabinToolCall } from './types.js'
 import { buildConversationKey } from './auth.js'
 import { CabinStore } from './store.js'
 import type { RuntimeService } from '../runtimeService.js'
@@ -31,6 +31,71 @@ export class CabinServices {
       ? await this.options.createMossSession(context)
       : randomUUID()
     return this.options.store.createConversation({ ...context, mossSessionId })
+  }
+
+  inferToolCall(input: {
+    context: CabinPassengerContext
+    text: string
+  }): { intent: string; slots: Record<string, unknown>; toolCall: CabinToolCall } | null {
+    const text = input.text.toLowerCase()
+    const seatId = input.context.seatId || ''
+    const hasAny = (...words: string[]) => words.some(word => text.includes(word.toLowerCase()))
+
+    if (hasAny('温度', 'temperature', '暖', '热', '冷')) {
+      let direction: 'up' | 'down' | null = null
+      if (hasAny('调高', '升高', '提高', '加热', '暖', '热', 'up', 'warmer', 'increase')) direction = 'up'
+      if (hasAny('调低', '降低', '冷', '凉', 'down', 'cooler', 'decrease')) direction = 'down'
+      if (direction) {
+        return {
+          intent: 'seat_temperature_adjust',
+          slots: { target: 'seat', direction },
+          toolCall: {
+            id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+            name: 'cabin.seat.adjust_temperature',
+            arguments: { seat_id: seatId, direction },
+          },
+        }
+      }
+    }
+
+    if (hasAny('灯', 'light', 'reading light', '读书灯')) {
+      let action: 'on' | 'off' | 'brighter' | 'dimmer' | 'adjust' | null = null
+      if (hasAny('关闭', '关掉', '关上', 'off')) action = 'off'
+      if (hasAny('打开', '开启', '开灯', 'on')) action = 'on'
+      if (hasAny('亮一点', '调亮', 'brighter')) action = 'brighter'
+      if (hasAny('暗一点', '调暗', 'dimmer')) action = 'dimmer'
+      if (!action && hasAny('调', 'adjust')) action = 'adjust'
+      if (action) {
+        return {
+          intent: 'light_adjust',
+          slots: {
+            target: hasAny('读书灯', 'reading light') ? 'reading_light' : 'light',
+            action,
+          },
+          toolCall: {
+            id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+            name: 'cabin.light.adjust',
+            arguments: { seat_id: seatId, action },
+          },
+        }
+      }
+    }
+
+    const itemMatch = input.text.match(/(?:要|需要|给我|拿|送|来)(.*?)(?:$|。|，|,|\.|！|!)/)
+    if (hasAny('水', '毯', '毛毯', '耳机', '饮料', '餐', 'blanket', 'water', 'headphone', 'meal') && itemMatch?.[1]?.trim()) {
+      const item = itemMatch[1].trim()
+      return {
+        intent: 'service_request_item',
+        slots: { item },
+        toolCall: {
+          id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+          name: 'cabin.service.request_item',
+          arguments: { seat_id: seatId, item },
+        },
+      }
+    }
+
+    return null
   }
 
   async transcribe(input: {

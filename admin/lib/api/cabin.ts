@@ -23,6 +23,11 @@ export interface CabinMessage {
   content: string
   intent: string | null
   slots: Record<string, unknown> | null
+  tool_calls: Array<{
+    id: string
+    name: string
+    arguments: Record<string, unknown>
+  }> | null
   created_at: number
 }
 

@@ -38,9 +38,16 @@ export function verifyCabinToken(
   token: string,
   options: { secret: string; nowMs?: number },
 ): CabinTokenPayload | null {
+  return verifyCabinTokenDetailed(token, options).payload
+}
+
+export function verifyCabinTokenDetailed(
+  token: string,
+  options: { secret: string; nowMs?: number },
+): { payload: CabinTokenPayload | null; reason?: 'invalid' | 'expired' } {
   const normalized = token.startsWith('ai_') ? token.slice('ai_'.length) : token
   const [body, signature] = normalized.split('.')
-  if (!body || !signature) return null
+  if (!body || !signature) return { payload: null, reason: 'invalid' }
   const expected = sign(body, options.secret)
   const actualBuffer = Buffer.from(signature)
   const expectedBuffer = Buffer.from(expected)
@@ -48,16 +55,16 @@ export function verifyCabinToken(
     actualBuffer.length !== expectedBuffer.length ||
     !timingSafeEqual(actualBuffer, expectedBuffer)
   ) {
-    return null
+    return { payload: null, reason: 'invalid' }
   }
 
   let parsed: unknown
   try {
     parsed = JSON.parse(base64UrlDecode(body).toString('utf8'))
   } catch {
-    return null
+    return { payload: null, reason: 'invalid' }
   }
-  if (!parsed || typeof parsed !== 'object') return null
+  if (!parsed || typeof parsed !== 'object') return { payload: null, reason: 'invalid' }
   const payload = parsed as Partial<CabinTokenPayload>
   if (
     typeof payload.tabletToken !== 'string' ||
@@ -65,10 +72,12 @@ export function verifyCabinToken(
     typeof payload.issuedAt !== 'number' ||
     typeof payload.expiresAt !== 'number'
   ) {
-    return null
+    return { payload: null, reason: 'invalid' }
   }
-  if ((options.nowMs ?? Date.now()) >= payload.expiresAt) return null
-  return payload as CabinTokenPayload
+  if ((options.nowMs ?? Date.now()) >= payload.expiresAt) {
+    return { payload: null, reason: 'expired' }
+  }
+  return { payload: payload as CabinTokenPayload }
 }
 
 export function buildConversationKey(context: CabinPassengerContext): string {
