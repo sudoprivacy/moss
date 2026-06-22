@@ -1,0 +1,499 @@
+import http from 'http'
+import { randomUUID } from 'crypto'
+import type { RuntimeService } from '../runtimeService.js'
+import type { ServerConfig } from '../types.js'
+import { issueCabinToken, verifyCabinToken } from './auth.js'
+import { CabinServices } from './service.js'
+import { CabinStore } from './store.js'
+import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
+
+type JsonBody = Record<string, unknown>
+
+type UploadedFile = {
+  fieldName: string
+  filename: string
+  contentType: string
+  data: Buffer
+}
+
+class CabinHttpError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+function writeJson(res: http.ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  })
+  res.end(payload)
+}
+
+function writeSse(res: http.ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\n`)
+  res.write(`data: ${JSON.stringify(data)}\n\n`)
+}
+
+function getHeader(req: http.IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name.toLowerCase()]
+  return typeof value === 'string' ? value : undefined
+}
+
+function getBearerToken(req: http.IncomingMessage): string | null {
+  const header = getHeader(req, 'authorization')
+  if (!header) return null
+  const match = header.match(/^Bearer\s+(.+)$/i)
+  return match?.[1] ?? null
+}
+
+function requireTabletHeaders(req: http.IncomingMessage): { tabletToken: string; tabletId: string } {
+  const tabletToken = getHeader(req, 'x-cabin-tablet-token')
+  const tabletId = getHeader(req, 'x-cabin-tablet-id')
+  if (!tabletToken) {
+    throw new CabinHttpError(400, 'MISSING_TABLET_TOKEN', 'X-Cabin-Tablet-Token is required')
+  }
+  if (!tabletId) {
+    throw new CabinHttpError(400, 'MISSING_TABLET_ID', 'X-Cabin-Tablet-Id is required')
+  }
+  return { tabletToken, tabletId }
+}
+
+function requireCabinToken(req: http.IncomingMessage, config: ServerConfig['cabin']): CabinTokenPayload {
+  const token = getBearerToken(req)
+  if (!token) {
+    throw new CabinHttpError(401, 'UNAUTHORIZED', 'Authorization bearer token is required')
+  }
+  const payload = verifyCabinToken(token, { secret: config.tokenSecret })
+  if (!payload) {
+    throw new CabinHttpError(401, 'UNAUTHORIZED', 'Invalid or expired cabin token')
+  }
+  return payload
+}
+
+function readRawBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    req.on('data', chunk => {
+      const buf = Buffer.from(chunk)
+      total += buf.length
+      if (total > maxBytes) {
+        reject(new CabinHttpError(413, 'PAYLOAD_TOO_LARGE', 'Request body is too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(buf)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
+  const raw = await readRawBody(req, 1024 * 1024)
+  if (!raw.toString('utf8').trim()) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.toString('utf8'))
+  } catch {
+    throw new CabinHttpError(400, 'INVALID_JSON', 'Invalid JSON body')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new CabinHttpError(400, 'INVALID_JSON', 'JSON body must be an object')
+  }
+  return parsed as JsonBody
+}
+
+function parseContentDisposition(value: string): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const part of value.split(';')) {
+    const [rawKey, ...rawRest] = part.trim().split('=')
+    const key = rawKey?.trim().toLowerCase()
+    if (!key || rawRest.length === 0) continue
+    result[key] = rawRest.join('=').trim().replace(/^"|"$/g, '')
+  }
+  return result
+}
+
+async function readMultipartFile(req: http.IncomingMessage): Promise<UploadedFile> {
+  const contentType = getHeader(req, 'content-type') || ''
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2]
+  if (!boundary) {
+    throw new CabinHttpError(400, 'INVALID_MULTIPART', 'multipart boundary is required')
+  }
+
+  const body = await readRawBody(req, 25 * 1024 * 1024)
+  const delimiter = Buffer.from(`--${boundary}`)
+  let offset = 0
+  while (offset < body.length) {
+    const start = body.indexOf(delimiter, offset)
+    if (start < 0) break
+    const next = body.indexOf(delimiter, start + delimiter.length)
+    if (next < 0) break
+    let part = body.subarray(start + delimiter.length, next)
+    if (part.subarray(0, 2).toString() === '\r\n') part = part.subarray(2)
+    if (part.subarray(part.length - 2).toString() === '\r\n') part = part.subarray(0, part.length - 2)
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'))
+    if (headerEnd > 0) {
+      const headerText = part.subarray(0, headerEnd).toString('utf8')
+      const data = part.subarray(headerEnd + 4)
+      const headers = new Map<string, string>()
+      for (const line of headerText.split('\r\n')) {
+        const colon = line.indexOf(':')
+        if (colon > 0) headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim())
+      }
+      const disposition = headers.get('content-disposition')
+      if (disposition) {
+        const params = parseContentDisposition(disposition)
+        if (params.name === 'file' && params.filename) {
+          return {
+            fieldName: params.name,
+            filename: params.filename,
+            contentType: headers.get('content-type') || 'application/octet-stream',
+            data,
+          }
+        }
+      }
+    }
+    offset = next
+  }
+
+  throw new CabinHttpError(400, 'MISSING_FILE', 'multipart field "file" is required')
+}
+
+function stringField(body: JsonBody, key: string): string | undefined {
+  const value = body[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function objectField(value: unknown, key: string): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const child = (value as Record<string, unknown>)[key]
+  return child && typeof child === 'object' && !Array.isArray(child)
+    ? child as Record<string, unknown>
+    : null
+}
+
+function stringFromObject(value: unknown, ...keys: string[]): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const obj = value as Record<string, unknown>
+  for (const key of keys) {
+    const raw = obj[key]
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+    if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  }
+  return undefined
+}
+
+async function fetchPassengerContext(
+  config: ServerConfig['cabin'],
+  tablet: { tabletToken: string; tabletId: string },
+): Promise<CabinPassengerContext> {
+  if (!config.passengerInfoUrl) {
+    throw new CabinHttpError(500, 'PASSENGER_INFO_NOT_CONFIGURED', 'cabin.passengerInfoUrl is required')
+  }
+  const response = await fetch(config.passengerInfoUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'tablet-token': tablet.tabletToken,
+      'x-cabin-tablet-token': tablet.tabletToken,
+      ...(config.passengerInfoAuth ? { authorization: config.passengerInfoAuth } : {}),
+    },
+    body: JSON.stringify({
+      privacyLevel: config.passengerInfoPrivacyLevel,
+    }),
+  })
+  if (!response.ok) {
+    throw new CabinHttpError(502, 'PASSENGER_INFO_FAILED', `Passenger info request failed: ${response.status}`)
+  }
+  const envelope = await response.json() as unknown
+  const data = objectField(envelope, 'data') || (envelope && typeof envelope === 'object' ? envelope as Record<string, unknown> : null)
+  if (!data) {
+    throw new CabinHttpError(502, 'PASSENGER_INFO_INVALID', 'Passenger info response missing data')
+  }
+  const flight = objectField(data, 'flight')
+  const passenger = objectField(data, 'passenger')
+  const flightId = stringFromObject(data, 'flightId', 'flight_id') || stringFromObject(flight, 'flightId', 'flight_id')
+  const flightDate = stringFromObject(data, 'flightDate', 'flight_date') || stringFromObject(flight, 'flightDate', 'flight_date')
+  const seatId = stringFromObject(data, 'seatNo', 'seat_id', 'seatId') || stringFromObject(passenger, 'seatNo', 'seat_id', 'seatId')
+  if (!flightId) throw new CabinHttpError(502, 'PASSENGER_INFO_INVALID', 'Passenger info response missing flightId')
+  if (!flightDate) throw new CabinHttpError(502, 'PASSENGER_INFO_INVALID', 'Passenger info response missing flightDate')
+  return {
+    passengerId: stringFromObject(passenger, 'passengerId', 'id'),
+    passengerRef: stringFromObject(passenger, 'passengerRef', 'passenger_ref') || stringFromObject(data, 'passengerRef', 'passenger_ref'),
+    passengerName: stringFromObject(passenger, 'displayName', 'passengerName', 'passengerNameMasked')
+      || stringFromObject(data, 'displayName', 'passengerName', 'passengerNameMasked'),
+    flightId,
+    flightDate,
+    flightNo: stringFromObject(flight, 'flightNo', 'flight_no') || stringFromObject(data, 'flightNo', 'flight_no'),
+    flightSeatId: stringFromObject(data, 'flightSeatId', 'flight_seat_id'),
+    seatId,
+    tabletId: tablet.tabletId,
+    language: stringFromObject(passenger, 'language') || stringFromObject(data, 'language'),
+  }
+}
+
+async function contextFromToken(config: ServerConfig['cabin'], payload: CabinTokenPayload, headers: { tabletToken: string; tabletId: string }): Promise<CabinPassengerContext> {
+  if (payload.tabletId !== headers.tabletId || payload.tabletToken !== headers.tabletToken) {
+    throw new CabinHttpError(401, 'UNAUTHORIZED', 'Cabin token does not match tablet headers')
+  }
+  return fetchPassengerContext(config, headers)
+}
+
+export function createCabinApi(options: {
+  config: ServerConfig
+  runtime: RuntimeService
+}): {
+  handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
+} {
+  const cabinConfig = options.config.cabin
+  const store = new CabinStore(options.runtime.store.db)
+  const services = new CabinServices({
+    config: cabinConfig,
+    store,
+    runtime: options.runtime,
+    createMossSession: async (context) => {
+      if (!cabinConfig.createMossSession) return `cabin-${randomUUID()}`
+      const orgId = options.runtime.authService.listAllOrganizations().organizations[0]?.id
+      if (!orgId) throw new Error('No organization available for cabin moss session')
+      const created = await options.runtime.createSession({
+        cwd: options.config.workspace,
+        dangerouslySkipPermissions: true,
+        userId: 'cabin-system',
+        orgId,
+        role: 'user',
+        scopes: ['sessions:create'],
+        assistantName: cabinConfig.assistantName,
+        source: 'cabin',
+        channelChatId: `${context.flightId}:${context.passengerId || context.passengerRef || context.tabletId}`,
+        runtime: {
+          type: options.config.defaultRuntime,
+          engine: 'scode',
+          hostMode: 'user',
+          model: cabinConfig.llmModel,
+        },
+      })
+      return created.sessionId
+    },
+  })
+
+  async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const tablet = requireTabletHeaders(req)
+    const token = issueCabinToken(tablet, {
+      secret: cabinConfig.tokenSecret,
+      ttlSeconds: cabinConfig.tokenTtlSeconds,
+    })
+    writeJson(res, 200, {
+      status: 'ok',
+      access_token: token,
+      token_type: 'Bearer',
+      expires_in: cabinConfig.tokenTtlSeconds,
+    })
+  }
+
+  async function handleVoiceQuery(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const file = await readMultipartFile(req)
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+    const result = await services.transcribe({
+      audio: file.data,
+      filename: file.filename,
+      contentType: file.contentType,
+      language: payload.language,
+    })
+    const message = store.appendMessage({
+      conversationId: conversation.id,
+      role: 'user',
+      source: 'voice',
+      content: result.text,
+    })
+    store.insertVoiceLog({
+      conversationId: conversation.id,
+      messageId: message.id,
+      type: 'asr',
+      text: result.text,
+      status: 'ok',
+      elapsedMs: result.elapsedMs,
+    })
+    writeJson(res, 200, {
+      text: result.text,
+      conversation_id: conversation.id,
+    })
+  }
+
+  async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const body = await readJsonBody(req)
+    const text = stringField(body, 'text')
+    if (!text) throw new CabinHttpError(400, 'MISSING_TEXT', 'text is required')
+
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+    store.appendMessage({
+      conversationId: conversation.id,
+      role: 'user',
+      source: 'text',
+      content: text,
+    })
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    writeSse(res, 'message_start', { conversation_id: conversation.id })
+    const reply = cabinConfig.createMossSession
+      ? await services.generateReplyWithMossSession({
+          mossSessionId: conversation.mossSessionId,
+          text,
+          onDelta: delta => writeSse(res, 'message_delta', { text: delta }),
+        })
+      : await services.generateReply({
+          context,
+          messages: store.listMessages(conversation.id, 30),
+          text,
+        })
+    const assistantMessage = store.appendMessage({
+      conversationId: conversation.id,
+      role: 'assistant',
+      source: 'agent',
+      content: reply,
+    })
+    if (!cabinConfig.createMossSession) {
+      writeSse(res, 'message_delta', { text: reply })
+    }
+    writeSse(res, 'message_end', {
+      conversation_id: conversation.id,
+      message_id: assistantMessage.id,
+      moss_session_id: conversation.mossSessionId,
+    })
+    res.end()
+  }
+
+  async function handleHistory(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+    const limit = Number.parseInt(url.searchParams.get('limit') || '50', 10)
+    const messages = store.listMessages(conversation.id, Number.isFinite(limit) ? limit : 50)
+    writeJson(res, 200, {
+      conversation_id: conversation.id,
+      moss_session_id: conversation.mossSessionId,
+      messages: messages
+        .filter(message => message.role !== 'system')
+        .map(message => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          created_at: message.createdAt,
+        })),
+    })
+  }
+
+  async function handleReset(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+    store.resetConversation(conversation.id)
+    writeJson(res, 200, { ok: true, conversation_id: conversation.id })
+  }
+
+  async function handleSpeech(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const body = await readJsonBody(req)
+    const text = stringField(body, 'text')
+    if (!text) throw new CabinHttpError(400, 'MISSING_TEXT', 'text is required')
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+    const result = await services.speech(text)
+    store.insertVoiceLog({
+      conversationId: conversation.id,
+      type: 'tts',
+      text,
+      status: 'ok',
+      elapsedMs: result.elapsedMs,
+    })
+    res.writeHead(200, {
+      'content-type': result.contentType,
+      'content-length': result.audio.length,
+    })
+    res.end(result.audio)
+  }
+
+  return {
+    async handle(req, res, pathname) {
+      if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
+      try {
+        const url = new URL(req.url || '/', 'http://localhost')
+        if (req.method === 'POST' && pathname === '/v1/auth/token') {
+          await handleAuthToken(req, res)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/voice/query') {
+          await handleVoiceQuery(req, res)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/ai-chat/send') {
+          await handleChatSend(req, res)
+          return true
+        }
+        if (req.method === 'GET' && pathname === '/v1/ai-chat/history') {
+          await handleHistory(req, res, url)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/ai-chat/reset') {
+          await handleReset(req, res)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/tts/speech') {
+          await handleSpeech(req, res)
+          return true
+        }
+        return false
+      } catch (error) {
+        if (res.headersSent) {
+          try {
+            writeSse(res, 'error', {
+              code: 'INTERNAL_ERROR',
+              message: error instanceof Error ? error.message : String(error),
+            })
+          } catch {
+            // ignore secondary write failures
+          }
+          res.end()
+          return true
+        }
+        if (error instanceof CabinHttpError) {
+          writeJson(res, error.statusCode, {
+            error: {
+              code: error.code,
+              message: error.message,
+            },
+          })
+          return true
+        }
+        writeJson(res, 500, {
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        })
+        return true
+      }
+    },
+  }
+}

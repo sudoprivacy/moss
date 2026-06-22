@@ -9,6 +9,8 @@ ui/dist/
 ui/node_modules/
 bin/
 data/
+data-cabin-dev/
+server.cabin.local.json
 sudocode/
 .scode/
 ui/electron-direct.mjs

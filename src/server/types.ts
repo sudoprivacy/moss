@@ -165,6 +165,42 @@ export const serverFileConfigSchema = lazySchema(() =>
       maxPassagesPerWiki: 20_000,
       topKVector: 50,
     }),
+    cabin: z.object({
+      enabled: z.boolean().default(false),
+      tokenSecret: z.string().default('dev-cabin-token-secret'),
+      tokenTtlSeconds: z.number().int().min(60).default(2 * 60 * 60),
+      passengerInfoUrl: z.string().optional(),
+      passengerInfoAuth: z.string().optional(),
+      passengerInfoPrivacyLevel: z.number().int().min(1).max(3).default(2),
+      asrUrl: z.string().default('http://127.0.0.1:8002/v1/audio/transcriptions'),
+      asrModel: z.string().default('Qwen/Qwen3-ASR-1.7B'),
+      asrApiKey: z.string().optional(),
+      ttsUrl: z.string().default('http://127.0.0.1:8004/v1/audio/speech'),
+      ttsModel: z.string().default('qwen3-tts'),
+      ttsVoice: z.string().default('vivian'),
+      ttsLanguage: z.string().default('chinese'),
+      ttsApiKey: z.string().optional(),
+      llmBaseUrl: z.string().default('http://127.0.0.1:8000/v1'),
+      llmModel: z.string().default('Qwen3.6-35B-A3B-NVFP4'),
+      llmApiKey: z.string().optional(),
+      assistantName: z.string().default('cabin-ai-flight-attendant'),
+      createMossSession: z.boolean().default(false),
+    }).default({
+      enabled: false,
+      tokenSecret: 'dev-cabin-token-secret',
+      tokenTtlSeconds: 2 * 60 * 60,
+      passengerInfoPrivacyLevel: 2,
+      asrUrl: 'http://127.0.0.1:8002/v1/audio/transcriptions',
+      asrModel: 'Qwen/Qwen3-ASR-1.7B',
+      ttsUrl: 'http://127.0.0.1:8004/v1/audio/speech',
+      ttsModel: 'qwen3-tts',
+      ttsVoice: 'vivian',
+      ttsLanguage: 'chinese',
+      llmBaseUrl: 'http://127.0.0.1:8000/v1',
+      llmModel: 'Qwen3.6-35B-A3B-NVFP4',
+      assistantName: 'cabin-ai-flight-attendant',
+      createMossSession: false,
+    }),
   }),
 )
 
@@ -248,6 +284,27 @@ export type ServerConfig = {
     modelMirror?: string
     maxPassagesPerWiki: number
     topKVector: number
+  }
+  cabin: {
+    enabled: boolean
+    tokenSecret: string
+    tokenTtlSeconds: number
+    passengerInfoUrl?: string
+    passengerInfoAuth?: string
+    passengerInfoPrivacyLevel: number
+    asrUrl: string
+    asrModel: string
+    asrApiKey?: string
+    ttsUrl: string
+    ttsModel: string
+    ttsVoice: string
+    ttsLanguage: string
+    ttsApiKey?: string
+    llmBaseUrl: string
+    llmModel: string
+    llmApiKey?: string
+    assistantName: string
+    createMossSession: boolean
   }
 }
 

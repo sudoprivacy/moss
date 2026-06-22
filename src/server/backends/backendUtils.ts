@@ -79,10 +79,13 @@ export function buildSessionEnv(
     // Ignore read errors
   }
 
-  const apiKey = fileApiKey
-    || settings.apiKey
-    || process.env.ANTHROPIC_API_KEY
-    || process.env.ANTHROPIC_AUTH_TOKEN
+  const forceEnvModelConfig = process.env.MOSS_FORCE_ENV_MODEL_CONFIG === '1'
+  const apiKey = forceEnvModelConfig
+    ? (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || fileApiKey || settings.apiKey)
+    : (fileApiKey
+      || settings.apiKey
+      || process.env.ANTHROPIC_API_KEY
+      || process.env.ANTHROPIC_AUTH_TOKEN)
 
   // Document Center: in-container scode talks back to moss-server through
   // the `wiki` CLI. The CLI refuses to run unless these two env vars are
@@ -118,10 +121,12 @@ export function buildSessionEnv(
     ...(apiKey ? { ANTHROPIC_AUTH_TOKEN: apiKey } : {}),
     ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
     ...(apiKey ? { PROXY_AUTH_TOKEN: apiKey } : {}),
-    ANTHROPIC_BASE_URL: fileBaseUrl
-      || settings.url
-      || process.env.ANTHROPIC_BASE_URL
-      || 'https://hk.sudorouter.ai/v1',
+    ANTHROPIC_BASE_URL: forceEnvModelConfig
+      ? (process.env.ANTHROPIC_BASE_URL || fileBaseUrl || settings.url || 'https://hk.sudorouter.ai/v1')
+      : (fileBaseUrl
+        || settings.url
+        || process.env.ANTHROPIC_BASE_URL
+        || 'https://hk.sudorouter.ai/v1'),
     ...(options.userId ? { MOSS_SESSION_USER_ID: options.userId } : {}),
     ...(options.orgId ? { MOSS_SESSION_ORG_ID: options.orgId } : {}),
     ...(options.role ? { MOSS_SESSION_ROLE: options.role } : {}),

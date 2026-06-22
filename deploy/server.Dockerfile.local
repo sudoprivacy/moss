@@ -4,11 +4,11 @@
 # Unlike deploy/server.Dockerfile (which only COPYs prebuilt artifacts produced
 # by CI / a prior local `bun run build:node`), this variant BUILDS EVERYTHING
 # from source inside the image, so a single `docker build` yields a correct
-# linux/amd64 image with no host-side preparation:
+# linux/amd64 or linux/arm64 image with no host-side preparation:
 #
 #   - moss-server.mjs / direct-connect-session-runner.mjs / admin/dist  (bun)
-#   - bin/wiki, bin/corpapp                                            (Go, linux/amd64)
-#   - native/nexus-napi/nexus-napi.node                                (Rust, x86_64-unknown-linux-gnu)
+#   - bin/wiki, bin/corpapp                                            (Go, target arch)
+#   - native/nexus-napi/nexus-napi.node                                (Rust, target arch)
 #   - bin/nexus/nexusd, bin/scode                                      (downloaded)
 #
 # The nexus-napi addon depends on the PRIVATE crate `nexus-vfs-client` from
@@ -62,18 +62,22 @@ RUN cd admin && (bun install --frozen-lockfile || bun install)
 # Now the full source and run the build (admin/dist + bin/*.mjs).
 COPY . .
 RUN bun run build:node
-# build:node also builds Go CLIs for the BUILD host arch (wrong for the image);
-# the Go stage below rebuilds wiki/corpapp for linux/amd64 and overrides them.
+# build:node also builds Go CLIs for the BUILD host arch (wrong for a
+# cross-platform image); the Go stage below rebuilds wiki/corpapp for the target
+# arch and overrides them.
 
-# --- Stage 2: Go CLIs cross-compiled for linux/amd64 -------------------------
+# --- Stage 2: Go CLIs cross-compiled for the target arch ---------------------
 FROM golang:1.22-alpine AS go-builder
 WORKDIR /src
+ARG TARGETARCH
 COPY cli ./cli
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-RUN cd cli/wiki && go build -ldflags="-s -w" -o /out/wiki . \
-    && cd /src/cli/corpapp && go build -ldflags="-s -w" -o /out/corpapp .
+RUN test -n "$TARGETARCH" \
+    && cd cli/wiki \
+    && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -ldflags="-s -w" -o /out/wiki . \
+    && cd /src/cli/corpapp \
+    && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -ldflags="-s -w" -o /out/corpapp .
 
-# --- Stage 3: nexus-napi (Rust) for x86_64-unknown-linux-gnu -----------------
+# --- Stage 3: nexus-napi (Rust) for the target arch --------------------------
 # Uses the locally-staged sudocode clone (./.sudocode-build-context) via a Cargo
 # [patch], so no GitHub token is needed for the private nexus-vfs-client dep.
 # Base on rust:1-bookworm — Rust/cargo are preinstalled, so no rustup toolchain
@@ -85,6 +89,7 @@ RUN cd cli/wiki && go build -ldflags="-s -w" -o /out/wiki . \
 # the sparse protocol + retries below).
 FROM rust:1-bookworm AS napi-builder
 WORKDIR /src
+ARG TARGETARCH
 # Cargo network resilience: sparse crates.io protocol (plain HTTPS, no git index
 # clone) + built-in retries survive the transient TLS drops the mirror throws.
 ENV CARGO_NET_RETRY=10 CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse CARGO_HTTP_MULTIPLEXING=false
@@ -101,37 +106,54 @@ RUN printf '\n[patch."https://github.com/sudoprivacy/sudocode"]\nnexus-vfs-clien
 # can still abort a run; retrying converges (cargo caches what it fetched).
 # napi-rs cdylib output is lib<crate>.so → rename to <binaryName>.node.
 RUN cd native/nexus-napi \
+    && case "$TARGETARCH" in \
+         amd64) RUST_TARGET="x86_64-unknown-linux-gnu" ;; \
+         arm64) RUST_TARGET="aarch64-unknown-linux-gnu" ;; \
+         *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+       esac \
+    && rustup target add "$RUST_TARGET" \
     && for i in 1 2 3 4 5; do \
-         cargo build --release --target x86_64-unknown-linux-gnu && break \
+         cargo build --release --target "$RUST_TARGET" && break \
          || { echo "cargo build attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
-    && cp target/x86_64-unknown-linux-gnu/release/libnexus_napi.so nexus-napi.node \
+    && cp "target/$RUST_TARGET/release/libnexus_napi.so" nexus-napi.node \
     && test -f nexus-napi.node || (echo "napi build failed after retries" && exit 1)
-# Output: native/nexus-napi/nexus-napi.node (ELF x86-64)
+# Output: native/nexus-napi/nexus-napi.node
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
 FROM debian:bookworm-slim AS dl
 ARG NEXUS_VFS_VERSION=v0.1.0
 ARG SCODE_VERSION=latest
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
-# nexusd-cluster (Rust nexus daemon). Archive ships nexusd-cluster-linux-x86_64/nexusd-cluster.
-RUN curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/${NEXUS_VFS_VERSION}/nexusd-cluster-linux-x86_64.tar.gz" -o nexus.tar.gz \
+# nexusd-cluster (Rust nexus daemon).
+RUN case "$TARGETARCH" in \
+      amd64) NEXUS_ARCH="x86_64" ;; \
+      arm64) NEXUS_ARCH="aarch64" ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/${NEXUS_VFS_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
     && tar -xzf nexus.tar.gz \
     && mkdir -p /out/bin/nexus \
-    && mv nexusd-cluster-linux-x86_64/nexusd-cluster /out/bin/nexus/nexusd \
+    && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
     && chmod +x /out/bin/nexus/nexusd
 # scode (resolve "latest" tag when not pinned).
 RUN set -e; \
+    case "$TARGETARCH" in \
+      amd64) SCODE_ARCH="x64" ;; \
+      arm64) SCODE_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+    esac; \
     V="${SCODE_VERSION}"; \
     if [ "$V" = "latest" ]; then \
       V=$(curl -sI "https://github.com/sudoprivacy/sudocode/releases/latest" | grep -i "location:" | sed 's/.*tag\///' | tr -d '\r\n'); \
     fi; \
-    echo "scode version: $V"; \
-    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${V}/scode-linux-x64.tar.gz" -o scode.tar.gz; \
+    echo "scode version: $V arch: $SCODE_ARCH"; \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${V}/scode-linux-${SCODE_ARCH}.tar.gz" -o scode.tar.gz; \
     tar -xzf scode.tar.gz; \
-    mv scode-linux-x64/scode /out/bin/scode; \
+    mv "scode-linux-${SCODE_ARCH}/scode" /out/bin/scode; \
     chmod +x /out/bin/scode
 
 # --- Stage 5: runtime image --------------------------------------------------
@@ -177,8 +199,9 @@ RUN apt-get update \
          && break || { echo "apt install attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && command -v jq >/dev/null || (echo "jq not installed after retries" && exit 1) \
-    && ln -sf /lib/x86_64-linux-gnu/libssl.so.3 /lib/x86_64-linux-gnu/libssl3.so \
-    && ln -sf /lib/x86_64-linux-gnu/libcrypto.so.3 /lib/x86_64-linux-gnu/libcrypto3.so \
+    && LIBDIR="$(dirname "$(ldconfig -p | awk '/libssl.so.3/{print $NF; exit}')")" \
+    && ln -sf "$LIBDIR/libssl.so.3" "$LIBDIR/libssl3.so" \
+    && ln -sf "$LIBDIR/libcrypto.so.3" "$LIBDIR/libcrypto3.so" \
     && rm -rf /var/lib/apt/lists/*
 
 # Run the whole server in China time (Asia/Shanghai): logs, timestamps, and cron
@@ -224,10 +247,10 @@ COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
 COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
 COPY --from=js-builder /src/admin/dist/ ./admin/dist/
 COPY --from=js-builder /src/assistants/ ./assistants/
-# nexus-napi loader + the linux/amd64 native addon (from napi-builder).
+# nexus-napi loader + native addon (from napi-builder).
 COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/index.d.ts ./native/nexus-napi/
 COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./native/nexus-napi/
-# Go CLIs cross-compiled for linux/amd64 (from go-builder).
+# Go CLIs cross-compiled for target arch (from go-builder).
 COPY --from=go-builder /out/wiki ./bin/wiki
 COPY --from=go-builder /out/corpapp ./bin/corpapp
 # Downloaded binaries (from dl).

@@ -6,7 +6,8 @@
 #   - tag 推送 (创建 GitHub Release)
 #
 # 产出物:
-#   - moss-deploy-{commit8}.tar.gz
+#   - moss-deploy-{commit8}-amd64.tar.gz
+#   - moss-deploy-{commit8}-arm64.tar.gz
 #   包含:
 #     - my-moss-runtime-{tag}.tar.gz (会话容器镜像)
 #     - my-moss-server-{tag}.tar.gz (主服务镜像)
@@ -35,6 +36,17 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_platform: linux/amd64
+            target_arch: amd64
+            scode_arch: x64
+          - target_platform: linux/arm64
+            target_arch: arm64
+            scode_arch: arm64
+    name: build-${{ matrix.target_arch }}
 
     steps:
       - name: Checkout code
@@ -48,9 +60,16 @@ jobs:
       - name: Set image tag
         id: tag
         run: |
-          TAG=$(echo $GITHUB_SHA | cut -c1-8)
-          echo "IMAGE_TAG=$TAG" >> $GITHUB_OUTPUT
-          echo "Image tag: $TAG"
+          COMMIT_TAG=$(echo $GITHUB_SHA | cut -c1-8)
+          TARGET_ARCH="${{ matrix.target_arch }}"
+          IMAGE_TAG="$COMMIT_TAG-$TARGET_ARCH"
+          echo "COMMIT_TAG=$COMMIT_TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "TARGET_PLATFORM=${{ matrix.target_platform }}" >> $GITHUB_OUTPUT
+          echo "TARGET_ARCH=$TARGET_ARCH" >> $GITHUB_OUTPUT
+          echo "Commit tag: $COMMIT_TAG"
+          echo "Image tag: $IMAGE_TAG"
+          echo "Target platform: ${{ matrix.target_platform }}"
 
       # 2. 安装 Bun 并构建 (build:node 已包含前端构建)
       - name: Setup Bun
@@ -95,20 +114,25 @@ jobs:
         env:
           SCODE_VERSION: ${{ steps.scode-version.outputs.version }}
         run: |
-          echo "Downloading scode $SCODE_VERSION for linux-x64"
+          SCODE_ARCH="${{ matrix.scode_arch }}"
 
-          DOWNLOAD_URL="https://github.com/sudoprivacy/sudocode/releases/download/$SCODE_VERSION/scode-linux-x64.tar.gz"
+          echo "Downloading scode $SCODE_VERSION for linux-$SCODE_ARCH"
+
+          DOWNLOAD_URL="https://github.com/sudoprivacy/sudocode/releases/download/$SCODE_VERSION/scode-linux-$SCODE_ARCH.tar.gz"
           echo "Downloading from: $DOWNLOAD_URL"
           curl -L -o scode.tar.gz "$DOWNLOAD_URL"
 
           tar -xzf scode.tar.gz
-          mv scode-linux-x64/scode bin/scode
+          mv "scode-linux-$SCODE_ARCH/scode" bin/scode
           chmod +x bin/scode
-          rm -rf scode-linux-x64 scode.tar.gz
+          rm -rf "scode-linux-$SCODE_ARCH" scode.tar.gz
 
           echo "scode ready: $(ls -la bin/scode)"
 
       # 4. 设置 Docker Buildx
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -123,10 +147,11 @@ jobs:
       - name: Build Runtime Docker Image
         env:
           IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+          TARGET_PLATFORM: ${{ steps.tag.outputs.TARGET_PLATFORM }}
         run: |
-          echo "Building runtime image with tag: $IMAGE_TAG"
-          docker build -t my-moss-runtime:$IMAGE_TAG -f deploy/runtime/Dockerfile .
-          docker save my-moss-runtime:$IMAGE_TAG | gzip > my-moss-runtime-$IMAGE_TAG.tar.gz
+          echo "Building runtime image with tag: $IMAGE_TAG platform: $TARGET_PLATFORM"
+          docker buildx build --platform "$TARGET_PLATFORM" --load -t my-moss-runtime:$IMAGE_TAG -f deploy/runtime/Dockerfile .
+          docker save --platform "$TARGET_PLATFORM" my-moss-runtime:$IMAGE_TAG | gzip > my-moss-runtime-$IMAGE_TAG.tar.gz
           echo "Runtime image size: $(ls -lh my-moss-runtime-$IMAGE_TAG.tar.gz)"
 
       # 6. 构建 Server 镜像 (主服务)
@@ -134,19 +159,23 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
           SCODE_VERSION: ${{ steps.scode-version.outputs.version }}
+          TARGET_PLATFORM: ${{ steps.tag.outputs.TARGET_PLATFORM }}
         run: |
-          echo "Building server image with tag: $IMAGE_TAG"
-          docker build \
+          echo "Building server image with tag: $IMAGE_TAG platform: $TARGET_PLATFORM"
+          docker buildx build \
+            --platform "$TARGET_PLATFORM" \
+            --load \
             --build-arg SCODE_VERSION="$SCODE_VERSION" \
             -t my-moss-server:$IMAGE_TAG \
             -f deploy/server.Dockerfile.local .
-          docker save my-moss-server:$IMAGE_TAG | gzip > my-moss-server-$IMAGE_TAG.tar.gz
+          docker save --platform "$TARGET_PLATFORM" my-moss-server:$IMAGE_TAG | gzip > my-moss-server-$IMAGE_TAG.tar.gz
           echo "Server image size: $(ls -lh my-moss-server-$IMAGE_TAG.tar.gz)"
 
       # 7. 组装部署包
       - name: Assemble Release Package
         env:
           IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+          TARGET_ARCH: ${{ steps.tag.outputs.TARGET_ARCH }}
         run: |
           mkdir -p release/moss
 
@@ -185,7 +214,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: moss-deploy-${{ steps.tag.outputs.IMAGE_TAG }}
-          path: moss-deploy-*.tar.gz
+          path: moss-deploy-${{ steps.tag.outputs.IMAGE_TAG }}.tar.gz
           retention-days: 30
 
   # 创建 GitHub Release（当打 tag 时）

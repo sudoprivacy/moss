@@ -19,7 +19,7 @@ import {
   buildAvailableSkillSnapshot,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
-import { buildAllModelsConfig } from '../modelListCache.js'
+import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
 import { reapInUserContainer } from '../runtime/reaper.js'
 import { toHostPath } from '../runtime/dockerPathMap.js'
 import { logRuntimeEvent, logRuntimeMetric } from '../runtime/runtimeMetrics.js'
@@ -185,7 +185,7 @@ export class DockerBackend implements SessionBackend {
 
       // Preload all available models from sudorouter API
       // This allows dynamic model switching without modifying sudocode.json
-      const allModels = await buildAllModelsConfig(baseUrl)
+      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
 
       const scodeConfig = {
         auth_modes: {

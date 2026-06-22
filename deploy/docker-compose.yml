@@ -27,6 +27,15 @@ services:
       # handed to session containers points back at this container by name.
       - MOSS_AUTH_PROXY_HOST=0.0.0.0
       - MOSS_AUTH_PROXY_URL=http://moss-server:12013
+      - CABIN_TOKEN_SECRET=${CABIN_TOKEN_SECRET:-CHANGE_ME_LONG_RANDOM_TOKEN_SECRET}
+      - CABIN_PASSENGER_INFO_URL=${CABIN_PASSENGER_INFO_URL:-http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current}
+      - CABIN_PASSENGER_INFO_AUTH=${CABIN_PASSENGER_INFO_AUTH:-CHANGE_ME_ADMIN_API_AUTH}
+      - CABIN_PASSENGER_INFO_PRIVACY_LEVEL=${CABIN_PASSENGER_INFO_PRIVACY_LEVEL:-2}
+      - CABIN_ASR_URL=${CABIN_ASR_URL:-http://asr-proxy:8002/v1/audio/transcriptions}
+      - CABIN_TTS_URL=${CABIN_TTS_URL:-http://qwen3-tts:8004/v1/audio/speech}
+      - CABIN_LLM_BASE_URL=${CABIN_LLM_BASE_URL:-http://vllm-qwen-llm:8000/v1}
+      - CABIN_LLM_API_KEY=${CABIN_LLM_API_KEY:-local-no-auth}
+      - CABIN_CREATE_MOSS_SESSION=${CABIN_CREATE_MOSS_SESSION:-true}
     networks:
       - moss-network
 

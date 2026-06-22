@@ -23,6 +23,7 @@ import {
   Wrench,
   ScrollText,
   ShieldCheck,
+  Plane,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -81,6 +82,12 @@ const menuItems: NavItem[] = [
     url: '/sessions',
     icon: MessageSquare,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
+  },
+  {
+    title: '客舱 AI',
+    url: '/cabin/conversations',
+    icon: Plane,
+    requiredScope: 'admin:settings',
   },
   {
     title: '定时任务',

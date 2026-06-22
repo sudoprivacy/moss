@@ -1281,7 +1281,10 @@ export class RuntimeService {
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
     const userModelPref = session.userId ? getUserModelPreference(session.userId) : null
-    const defaultModel = userModelPref?.modelId
+    const isCabinSession = session.source === 'cabin'
+    const defaultModel = isCabinSession
+      ? (session.runtime.model || this.options.config.cabin.llmModel)
+      : userModelPref?.modelId
       || systemSettings.model
       || process.env.MOSS_DEFAULT_MODEL
       || 'gemini-3-flash-preview'
@@ -1305,6 +1308,15 @@ export class RuntimeService {
     }
     if (systemSettings.model) {
       runnerEnv.ANTHROPIC_MODEL = systemSettings.model
+    }
+    if (isCabinSession) {
+      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
+      runnerEnv.MOSS_DEFAULT_MODEL = session.runtime.model || this.options.config.cabin.llmModel
+      runnerEnv.ANTHROPIC_BASE_URL = this.options.config.cabin.llmBaseUrl
+      runnerEnv.ANTHROPIC_API_KEY = this.options.config.cabin.llmApiKey || process.env.ANTHROPIC_API_KEY || 'local-no-auth'
+      runnerEnv.ANTHROPIC_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
+      runnerEnv.PROXY_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
+      runnerEnv.ANTHROPIC_MODEL = runnerEnv.MOSS_DEFAULT_MODEL
     }
 
     // Inject Auth Proxy token for scode process. The URL must be reachable from

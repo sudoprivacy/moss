@@ -7,6 +7,7 @@ const LoginPage = lazy(() => import('./pages/login-page'))
 const DashboardPage = lazy(() => import('./pages/dashboard-page'))
 const BudgetPage = lazy(() => import('./pages/budget-page'))
 const SessionsPage = lazy(() => import('./pages/sessions-page'))
+const CabinConversationsPage = lazy(() => import('./pages/cabin-conversations-page'))
 const UsersPage = lazy(() => import('./pages/users-page'))
 const ApiKeysPage = lazy(() => import('./pages/api-keys-page'))
 const SystemSettingsPage = lazy(() => import('./pages/system-settings-page'))
@@ -109,6 +110,14 @@ export default function App() {
           element={
             <SuspendedRoute>
               <SessionDetailRoute />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path="/cabin/conversations"
+          element={
+            <SuspendedRoute>
+              <CabinConversationsPage />
             </SuspendedRoute>
           }
         />
