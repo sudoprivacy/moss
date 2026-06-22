@@ -73,6 +73,16 @@ for img in "${BASE_IMAGES[@]}"; do
   done
 done
 
+# The embedding model ships in-repo at deploy/models/Xenova.zip (git-lfs) and is
+# unzipped inside server.Dockerfile.local's model-stage, so no host-side staging
+# is needed here. Warn early if the LFS object wasn't materialized (a plain
+# `git clone` without `git lfs pull` leaves a ~130B pointer in its place).
+MODEL_ZIP_IN_REPO="$REPO_ROOT/deploy/models/Xenova.zip"
+if [ ! -f "$MODEL_ZIP_IN_REPO" ] || [ "$(wc -c < "$MODEL_ZIP_IN_REPO")" -lt 1000000 ]; then
+  log "WARNING: $MODEL_ZIP_IN_REPO missing or looks like an unresolved git-lfs pointer."
+  log "         Run 'git lfs pull' so the embedding model is baked into the image."
+fi
+
 # 4. Build the fully self-contained image for linux/amd64.
 log "Building $IMAGE_TAG (linux/amd64) from deploy/server.Dockerfile.local"
 cd "$REPO_ROOT"

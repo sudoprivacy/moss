@@ -19,7 +19,7 @@ export const MOSS_HOME = process.env.MOSS_HOME || path.join(os.homedir(), '.moss
 
 export const MOSS_DOCS_DIR = path.join(MOSS_HOME, 'docs')
 export const MOSS_WIKIS_DIR = path.join(MOSS_HOME, 'wikis')
-export const MOSS_MODELS_DIR = path.join(MOSS_HOME, 'models')
+export const MOSS_MODELS_DIR = process.env.MOSS_MODELS_DIR || path.join(MOSS_HOME, 'models')
 
 export const WIKI_META_FILE = '_moss_meta.json'
 export const WIKI_INDEX_FILE = 'WIKI.md'

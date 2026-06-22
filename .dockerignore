@@ -24,7 +24,8 @@ admin/dist
 *.log
 .DS_Store
 
-# Deploy-local scratch that must NOT be excluded:
+# Deploy-local scratch / assets that must NOT be excluded:
 #   .sudocode-build-context/  (the napi stage COPYs it — keep it)
+#   deploy/models/Xenova.zip  (the model-stage COPYs + unzips it — keep it)
 # Everything else (src, vendor, cli, native/nexus-napi/src, admin source,
 # scripts, assistants, package.json, lockfiles) is kept.
