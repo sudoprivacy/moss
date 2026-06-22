@@ -16,6 +16,11 @@ type UploadedFile = {
   data: Buffer
 }
 
+type MultipartForm = {
+  file: UploadedFile
+  fields: Record<string, string>
+}
+
 class CabinHttpError extends Error {
   constructor(
     public readonly statusCode: number,
@@ -56,7 +61,7 @@ function requireTabletHeaders(req: http.IncomingMessage): { tabletToken: string;
   const tabletToken = getHeader(req, 'x-cabin-tablet-token')
   const tabletId = getHeader(req, 'x-cabin-tablet-id')
   if (!tabletToken) {
-    throw new CabinHttpError(400, 'MISSING_TABLET_TOKEN', 'X-Cabin-Tablet-Token is required')
+    throw new CabinHttpError(401, 'MISSING_TABLET_TOKEN', 'X-Cabin-Tablet-Token is required')
   }
   if (!tabletId) {
     throw new CabinHttpError(400, 'MISSING_TABLET_ID', 'X-Cabin-Tablet-Id is required')
@@ -67,11 +72,11 @@ function requireTabletHeaders(req: http.IncomingMessage): { tabletToken: string;
 function requireCabinToken(req: http.IncomingMessage, config: ServerConfig['cabin']): CabinTokenPayload {
   const token = getBearerToken(req)
   if (!token) {
-    throw new CabinHttpError(401, 'UNAUTHORIZED', 'Authorization bearer token is required')
+    throw new CabinHttpError(401, 'MISSING_AUTHORIZATION', 'Authorization bearer token is required')
   }
   const payload = verifyCabinToken(token, { secret: config.tokenSecret })
   if (!payload) {
-    throw new CabinHttpError(401, 'UNAUTHORIZED', 'Invalid or expired cabin token')
+    throw new CabinHttpError(403, 'INVALID_AUTHORIZATION', 'Invalid or expired cabin token')
   }
   return payload
 }
@@ -121,7 +126,7 @@ function parseContentDisposition(value: string): Record<string, string> {
   return result
 }
 
-async function readMultipartFile(req: http.IncomingMessage): Promise<UploadedFile> {
+async function readMultipartForm(req: http.IncomingMessage): Promise<MultipartForm> {
   const contentType = getHeader(req, 'content-type') || ''
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)
   const boundary = boundaryMatch?.[1] || boundaryMatch?.[2]
@@ -131,6 +136,8 @@ async function readMultipartFile(req: http.IncomingMessage): Promise<UploadedFil
 
   const body = await readRawBody(req, 25 * 1024 * 1024)
   const delimiter = Buffer.from(`--${boundary}`)
+  const fields: Record<string, string> = {}
+  let file: UploadedFile | null = null
   let offset = 0
   while (offset < body.length) {
     const start = body.indexOf(delimiter, offset)
@@ -152,25 +159,65 @@ async function readMultipartFile(req: http.IncomingMessage): Promise<UploadedFil
       const disposition = headers.get('content-disposition')
       if (disposition) {
         const params = parseContentDisposition(disposition)
-        if (params.name === 'file' && params.filename) {
-          return {
+        if ((params.name === 'audio' || params.name === 'file') && params.filename) {
+          file = {
             fieldName: params.name,
             filename: params.filename,
             contentType: headers.get('content-type') || 'application/octet-stream',
             data,
           }
+        } else if (params.name && !params.filename) {
+          fields[params.name] = data.toString('utf8').trim()
         }
       }
     }
     offset = next
   }
 
-  throw new CabinHttpError(400, 'MISSING_FILE', 'multipart field "file" is required')
+  if (!file) throw new CabinHttpError(400, 'MISSING_AUDIO', 'multipart field "audio" is required')
+  if (file.data.length > 10 * 1024 * 1024) {
+    throw new CabinHttpError(400, 'AUDIO_TOO_LARGE', 'audio file exceeds 10 MB')
+  }
+  const isWav = /\.wav$/i.test(file.filename) || /audio\/(wav|x-wav|wave)/i.test(file.contentType)
+  if (!isWav) {
+    throw new CabinHttpError(400, 'INVALID_AUDIO_FORMAT', 'audio must be a wav file')
+  }
+  return { file, fields }
 }
 
 function stringField(body: JsonBody, key: string): string | undefined {
   const value = body[key]
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function validateLanguage(value: string | undefined): string {
+  const language = value || 'auto'
+  if (!['auto', 'zh', 'en', 'fr', 'ja', 'ko'].includes(language)) {
+    throw new CabinHttpError(400, 'INVALID_LANGUAGE', 'language must be one of auto/zh/en/fr/ja/ko')
+  }
+  return language
+}
+
+function normalizeLanguage(value: string | undefined): string {
+  if (!value || value === 'auto') return 'unknown'
+  const normalized = value.toLowerCase()
+  if (normalized.startsWith('zh')) return 'zh'
+  if (normalized.startsWith('en')) return 'en'
+  if (normalized.startsWith('fr')) return 'fr'
+  if (normalized.startsWith('ja')) return 'ja'
+  if (normalized.startsWith('ko')) return 'ko'
+  return 'unknown'
+}
+
+function parseMessageSource(value: string | undefined): 'voice' | 'text' {
+  if (!value) return 'text'
+  if (value === 'voice' || value === 'text') return value
+  throw new CabinHttpError(400, 'INVALID_REQUEST', 'source must be voice or text')
+}
+
+function formatCabinTime(ms: number): string {
+  const date = new Date(ms + 8 * 60 * 60 * 1000)
+  return `${date.toISOString().slice(0, 19)}+08:00`
 }
 
 function objectField(value: unknown, key: string): Record<string, unknown> | null {
@@ -302,14 +349,16 @@ export function createCabinApi(options: {
   async function handleVoiceQuery(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
-    const file = await readMultipartFile(req)
+    const form = await readMultipartForm(req)
+    const file = form.file
+    const language = validateLanguage(form.fields.language)
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
     const result = await services.transcribe({
       audio: file.data,
       filename: file.filename,
       contentType: file.contentType,
-      language: payload.language,
+      language: language === 'auto' ? undefined : language,
     })
     const message = store.appendMessage({
       conversationId: conversation.id,
@@ -326,8 +375,10 @@ export function createCabinApi(options: {
       elapsedMs: result.elapsedMs,
     })
     writeJson(res, 200, {
+      status: 'ok',
+      seat_id: context.seatId || '',
+      language: normalizeLanguage(language === 'auto' ? context.language : language),
       text: result.text,
-      conversation_id: conversation.id,
     })
   }
 
@@ -335,15 +386,17 @@ export function createCabinApi(options: {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
-    const text = stringField(body, 'text')
-    if (!text) throw new CabinHttpError(400, 'MISSING_TEXT', 'text is required')
+    const text = stringField(body, 'content') || stringField(body, 'text')
+    if (!text) throw new CabinHttpError(400, 'MISSING_CONTENT', 'content is required')
+    const source = parseMessageSource(stringField(body, 'source'))
+    validateLanguage(stringField(body, 'language'))
 
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
     store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
-      source: 'text',
+      source,
       content: text,
     })
 
@@ -352,12 +405,12 @@ export function createCabinApi(options: {
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     })
-    writeSse(res, 'message_start', { conversation_id: conversation.id })
+    writeSse(res, 'start', { status: 'ok' })
     const reply = cabinConfig.createMossSession
       ? await services.generateReplyWithMossSession({
           mossSessionId: conversation.mossSessionId,
           text,
-          onDelta: delta => writeSse(res, 'message_delta', { text: delta }),
+          onDelta: delta => writeSse(res, 'delta', { content: delta }),
         })
       : await services.generateReply({
           context,
@@ -371,12 +424,12 @@ export function createCabinApi(options: {
       content: reply,
     })
     if (!cabinConfig.createMossSession) {
-      writeSse(res, 'message_delta', { text: reply })
+      writeSse(res, 'delta', { content: reply })
     }
-    writeSse(res, 'message_end', {
-      conversation_id: conversation.id,
-      message_id: assistantMessage.id,
-      moss_session_id: conversation.mossSessionId,
+    writeSse(res, 'done', {
+      intent: assistantMessage.intent || '',
+      slots: assistantMessage.slots || {},
+      reply_text: reply,
     })
     res.end()
   }
@@ -386,19 +439,25 @@ export function createCabinApi(options: {
     const tablet = requireTabletHeaders(req)
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
-    const limit = Number.parseInt(url.searchParams.get('limit') || '50', 10)
+    const limit = Number.parseInt(url.searchParams.get('limit') || '20', 10)
     const messages = store.listMessages(conversation.id, Number.isFinite(limit) ? limit : 50)
     writeJson(res, 200, {
-      conversation_id: conversation.id,
-      moss_session_id: conversation.mossSessionId,
+      status: 'ok',
+      mode: 'CABIN_AI_CHAT',
       messages: messages
         .filter(message => message.role !== 'system')
         .map(message => ({
           id: message.id,
           role: message.role,
           content: message.content,
-          created_at: message.createdAt,
+          source: message.source,
+          ...(message.intent ? { intent: message.intent } : {}),
+          ...(message.slots ? { slots: message.slots } : {}),
+          create_time: formatCabinTime(message.createdAt),
         })),
+      next_cursor: messages.length >= Math.max(1, Math.min(Number.isFinite(limit) ? limit : 20, 100))
+        ? messages[0]?.id || null
+        : null,
     })
   }
 
@@ -408,14 +467,14 @@ export function createCabinApi(options: {
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
     store.resetConversation(conversation.id)
-    writeJson(res, 200, { ok: true, conversation_id: conversation.id })
+    writeJson(res, 200, { status: 'ok', cleared: true })
   }
 
   async function handleSpeech(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
-    const text = stringField(body, 'text')
+    const text = stringField(body, 'text') || stringField(body, 'content')
     if (!text) throw new CabinHttpError(400, 'MISSING_TEXT', 'text is required')
     const context = await contextFromToken(cabinConfig, payload, tablet)
     const conversation = await services.ensureConversation(context)
@@ -479,18 +538,16 @@ export function createCabinApi(options: {
         }
         if (error instanceof CabinHttpError) {
           writeJson(res, error.statusCode, {
-            error: {
-              code: error.code,
-              message: error.message,
-            },
+            status: 'error',
+            code: error.code,
+            message: error.message,
           })
           return true
         }
         writeJson(res, 500, {
-          error: {
-            code: 'INTERNAL_ERROR',
-            message: error instanceof Error ? error.message : String(error),
-          },
+          status: 'error',
+          code: 'INTERNAL_ERROR',
+          message: error instanceof Error ? error.message : String(error),
         })
         return true
       }
