@@ -246,18 +246,37 @@ async function fetchPassengerContext(
   if (!config.passengerInfoUrl) {
     throw new CabinHttpError(500, 'PASSENGER_INFO_NOT_CONFIGURED', 'cabin.passengerInfoUrl is required')
   }
-  const response = await fetch(config.passengerInfoUrl, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'tablet-token': tablet.tabletToken,
-      'x-cabin-tablet-token': tablet.tabletToken,
-      ...(config.passengerInfoAuth ? { authorization: config.passengerInfoAuth } : {}),
-    },
-    body: JSON.stringify({
-      privacyLevel: config.passengerInfoPrivacyLevel,
-    }),
-  })
+  let response: Response | null = null
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10_000)
+    try {
+      response = await fetch(config.passengerInfoUrl, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          'tablet-token': tablet.tabletToken,
+          'x-cabin-tablet-token': tablet.tabletToken,
+          ...(config.passengerInfoAuth ? { authorization: config.passengerInfoAuth } : {}),
+        },
+        body: JSON.stringify({
+          privacyLevel: config.passengerInfoPrivacyLevel,
+        }),
+      })
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 300))
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+  if (!response) {
+    const message = lastError instanceof Error ? lastError.message : String(lastError)
+    throw new CabinHttpError(502, 'PASSENGER_INFO_FAILED', `Passenger info request failed: ${message}`)
+  }
   if (!response.ok) {
     throw new CabinHttpError(502, 'PASSENGER_INFO_FAILED', `Passenger info request failed: ${response.status}`)
   }
