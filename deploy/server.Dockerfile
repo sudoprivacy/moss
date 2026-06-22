@@ -1,3 +1,29 @@
+# --- Stage: runtime external deps (bun) --------------------------------------
+# scripts/build.js marks @xenova/transformers / onnxruntime-node / sharp as
+# --external, so they are NOT in bin/moss-server.mjs and must be resolvable from
+# /app/node_modules at runtime; otherwise the wiki embedder degrades to
+# grep-only. Install just those into an isolated node_modules and COPY it into
+# the runtime image. (onnxruntime-node is a transitive dep of @xenova.)
+FROM oven/bun:1 AS runtime-deps
+WORKDIR /deps
+COPY deploy/runtime-deps.package.json package.json
+RUN bun install
+
+# --- Stage: unzip the embedding model ----------------------------------------
+# The model ships in-repo as deploy/models/Xenova.zip (tracked via git-lfs). Its
+# top level is Xenova/multilingual-e5-small/...; unzip it here and strip Mac junk
+# so the runtime stage COPYs only the clean model tree (the zip + unzip tooling
+# never land in the final image).
+FROM debian:bookworm-slim AS model-stage
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
+WORKDIR /m
+COPY deploy/models/Xenova.zip ./Xenova.zip
+RUN unzip -q Xenova.zip -d out \
+    && rm -rf out/__MACOSX \
+    && find out -name '.DS_Store' -delete \
+    && find out -name '.cache' -type d -prune -exec rm -rf {} + \
+    && test -f out/Xenova/multilingual-e5-small/onnx/model_quantized.onnx
+
 FROM node:22.14.0-slim
 # 让 apt 对镜像源的瞬时故障 (例如代理偶发 502/连接超时) 自动重试，并强制串行单连接下载，
 # 避免并发把脆弱的代理打挂导致整层构建失败。
@@ -100,6 +126,18 @@ COPY assistants/ ./assistants/
 # 复制 wiki (从 Go 构建阶段)
 RUN chmod +x ./bin/wiki
 RUN chmod +x ./bin/scode
+
+# Runtime external deps (@xenova/transformers + onnxruntime-node + sharp), so
+# the wiki embedder can import('@xenova/transformers') instead of degrading to
+# grep-only. Lands at /app/node_modules (cwd=/app), the default resolution root.
+COPY --from=runtime-deps /deps/node_modules ./node_modules
+
+# Embedding model baked into the image at /app/models (NOT /root/.moss/models:
+# docker-compose mounts the host ./.moss over /root/.moss and would shadow it).
+# MOSS_MODELS_DIR points the embedder cache here. The model-stage unzipped the
+# in-repo deploy/models/Xenova.zip to /m/out/Xenova/...
+COPY --from=model-stage /m/out/Xenova /app/models/Xenova
+ENV MOSS_MODELS_DIR=/app/models
 
 
 EXPOSE 43127

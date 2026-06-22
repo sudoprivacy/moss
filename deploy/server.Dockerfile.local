@@ -21,6 +21,33 @@
 # Build:  deploy/build-server-local.sh [image-tag]
 # =============================================================================
 
+# --- Stage 0: runtime external deps (bun) ------------------------------------
+# scripts/build.js marks @xenova/transformers / onnxruntime-node / sharp as
+# --external (kept out of bin/moss-server.mjs to keep the bundle lean). They
+# must therefore be resolvable from /app/node_modules at runtime, or the wiki
+# embedder silently degrades to grep-only. Install just those into an isolated
+# node_modules and COPY it into the runtime stage. (onnxruntime-node is a
+# transitive dep of @xenova and is pulled in automatically.)
+FROM oven/bun:1 AS runtime-deps
+WORKDIR /deps
+COPY deploy/runtime-deps.package.json package.json
+RUN bun install
+
+# --- Stage 0b: unzip the embedding model -------------------------------------
+# The model ships in-repo as deploy/models/Xenova.zip (tracked via git-lfs). Its
+# top level is Xenova/multilingual-e5-small/...; unzip it here and strip Mac junk
+# so the runtime stage COPYs only the clean model tree (the zip + unzip tooling
+# never land in the final image).
+FROM debian:bookworm-slim AS model-stage
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
+WORKDIR /m
+COPY deploy/models/Xenova.zip ./Xenova.zip
+RUN unzip -q Xenova.zip -d out \
+    && rm -rf out/__MACOSX \
+    && find out -name '.DS_Store' -delete \
+    && find out -name '.cache' -type d -prune -exec rm -rf {} + \
+    && test -f out/Xenova/multilingual-e5-small/onnx/model_quantized.onnx
+
 # --- Stage 1: JS/TS bundles + admin frontend (bun) ---------------------------
 FROM oven/bun:1 AS js-builder
 WORKDIR /src
@@ -211,6 +238,18 @@ COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
 COPY --from=dl /out/bin/scode ./bin/scode
 
 RUN chmod +x ./bin/wiki ./bin/corpapp ./bin/scode ./bin/nexus/nexusd
+
+# Runtime external deps (@xenova/transformers + onnxruntime-node + sharp), so
+# the wiki embedder can import('@xenova/transformers') instead of degrading to
+# grep-only. Lands at /app/node_modules (cwd=/app), the default resolution root.
+COPY --from=runtime-deps /deps/node_modules ./node_modules
+
+# Embedding model baked into the image at /app/models (NOT /root/.moss/models:
+# docker-compose mounts the host ./.moss over /root/.moss and would shadow it).
+# MOSS_MODELS_DIR points the embedder cache here. The model-stage unzipped the
+# in-repo deploy/models/Xenova.zip to /m/out/Xenova/...
+COPY --from=model-stage /m/out/Xenova /app/models/Xenova
+ENV MOSS_MODELS_DIR=/app/models
 
 EXPOSE 43127
 

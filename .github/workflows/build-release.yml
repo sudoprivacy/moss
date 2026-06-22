@@ -39,6 +39,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # 拉取 git-lfs 对象（deploy/models/Xenova.zip 嵌入模型）。否则 checkout
+          # 只得到 LFS 指针文件，server.Dockerfile.local 会把指针而非真模型打进镜像。
+          lfs: true
 
       # 1. 设置镜像 tag (git commit 前 8 位)
       - name: Set image tag
