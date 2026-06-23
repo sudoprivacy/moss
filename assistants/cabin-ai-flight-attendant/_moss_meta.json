@@ -1,0 +1,17 @@
+{
+  "name": "cabin-ai-flight-attendant",
+  "display_name": "客舱 AI 乘务员",
+  "description": "面向飞机客舱平板的 AI 乘务员助手，处理乘客语音/文本诉求，识别座椅、灯光、温度、服务物品等意图，并通过已绑定技能执行业务工具。",
+  "emoji": "✈️",
+  "category": "系统",
+  "categories": ["系统", "客舱服务"],
+  "source_type": "system",
+  "feature": "cabin",
+  "is_builtin": true,
+  "enabled": true,
+  "installed_version": "1.0.0",
+  "installed_at": "2026-06-22T00:00:00.000Z",
+  "ruleFile": "cabin-ai-flight-attendant.md",
+  "memory_mode": "session",
+  "enabledSkills": []
+}

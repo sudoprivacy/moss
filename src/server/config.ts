@@ -72,6 +72,22 @@ export function getDefaultServerConfig(): ServerFileConfig {
       maxPassagesPerWiki: 20_000,
       topKVector: 50,
     },
+    cabin: {
+      enabled: false,
+      tokenSecret: 'dev-cabin-token-secret',
+      tokenTtlSeconds: 2 * 60 * 60,
+      passengerInfoPrivacyLevel: 2,
+      asrUrl: 'http://127.0.0.1:8002/v1/audio/transcriptions',
+      asrModel: 'Qwen/Qwen3-ASR-1.7B',
+      ttsUrl: 'http://127.0.0.1:8004/v1/audio/speech',
+      ttsModel: 'qwen3-tts',
+      ttsVoice: 'vivian',
+      ttsLanguage: 'chinese',
+      llmBaseUrl: 'http://127.0.0.1:8000/v1',
+      llmModel: 'Qwen3.6-35B-A3B-NVFP4',
+      assistantName: 'cabin-ai-flight-attendant',
+      createMossSession: false,
+    },
   }
 }
 
@@ -148,6 +164,35 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       modelMirror: process.env.MOSS_MODEL_MIRROR || raw.wikiIndex.modelMirror,
       maxPassagesPerWiki: raw.wikiIndex.maxPassagesPerWiki,
       topKVector: raw.wikiIndex.topKVector,
+    },
+    cabin: {
+      enabled: process.env.CABIN_ENABLED
+        ? process.env.CABIN_ENABLED === '1' || process.env.CABIN_ENABLED === 'true'
+        : raw.cabin.enabled,
+      tokenSecret: process.env.CABIN_TOKEN_SECRET || raw.cabin.tokenSecret,
+      tokenTtlSeconds: process.env.CABIN_TOKEN_TTL_SECONDS
+        ? Number.parseInt(process.env.CABIN_TOKEN_TTL_SECONDS, 10)
+        : raw.cabin.tokenTtlSeconds,
+      passengerInfoUrl: process.env.CABIN_PASSENGER_INFO_URL || raw.cabin.passengerInfoUrl,
+      passengerInfoAuth: process.env.CABIN_PASSENGER_INFO_AUTH || raw.cabin.passengerInfoAuth,
+      passengerInfoPrivacyLevel: process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL
+        ? Number.parseInt(process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL, 10)
+        : raw.cabin.passengerInfoPrivacyLevel,
+      asrUrl: process.env.CABIN_ASR_URL || raw.cabin.asrUrl,
+      asrModel: process.env.CABIN_ASR_MODEL || raw.cabin.asrModel,
+      asrApiKey: process.env.CABIN_ASR_API_KEY || raw.cabin.asrApiKey,
+      ttsUrl: process.env.CABIN_TTS_URL || raw.cabin.ttsUrl,
+      ttsModel: process.env.CABIN_TTS_MODEL || raw.cabin.ttsModel,
+      ttsVoice: process.env.CABIN_TTS_VOICE || raw.cabin.ttsVoice,
+      ttsLanguage: process.env.CABIN_TTS_LANGUAGE || raw.cabin.ttsLanguage,
+      ttsApiKey: process.env.CABIN_TTS_API_KEY || raw.cabin.ttsApiKey,
+      llmBaseUrl: process.env.CABIN_LLM_BASE_URL || raw.cabin.llmBaseUrl,
+      llmModel: process.env.CABIN_LLM_MODEL || raw.cabin.llmModel,
+      llmApiKey: process.env.CABIN_LLM_API_KEY || raw.cabin.llmApiKey,
+      assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
+      createMossSession: process.env.CABIN_CREATE_MOSS_SESSION
+        ? process.env.CABIN_CREATE_MOSS_SESSION === '1' || process.env.CABIN_CREATE_MOSS_SESSION === 'true'
+        : raw.cabin.createMossSession,
     },
   }
 }

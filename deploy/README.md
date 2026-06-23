@@ -4,7 +4,7 @@
 
 - Docker 20.10+
 - Docker Compose 2.0+
-- Linux x64 操作系统
+- Linux x64 或 Linux ARM64 操作系统。DGX Spark 使用 ARM64 部署包。
 
 ## 快速开始
 
@@ -40,6 +40,18 @@ export ANTHROPIC_BASE_URL="https://hk.sudorouter.ai/v1"
 
 # 服务端口（可选，默认 43127）
 export MOSS_PORT="43127"
+
+# Cabin AI token 签名密钥（生产必须修改）
+export CABIN_TOKEN_SECRET="a-long-random-secret"
+
+# 客舱平板当前乘客信息接口（按实际后台服务地址调整）
+export CABIN_PASSENGER_INFO_URL="http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current"
+export CABIN_PASSENGER_INFO_AUTH="test1"
+
+# DGX 本机 AI 服务地址（按实际 docker compose 服务名调整）
+export CABIN_ASR_URL="http://asr-proxy:8002/v1/audio/transcriptions"
+export CABIN_TTS_URL="http://qwen3-tts:8004/v1/audio/speech"
+export CABIN_LLM_BASE_URL="http://vllm-qwen-llm:8000/v1"
 ```
 
 ### 4. 启动服务
@@ -59,7 +71,7 @@ docker ps | grep moss-server
 docker logs -f moss-server
 
 # 访问服务
-curl http://localhost:43127/health
+curl http://localhost:43127/healthz
 ```
 
 ## 停止服务
@@ -91,6 +103,12 @@ curl http://localhost:43127/health
 | `MOSS_PORT` | 服务端口 | 43127 |
 | `ANTHROPIC_API_KEY` | API Key | 无（必须设置） |
 | `ANTHROPIC_BASE_URL` | API Base URL | https://hk.sudorouter.ai/v1 |
+| `CABIN_TOKEN_SECRET` | Cabin 会话 token 签名密钥 | CHANGE_ME_LONG_RANDOM_TOKEN_SECRET |
+| `CABIN_PASSENGER_INFO_URL` | 客舱平板当前乘客信息接口 | http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current |
+| `CABIN_PASSENGER_INFO_AUTH` | 调用乘客信息接口时透传的 Authorization | CHANGE_ME_ADMIN_API_AUTH |
+| `CABIN_ASR_URL` | ASR 服务 OpenAI 兼容接口 | http://asr-proxy:8002/v1/audio/transcriptions |
+| `CABIN_TTS_URL` | TTS 服务 OpenAI 兼容接口 | http://qwen3-tts:8004/v1/audio/speech |
+| `CABIN_LLM_BASE_URL` | LLM OpenAI 兼容接口 base URL | http://vllm-qwen-llm:8000/v1 |
 
 ## 目录结构
 

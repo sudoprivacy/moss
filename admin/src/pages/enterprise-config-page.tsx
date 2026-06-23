@@ -159,7 +159,7 @@ export default function EnterpriseConfigPage() {
 
     setIsSaving(true)
     try {
-      const { logo, ...textFields } = config
+      const { logo, cabin_enabled: _cabinEnabled, ...textFields } = config
       const response = await updateEnterpriseConfig(textFields)
       if (response.success) {
         setConfig(response.data)

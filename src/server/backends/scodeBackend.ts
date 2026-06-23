@@ -12,7 +12,7 @@ import {
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
-import { buildAllModelsConfig } from '../modelListCache.js'
+import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
 import type {
   BackendHandle,
   BackendSpawnOptions,
@@ -84,7 +84,7 @@ export class ScodeBackend implements SessionBackend {
 
       // Preload all available models from sudorouter API
       // This allows dynamic model switching without modifying sudocode.json
-      const allModels = await buildAllModelsConfig(baseUrl)
+      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
 
       const scodeConfig = {
         auth_modes: {

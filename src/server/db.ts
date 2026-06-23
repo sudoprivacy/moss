@@ -3,6 +3,7 @@ import { mkdirSync } from 'fs'
 import { dirname } from 'path'
 import { DatabaseSync } from 'node:sqlite'
 import { McpStore } from './mcp/db.js'
+import { ensureCabinTables } from './cabin/store.js'
 import type {
   AttemptRecord,
   AttemptRuntimeState,
@@ -260,6 +261,7 @@ export class DirectConnectStore {
         user_id TEXT
       );
     `)
+    ensureCabinTables(this.db)
 
     const nowTs = now()
     this.db.prepare(`

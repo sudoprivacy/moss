@@ -6,8 +6,8 @@
 # Unlike deploy/server.Dockerfile (which only COPYs prebuilt artifacts produced
 # by CI), the .local variant builds EVERYTHING inside the image:
 #   - moss-server.mjs / direct-connect-session-runner.mjs / admin/dist (bun)
-#   - bin/wiki, bin/corpapp (Go, cross-compiled for linux/amd64)
-#   - native/nexus-napi/nexus-napi.node (Rust, x86_64-unknown-linux-gnu)
+#   - bin/wiki, bin/corpapp (Go, cross-compiled for target platform)
+#   - native/nexus-napi/nexus-napi.node (Rust, target platform)
 #   - bin/nexus/nexusd, bin/scode (downloaded)
 #
 # The nexus-napi addon depends on the PRIVATE crate `nexus-vfs-client` from
@@ -20,11 +20,13 @@
 #
 # Usage:
 #   deploy/build-server-local.sh [image-tag]
+#   MOSS_BUILD_PLATFORM=linux/arm64 deploy/build-server-local.sh my-moss-server:arm64
 # Default tag: my-moss-server:local
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_TAG="${1:-my-moss-server:local}"
+BUILD_PLATFORM="${MOSS_BUILD_PLATFORM:-linux/amd64}"
 SUDOCODE_DIR="${SUDOCODE_DIR:-$HOME/sudocode}"
 SUDOCODE_REMOTE="${SUDOCODE_REMOTE:-https://github.com/sudoprivacy/sudocode.git}"
 SUDOCODE_BRANCH="${SUDOCODE_BRANCH:-main}"
@@ -65,7 +67,7 @@ git -C "$SUDOCODE_DIR" archive --format=tar "$SUDOCODE_REF" | tar -x -C "$STAGE_
 BASE_IMAGES=(oven/bun:1 golang:1.22-alpine rust:1-bookworm debian:bookworm-slim node:22-trixie-slim)
 for img in "${BASE_IMAGES[@]}"; do
   for attempt in 1 2 3 4 5; do
-    if docker pull --platform linux/amd64 "$img" >/dev/null 2>&1; then
+    if docker pull --platform "$BUILD_PLATFORM" "$img" >/dev/null 2>&1; then
       log "base image ready: $img"; break
     fi
     log "pull attempt $attempt failed for $img; retrying in 5s..."; sleep 5
@@ -83,11 +85,11 @@ if [ ! -f "$MODEL_ZIP_IN_REPO" ] || [ "$(wc -c < "$MODEL_ZIP_IN_REPO")" -lt 1000
   log "         Run 'git lfs pull' so the embedding model is baked into the image."
 fi
 
-# 4. Build the fully self-contained image for linux/amd64.
-log "Building $IMAGE_TAG (linux/amd64) from deploy/server.Dockerfile.local"
+# 4. Build the fully self-contained image for the selected platform.
+log "Building $IMAGE_TAG ($BUILD_PLATFORM) from deploy/server.Dockerfile.local"
 cd "$REPO_ROOT"
 docker buildx build \
-  --platform linux/amd64 \
+  --platform "$BUILD_PLATFORM" \
   --load \
   -t "$IMAGE_TAG" \
   -f deploy/server.Dockerfile.local \

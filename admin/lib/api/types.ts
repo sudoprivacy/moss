@@ -483,6 +483,10 @@ export interface EnterpriseConfig {
    * the chat stream. Client users may override locally. null = unset → shown.
    */
   client_show_tool_calls: boolean | null;
+  /**
+   * Whether Cabin AI gateway/admin features are enabled on this server.
+   */
+  cabin_enabled: boolean;
 }
 
 export interface EnterpriseConfigResponse {

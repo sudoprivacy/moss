@@ -23,6 +23,7 @@ import {
   Wrench,
   ScrollText,
   ShieldCheck,
+  Plane,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -38,6 +39,7 @@ import {
 import { useAuth } from '@/lib/hooks/use-auth'
 import { hasAnyScope, hasScope, setPreferredOrgId } from '@/lib/api/client'
 import { getOrganizations, switchOrg } from '@/lib/api/auth'
+import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import type { AuthOrgWithCounts } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
 
@@ -48,6 +50,7 @@ type NavItem = {
   requiredScope?: string
   requiredAnyScopes?: string[]
   requiredRole?: string
+  feature?: 'cabin'
   children?: NavItem[]
 }
 
@@ -81,6 +84,13 @@ const menuItems: NavItem[] = [
     url: '/sessions',
     icon: MessageSquare,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
+  },
+  {
+    title: '客舱 AI',
+    url: '/cabin/conversations',
+    icon: Plane,
+    requiredScope: 'admin:settings',
+    feature: 'cabin',
   },
   {
     title: '定时任务',
@@ -179,6 +189,7 @@ export function AppSidebar() {
   const navigate = useNavigate()
   const { user, scopes, activeOrgId, logout } = useAuth()
   const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set())
+  const [cabinEnabled, setCabinEnabled] = useState(false)
 
   // Super-admin org switcher: lists all orgs and re-scopes the session to the
   // selected one. Only super admins may switch across organizations.
@@ -201,6 +212,20 @@ export function AppSidebar() {
     }
   }, [isSuperAdmin])
 
+  useEffect(() => {
+    let cancelled = false
+    getEnterpriseConfig()
+      .then((response) => {
+        if (!cancelled) setCabinEnabled(response.data.cabin_enabled === true)
+      })
+      .catch(() => {
+        if (!cancelled) setCabinEnabled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const handleSwitchOrg = async (orgId: string) => {
     if (!orgId || orgId === activeOrgId || switchingOrg) return
     setSwitchingOrg(true)
@@ -216,6 +241,9 @@ export function AppSidebar() {
   }
 
   const visibleMenuItems = menuItems.filter((item) => {
+    if (item.feature === 'cabin' && !cabinEnabled) {
+      return false
+    }
     if ('requiredScope' in item && item.requiredScope) {
       return hasScope(scopes, item.requiredScope)
     }

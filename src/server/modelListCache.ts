@@ -134,3 +134,26 @@ export async function buildAllModelsConfig(baseUrl: string): Promise<Record<stri
 
   return modelsConfig
 }
+
+export function ensureOpenAIModelConfig(
+  modelsConfig: Record<string, unknown>,
+  modelId: string,
+): Record<string, unknown> {
+  const normalized = modelId.startsWith('proxy/') ? modelId.slice('proxy/'.length) : modelId
+  const alias = modelId.startsWith('proxy/') ? modelId : `proxy/${normalized}`
+  if (!modelsConfig[alias]) {
+    modelsConfig[alias] = {
+      alias,
+      name: `Moss Dynamic: ${alias}`,
+      input: ['text'],
+      providers: {
+        proxy: {
+          provider: 'moss-proxy',
+          model: normalized,
+          api: 'openai-completions',
+        },
+      },
+    }
+  }
+  return modelsConfig
+}

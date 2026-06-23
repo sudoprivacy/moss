@@ -50,5 +50,21 @@
   },
   "logging": {
     "level": "info"
+  },
+  "cabin": {
+    "enabled": false,
+    "tokenSecret": "dev-cabin-token-secret",
+    "tokenTtlSeconds": 7200,
+    "passengerInfoPrivacyLevel": 2,
+    "asrUrl": "http://127.0.0.1:8002/v1/audio/transcriptions",
+    "asrModel": "Qwen/Qwen3-ASR-1.7B",
+    "ttsUrl": "http://127.0.0.1:8004/v1/audio/speech",
+    "ttsModel": "qwen3-tts",
+    "ttsVoice": "vivian",
+    "ttsLanguage": "chinese",
+    "llmBaseUrl": "http://127.0.0.1:8000/v1",
+    "llmModel": "Qwen3.6-35B-A3B-NVFP4",
+    "assistantName": "cabin-ai-flight-attendant",
+    "createMossSession": false
   }
 }

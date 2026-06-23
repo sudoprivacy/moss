@@ -114,6 +114,8 @@ import {
   initUserModelPreferenceStore,
 } from './userModelPreference.js'
 import { getAvailableModels, getCacheStatus, refreshModelCache } from './modelListCache.js'
+import { createCabinApi } from './cabin/api.js'
+import { CabinStore } from './cabin/store.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -481,7 +483,7 @@ async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> 
  *     deployments to find the source.
  *   - Best-effort: failures log a warning but never abort startup.
  */
-async function seedBuiltinSystemAssistants(): Promise<void> {
+async function seedBuiltinSystemAssistants(options: { cabinEnabled?: boolean } = {}): Promise<void> {
   const currentDir = dirname(fileURLToPath(import.meta.url))
   const candidates = [
     resolve(process.cwd(), 'assistants'),
@@ -519,6 +521,10 @@ async function seedBuiltinSystemAssistants(): Promise<void> {
     if (!entry.isDirectory()) continue
     const sourceDir = join(sourceRoot, entry.name)
     const targetDir = join(systemDir, entry.name)
+    if (entry.name === 'cabin-ai-flight-attendant' && options.cabinEnabled !== true) {
+      skipped++
+      continue
+    }
 
     // First install: just copy.
     if (!existsSync(targetDir)) {
@@ -1139,7 +1145,7 @@ function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): bo
 
   res.setHeader('Access-Control-Allow-Origin', origin)
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-Id')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-Id, X-Cabin-Tablet-Token, X-Cabin-Tablet-Id')
   res.setHeader('Access-Control-Allow-Credentials', 'true')
   res.setHeader('Access-Control-Max-Age', '86400')
   return true
@@ -1168,7 +1174,9 @@ export function startServer(
 } {
   const adminDistDir = resolveAdminDistDir()
   const wss = new WebSocketServer({ noServer: true })
-  const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir)
+  const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
+    cabinEnabled: config.cabin.enabled,
+  })
   const configItemsApi = createConfigItemsApi(runtime.store)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, (userId: string) => {
     try {
@@ -1263,7 +1271,7 @@ export function startServer(
   // Customers can override by editing files in place — subsequent boots
   // skip existing dirs. Fire-and-forget (best-effort) — boot must not
   // block on this, and failures don't affect server health.
-  seedBuiltinSystemAssistants().catch((err) => {
+  seedBuiltinSystemAssistants({ cabinEnabled: config.cabin.enabled }).catch((err) => {
     console.warn('[seedBuiltinSystemAssistants] background seed failed:', err)
   })
 
@@ -1343,6 +1351,8 @@ export function startServer(
   })
 
   const channelsApi = createChannelsApi(runtime.store)
+  const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime }) : null
+  const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.db) : null
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -1351,13 +1361,17 @@ export function startServer(
       const isHead = req.method === 'HEAD'
 
       // Handle CORS preflight for all API routes
-      if (pathname.startsWith('/api/') && handleCorsPreflight(req, res)) {
+      if ((pathname.startsWith('/api/') || pathname.startsWith('/v1/')) && handleCorsPreflight(req, res)) {
         return
       }
 
       // Set CORS headers for all API routes (non-preflight)
-      if (pathname.startsWith('/api/')) {
+      if (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) {
         setCorsHeaders(req, res)
+      }
+
+      if (cabinApi && await cabinApi.handle(req, res, pathname)) {
+        return
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/') {
@@ -1704,6 +1718,86 @@ export function startServer(
 
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/tenant/config') {
         writeJson(res, 200, await enterpriseApi.getConfig())
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/cabin/conversations') {
+        if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
+        const auth = authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        authService.requireScope(auth, 'admin:settings')
+        const limit = Number.parseInt(url.searchParams.get('limit') || '50', 10)
+        const offset = Number.parseInt(url.searchParams.get('offset') || '0', 10)
+        const statusParam = url.searchParams.get('status') || undefined
+        const result = cabinAdminStore.listConversations({
+          flightId: url.searchParams.get('flight_id') || undefined,
+          flightDate: url.searchParams.get('flight_date') || undefined,
+          seatId: url.searchParams.get('seat_id') || undefined,
+          passenger: url.searchParams.get('passenger') || undefined,
+          status: statusParam === 'active' || statusParam === 'reset' ? statusParam : undefined,
+          limit: Number.isFinite(limit) ? limit : 50,
+          offset: Number.isFinite(offset) ? offset : 0,
+        })
+        writeJson(res, 200, {
+          conversations: result.conversations.map(conversation => ({
+            id: conversation.id,
+            passenger_id: conversation.passengerId,
+            passenger_ref: conversation.passengerRef,
+            passenger_name: conversation.passengerName,
+            flight_id: conversation.flightId,
+            flight_date: conversation.flightDate,
+            seat_id: conversation.seatId,
+            tablet_id: conversation.tabletId,
+            moss_session_id: conversation.mossSessionId,
+            status: conversation.status,
+            summary: conversation.summary,
+            created_at: conversation.createdAt,
+            updated_at: conversation.updatedAt,
+          })),
+          total: result.total,
+          limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+          offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+        })
+        return
+      }
+
+      const cabinConversationMatch = pathname.match(/^\/api\/v1\/cabin\/conversations\/([^/]+)$/)
+      if (req.method === 'GET' && cabinConversationMatch) {
+        if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
+        const auth = authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        authService.requireScope(auth, 'admin:settings')
+        const conversationId = decodeURIComponent(cabinConversationMatch[1] || '')
+        const conversation = cabinAdminStore.getConversationById(conversationId)
+        if (!conversation) throw new HttpError(404, 'Cabin conversation not found')
+        const messages = cabinAdminStore.listMessages(conversation.id, 200)
+        writeJson(res, 200, {
+          conversation: {
+            id: conversation.id,
+            passenger_id: conversation.passengerId,
+            passenger_ref: conversation.passengerRef,
+            passenger_name: conversation.passengerName,
+            flight_id: conversation.flightId,
+            flight_date: conversation.flightDate,
+            seat_id: conversation.seatId,
+            tablet_id: conversation.tabletId,
+            moss_session_id: conversation.mossSessionId,
+            status: conversation.status,
+            summary: conversation.summary,
+            created_at: conversation.createdAt,
+            updated_at: conversation.updatedAt,
+          },
+          messages: messages.map(message => ({
+            id: message.id,
+            role: message.role,
+            source: message.source,
+            content: message.content,
+            intent: message.intent,
+            slots: message.slots,
+            tool_calls: message.toolCalls,
+            created_at: message.createdAt,
+          })),
+        })
         return
       }
 
@@ -4453,7 +4547,14 @@ export function startServer(
         const filter = authService.buildVisibilityFilter(auth)
         // Return all installed assistants: hub, tenant, and custom
         const all = await getInstalledAssistants()
-        writeJson(res, 200, all.filter(a => isVisibleTo(a.visibleTo, filter)))
+        writeJson(
+          res,
+          200,
+          all.filter(a => {
+            if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
+            return isVisibleTo(a.visibleTo, filter)
+          }),
+        )
         return
       }
 
