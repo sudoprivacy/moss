@@ -171,6 +171,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       tokenTtlSeconds: z.number().int().min(60).default(2 * 60 * 60),
       passengerInfoUrl: z.string().optional(),
       passengerInfoAuth: z.string().optional(),
+      controlBaseUrl: z.string().optional(),
+      controlAuth: z.string().optional(),
       passengerInfoPrivacyLevel: z.number().int().min(1).max(3).default(2),
       asrUrl: z.string().default('http://127.0.0.1:8002/v1/audio/transcriptions'),
       asrModel: z.string().default('Qwen/Qwen3-ASR-1.7B'),
@@ -291,6 +293,8 @@ export type ServerConfig = {
     tokenTtlSeconds: number
     passengerInfoUrl?: string
     passengerInfoAuth?: string
+    controlBaseUrl?: string
+    controlAuth?: string
     passengerInfoPrivacyLevel: number
     asrUrl: string
     asrModel: string

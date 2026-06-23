@@ -196,6 +196,7 @@ jobs:
 
           # 复制说明文档
           cp deploy/README.md release/moss/
+          cp deploy/cabin-mock-server.js release/moss/
 
           # 打包
           cd release

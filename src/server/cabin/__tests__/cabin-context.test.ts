@@ -148,4 +148,182 @@ describe('cabin binding context', () => {
       action: 'off',
     })
   })
+
+  it('executes backrest control calls against the configured cabin control service', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const services = new CabinServices({
+      config: {
+        enabled: true,
+        asrUrl: 'http://127.0.0.1/asr',
+        asrModel: 'asr',
+        ttsUrl: 'http://127.0.0.1/tts',
+        ttsModel: 'tts',
+        ttsVoice: 'voice',
+        ttsLanguage: 'zh',
+        llmBaseUrl: 'http://127.0.0.1/v1',
+        llmModel: 'llm',
+        passengerInfoUrl: 'http://127.0.0.1/passenger',
+        passengerInfoPrivacyLevel: 2,
+        controlBaseUrl: 'http://127.0.0.1:48082',
+        controlAuth: 'test1',
+        tokenSecret: 'test-secret',
+        tokenTtlSeconds: 7200,
+        createMossSession: false,
+        assistantName: 'cabin-ai-flight-attendant',
+      },
+      store: null as never,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), init })
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: '',
+          data: {
+            status: 'completed',
+            code: 0,
+            message: 'ok',
+            position: 80,
+          },
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    })
+
+    const inferred = services.inferToolCall({
+      text: '帮我把座椅靠背调高一点',
+      context: {
+        flightId: '2',
+        flightDate: '2026-06-02',
+        flightSeatId: '20',
+        aircraftSeatId: '120',
+        seatId: '01C',
+        columnNo: 'C',
+        tabletId: 'PAX-PAD-0001',
+      },
+    })
+
+    expect(inferred?.intent).toBe('seat_backrest_adjust')
+    expect(inferred?.toolCall.name).toBe('cabin.seat.adjust_backrest')
+
+    const result = await services.executeToolCall({
+      context: {
+        flightId: '2',
+        flightDate: '2026-06-02',
+        flightSeatId: '20',
+        aircraftSeatId: '120',
+        seatId: '01C',
+        columnNo: 'C',
+        tabletId: 'PAX-PAD-0001',
+      },
+      toolCall: inferred!.toolCall,
+    })
+
+    expect(calls[0]?.url).toBe('http://127.0.0.1:48082/admin-api/tcp-client/cmd/seatC/cushion?seatNo=01C&position=80')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(calls[0]?.init?.headers).toMatchObject({ authorization: 'test1' })
+    expect(result).toMatchObject({
+      name: 'cabin.seat.adjust_backrest',
+      status: 'ok',
+      message: 'ok',
+    })
+  })
+
+  it('creates cabin service tasks for item requests', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const services = new CabinServices({
+      config: {
+        enabled: true,
+        asrUrl: 'http://127.0.0.1/asr',
+        asrModel: 'asr',
+        ttsUrl: 'http://127.0.0.1/tts',
+        ttsModel: 'tts',
+        ttsVoice: 'voice',
+        ttsLanguage: 'zh',
+        llmBaseUrl: 'http://127.0.0.1/v1',
+        llmModel: 'llm',
+        passengerInfoUrl: 'http://127.0.0.1/passenger',
+        passengerInfoPrivacyLevel: 2,
+        controlBaseUrl: 'http://127.0.0.1:48082',
+        controlAuth: 'test1',
+        tokenSecret: 'test-secret',
+        tokenTtlSeconds: 7200,
+        createMossSession: false,
+        assistantName: 'cabin-ai-flight-attendant',
+      },
+      store: null as never,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), init })
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: '',
+          data: {
+            status: 'created',
+            taskId: 'task-1',
+          },
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    })
+
+    const inferred = services.inferToolCall({
+      text: '请给我一杯水',
+      context: {
+        passengerRef: 'REF-01B-2',
+        passengerName: '刘淑芬',
+        flightId: '2',
+        flightNo: 'CA8888',
+        flightDate: '2026-06-05',
+        flightSeatId: '21',
+        aircraftSeatId: '21',
+        seatId: '01B',
+        columnNo: 'B',
+        tabletId: 'PAX-PAD-0003',
+      },
+    })
+
+    expect(inferred?.intent).toBe('service_request_item')
+    expect(inferred?.toolCall.name).toBe('cabin.service.request_item')
+
+    const result = await services.executeToolCall({
+      context: {
+        passengerRef: 'REF-01B-2',
+        passengerName: '刘淑芬',
+        flightId: '2',
+        flightNo: 'CA8888',
+        flightDate: '2026-06-05',
+        flightSeatId: '21',
+        aircraftSeatId: '21',
+        seatId: '01B',
+        columnNo: 'B',
+        tabletId: 'PAX-PAD-0003',
+      },
+      toolCall: inferred!.toolCall,
+    })
+
+    expect(calls[0]?.url).toBe('http://127.0.0.1:48082/admin-api/cabin/service-task/create')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(calls[0]?.init?.headers).toMatchObject({
+      authorization: 'test1',
+      'content-type': 'application/json',
+    })
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      type: 'ITEM_DELIVERY',
+      seatNo: '01B',
+      columnNo: 'B',
+      flightId: '2',
+      flightNo: 'CA8888',
+      flightDate: '2026-06-05',
+      passengerRef: 'REF-01B-2',
+      passengerName: '刘淑芬',
+      tabletId: 'PAX-PAD-0003',
+    })
+    expect(result).toMatchObject({
+      name: 'cabin.service.request_item',
+      status: 'ok',
+      message: '指令下发成功',
+    })
+  })
 })

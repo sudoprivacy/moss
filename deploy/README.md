@@ -47,6 +47,8 @@ export CABIN_TOKEN_SECRET="a-long-random-secret"
 # 客舱平板当前乘客信息接口（按实际后台服务地址调整）
 export CABIN_PASSENGER_INFO_URL="http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current"
 export CABIN_PASSENGER_INFO_AUTH="test1"
+export CABIN_CONTROL_BASE_URL="http://host.docker.internal:48082"
+export CABIN_CONTROL_AUTH="test1"
 
 # DGX 本机 AI 服务地址（按实际 docker compose 服务名调整）
 export CABIN_ASR_URL="http://asr-proxy:8002/v1/audio/transcriptions"
@@ -106,9 +108,58 @@ curl http://localhost:43127/healthz
 | `CABIN_TOKEN_SECRET` | Cabin 会话 token 签名密钥 | CHANGE_ME_LONG_RANDOM_TOKEN_SECRET |
 | `CABIN_PASSENGER_INFO_URL` | 客舱平板当前乘客信息接口 | http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current |
 | `CABIN_PASSENGER_INFO_AUTH` | 调用乘客信息接口时透传的 Authorization | CHANGE_ME_ADMIN_API_AUTH |
+| `CABIN_CONTROL_BASE_URL` | 客舱硬件控制接口 base URL | 无 |
+| `CABIN_CONTROL_AUTH` | 调用硬件控制接口时透传的 Authorization | 无 |
 | `CABIN_ASR_URL` | ASR 服务 OpenAI 兼容接口 | http://asr-proxy:8002/v1/audio/transcriptions |
 | `CABIN_TTS_URL` | TTS 服务 OpenAI 兼容接口 | http://qwen3-tts:8004/v1/audio/speech |
 | `CABIN_LLM_BASE_URL` | LLM OpenAI 兼容接口 base URL | http://vllm-qwen-llm:8000/v1 |
+
+## Cabin 演示 Mock 服务
+
+当客户乘客信息接口或硬件控制接口暂时不可用时，可以在部署目录启动内置 mock：
+
+```bash
+cd moss
+nohup node cabin-mock-server.js > cabin-mock-server.log 2>&1 &
+tail -f cabin-mock-server.log
+```
+
+mock 默认监听 `48082`，内置乘客信息来自联调接口返回示例：
+
+- 航班：`CA8888`
+- 航班日期：`2026-06-05`
+- 乘客：`刘淑芬`
+- 乘客标识：`REF-01B-2`
+- 语言：`zh-CN`
+
+将 Moss 指向 mock：
+
+```bash
+export CABIN_PASSENGER_INFO_URL="http://host.docker.internal:48082/admin-api/cabin/tablet-passenger-info/current"
+export CABIN_PASSENGER_INFO_AUTH="test1"
+export CABIN_CONTROL_BASE_URL="http://host.docker.internal:48082"
+export CABIN_CONTROL_AUTH="test1"
+```
+
+Docker 部署时 `docker-compose.yml` 需要包含：
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+mock 支持的接口：
+
+```text
+POST /admin-api/cabin/tablet-passenger-info/current
+POST /admin-api/tcp-client/cmd/seat{columnNo}/cushion?seatNo=01B&position=80
+POST /admin-api/tcp-client/cmd/seat{columnNo}/light?seatNo=01B&on=false
+POST /admin-api/cabin/service-task/create
+POST /v1/audio/speech
+GET  /calls
+```
+
+`GET /calls` 可查看最近收到的 mock 请求，便于演示时确认 Moss 已经实际调用控制接口、服务任务接口和 TTS 接口。
 
 ## 目录结构
 

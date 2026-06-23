@@ -175,6 +175,8 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         : raw.cabin.tokenTtlSeconds,
       passengerInfoUrl: process.env.CABIN_PASSENGER_INFO_URL || raw.cabin.passengerInfoUrl,
       passengerInfoAuth: process.env.CABIN_PASSENGER_INFO_AUTH || raw.cabin.passengerInfoAuth,
+      controlBaseUrl: process.env.CABIN_CONTROL_BASE_URL || raw.cabin.controlBaseUrl,
+      controlAuth: process.env.CABIN_CONTROL_AUTH || raw.cabin.controlAuth,
       passengerInfoPrivacyLevel: process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL
         ? Number.parseInt(process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL, 10)
         : raw.cabin.passengerInfoPrivacyLevel,

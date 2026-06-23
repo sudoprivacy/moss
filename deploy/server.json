@@ -56,6 +56,7 @@
     "tokenSecret": "dev-cabin-token-secret",
     "tokenTtlSeconds": 7200,
     "passengerInfoPrivacyLevel": 2,
+    "controlBaseUrl": "http://127.0.0.1:48082",
     "asrUrl": "http://127.0.0.1:8002/v1/audio/transcriptions",
     "asrModel": "Qwen/Qwen3-ASR-1.7B",
     "ttsUrl": "http://127.0.0.1:8004/v1/audio/speech",

@@ -7,6 +7,11 @@ import { CabinStore } from './store.js'
 import type { RuntimeService } from '../runtimeService.js'
 
 type FetchLike = typeof fetch
+type ControlRequest = {
+  method: 'POST'
+  url: string
+  body?: unknown
+}
 
 export type CabinServicesOptions = {
   config: CabinConfig
@@ -41,6 +46,28 @@ export class CabinServices {
     const seatId = input.context.seatId || ''
     const seatContext = buildSeatToolArguments(input.context)
     const hasAny = (...words: string[]) => words.some(word => text.includes(word.toLowerCase()))
+
+    if (hasAny('靠背', '座椅位置', '座椅角度', '椅背', 'backrest', 'recline')) {
+      let position = 80
+      let direction: 'up' | 'down' | 'adjust' = 'adjust'
+      if (hasAny('调高', '升高', '起来', '直一点', '抬高', 'up', 'raise')) {
+        position = 80
+        direction = 'up'
+      }
+      if (hasAny('调低', '降低', '躺', '放倒', '后仰', 'down', 'lower', 'recline')) {
+        position = 30
+        direction = 'down'
+      }
+      return {
+        intent: 'seat_backrest_adjust',
+        slots: { target: 'seat_backrest', direction, position },
+        toolCall: {
+          id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+          name: 'cabin.seat.adjust_backrest',
+          arguments: { ...seatContext, seat_id: seatId, direction, position },
+        },
+      }
+    }
 
     if (hasAny('温度', 'temperature', '暖', '热', '冷')) {
       let direction: 'up' | 'down' | null = null
@@ -97,6 +124,69 @@ export class CabinServices {
     }
 
     return null
+  }
+
+  async executeToolCall(input: {
+    context: CabinPassengerContext
+    toolCall: CabinToolCall
+  }): Promise<{
+    toolCallId: string
+    name: string
+    status: 'ok' | 'error' | 'skipped'
+    message: string
+    data?: unknown
+  }> {
+    if (!this.options.config.controlBaseUrl) {
+      return {
+        toolCallId: input.toolCall.id,
+        name: input.toolCall.name,
+        status: 'skipped',
+        message: 'cabin.controlBaseUrl is not configured',
+      }
+    }
+
+    const request = buildControlRequest(this.options.config.controlBaseUrl, input.context, input.toolCall)
+    if (!request) {
+      return {
+        toolCallId: input.toolCall.id,
+        name: input.toolCall.name,
+        status: 'skipped',
+        message: `No executor is configured for ${input.toolCall.name}`,
+      }
+    }
+
+    const response = await this.fetchImpl(request.url, {
+      method: request.method,
+      headers: {
+        ...(request.body ? { 'content-type': 'application/json' } : {}),
+        ...(this.options.config.controlAuth ? { authorization: this.options.config.controlAuth } : {}),
+      },
+      ...(request.body ? { body: JSON.stringify(request.body) } : {}),
+    })
+    const text = await response.text()
+    let data: unknown = text
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      // keep raw text
+    }
+    if (!response.ok) {
+      return {
+        toolCallId: input.toolCall.id,
+        name: input.toolCall.name,
+        status: 'error',
+        message: `Control request failed: ${response.status}`,
+        data,
+      }
+    }
+    const message = extractControlMessage(data) || '指令下发成功'
+    return {
+      toolCallId: input.toolCall.id,
+      name: input.toolCall.name,
+      status: 'ok',
+      message,
+      data,
+    }
   }
 
   async transcribe(input: {
@@ -224,6 +314,83 @@ export class CabinServices {
     const socket = await this.options.runtime.connectToAttempt(ready.attempt)
     return await sendPromptToRunnerSocket(socket, formatCabinSessionPrompt(input.context, input.text), input.timeoutMs ?? 120_000, input.onDelta)
   }
+}
+
+function buildControlRequest(
+  baseUrl: string,
+  context: CabinPassengerContext,
+  toolCall: CabinToolCall,
+): ControlRequest | null {
+  const base = baseUrl.replace(/\/+$/, '')
+  const seatNo = context.seatId || String(toolCall.arguments.seat_no || toolCall.arguments.seat_id || '')
+  const columnNo = context.columnNo || String(toolCall.arguments.column_no || toolCall.arguments.seat_side || '')
+  if (!seatNo || !columnNo) return null
+  const seatPath = `seat${encodeURIComponent(columnNo)}`
+
+  if (toolCall.name === 'cabin.seat.adjust_backrest') {
+    const position = normalizePosition(toolCall.arguments.position)
+    return {
+      method: 'POST',
+      url: `${base}/admin-api/tcp-client/cmd/${seatPath}/cushion?seatNo=${encodeURIComponent(seatNo)}&position=${encodeURIComponent(String(position))}`,
+    }
+  }
+
+  if (toolCall.name === 'cabin.light.adjust') {
+    const action = String(toolCall.arguments.action || '')
+    const params = new URLSearchParams({ seatNo })
+    if (action === 'off') params.set('on', 'false')
+    if (action === 'on') params.set('on', 'true')
+    if (action === 'brighter') params.set('pwm', '900')
+    if (action === 'dimmer') params.set('pwm', '300')
+    if (!params.has('on') && !params.has('pwm')) return null
+    return {
+      method: 'POST',
+      url: `${base}/admin-api/tcp-client/cmd/${seatPath}/light?${params.toString()}`,
+    }
+  }
+
+  if (toolCall.name === 'cabin.service.request_item') {
+    return {
+      method: 'POST',
+      url: `${base}/admin-api/cabin/service-task/create`,
+      body: {
+        type: 'ITEM_DELIVERY',
+        item: String(toolCall.arguments.item || ''),
+        seatNo,
+        columnNo,
+        flightId: context.flightId,
+        flightNo: context.flightNo || '',
+        flightDate: context.flightDate,
+        passengerRef: context.passengerRef || '',
+        passengerName: context.passengerName || '',
+        tabletId: context.tabletId,
+      },
+    }
+  }
+
+  return null
+}
+
+function normalizePosition(value: unknown): number {
+  const n = typeof value === 'number'
+    ? value
+    : Number.parseInt(typeof value === 'string' ? value : '', 10)
+  if (!Number.isFinite(n)) return 80
+  return Math.max(0, Math.min(100, Math.round(n)))
+}
+
+function extractControlMessage(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined
+  const obj = data as Record<string, unknown>
+  if (typeof obj.msg === 'string' && obj.msg.trim()) return obj.msg.trim()
+  if (typeof obj.message === 'string' && obj.message.trim()) return obj.message.trim()
+  if (typeof obj.data === 'string' && obj.data.trim()) return obj.data.trim()
+  const nested = obj.data
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    const nestedObj = nested as Record<string, unknown>
+    if (typeof nestedObj.message === 'string' && nestedObj.message.trim()) return nestedObj.message.trim()
+  }
+  return undefined
 }
 
 function buildPromptContext(context: CabinPassengerContext): Record<string, unknown> {

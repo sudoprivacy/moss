@@ -267,6 +267,14 @@ function formatCabinTime(ms: number): string {
   return `${date.toISOString().slice(0, 19)}+08:00`
 }
 
+function replyForToolResult(intent: string | undefined, fallback: string): string {
+  if (intent === 'seat_backrest_adjust') return '好的，已为您调整座椅靠背。'
+  if (intent === 'light_adjust') return '好的，已为您调整阅读灯。'
+  if (intent === 'seat_temperature_adjust') return '好的，已为您调整座椅温度。'
+  if (intent === 'service_request_item') return '好的，已为您提交服务请求。'
+  return fallback || '好的，已为您处理。'
+}
+
 function objectField(value: unknown, key: string): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const child = (value as Record<string, unknown>)[key]
@@ -507,12 +515,30 @@ export function createCabinApi(options: {
       connection: 'keep-alive',
     })
     writeSse(res, 'start', { status: 'ok' })
+    let toolResult: Awaited<ReturnType<CabinServices['executeToolCall']>> | null = null
     if (inferredTool) {
       writeSse(res, 'tool_call', inferredTool.toolCall)
+      try {
+        toolResult = await services.executeToolCall({
+          context,
+          toolCall: inferredTool.toolCall,
+        })
+        writeSse(res, 'tool_result', toolResult)
+      } catch (error) {
+        toolResult = {
+          toolCallId: inferredTool.toolCall.id,
+          name: inferredTool.toolCall.name,
+          status: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        }
+        writeSse(res, 'tool_result', toolResult)
+      }
     }
     let reply: string
     try {
-      reply = cabinConfig.createMossSession
+      reply = toolResult?.status === 'ok'
+        ? replyForToolResult(inferredTool?.intent, toolResult.message)
+        : cabinConfig.createMossSession
         ? await services.generateReplyWithMossSession({
             mossSessionId: conversation.mossSessionId,
             context,
@@ -549,6 +575,7 @@ export function createCabinApi(options: {
     writeSse(res, 'done', {
       intent: assistantMessage.intent || '',
       slots: assistantMessage.slots || {},
+      ...(toolResult ? { tool_result: toolResult } : {}),
       reply_text: reply,
     })
     res.end()

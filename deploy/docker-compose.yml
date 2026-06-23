@@ -17,6 +17,8 @@ services:
       - seccomp:unconfined
     cap_add:
       - SYS_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - MOSS_SERVER_CONFIG=/app/server.json
       - MOSS_HOME=/root/.moss
