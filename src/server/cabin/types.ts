@@ -10,8 +10,16 @@ export type CabinPassengerContext = {
   flightDate: string
   flightNo?: string
   flightSeatId?: string
+  aircraftSeatId?: string
+  aircraftId?: string
+  aircraftNo?: string
   seatId?: string
+  columnNo?: string
   tabletId: string
+  tabletToken?: string
+  tabletType?: string
+  bindingId?: string
+  contextStatus?: string
   language?: string
 }
 
@@ -56,6 +64,15 @@ export type CabinToolCall = {
 export type CabinTokenPayload = {
   tabletToken: string
   tabletId: string
+  seatNo?: string
+  columnNo?: string
+  flightSeatId?: string
+  aircraftSeatId?: string
+  aircraftId?: string
+  aircraftNo?: string
+  tabletType?: string
+  bindingId?: string
+  contextStatus?: string
   issuedAt: number
   expiresAt: number
 }

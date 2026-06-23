@@ -208,6 +208,35 @@ function stringField(body: JsonBody, key: string): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function stringBodyField(body: JsonBody, key: string): string | undefined {
+  const value = body[key]
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
+function requiredBodyField(body: JsonBody, key: string): string {
+  const value = stringBodyField(body, key)
+  if (!value) {
+    throw new CabinHttpError(400, 'INVALID_REQUEST', `${key} is required`)
+  }
+  return value
+}
+
+function optionalCabinTokenFields(body: JsonBody): Omit<CabinTokenPayload, 'tabletToken' | 'tabletId' | 'issuedAt' | 'expiresAt'> {
+  return {
+    seatNo: requiredBodyField(body, 'seatNo'),
+    columnNo: requiredBodyField(body, 'columnNo'),
+    flightSeatId: requiredBodyField(body, 'flightSeatId'),
+    aircraftSeatId: stringBodyField(body, 'aircraftSeatId'),
+    aircraftId: stringBodyField(body, 'aircraftId'),
+    aircraftNo: stringBodyField(body, 'aircraftNo'),
+    tabletType: stringBodyField(body, 'tabletType'),
+    bindingId: stringBodyField(body, 'bindingId'),
+    contextStatus: stringBodyField(body, 'contextStatus'),
+  }
+}
+
 function validateLanguage(value: string | undefined): string {
   const language = value || 'auto'
   if (!['auto', 'zh', 'en', 'fr', 'ja', 'ko'].includes(language)) {
@@ -339,7 +368,21 @@ async function contextFromToken(config: ServerConfig['cabin'], payload: CabinTok
   if (payload.tabletId !== headers.tabletId || payload.tabletToken !== headers.tabletToken) {
     throw new CabinHttpError(401, 'UNAUTHORIZED', 'Cabin token does not match tablet headers')
   }
-  return fetchPassengerContext(config, headers)
+  const passengerContext = await fetchPassengerContext(config, headers)
+  return {
+    ...passengerContext,
+    tabletToken: payload.tabletToken,
+    tabletId: payload.tabletId,
+    seatId: passengerContext.seatId || payload.seatNo,
+    flightSeatId: passengerContext.flightSeatId || payload.flightSeatId,
+    columnNo: payload.columnNo,
+    aircraftSeatId: payload.aircraftSeatId,
+    aircraftId: payload.aircraftId,
+    aircraftNo: payload.aircraftNo,
+    tabletType: payload.tabletType,
+    bindingId: payload.bindingId,
+    contextStatus: payload.contextStatus,
+  }
 }
 
 export function createCabinApi(options: {
@@ -381,7 +424,12 @@ export function createCabinApi(options: {
 
   async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const tablet = requireTabletHeaders(req)
-    const token = issueCabinToken(tablet, {
+    const body = await readJsonBody(req)
+    const tokenContext = optionalCabinTokenFields(body)
+    const token = issueCabinToken({
+      ...tablet,
+      ...tokenContext,
+    }, {
       secret: cabinConfig.tokenSecret,
       ttlSeconds: cabinConfig.tokenTtlSeconds,
     })
@@ -467,6 +515,7 @@ export function createCabinApi(options: {
       reply = cabinConfig.createMossSession
         ? await services.generateReplyWithMossSession({
             mossSessionId: conversation.mossSessionId,
+            context,
             text,
             onDelta: delta => writeSse(res, 'delta', { content: delta }),
           })

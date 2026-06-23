@@ -20,13 +20,12 @@ function sign(value: string, secret: string): string {
 }
 
 export function issueCabinToken(
-  input: { tabletToken: string; tabletId: string },
+  input: Omit<CabinTokenPayload, 'issuedAt' | 'expiresAt'>,
   options: { secret: string; ttlSeconds: number; nowMs?: number },
 ): string {
   const now = options.nowMs ?? Date.now()
   const payload: CabinTokenPayload = {
-    tabletToken: input.tabletToken,
-    tabletId: input.tabletId,
+    ...input,
     issuedAt: now,
     expiresAt: now + options.ttlSeconds * 1000,
   }
@@ -76,6 +75,21 @@ export function verifyCabinTokenDetailed(
   }
   if ((options.nowMs ?? Date.now()) >= payload.expiresAt) {
     return { payload: null, reason: 'expired' }
+  }
+  for (const key of [
+    'seatNo',
+    'columnNo',
+    'flightSeatId',
+    'aircraftSeatId',
+    'aircraftId',
+    'aircraftNo',
+    'tabletType',
+    'bindingId',
+    'contextStatus',
+  ] as const) {
+    if (payload[key] !== undefined && typeof payload[key] !== 'string') {
+      return { payload: null, reason: 'invalid' }
+    }
   }
   return { payload: payload as CabinTokenPayload }
 }

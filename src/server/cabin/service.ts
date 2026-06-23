@@ -39,6 +39,7 @@ export class CabinServices {
   }): { intent: string; slots: Record<string, unknown>; toolCall: CabinToolCall } | null {
     const text = input.text.toLowerCase()
     const seatId = input.context.seatId || ''
+    const seatContext = buildSeatToolArguments(input.context)
     const hasAny = (...words: string[]) => words.some(word => text.includes(word.toLowerCase()))
 
     if (hasAny('温度', 'temperature', '暖', '热', '冷')) {
@@ -52,7 +53,7 @@ export class CabinServices {
           toolCall: {
             id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
             name: 'cabin.seat.adjust_temperature',
-            arguments: { seat_id: seatId, direction },
+            arguments: { ...seatContext, seat_id: seatId, direction },
           },
         }
       }
@@ -75,7 +76,7 @@ export class CabinServices {
           toolCall: {
             id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
             name: 'cabin.light.adjust',
-            arguments: { seat_id: seatId, action },
+            arguments: { ...seatContext, seat_id: seatId, action },
           },
         }
       }
@@ -90,7 +91,7 @@ export class CabinServices {
         toolCall: {
           id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
           name: 'cabin.service.request_item',
-          arguments: { seat_id: seatId, item },
+          arguments: { ...seatContext, seat_id: seatId, item },
         },
       }
     }
@@ -173,12 +174,7 @@ export class CabinServices {
       '你是飞机客舱 AI 乘务员。回答要简短、礼貌、明确。',
       '对于座椅、灯光、温度、服务物品等请求，先确认已收到并说明将处理。',
       '不要编造真实设备执行结果。',
-      `当前上下文: ${JSON.stringify({
-        flight_id: input.context.flightId,
-        flight_date: input.context.flightDate,
-        seat_id: input.context.seatId,
-        language: input.context.language,
-      })}`,
+      `当前上下文: ${JSON.stringify(buildPromptContext(input.context))}`,
     ].join('\n')
 
     const response = await this.fetchImpl(`${this.options.config.llmBaseUrl.replace(/\/$/, '')}/chat/completions`, {
@@ -216,6 +212,7 @@ export class CabinServices {
 
   async generateReplyWithMossSession(input: {
     mossSessionId: string
+    context: CabinPassengerContext
     text: string
     timeoutMs?: number
     onDelta?: (text: string) => void
@@ -225,8 +222,50 @@ export class CabinServices {
     }
     const ready = await this.options.runtime.ensureSessionReady(input.mossSessionId)
     const socket = await this.options.runtime.connectToAttempt(ready.attempt)
-    return await sendPromptToRunnerSocket(socket, input.text, input.timeoutMs ?? 120_000, input.onDelta)
+    return await sendPromptToRunnerSocket(socket, formatCabinSessionPrompt(input.context, input.text), input.timeoutMs ?? 120_000, input.onDelta)
   }
+}
+
+function buildPromptContext(context: CabinPassengerContext): Record<string, unknown> {
+  return {
+    passenger_id: context.passengerId,
+    passenger_ref: context.passengerRef,
+    passenger_name: context.passengerName,
+    flight_id: context.flightId,
+    flight_date: context.flightDate,
+    flight_no: context.flightNo,
+    flight_seat_id: context.flightSeatId,
+    seat_id: context.seatId,
+    column_no: context.columnNo,
+    aircraft_seat_id: context.aircraftSeatId,
+    aircraft_id: context.aircraftId,
+    aircraft_no: context.aircraftNo,
+    tablet_id: context.tabletId,
+    tablet_type: context.tabletType,
+    binding_id: context.bindingId,
+    context_status: context.contextStatus,
+    language: context.language,
+  }
+}
+
+function buildSeatToolArguments(context: CabinPassengerContext): Record<string, unknown> {
+  return {
+    seat_id: context.seatId || '',
+    seat_no: context.seatId || '',
+    column_no: context.columnNo || '',
+    seat_side: context.columnNo || '',
+    flight_seat_id: context.flightSeatId || '',
+    aircraft_seat_id: context.aircraftSeatId || '',
+  }
+}
+
+function formatCabinSessionPrompt(context: CabinPassengerContext, text: string): string {
+  return [
+    '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧。',
+    `cabin_context=${JSON.stringify(buildPromptContext(context))}`,
+    '用户消息：',
+    text,
+  ].join('\n')
 }
 
 function formatUserMessage(text: string): string {
