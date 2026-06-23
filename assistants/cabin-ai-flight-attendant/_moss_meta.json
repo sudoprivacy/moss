@@ -6,6 +6,7 @@
   "category": "系统",
   "categories": ["系统", "客舱服务"],
   "source_type": "system",
+  "feature": "cabin",
   "is_builtin": true,
   "enabled": true,
   "installed_version": "1.0.0",

@@ -3,7 +3,11 @@ import path from 'node:path'
 import type { DirectConnectStore } from '../db.js'
 import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
 
-export function createEnterpriseApi(db: DirectConnectStore, runtimeDir: string) {
+export function createEnterpriseApi(
+  db: DirectConnectStore,
+  runtimeDir: string,
+  options: { cabinEnabled?: boolean } = {},
+) {
   const api = {
     /**
      * Get enterprise configuration. Branding fields come from the DB
@@ -38,6 +42,7 @@ export function createEnterpriseApi(db: DirectConnectStore, runtimeDir: string) 
             logo: logoBase64,
             client_cron_enabled: systemSettings.clientCronEnabled,
             client_show_tool_calls: systemSettings.clientShowToolCalls,
+            cabin_enabled: options.cabinEnabled === true,
           },
         }
       } catch (err) {
@@ -57,7 +62,7 @@ export function createEnterpriseApi(db: DirectConnectStore, runtimeDir: string) 
     updateConfig: async (patch: any) => {
       try {
         if (patch && typeof patch === 'object') {
-          const { client_cron_enabled, client_show_tool_calls, ...rest } = patch
+          const { cabin_enabled: _cabinEnabled, client_cron_enabled, client_show_tool_calls, ...rest } = patch
           const settingsPatch: Record<string, unknown> = {}
           if (client_cron_enabled !== undefined) {
             settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)

@@ -88,6 +88,7 @@ export type AssistantStoreMeta = {
   category?: string
   categories?: string[]
   source_type?: 'hub' | 'upload' | 'custom' | 'tenant'
+  feature?: string
   tag?: string
   is_builtin?: boolean
   enabled?: boolean

@@ -483,7 +483,7 @@ async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> 
  *     deployments to find the source.
  *   - Best-effort: failures log a warning but never abort startup.
  */
-async function seedBuiltinSystemAssistants(): Promise<void> {
+async function seedBuiltinSystemAssistants(options: { cabinEnabled?: boolean } = {}): Promise<void> {
   const currentDir = dirname(fileURLToPath(import.meta.url))
   const candidates = [
     resolve(process.cwd(), 'assistants'),
@@ -521,6 +521,10 @@ async function seedBuiltinSystemAssistants(): Promise<void> {
     if (!entry.isDirectory()) continue
     const sourceDir = join(sourceRoot, entry.name)
     const targetDir = join(systemDir, entry.name)
+    if (entry.name === 'cabin-ai-flight-attendant' && options.cabinEnabled !== true) {
+      skipped++
+      continue
+    }
 
     // First install: just copy.
     if (!existsSync(targetDir)) {
@@ -1170,7 +1174,9 @@ export function startServer(
 } {
   const adminDistDir = resolveAdminDistDir()
   const wss = new WebSocketServer({ noServer: true })
-  const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir)
+  const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
+    cabinEnabled: config.cabin.enabled,
+  })
   const configItemsApi = createConfigItemsApi(runtime.store)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, (userId: string) => {
     try {
@@ -1265,7 +1271,7 @@ export function startServer(
   // Customers can override by editing files in place — subsequent boots
   // skip existing dirs. Fire-and-forget (best-effort) — boot must not
   // block on this, and failures don't affect server health.
-  seedBuiltinSystemAssistants().catch((err) => {
+  seedBuiltinSystemAssistants({ cabinEnabled: config.cabin.enabled }).catch((err) => {
     console.warn('[seedBuiltinSystemAssistants] background seed failed:', err)
   })
 
@@ -1345,8 +1351,8 @@ export function startServer(
   })
 
   const channelsApi = createChannelsApi(runtime.store)
-  const cabinApi = createCabinApi({ config, runtime })
-  const cabinAdminStore = new CabinStore(runtime.store.db)
+  const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime }) : null
+  const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.db) : null
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -1364,7 +1370,7 @@ export function startServer(
         setCorsHeaders(req, res)
       }
 
-      if (await cabinApi.handle(req, res, pathname)) {
+      if (cabinApi && await cabinApi.handle(req, res, pathname)) {
         return
       }
 
@@ -1716,6 +1722,7 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/cabin/conversations') {
+        if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
         const auth = authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
         authService.requireScope(auth, 'admin:settings')
@@ -1756,6 +1763,7 @@ export function startServer(
 
       const cabinConversationMatch = pathname.match(/^\/api\/v1\/cabin\/conversations\/([^/]+)$/)
       if (req.method === 'GET' && cabinConversationMatch) {
+        if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
         const auth = authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
         authService.requireScope(auth, 'admin:settings')
@@ -4539,7 +4547,14 @@ export function startServer(
         const filter = authService.buildVisibilityFilter(auth)
         // Return all installed assistants: hub, tenant, and custom
         const all = await getInstalledAssistants()
-        writeJson(res, 200, all.filter(a => isVisibleTo(a.visibleTo, filter)))
+        writeJson(
+          res,
+          200,
+          all.filter(a => {
+            if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
+            return isVisibleTo(a.visibleTo, filter)
+          }),
+        )
         return
       }
 

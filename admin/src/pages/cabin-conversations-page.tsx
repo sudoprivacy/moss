@@ -32,6 +32,7 @@ import {
   type CabinConversation,
   type CabinMessage,
 } from '@/lib/api/cabin'
+import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import { cn } from '@/lib/utils'
 
 const PAGE_SIZE = 50
@@ -94,6 +95,8 @@ export default function CabinConversationsPage() {
   const [selectedConversation, setSelectedConversation] = useState<CabinConversation | null>(null)
   const [selectedMessages, setSelectedMessages] = useState<CabinMessage[]>([])
   const [isDetailLoading, setIsDetailLoading] = useState(false)
+  const [isCheckingConfig, setIsCheckingConfig] = useState(true)
+  const [cabinEnabled, setCabinEnabled] = useState(false)
 
   const fetchData = useCallback(async (
     nextOffset = offset,
@@ -136,7 +139,30 @@ export default function CabinConversationsPage() {
   }, [flightDate, flightId, offset, passenger, seatId, status])
 
   useEffect(() => {
-    fetchData(0)
+    let cancelled = false
+    getEnterpriseConfig()
+      .then((response) => {
+        if (cancelled) return
+        const enabled = response.data.cabin_enabled === true
+        setCabinEnabled(enabled)
+        if (enabled) {
+          void fetchData(0)
+        } else {
+          setIsLoading(false)
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return
+        console.error('Failed to fetch enterprise config:', error)
+        toast.error(error instanceof Error ? error.message : '获取系统配置失败')
+        setIsLoading(false)
+      })
+      .finally(() => {
+        if (!cancelled) setIsCheckingConfig(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSearch = () => {
@@ -177,6 +203,24 @@ export default function CabinConversationsPage() {
 
   const canPrev = offset > 0
   const canNext = offset + PAGE_SIZE < total
+
+  if (isCheckingConfig) {
+    return (
+      <DashboardLayout title="客舱 AI 会话">
+        <CabinSkeleton />
+      </DashboardLayout>
+    )
+  }
+
+  if (!cabinEnabled) {
+    return (
+      <DashboardLayout title="客舱 AI 会话">
+        <div className="rounded-lg border bg-card p-8 text-center text-muted-foreground">
+          客舱 AI 功能未启用。
+        </div>
+      </DashboardLayout>
+    )
+  }
 
   return (
     <DashboardLayout title="客舱 AI 会话" description="按航班、座位或乘客检索平板侧语音与文本对话，并跳转原始 moss transcript。">
