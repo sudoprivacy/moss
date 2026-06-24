@@ -7,7 +7,7 @@
 import { Cron } from 'croner'
 import path from 'path'
 import type { DatabaseSync } from 'node:sqlite'
-import { CronStore, type CronJob, type CronJobRun } from './CronStore.js'
+import { CronStore, type CronJob, type CronJobRun, type CronJobSchedule } from './CronStore.js'
 import type { RuntimeService } from '../runtimeService.js'
 import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
 import { getSystemSettings } from '../../systemSettings.js'
@@ -25,6 +25,39 @@ const DEFAULT_CRON_TZ = process.env.MOSS_CRON_DEFAULT_TZ || 'Asia/Shanghai'
 // A job's effective timezone: its own schedule.tz if set, else the default.
 function resolveCronTz(tz?: string): string {
   return tz && tz.trim() ? tz : DEFAULT_CRON_TZ
+}
+
+/**
+ * The next fire time (epoch ms) for a job, computed from `fromTs`. Single
+ * source of truth for scheduling math — used both at fire time (to advance
+ * next_run_at atomically with the lease) and as the post-run backstop.
+ *
+ * Returns null when there is no further occurrence: one-shot 'at' jobs (never
+ * re-fire), unparseable 'every' values, or a 'cron' expression with no future
+ * match.
+ */
+function computeNextRunAt(schedule: CronJobSchedule, fromTs: number): number | null {
+  switch (schedule.kind) {
+    case 'cron': {
+      try {
+        const cron = new Cron(schedule.value, { timezone: resolveCronTz(schedule.tz) })
+        const next = cron.nextRun(new Date(fromTs))
+        return next ? next.getTime() : null
+      } catch {
+        return null
+      }
+    }
+    case 'every': {
+      const match = schedule.value.match(/^(\d+)([mhd])$/)
+      if (!match) return null
+      const num = parseInt(match[1], 10)
+      const unitMs = match[2] === 'm' ? 60_000 : match[2] === 'h' ? 3_600_000 : 86_400_000
+      return fromTs + num * unitMs
+    }
+    case 'at':
+      // One-shot: no next occurrence.
+      return null
+  }
 }
 
 export interface CronServiceConfig {
@@ -253,15 +286,22 @@ export class CronService {
   }
 
   /**
-   * Acquire DB lease for a job (distributed lock)
+   * Acquire DB lease for a job (distributed lock) and advance next_run_at in
+   * the same atomic UPDATE so the job stops looking "due" the moment it
+   * starts. The lease covers the full run window (CRON_RUN_TIMEOUT_MS) rather
+   * than a flat 30s — the next_run_at advance is the real dedup guard, but
+   * sizing the lease to the run keeps the lock meaningful for its duration.
    */
-  private acquireLease(jobId: string, nowTs: number): boolean {
-    const leaseUntil = nowTs + 30000 // 30 second lease
-    return this.store.acquireLease(jobId, nowTs, leaseUntil)
+  private acquireLease(job: CronJob, nowTs: number): boolean {
+    const leaseUntil = nowTs + CRON_RUN_TIMEOUT_MS + 60_000 // cover the run + margin
+    const nextRunAt = computeNextRunAt(job.schedule, nowTs)
+    return this.store.acquireLease(job.id, nowTs, leaseUntil, nextRunAt)
   }
 
   private async executeDueJob(jobId: string, nowTs = Date.now()): Promise<void> {
-    if (!this.acquireLease(jobId, nowTs)) return
+    const job = this.store.getById(jobId)
+    if (!job) return
+    if (!this.acquireLease(job, nowTs)) return
     await this.executeJob(jobId)
   }
 
@@ -511,59 +551,34 @@ export class CronService {
   }
 
   /**
-   * Calculate next run time based on schedule kind
+   * Post-run backstop for next_run_at. next_run_at is already advanced
+   * atomically at fire time (see acquireLease), so this exists only to repair
+   * the value if the schedule changed mid-run or the fire-time computation was
+   * superseded. Critically it must never move next_run_at *backward* into an
+   * already-passed slot — doing so would re-introduce a duplicate fire — so it
+   * only writes a strictly-later time. The one-shot 'at' path still disables
+   * the job here.
    */
   private calculateNextRun(job: CronJob): void {
     const now = Date.now()
 
-    switch (job.schedule.kind) {
-      case 'cron': {
-        const timer = this.timers.get(job.id)
-        const nextRun = timer?.nextRun()
-        if (nextRun) {
-          this.store.updateNextRunAt(job.id, nextRun.getTime())
-        } else {
-          // Timer might have been stopped, try to parse manually. Use the same
-          // resolved timezone as the live timer so next_run_at stays consistent.
-          try {
-            const cron = new Cron(job.schedule.value, { timezone: resolveCronTz(job.schedule.tz) })
-            const next = cron.nextRun()
-            if (next) {
-              this.store.updateNextRunAt(job.id, next.getTime())
-            }
-          } catch {
-            this.store.updateNextRunAt(job.id, null)
-          }
-        }
-        break
-      }
+    if (job.schedule.kind === 'at') {
+      // 'at' jobs are one-time, disable after execution.
+      this.db.prepare(`
+        UPDATE cron_jobs SET enabled = 0, next_run_at = NULL, lease_until = NULL WHERE id = ?
+      `).run(job.id)
+      this.stopTimer(job.id)
+      return
+    }
 
-      case 'every': {
-        // Parse 'every' value (e.g., "1h", "30m", "1d")
-        const value = job.schedule.value
-        const match = value.match(/^(\d+)([mhd])$/)
-        if (match) {
-          const num = parseInt(match[1], 10)
-          const unit = match[2]
-          let ms = 0
-          switch (unit) {
-            case 'm': ms = num * 60 * 1000; break
-            case 'h': ms = num * 60 * 60 * 1000; break
-            case 'd': ms = num * 24 * 60 * 60 * 1000; break
-          }
-          this.store.updateNextRunAt(job.id, now + ms)
-        }
-        break
-      }
+    const next = computeNextRunAt(job.schedule, now)
+    if (next == null) return
 
-      case 'at': {
-        // 'at' jobs are one-time, disable after execution
-        this.db.prepare(`
-          UPDATE cron_jobs SET enabled = 0, next_run_at = NULL, lease_until = NULL WHERE id = ?
-        `).run(job.id)
-        this.stopTimer(job.id)
-        break
-      }
+    // Only advance — never rewind into a slot the fire-time advance already
+    // moved us past.
+    const current = this.store.getById(job.id)?.nextRunAt ?? null
+    if (current == null || next > current) {
+      this.store.updateNextRunAt(job.id, next)
     }
   }
 

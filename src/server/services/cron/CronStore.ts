@@ -339,17 +339,31 @@ export class CronStore {
     )
   }
 
-  acquireLease(jobId: string, nowTs: number, leaseUntil: number): boolean {
+  /**
+   * Acquire the lease for a due job AND advance next_run_at in the same
+   * atomic UPDATE. Advancing next_run_at here (rather than after the run
+   * completes) is what prevents duplicate fires: a run can take up to
+   * CRON_RUN_TIMEOUT_MS (30 min) while the lease is only ~30s, so without
+   * this the 60s checkDueJobs poll would keep seeing the job as due
+   * (next_run_at <= now, lease expired) and re-fire it every minute until
+   * completion. SQLite serializes these UPDATEs and the WHERE still gates on
+   * the OLD next_run_at <= now, so exactly one caller wins; concurrent
+   * callers see the advanced next_run_at and get changes === 0.
+   *
+   * nextRunAt is the next occurrence computed by the caller (null for
+   * one-shot 'at' jobs, which must never re-fire).
+   */
+  acquireLease(jobId: string, nowTs: number, leaseUntil: number, nextRunAt: number | null): boolean {
     const result = this.db.prepare(`
       UPDATE cron_jobs
-      SET lease_until = ?, updated_at = ?
+      SET lease_until = ?, next_run_at = ?, updated_at = ?
       WHERE id = ?
         AND enabled = 1
         AND deleted_at IS NULL
         AND next_run_at IS NOT NULL
         AND next_run_at <= ?
         AND (lease_until IS NULL OR lease_until < ?)
-    `).run(leaseUntil, nowTs, jobId, nowTs, nowTs)
+    `).run(leaseUntil, nextRunAt, nowTs, jobId, nowTs, nowTs)
     return result.changes > 0
   }
 
