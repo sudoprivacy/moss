@@ -653,6 +653,21 @@ export default function SkillStorePage() {
     return lookup
   }, [installedList])
 
+  // Store tab "installed-of-catalog" indicator: count catalog skills that are
+  // actually installed, the same way a store card decides its installed state
+  // (installedVersionLookup hit by id or name). Counting catalog entries — not
+  // on-disk dirs — keeps the badge a subset of the cards the store renders and
+  // excludes stale/orphaned installs that would otherwise inflate the count.
+  const hubInstalledCount = useMemo(
+    () =>
+      skills.filter(
+        skill =>
+          installedVersionLookup.has(skill.id) ||
+          installedVersionLookup.has(skill.name),
+      ).length,
+    [skills, installedVersionLookup],
+  )
+
   const detailResolvedInstalledSkill = useMemo(() => {
     if (detailInstalledSkill) return detailInstalledSkill
     if (!detailSkill) return null
@@ -673,33 +688,16 @@ export default function SkillStorePage() {
       : undefined
 
   const groupedInstalledSkills = useMemo(() => {
-    // Custom = user uploads (source_type 'upload' or 'custom').
+    // Custom = user uploads (source_type 'upload' or 'custom'); this is the only
+    // bucket the 自定义 tab renders. The 技能库 (store) badge uses
+    // hubInstalledCount (catalog-matched) and the 专属 badge uses the DB catalog
+    // list (filteredTenantSkills), so each badge matches the cards its tab shows.
     const custom = installedList.filter(
       skill => !skill.isBuiltin && (skill.isUploaded || skill.meta?.source_type === 'custom'),
-    )
-    // Installed hub skills present on disk; used as the store tab's
-    // "installed-of-catalog" indicator. The 专属 tab counts the DB catalog list
-    // it renders (filteredTenantSkills) instead, so its badge matches the visible
-    // cards even when the on-disk scan and the DB catalog drift.
-    const hub = installedList.filter(
-      skill => !skill.isBuiltin && skill.isHubInstalled,
-    )
-    const builtin = installedList.filter(skill => skill.isBuiltin)
-    // Local = manually-placed skills with no category/tab (excluded from counts).
-    const local = installedList.filter(
-      skill =>
-        !skill.isBuiltin &&
-        !skill.isUploaded &&
-        !skill.isHubInstalled &&
-        skill.meta?.source_type !== 'custom' &&
-        skill.meta?.source_type !== 'tenant',
     )
 
     return {
       custom,
-      hub,
-      builtin,
-      local,
     }
   }, [installedList])
 
@@ -1564,7 +1562,7 @@ export default function SkillStorePage() {
               {tenantId ? `专属租户: ${tenantId}` : '未配置专属租户 ID'}
             </Badge> */}
             <Badge variant="secondary">
-              已安装 {groupedInstalledSkills.hub.length + filteredTenantSkills.length + filteredCustomSkills.length} 个技能
+              已安装 {hubInstalledCount + filteredTenantSkills.length + filteredCustomSkills.length} 个技能
             </Badge>
           </div>
           <div className="flex items-center gap-2">
@@ -1598,9 +1596,9 @@ export default function SkillStorePage() {
                 <TabsList>
                   <TabsTrigger value="store">
                     技能库
-                    {groupedInstalledSkills.hub.length > 0 ? (
+                    {hubInstalledCount > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {groupedInstalledSkills.hub.length}
+                        {hubInstalledCount}
                       </span>
                     ) : null}
                   </TabsTrigger>

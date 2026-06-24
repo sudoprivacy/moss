@@ -1653,13 +1653,21 @@ export default function AgentHubPage() {
     })
   }, [installedAgents])
 
-  // Installed hub agents present on disk; used as the store tab's
-  // "installed-of-catalog" indicator. The 专属/自定义 tabs count the very lists
-  // they render (filteredTenantAssistants/filteredCustomAgents) so badges always
-  // match the visible cards, even when the on-disk scan and the DB catalog drift.
+  // Store tab "installed-of-catalog" indicator: count catalog assistants that are
+  // actually installed, the same way a store card decides its installed state
+  // (matched by id or name against the installed list). Counting catalog entries
+  // — not on-disk dirs — keeps the badge a subset of the cards the store renders
+  // and excludes stale/orphaned installs (e.g. an empty-id dir that no longer
+  // matches any catalog item) that would otherwise inflate the count.
+  // The 专属/自定义 tabs count the very lists they render
+  // (filteredTenantAssistants/filteredCustomAgents) so those badges always match
+  // the visible cards, even when the on-disk scan and the DB catalog drift.
   const hubAgents = useMemo(
-    () => installedAgents.filter(a => !a.isBuiltin && (a.isHubInstalled || a.category === 'hub')),
-    [installedAgents],
+    () =>
+      assistants.filter(
+        a => installedAgentLookup.has(a.id) || installedAgentLookup.has(a.name),
+      ),
+    [assistants, installedAgentLookup],
   )
 
   // Filter tenant assistants by search query, type and visibility
