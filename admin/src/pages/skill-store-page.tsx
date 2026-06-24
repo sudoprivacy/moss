@@ -677,13 +677,12 @@ export default function SkillStorePage() {
     const custom = installedList.filter(
       skill => !skill.isBuiltin && (skill.isUploaded || skill.meta?.source_type === 'custom'),
     )
+    // Installed hub skills present on disk; used as the store tab's
+    // "installed-of-catalog" indicator. The 专属 tab counts the DB catalog list
+    // it renders (filteredTenantSkills) instead, so its badge matches the visible
+    // cards even when the on-disk scan and the DB catalog drift.
     const hub = installedList.filter(
       skill => !skill.isBuiltin && skill.isHubInstalled,
-    )
-    // Tenant = installed exclusive skills (source_type 'tenant'), which match a
-    // tab; they previously fell into `local` and were uncounted.
-    const tenant = installedList.filter(
-      skill => !skill.isBuiltin && skill.meta?.source_type === 'tenant',
     )
     const builtin = installedList.filter(skill => skill.isBuiltin)
     // Local = manually-placed skills with no category/tab (excluded from counts).
@@ -699,7 +698,6 @@ export default function SkillStorePage() {
     return {
       custom,
       hub,
-      tenant,
       builtin,
       local,
     }
@@ -1566,7 +1564,7 @@ export default function SkillStorePage() {
               {tenantId ? `专属租户: ${tenantId}` : '未配置专属租户 ID'}
             </Badge> */}
             <Badge variant="secondary">
-              已安装 {groupedInstalledSkills.hub.length + groupedInstalledSkills.tenant.length + groupedInstalledSkills.custom.length} 个技能
+              已安装 {groupedInstalledSkills.hub.length + filteredTenantSkills.length + filteredCustomSkills.length} 个技能
             </Badge>
           </div>
           <div className="flex items-center gap-2">
@@ -1608,17 +1606,17 @@ export default function SkillStorePage() {
                   </TabsTrigger>
                   <TabsTrigger value="exclusive">
                     专属技能
-                    {groupedInstalledSkills.tenant.length > 0 ? (
+                    {filteredTenantSkills.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {groupedInstalledSkills.tenant.length}
+                        {filteredTenantSkills.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
                   <TabsTrigger value="custom">
                     自定义技能
-                    {groupedInstalledSkills.custom.length > 0 ? (
+                    {filteredCustomSkills.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {groupedInstalledSkills.custom.length}
+                        {filteredCustomSkills.length}
                       </span>
                     ) : null}
                   </TabsTrigger>

@@ -1653,17 +1653,12 @@ export default function AgentHubPage() {
     })
   }, [installedAgents])
 
-  // Installed-by-type buckets that map to the tabs, so badges + total reconcile.
-  // category is dir-based (reliable); meta.source_type is the secondary signal.
+  // Installed hub agents present on disk; used as the store tab's
+  // "installed-of-catalog" indicator. The 专属/自定义 tabs count the very lists
+  // they render (filteredTenantAssistants/filteredCustomAgents) so badges always
+  // match the visible cards, even when the on-disk scan and the DB catalog drift.
   const hubAgents = useMemo(
     () => installedAgents.filter(a => !a.isBuiltin && (a.isHubInstalled || a.category === 'hub')),
-    [installedAgents],
-  )
-  const tenantAgents = useMemo(
-    () =>
-      installedAgents.filter(
-        a => !a.isBuiltin && (a.category === 'tenant' || a.meta?.source_type === 'tenant'),
-      ),
     [installedAgents],
   )
 
@@ -1840,7 +1835,7 @@ export default function AgentHubPage() {
             {/* <Badge variant={tenantId ? 'secondary' : 'outline'}>
               {tenantId ? `专属技能租户: ${tenantId}` : '未配置专属技能租户 ID'}
             </Badge> */}
-            <Badge variant="secondary">已安装 {hubAgents.length + tenantAgents.length + customAgents.length} 个智能体</Badge>
+            <Badge variant="secondary">已安装 {hubAgents.length + filteredTenantAssistants.length + filteredCustomAgents.length} 个智能体</Badge>
           </div>
 
           <div className="flex items-center gap-2">
@@ -1882,17 +1877,17 @@ export default function AgentHubPage() {
                   </TabsTrigger>
                   <TabsTrigger value="exclusive">
                     专属智能体
-                    {tenantAgents.length > 0 ? (
+                    {filteredTenantAssistants.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {tenantAgents.length}
+                        {filteredTenantAssistants.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
                   <TabsTrigger value="custom">
                     自定义智能体
-                    {customAgents.length > 0 ? (
+                    {filteredCustomAgents.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {customAgents.length}
+                        {filteredCustomAgents.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
