@@ -711,6 +711,13 @@ export default function SkillStorePage() {
     )
   }, [tenantSkills, searchQuery])
 
+  // 专属 badge counts only approved tenant skills (the tab still renders
+  // pending/rejected ones, but the badge reflects what's actually active).
+  const approvedTenantSkillCount = useMemo(
+    () => filteredTenantSkills.filter(skill => skill.status === 'approved').length,
+    [filteredTenantSkills],
+  )
+
   // Filter custom skills by search query
   const filteredCustomSkills = useMemo(() => {
     if (!searchQuery.trim()) return groupedInstalledSkills.custom
@@ -1562,7 +1569,7 @@ export default function SkillStorePage() {
               {tenantId ? `专属租户: ${tenantId}` : '未配置专属租户 ID'}
             </Badge> */}
             <Badge variant="secondary">
-              已安装 {hubInstalledCount + filteredTenantSkills.length + filteredCustomSkills.length} 个技能
+              已安装 {hubInstalledCount + approvedTenantSkillCount + filteredCustomSkills.length} 个技能
             </Badge>
           </div>
           <div className="flex items-center gap-2">
@@ -1604,9 +1611,9 @@ export default function SkillStorePage() {
                   </TabsTrigger>
                   <TabsTrigger value="exclusive">
                     专属技能
-                    {filteredTenantSkills.length > 0 ? (
+                    {approvedTenantSkillCount > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {filteredTenantSkills.length}
+                        {approvedTenantSkillCount}
                       </span>
                     ) : null}
                   </TabsTrigger>

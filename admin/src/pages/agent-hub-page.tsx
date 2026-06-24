@@ -1696,6 +1696,13 @@ export default function AgentHubPage() {
     })
   }, [tenantAssistants, searchQuery, installedFilterAgentType, installedFilterVisibility])
 
+  // 专属 badge counts only approved tenant assistants (the tab still renders
+  // pending/rejected ones, but the badge reflects what's actually active).
+  const approvedTenantAssistantCount = useMemo(
+    () => filteredTenantAssistants.filter(a => a.status === 'approved').length,
+    [filteredTenantAssistants],
+  )
+
   // Filter custom agents by search query, type and visibility
   const filteredCustomAgents = useMemo(() => {
     return customAgents.filter(agent => {
@@ -1843,7 +1850,7 @@ export default function AgentHubPage() {
             {/* <Badge variant={tenantId ? 'secondary' : 'outline'}>
               {tenantId ? `专属技能租户: ${tenantId}` : '未配置专属技能租户 ID'}
             </Badge> */}
-            <Badge variant="secondary">已安装 {hubAgents.length + filteredTenantAssistants.length + filteredCustomAgents.length} 个智能体</Badge>
+            <Badge variant="secondary">已安装 {hubAgents.length + approvedTenantAssistantCount + filteredCustomAgents.length} 个智能体</Badge>
           </div>
 
           <div className="flex items-center gap-2">
@@ -1885,9 +1892,9 @@ export default function AgentHubPage() {
                   </TabsTrigger>
                   <TabsTrigger value="exclusive">
                     专属智能体
-                    {filteredTenantAssistants.length > 0 ? (
+                    {approvedTenantAssistantCount > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {filteredTenantAssistants.length}
+                        {approvedTenantAssistantCount}
                       </span>
                     ) : null}
                   </TabsTrigger>
