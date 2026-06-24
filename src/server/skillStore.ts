@@ -1155,6 +1155,9 @@ export type ImportTenantSkillResult = {
   version: string
   displayName: string
   description: string
+  // Absolute on-disk path the skill was materialized to. Persisted in the
+  // tenant_skills DB row so disk/DB drift is detectable and repairable.
+  filePath: string
 }
 
 export async function importTenantSkillArchive(
@@ -1253,5 +1256,6 @@ async function installTenantSkillFromTemp(
     version: meta.installed_version || '1.0.0',
     displayName: meta.display_name || skillName,
     description: meta.description || '',
+    filePath: targetDir,
   }
 }
