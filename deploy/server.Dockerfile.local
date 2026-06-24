@@ -242,11 +242,12 @@ ENV LIBREOFFICE_BIN=/usr/bin/soffice
 
 WORKDIR /app
 
-# Built JS/TS artifacts + admin frontend + assistants (from js-builder).
+# Built JS/TS artifacts + admin frontend + assistants/skills (from js-builder).
 COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
 COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
 COPY --from=js-builder /src/admin/dist/ ./admin/dist/
 COPY --from=js-builder /src/assistants/ ./assistants/
+COPY --from=js-builder /src/skills/ ./skills/
 # nexus-napi loader + native addon (from napi-builder).
 COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/index.d.ts ./native/nexus-napi/
 COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./native/nexus-napi/

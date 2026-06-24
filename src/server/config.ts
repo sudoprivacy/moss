@@ -85,6 +85,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       ttsLanguage: 'chinese',
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
+      controlTimeoutMs: 10_000,
       assistantName: 'cabin-ai-flight-attendant',
       createMossSession: false,
     },
@@ -189,6 +190,11 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       llmBaseUrl: process.env.CABIN_LLM_BASE_URL || raw.cabin.llmBaseUrl,
       llmModel: process.env.CABIN_LLM_MODEL || raw.cabin.llmModel,
       llmApiKey: process.env.CABIN_LLM_API_KEY || raw.cabin.llmApiKey,
+      controlBaseUrl: process.env.CABIN_CONTROL_BASE_URL || raw.cabin.controlBaseUrl,
+      controlAuth: process.env.CABIN_CONTROL_AUTH || raw.cabin.controlAuth,
+      controlTimeoutMs: process.env.CABIN_CONTROL_TIMEOUT_MS
+        ? Number.parseInt(process.env.CABIN_CONTROL_TIMEOUT_MS, 10)
+        : raw.cabin.controlTimeoutMs,
       assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
       createMossSession: process.env.CABIN_CREATE_MOSS_SESSION
         ? process.env.CABIN_CREATE_MOSS_SESSION === '1' || process.env.CABIN_CREATE_MOSS_SESSION === 'true'

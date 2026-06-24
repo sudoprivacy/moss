@@ -183,6 +183,9 @@ export const serverFileConfigSchema = lazySchema(() =>
       llmBaseUrl: z.string().default('http://127.0.0.1:8000/v1'),
       llmModel: z.string().default('Qwen3.6-35B-A3B-NVFP4'),
       llmApiKey: z.string().optional(),
+      controlBaseUrl: z.string().optional(),
+      controlAuth: z.string().optional(),
+      controlTimeoutMs: z.number().int().min(1000).default(10_000),
       assistantName: z.string().default('cabin-ai-flight-attendant'),
       createMossSession: z.boolean().default(false),
     }).default({
@@ -198,6 +201,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       ttsLanguage: 'chinese',
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
+      controlTimeoutMs: 10_000,
       assistantName: 'cabin-ai-flight-attendant',
       createMossSession: false,
     }),
@@ -303,6 +307,9 @@ export type ServerConfig = {
     llmBaseUrl: string
     llmModel: string
     llmApiKey?: string
+    controlBaseUrl?: string
+    controlAuth?: string
+    controlTimeoutMs: number
     assistantName: string
     createMossSession: boolean
   }

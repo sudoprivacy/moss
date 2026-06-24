@@ -122,6 +122,7 @@ COPY bin/moss-server.mjs ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
 COPY admin/dist/ ./admin/dist/
 COPY assistants/ ./assistants/
+COPY skills/ ./skills/
 
 # 复制 wiki (从 Go 构建阶段)
 RUN chmod +x ./bin/wiki

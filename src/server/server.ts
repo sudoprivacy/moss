@@ -106,7 +106,7 @@ import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
-import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_TENANT_DIR } from '../utils/skills/localSkillDirectories.js'
+import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
   getUserModelPreference,
@@ -586,6 +586,125 @@ async function seedBuiltinSystemAssistants(options: { cabinEnabled?: boolean } =
       `[seedBuiltinSystemAssistants] seeded ${seeded} new, upgraded ${upgraded}, ` +
         `${skipped} already present at ${systemDir}`,
     )
+  }
+}
+
+/**
+ * Seed bundled hub skills from repo `skills/hub/<name>/` into
+ * `$MOSS_HOME/skills/hub/<name>/`. Assistant skill binding resolves through
+ * MOSS_HOME, so bundled skills must be present there before scode sessions are
+ * created.
+ */
+async function seedBundledHubSkills(options: { cabinEnabled?: boolean } = {}): Promise<void> {
+  const currentDir = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    resolve(process.cwd(), 'skills', 'hub'),
+    resolve(currentDir, '..', 'skills', 'hub'),
+    resolve(currentDir, '..', '..', 'skills', 'hub'),
+  ]
+  let sourceRoot: string | null = null
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      sourceRoot = candidate
+      break
+    }
+  }
+  if (!sourceRoot) {
+    return
+  }
+
+  await mkdir(MOSS_SKILLS_HUB_DIR, { recursive: true })
+
+  let entries
+  try {
+    entries = await readdir(sourceRoot, { withFileTypes: true })
+  } catch (err) {
+    console.warn('[seedBundledHubSkills] readdir failed:', err)
+    return
+  }
+
+  let seeded = 0
+  let upgraded = 0
+  let skipped = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (entry.name === 'cabin-hardware-control' && options.cabinEnabled !== true) {
+      skipped++
+      continue
+    }
+
+    const sourceDir = join(sourceRoot, entry.name)
+    const targetDir = join(MOSS_SKILLS_HUB_DIR, entry.name)
+    if (!existsSync(targetDir)) {
+      try {
+        cpSync(sourceDir, targetDir, { recursive: true })
+        seeded++
+      } catch (err) {
+        console.warn(`[seedBundledHubSkills] copy failed for ${entry.name}:`, err)
+      }
+      continue
+    }
+
+    const bundledVer = readSkillInstalledVersion(join(sourceDir, 'SKILL.md'))
+    const installedVer = readSkillInstalledVersion(join(targetDir, 'SKILL.md'))
+    if (
+      bundledVer === null ||
+      installedVer === null ||
+      compareSemver(bundledVer, installedVer) <= 0
+    ) {
+      skipped++
+      continue
+    }
+
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    const backupDir = join(MOSS_SKILLS_HUB_DIR, `_${entry.name}.bak-${installedVer}-${ts}`)
+    try {
+      renameSync(targetDir, backupDir)
+      cpSync(sourceDir, targetDir, { recursive: true })
+      upgraded++
+      console.log(
+        `[seedBundledHubSkills] upgraded ${entry.name} ${installedVer} → ${bundledVer} ` +
+          `(previous version backed up to ${backupDir})`,
+      )
+    } catch (err) {
+      console.warn(`[seedBundledHubSkills] upgrade failed for ${entry.name}:`, err)
+      if (!existsSync(targetDir) && existsSync(backupDir)) {
+        try {
+          renameSync(backupDir, targetDir)
+        } catch (restoreErr) {
+          console.error(
+            `[seedBundledHubSkills] CRITICAL: failed to restore ${entry.name} from ${backupDir}:`,
+            restoreErr,
+          )
+        }
+      }
+    }
+  }
+
+  if (seeded > 0 || upgraded > 0 || skipped > 0) {
+    console.log(
+      `[seedBundledHubSkills] seeded ${seeded} new, upgraded ${upgraded}, ` +
+        `${skipped} already present at ${MOSS_SKILLS_HUB_DIR}`,
+    )
+  }
+}
+
+function readSkillInstalledVersion(skillMdPath: string): string | null {
+  try {
+    const content = readFileSync(skillMdPath, 'utf-8')
+    const match = content.match(/^---\n([\s\S]*?)\n---/)
+    if (!match) return null
+    for (const line of match[1].split('\n')) {
+      const colonIdx = line.indexOf(':')
+      if (colonIdx === -1) continue
+      const key = line.slice(0, colonIdx).trim()
+      if (key !== 'version') continue
+      const value = line.slice(colonIdx + 1).trim().replace(/^['"]|['"]$/g, '')
+      return value || null
+    }
+    return null
+  } catch {
+    return null
   }
 }
 
@@ -1274,8 +1393,11 @@ export function startServer(
   // Customers can override by editing files in place — subsequent boots
   // skip existing dirs. Fire-and-forget (best-effort) — boot must not
   // block on this, and failures don't affect server health.
-  seedBuiltinSystemAssistants({ cabinEnabled: config.cabin.enabled }).catch((err) => {
-    console.warn('[seedBuiltinSystemAssistants] background seed failed:', err)
+  const seedBuiltinsReady = Promise.all([
+    seedBuiltinSystemAssistants({ cabinEnabled: config.cabin.enabled }),
+    seedBundledHubSkills({ cabinEnabled: config.cabin.enabled }),
+  ]).catch((err) => {
+    console.warn('[seedBuiltins] background seed failed:', err)
   })
 
   // Boot-time settings.json sanity check — warns if model/url/apiKey
@@ -1359,6 +1481,7 @@ export function startServer(
 
   const server = http.createServer(async (req, res) => {
     try {
+      await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
       const pathname = url.pathname
       const isHead = req.method === 'HEAD'
