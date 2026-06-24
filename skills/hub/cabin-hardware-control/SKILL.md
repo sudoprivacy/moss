@@ -2,7 +2,7 @@
 name: cabin-hardware-control
 displayName: 客舱硬件控制
 description: Use this skill when a cabin passenger asks to control real cabin hardware, especially opening or closing the tray table, seat-side devices, lights, seat posture, or other equipment through customer cabin control APIs. The skill must use server-provided cabin_context for seat identity.
-version: 1.1.0
+version: 1.1.1
 category: 客舱服务
 emoji: "🛫"
 ---
