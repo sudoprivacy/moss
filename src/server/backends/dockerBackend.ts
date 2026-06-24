@@ -150,6 +150,9 @@ export class DockerBackend implements SessionBackend {
       'SUDOWORK_AUTH_PROXY_URL',
       'SUDOWORK_AUTH_PROXY_BASE_URL',
       'SUDOWORK_AUTH_PROXY_TOKEN',
+      'CABIN_CONTROL_BASE_URL',
+      'CABIN_CONTROL_AUTH',
+      'CABIN_CONTROL_TIMEOUT_MS',
     ]
 
     const env = buildSessionEnv(options, {
