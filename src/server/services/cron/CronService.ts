@@ -130,6 +130,13 @@ export class CronService {
   private checkInterval?: ReturnType<typeof setInterval>
 
   constructor(db: DatabaseSync, config: CronServiceConfig) {
+    // Fail loud if required config is missing. The project has no type-check
+    // step (build only strips types), so an omitted required field at the
+    // construction site compiles fine and only surfaces later as a cryptic
+    // `path.join(undefined, …)` error when a 'new'-mode job creates a session.
+    if (!config.runtimeDir) {
+      throw new Error('CronService misconfigured: runtimeDir is required')
+    }
     this.db = db
     this.store = new CronStore(db)
     this.config = config

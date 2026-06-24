@@ -1187,6 +1187,9 @@ export function startServer(
   // Cron Service - scheduled task execution engine
   const cronService = new CronService(runtime.store.db, {
     runtimeService: runtime,
+    runtimeDir: config.runtimeDir,
+    defaultRuntime: config.defaultRuntime,
+    dockerContainerMode: config.docker?.containerMode ?? 'session',
     workspace: config.workspace,
     getUserAuth: async (userId: string, orgId: string) => {
       try {
