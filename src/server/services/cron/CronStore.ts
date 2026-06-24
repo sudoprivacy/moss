@@ -445,4 +445,37 @@ export class CronStore {
       UPDATE cron_job_runs SET status = 'running', started_at = ? WHERE id = ?
     `).run(ts, runId)
   }
+
+  /**
+   * True when a job already has a run in flight (queued or running). Used as a
+   * concurrency guard so a job whose previous run is stuck/long-running does
+   * not stack another run on top — in reuse mode the stacked runs collide on
+   * the same single-turn session and each blocks until the timeout.
+   */
+  hasActiveRun(jobId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM cron_job_runs
+      WHERE job_id = ? AND status IN ('queued', 'running')
+      LIMIT 1
+    `).get(jobId)
+    return row != null
+  }
+
+  /**
+   * Mark runs that have been 'running'/'queued' since before `startedBefore` as
+   * errored. Reaps orphans left behind by a server crash/restart (their socket
+   * is long gone but the row never reached a terminal status) and runs that
+   * blew past the run timeout without their promise settling. Returns the
+   * number of runs reaped.
+   */
+  reapStaleRuns(startedBefore: number, error: string): number {
+    const ts = now()
+    const result = this.db.prepare(`
+      UPDATE cron_job_runs
+      SET status = 'error', finished_at = ?, error = ?
+      WHERE status IN ('queued', 'running')
+        AND COALESCE(started_at, created_at) < ?
+    `).run(ts, error, startedBefore)
+    return result.changes
+  }
 }
