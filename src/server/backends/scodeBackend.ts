@@ -103,13 +103,13 @@ export class ScodeBackend implements SessionBackend {
       process.stderr.write(`[ScodeBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
 
-    // Write user-visible MCP servers as settings.json (same dir as sudocode.json)
-    // so scode loads them on startup. mcpSettings is resolved in the main process
-    // and passed via the runner manifest; here we only write the file.
-    if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
+    const scodeSettings = buildScodeSettings(options)
+    // Write per-session scode settings (same dir as sudocode.json) so scode
+    // loads them on startup.
+    if (Object.keys(scodeSettings).length > 0) {
       try {
-        writeFileSync(join(dotNexusDir, 'settings.json'), JSON.stringify(options.mcpSettings, null, 2), 'utf8')
-        process.stderr.write(`[ScodeBackend] Wrote ${Object.keys(options.mcpSettings.mcpServers).length} MCP server(s) to settings.json\n`)
+        writeFileSync(join(dotNexusDir, 'settings.json'), JSON.stringify(scodeSettings, null, 2), 'utf8')
+        process.stderr.write(`[ScodeBackend] Wrote per-session scode settings.json\n`)
       } catch (e) {
         process.stderr.write(`[ScodeBackend] Failed to write settings.json: ${e}\n`)
       }
@@ -193,4 +193,20 @@ export class ScodeBackend implements SessionBackend {
     handle.availableSkills = availableSkills
     return handle
   }
+}
+
+function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
+  const settings: Record<string, unknown> = {}
+  if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
+    Object.assign(settings, options.mcpSettings)
+  }
+  if (options.enabledSkillNames?.includes('cabin-hardware-control')) {
+    settings.sandbox = {
+      ...(typeof settings.sandbox === 'object' && settings.sandbox !== null ? settings.sandbox : {}),
+      enabled: false,
+      enabledPlatforms: ['macos'],
+      allowUnsandboxedCommands: true,
+    }
+  }
+  return settings
 }

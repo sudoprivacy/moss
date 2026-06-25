@@ -64,6 +64,9 @@
     "ttsLanguage": "chinese",
     "llmBaseUrl": "http://127.0.0.1:8000/v1",
     "llmModel": "Qwen3.6-35B-A3B-NVFP4",
+    "controlBaseUrl": "http://1.94.107.87:48081",
+    "controlAuth": "test1",
+    "controlTimeoutMs": 10000,
     "assistantName": "cabin-ai-flight-attendant",
     "createMossSession": false
   }

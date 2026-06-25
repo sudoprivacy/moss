@@ -499,7 +499,9 @@ export function createCabinApi(options: {
       source,
       content: text,
     })
-    const inferredTool = services.inferToolCall({ context, text })
+    const inferredTool = cabinConfig.createMossSession
+      ? null
+      : services.inferToolCall({ context, text })
 
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',

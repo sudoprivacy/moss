@@ -222,7 +222,13 @@ export class CabinServices {
     }
     const ready = await this.options.runtime.ensureSessionReady(input.mossSessionId)
     const socket = await this.options.runtime.connectToAttempt(ready.attempt)
-    return await sendPromptToRunnerSocket(socket, formatCabinSessionPrompt(input.context, input.text), input.timeoutMs ?? 120_000, input.onDelta)
+    return await sendPromptToRunnerSocket(
+      socket,
+      formatCabinSessionPrompt(input.context, input.text),
+      input.timeoutMs ?? 120_000,
+      input.onDelta,
+      shouldSuppressPreToolText(input.text),
+    )
   }
 }
 
@@ -308,15 +314,67 @@ function extractAssistantText(line: string): string {
   return ''
 }
 
+function shouldSuppressPreToolText(text: string): boolean {
+  return /小桌板|桌板|tray|灯|light|顶灯|座椅|靠背|坐垫|通风|加热|按摩|seat|温度|temperature|空调|air\s*condition|场景|scene|生理|健康|采集/i.test(text)
+}
+
+function sanitizeCabinHardwareReply(text: string): string {
+  return text
+    .replace(/^(?:现在|正在)?(?:调用|执行)[\s\S]*?(?:：|:\s*)/, '')
+    .replace(/^(?:好的，)?我来帮您(?:打开|关闭|调整)?(?:小桌板|桌板)?[。！!，,\s]*/u, '')
+    .replace(/^(?:好的，)?我来为您(?:打开|关闭|调整)?(?:小桌板|桌板)?[。！!，,\s]*/u, '')
+    .trim()
+}
+
+function buildAcceptedHardwareReply(text: string): string {
+  if (/阅读灯|读书灯|reading\s*light/i.test(text)) {
+    if (/关闭|关上|关掉|close|off/i.test(text)) return '已为您下发关闭阅读灯的指令，请稍候。'
+    if (/亮|brightness|调亮|调暗|暗一点/i.test(text)) return '已为您下发调整阅读灯亮度的指令，请稍候。'
+    if (/打开|开启|open|on/i.test(text)) return '已为您下发打开阅读灯的指令，请稍候。'
+    return '已为您下发阅读灯控制指令，请稍候。'
+  }
+  if (/小桌板|桌板|tray/i.test(text)) {
+    if (/关闭|关上|合上|收起|close/i.test(text)) {
+      return '已为您下发关闭小桌板的指令，请稍候。'
+    }
+    if (/打开|开启|展开|open/i.test(text)) {
+      return '已为您下发打开小桌板的指令，请稍候。'
+    }
+    return '已为您下发小桌板控制指令，请稍候。'
+  }
+  if (/顶灯|客舱灯|ceiling|cabin light/i.test(text)) {
+    return '已为您下发客舱灯光控制指令，请稍候。'
+  }
+  if (/场景|scene|登机|巡航|休息|睡眠/i.test(text)) {
+    return '已为您下发客舱场景控制指令，请稍候。'
+  }
+  if (/座椅|靠背|坐垫|通风|加热|按摩|seat|ventilation|heating|massage/i.test(text)) {
+    return '已为您下发座椅控制指令，请稍候。'
+  }
+  if (/生理|健康|采集|health/i.test(text)) {
+    return '已为您下发生理检测控制指令，请稍候。'
+  }
+  return ''
+}
+
+function shouldUseAcceptedHardwareReply(text: string): boolean {
+  if (!text.trim()) return true
+  return /已(?:经)?(?:打开|关闭|完成|调好|处理好)|调用|执行|脚本|接口|技能|工具/u.test(text)
+}
+
 function sendPromptToRunnerSocket(
   socket: net.Socket,
   text: string,
   timeoutMs: number,
   onDelta?: (text: string) => void,
+  suppressPreToolText = false,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false
     let assistantText = ''
+    let pendingText = ''
+    let sawToolUse = false
+    let releasedDeltas = !suppressPreToolText
     const rl = createInterface({ input: socket })
 
     const cleanup = (): void => {
@@ -352,14 +410,39 @@ function sendPromptToRunnerSocket(
 
       const textDelta = extractAssistantText(message.line)
       if (textDelta) {
-        assistantText += textDelta
-        onDelta?.(textDelta)
+        if (suppressPreToolText) {
+          pendingText += textDelta
+        } else if (releasedDeltas) {
+          assistantText += textDelta
+          onDelta?.(textDelta)
+        } else {
+          pendingText += textDelta
+        }
       }
 
       try {
         const inner = JSON.parse(message.line) as { type?: string; status?: string }
+        if (inner.type === 'tool_use') {
+          sawToolUse = true
+          if (suppressPreToolText) {
+            pendingText = ''
+          }
+        }
         if (inner.type === 'result') {
           if (inner.status === 'success') {
+            if (suppressPreToolText) {
+              const cleanedText = sanitizeCabinHardwareReply(pendingText)
+              const acceptedHardwareReply = sawToolUse ? buildAcceptedHardwareReply(text) : ''
+              assistantText = acceptedHardwareReply && shouldUseAcceptedHardwareReply(cleanedText)
+                ? acceptedHardwareReply
+                : cleanedText || acceptedHardwareReply || pendingText.trim()
+              if (assistantText) {
+                onDelta?.(assistantText)
+              }
+            } else if (!releasedDeltas && pendingText) {
+              assistantText += pendingText
+              onDelta?.(pendingText)
+            }
             finish(() => resolve(assistantText.trim() || '收到，我会为您处理。'))
           } else {
             finish(() => reject(new Error(`Moss session result status: ${inner.status || 'unknown'}`)))

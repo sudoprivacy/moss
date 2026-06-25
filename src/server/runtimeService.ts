@@ -1317,6 +1317,13 @@ export class RuntimeService {
       runnerEnv.ANTHROPIC_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
       runnerEnv.PROXY_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
       runnerEnv.ANTHROPIC_MODEL = runnerEnv.MOSS_DEFAULT_MODEL
+      if (this.options.config.cabin.controlBaseUrl) {
+        runnerEnv.CABIN_CONTROL_BASE_URL = this.options.config.cabin.controlBaseUrl
+      }
+      if (this.options.config.cabin.controlAuth) {
+        runnerEnv.CABIN_CONTROL_AUTH = this.options.config.cabin.controlAuth
+      }
+      runnerEnv.CABIN_CONTROL_TIMEOUT_MS = String(this.options.config.cabin.controlTimeoutMs)
     }
 
     // Inject Auth Proxy token for scode process. The URL must be reachable from
