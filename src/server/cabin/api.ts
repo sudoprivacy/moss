@@ -482,17 +482,14 @@ export function createCabinApi(options: {
     })
   }
 
-  async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
-    const body = await readJsonBody(req)
-    const text = stringField(body, 'content') || stringField(body, 'text')
-    if (!text) throw new CabinHttpError(400, 'MISSING_CONTENT', 'content is required')
-    const source = parseMessageSource(stringField(body, 'source'))
-    validateLanguage(stringField(body, 'language'))
-
-    const context = await contextFromToken(cabinConfig, payload, tablet)
-    const conversation = await services.ensureConversation(context)
+  async function streamChatReply(input: {
+    res: http.ServerResponse
+    context: CabinPassengerContext
+    conversation: Awaited<ReturnType<CabinServices['ensureConversation']>>
+    text: string
+    source: 'voice' | 'text'
+  }): Promise<void> {
+    const { res, context, conversation, text, source } = input
     store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
@@ -503,12 +500,6 @@ export function createCabinApi(options: {
       ? null
       : services.inferToolCall({ context, text })
 
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    })
-    writeSse(res, 'start', { status: 'ok' })
     if (inferredTool) {
       writeSse(res, 'tool_call', inferredTool.toolCall)
     }
@@ -554,6 +545,99 @@ export function createCabinApi(options: {
       reply_text: reply,
     })
     res.end()
+  }
+
+  async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const body = await readJsonBody(req)
+    const text = stringField(body, 'content') || stringField(body, 'text')
+    if (!text) throw new CabinHttpError(400, 'MISSING_CONTENT', 'content is required')
+    const source = parseMessageSource(stringField(body, 'source'))
+    validateLanguage(stringField(body, 'language'))
+
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    writeSse(res, 'start', { status: 'ok' })
+    await streamChatReply({
+      res,
+      context,
+      conversation,
+      text,
+      source,
+    })
+  }
+
+  async function handleVoiceChatSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const payload = requireCabinToken(req, cabinConfig)
+    const tablet = requireTabletHeaders(req)
+    const form = await readMultipartForm(req)
+    const file = form.file
+    const language = validateLanguage(form.fields.language)
+    const source = form.fields.source
+      ? parseMessageSource(form.fields.source)
+      : 'voice'
+    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const conversation = await services.ensureConversation(context)
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    writeSse(res, 'start', { status: 'ok' })
+
+    let result: Awaited<ReturnType<CabinServices['transcribe']>>
+    try {
+      result = await services.transcribe({
+        audio: file.data,
+        filename: file.filename,
+        contentType: file.contentType,
+        language: language === 'auto' ? undefined : language,
+      })
+    } catch (error) {
+      const mapped = mapServiceError(error)
+      store.insertVoiceLog({
+        conversationId: conversation.id,
+        type: 'asr',
+        status: 'error',
+        errorMessage: mapped.message,
+      })
+      writeSse(res, 'error', {
+        code: mapped.code,
+        message: mapped.message,
+        retriable: mapped.statusCode >= 500,
+      })
+      res.end()
+      return
+    }
+
+    store.insertVoiceLog({
+      conversationId: conversation.id,
+      type: 'asr',
+      text: result.text,
+      status: 'ok',
+      elapsedMs: result.elapsedMs,
+    })
+    writeSse(res, 'asr_result', {
+      status: 'ok',
+      seat_id: context.seatId || '',
+      language: normalizeLanguage(language === 'auto' ? context.language : language),
+      text: result.text,
+    })
+
+    await streamChatReply({
+      res,
+      context,
+      conversation,
+      text: result.text,
+      source,
+    })
   }
 
   async function handleHistory(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
@@ -631,6 +715,10 @@ export function createCabinApi(options: {
         }
         if (req.method === 'POST' && pathname === '/v1/voice/query') {
           await handleVoiceQuery(req, res)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/voice-chat/send') {
+          await handleVoiceChatSend(req, res)
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/ai-chat/send') {
