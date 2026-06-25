@@ -150,6 +150,9 @@ export class CronService {
     this.running = true
 
     this.markMissedJobsOnStartup()
+    // Reap runs orphaned by a crash/restart (status stuck at running/queued
+    // with their socket long gone) before scheduling anything.
+    this.reapStaleRuns()
 
     // Load all enabled jobs and start their timers
     const jobs = this.store.listEnabled()
@@ -157,8 +160,11 @@ export class CronService {
       this.scheduleNextRun(job)
     }
 
-    // Also start periodic check for missed/due jobs (every 60s)
+    // Also start periodic check for missed/due jobs (every 60s). Reap stale
+    // runs on the same cadence so a run whose promise never settled doesn't
+    // block the concurrency guard forever.
     this.checkInterval = setInterval(() => {
+      this.reapStaleRuns()
       this.checkDueJobs()
     }, 60000)
     this.checkInterval.unref()
@@ -186,6 +192,24 @@ export class CronService {
       })
       this.calculateNextRun(job)
       console.warn(`[CronService] Marked missed job ${job.id} (name: ${job.name})`)
+    }
+  }
+
+  /**
+   * Mark runs stuck in running/queued past the run timeout as errored. Covers
+   * orphans from a crash/restart and runs whose completion promise never
+   * settled. The threshold is the run timeout plus a margin, so a healthy
+   * in-flight run is never reaped. Frees the concurrency guard for the next
+   * scheduled fire.
+   */
+  private reapStaleRuns(): void {
+    const staleBefore = Date.now() - (CRON_RUN_TIMEOUT_MS + 60_000)
+    const reaped = this.store.reapStaleRuns(
+      staleBefore,
+      'Run did not complete within the timeout (reaped as stale)',
+    )
+    if (reaped > 0) {
+      console.warn(`[CronService] Reaped ${reaped} stale cron run(s)`)
     }
   }
 
@@ -319,6 +343,16 @@ export class CronService {
     const job = this.store.getById(jobId)
     if (!job || !job.enabled || job.deletedAt) {
       console.log(`[CronService] Job ${jobId} not found, disabled, or deleted`)
+      return
+    }
+
+    // Concurrency guard: skip this fire if a previous run is still in flight.
+    // In reuse mode the stacked run would collide on the same single-turn
+    // session and block until the timeout; this keeps a stuck/long run from
+    // snowballing into a pile-up. The schedule already advanced at lease time,
+    // so the job resumes cleanly on the next slot.
+    if (this.store.hasActiveRun(job.id)) {
+      console.warn(`[CronService] Job ${job.id} (name: ${job.name}) skipped: previous run still in progress`)
       return
     }
 
@@ -620,6 +654,13 @@ export class CronService {
     const job = this.store.getById(jobId)
     if (!job) {
       throw new Error(`Job ${jobId} not found`)
+    }
+
+    // Same concurrency guard as scheduled fires, but surface it to the caller
+    // so the manual trigger reports a clear error instead of silently stacking
+    // a run that would collide with the in-flight one.
+    if (this.store.hasActiveRun(job.id)) {
+      throw new Error('A run for this job is already in progress')
     }
 
     // Create run record

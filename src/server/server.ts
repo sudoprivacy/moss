@@ -1447,6 +1447,42 @@ export function startServer(
     console.error('[server] Failed to start cron service:', err)
   })
 
+  // Startup integrity check: approved tenant skills must have their files on
+  // disk. The DB row is the source of truth for "this skill exists", but the
+  // runtime loads the actual skill from file_path; if the on-disk dir was wiped
+  // (e.g. a manual ~/.moss/skills cleanup) the skill silently stops working.
+  // Warn loudly so the drift is visible rather than failing at use time. Rows
+  // with a null file_path are legacy (created before file_path was persisted)
+  // and are reported separately since their location can't be verified.
+  try {
+    const approvedTenantSkills = runtime.store.listTenantSkills('approved')
+    const missing: string[] = []
+    const unknownPath: string[] = []
+    for (const row of approvedTenantSkills) {
+      const filePath = typeof row.file_path === 'string' ? row.file_path.trim() : ''
+      const name = typeof row.name === 'string' ? row.name : String(row.id)
+      if (!filePath) {
+        unknownPath.push(name)
+      } else if (!existsSync(filePath)) {
+        missing.push(`${name} (${filePath})`)
+      }
+    }
+    if (missing.length) {
+      console.warn(
+        `[server] ${missing.length} approved tenant skill(s) have a file_path that no longer exists on disk; ` +
+          `they will not load until re-uploaded: ${missing.join(', ')}`,
+      )
+    }
+    if (unknownPath.length) {
+      console.warn(
+        `[server] ${unknownPath.length} approved tenant skill(s) have no recorded file_path (legacy rows); ` +
+          `disk presence can't be verified: ${unknownPath.join(', ')}`,
+      )
+    }
+  } catch (err) {
+    console.error('[server] tenant skill disk reconcile failed:', err)
+  }
+
   // Initialize ChannelManager and PairingService with database
   // 初始化 ChannelManager 和 PairingService
   const channelManager = getChannelManager()
@@ -5677,6 +5713,7 @@ export function startServer(
             author_name: authorName,
             status: 'approved',
             enabled: 1,
+            file_path: result.filePath,
             org_id: auth.orgId,
           })
 
@@ -5711,6 +5748,7 @@ export function startServer(
             author_name: authorName,
             status: 'approved',
             enabled: 1,
+            file_path: result.filePath,
             org_id: auth.orgId,
           })
 

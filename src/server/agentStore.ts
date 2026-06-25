@@ -827,6 +827,34 @@ export async function fetchAgentHubSkillDetailsByIds(
   return details.filter((detail): detail is NonNullable<typeof detail> => detail !== null) as Array<Record<string, unknown>>
 }
 
+/**
+ * Remove existing hub-assistant install dirs whose meta id matches `assistantId`,
+ * except the dir named `keepName` (the target of the current install). Lets a
+ * re-install under a different name spelling upsert in place instead of leaving
+ * a stale orphan dir, and clears legacy empty-id dirs that share the id (none,
+ * since empty ids never match a real catalog id).
+ */
+async function removeHubAssistantDirsById(
+  assistantId: string,
+  keepName: string,
+): Promise<void> {
+  let entries: Awaited<ReturnType<typeof readdir>>
+  try {
+    entries = await readdir(ASSISTANT_HUB_DIR, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('_')) continue
+    if (entry.name === keepName) continue
+    const candidateDir = path.join(ASSISTANT_HUB_DIR, entry.name)
+    const meta = await readAssistantMeta(candidateDir)
+    if (typeof meta?.id === 'string' && meta.id.trim() && meta.id.trim() === assistantId) {
+      await rm(candidateDir, { recursive: true, force: true })
+    }
+  }
+}
+
 export async function installHubAssistant(params: {
   assistantName: string
   sourceUrl: string
@@ -849,6 +877,15 @@ export async function installHubAssistant(params: {
     throw new Error('sourceUrl is required')
   }
 
+  // The catalog id is the stable identity of a hub assistant. Require it so the
+  // install is always reconcilable against the catalog — installs without an id
+  // produce empty-id, name-keyed dirs that can never be matched/deduped and
+  // linger as orphans (see the legacy "Test-Assistant" dir).
+  const assistantId = String(params.assistantMeta?.id || '').trim()
+  if (!assistantId) {
+    throw new Error('assistantMeta.id is required to install a hub assistant')
+  }
+
   const zipBuffer = await downloadFileBuffer(sourceUrl)
   if (params.checksum?.trim()) {
     const isValid = await verifyChecksum(zipBuffer, params.checksum.trim())
@@ -860,6 +897,10 @@ export async function installHubAssistant(params: {
   }
 
   await mkdir(ASSISTANT_HUB_DIR, { recursive: true })
+  // Remove any existing hub install of the same catalog id, even under a
+  // different dir name (e.g. an earlier install with a different name spelling),
+  // so a re-install upserts instead of leaving a stale orphan dir behind.
+  await removeHubAssistantDirsById(assistantId, assistantName)
   const assistantDir = path.join(ASSISTANT_HUB_DIR, assistantName)
   await rm(assistantDir, { recursive: true, force: true })
   await mkdir(assistantDir, { recursive: true })
