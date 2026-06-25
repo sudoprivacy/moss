@@ -11,6 +11,10 @@ emoji: "🛫"
 
 Use this skill for passenger requests that require real cabin hardware control.
 
+Only use the command names listed below. Do not invent command names such as
+`seat.recline`, `seat.light.off`, `seat.health`, or `cabin.scene.boarding`.
+If a passenger says 靠背/backrest/recline, use `seat.cushion --position`.
+
 Supported customer hardware APIs:
 
 - Seat cushion position: `seat.cushion`, query `seatNo`, `position`.
@@ -107,14 +111,16 @@ The script reads:
 - 阅读灯打开/关闭: `--command seat.light --on true|false`; if brightness is requested together, add `--pwm 0-100`.
 - 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-100`.
 - 座椅靠背/坐垫位置百分比: `--command seat.cushion --position 0-100`.
+- 座椅靠背/backrest/recline: always use `--command seat.cushion --position 0-100`; never use `seat.recline`.
 - 座椅通风: `--command seat.ventilation --level 0-10`.
 - 座椅加热: `--command seat.heating --level 0-10`.
 - 座椅按摩: `--command seat.massage --level 0-10`.
 - 生理检测开始/停止: `--command seat.health.start` or `--command seat.health.stop`.
 - 客舱顶灯打开/关闭: `--command cabin.ceiling.light --on true|false`.
 - 客舱顶灯颜色亮度: `--command cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`.
+- 客舱顶灯颜色 such as 蓝色/blue: use `--command cabin.ceiling.color`, not `cabin.ceiling.light`.
 - 客舱场景切换: `--command cabin.scene --preset boarding`; use the preset named by the user when provided.
-- 清除客舱场景: `--command cabin.scene.clear`.
+- 清除客舱场景: `--command cabin.scene.clear`; never approximate this as `cabin.scene --preset none`.
 
 ## Reply Rules
 

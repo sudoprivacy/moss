@@ -359,7 +359,18 @@ function buildAcceptedHardwareReply(text: string): string {
 
 function shouldUseAcceptedHardwareReply(text: string): boolean {
   if (!text.trim()) return true
+  if (/无法|不能|不可用|失败|未成功|没有可用|not available|cannot|can't|failed|error/i.test(text)) {
+    return false
+  }
   return /已(?:经)?(?:打开|关闭|完成|调好|处理好)|调用|执行|脚本|接口|技能|工具/u.test(text)
+}
+
+function shouldExposeHardwareReply(text: string): boolean {
+  if (!text.trim()) return false
+  if (/无法|不能|不可用|失败|未成功|没有可用|not available|cannot|can't|failed|error/i.test(text)) {
+    return true
+  }
+  return false
 }
 
 function sendPromptToRunnerSocket(
@@ -421,10 +432,10 @@ function sendPromptToRunnerSocket(
       }
 
       try {
-        const inner = JSON.parse(message.line) as { type?: string; status?: string }
+        const inner = JSON.parse(message.line) as { type?: string; status?: string; input?: unknown }
         if (inner.type === 'tool_use') {
           sawToolUse = true
-          if (suppressPreToolText) {
+          if (suppressPreToolText && typeof inner.input === 'string') {
             pendingText = ''
           }
         }
@@ -433,7 +444,9 @@ function sendPromptToRunnerSocket(
             if (suppressPreToolText) {
               const cleanedText = sanitizeCabinHardwareReply(pendingText)
               const acceptedHardwareReply = sawToolUse ? buildAcceptedHardwareReply(text) : ''
-              assistantText = acceptedHardwareReply && shouldUseAcceptedHardwareReply(cleanedText)
+              assistantText = shouldExposeHardwareReply(cleanedText)
+                ? cleanedText
+                : acceptedHardwareReply && shouldUseAcceptedHardwareReply(cleanedText)
                 ? acceptedHardwareReply
                 : cleanedText || acceptedHardwareReply || pendingText.trim()
               if (assistantText) {

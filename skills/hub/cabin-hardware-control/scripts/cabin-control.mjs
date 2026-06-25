@@ -147,6 +147,32 @@ const COMMANDS = {
 const LEGACY_COMMANDS = {
   'tray:open': 'seat.tray.open',
   'tray:close': 'seat.tray.close',
+  'seat.recline': 'seat.cushion',
+  'seat.backrest': 'seat.cushion',
+  'seat.position': 'seat.cushion',
+  'seat.light.on': 'seat.light',
+  'seat.light.off': 'seat.light',
+  'seat.health': 'seat.health.start',
+  'cabin.scene.none': 'cabin.scene.clear',
+  'cabin.scene.clear.none': 'cabin.scene.clear',
+}
+
+const COLOR_ALIASES = {
+  blue: { r: 0, g: 0, b: 255 },
+  蓝: { r: 0, g: 0, b: 255 },
+  蓝色: { r: 0, g: 0, b: 255 },
+  red: { r: 255, g: 0, b: 0 },
+  红: { r: 255, g: 0, b: 0 },
+  红色: { r: 255, g: 0, b: 0 },
+  green: { r: 0, g: 255, b: 0 },
+  绿: { r: 0, g: 255, b: 0 },
+  绿色: { r: 0, g: 255, b: 0 },
+  white: { r: 255, g: 255, b: 255 },
+  白: { r: 255, g: 255, b: 255 },
+  白色: { r: 255, g: 255, b: 255 },
+  warm: { r: 255, g: 180, b: 80 },
+  暖: { r: 255, g: 180, b: 80 },
+  暖色: { r: 255, g: 180, b: 80 },
 }
 
 function parseArgs(argv) {
@@ -164,6 +190,59 @@ function parseArgs(argv) {
     }
   }
   return args
+}
+
+function normalizeArgs(args) {
+  const normalized = { ...args }
+  const command = String(normalized.command ?? '').trim()
+
+  if (normalized.on === undefined) {
+    if (/\.on$/i.test(command)) normalized.on = 'true'
+    if (/\.off$/i.test(command)) normalized.on = 'false'
+  }
+
+  const sceneCommandMatch = command.match(/^cabin\.scene\.([A-Za-z0-9_.:-]+)$/i)
+  if (sceneCommandMatch) {
+    const preset = sceneCommandMatch[1]
+    if (['clear', 'none', 'off'].includes(preset.toLowerCase())) {
+      normalized.command = 'cabin.scene.clear'
+    } else {
+      normalized.command = 'cabin.scene'
+      normalized.preset ??= preset
+    }
+  }
+
+  if (normalized.action && normalized.on === undefined) {
+    const action = String(normalized.action).trim().toLowerCase()
+    if (['on', 'open', 'true', '1', '打开', '开启'].includes(action)) normalized.on = 'true'
+    if (['off', 'close', 'false', '0', '关闭', '关'].includes(action)) normalized.on = 'false'
+  }
+
+  if (normalized.position === undefined) {
+    if (normalized.percent !== undefined) normalized.position = normalized.percent
+    if (normalized.angle !== undefined) normalized.position = normalized.angle
+    if (normalized.value !== undefined) normalized.position = normalized.value
+  }
+
+  if (normalized.preset === undefined) {
+    if (normalized.scene !== undefined) normalized.preset = normalized.scene
+    if (normalized.mode !== undefined) normalized.preset = normalized.mode
+  }
+
+  const preset = String(normalized.preset ?? '').trim().toLowerCase()
+  if (['none', 'clear', 'off', '关闭', '清除', '取消'].includes(preset)) {
+    normalized.command = 'cabin.scene.clear'
+  }
+
+  const color = String(normalized.color ?? '').trim().toLowerCase()
+  const colorRgb = COLOR_ALIASES[color]
+  if (colorRgb) {
+    normalized.r ??= String(colorRgb.r)
+    normalized.g ??= String(colorRgb.g)
+    normalized.b ??= String(colorRgb.b)
+  }
+
+  return normalized
 }
 
 function fail(code, message, extra = {}) {
@@ -226,7 +305,17 @@ function parseParam(spec, args) {
 
 function resolveCommand(args) {
   const explicit = String(args.command || '').trim()
-  if (explicit) return explicit
+  if (explicit) {
+    if (explicit === 'cabin.ceiling.light' && (
+      args.r !== undefined ||
+      args.g !== undefined ||
+      args.b !== undefined ||
+      args.color !== undefined
+    )) {
+      return 'cabin.ceiling.color'
+    }
+    return LEGACY_COMMANDS[explicit] || explicit
+  }
 
   const legacyKey = `${String(args.device || '').trim().toLowerCase()}:${String(args.action || '').trim().toLowerCase()}`
   return LEGACY_COMMANDS[legacyKey] || ''
@@ -252,7 +341,7 @@ function normalizePayload(bodyText) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2))
+  const args = normalizeArgs(parseArgs(process.argv.slice(2)))
   if (args.help || args.h) {
     console.log(JSON.stringify({
       ok: true,
