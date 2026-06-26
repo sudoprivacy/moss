@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
-import { CabinServices, isCabinHardwareRequest, normalizeCabinPassengerReply } from './service.js'
+import { CabinServices, normalizeCabinPassengerReply, shouldBufferCabinReply } from './service.js'
 import { CabinStore } from './store.js'
 import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
 
@@ -505,10 +505,10 @@ export function createCabinApi(options: {
       writeSse(res, 'tool_call', inferredTool.toolCall)
     }
     let reply: string
-    const shouldNormalizeHardwareReply = isCabinHardwareRequest(text)
+    const shouldBufferReply = shouldBufferCabinReply(text)
     const bufferedDeltas: string[] = []
     const writeDelta = (delta: string): void => {
-      if (shouldNormalizeHardwareReply) {
+      if (shouldBufferReply) {
         bufferedDeltas.push(delta)
         return
       }
@@ -547,7 +547,7 @@ export function createCabinApi(options: {
       slots: inferredTool?.slots,
       toolCalls: inferredTool ? [inferredTool.toolCall] : null,
     })
-    if (shouldNormalizeHardwareReply || !cabinConfig.createMossSession) {
+    if (shouldBufferReply || !cabinConfig.createMossSession) {
       writeSse(res, 'delta', { content: reply })
     }
     writeSse(res, 'done', {

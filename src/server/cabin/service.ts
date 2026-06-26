@@ -398,12 +398,64 @@ function addPassengerSalutation(reply: string, context?: CabinPassengerContext):
   const salutation = buildPassengerSalutation(context)
   if (!salutation) return reply
   if (reply.startsWith(`${salutation}，`) || reply.startsWith(`${salutation},`)) return reply
+  const rawName = context?.passengerName?.trim()
+  if (rawName && new RegExp(`^${escapeRegExp(rawName)}(?:先生|女士|小姐|太太|夫人)?[，,！!]`).test(reply)) return reply
   return `${salutation}，${reply}`
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function isShortGreetingReply(text: string): boolean {
   const trimmed = text.trim()
   return trimmed.length <= 30 && /^(您好|你好|好的|在的|请问|有什么可以帮您|我在)/u.test(trimmed)
+}
+
+function isWeakGreetingRequest(text: string): boolean {
+  return /^(?:你好|您好|嗨|hello|hi|嗯|好|好的|知道了|有了|谢谢|thanks)[。！!，,\s]*$/iu.test(text.trim())
+}
+
+function isFlightInfoRequest(text: string): boolean {
+  return /航班|班机|飞行|起飞|降落|到达|目的地|出发地|flight|arrival|departure/i.test(text)
+}
+
+export function shouldBufferCabinReply(text: string): boolean {
+  return isCabinHardwareRequest(text) || isWeakGreetingRequest(text) || isFlightInfoRequest(text)
+}
+
+function formatFlightDate(value?: string): string {
+  const trimmed = value?.trim()
+  if (!trimmed) return ''
+  const match = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
+  if (!match) return trimmed
+  return `${match[1]} 年 ${Number(match[2])} 月 ${Number(match[3])} 日`
+}
+
+function buildFlightInfoReply(context?: CabinPassengerContext): string {
+  const parts: string[] = []
+  if (context?.flightNo) {
+    parts.push(`您目前乘坐的是 ${context.flightNo} 航班`)
+  } else if (context?.flightId) {
+    parts.push(`您当前航班编号为 ${context.flightId}`)
+  }
+  const date = formatFlightDate(context?.flightDate)
+  if (date) parts.push(`航班日期为 ${date}`)
+  if (context?.seatId) {
+    parts.push(`您的座位是 ${context.seatId}${context.columnNo ? ` 排 ${context.columnNo} 座` : ''}`)
+  }
+  if (!parts.length) return '当前暂未获取到完整航班信息，我会建议乘务人员为您确认。'
+  return `${parts.join('，')}。`
+}
+
+function sanitizeInternalCapabilityText(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .map(part => part.trim())
+    .filter(Boolean)
+    .filter(part => !/(?:技能|工具|接口|功能范围|硬件控制|内部|配置|token|cabin-hardware-control)/i.test(part))
+    .join('\n\n')
+    .trim()
 }
 
 export function normalizeCabinPassengerReply(input: {
@@ -414,10 +466,19 @@ export function normalizeCabinPassengerReply(input: {
   if (isCabinHardwareRequest(input.userText)) {
     return normalizeCabinHardwareReply(input)
   }
+  if (isWeakGreetingRequest(input.userText)) {
+    return addPassengerSalutation('您好，请问有什么可以帮您？', input.context)
+  }
+  if (isFlightInfoRequest(input.userText)) {
+    const sanitized = sanitizeInternalCapabilityText(input.reply)
+    const reply = sanitized || buildFlightInfoReply(input.context)
+    return addPassengerSalutation(reply, input.context)
+  }
+  const sanitizedReply = sanitizeInternalCapabilityText(input.reply)
   if (isShortGreetingReply(input.reply)) {
     return addPassengerSalutation(input.reply, input.context)
   }
-  return input.reply
+  return sanitizedReply || input.reply
 }
 
 export function normalizeCabinHardwareReply(input: {

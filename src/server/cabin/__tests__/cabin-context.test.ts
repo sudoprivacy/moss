@@ -472,7 +472,7 @@ describe('cabin binding context', () => {
 
     expect(normalizeCabinPassengerReply({
       userText: '你好',
-      reply: '您好，请问有什么可以帮您？',
+      reply: '您好！我是客舱 AI 乘务员，有什么可以帮助您的吗？',
       context,
     })).toBe('刘女士，您好，请问有什么可以帮您？')
 
@@ -483,9 +483,39 @@ describe('cabin binding context', () => {
     })).toBe('刘女士，您好，请问有什么可以帮您？')
 
     expect(normalizeCabinPassengerReply({
-      userText: '介绍一下航班服务',
-      reply: '您好，本次航班可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。',
+      userText: '介绍一下客舱服务',
+      reply: '您好，客舱可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。',
       context,
-    })).toBe('您好，本次航班可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。')
+    })).toBe('您好，客舱可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。')
+  })
+
+  it('removes internal skill boundary text from flight info replies', () => {
+    const context = {
+      flightId: '2',
+      flightDate: '2026-06-05',
+      flightNo: 'CA8888',
+      seatId: '01B',
+      columnNo: 'B',
+      tabletId: 'PAX-PAD-0003',
+      passengerName: '刘淑芬',
+    }
+
+    const reply = normalizeCabinPassengerReply({
+      userText: '查询下航班信息',
+      reply: [
+        '这个技能主要用于硬件控制，航班信息查询不在其功能范围内。',
+        '',
+        '刘淑芬女士，您好！您目前乘坐的是中国国际航空 CA8888 航班，航班日期为 2026 年 6 月 5 日，您的座位是 01B 排 B 座。',
+      ].join('\n'),
+      context,
+    })
+
+    expect(reply).toBe('刘淑芬女士，您好！您目前乘坐的是中国国际航空 CA8888 航班，航班日期为 2026 年 6 月 5 日，您的座位是 01B 排 B 座。')
+
+    expect(normalizeCabinPassengerReply({
+      userText: '查询下航班信息',
+      reply: '这个技能主要用于硬件控制，航班信息查询不在其功能范围内。',
+      context,
+    })).toBe('刘女士，您目前乘坐的是 CA8888 航班，航班日期为 2026 年 6 月 5 日，您的座位是 01B 排 B 座。')
   })
 })
