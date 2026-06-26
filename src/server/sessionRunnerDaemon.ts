@@ -140,6 +140,7 @@ export class SessionRunnerDaemon {
         scopes: this.manifest.session.scopes,
         runtime: this.manifest.session.runtime,
         assistantName: this.manifest.session.assistantName,
+        assistantDisplayName: this.manifest.session.assistantDisplayName,
         sessionToken: this.manifest.session.sessionToken,
         availableWikis: this.manifest.session.availableWikis,
         availableCorpApps: this.manifest.session.availableCorpApps,

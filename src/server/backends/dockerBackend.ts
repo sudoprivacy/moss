@@ -365,6 +365,7 @@ export class DockerBackend implements SessionBackend {
       scodeSessionIdPath,
       containerMode,
       assistantName: options.assistantName,
+      assistantDisplayName: options.assistantDisplayName,
       enabledSkillNames: enabledSkills,
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,

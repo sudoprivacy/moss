@@ -74,6 +74,7 @@ export type SessionCreateOptions = {
   scopes?: string[]
   runtime?: SessionRuntimeOptions
   assistantName?: string
+  assistantDisplayName?: string
 }
 
 export type BackendSpawnOptions = {
@@ -88,6 +89,7 @@ export type BackendSpawnOptions = {
   scopes?: string[]
   runtime?: SessionRuntimeOptions
   assistantName?: string
+  assistantDisplayName?: string
   enabledSkillNames?: string[]
   /**
    * Document Center v2: pre-signed JWT (signed by RuntimeService via

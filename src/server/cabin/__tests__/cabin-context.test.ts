@@ -5,7 +5,7 @@ import { Database } from 'bun:sqlite'
 import type { DatabaseSync } from 'node:sqlite'
 import { issueCabinToken, verifyCabinTokenDetailed } from '../auth.js'
 import { createCabinApi } from '../api.js'
-import { CabinServices } from '../service.js'
+import { CabinServices, normalizeCabinHardwareReply, normalizeCabinPassengerReply } from '../service.js'
 import type { RuntimeService } from '../../runtimeService.js'
 import type { ServerConfig } from '../../types.js'
 
@@ -96,6 +96,7 @@ function createCabinTestConfig(baseUrl: string): ServerConfig {
       llmModel: 'llm',
       controlTimeoutMs: 10_000,
       assistantName: 'cabin-ai-flight-attendant',
+      assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
     },
   }
@@ -343,7 +344,7 @@ describe('cabin binding context', () => {
       language: 'zh',
       text: '请帮我关闭读书灯',
     })
-    expect(events.at(-1)?.data.reply_text).toBe('已为您下发关闭读书灯的指令，请稍候。')
+    expect(events.at(-1)?.data.reply_text).toBe('刘女士，已为您下发关闭读书灯的指令，请稍候。')
 
     const historyResponse = await fetch(`${cabinBaseUrl}/v1/ai-chat/history?limit=10`, {
       headers: {
@@ -369,8 +370,122 @@ describe('cabin binding context', () => {
       {
         role: 'assistant',
         source: 'agent',
-        content: '已为您下发关闭读书灯的指令，请稍候。',
+        content: '刘女士，已为您下发关闭读书灯的指令，请稍候。',
       },
     ])
+  })
+
+  it('passes cabin assistant display name without replacing assistant id', async () => {
+    const upstream = http.createServer((req, res) => {
+      if (req.url === '/passenger') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          code: 0,
+          data: {
+            flightId: '2',
+            flightDate: '2026-06-05',
+            flightNo: 'MU001',
+            seatNo: '01A',
+            flightSeatId: '20',
+            passengerRef: 'REF-01A-2',
+            passengerName: '刘女士',
+            language: 'zh',
+          },
+        }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const upstreamBaseUrl = await listen(upstream)
+    const db = new Database(':memory:') as unknown as DatabaseSync
+    const createSessionCalls: Array<Record<string, unknown>> = []
+    const runtime = {
+      store: { db },
+      authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
+      createSession: async (input: Record<string, unknown>) => {
+        createSessionCalls.push(input)
+        return { sessionId: 'moss-session-1' }
+      },
+    } as unknown as RuntimeService
+    const config = createCabinTestConfig(upstreamBaseUrl)
+    config.cabin.createMossSession = true
+    const api = createCabinApi({ config, runtime })
+    const cabinServer = http.createServer(async (req, res) => {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname
+      const handled = await api.handle(req, res, pathname)
+      if (!handled) {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    const cabinBaseUrl = await listen(cabinServer)
+
+    const tokenResponse = await fetch(`${cabinBaseUrl}/v1/auth/token`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-cabin-tablet-token': 'tablet-token',
+        'x-cabin-tablet-id': 'PAX-PAD-0001',
+      },
+      body: JSON.stringify({
+        seatNo: '01A',
+        columnNo: 'A',
+        flightSeatId: '20',
+      }),
+    })
+    const tokenPayload = await tokenResponse.json() as { access_token: string }
+
+    const response = await fetch(`${cabinBaseUrl}/v1/ai-chat/history?limit=1`, {
+      headers: {
+        authorization: `Bearer ${tokenPayload.access_token}`,
+        'x-cabin-tablet-token': 'tablet-token',
+        'x-cabin-tablet-id': 'PAX-PAD-0001',
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(createSessionCalls).toHaveLength(1)
+    expect(createSessionCalls[0]).toMatchObject({
+      assistantName: 'cabin-ai-flight-attendant',
+      assistantDisplayName: '客舱 AI 乘务员',
+    })
+  })
+
+  it('normalizes accepted hardware replies without claiming completion', () => {
+    const reply = normalizeCabinHardwareReply({
+      userText: '请打开小桌板',
+      reply: '好的，已为您打开小桌板，请稍后。请问还有其他需要帮助的吗？',
+      context: { flightId: '2', flightDate: '2026-06-05', tabletId: 'PAX-PAD-0003', passengerName: '刘淑芬' },
+    })
+
+    expect(reply).toBe('刘女士，已为您下发打开小桌板的指令，请稍候。')
+  })
+
+  it('adds passenger salutation to short greetings only', () => {
+    const context = {
+      flightId: '2',
+      flightDate: '2026-06-05',
+      tabletId: 'PAX-PAD-0003',
+      passengerName: '刘淑芬',
+    }
+
+    expect(normalizeCabinPassengerReply({
+      userText: '你好',
+      reply: '您好，请问有什么可以帮您？',
+      context,
+    })).toBe('刘女士，您好，请问有什么可以帮您？')
+
+    expect(normalizeCabinPassengerReply({
+      userText: '你好',
+      reply: '刘女士，您好，请问有什么可以帮您？',
+      context,
+    })).toBe('刘女士，您好，请问有什么可以帮您？')
+
+    expect(normalizeCabinPassengerReply({
+      userText: '介绍一下航班服务',
+      reply: '您好，本次航班可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。',
+      context,
+    })).toBe('您好，本次航班可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。')
   })
 })

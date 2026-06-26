@@ -2,7 +2,7 @@
 name: cabin-hardware-control
 displayName: 客舱硬件控制
 description: Use this skill when a cabin passenger asks to control real cabin hardware, especially opening or closing the tray table, seat-side devices, lights, seat posture, or other equipment through customer cabin control APIs. The skill must use server-provided cabin_context for seat identity.
-version: 1.1.1
+version: 1.1.2
 category: 客舱服务
 emoji: "🛫"
 ---
@@ -40,6 +40,9 @@ Required fields:
 ## How To Execute
 
 Call the bundled script instead of hand-writing HTTP requests. Prefer `--command`.
+Pass only the command name as the `--command` value, and pass command parameters
+as separate flags. For example, use `--command seat.cushion --position 30`;
+do not prefer `--command "seat.cushion --position 30"`.
 
 When using the Bash tool to run this script, set `dangerouslyDisableSandbox: true`.
 The script is a server-provided hardware executor and must be allowed to reach

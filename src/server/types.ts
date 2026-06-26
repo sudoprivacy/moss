@@ -187,6 +187,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       controlAuth: z.string().optional(),
       controlTimeoutMs: z.number().int().min(1000).default(10_000),
       assistantName: z.string().default('cabin-ai-flight-attendant'),
+      assistantDisplayName: z.string().optional(),
       createMossSession: z.boolean().default(false),
     }).default({
       enabled: false,
@@ -203,6 +204,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
       assistantName: 'cabin-ai-flight-attendant',
+      assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
     }),
   }),
@@ -311,6 +313,7 @@ export type ServerConfig = {
     controlAuth?: string
     controlTimeoutMs: number
     assistantName: string
+    assistantDisplayName?: string
     createMossSession: boolean
   }
 }
@@ -432,6 +435,7 @@ export type SessionCreateInput = {
   scopes: string[]
   runtime?: SessionRuntimeOptions
   assistantName?: string
+  assistantDisplayName?: string
   source?: string
   channelChatId?: string
   /** Enabled skill names (optional, for non-assistant sessions) */
@@ -472,6 +476,7 @@ export type RunnerManifest = {
     dangerouslySkipPermissions: boolean
     runtime: SessionRuntimeInfo
     assistantName?: string
+    assistantDisplayName?: string
     /**
      * Document Center v2: pre-signed JWT for the in-container `wiki` CLI
      * to call /api/v1/agent/wikis*. Carries `assistant_id` so server-side

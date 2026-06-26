@@ -130,6 +130,25 @@ describe('shared agent memory', () => {
       expect(override).toContain('Always answer tersely.')
     })
   })
+
+  it('uses display name for assistant override identity when provided', async () => {
+    await withTempDir(async configDir => {
+      await writeAssistantOverrideAgentsMd({
+        configDir,
+        assistantName: 'cabin-ai-flight-attendant',
+        assistantDisplayName: '客舱 AI 乘务员',
+        assistantRules: 'Answer as a cabin attendant.',
+      })
+
+      const override = await readFile(
+        getAssistantOverrideAgentsMdPath(configDir),
+        'utf8',
+      )
+      expect(override).toContain('我是客舱 AI 乘务员')
+      expect(override).toContain('Your assistant identity is 客舱 AI 乘务员')
+      expect(override).not.toContain('我是cabin-ai-flight-attendant')
+    })
+  })
 })
 
 describe('runtime schema', () => {

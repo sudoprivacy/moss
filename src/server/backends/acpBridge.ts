@@ -29,6 +29,7 @@ type AcpBridgeOptions = {
   containerMode?: 'session' | 'user'
   // 新增参数：首次消息注入
   assistantName?: string
+  assistantDisplayName?: string
   enabledSkillNames?: string[]
   /**
    * Document Center v2: wikis this assistant is authorized to query.
@@ -384,6 +385,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       try {
         finalText = await prepareFirstMessageForScode(trimmedText, {
           assistantName: options.assistantName,
+          identityName: options.assistantDisplayName || options.assistantName,
           workspace: cwd,
           enabledSkillNames: options.enabledSkillNames,
           sharedMemory: options.sharedMemory,
@@ -397,7 +399,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       isFirstMessage = false
     } else if (options.assistantName) {
       // 后续消息：只注入身份声明
-      const identityBlock = buildIdentityBlock(options.assistantName)
+      const identityBlock = buildIdentityBlock(
+        options.assistantDisplayName || options.assistantName,
+      )
       finalText = `${identityBlock}[User Request]\n${trimmedText}`
     }
 

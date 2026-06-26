@@ -243,6 +243,7 @@ export async function prepareFirstMessageForScode(
   userContent: string,
   config: {
     assistantName?: string | null
+    identityName?: string | null
     workspace: string
     enabledSkillNames?: string[]
     sharedMemory?: string | null
@@ -271,7 +272,7 @@ export async function prepareFirstMessageForScode(
   // runtime-level override；首条消息注入保证 scode 没有读取该文件时
   // 也能收到同一套约束。
   if (config.assistantName) {
-    instructions.push(buildIdentityBlock(config.assistantName))
+    instructions.push(buildIdentityBlock(config.identityName || config.assistantName))
     const assistantRules = await loadAssistantRules(config.assistantName)
     if (assistantRules) {
       instructions.push(assistantRules)

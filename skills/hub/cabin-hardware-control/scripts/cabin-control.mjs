@@ -192,8 +192,57 @@ function parseArgs(argv) {
   return args
 }
 
+function tokenizeCommand(value) {
+  const tokens = []
+  let current = ''
+  let quote = ''
+
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i]
+    if (quote) {
+      if (char === quote) {
+        quote = ''
+      } else {
+        current += char
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+      continue
+    }
+    current += char
+  }
+
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function expandEmbeddedCommandArgs(args) {
+  const command = String(args.command ?? '').trim()
+  if (!command || !/\s/.test(command)) return args
+
+  const tokens = tokenizeCommand(command)
+  if (tokens.length <= 1) return args
+
+  const [commandName, ...embeddedArgv] = tokens
+  const embeddedArgs = parseArgs(embeddedArgv)
+  return {
+    ...embeddedArgs,
+    ...args,
+    command: commandName,
+  }
+}
+
 function normalizeArgs(args) {
-  const normalized = { ...args }
+  const normalized = expandEmbeddedCommandArgs({ ...args })
   const command = String(normalized.command ?? '').trim()
 
   if (normalized.on === undefined) {

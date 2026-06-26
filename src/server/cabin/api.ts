@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
-import { CabinServices } from './service.js'
+import { CabinServices, isCabinHardwareRequest, normalizeCabinPassengerReply } from './service.js'
 import { CabinStore } from './store.js'
 import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
 
@@ -409,6 +409,7 @@ export function createCabinApi(options: {
         role: 'user',
         scopes: ['sessions:create'],
         assistantName: cabinConfig.assistantName,
+        assistantDisplayName: cabinConfig.assistantDisplayName,
         source: 'cabin',
         channelChatId: `${context.flightId}:${context.passengerId || context.passengerRef || context.tabletId}`,
         runtime: {
@@ -504,13 +505,22 @@ export function createCabinApi(options: {
       writeSse(res, 'tool_call', inferredTool.toolCall)
     }
     let reply: string
+    const shouldNormalizeHardwareReply = isCabinHardwareRequest(text)
+    const bufferedDeltas: string[] = []
+    const writeDelta = (delta: string): void => {
+      if (shouldNormalizeHardwareReply) {
+        bufferedDeltas.push(delta)
+        return
+      }
+      writeSse(res, 'delta', { content: delta })
+    }
     try {
       reply = cabinConfig.createMossSession
         ? await services.generateReplyWithMossSession({
             mossSessionId: conversation.mossSessionId,
             context,
             text,
-            onDelta: delta => writeSse(res, 'delta', { content: delta }),
+            onDelta: writeDelta,
           })
         : await services.generateReply({
             context,
@@ -527,6 +537,7 @@ export function createCabinApi(options: {
       res.end()
       return
     }
+    reply = normalizeCabinPassengerReply({ userText: text, reply, context })
     const assistantMessage = store.appendMessage({
       conversationId: conversation.id,
       role: 'assistant',
@@ -536,7 +547,7 @@ export function createCabinApi(options: {
       slots: inferredTool?.slots,
       toolCalls: inferredTool ? [inferredTool.toolCall] : null,
     })
-    if (!cabinConfig.createMossSession) {
+    if (shouldNormalizeHardwareReply || !cabinConfig.createMossSession) {
       writeSse(res, 'delta', { content: reply })
     }
     writeSse(res, 'done', {
