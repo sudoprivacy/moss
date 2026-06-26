@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
+import { CabinDemoState } from './demo.js'
 import { CabinServices, normalizeCabinPassengerReply, shouldBufferCabinReply } from './service.js'
 import { CabinStore } from './store.js'
 import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
@@ -422,6 +423,7 @@ export function createCabinApi(options: {
       return created.sessionId
     },
   })
+  const demoState = new CabinDemoState(options.config, services)
 
   async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const tablet = requireTabletHeaders(req)
@@ -715,6 +717,39 @@ export function createCabinApi(options: {
     res.end(result.audio)
   }
 
+  async function handleDemoFlightState(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!cabinConfig.flightStateDemoEnabled) {
+      throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
+    }
+    const body = await readJsonBody(req)
+    try {
+      const result = await demoState.handleFlightState(body)
+      writeJson(res, 200, result)
+    } catch (error) {
+      throw mapServiceError(error)
+    }
+  }
+
+  function handleDemoAlerts(res: http.ServerResponse): void {
+    if (!cabinConfig.flightStateDemoEnabled) {
+      throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
+    }
+    writeJson(res, 200, {
+      status: 'ok',
+      alerts: demoState.alerts,
+    })
+  }
+
+  function handleDemoBroadcasts(res: http.ServerResponse): void {
+    if (!cabinConfig.flightStateDemoEnabled) {
+      throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
+    }
+    writeJson(res, 200, {
+      status: 'ok',
+      broadcasts: demoState.broadcasts,
+    })
+  }
+
   return {
     async handle(req, res, pathname) {
       if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
@@ -746,6 +781,18 @@ export function createCabinApi(options: {
         }
         if (req.method === 'POST' && pathname === '/v1/tts/speech') {
           await handleSpeech(req, res)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/cabin-demo/flight-state') {
+          await handleDemoFlightState(req, res)
+          return true
+        }
+        if (req.method === 'GET' && pathname === '/v1/cabin-demo/alerts') {
+          handleDemoAlerts(res)
+          return true
+        }
+        if (req.method === 'GET' && pathname === '/v1/cabin-demo/broadcasts') {
+          handleDemoBroadcasts(res)
           return true
         }
         return false

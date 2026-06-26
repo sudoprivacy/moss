@@ -98,6 +98,7 @@ function createCabinTestConfig(baseUrl: string): ServerConfig {
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
+      flightStateDemoEnabled: false,
     },
   }
 }
@@ -517,5 +518,90 @@ describe('cabin binding context', () => {
       reply: '这个技能主要用于硬件控制，航班信息查询不在其功能范围内。',
       context,
     })).toBe('刘女士，您目前乘坐的是 CA8888 航班，航班日期为 2026 年 6 月 5 日，您的座位是 01B 排 B 座。')
+  })
+
+  it('runs taxiing flight-state demo broadcast, alerts, and control commands', async () => {
+    const controlRequests: string[] = []
+    const upstream = http.createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://localhost')
+      if (url.pathname === '/tts') {
+        res.writeHead(200, { 'content-type': 'audio/wav' })
+        res.end(Buffer.from('RIFF....WAVE'))
+        return
+      }
+      if (url.pathname === '/playback') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ status: 'accepted' }))
+        return
+      }
+      if (url.pathname === '/alert') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ status: 'accepted' }))
+        return
+      }
+      if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
+        controlRequests.push(`${url.pathname}?${url.searchParams.toString()}`)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ status: 'accepted', code: 0, message: 'ok' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const upstreamBaseUrl = await listen(upstream)
+    const db = new Database(':memory:') as unknown as DatabaseSync
+    const runtime = {
+      store: { db },
+      authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
+    } as unknown as RuntimeService
+    const config = createCabinTestConfig(upstreamBaseUrl)
+    config.cabin.flightStateDemoEnabled = true
+    config.cabin.ttsUrl = `${upstreamBaseUrl}/tts`
+    config.cabin.controlBaseUrl = upstreamBaseUrl
+    config.cabin.controlAuth = 'test1'
+    config.cabin.demoPlaybackUrl = `${upstreamBaseUrl}/playback`
+    config.cabin.demoAlertUrl = `${upstreamBaseUrl}/alert`
+    const api = createCabinApi({ config, runtime })
+    const cabinServer = http.createServer(async (req, res) => {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname
+      const handled = await api.handle(req, res, pathname)
+      if (!handled) {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    const cabinBaseUrl = await listen(cabinServer)
+
+    const response = await fetch(`${cabinBaseUrl}/v1/cabin-demo/flight-state`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        flightId: '2',
+        flightNo: 'CA8888',
+        flightPhase: 'TAXIING',
+        seats: [
+          { seatNo: '01B', position: 20, trayState: 'open' },
+        ],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const payload = await response.json() as {
+      broadcast?: { playback?: { ok?: boolean } }
+      alerts?: Array<{ seatNo: string; type: string }>
+      commands?: Array<{ command: string; ok: boolean }>
+    }
+    expect(payload.broadcast?.playback?.ok).toBe(true)
+    expect(payload.alerts?.[0]).toMatchObject({
+      seatNo: '01B',
+      type: 'CABIN_DEVICE_NOT_READY',
+    })
+    expect(payload.commands?.map(command => command.command)).toEqual([
+      'seat.cushion',
+      'seat.tray.close',
+    ])
+    expect(payload.commands?.every(command => command.ok)).toBe(true)
+    expect(controlRequests).toContain('/admin-api/tcp-client/cmd/seat/cushion?seatNo=01B&position=0')
+    expect(controlRequests).toContain('/admin-api/tcp-client/cmd/seat/tray/close?seatNo=01B')
   })
 })
