@@ -9,7 +9,7 @@
   "feature": "cabin",
   "is_builtin": true,
   "enabled": true,
-  "installed_version": "1.2.0",
+  "installed_version": "1.2.1",
   "installed_at": "2026-06-22T00:00:00.000Z",
   "ruleFile": "cabin-ai-flight-attendant.md",
   "memory_mode": "session",
