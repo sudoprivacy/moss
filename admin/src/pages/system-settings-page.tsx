@@ -900,7 +900,7 @@ export default function SystemSettingsPage() {
 
         <SettingSection
           icon={Shield}
-          title="权限"
+          title="运行时设置"
           description="设置工具调用权限确认、最大轮次和 thinking 模式。"
         >
           <SettingField

@@ -1164,7 +1164,8 @@ async function writeWorkspaceFile(
       ? configuredLimit
       : 20 * 1024 * 1024
   if (buffer.length > uploadLimit) {
-    throw new HttpError(413, 'Uploaded file exceeds size limit')
+    const limitMb = Math.round(uploadLimit / (1024 * 1024))
+    throw new HttpError(413, `Uploaded file exceeds size limit (${limitMb}MB)`)
   }
 
   // Ensure the workspace root exists; for remote sessions it may not be
