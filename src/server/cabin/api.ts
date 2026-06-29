@@ -3,7 +3,8 @@ import { randomUUID } from 'crypto'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
-import { CabinServices } from './service.js'
+import { CabinDemoState } from './demo.js'
+import { CabinServices, normalizeCabinPassengerReply, shouldBufferCabinReply } from './service.js'
 import { CabinStore } from './store.js'
 import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
 
@@ -409,6 +410,7 @@ export function createCabinApi(options: {
         role: 'user',
         scopes: ['sessions:create'],
         assistantName: cabinConfig.assistantName,
+        assistantDisplayName: cabinConfig.assistantDisplayName,
         source: 'cabin',
         channelChatId: `${context.flightId}:${context.passengerId || context.passengerRef || context.tabletId}`,
         runtime: {
@@ -421,6 +423,7 @@ export function createCabinApi(options: {
       return created.sessionId
     },
   })
+  const demoState = new CabinDemoState(options.config, services)
 
   async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const tablet = requireTabletHeaders(req)
@@ -504,13 +507,22 @@ export function createCabinApi(options: {
       writeSse(res, 'tool_call', inferredTool.toolCall)
     }
     let reply: string
+    const shouldBufferReply = shouldBufferCabinReply(text)
+    const bufferedDeltas: string[] = []
+    const writeDelta = (delta: string): void => {
+      if (shouldBufferReply) {
+        bufferedDeltas.push(delta)
+        return
+      }
+      writeSse(res, 'delta', { content: delta })
+    }
     try {
       reply = cabinConfig.createMossSession
         ? await services.generateReplyWithMossSession({
             mossSessionId: conversation.mossSessionId,
             context,
             text,
-            onDelta: delta => writeSse(res, 'delta', { content: delta }),
+            onDelta: writeDelta,
           })
         : await services.generateReply({
             context,
@@ -527,6 +539,7 @@ export function createCabinApi(options: {
       res.end()
       return
     }
+    reply = normalizeCabinPassengerReply({ userText: text, reply, context })
     const assistantMessage = store.appendMessage({
       conversationId: conversation.id,
       role: 'assistant',
@@ -536,7 +549,7 @@ export function createCabinApi(options: {
       slots: inferredTool?.slots,
       toolCalls: inferredTool ? [inferredTool.toolCall] : null,
     })
-    if (!cabinConfig.createMossSession) {
+    if (shouldBufferReply || !cabinConfig.createMossSession) {
       writeSse(res, 'delta', { content: reply })
     }
     writeSse(res, 'done', {
@@ -704,6 +717,39 @@ export function createCabinApi(options: {
     res.end(result.audio)
   }
 
+  async function handleDemoFlightState(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!cabinConfig.flightStateDemoEnabled) {
+      throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
+    }
+    const body = await readJsonBody(req)
+    try {
+      const result = await demoState.handleFlightState(body)
+      writeJson(res, 200, result)
+    } catch (error) {
+      throw mapServiceError(error)
+    }
+  }
+
+  function handleDemoAlerts(res: http.ServerResponse): void {
+    if (!cabinConfig.flightStateDemoEnabled) {
+      throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
+    }
+    writeJson(res, 200, {
+      status: 'ok',
+      alerts: demoState.alerts,
+    })
+  }
+
+  function handleDemoBroadcasts(res: http.ServerResponse): void {
+    if (!cabinConfig.flightStateDemoEnabled) {
+      throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
+    }
+    writeJson(res, 200, {
+      status: 'ok',
+      broadcasts: demoState.broadcasts,
+    })
+  }
+
   return {
     async handle(req, res, pathname) {
       if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
@@ -735,6 +781,18 @@ export function createCabinApi(options: {
         }
         if (req.method === 'POST' && pathname === '/v1/tts/speech') {
           await handleSpeech(req, res)
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/cabin-demo/flight-state') {
+          await handleDemoFlightState(req, res)
+          return true
+        }
+        if (req.method === 'GET' && pathname === '/v1/cabin-demo/alerts') {
+          handleDemoAlerts(res)
+          return true
+        }
+        if (req.method === 'GET' && pathname === '/v1/cabin-demo/broadcasts') {
+          handleDemoBroadcasts(res)
           return true
         }
         return false

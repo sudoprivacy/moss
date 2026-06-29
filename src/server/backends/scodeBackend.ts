@@ -179,6 +179,7 @@ export class ScodeBackend implements SessionBackend {
       scodeSessionIdPath,
       // 新方案：传递智能体名称和启用的技能列表
       assistantName: options.assistantName,
+      assistantDisplayName: options.assistantDisplayName,
       enabledSkillNames: enabledSkills,
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,

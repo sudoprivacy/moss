@@ -87,7 +87,9 @@ export function getDefaultServerConfig(): ServerFileConfig {
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
       assistantName: 'cabin-ai-flight-attendant',
+      assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
+      flightStateDemoEnabled: false,
     },
   }
 }
@@ -196,9 +198,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? Number.parseInt(process.env.CABIN_CONTROL_TIMEOUT_MS, 10)
         : raw.cabin.controlTimeoutMs,
       assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
+      assistantDisplayName:
+        process.env.CABIN_ASSISTANT_DISPLAY_NAME || raw.cabin.assistantDisplayName,
       createMossSession: process.env.CABIN_CREATE_MOSS_SESSION
         ? process.env.CABIN_CREATE_MOSS_SESSION === '1' || process.env.CABIN_CREATE_MOSS_SESSION === 'true'
         : raw.cabin.createMossSession,
+      flightStateDemoEnabled: process.env.CABIN_FLIGHT_STATE_DEMO_ENABLED
+        ? process.env.CABIN_FLIGHT_STATE_DEMO_ENABLED === '1' || process.env.CABIN_FLIGHT_STATE_DEMO_ENABLED === 'true'
+        : raw.cabin.flightStateDemoEnabled,
+      demoPlaybackUrl: process.env.CABIN_DEMO_PLAYBACK_URL || raw.cabin.demoPlaybackUrl,
+      demoAlertUrl: process.env.CABIN_DEMO_ALERT_URL || raw.cabin.demoAlertUrl,
     },
   }
 }

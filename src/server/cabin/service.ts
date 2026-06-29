@@ -314,8 +314,12 @@ function extractAssistantText(line: string): string {
   return ''
 }
 
-function shouldSuppressPreToolText(text: string): boolean {
+export function isCabinHardwareRequest(text: string): boolean {
   return /小桌板|桌板|tray|灯|light|顶灯|座椅|靠背|坐垫|通风|加热|按摩|seat|温度|temperature|空调|air\s*condition|场景|scene|生理|健康|采集/i.test(text)
+}
+
+function shouldSuppressPreToolText(text: string): boolean {
+  return isCabinHardwareRequest(text)
 }
 
 function sanitizeCabinHardwareReply(text: string): string {
@@ -323,15 +327,17 @@ function sanitizeCabinHardwareReply(text: string): string {
     .replace(/^(?:现在|正在)?(?:调用|执行)[\s\S]*?(?:：|:\s*)/, '')
     .replace(/^(?:好的，)?我来帮您(?:打开|关闭|调整)?(?:小桌板|桌板)?[。！!，,\s]*/u, '')
     .replace(/^(?:好的，)?我来为您(?:打开|关闭|调整)?(?:小桌板|桌板)?[。！!，,\s]*/u, '')
+    .replace(/(?:\s|\n)*(?:请问)?(?:还)?(?:有)?(?:其他|其它)?(?:什么)?(?:需要|需求).*?吗[？?]?$/u, '')
     .trim()
 }
 
 function buildAcceptedHardwareReply(text: string): string {
   if (/阅读灯|读书灯|reading\s*light/i.test(text)) {
-    if (/关闭|关上|关掉|close|off/i.test(text)) return '已为您下发关闭阅读灯的指令，请稍候。'
-    if (/亮|brightness|调亮|调暗|暗一点/i.test(text)) return '已为您下发调整阅读灯亮度的指令，请稍候。'
-    if (/打开|开启|open|on/i.test(text)) return '已为您下发打开阅读灯的指令，请稍候。'
-    return '已为您下发阅读灯控制指令，请稍候。'
+    const lightLabel = /读书灯/i.test(text) ? '读书灯' : '阅读灯'
+    if (/关闭|关上|关掉|close|off/i.test(text)) return `已为您下发关闭${lightLabel}的指令，请稍候。`
+    if (/亮|brightness|调亮|调暗|暗一点/i.test(text)) return `已为您下发调整${lightLabel}亮度的指令，请稍候。`
+    if (/打开|开启|open|on/i.test(text)) return `已为您下发打开${lightLabel}的指令，请稍候。`
+    return `已为您下发${lightLabel}控制指令，请稍候。`
   }
   if (/小桌板|桌板|tray/i.test(text)) {
     if (/关闭|关上|合上|收起|close/i.test(text)) {
@@ -362,7 +368,7 @@ function shouldUseAcceptedHardwareReply(text: string): boolean {
   if (/无法|不能|不可用|失败|未成功|没有可用|not available|cannot|can't|failed|error/i.test(text)) {
     return false
   }
-  return /已(?:经)?(?:打开|关闭|完成|调好|处理好)|调用|执行|脚本|接口|技能|工具/u.test(text)
+  return /已(?:经)?(?:为您)?(?:打开|关闭|完成|调好|处理好)|已为您下发.*指令|调用|执行|脚本|接口|技能|工具/u.test(text)
 }
 
 function shouldExposeHardwareReply(text: string): boolean {
@@ -371,6 +377,126 @@ function shouldExposeHardwareReply(text: string): boolean {
     return true
   }
   return false
+}
+
+function buildPassengerSalutation(context?: CabinPassengerContext): string {
+  const rawName = context?.passengerName?.trim()
+  if (!rawName) return ''
+  if (/先生|女士|小姐|太太|夫人|sir|madam|miss|ms\.?|mr\.?/i.test(rawName)) return rawName
+
+  const genderHint = `${context?.passengerRef || ''} ${context?.passengerId || ''}`.toLowerCase()
+  const suffix = /female|女士|女/.test(genderHint) ? '女士' : /male|先生|男/.test(genderHint) ? '先生' : '女士'
+  const chineseName = rawName.match(/[\u4e00-\u9fa5]+/u)?.[0]
+  if (chineseName) {
+    const familyName = chineseName.slice(0, 1)
+    return `${familyName}${suffix}`
+  }
+  return rawName
+}
+
+function addPassengerSalutation(reply: string, context?: CabinPassengerContext): string {
+  const salutation = buildPassengerSalutation(context)
+  if (!salutation) return reply
+  if (reply.startsWith(`${salutation}，`) || reply.startsWith(`${salutation},`)) return reply
+  const rawName = context?.passengerName?.trim()
+  if (rawName && new RegExp(`^${escapeRegExp(rawName)}(?:先生|女士|小姐|太太|夫人)?[，,！!]`).test(reply)) return reply
+  return `${salutation}，${reply}`
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isShortGreetingReply(text: string): boolean {
+  const trimmed = text.trim()
+  return trimmed.length <= 30 && /^(您好|你好|好的|在的|请问|有什么可以帮您|我在)/u.test(trimmed)
+}
+
+function isWeakGreetingRequest(text: string): boolean {
+  return /^(?:你好|您好|嗨|hello|hi|嗯|好|好的|知道了|有了|谢谢|thanks)[。！!，,\s]*$/iu.test(text.trim())
+}
+
+function isFlightInfoRequest(text: string): boolean {
+  return /航班|班机|飞行|起飞|降落|到达|目的地|出发地|flight|arrival|departure/i.test(text)
+}
+
+export function shouldBufferCabinReply(text: string): boolean {
+  return isCabinHardwareRequest(text) || isWeakGreetingRequest(text) || isFlightInfoRequest(text)
+}
+
+function formatFlightDate(value?: string): string {
+  const trimmed = value?.trim()
+  if (!trimmed) return ''
+  const match = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
+  if (!match) return trimmed
+  return `${match[1]} 年 ${Number(match[2])} 月 ${Number(match[3])} 日`
+}
+
+function buildFlightInfoReply(context?: CabinPassengerContext): string {
+  const parts: string[] = []
+  if (context?.flightNo) {
+    parts.push(`您目前乘坐的是 ${context.flightNo} 航班`)
+  } else if (context?.flightId) {
+    parts.push(`您当前航班编号为 ${context.flightId}`)
+  }
+  const date = formatFlightDate(context?.flightDate)
+  if (date) parts.push(`航班日期为 ${date}`)
+  if (context?.seatId) {
+    parts.push(`您的座位是 ${context.seatId}${context.columnNo ? ` 排 ${context.columnNo} 座` : ''}`)
+  }
+  if (!parts.length) return '当前暂未获取到完整航班信息，我会建议乘务人员为您确认。'
+  return `${parts.join('，')}。`
+}
+
+function sanitizeInternalCapabilityText(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .map(part => part.trim())
+    .filter(Boolean)
+    .filter(part => !/(?:技能|工具|接口|功能范围|硬件控制|内部|配置|token|cabin-hardware-control)/i.test(part))
+    .join('\n\n')
+    .trim()
+}
+
+export function normalizeCabinPassengerReply(input: {
+  userText: string
+  reply: string
+  context?: CabinPassengerContext
+}): string {
+  if (isCabinHardwareRequest(input.userText)) {
+    return normalizeCabinHardwareReply(input)
+  }
+  if (isWeakGreetingRequest(input.userText)) {
+    return addPassengerSalutation('您好，请问有什么可以帮您？', input.context)
+  }
+  if (isFlightInfoRequest(input.userText)) {
+    const sanitized = sanitizeInternalCapabilityText(input.reply)
+    const reply = sanitized || buildFlightInfoReply(input.context)
+    return addPassengerSalutation(reply, input.context)
+  }
+  const sanitizedReply = sanitizeInternalCapabilityText(input.reply)
+  if (isShortGreetingReply(input.reply)) {
+    return addPassengerSalutation(input.reply, input.context)
+  }
+  return sanitizedReply || input.reply
+}
+
+export function normalizeCabinHardwareReply(input: {
+  userText: string
+  reply: string
+  context?: CabinPassengerContext
+}): string {
+  if (!isCabinHardwareRequest(input.userText)) return input.reply
+  const cleanedText = sanitizeCabinHardwareReply(input.reply)
+  if (shouldExposeHardwareReply(cleanedText)) return addPassengerSalutation(cleanedText, input.context)
+
+  const acceptedHardwareReply = buildAcceptedHardwareReply(input.userText)
+  if (acceptedHardwareReply && shouldUseAcceptedHardwareReply(cleanedText)) {
+    return addPassengerSalutation(acceptedHardwareReply, input.context)
+  }
+
+  const reply = cleanedText || acceptedHardwareReply || input.reply.trim()
+  return addPassengerSalutation(reply, input.context)
 }
 
 function sendPromptToRunnerSocket(

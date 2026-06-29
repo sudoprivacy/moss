@@ -520,6 +520,7 @@ export class RuntimeService {
       await this.spawnAttempt(created, {
         dangerouslySkipPermissions: input.dangerouslySkipPermissions,
         assistantName: input.assistantName,
+        assistantDisplayName: input.assistantDisplayName,
         enabledSkills: input.enabledSkills,
       })
     } catch (error) {
@@ -875,6 +876,7 @@ export class RuntimeService {
       dangerouslySkipPermissions?: boolean
       resumeTranscriptSessionId?: string
       assistantName?: string
+      assistantDisplayName?: string
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
@@ -888,6 +890,15 @@ export class RuntimeService {
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
     const effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+    let assistantDisplayName = options.assistantDisplayName
+    if (!assistantDisplayName && effectiveAssistantName) {
+      try {
+        const { resolveAssistantDisplayName } = await import('./agentStore.js')
+        assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)
+      } catch {
+        assistantDisplayName = effectiveAssistantName
+      }
+    }
 
     const generation = this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)
@@ -1074,6 +1085,7 @@ export class RuntimeService {
             await writeAssistantOverrideAgentsMd({
               configDir: session.runtime.configDir,
               assistantName: effectiveAssistantName,
+              assistantDisplayName,
               assistantRules: await import('./agentStore.js').then(m =>
                 m.getAssistantSystemPrompt(effectiveAssistantName!),
               ),
@@ -1236,6 +1248,7 @@ export class RuntimeService {
         dangerouslySkipPermissions:
           options.dangerouslySkipPermissions === true,
         assistantName: effectiveAssistantName,
+        assistantDisplayName,
         sessionToken,
         availableWikis,
         availableCorpApps,

@@ -196,17 +196,19 @@ export function buildUserProfileMemory(params: {
 export async function writeAssistantOverrideAgentsMd(params: {
   configDir?: string | null
   assistantName: string
+  assistantDisplayName?: string | null
   assistantRules?: string | null
   sharedMemory?: string | null
 }): Promise<void> {
+  const identityName = params.assistantDisplayName?.trim() || params.assistantName
   const lines = [
     '# Moss Assistant Override',
     '',
     'These instructions override any default runtime identity or generic assistant framing.',
     '',
     '## Identity Override',
-    `When asked "Who are you?" / "你是谁?" you MUST answer: "我是${params.assistantName}，有什么可以帮助你的吗？"`,
-    `Your assistant identity is ${params.assistantName}. Do not answer that you are Sudo Code when the user is asking your identity.`,
+    `When asked "Who are you?" / "你是谁?" you MUST answer: "我是${identityName}，有什么可以帮助你的吗？"`,
+    `Your assistant identity is ${identityName}. Do not answer that you are Sudo Code when the user is asking your identity.`,
     '',
   ]
 
