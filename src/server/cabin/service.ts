@@ -242,6 +242,7 @@ function buildPromptContext(context: CabinPassengerContext): Record<string, unkn
     flight_no: context.flightNo,
     flight_seat_id: context.flightSeatId,
     seat_id: context.seatId,
+    seat_no: context.seatId,
     column_no: context.columnNo,
     aircraft_seat_id: context.aircraftSeatId,
     aircraft_id: context.aircraftId,
@@ -267,7 +268,7 @@ function buildSeatToolArguments(context: CabinPassengerContext): Record<string, 
 
 function formatCabinSessionPrompt(context: CabinPassengerContext, text: string): string {
   return [
-    '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧。',
+    '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧；硬件控制的 seat-no 必须原样使用 cabin_context.seat_no 或 seat_id。',
     `cabin_context=${JSON.stringify(buildPromptContext(context))}`,
     '用户消息：',
     text,

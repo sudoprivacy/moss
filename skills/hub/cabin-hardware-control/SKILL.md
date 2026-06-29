@@ -2,7 +2,7 @@
 name: cabin-hardware-control
 displayName: 客舱硬件控制
 description: Use this skill when a cabin passenger asks to control real cabin hardware, especially opening or closing the tray table, seat-side devices, lights, seat posture, or other equipment through customer cabin control APIs. The skill must use server-provided cabin_context for seat identity.
-version: 1.1.2
+version: 1.1.3
 category: 客舱服务
 emoji: "🛫"
 ---
@@ -34,7 +34,7 @@ Use only the server-provided `cabin_context` from the current prompt. Do not ask
 
 Required fields:
 
-- `seat_id` or `seat_no`: passenger seat number, for example `01A`.
+- `seat_no` or `seat_id`: customer hardware `seatNo` code from `cabin_context`, for example `A`, `B`, `01A`, or any site-specific value. Use the value exactly as provided. Do not pad, concatenate, normalize, or infer a different seat number.
 - `column_no`: hardware side/channel, for example `A` or `B`. It may expand beyond A/B later. The current tray table API does not require it, but still pass it to the script for audit context.
 
 ## How To Execute
@@ -52,8 +52,8 @@ the real HTTP request is sent.
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command seat.tray.open \
-  --seat-no "01A" \
-  --column-no "B"
+  --seat-no "A" \
+  --column-no "A"
 ```
 
 Examples:
@@ -61,15 +61,15 @@ Examples:
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command seat.tray.close \
-  --seat-no "01A" \
-  --column-no "B"
+  --seat-no "A" \
+  --column-no "A"
 ```
 
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command seat.light \
-  --seat-no "01A" \
-  --column-no "B" \
+  --seat-no "A" \
+  --column-no "A" \
   --on true \
   --pwm 80
 ```
@@ -77,16 +77,16 @@ node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command seat.cushion \
-  --seat-no "01A" \
-  --column-no "B" \
+  --seat-no "A" \
+  --column-no "A" \
   --position 30
 ```
 
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command cabin.ceiling.color \
-  --seat-no "01A" \
-  --column-no "B" \
+  --seat-no "A" \
+  --column-no "A" \
   --r 20 \
   --g 20 \
   --b 20 \

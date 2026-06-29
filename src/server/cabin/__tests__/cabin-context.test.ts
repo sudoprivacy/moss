@@ -254,6 +254,48 @@ describe('cabin binding context', () => {
     })
   })
 
+  it('preserves site-specific hardware seat codes without normalizing them', () => {
+    const services = new CabinServices({
+      config: {
+        enabled: true,
+        asrUrl: 'http://127.0.0.1/asr',
+        asrModel: 'asr',
+        ttsUrl: 'http://127.0.0.1/tts',
+        ttsModel: 'tts',
+        ttsVoice: 'voice',
+        ttsLanguage: 'zh',
+        llmBaseUrl: 'http://127.0.0.1/v1',
+        llmModel: 'llm',
+        passengerInfoUrl: 'http://127.0.0.1/passenger',
+        passengerInfoPrivacyLevel: 2,
+        tokenSecret: 'test-secret',
+        tokenTtlSeconds: 7200,
+        createMossSession: false,
+        assistantName: 'cabin-ai-flight-attendant',
+      },
+      store: null as never,
+    })
+
+    const inferred = services.inferToolCall({
+      text: '帮我关闭读书灯',
+      context: {
+        flightId: '2',
+        flightDate: '2026-06-02',
+        flightSeatId: '21',
+        aircraftSeatId: '121',
+        seatId: 'A',
+        columnNo: 'A',
+        tabletId: 'PAX-PAD-0003',
+      },
+    })
+
+    expect(inferred?.toolCall.arguments).toMatchObject({
+      seat_id: 'A',
+      seat_no: 'A',
+      column_no: 'A',
+    })
+  })
+
   it('streams ASR text before agent reply in voice chat and stores one user message', async () => {
     const upstream = http.createServer((req, res) => {
       if (req.url === '/passenger') {
