@@ -210,6 +210,9 @@ export interface SystemSettings {
   /** Default for whether enterprise clients show tool calls in the chat stream.
    *  Client users may override locally. Stored in settings.json. */
   clientShowToolCalls: boolean
+  /** Max size (bytes) for a single file uploaded into a session workspace.
+   *  Enforced server-side (413 when exceeded). Default 20MB. */
+  workspaceUploadLimitBytes: number
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
@@ -229,6 +232,7 @@ export interface UpdateSystemSettingsRequest {
   oauth2?: Partial<SystemSettingsOAuth2>
   clientCronEnabled?: boolean
   clientShowToolCalls?: boolean
+  workspaceUploadLimitBytes?: number
 }
 
 // Direct Connect Server Types

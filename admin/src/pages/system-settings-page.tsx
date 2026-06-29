@@ -113,6 +113,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     },
     clientCronEnabled: settings.clientCronEnabled,
     clientShowToolCalls: settings.clientShowToolCalls,
+    workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
   }
 }
 
@@ -185,6 +186,9 @@ function buildSystemSettingsPatch(
   if (Object.keys(oauth2Patch).length > 0) {
     patch.oauth2 = oauth2Patch
   }
+
+  // workspaceUploadLimitBytes is owned by ClientSettingsSection (separate
+  // load/save), so it is intentionally not part of the primary auto-save patch.
 
   return patch
 }
@@ -259,8 +263,10 @@ function SettingsSkeleton() {
  * doesn't entangle the page's primary auto-save flow.
  */
 function ClientSettingsSection() {
+  const DEFAULT_UPLOAD_LIMIT_MB = 20
   const [cronEnabled, setCronEnabled] = useState(true)
   const [showToolCalls, setShowToolCalls] = useState(true)
+  const [uploadLimitMb, setUploadLimitMb] = useState(DEFAULT_UPLOAD_LIMIT_MB)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -272,6 +278,9 @@ function ClientSettingsSection() {
         if (cancelled) return
         setCronEnabled(res.clientCronEnabled !== false)
         setShowToolCalls(res.clientShowToolCalls !== false)
+        if (Number.isFinite(res.workspaceUploadLimitBytes) && res.workspaceUploadLimitBytes > 0) {
+          setUploadLimitMb(Math.round(res.workspaceUploadLimitBytes / (1024 * 1024)))
+        }
         setLoaded(true)
       })
       .catch(() => {
@@ -285,7 +294,11 @@ function ClientSettingsSection() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      await updateSystemSettings({ clientCronEnabled: cronEnabled, clientShowToolCalls: showToolCalls })
+      await updateSystemSettings({
+        clientCronEnabled: cronEnabled,
+        clientShowToolCalls: showToolCalls,
+        workspaceUploadLimitBytes: Math.max(1, uploadLimitMb) * 1024 * 1024,
+      })
       setDirty(false)
       toast.success('客户端设置已保存')
     } catch (error) {
@@ -324,6 +337,23 @@ function ClientSettingsSection() {
           disabled={!loaded || saving}
           onCheckedChange={(checked) => {
             setShowToolCalls(checked)
+            setDirty(true)
+          }}
+        />
+      </SettingField>
+
+      <SettingField
+        label="工作区上传大小上限 (MB)"
+        description="企业客户端上传到会话工作区的单个文件大小上限。默认 20MB。"
+      >
+        <Input
+          type="number"
+          min={1}
+          max={1024}
+          value={uploadLimitMb}
+          disabled={!loaded || saving}
+          onChange={(event) => {
+            setUploadLimitMb(Number.parseInt(event.target.value || '1', 10) || 1)
             setDirty(true)
           }}
         />
@@ -870,7 +900,7 @@ export default function SystemSettingsPage() {
 
         <SettingSection
           icon={Shield}
-          title="权限"
+          title="运行时设置"
           description="设置工具调用权限确认、最大轮次和 thinking 模式。"
         >
           <SettingField

@@ -55,6 +55,10 @@ export type SystemSettingsPayload = {
    *  locally. Stored in settings.json; surfaced to clients via
    *  GET /api/v1/tenant/config. */
   clientShowToolCalls: boolean
+  /** Max size (bytes) for a single file uploaded into a session workspace via
+   *  POST /api/v1/sessions/:id/workspace/file. Enforced server-side (413 when
+   *  exceeded). Admin-editable; default 20MB. */
+  workspaceUploadLimitBytes: number
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
@@ -99,6 +103,7 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   },
   clientCronEnabled: true,
   clientShowToolCalls: true,
+  workspaceUploadLimitBytes: 20 * 1024 * 1024,
 })
 
 type SystemSettingsState = {
@@ -162,6 +167,16 @@ function normalizeSystemSettings(
     result.clientShowToolCalls = Boolean(source.clientShowToolCalls)
   } else if (result.clientShowToolCalls === undefined) {
     result.clientShowToolCalls = DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls
+  }
+
+  if (source.workspaceUploadLimitBytes !== undefined) {
+    const limit = Number.parseInt(String(source.workspaceUploadLimitBytes), 10)
+    if (Number.isFinite(limit) && limit >= 1) {
+      // Cap at 1GB to keep a single base64 upload from exhausting server memory.
+      result.workspaceUploadLimitBytes = Math.min(limit, 1024 * 1024 * 1024)
+    }
+  } else if (result.workspaceUploadLimitBytes === undefined) {
+    result.workspaceUploadLimitBytes = DEFAULT_SYSTEM_SETTINGS.workspaceUploadLimitBytes
   }
 
   if (source.thinkingMode !== undefined) {
@@ -339,6 +354,7 @@ function toSystemSettingsPayload(
     oauth2: state.value.oauth2,
     clientCronEnabled: state.value.clientCronEnabled ?? DEFAULT_SYSTEM_SETTINGS.clientCronEnabled,
     clientShowToolCalls: state.value.clientShowToolCalls ?? DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls,
+    workspaceUploadLimitBytes: state.value.workspaceUploadLimitBytes ?? DEFAULT_SYSTEM_SETTINGS.workspaceUploadLimitBytes,
     settingsPath: state.path,
     settingsExists: state.exists,
     settingsLoaded: state.loaded,
@@ -416,6 +432,7 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
     oauth2: nextSettings.oauth2,
     clientCronEnabled: nextSettings.clientCronEnabled,
     clientShowToolCalls: nextSettings.clientShowToolCalls,
+    workspaceUploadLimitBytes: nextSettings.workspaceUploadLimitBytes,
     settingsPath: SYSTEM_SETTINGS_PATH,
     settingsExists: true,
     settingsLoaded: true,

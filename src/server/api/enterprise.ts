@@ -42,6 +42,7 @@ export function createEnterpriseApi(
             logo: logoBase64,
             client_cron_enabled: systemSettings.clientCronEnabled,
             client_show_tool_calls: systemSettings.clientShowToolCalls,
+            workspace_upload_limit_bytes: systemSettings.workspaceUploadLimitBytes,
             cabin_enabled: options.cabinEnabled === true,
           },
         }
