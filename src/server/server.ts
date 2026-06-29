@@ -1139,6 +1139,50 @@ async function readWorkspaceFilePreview(
   }
 }
 
+const WORKSPACE_UPLOAD_LIMIT_BYTES = WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES
+
+async function writeWorkspaceFile(
+  session: SessionRecord,
+  params: { path: string | null; contentBase64: string | null },
+): Promise<{ relativePath: string; size: number }> {
+  const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
+  if (!relativePath) throw new HttpError(400, 'Missing path')
+  if (typeof params.contentBase64 !== 'string') {
+    throw new HttpError(400, 'Missing content_base64')
+  }
+
+  let buffer: Buffer
+  try {
+    buffer = Buffer.from(params.contentBase64, 'base64')
+  } catch {
+    throw new HttpError(400, 'Invalid base64 content')
+  }
+  if (buffer.length > WORKSPACE_UPLOAD_LIMIT_BYTES) {
+    throw new HttpError(413, 'Uploaded file exceeds size limit')
+  }
+
+  // Ensure the workspace root exists; for remote sessions it may not be
+  // materialized until the runtime spawns, and we want upload-before-first-
+  // message to work.
+  await mkdir(session.cwd, { recursive: true })
+  const rootRealPath = await realpathOrHttpNotFound(session.cwd, 'Workspace root not found')
+
+  // resolveWorkspaceEntry realpaths the target and 404s if it does not exist
+  // yet, so for a not-yet-existing destination we mirror its guard logic
+  // manually against the resolved root.
+  const candidate = resolve(rootRealPath, relativePath)
+  if (!isInsideDir(rootRealPath, candidate)) {
+    throw new HttpError(403, 'Path escapes workspace root')
+  }
+
+  await mkdir(dirname(candidate), { recursive: true })
+  await writeFile(candidate, buffer)
+  return {
+    relativePath: toWorkspaceRelativePath(rootRealPath, candidate),
+    size: buffer.length,
+  }
+}
+
 function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
   if (!Array.isArray(value)) return []
   return value.flatMap(item => {
@@ -6224,6 +6268,22 @@ export function startServer(
           throw new HttpError(403, 'Forbidden')
         }
         writeJson(res, 200, await readWorkspaceFilePreview(session, url.searchParams.get('path')))
+        return
+      }
+
+      if (req.method === 'POST' && sessionWorkspaceFileMatch) {
+        const sessionId = sessionWorkspaceFileMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) throw new HttpError(404, 'Session not found')
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const body = await readJsonBody(req)
+        const result = await writeWorkspaceFile(session, {
+          path: typeof body.path === 'string' ? body.path : null,
+          contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
+        })
+        writeJson(res, 200, result)
         return
       }
 
