@@ -187,9 +187,8 @@ function buildSystemSettingsPatch(
     patch.oauth2 = oauth2Patch
   }
 
-  if (draft.workspaceUploadLimitBytes !== settings.workspaceUploadLimitBytes) {
-    patch.workspaceUploadLimitBytes = draft.workspaceUploadLimitBytes
-  }
+  // workspaceUploadLimitBytes is owned by ClientSettingsSection (separate
+  // load/save), so it is intentionally not part of the primary auto-save patch.
 
   return patch
 }
@@ -264,8 +263,10 @@ function SettingsSkeleton() {
  * doesn't entangle the page's primary auto-save flow.
  */
 function ClientSettingsSection() {
+  const DEFAULT_UPLOAD_LIMIT_MB = 20
   const [cronEnabled, setCronEnabled] = useState(true)
   const [showToolCalls, setShowToolCalls] = useState(true)
+  const [uploadLimitMb, setUploadLimitMb] = useState(DEFAULT_UPLOAD_LIMIT_MB)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -277,6 +278,9 @@ function ClientSettingsSection() {
         if (cancelled) return
         setCronEnabled(res.clientCronEnabled !== false)
         setShowToolCalls(res.clientShowToolCalls !== false)
+        if (Number.isFinite(res.workspaceUploadLimitBytes) && res.workspaceUploadLimitBytes > 0) {
+          setUploadLimitMb(Math.round(res.workspaceUploadLimitBytes / (1024 * 1024)))
+        }
         setLoaded(true)
       })
       .catch(() => {
@@ -290,7 +294,11 @@ function ClientSettingsSection() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      await updateSystemSettings({ clientCronEnabled: cronEnabled, clientShowToolCalls: showToolCalls })
+      await updateSystemSettings({
+        clientCronEnabled: cronEnabled,
+        clientShowToolCalls: showToolCalls,
+        workspaceUploadLimitBytes: Math.max(1, uploadLimitMb) * 1024 * 1024,
+      })
       setDirty(false)
       toast.success('客户端设置已保存')
     } catch (error) {
@@ -329,6 +337,23 @@ function ClientSettingsSection() {
           disabled={!loaded || saving}
           onCheckedChange={(checked) => {
             setShowToolCalls(checked)
+            setDirty(true)
+          }}
+        />
+      </SettingField>
+
+      <SettingField
+        label="工作区上传大小上限 (MB)"
+        description="企业客户端上传到会话工作区的单个文件大小上限。默认 20MB。"
+      >
+        <Input
+          type="number"
+          min={1}
+          max={1024}
+          value={uploadLimitMb}
+          disabled={!loaded || saving}
+          onChange={(event) => {
+            setUploadLimitMb(Number.parseInt(event.target.value || '1', 10) || 1)
             setDirty(true)
           }}
         />
@@ -914,29 +939,6 @@ export default function SystemSettingsPage() {
                     ? {
                         ...current,
                         maxTurns: Number.parseInt(event.target.value || '1', 10) || 1,
-                      }
-                    : current,
-                )
-              }
-            />
-          </SettingField>
-
-          <SettingField
-            label="工作区上传大小上限 (MB)"
-            description="企业客户端上传到会话工作区的单个文件大小上限。默认 20MB。"
-          >
-            <Input
-              type="number"
-              min={1}
-              max={1024}
-              value={Math.round(draft.workspaceUploadLimitBytes / (1024 * 1024))}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        workspaceUploadLimitBytes:
-                          (Number.parseInt(event.target.value || '1', 10) || 1) * 1024 * 1024,
                       }
                     : current,
                 )
