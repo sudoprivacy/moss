@@ -113,6 +113,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     },
     clientCronEnabled: settings.clientCronEnabled,
     clientShowToolCalls: settings.clientShowToolCalls,
+    workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
   }
 }
 
@@ -184,6 +185,10 @@ function buildSystemSettingsPatch(
   }
   if (Object.keys(oauth2Patch).length > 0) {
     patch.oauth2 = oauth2Patch
+  }
+
+  if (draft.workspaceUploadLimitBytes !== settings.workspaceUploadLimitBytes) {
+    patch.workspaceUploadLimitBytes = draft.workspaceUploadLimitBytes
   }
 
   return patch
@@ -909,6 +914,29 @@ export default function SystemSettingsPage() {
                     ? {
                         ...current,
                         maxTurns: Number.parseInt(event.target.value || '1', 10) || 1,
+                      }
+                    : current,
+                )
+              }
+            />
+          </SettingField>
+
+          <SettingField
+            label="工作区上传大小上限 (MB)"
+            description="企业客户端上传到会话工作区的单个文件大小上限。默认 20MB。"
+          >
+            <Input
+              type="number"
+              min={1}
+              max={1024}
+              value={Math.round(draft.workspaceUploadLimitBytes / (1024 * 1024))}
+              onChange={(event) =>
+                setDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        workspaceUploadLimitBytes:
+                          (Number.parseInt(event.target.value || '1', 10) || 1) * 1024 * 1024,
                       }
                     : current,
                 )

@@ -1139,8 +1139,6 @@ async function readWorkspaceFilePreview(
   }
 }
 
-const WORKSPACE_UPLOAD_LIMIT_BYTES = WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES
-
 async function writeWorkspaceFile(
   session: SessionRecord,
   params: { path: string | null; contentBase64: string | null },
@@ -1157,7 +1155,15 @@ async function writeWorkspaceFile(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  if (buffer.length > WORKSPACE_UPLOAD_LIMIT_BYTES) {
+  // Admin-configurable cap (settings.json: workspaceUploadLimitBytes), read per
+  // request so changes take effect without a restart. Falls back to 20MB if the
+  // setting is missing/invalid.
+  const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+  const uploadLimit =
+    Number.isFinite(configuredLimit) && configuredLimit > 0
+      ? configuredLimit
+      : 20 * 1024 * 1024
+  if (buffer.length > uploadLimit) {
     throw new HttpError(413, 'Uploaded file exceeds size limit')
   }
 
