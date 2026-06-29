@@ -522,9 +522,11 @@ describe('cabin binding context', () => {
 
   it('runs taxiing flight-state demo broadcast, alerts, and control commands', async () => {
     const controlRequests: string[] = []
+    let ttsRequests = 0
     const upstream = http.createServer((req, res) => {
       const url = new URL(req.url || '/', 'http://localhost')
       if (url.pathname === '/tts') {
+        ttsRequests += 1
         res.writeHead(200, { 'content-type': 'audio/wav' })
         res.end(Buffer.from('RIFF....WAVE'))
         return
@@ -587,11 +589,12 @@ describe('cabin binding context', () => {
 
     expect(response.status).toBe(200)
     const payload = await response.json() as {
-      broadcast?: { playback?: { ok?: boolean } }
+      broadcast?: { playback?: { ok?: boolean }; reused?: boolean }
       alerts?: Array<{ seatNo: string; type: string }>
       commands?: Array<{ command: string; ok: boolean }>
     }
     expect(payload.broadcast?.playback?.ok).toBe(true)
+    expect(payload.broadcast?.reused).toBe(false)
     expect(payload.alerts?.[0]).toMatchObject({
       seatNo: '01B',
       type: 'CABIN_DEVICE_NOT_READY',
@@ -603,5 +606,28 @@ describe('cabin binding context', () => {
     expect(payload.commands?.every(command => command.ok)).toBe(true)
     expect(controlRequests).toContain('/admin-api/tcp-client/cmd/seat/cushion?seatNo=01B&position=0')
     expect(controlRequests).toContain('/admin-api/tcp-client/cmd/seat/tray/close?seatNo=01B')
+
+    const secondResponse = await fetch(`${cabinBaseUrl}/v1/cabin-demo/flight-state`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        flightId: '2',
+        flightNo: 'CA8888',
+        flightPhase: 'TAXIING',
+        seats: [
+          { seatNo: '01B', position: 0, trayState: 'close' },
+        ],
+      }),
+    })
+    const secondPayload = await secondResponse.json() as {
+      broadcast?: { reused?: boolean; elapsedMs?: number }
+      alerts?: unknown[]
+      commands?: unknown[]
+    }
+    expect(secondPayload.broadcast?.reused).toBe(true)
+    expect(secondPayload.broadcast?.elapsedMs).toBe(0)
+    expect(secondPayload.alerts).toEqual([])
+    expect(secondPayload.commands).toEqual([])
+    expect(ttsRequests).toBe(1)
   })
 })

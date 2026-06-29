@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'fs/promises'
+import { access, mkdir, writeFile } from 'fs/promises'
 import path from 'path'
 import { randomUUID } from 'crypto'
 import type { ServerConfig } from '../types.js'
@@ -38,6 +38,7 @@ type DemoBroadcast = {
   audioPath: string
   contentType: string
   elapsedMs: number
+  reused: boolean
   playback: {
     configured: boolean
     ok: boolean
@@ -137,26 +138,49 @@ export class CabinDemoState {
   }
 
   private async createTaxiingBroadcast(flightId: string, flightNo: string, flightPhase: string): Promise<DemoBroadcast> {
-    const speech = await this.services.speech(TAXIING_BROADCAST_TEXT)
     const dir = path.join(this.config.rootDir, 'cabin-demo', 'broadcasts')
     await mkdir(dir, { recursive: true })
+    const audioPath = path.join(dir, 'taxiing-fixed.wav')
+    const generated = await this.ensureTaxiingBroadcastAudio(audioPath)
     const id = randomUUID()
-    const audioPath = path.join(dir, `taxiing-${id}.wav`)
-    await writeFile(audioPath, speech.audio)
     const broadcast: DemoBroadcast = {
       id,
       flightId,
       flightNo,
       flightPhase,
       audioPath,
-      contentType: speech.contentType,
-      elapsedMs: speech.elapsedMs,
+      contentType: generated.contentType,
+      elapsedMs: generated.elapsedMs,
+      reused: generated.reused,
       playback: await this.postPlayback({ flightId, flightNo, flightPhase, audioPath }),
       createdAt: new Date().toISOString(),
     }
     this.broadcasts.unshift(broadcast)
     this.broadcasts.splice(20)
     return broadcast
+  }
+
+  private async ensureTaxiingBroadcastAudio(audioPath: string): Promise<{
+    contentType: string
+    elapsedMs: number
+    reused: boolean
+  }> {
+    try {
+      await access(audioPath)
+      return {
+        contentType: 'audio/wav',
+        elapsedMs: 0,
+        reused: true,
+      }
+    } catch {
+      const speech = await this.services.speech(TAXIING_BROADCAST_TEXT)
+      await writeFile(audioPath, speech.audio)
+      return {
+        contentType: speech.contentType,
+        elapsedMs: speech.elapsedMs,
+        reused: false,
+      }
+    }
   }
 
   private recordAlert(input: Omit<DemoAlert, 'id' | 'createdAt'>): DemoAlert {
