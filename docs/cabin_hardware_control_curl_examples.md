@@ -96,10 +96,10 @@ curl --location --request POST 'http://1.94.107.87:48081/admin-api/tcp-client/cm
 
 ## 9. 调整阅读灯亮度
 
-`pwm` 范围：`0-100`。
+`pwm` 范围：`0-1000`。
 
 ```bash
-curl --location --request POST 'http://1.94.107.87:48081/admin-api/tcp-client/cmd/seat/light/brightness?seatNo=A&pwm=50' \
+curl --location --request POST 'http://1.94.107.87:48081/admin-api/tcp-client/cmd/seat/light/brightness?seatNo=A&pwm=500' \
   --header 'Authorization: test1'
 ```
 

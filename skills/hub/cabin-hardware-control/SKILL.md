@@ -71,7 +71,7 @@ node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --seat-no "A" \
   --column-no "A" \
   --on true \
-  --pwm 80
+  --pwm 800
 ```
 
 ```bash
@@ -111,8 +111,8 @@ The script reads:
 
 - 小桌板打开/展开: `--command seat.tray.open`
 - 小桌板关闭/收起: `--command seat.tray.close`
-- 阅读灯打开/关闭: `--command seat.light --on true|false`; if brightness is requested together, add `--pwm 0-100`.
-- 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-100`.
+- 阅读灯打开/关闭: `--command seat.light --on true|false`; if brightness is requested together, add `--pwm 0-1000`.
+- 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-1000`.
 - 座椅靠背/坐垫位置百分比: `--command seat.cushion --position 0-100`.
 - 座椅靠背/backrest/recline: always use `--command seat.cushion --position 0-100`; never use `seat.recline`.
 - 放倒座椅/躺下/往后躺/后仰/调舒服一点: use `--command seat.cushion`. If the passenger does not provide a percentage, use `--position 60`.

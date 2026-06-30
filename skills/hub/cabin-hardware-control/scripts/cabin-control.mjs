@@ -70,7 +70,7 @@ const COMMANDS = {
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
       { name: 'on', arg: 'on', required: true, type: 'bool' },
-      { name: 'pwm', arg: 'pwm', required: false, type: 'int', min: 0, max: 100 },
+      { name: 'pwm', arg: 'pwm', required: false, type: 'int', min: 0, max: 1000 },
     ],
     label: args => `${args.on ? '打开' : '关闭'}阅读灯`,
   },
@@ -80,9 +80,9 @@ const COMMANDS = {
     path: '/admin-api/tcp-client/cmd/seat/light/brightness',
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
-      { name: 'pwm', arg: 'pwm', required: true, type: 'int', min: 0, max: 100 },
+      { name: 'pwm', arg: 'pwm', required: true, type: 'int', min: 0, max: 1000 },
     ],
-    label: args => `阅读灯亮度调整到 ${args.pwm}%`,
+    label: args => `阅读灯亮度调整到 ${args.pwm}`,
   },
   'seat.health.start': {
     device: 'health',
@@ -406,7 +406,7 @@ function sanitizeUrl(value) {
 }
 
 function logCabinHardware(event) {
-  const file = String(process.env.CABIN_LOG_FILE || '').trim()
+  const file = String(process.env.CABIN_LOG_FILE || '/app/data/logs/cabin.jsonl').trim()
   if (!file) return
   const payload = {
     time: new Date().toISOString(),
