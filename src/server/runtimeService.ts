@@ -1337,6 +1337,7 @@ export class RuntimeService {
         runnerEnv.CABIN_CONTROL_AUTH = this.options.config.cabin.controlAuth
       }
       runnerEnv.CABIN_CONTROL_TIMEOUT_MS = String(this.options.config.cabin.controlTimeoutMs)
+      runnerEnv.CABIN_LOG_FILE = this.options.config.cabin.logFile || join(this.options.config.rootDir, 'logs', 'cabin.jsonl')
     }
 
     // Inject Auth Proxy token for scode process. The URL must be reachable from

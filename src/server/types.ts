@@ -192,6 +192,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       flightStateDemoEnabled: z.boolean().default(false),
       demoPlaybackUrl: z.string().optional(),
       demoAlertUrl: z.string().optional(),
+      logEnabled: z.boolean().default(true),
+      logFile: z.string().optional(),
     }).default({
       enabled: false,
       tokenSecret: 'dev-cabin-token-secret',
@@ -210,6 +212,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
       flightStateDemoEnabled: false,
+      logEnabled: true,
     }),
   }),
 )
@@ -322,6 +325,8 @@ export type ServerConfig = {
     flightStateDemoEnabled: boolean
     demoPlaybackUrl?: string
     demoAlertUrl?: string
+    logEnabled: boolean
+    logFile?: string
   }
 }
 

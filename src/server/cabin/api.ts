@@ -6,6 +6,7 @@ import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
 import { CabinDemoState } from './demo.js'
 import { CabinServices, normalizeCabinPassengerReply, shouldBufferCabinReply } from './service.js'
 import { CabinStore } from './store.js'
+import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
 
 type JsonBody = Record<string, unknown>
@@ -235,6 +236,8 @@ function optionalCabinTokenFields(body: JsonBody): Omit<CabinTokenPayload, 'tabl
     tabletType: stringBodyField(body, 'tabletType'),
     bindingId: stringBodyField(body, 'bindingId'),
     contextStatus: stringBodyField(body, 'contextStatus'),
+    passengerGender: stringBodyField(body, 'passengerGender'),
+    passengerTitle: stringBodyField(body, 'passengerTitle'),
   }
 }
 
@@ -290,12 +293,15 @@ function stringFromObject(value: unknown, ...keys: string[]): string | undefined
 async function fetchPassengerContext(
   config: ServerConfig['cabin'],
   tablet: { tabletToken: string; tabletId: string },
+  logger?: CabinLogger,
+  logContext?: CabinLogContext,
 ): Promise<CabinPassengerContext> {
   if (!config.passengerInfoUrl) {
     throw new CabinHttpError(500, 'PASSENGER_INFO_NOT_CONFIGURED', 'cabin.passengerInfoUrl is required')
   }
   let response: Response | null = null
   let lastError: unknown
+  const start = Date.now()
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10_000)
@@ -323,9 +329,29 @@ async function fetchPassengerContext(
   }
   if (!response) {
     const message = lastError instanceof Error ? lastError.message : String(lastError)
+    logger?.log({
+      type: 'outbound',
+      ...summarizeContext({ ...logContext, tabletId: tablet.tabletId }),
+      upstream: 'passenger-info',
+      method: 'POST',
+      url: config.passengerInfoUrl,
+      ok: false,
+      elapsedMs: Date.now() - start,
+      errorMessage: message,
+    })
     throw new CabinHttpError(502, 'PASSENGER_INFO_FAILED', `Passenger info request failed: ${message}`)
   }
   if (!response.ok) {
+    logger?.log({
+      type: 'outbound',
+      ...summarizeContext({ ...logContext, tabletId: tablet.tabletId }),
+      upstream: 'passenger-info',
+      method: 'POST',
+      url: config.passengerInfoUrl,
+      status: response.status,
+      ok: false,
+      elapsedMs: Date.now() - start,
+    })
     throw new CabinHttpError(502, 'PASSENGER_INFO_FAILED', `Passenger info request failed: ${response.status}`)
   }
   const envelope = await response.json() as unknown
@@ -336,6 +362,18 @@ async function fetchPassengerContext(
       const message = typeof msg === 'string' && msg.trim()
         ? msg.trim()
         : 'Invalid tablet token'
+      logger?.log({
+        type: 'outbound',
+        ...summarizeContext({ ...logContext, tabletId: tablet.tabletId }),
+        upstream: 'passenger-info',
+        method: 'POST',
+        url: config.passengerInfoUrl,
+        status: response.status,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorCode: 'INVALID_TABLET_TOKEN',
+        errorMessage: message,
+      })
       throw new CabinHttpError(401, 'INVALID_TABLET_TOKEN', message)
     }
   }
@@ -350,11 +388,15 @@ async function fetchPassengerContext(
   const seatId = stringFromObject(data, 'seatNo', 'seat_id', 'seatId') || stringFromObject(passenger, 'seatNo', 'seat_id', 'seatId')
   if (!flightId) throw new CabinHttpError(502, 'PASSENGER_INFO_INVALID', 'Passenger info response missing flightId')
   if (!flightDate) throw new CabinHttpError(502, 'PASSENGER_INFO_INVALID', 'Passenger info response missing flightDate')
-  return {
+  const context = {
     passengerId: stringFromObject(passenger, 'passengerId', 'id'),
     passengerRef: stringFromObject(passenger, 'passengerRef', 'passenger_ref') || stringFromObject(data, 'passengerRef', 'passenger_ref'),
     passengerName: stringFromObject(passenger, 'displayName', 'passengerName', 'passengerNameMasked')
       || stringFromObject(data, 'displayName', 'passengerName', 'passengerNameMasked'),
+    passengerGender: stringFromObject(passenger, 'gender', 'sex', 'passengerGender', 'passengerSex')
+      || stringFromObject(data, 'gender', 'sex', 'passengerGender', 'passengerSex'),
+    passengerTitle: stringFromObject(passenger, 'title', 'salutation', 'passengerTitle')
+      || stringFromObject(data, 'title', 'salutation', 'passengerTitle'),
     flightId,
     flightDate,
     flightNo: stringFromObject(flight, 'flightNo', 'flight_no') || stringFromObject(data, 'flightNo', 'flight_no'),
@@ -363,13 +405,35 @@ async function fetchPassengerContext(
     tabletId: tablet.tabletId,
     language: stringFromObject(passenger, 'language') || stringFromObject(data, 'language'),
   }
+  logger?.log({
+    type: 'outbound',
+    ...summarizeContext({
+      ...logContext,
+      tabletId: context.tabletId,
+      seatNo: context.seatId,
+      flightId: context.flightId,
+    }),
+    upstream: 'passenger-info',
+    method: 'POST',
+    url: config.passengerInfoUrl,
+    status: response.status,
+    ok: true,
+    elapsedMs: Date.now() - start,
+  })
+  return context
 }
 
-async function contextFromToken(config: ServerConfig['cabin'], payload: CabinTokenPayload, headers: { tabletToken: string; tabletId: string }): Promise<CabinPassengerContext> {
+async function contextFromToken(
+  config: ServerConfig['cabin'],
+  payload: CabinTokenPayload,
+  headers: { tabletToken: string; tabletId: string },
+  logger?: CabinLogger,
+  logContext?: CabinLogContext,
+): Promise<CabinPassengerContext> {
   if (payload.tabletId !== headers.tabletId || payload.tabletToken !== headers.tabletToken) {
     throw new CabinHttpError(401, 'UNAUTHORIZED', 'Cabin token does not match tablet headers')
   }
-  const passengerContext = await fetchPassengerContext(config, headers)
+  const passengerContext = await fetchPassengerContext(config, headers, logger, logContext)
   return {
     ...passengerContext,
     tabletToken: payload.tabletToken,
@@ -383,6 +447,8 @@ async function contextFromToken(config: ServerConfig['cabin'], payload: CabinTok
     tabletType: payload.tabletType,
     bindingId: payload.bindingId,
     contextStatus: payload.contextStatus,
+    passengerGender: passengerContext.passengerGender || payload.passengerGender,
+    passengerTitle: passengerContext.passengerTitle || payload.passengerTitle,
   }
 }
 
@@ -394,10 +460,12 @@ export function createCabinApi(options: {
 } {
   const cabinConfig = options.config.cabin
   const store = new CabinStore(options.runtime.store.db)
+  const cabinLogger = new CabinLogger(options.config)
   const services = new CabinServices({
     config: cabinConfig,
     store,
     runtime: options.runtime,
+    logger: cabinLogger,
     createMossSession: async (context) => {
       if (!cabinConfig.createMossSession) return `cabin-${randomUUID()}`
       const orgId = options.runtime.authService.listAllOrganizations().organizations[0]?.id
@@ -423,9 +491,9 @@ export function createCabinApi(options: {
       return created.sessionId
     },
   })
-  const demoState = new CabinDemoState(options.config, services)
+  const demoState = new CabinDemoState(options.config, services, cabinLogger)
 
-  async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
     const tokenContext = optionalCabinTokenFields(body)
@@ -442,16 +510,37 @@ export function createCabinApi(options: {
       token_type: 'Bearer',
       expires_in: cabinConfig.tokenTtlSeconds,
     })
+    cabinLogger.log({
+      type: 'outbound',
+      requestId,
+      tabletId: tablet.tabletId,
+      upstream: 'cabin-token',
+      method: 'SIGN',
+      ok: true,
+      elapsedMs: 0,
+      details: {
+        expires_in: cabinConfig.tokenTtlSeconds,
+        seat_no: tokenContext.seatNo,
+        flight_seat_id: tokenContext.flightSeatId,
+      },
+    })
   }
 
-  async function handleVoiceQuery(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleVoiceQuery(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
     const form = await readMultipartForm(req)
     const file = form.file
     const language = validateLanguage(form.fields.language)
-    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
+    const logContext = {
+      requestId,
+      tabletId: context.tabletId,
+      seatNo: context.seatId,
+      flightId: context.flightId,
+      conversationId: conversation.id,
+    }
     let result: Awaited<ReturnType<CabinServices['transcribe']>>
     try {
       result = await services.transcribe({
@@ -459,6 +548,7 @@ export function createCabinApi(options: {
         filename: file.filename,
         contentType: file.contentType,
         language: language === 'auto' ? undefined : language,
+        logContext,
       })
     } catch (error) {
       throw mapServiceError(error)
@@ -491,8 +581,16 @@ export function createCabinApi(options: {
     conversation: Awaited<ReturnType<CabinServices['ensureConversation']>>
     text: string
     source: 'voice' | 'text'
+    requestId: string
   }): Promise<void> {
-    const { res, context, conversation, text, source } = input
+    const { res, context, conversation, text, source, requestId } = input
+    const logContext = {
+      requestId,
+      tabletId: context.tabletId,
+      seatNo: context.seatId,
+      flightId: context.flightId,
+      conversationId: conversation.id,
+    }
     store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
@@ -523,11 +621,13 @@ export function createCabinApi(options: {
             context,
             text,
             onDelta: writeDelta,
+            logContext,
           })
         : await services.generateReply({
             context,
             messages: store.listMessages(conversation.id, 30),
             text,
+            logContext,
           })
     } catch (error) {
       const mapped = mapServiceError(error)
@@ -549,6 +649,20 @@ export function createCabinApi(options: {
       slots: inferredTool?.slots,
       toolCalls: inferredTool ? [inferredTool.toolCall] : null,
     })
+    cabinLogger.log({
+      type: 'outbound',
+      ...logContext,
+      upstream: 'agent-reply',
+      method: 'GENERATE',
+      ok: true,
+      elapsedMs: 0,
+      details: {
+        source,
+        input_chars: text.length,
+        reply_chars: reply.length,
+        intent: assistantMessage.intent || '',
+      },
+    })
     if (shouldBufferReply || !cabinConfig.createMossSession) {
       writeSse(res, 'delta', { content: reply })
     }
@@ -560,7 +674,7 @@ export function createCabinApi(options: {
     res.end()
   }
 
-  async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
@@ -569,7 +683,7 @@ export function createCabinApi(options: {
     const source = parseMessageSource(stringField(body, 'source'))
     validateLanguage(stringField(body, 'language'))
 
-    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -583,10 +697,11 @@ export function createCabinApi(options: {
       conversation,
       text,
       source,
+      requestId,
     })
   }
 
-  async function handleVoiceChatSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleVoiceChatSend(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
     const form = await readMultipartForm(req)
@@ -595,8 +710,15 @@ export function createCabinApi(options: {
     const source = form.fields.source
       ? parseMessageSource(form.fields.source)
       : 'voice'
-    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
+    const logContext = {
+      requestId,
+      tabletId: context.tabletId,
+      seatNo: context.seatId,
+      flightId: context.flightId,
+      conversationId: conversation.id,
+    }
 
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -612,6 +734,7 @@ export function createCabinApi(options: {
         filename: file.filename,
         contentType: file.contentType,
         language: language === 'auto' ? undefined : language,
+        logContext,
       })
     } catch (error) {
       const mapped = mapServiceError(error)
@@ -650,13 +773,14 @@ export function createCabinApi(options: {
       conversation,
       text: result.text,
       source,
+      requestId,
     })
   }
 
-  async function handleHistory(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+  async function handleHistory(req: http.IncomingMessage, res: http.ServerResponse, url: URL, requestId: string): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
-    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
     const limit = Number.parseInt(url.searchParams.get('limit') || '20', 10)
     const normalizedLimit = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 20, 100))
@@ -685,24 +809,31 @@ export function createCabinApi(options: {
     })
   }
 
-  async function handleReset(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleReset(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
-    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
     store.resetConversation(conversation.id)
     writeJson(res, 200, { status: 'ok', cleared: true })
   }
 
-  async function handleSpeech(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleSpeech(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const payload = requireCabinToken(req, cabinConfig)
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
     const text = stringField(body, 'text') || stringField(body, 'content')
     if (!text) throw new CabinHttpError(400, 'MISSING_TEXT', 'text is required')
-    const context = await contextFromToken(cabinConfig, payload, tablet)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
-    const result = await services.speech(text)
+    const logContext = {
+      requestId,
+      tabletId: context.tabletId,
+      seatNo: context.seatId,
+      flightId: context.flightId,
+      conversationId: conversation.id,
+    }
+    const result = await services.speech(text, logContext)
     store.insertVoiceLog({
       conversationId: conversation.id,
       type: 'tts',
@@ -717,13 +848,13 @@ export function createCabinApi(options: {
     res.end(result.audio)
   }
 
-  async function handleDemoFlightState(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleDemoFlightState(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     if (!cabinConfig.flightStateDemoEnabled) {
       throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
     }
     const body = await readJsonBody(req)
     try {
-      const result = await demoState.handleFlightState(body)
+      const result = await demoState.handleFlightState(body, { requestId })
       writeJson(res, 200, result)
     } catch (error) {
       throw mapServiceError(error)
@@ -753,46 +884,82 @@ export function createCabinApi(options: {
   return {
     async handle(req, res, pathname) {
       if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
+      const requestId = cabinLogger.createRequestId()
+      const startedAt = Date.now()
+      res.setHeader('x-request-id', requestId)
+      const inboundBase = {
+        requestId,
+        method: req.method || '',
+        path: pathname,
+      }
+      const logInbound = (event: {
+        status: number
+        ok: boolean
+        errorCode?: string
+        errorMessage?: string
+        details?: Record<string, unknown>
+      }): void => {
+        cabinLogger.log({
+          type: 'inbound',
+          ...inboundBase,
+          status: event.status,
+          ok: event.ok,
+          elapsedMs: Date.now() - startedAt,
+          errorCode: event.errorCode,
+          errorMessage: event.errorMessage,
+          details: event.details,
+        })
+      }
       try {
         const url = new URL(req.url || '/', 'http://localhost')
         if (req.method === 'POST' && pathname === '/v1/auth/token') {
-          await handleAuthToken(req, res)
+          await handleAuthToken(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/voice/query') {
-          await handleVoiceQuery(req, res)
+          await handleVoiceQuery(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/voice-chat/send') {
-          await handleVoiceChatSend(req, res)
+          await handleVoiceChatSend(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/ai-chat/send') {
-          await handleChatSend(req, res)
+          await handleChatSend(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'GET' && pathname === '/v1/ai-chat/history') {
-          await handleHistory(req, res, url)
+          await handleHistory(req, res, url, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/ai-chat/reset') {
-          await handleReset(req, res)
+          await handleReset(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/tts/speech') {
-          await handleSpeech(req, res)
+          await handleSpeech(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'POST' && pathname === '/v1/cabin-demo/flight-state') {
-          await handleDemoFlightState(req, res)
+          await handleDemoFlightState(req, res, requestId)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'GET' && pathname === '/v1/cabin-demo/alerts') {
           handleDemoAlerts(res)
+          logInbound({ status: 200, ok: true })
           return true
         }
         if (req.method === 'GET' && pathname === '/v1/cabin-demo/broadcasts') {
           handleDemoBroadcasts(res)
+          logInbound({ status: 200, ok: true })
           return true
         }
         return false
@@ -807,6 +974,12 @@ export function createCabinApi(options: {
             // ignore secondary write failures
           }
           res.end()
+          logInbound({
+            status: 500,
+            ok: false,
+            errorCode: 'INTERNAL_ERROR',
+            errorMessage: error instanceof Error ? error.message : String(error),
+          })
           return true
         }
         if (error instanceof CabinHttpError) {
@@ -815,6 +988,12 @@ export function createCabinApi(options: {
             code: error.code,
             message: error.message,
           })
+          logInbound({
+            status: error.statusCode,
+            ok: false,
+            errorCode: error.code,
+            errorMessage: error.message,
+          })
           return true
         }
         const mapped = mapServiceError(error)
@@ -822,6 +1001,12 @@ export function createCabinApi(options: {
           status: 'error',
           code: mapped.code,
           message: mapped.message,
+        })
+        logInbound({
+          status: mapped.statusCode,
+          ok: false,
+          errorCode: mapped.code,
+          errorMessage: mapped.message,
         })
         return true
       }

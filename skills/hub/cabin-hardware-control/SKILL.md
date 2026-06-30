@@ -96,8 +96,8 @@ node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command cabin.scene \
-  --seat-no "01A" \
-  --column-no "B" \
+  --seat-no "A" \
+  --column-no "A" \
   --preset boarding
 ```
 
@@ -115,6 +115,10 @@ The script reads:
 - 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-100`.
 - 座椅靠背/坐垫位置百分比: `--command seat.cushion --position 0-100`.
 - 座椅靠背/backrest/recline: always use `--command seat.cushion --position 0-100`; never use `seat.recline`.
+- 放倒座椅/躺下/往后躺/后仰/调舒服一点: use `--command seat.cushion`. If the passenger does not provide a percentage, use `--position 60`.
+- 放倒一点/后仰一点/往后调一点: use `--command seat.cushion --position 30` when no explicit percentage is provided.
+- 调直座椅/座椅归位/靠背立起来/恢复正常: use `--command seat.cushion --position 0`.
+- If the passenger only says they are tired, sleepy, or uncomfortable without requesting a concrete action, ask what service they need instead of calling hardware.
 - 座椅通风: `--command seat.ventilation --level 0-10`.
 - 座椅加热: `--command seat.heating --level 0-10`.
 - 座椅按摩: `--command seat.massage --level 0-10`.

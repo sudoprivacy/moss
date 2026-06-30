@@ -90,6 +90,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
       flightStateDemoEnabled: false,
+      logEnabled: true,
     },
   }
 }
@@ -208,6 +209,12 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         : raw.cabin.flightStateDemoEnabled,
       demoPlaybackUrl: process.env.CABIN_DEMO_PLAYBACK_URL || raw.cabin.demoPlaybackUrl,
       demoAlertUrl: process.env.CABIN_DEMO_ALERT_URL || raw.cabin.demoAlertUrl,
+      logEnabled: process.env.CABIN_LOG_ENABLED
+        ? process.env.CABIN_LOG_ENABLED === '1' || process.env.CABIN_LOG_ENABLED === 'true'
+        : raw.cabin.logEnabled,
+      logFile: (process.env.CABIN_LOG_FILE || raw.cabin.logFile)
+        ? normalizePath((process.env.CABIN_LOG_FILE || raw.cabin.logFile)!)
+        : undefined,
     },
   }
 }

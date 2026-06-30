@@ -5,6 +5,8 @@ import type { CabinConfig, CabinMessage, CabinPassengerContext, CabinToolCall } 
 import { buildConversationKey } from './auth.js'
 import { CabinStore } from './store.js'
 import type { RuntimeService } from '../runtimeService.js'
+import type { CabinLogger, CabinLogContext } from './logger.js'
+import { summarizeContext } from './logger.js'
 
 type FetchLike = typeof fetch
 
@@ -14,6 +16,7 @@ export type CabinServicesOptions = {
   runtime?: RuntimeService
   createMossSession?: (context: CabinPassengerContext) => Promise<string>
   fetchImpl?: FetchLike
+  logger?: CabinLogger
 }
 
 export class CabinServices {
@@ -104,6 +107,7 @@ export class CabinServices {
     filename: string
     contentType?: string
     language?: string
+    logContext?: CabinLogContext
   }): Promise<{ text: string; elapsedMs: number }> {
     const start = Date.now()
     const body = new FormData()
@@ -116,48 +120,136 @@ export class CabinServices {
     if (input.language) body.set('language', input.language)
     body.set('response_format', 'json')
 
-    const response = await this.fetchImpl(this.options.config.asrUrl, {
-      method: 'POST',
-      body,
-      headers: this.options.config.asrApiKey
-        ? { authorization: `Bearer ${this.options.config.asrApiKey}` }
-        : undefined,
-    })
+    let response: Response
+    try {
+      response = await this.fetchImpl(this.options.config.asrUrl, {
+        method: 'POST',
+        body,
+        headers: this.options.config.asrApiKey
+          ? { authorization: `Bearer ${this.options.config.asrApiKey}` }
+          : undefined,
+      })
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'asr',
+        method: 'POST',
+        url: this.options.config.asrUrl,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        model: this.options.config.asrModel,
+      })
+      throw error
+    }
     if (!response.ok) {
-      throw new Error(`ASR request failed: ${response.status} ${await response.text()}`)
+      const errorText = await response.text()
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'asr',
+        method: 'POST',
+        url: this.options.config.asrUrl,
+        status: response.status,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: errorText,
+        model: this.options.config.asrModel,
+      })
+      throw new Error(`ASR request failed: ${response.status} ${errorText}`)
     }
     const payload = await response.json() as { text?: unknown }
     const text = typeof payload.text === 'string' ? payload.text.trim() : ''
     if (!text) throw new Error('ASR response missing text')
-    return { text, elapsedMs: Date.now() - start }
+    const elapsedMs = Date.now() - start
+    this.logOutbound({
+      ...input.logContext,
+      upstream: 'asr',
+      method: 'POST',
+      url: this.options.config.asrUrl,
+      status: response.status,
+      ok: true,
+      elapsedMs,
+      model: this.options.config.asrModel,
+      details: {
+        language: input.language || 'auto',
+        filename: input.filename,
+        content_type: input.contentType || 'audio/wav',
+        audio_bytes: input.audio.length,
+      },
+    })
+    return { text, elapsedMs }
   }
 
-  async speech(text: string): Promise<{ audio: Buffer; contentType: string; elapsedMs: number }> {
+  async speech(text: string, logContext?: CabinLogContext): Promise<{ audio: Buffer; contentType: string; elapsedMs: number }> {
     const start = Date.now()
-    const response = await this.fetchImpl(this.options.config.ttsUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(this.options.config.ttsApiKey
-          ? { authorization: `Bearer ${this.options.config.ttsApiKey}` }
-          : {}),
-      },
-      body: JSON.stringify({
+    let response: Response
+    try {
+      response = await this.fetchImpl(this.options.config.ttsUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.options.config.ttsApiKey
+            ? { authorization: `Bearer ${this.options.config.ttsApiKey}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          model: this.options.config.ttsModel,
+          voice: this.options.config.ttsVoice,
+          input: text,
+          response_format: 'wav',
+          language: this.options.config.ttsLanguage,
+        }),
+      })
+    } catch (error) {
+      this.logOutbound({
+        ...logContext,
+        upstream: 'tts',
+        method: 'POST',
+        url: this.options.config.ttsUrl,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
         model: this.options.config.ttsModel,
-        voice: this.options.config.ttsVoice,
-        input: text,
-        response_format: 'wav',
-        language: this.options.config.ttsLanguage,
-      }),
-    })
+      })
+      throw error
+    }
     if (!response.ok) {
-      throw new Error(`TTS request failed: ${response.status} ${await response.text()}`)
+      const errorText = await response.text()
+      this.logOutbound({
+        ...logContext,
+        upstream: 'tts',
+        method: 'POST',
+        url: this.options.config.ttsUrl,
+        status: response.status,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: errorText,
+        model: this.options.config.ttsModel,
+      })
+      throw new Error(`TTS request failed: ${response.status} ${errorText}`)
     }
     const arrayBuffer = await response.arrayBuffer()
+    const elapsedMs = Date.now() - start
+    this.logOutbound({
+      ...logContext,
+      upstream: 'tts',
+      method: 'POST',
+      url: this.options.config.ttsUrl,
+      status: response.status,
+      ok: true,
+      elapsedMs,
+      model: this.options.config.ttsModel,
+      details: {
+        voice: this.options.config.ttsVoice,
+        language: this.options.config.ttsLanguage,
+        input_chars: text.length,
+        audio_bytes: arrayBuffer.byteLength,
+      },
+    })
     return {
       audio: Buffer.from(arrayBuffer),
       contentType: response.headers.get('content-type') || 'audio/wav',
-      elapsedMs: Date.now() - start,
+      elapsedMs,
     }
   }
 
@@ -165,6 +257,7 @@ export class CabinServices {
     context: CabinPassengerContext
     messages: CabinMessage[]
     text: string
+    logContext?: CabinLogContext
   }): Promise<string> {
     const history = input.messages
       .filter(message => message.role === 'user' || message.role === 'assistant')
@@ -177,30 +270,73 @@ export class CabinServices {
       `当前上下文: ${JSON.stringify(buildPromptContext(input.context))}`,
     ].join('\n')
 
-    const response = await this.fetchImpl(`${this.options.config.llmBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(this.options.config.llmApiKey
-          ? { authorization: `Bearer ${this.options.config.llmApiKey}` }
-          : {}),
-      },
-      body: JSON.stringify({
+    const url = `${this.options.config.llmBaseUrl.replace(/\/$/, '')}/chat/completions`
+    const start = Date.now()
+    let response: Response
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.options.config.llmApiKey
+            ? { authorization: `Bearer ${this.options.config.llmApiKey}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          model: this.options.config.llmModel,
+          messages: [
+            {
+              role: 'system',
+              content: systemContent,
+            },
+            ...history,
+          ],
+          temperature: 0.2,
+          stream: false,
+        }),
+      })
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'llm',
+        method: 'POST',
+        url,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
         model: this.options.config.llmModel,
-        messages: [
-          {
-            role: 'system',
-            content: systemContent,
-          },
-          ...history,
-        ],
-        temperature: 0.2,
-        stream: false,
-      }),
-    })
-    if (!response.ok) {
-      throw new Error(`LLM request failed: ${response.status} ${await response.text()}`)
+      })
+      throw error
     }
+    if (!response.ok) {
+      const errorText = await response.text()
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'llm',
+        method: 'POST',
+        url,
+        status: response.status,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: errorText,
+        model: this.options.config.llmModel,
+      })
+      throw new Error(`LLM request failed: ${response.status} ${errorText}`)
+    }
+    this.logOutbound({
+      ...input.logContext,
+      upstream: 'llm',
+      method: 'POST',
+      url,
+      status: response.status,
+      ok: true,
+      elapsedMs: Date.now() - start,
+      model: this.options.config.llmModel,
+      details: {
+        history_messages: history.length,
+        input_chars: input.text.length,
+      },
+    })
     const payload = await response.json() as {
       choices?: Array<{ message?: { content?: unknown } }>
     }
@@ -216,19 +352,77 @@ export class CabinServices {
     text: string
     timeoutMs?: number
     onDelta?: (text: string) => void
+    logContext?: CabinLogContext
   }): Promise<string> {
     if (!this.options.runtime) {
       throw new Error('RuntimeService is required for moss session replies')
     }
     const ready = await this.options.runtime.ensureSessionReady(input.mossSessionId)
     const socket = await this.options.runtime.connectToAttempt(ready.attempt)
-    return await sendPromptToRunnerSocket(
-      socket,
-      formatCabinSessionPrompt(input.context, input.text),
-      input.timeoutMs ?? 120_000,
-      input.onDelta,
-      shouldSuppressPreToolText(input.text),
-    )
+    const start = Date.now()
+    try {
+      const reply = await sendPromptToRunnerSocket(
+        socket,
+        formatCabinSessionPrompt(input.context, input.text),
+        input.timeoutMs ?? 120_000,
+        input.onDelta,
+        shouldSuppressPreToolText(input.text),
+      )
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'moss-session',
+        method: 'SOCKET',
+        endpoint: input.mossSessionId,
+        ok: true,
+        elapsedMs: Date.now() - start,
+        model: this.options.config.llmModel,
+        details: {
+          input_chars: input.text.length,
+          reply_chars: reply.length,
+        },
+      })
+      return reply
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'moss-session',
+        method: 'SOCKET',
+        endpoint: input.mossSessionId,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        model: this.options.config.llmModel,
+      })
+      throw error
+    }
+  }
+
+  private logOutbound(event: CabinLogContext & {
+    upstream: string
+    method: string
+    url?: string
+    endpoint?: string
+    status?: number
+    ok: boolean
+    elapsedMs: number
+    errorMessage?: string
+    model?: string
+    details?: Record<string, unknown>
+  }): void {
+    this.options.logger?.log({
+      type: 'outbound',
+      ...summarizeContext(event),
+      upstream: event.upstream,
+      method: event.method,
+      url: event.url,
+      endpoint: event.endpoint,
+      status: event.status,
+      ok: event.ok,
+      elapsedMs: event.elapsedMs,
+      errorMessage: event.errorMessage,
+      model: event.model,
+      details: event.details,
+    })
   }
 }
 
@@ -237,6 +431,8 @@ function buildPromptContext(context: CabinPassengerContext): Record<string, unkn
     passenger_id: context.passengerId,
     passenger_ref: context.passengerRef,
     passenger_name: context.passengerName,
+    passenger_gender: context.passengerGender,
+    passenger_title: context.passengerTitle,
     flight_id: context.flightId,
     flight_date: context.flightDate,
     flight_no: context.flightNo,
@@ -385,8 +581,18 @@ function buildPassengerSalutation(context?: CabinPassengerContext): string {
   if (!rawName) return ''
   if (/先生|女士|小姐|太太|夫人|sir|madam|miss|ms\.?|mr\.?/i.test(rawName)) return rawName
 
-  const genderHint = `${context?.passengerRef || ''} ${context?.passengerId || ''}`.toLowerCase()
-  const suffix = /female|女士|女/.test(genderHint) ? '女士' : /male|先生|男/.test(genderHint) ? '先生' : '女士'
+  const explicitTitle = context?.passengerTitle?.trim()
+  if (explicitTitle && /先生|女士|小姐|太太|夫人|sir|madam|miss|ms\.?|mr\.?/i.test(explicitTitle)) {
+    return `${rawName}${explicitTitle}`
+  }
+
+  const genderHint = `${context?.passengerGender || ''}`.toLowerCase()
+  const suffix = /female|woman|女士|小姐|女/.test(genderHint)
+    ? '女士'
+    : /male|man|先生|男/.test(genderHint)
+      ? '先生'
+      : ''
+  if (!suffix) return ''
   const chineseName = rawName.match(/[\u4e00-\u9fa5]+/u)?.[0]
   if (chineseName) {
     const familyName = chineseName.slice(0, 1)

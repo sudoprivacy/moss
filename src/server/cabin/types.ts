@@ -6,6 +6,8 @@ export type CabinPassengerContext = {
   passengerId?: string
   passengerRef?: string
   passengerName?: string
+  passengerGender?: string
+  passengerTitle?: string
   flightId: string
   flightDate: string
   flightNo?: string
@@ -73,6 +75,8 @@ export type CabinTokenPayload = {
   tabletType?: string
   bindingId?: string
   contextStatus?: string
+  passengerGender?: string
+  passengerTitle?: string
   issuedAt: number
   expiresAt: number
 }

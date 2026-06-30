@@ -86,6 +86,8 @@ export function verifyCabinTokenDetailed(
     'tabletType',
     'bindingId',
     'contextStatus',
+    'passengerGender',
+    'passengerTitle',
   ] as const) {
     if (payload[key] !== undefined && typeof payload[key] !== 'string') {
       return { payload: null, reason: 'invalid' }

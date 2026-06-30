@@ -3,6 +3,8 @@ import path from 'path'
 import { randomUUID } from 'crypto'
 import type { ServerConfig } from '../types.js'
 import type { CabinServices } from './service.js'
+import type { CabinLogger, CabinLogContext } from './logger.js'
+import { summarizeContext } from './logger.js'
 
 type DemoSeatState = {
   seatNo: string
@@ -69,9 +71,10 @@ export class CabinDemoState {
   constructor(
     private readonly config: ServerConfig,
     private readonly services: CabinServices,
+    private readonly logger?: CabinLogger,
   ) {}
 
-  async handleFlightState(input: CabinDemoFlightStateInput): Promise<Record<string, unknown>> {
+  async handleFlightState(input: CabinDemoFlightStateInput, logContext?: CabinLogContext): Promise<Record<string, unknown>> {
     if (!this.config.cabin.flightStateDemoEnabled) {
       throw new Error('Cabin flight state demo is disabled')
     }
@@ -95,7 +98,9 @@ export class CabinDemoState {
       return result
     }
 
-    result.broadcast = await this.createTaxiingBroadcast(flightId, flightNo, flightPhase)
+    const baseLogContext = { ...logContext, flightId }
+
+    result.broadcast = await this.createTaxiingBroadcast(flightId, flightNo, flightPhase, baseLogContext)
 
     for (const seat of seats) {
       const seatNo = String(seat.seatNo || '').trim()
@@ -118,30 +123,30 @@ export class CabinDemoState {
           message: `滑行阶段${problems.join('，')}`,
         })
         result.alerts.push(alert)
-        await this.postAlert(alert)
+        await this.postAlert(alert, { ...baseLogContext, seatNo })
       }
 
       if (needsSeatReset) {
         result.commands.push(await this.sendControlCommand('/admin-api/tcp-client/cmd/seat/cushion', {
           seatNo,
           position: '0',
-        }, 'seat.cushion'))
+        }, 'seat.cushion', { ...baseLogContext, seatNo }))
       }
       if (needsTrayClose) {
         result.commands.push(await this.sendControlCommand('/admin-api/tcp-client/cmd/seat/tray/close', {
           seatNo,
-        }, 'seat.tray.close'))
+        }, 'seat.tray.close', { ...baseLogContext, seatNo }))
       }
     }
 
     return result
   }
 
-  private async createTaxiingBroadcast(flightId: string, flightNo: string, flightPhase: string): Promise<DemoBroadcast> {
+  private async createTaxiingBroadcast(flightId: string, flightNo: string, flightPhase: string, logContext?: CabinLogContext): Promise<DemoBroadcast> {
     const dir = path.join(this.config.rootDir, 'cabin-demo', 'broadcasts')
     await mkdir(dir, { recursive: true })
     const audioPath = path.join(dir, 'taxiing-fixed.wav')
-    const generated = await this.ensureTaxiingBroadcastAudio(audioPath)
+    const generated = await this.ensureTaxiingBroadcastAudio(audioPath, logContext)
     const id = randomUUID()
     const broadcast: DemoBroadcast = {
       id,
@@ -152,7 +157,7 @@ export class CabinDemoState {
       contentType: generated.contentType,
       elapsedMs: generated.elapsedMs,
       reused: generated.reused,
-      playback: await this.postPlayback({ flightId, flightNo, flightPhase, audioPath }),
+      playback: await this.postPlayback({ flightId, flightNo, flightPhase, audioPath }, logContext),
       createdAt: new Date().toISOString(),
     }
     this.broadcasts.unshift(broadcast)
@@ -160,7 +165,7 @@ export class CabinDemoState {
     return broadcast
   }
 
-  private async ensureTaxiingBroadcastAudio(audioPath: string): Promise<{
+  private async ensureTaxiingBroadcastAudio(audioPath: string, logContext?: CabinLogContext): Promise<{
     contentType: string
     elapsedMs: number
     reused: boolean
@@ -173,7 +178,7 @@ export class CabinDemoState {
         reused: true,
       }
     } catch {
-      const speech = await this.services.speech(TAXIING_BROADCAST_TEXT)
+      const speech = await this.services.speech(TAXIING_BROADCAST_TEXT, logContext)
       await writeFile(audioPath, speech.audio)
       return {
         contentType: speech.contentType,
@@ -194,17 +199,38 @@ export class CabinDemoState {
     return alert
   }
 
-  private async postPlayback(payload: Record<string, unknown>): Promise<DemoBroadcast['playback']> {
+  private async postPlayback(payload: Record<string, unknown>, logContext?: CabinLogContext): Promise<DemoBroadcast['playback']> {
     const url = this.config.cabin.demoPlaybackUrl
     if (!url) return { configured: false, ok: true }
+    const start = Date.now()
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       })
+      this.logger?.log({
+        type: 'outbound',
+        ...summarizeContext(logContext),
+        upstream: 'headrest-player',
+        method: 'POST',
+        url,
+        status: response.status,
+        ok: response.ok,
+        elapsedMs: Date.now() - start,
+      })
       return { configured: true, ok: response.ok, status: response.status }
     } catch (error) {
+      this.logger?.log({
+        type: 'outbound',
+        ...summarizeContext(logContext),
+        upstream: 'headrest-player',
+        method: 'POST',
+        url,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
       return {
         configured: true,
         ok: false,
@@ -213,21 +239,48 @@ export class CabinDemoState {
     }
   }
 
-  private async postAlert(alert: DemoAlert): Promise<void> {
+  private async postAlert(alert: DemoAlert, logContext?: CabinLogContext): Promise<void> {
     const url = this.config.cabin.demoAlertUrl
     if (!url) return
+    const start = Date.now()
     try {
-      await fetch(url, {
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(alert),
       })
-    } catch {
+      this.logger?.log({
+        type: 'outbound',
+        ...summarizeContext(logContext),
+        upstream: 'cabin-alert',
+        method: 'POST',
+        url,
+        status: response.status,
+        ok: response.ok,
+        elapsedMs: Date.now() - start,
+        details: {
+          alert_type: alert.type,
+        },
+      })
+    } catch (error) {
+      this.logger?.log({
+        type: 'outbound',
+        ...summarizeContext(logContext),
+        upstream: 'cabin-alert',
+        method: 'POST',
+        url,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: {
+          alert_type: alert.type,
+        },
+      })
       // Demo alert delivery is best-effort until the customer provides the real API.
     }
   }
 
-  private async sendControlCommand(pathname: string, query: Record<string, string>, command: string): Promise<DemoCommand> {
+  private async sendControlCommand(pathname: string, query: Record<string, string>, command: string, logContext?: CabinLogContext): Promise<DemoCommand> {
     const baseUrl = this.config.cabin.controlBaseUrl?.replace(/\/+$/, '')
     if (!baseUrl) {
       return { seatNo: query.seatNo, command, ok: false, error: 'cabin.controlBaseUrl is not configured' }
@@ -238,6 +291,7 @@ export class CabinDemoState {
     }
     const headers: Record<string, string> = {}
     if (this.config.cabin.controlAuth) headers.Authorization = this.config.cabin.controlAuth
+    const start = Date.now()
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -250,6 +304,17 @@ export class CabinDemoState {
       } catch {
         payload = text
       }
+      this.logger?.log({
+        type: 'outbound',
+        ...summarizeContext(logContext),
+        upstream: 'hardware-control',
+        method: 'POST',
+        url: url.toString(),
+        status: response.status,
+        ok: response.ok,
+        elapsedMs: Date.now() - start,
+        command,
+      })
       return {
         seatNo: query.seatNo,
         command,
@@ -258,6 +323,17 @@ export class CabinDemoState {
         response: payload,
       }
     } catch (error) {
+      this.logger?.log({
+        type: 'outbound',
+        ...summarizeContext(logContext),
+        upstream: 'hardware-control',
+        method: 'POST',
+        url: url.toString(),
+        ok: false,
+        elapsedMs: Date.now() - start,
+        command,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
       return {
         seatNo: query.seatNo,
         command,

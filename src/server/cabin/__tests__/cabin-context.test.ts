@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { createHmac } from 'crypto'
 import http from 'http'
 import { Database } from 'bun:sqlite'
+import { mkdtemp, readFile, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import type { DatabaseSync } from 'node:sqlite'
 import { issueCabinToken, verifyCabinTokenDetailed } from '../auth.js'
 import { createCabinApi } from '../api.js'
@@ -117,6 +120,90 @@ async function readSse(response: Response): Promise<Array<{ event: string; data:
 }
 
 describe('cabin binding context', () => {
+  it('writes structured cabin request logs', async () => {
+    const upstream = http.createServer((req, res) => {
+      if (req.url === '/passenger') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          code: 0,
+          data: {
+            flightId: '2',
+            flightDate: '2026-06-05',
+            flightNo: 'MU001',
+            seatNo: 'A',
+            flightSeatId: '20',
+            passengerRef: 'REF-A-2',
+            passengerName: '刘女士',
+            language: 'zh',
+          },
+        }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const upstreamBaseUrl = await listen(upstream)
+    const tempDir = await mkdtemp(join(tmpdir(), 'moss-cabin-log-test-'))
+    const logFile = join(tempDir, 'cabin.jsonl')
+    try {
+      const runtime = {
+        store: { db: new Database(':memory:') },
+        authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
+      } as unknown as RuntimeService
+      const config = createCabinTestConfig(upstreamBaseUrl)
+      config.rootDir = tempDir
+      config.cabin.logFile = logFile
+      const api = createCabinApi({ config, runtime })
+      const cabinServer = http.createServer(async (req, res) => {
+        const pathname = new URL(req.url || '/', 'http://localhost').pathname
+        const handled = await api.handle(req, res, pathname)
+        if (!handled) {
+          res.writeHead(404)
+          res.end()
+        }
+      })
+      const cabinBaseUrl = await listen(cabinServer)
+
+      const tokenResponse = await fetch(`${cabinBaseUrl}/v1/auth/token`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-cabin-tablet-token': 'tablet-token',
+          'x-cabin-tablet-id': 'PAX-PAD-0003',
+        },
+        body: JSON.stringify({
+          seatNo: 'A',
+          columnNo: 'A',
+          flightSeatId: '20',
+        }),
+      })
+      expect(tokenResponse.status).toBe(200)
+      const requestId = tokenResponse.headers.get('x-request-id')
+      expect(requestId).toStartWith('req_')
+
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const lines = (await readFile(logFile, 'utf8')).trim().split('\n')
+      const events = lines.map(line => JSON.parse(line) as Record<string, unknown>)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'inbound',
+        request_id: requestId,
+        method: 'POST',
+        path: '/v1/auth/token',
+        status: 200,
+        ok: true,
+      }))
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'outbound',
+        request_id: requestId,
+        upstream: 'cabin-token',
+        tablet_id: 'PAX-PAD-0003',
+        ok: true,
+      }))
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('preserves seat binding fields in cabin access tokens', () => {
     const token = issueCabinToken({
       tabletToken: 'tablet-token',
@@ -310,6 +397,7 @@ describe('cabin binding context', () => {
             flightSeatId: '20',
             passengerRef: 'REF-01A-2',
             passengerName: '刘女士',
+            gender: 'female',
             language: 'zh',
           },
         }))
@@ -499,10 +587,16 @@ describe('cabin binding context', () => {
     const reply = normalizeCabinHardwareReply({
       userText: '请打开小桌板',
       reply: '好的，已为您打开小桌板，请稍后。请问还有其他需要帮助的吗？',
-      context: { flightId: '2', flightDate: '2026-06-05', tabletId: 'PAX-PAD-0003', passengerName: '刘淑芬' },
+      context: { flightId: '2', flightDate: '2026-06-05', tabletId: 'PAX-PAD-0003', passengerName: '刘淑芬', passengerGender: 'female' },
     })
 
     expect(reply).toBe('刘女士，已为您下发打开小桌板的指令，请稍候。')
+
+    expect(normalizeCabinHardwareReply({
+      userText: '请打开小桌板',
+      reply: '好的，已为您打开小桌板，请稍后。请问还有其他需要帮助的吗？',
+      context: { flightId: '2', flightDate: '2026-06-05', tabletId: 'PAX-PAD-0001', passengerName: '陈建国' },
+    })).toBe('已为您下发打开小桌板的指令，请稍候。')
   })
 
   it('adds passenger salutation to short greetings only', () => {
@@ -511,6 +605,7 @@ describe('cabin binding context', () => {
       flightDate: '2026-06-05',
       tabletId: 'PAX-PAD-0003',
       passengerName: '刘淑芬',
+      passengerGender: 'female',
     }
 
     expect(normalizeCabinPassengerReply({
@@ -541,6 +636,7 @@ describe('cabin binding context', () => {
       columnNo: 'B',
       tabletId: 'PAX-PAD-0003',
       passengerName: '刘淑芬',
+      passengerGender: 'female',
     }
 
     const reply = normalizeCabinPassengerReply({
@@ -598,7 +694,9 @@ describe('cabin binding context', () => {
       store: { db },
       authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
     } as unknown as RuntimeService
+    const tempDir = await mkdtemp(join(tmpdir(), 'moss-cabin-taxiing-test-'))
     const config = createCabinTestConfig(upstreamBaseUrl)
+    config.rootDir = tempDir
     config.cabin.flightStateDemoEnabled = true
     config.cabin.ttsUrl = `${upstreamBaseUrl}/tts`
     config.cabin.controlBaseUrl = upstreamBaseUrl
@@ -671,5 +769,6 @@ describe('cabin binding context', () => {
     expect(secondPayload.alerts).toEqual([])
     expect(secondPayload.commands).toEqual([])
     expect(ttsRequests).toBe(1)
+    await rm(tempDir, { recursive: true, force: true })
   })
 })

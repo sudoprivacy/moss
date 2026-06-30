@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { setTimeout as delay } from 'timers/promises'
+import { mkdir, appendFile } from 'fs/promises'
+import { dirname } from 'path'
 
 const COMMANDS = {
   'seat.cushion': {
@@ -389,6 +391,43 @@ function normalizePayload(bodyText) {
   }
 }
 
+function sanitizeUrl(value) {
+  try {
+    const url = new URL(value)
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (/token|authorization|auth|key|secret|password/i.test(key)) {
+        url.searchParams.set(key, '[redacted]')
+      }
+    }
+    return url.toString()
+  } catch {
+    return String(value)
+  }
+}
+
+function logCabinHardware(event) {
+  const file = String(process.env.CABIN_LOG_FILE || '').trim()
+  if (!file) return
+  const payload = {
+    time: new Date().toISOString(),
+    level: event.ok === false ? 'error' : 'info',
+    type: 'outbound',
+    upstream: 'hardware-control',
+    method: 'POST',
+    request_id: process.env.CABIN_REQUEST_ID || undefined,
+    seat_no: event.seatNo,
+    command: event.command,
+    url: event.url ? sanitizeUrl(event.url) : undefined,
+    status: event.status,
+    ok: event.ok,
+    elapsed_ms: event.elapsedMs,
+    error_message: event.errorMessage,
+  }
+  void mkdir(dirname(file), { recursive: true })
+    .then(() => appendFile(file, `${JSON.stringify(payload)}\n`, 'utf8'))
+    .catch(() => {})
+}
+
 async function main() {
   const args = normalizeArgs(parseArgs(process.argv.slice(2)))
   if (args.help || args.h) {
@@ -444,6 +483,7 @@ async function main() {
 
   let response
   let bodyText = ''
+  const startedAt = Date.now()
   try {
     response = await fetch(url, {
       method: 'POST',
@@ -452,6 +492,14 @@ async function main() {
     })
     bodyText = await response.text()
   } catch (error) {
+    logCabinHardware({
+      command: commandName,
+      seatNo: parsedArgs.seat_no,
+      url: url.toString(),
+      ok: false,
+      elapsedMs: Date.now() - startedAt,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    })
     fail('REQUEST_FAILED', error instanceof Error ? error.message : String(error), {
       command: commandName,
       device: command.device,
@@ -481,6 +529,15 @@ async function main() {
       ? 'accepted'
       : 'failed'
   const label = command.label(parsedArgs)
+
+  logCabinHardware({
+    command: commandName,
+    seatNo: parsedArgs.seat_no,
+    url: url.toString(),
+    status: response.status,
+    ok,
+    elapsedMs: Date.now() - startedAt,
+  })
 
   console.log(JSON.stringify({
     ok,
