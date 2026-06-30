@@ -583,6 +583,204 @@ describe('cabin binding context', () => {
     })
   })
 
+  it('routes high-confidence hardware commands before moss session generation', async () => {
+    const controlRequests: string[] = []
+    const upstream = http.createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://localhost')
+      if (url.pathname === '/passenger') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          code: 0,
+          data: {
+            flightId: '2',
+            flightDate: '2026-06-05',
+            flightNo: 'MU001',
+            seatNo: 'A',
+            columnNo: 'A',
+            flightSeatId: '20',
+            passengerRef: 'REF-A-2',
+            passengerName: '陈建国',
+            gender: 'male',
+            language: 'zh',
+          },
+        }))
+        return
+      }
+      if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
+        controlRequests.push(`${url.pathname}?${url.searchParams.toString()}`)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ status: 'accepted', code: 0, message: 'ok' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const upstreamBaseUrl = await listen(upstream)
+    const db = new Database(':memory:') as unknown as DatabaseSync
+    let socketCalls = 0
+    const runtime = {
+      store: { db },
+      authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
+      createSession: async () => ({ sessionId: 'moss-session-1' }),
+      ensureSessionReady: async () => {
+        socketCalls += 1
+        return { attempt: {} }
+      },
+    } as unknown as RuntimeService
+    const config = createCabinTestConfig(upstreamBaseUrl)
+    config.cabin.createMossSession = true
+    config.cabin.controlBaseUrl = upstreamBaseUrl
+    config.cabin.controlAuth = 'test1'
+    const api = createCabinApi({ config, runtime })
+    const cabinServer = http.createServer(async (req, res) => {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname
+      const handled = await api.handle(req, res, pathname)
+      if (!handled) {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    const cabinBaseUrl = await listen(cabinServer)
+
+    const tokenResponse = await fetch(`${cabinBaseUrl}/v1/auth/token`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-cabin-tablet-token': 'tablet-token',
+        'x-cabin-tablet-id': 'PAX-PAD-0002',
+      },
+      body: JSON.stringify({
+        seatNo: 'A',
+        columnNo: 'A',
+        flightSeatId: '20',
+      }),
+    })
+    const tokenPayload = await tokenResponse.json() as { access_token: string }
+
+    const response = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokenPayload.access_token}`,
+        'content-type': 'application/json',
+        'x-cabin-tablet-token': 'tablet-token',
+        'x-cabin-tablet-id': 'PAX-PAD-0002',
+      },
+      body: JSON.stringify({ content: '请帮我打开小桌板。', source: 'text' }),
+    })
+    expect(response.status).toBe(200)
+    const events = await readSse(response)
+    expect(events.map(event => event.event)).toEqual(['start', 'tool_call', 'delta', 'done'])
+    expect(events[1].data).toMatchObject({
+      name: 'cabin.hardware.control',
+      arguments: {
+        command: 'seat.tray.open',
+        seat_no: 'A',
+      },
+    })
+    expect(events.at(-1)?.data).toMatchObject({
+      intent: 'tray_open',
+      reply_text: '陈先生，已为您下发打开小桌板的指令，请稍候。',
+    })
+    expect(controlRequests).toEqual([
+      '/admin-api/tcp-client/cmd/seat/tray/open?seatNo=A',
+    ])
+    expect(socketCalls).toBe(0)
+  })
+
+  it('routes reading light percent brightness to 0-1000 pwm', async () => {
+    const controlRequests: string[] = []
+    const upstream = http.createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://localhost')
+      if (url.pathname === '/passenger') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          code: 0,
+          data: {
+            flightId: '2',
+            flightDate: '2026-06-05',
+            seatNo: 'B',
+            columnNo: 'B',
+            flightSeatId: '21',
+            passengerRef: 'REF-B-2',
+            passengerName: '刘淑芬',
+            gender: 'female',
+            language: 'zh',
+          },
+        }))
+        return
+      }
+      if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
+        controlRequests.push(`${url.pathname}?${url.searchParams.toString()}`)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ status: 'accepted', code: 0, message: 'ok' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const upstreamBaseUrl = await listen(upstream)
+    const db = new Database(':memory:') as unknown as DatabaseSync
+    const runtime = {
+      store: { db },
+      authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
+    } as unknown as RuntimeService
+    const config = createCabinTestConfig(upstreamBaseUrl)
+    config.cabin.createMossSession = false
+    config.cabin.controlBaseUrl = upstreamBaseUrl
+    const api = createCabinApi({ config, runtime })
+    const cabinServer = http.createServer(async (req, res) => {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname
+      const handled = await api.handle(req, res, pathname)
+      if (!handled) {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    const cabinBaseUrl = await listen(cabinServer)
+
+    const tokenResponse = await fetch(`${cabinBaseUrl}/v1/auth/token`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-cabin-tablet-token': 'tablet-token',
+        'x-cabin-tablet-id': 'PAX-PAD-0003',
+      },
+      body: JSON.stringify({
+        seatNo: 'B',
+        columnNo: 'B',
+        flightSeatId: '21',
+      }),
+    })
+    const tokenPayload = await tokenResponse.json() as { access_token: string }
+
+    const response = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokenPayload.access_token}`,
+        'content-type': 'application/json',
+        'x-cabin-tablet-token': 'tablet-token',
+        'x-cabin-tablet-id': 'PAX-PAD-0003',
+      },
+      body: JSON.stringify({ content: '把阅读灯亮度调到50%', source: 'text' }),
+    })
+    expect(response.status).toBe(200)
+    const events = await readSse(response)
+    expect(events[1].data).toMatchObject({
+      arguments: {
+        command: 'seat.light.brightness',
+        seat_no: 'B',
+        pwm: 500,
+      },
+    })
+    expect(events.at(-1)?.data).toMatchObject({
+      intent: 'reading_light_brightness',
+      reply_text: '刘女士，已为您下发调整阅读灯亮度的指令，请稍候。',
+    })
+    expect(controlRequests).toEqual([
+      '/admin-api/tcp-client/cmd/seat/light/brightness?seatNo=B&pwm=500',
+    ])
+  })
+
   it('normalizes accepted hardware replies without claiming completion', () => {
     const reply = normalizeCabinHardwareReply({
       userText: '请打开小桌板',

@@ -10,6 +10,16 @@ import { summarizeContext } from './logger.js'
 
 type FetchLike = typeof fetch
 
+type CabinHardwareRoute = {
+  intent: string
+  slots: Record<string, unknown>
+  toolCall: CabinToolCall
+  command: string
+  label: string
+  path: string
+  params: Record<string, string | number | boolean>
+}
+
 export type CabinServicesOptions = {
   config: CabinConfig
   store: CabinStore
@@ -100,6 +110,112 @@ export class CabinServices {
     }
 
     return null
+  }
+
+  routeHardwareControl(input: {
+    context: CabinPassengerContext
+    text: string
+  }): CabinHardwareRoute | null {
+    if (!this.options.config.controlBaseUrl) return null
+    return buildHardwareRoute(input.context, input.text)
+  }
+
+  async executeHardwareControl(input: {
+    route: CabinHardwareRoute
+    logContext?: CabinLogContext
+  }): Promise<{ intent: string; slots: Record<string, unknown>; toolCall: CabinToolCall; reply: string }> {
+    const baseUrl = this.options.config.controlBaseUrl?.replace(/\/+$/, '')
+    if (!baseUrl) {
+      return {
+        intent: input.route.intent,
+        slots: input.route.slots,
+        toolCall: input.route.toolCall,
+        reply: '当前暂时无法连接客舱设备控制服务，请稍后再试。',
+      }
+    }
+
+    const url = new URL(`${baseUrl}${input.route.path}`)
+    for (const [key, value] of Object.entries(input.route.params)) {
+      url.searchParams.set(key, String(value))
+    }
+
+    const start = Date.now()
+    let response: Response
+    let bodyText = ''
+    try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), this.options.config.controlTimeoutMs ?? 10_000)
+      try {
+        response = await this.fetchImpl(url, {
+          method: 'POST',
+          headers: this.options.config.controlAuth
+            ? { authorization: this.options.config.controlAuth }
+            : undefined,
+          signal: controller.signal,
+        })
+        bodyText = await response.text()
+      } finally {
+        clearTimeout(timeout)
+      }
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'hardware-control',
+        method: 'POST',
+        url: url.toString(),
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: {
+          command: input.route.command,
+        },
+      })
+      return {
+        intent: input.route.intent,
+        slots: input.route.slots,
+        toolCall: input.route.toolCall,
+        reply: `${input.route.label}的指令下发失败，请稍后再试。`,
+      }
+    }
+
+    const payload = parseJsonPayload(bodyText)
+    const businessCode = payload && typeof payload === 'object' && 'code' in payload
+      ? (payload as { code?: unknown }).code
+      : undefined
+    const ok = response.ok && (
+      businessCode === undefined ||
+      businessCode === 0 ||
+      businessCode === '0'
+    )
+    const executionStatus = ok && isCompletedPayload(payload) ? 'completed' : ok ? 'accepted' : 'failed'
+    this.logOutbound({
+      ...input.logContext,
+      upstream: 'hardware-control',
+      method: 'POST',
+      url: url.toString(),
+      status: response.status,
+      ok,
+      elapsedMs: Date.now() - start,
+      details: {
+        command: input.route.command,
+        execution_status: executionStatus,
+        response_code: businessCode,
+      },
+    })
+
+    return {
+      intent: input.route.intent,
+      slots: {
+        ...input.route.slots,
+        execution_status: executionStatus,
+      },
+      toolCall: input.route.toolCall,
+      reply: executionStatus === 'completed'
+        ? `${input.route.label}已完成。`
+        : executionStatus === 'accepted'
+          ? `已为您下发${input.route.label}的指令，请稍候。`
+          : `${input.route.label}的指令下发失败，请稍后再试。`,
+    }
   }
 
   async transcribe(input: {
@@ -460,6 +576,227 @@ function buildSeatToolArguments(context: CabinPassengerContext): Record<string, 
     flight_seat_id: context.flightSeatId || '',
     aircraft_seat_id: context.aircraftSeatId || '',
   }
+}
+
+function buildHardwareRoute(context: CabinPassengerContext, userText: string): CabinHardwareRoute | null {
+  const text = userText.toLowerCase()
+  const seatNo = context.seatId || ''
+  if (!seatNo) return null
+
+  const seatContext = buildSeatToolArguments(context)
+  const route = (input: {
+    intent: string
+    command: string
+    label: string
+    path: string
+    params?: Record<string, string | number | boolean>
+    slots?: Record<string, unknown>
+  }): CabinHardwareRoute => ({
+    intent: input.intent,
+    command: input.command,
+    label: input.label,
+    path: input.path,
+    params: { seatNo, ...(input.params || {}) },
+    slots: {
+      ...seatContext,
+      command: input.command,
+      ...(input.slots || {}),
+    },
+    toolCall: {
+      id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+      name: 'cabin.hardware.control',
+      arguments: {
+        ...seatContext,
+        command: input.command,
+        seat_no: seatNo,
+        ...(input.params || {}),
+      },
+    },
+  })
+
+  if (hasAnyText(text, ['小桌板', '桌板', '餐桌板', 'tray'])) {
+    if (hasAnyText(text, ['关闭', '关上', '合上', '收起', '收好', 'close'])) {
+      return route({
+        intent: 'tray_close',
+        command: 'seat.tray.close',
+        label: '关闭小桌板',
+        path: '/admin-api/tcp-client/cmd/seat/tray/close',
+        slots: { target: 'tray', action: 'close' },
+      })
+    }
+    if (hasAnyText(text, ['打开', '开启', '展开', '放下', 'open'])) {
+      return route({
+        intent: 'tray_open',
+        command: 'seat.tray.open',
+        label: '打开小桌板',
+        path: '/admin-api/tcp-client/cmd/seat/tray/open',
+        slots: { target: 'tray', action: 'open' },
+      })
+    }
+  }
+
+  if (hasAnyText(text, ['阅读灯', '读书灯', 'reading light']) || hasAnyText(text, ['灯', 'light'])) {
+    const pwm = extractPwmValue(userText)
+    if (pwm !== null || hasAnyText(text, ['亮度', '调亮', '调暗', '亮一点', '暗一点', 'brightness'])) {
+      const normalizedPwm = pwm ?? (hasAnyText(text, ['调暗', '暗一点', 'dimmer']) ? 300 : 700)
+      return route({
+        intent: 'reading_light_brightness',
+        command: 'seat.light.brightness',
+        label: `阅读灯亮度调整到 ${normalizedPwm}`,
+        path: '/admin-api/tcp-client/cmd/seat/light/brightness',
+        params: { pwm: normalizedPwm },
+        slots: { target: 'reading_light', action: 'brightness', pwm: normalizedPwm },
+      })
+    }
+    if (hasAnyText(text, ['关闭', '关掉', '关上', '熄灭', 'off'])) {
+      return route({
+        intent: 'reading_light_off',
+        command: 'seat.light',
+        label: '关闭阅读灯',
+        path: '/admin-api/tcp-client/cmd/seat/light',
+        params: { on: false },
+        slots: { target: 'reading_light', action: 'off' },
+      })
+    }
+    if (hasAnyText(text, ['打开', '开启', '开灯', 'on'])) {
+      return route({
+        intent: 'reading_light_on',
+        command: 'seat.light',
+        label: '打开阅读灯',
+        path: '/admin-api/tcp-client/cmd/seat/light',
+        params: { on: true },
+        slots: { target: 'reading_light', action: 'on' },
+      })
+    }
+  }
+
+  if (hasAnyText(text, ['座椅', '靠背', '坐垫', 'seat'])) {
+    const position = extractPercentValue(userText)
+      ?? (hasAnyText(text, ['调直', '归位', '直立', '收起', 'upright']) ? 0 : null)
+      ?? (hasAnyText(text, ['放倒', '后仰', '躺', '休息', '舒服', 'recline']) ? 60 : null)
+    if (position !== null) {
+      return route({
+        intent: 'seat_position',
+        command: 'seat.cushion',
+        label: `座椅位置调整到 ${position}%`,
+        path: '/admin-api/tcp-client/cmd/seat/cushion',
+        params: { position },
+        slots: { target: 'seat', action: 'position', position },
+      })
+    }
+  }
+
+  const level = extractLevelValue(userText)
+  if (hasAnyText(text, ['通风', 'ventilation'])) {
+    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 3)
+    return route({
+      intent: 'seat_ventilation',
+      command: 'seat.ventilation',
+      label: `座椅通风调整到 ${normalizedLevel} 档`,
+      path: '/admin-api/tcp-client/cmd/seat/ventilation',
+      params: { level: normalizedLevel },
+      slots: { target: 'seat', action: 'ventilation', level: normalizedLevel },
+    })
+  }
+  if (hasAnyText(text, ['加热', '热一点', '暖一点', 'heating'])) {
+    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 3)
+    return route({
+      intent: 'seat_heating',
+      command: 'seat.heating',
+      label: `座椅加热调整到 ${normalizedLevel} 档`,
+      path: '/admin-api/tcp-client/cmd/seat/heating',
+      params: { level: normalizedLevel },
+      slots: { target: 'seat', action: 'heating', level: normalizedLevel },
+    })
+  }
+  if (hasAnyText(text, ['按摩', 'massage'])) {
+    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 3)
+    return route({
+      intent: 'seat_massage',
+      command: 'seat.massage',
+      label: `座椅按摩调整到 ${normalizedLevel} 档`,
+      path: '/admin-api/tcp-client/cmd/seat/massage',
+      params: { level: normalizedLevel },
+      slots: { target: 'seat', action: 'massage', level: normalizedLevel },
+    })
+  }
+
+  return null
+}
+
+function hasAnyText(text: string, words: string[]): boolean {
+  return words.some(word => text.includes(word.toLowerCase()))
+}
+
+function extractPercentValue(text: string): number | null {
+  const percentMatch = text.match(/(\d{1,3})\s*(?:%|％|百分之)/)
+  if (percentMatch) return clampInt(Number.parseInt(percentMatch[1], 10), 0, 100)
+  const chinesePercent = text.match(/百分之\s*([一二三四五六七八九十百零〇两\d]+)/)
+  if (chinesePercent) {
+    const value = parseLooseNumber(chinesePercent[1])
+    if (value !== null) return clampInt(value, 0, 100)
+  }
+  return null
+}
+
+function extractPwmValue(text: string): number | null {
+  const percent = extractPercentValue(text)
+  if (percent !== null) return clampInt(percent * 10, 0, 1000)
+  const explicitPwm = text.match(/(?:pwm|亮度)\s*(?:调)?(?:到|为|=|：|:)?\s*(\d{1,4})/i)
+  if (explicitPwm) return clampInt(Number.parseInt(explicitPwm[1], 10), 0, 1000)
+  return null
+}
+
+function extractLevelValue(text: string): number | null {
+  const levelMatch = text.match(/(\d{1,2})\s*(?:档|级|level)/i)
+  if (levelMatch) return clampInt(Number.parseInt(levelMatch[1], 10), 0, 10)
+  return null
+}
+
+function parseLooseNumber(value: string): number | null {
+  if (/^\d+$/.test(value)) return Number.parseInt(value, 10)
+  const digits: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  }
+  if (value === '十') return 10
+  const tenMatch = value.match(/^([一二两三四五六七八九])?十([一二三四五六七八九])?$/)
+  if (tenMatch) {
+    return (tenMatch[1] ? digits[tenMatch[1]] : 1) * 10 + (tenMatch[2] ? digits[tenMatch[2]] : 0)
+  }
+  const hundredMatch = value.match(/^([一二两三四五六七八九])?百$/)
+  if (hundredMatch) return (hundredMatch[1] ? digits[hundredMatch[1]] : 1) * 100
+  return null
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min
+  return Math.max(min, Math.min(max, Math.round(value)))
+}
+
+function parseJsonPayload(text: string): unknown {
+  if (!text.trim()) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { raw: text.slice(0, 1000) }
+  }
+}
+
+function isCompletedPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false
+  const data = (payload as { data?: unknown }).data
+  return !!data && typeof data === 'object' && (data as { status?: unknown }).status === 'completed'
 }
 
 function formatCabinSessionPrompt(context: CabinPassengerContext, text: string): string {

@@ -597,6 +597,48 @@ export function createCabinApi(options: {
       source,
       content: text,
     })
+    const hardwareRoute = services.routeHardwareControl({ context, text })
+    if (hardwareRoute) {
+      writeSse(res, 'tool_call', hardwareRoute.toolCall)
+      const result = await services.executeHardwareControl({
+        route: hardwareRoute,
+        logContext,
+      })
+      const reply = normalizeCabinPassengerReply({ userText: text, reply: result.reply, context })
+      const assistantMessage = store.appendMessage({
+        conversationId: conversation.id,
+        role: 'assistant',
+        source: 'agent',
+        content: reply,
+        intent: result.intent,
+        slots: result.slots,
+        toolCalls: [result.toolCall],
+      })
+      cabinLogger.log({
+        type: 'outbound',
+        ...logContext,
+        upstream: 'agent-reply',
+        method: 'GENERATE',
+        ok: true,
+        elapsedMs: 0,
+        details: {
+          source,
+          input_chars: text.length,
+          reply_chars: reply.length,
+          intent: assistantMessage.intent || '',
+          routed: 'hardware-control',
+        },
+      })
+      writeSse(res, 'delta', { content: reply })
+      writeSse(res, 'done', {
+        intent: assistantMessage.intent || '',
+        slots: assistantMessage.slots || {},
+        reply_text: reply,
+      })
+      res.end()
+      return
+    }
+
     const inferredTool = cabinConfig.createMossSession
       ? null
       : services.inferToolCall({ context, text })
