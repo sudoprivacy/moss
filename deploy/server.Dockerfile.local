@@ -164,6 +164,18 @@ FROM node:22-trixie-slim
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
+# Mirror fallback: try the default deb.debian.org first; only if it fails (e.g.
+# the upstream mirror is unreachable from this network) rewrite the trixie
+# sources to mirrors.aliyun.com and retry. node:22-trixie-slim uses the deb822
+# format at /etc/apt/sources.list.d/debian.sources, so rewrite the URIs there.
+RUN if ! apt-get update; then \
+      echo "deb.debian.org apt-get update failed; switching to mirrors.aliyun.com"; \
+      sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g; s|https://deb.debian.org|https://mirrors.aliyun.com|g' \
+        /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+      sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g; s|https://deb.debian.org|https://mirrors.aliyun.com|g' \
+        /etc/apt/sources.list 2>/dev/null || true; \
+      apt-get update; \
+    fi
 # Docker CLI + LibreOffice deps. Retry loop converges past transient mirror 502s
 # (apt cache persists within the RUN). jq is required by the OAuth2 credential script.
 RUN apt-get update \

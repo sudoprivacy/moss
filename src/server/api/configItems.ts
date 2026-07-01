@@ -147,7 +147,6 @@ export function createConfigItemsApi(db: {
       auth_type?: string
       token_url?: string
       token_request_json?: string
-      mint_script?: string
       entries: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
       if (!body.name?.trim()) {
@@ -205,7 +204,6 @@ export function createConfigItemsApi(db: {
           auth_type: body.auth_type,
           token_url: body.token_url,
           token_request_json: body.token_request_json,
-          mint_script: body.mint_script,
         })
 
         if (body.entries?.length > 0) {
@@ -234,7 +232,6 @@ export function createConfigItemsApi(db: {
       auth_type?: string
       token_url?: string
       token_request_json?: string
-      mint_script?: string
       entries?: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
       const existing = db.getConfigItem(id, orgId)
@@ -270,7 +267,6 @@ export function createConfigItemsApi(db: {
       if (body.auth_type !== undefined) updates.auth_type = body.auth_type
       if (body.token_url !== undefined) updates.token_url = body.token_url
       if (body.token_request_json !== undefined) updates.token_request_json = body.token_request_json
-      if (body.mint_script !== undefined) updates.mint_script = body.mint_script
       updates.updated_at = now()
 
       try {

@@ -8,6 +8,7 @@ import { handleSecretsRequest } from './secretsApi.js'
 import { secretSubject, orgScopedNamespace } from '../secrets/secretSubject.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { TokenMinter } from './tokenMinter.js'
+import { getSystemSettings } from '../systemSettings.js'
 
 export interface AuthProxyRule {
   configItemId: number
@@ -31,7 +32,9 @@ export interface AuthProxyRule {
   authType?: string | null
   tokenUrl?: string | null
   tokenRequestJson?: string | null
-  mintScript?: string | null
+  // For auth_type 'script' the login script path is composed as
+  // `<mintScriptsDir>/<pinyin>_mint.sh`; carry the pinyin for the minter.
+  pinyin?: string | null
 }
 
 /**
@@ -72,7 +75,7 @@ export function configItemToRule(
     authType: (item.auth_type as string | null) ?? null,
     tokenUrl: (item.token_url as string | null) ?? null,
     tokenRequestJson: (item.token_request_json as string | null) ?? null,
-    mintScript: (item.mint_script as string | null) ?? null,
+    pinyin: (item.pinyin as string | null) ?? null,
   }
 }
 
@@ -379,7 +382,8 @@ export class AuthProxyServer {
             authType: match.authType!,
             tokenUrl: match.tokenUrl,
             tokenRequestJson: match.tokenRequestJson,
-            mintScript: match.mintScript,
+            pinyin: match.pinyin,
+            mintScriptsDir: getSystemSettings().mintScriptsDir,
           },
           creds,
         )

@@ -14,12 +14,16 @@
  *     by `token_request_json` (where creds + static params go, and where the
  *     token/expiry live in the response). Covers standard OAuth2-ish logins
  *     with no per-service code.
- *   - script (auth_type 'script'): run `mint_script` (creds via env), which
- *     prints {access_token, expiresIn} — the escape hatch for signed /
- *     multi-step / cookie-based flows.
+ *   - script (auth_type 'script'): run the per-service login script (creds via
+ *     env), which prints {access_token, expiresIn} — the escape hatch for
+ *     signed / multi-step / cookie-based flows. The script path is not
+ *     admin-configurable; it is composed by convention as
+ *     `<mintScriptsDir>/<pinyin>_mint.sh` so a script can only be installed on
+ *     the server by a sysadmin, never pointed at an arbitrary path from the UI.
  */
 
 import { spawn } from 'child_process'
+import path from 'path'
 
 const MINT_SAFETY_SEC = 5 * 60 // serve/store with a 5-min buffer before real expiry
 const MINT_SKEW_SEC = 60 // re-mint if a cached token has < this left
@@ -37,7 +41,11 @@ export interface MintConfig {
   authType: string // 'oauth2_password' | 'oauth2_client' | 'oauth2_refresh' | 'script' | ...
   tokenUrl?: string | null
   tokenRequestJson?: string | null
-  mintScript?: string | null
+  // For auth_type 'script': the config item's pinyin and the configured scripts
+  // directory. The minter runs `<mintScriptsDir>/<pinyin>_mint.sh` — the path is
+  // never taken from user/admin input, so the UI can't point it elsewhere.
+  pinyin?: string | null
+  mintScriptsDir?: string | null
 }
 
 /** Declarative recipe parsed from token_request_json. All fields optional. */
@@ -144,8 +152,14 @@ export class TokenMinter {
     cfg: MintConfig,
     creds: Record<string, string>,
   ): Promise<{ token: string; expiresIn: number } | null> {
-    const scriptPath = cfg.mintScript?.trim()
-    if (!scriptPath) return Promise.resolve(null)
+    // The script path is composed by convention, never taken from input:
+    // <mintScriptsDir>/<pinyin>_mint.sh. Pinyin is validated at creation to
+    // [a-z0-9_-]; re-check here (defense in depth) so a crafted value can't
+    // traverse out of the scripts dir.
+    const pinyin = cfg.pinyin?.trim()
+    if (!pinyin || !/^[a-z0-9_-]+$/i.test(pinyin)) return Promise.resolve(null)
+    const dir = cfg.mintScriptsDir?.trim() || '/app/scripts'
+    const scriptPath = path.join(dir, `${pinyin}_mint.sh`)
     return new Promise((resolve) => {
       // Creds travel as a single JSON env var (never argv — keeps them out of `ps`).
       const child = spawn(scriptPath, [], {
