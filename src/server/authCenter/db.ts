@@ -26,7 +26,10 @@ export type AuthCenterUser = {
   id: string
   orgId: string
   email: string
+  /** Login username (matched on password login). Non-null, unique-per-org via service layer. */
   name: string
+  /** Optional human display name shown in UIs / agent identity. Distinct from the login `name`. */
+  displayName: string | null
   departmentId: string | null
   role: string
   status: 'active' | 'disabled'
@@ -135,6 +138,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     orgId: String(row.org_id),
     email: String(row.email),
     name: String(row.name),
+    displayName: row.display_name == null ? null : String(row.display_name),
     departmentId: row.department_id == null ? null : String(row.department_id),
     role: String(row.role),
     status: String(row.status) as 'active' | 'disabled',
@@ -350,6 +354,13 @@ export class AuthCenterDb {
       'users',
       'ext_user_id',
       'ALTER TABLE users ADD COLUMN ext_user_id TEXT',
+    )
+    // Optional human display name, distinct from the login `name` (username).
+    // Nullable, not unique — existing rows stay NULL and resolve to `name`.
+    this.ensureColumn(
+      'users',
+      'display_name',
+      'ALTER TABLE users ADD COLUMN display_name TEXT',
     )
     this.ensureColumn(
       'departments',
@@ -593,14 +604,15 @@ export class AuthCenterDb {
   // User operations
   createUser(user: AuthCenterUser): void {
     this.db.prepare(`
-      INSERT INTO users (id, org_id, email, name, department_id, role, status, password_hash,
+      INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, password_hash,
                          password_updated_at, last_login_at, created_at, ext_user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       user.id,
       user.orgId,
       user.email,
       user.name,
+      user.displayName ?? null,
       user.departmentId,
       user.role,
       user.status,
@@ -671,6 +683,7 @@ export class AuthCenterDb {
     id: string,
     patch: {
       name?: string
+      displayName?: string | null
       email?: string
       orgId?: string
       departmentId?: string | null
@@ -687,6 +700,7 @@ export class AuthCenterDb {
     this.db.prepare(`
       UPDATE users
       SET name = ?,
+          display_name = ?,
           email = ?,
           org_id = ?,
           department_id = ?,
@@ -696,6 +710,7 @@ export class AuthCenterDb {
       WHERE id = ?
     `).run(
       patch.name ?? user.name,
+      patch.displayName === undefined ? user.displayName : patch.displayName,
       patch.email ?? user.email,
       patch.orgId ?? user.orgId,
       patch.departmentId === undefined ? user.departmentId : patch.departmentId,
@@ -985,6 +1000,7 @@ export class AuthCenterDb {
         orgId,
         email: resolvedAdmin.email,
         name: resolvedAdmin.username,
+        displayName: null,
         departmentId: null,
         // The seeded bootstrap admin is the platform root-of-trust: it gets the
         // super_admin role so it can promote other super admins and switch
@@ -1071,6 +1087,7 @@ export class AuthCenterDb {
         orgId,
         email: resolvedAdmin.email,
         name: resolvedAdmin.username,
+        displayName: null,
         departmentId: null,
         // Seeded root-of-trust account — see bootstrap() for rationale.
         role: 'super_admin',
@@ -1283,6 +1300,7 @@ export async function readJsonAuthCenterStore(
     })),
     users: parsed.users.map(user => ({
       ...user,
+      displayName: (user as Partial<AuthCenterUser>).displayName ?? null,
       departmentId: user.departmentId ?? null,
       passwordHash: user.passwordHash ?? null,
       passwordUpdatedAt: user.passwordUpdatedAt ?? null,

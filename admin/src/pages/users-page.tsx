@@ -271,6 +271,12 @@ function formatTimestamp(value: number | null): string {
   return new Date(value).toLocaleString('zh-CN')
 }
 
+/** Label a user as `<name> (<displayName>)` when a display name is set, else just `<name>`. */
+function userLabel(user: Pick<AuthUser, 'name' | 'displayName'>): string {
+  const display = user.displayName?.trim()
+  return display ? `${user.name} (${display})` : user.name
+}
+
 function getRoleBadgeVariant(role: UserRole): 'default' | 'secondary' | 'outline' {
   switch (role) {
     case 'admin':
@@ -1303,7 +1309,7 @@ export default function UsersPage() {
                                 className="text-left hover:text-primary"
                                 onClick={() => void handleViewUser(user)}
                               >
-                                {user.name}
+                                {userLabel(user)}
                               </button>
                               {user.extUserId ? (
                                 <div className="text-xs text-muted-foreground font-mono">{user.extUserId}</div>
@@ -2339,7 +2345,7 @@ export default function UsersPage() {
       <Sheet open={!!selectedUser} onOpenChange={(open) => !open && setSelectedUser(null)}>
         <SheetContent className="sm:max-w-[560px] overflow-y-auto">
           <SheetHeader>
-            <SheetTitle>{selectedUser?.name ?? '用户详情'}</SheetTitle>
+            <SheetTitle>{selectedUser ? userLabel(selectedUser) : '用户详情'}</SheetTitle>
             <SheetDescription>
               查看用户基础信息、API Key 以及最近会话。
             </SheetDescription>
