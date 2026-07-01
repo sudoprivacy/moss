@@ -31,6 +31,10 @@ import {
   getConfigItems, createConfigItem, updateConfigItem, deleteConfigItem, updateConfigItemStatus, uploadConfigItemIcon,
   type ConfigItem, type ConfigEntry,
 } from '@/lib/api/secrets'
+import { getSystemSettings } from '@/lib/api/settings'
+
+// Fallback shown before system settings load (and matches the server default).
+const DEFAULT_MINT_SCRIPTS_DIR = '/app/scripts'
 
 const schemeLabels: Record<string, string> = {
   bearer: 'Bearer Token',
@@ -88,7 +92,6 @@ interface ConfigItemForm {
   loginAuthType: LoginAuthType
   token_url: string
   token_request_json: string
-  mint_script: string
   entries: EntryForm[]
 }
 
@@ -97,7 +100,7 @@ const emptyEntry: EntryForm = { config_key: '', name: '', config_desc: '', requi
 const emptyForm: ConfigItemForm = {
   name: '', pinyin: '', description: '', icon: '', scope: 'system',
   url_pattern: '', authMode: 'static', scheme: '', bearer_prefix: '',
-  loginAuthType: 'oauth2_password', token_url: '', token_request_json: '', mint_script: '',
+  loginAuthType: 'oauth2_password', token_url: '', token_request_json: '',
   entries: [{ ...emptyEntry }],
 }
 
@@ -146,6 +149,15 @@ export default function ConfigItemsPage() {
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<ConfigItem | null>(null)
 
+  // Scripts dir for the script-login help text: the server runs
+  // `<mintScriptsDir>/<pinyin>_mint.sh`. Fetched once so the shown path is real.
+  const [mintScriptsDir, setMintScriptsDir] = useState(DEFAULT_MINT_SCRIPTS_DIR)
+  useEffect(() => {
+    getSystemSettings()
+      .then(s => { if (s.mintScriptsDir) setMintScriptsDir(s.mintScriptsDir) })
+      .catch(() => { /* keep the default on failure */ })
+  }, [])
+
   const fetchData = useCallback(async () => {
     try {
       const res = await getConfigItems({
@@ -187,7 +199,6 @@ export default function ConfigItemsPage() {
       loginAuthType,
       token_url: item.token_url || '',
       token_request_json: item.token_request_json || '',
-      mint_script: item.mint_script || '',
       entries: item.entries.length > 0
         ? item.entries.map(e => ({ config_key: e.config_key, name: e.name, config_desc: e.config_desc || '', required: !!e.required }))
         : [{ ...emptyEntry }],
@@ -222,10 +233,6 @@ export default function ConfigItemsPage() {
     }
     // 登录换取令牌的校验
     if (isLogin) {
-      if (form.loginAuthType === 'script' && !form.mint_script.trim()) {
-        toast.error('请填写登录脚本路径 (mint_script)')
-        return
-      }
       if (form.loginAuthType === 'oauth2_password' && !form.token_url.trim()) {
         toast.error('请填写令牌端点 URL (token_url)')
         return
@@ -240,7 +247,6 @@ export default function ConfigItemsPage() {
           auth_type: form.loginAuthType,
           token_url: form.loginAuthType === 'oauth2_password' ? (form.token_url.trim() || undefined) : undefined,
           token_request_json: form.token_request_json.trim() || undefined,
-          mint_script: form.loginAuthType === 'script' ? (form.mint_script.trim() || undefined) : undefined,
           scheme: undefined,
           bearer_prefix: undefined,
         }
@@ -248,7 +254,6 @@ export default function ConfigItemsPage() {
           auth_type: 'static',
           token_url: undefined,
           token_request_json: undefined,
-          mint_script: undefined,
           scheme: form.scheme || undefined,
           bearer_prefix: form.bearer_prefix.trim() || undefined,
         }
@@ -614,10 +619,8 @@ export default function ConfigItemsPage() {
 
                 {form.loginAuthType === 'script' && (
                   <div className="space-y-2">
-                    <Label>登录脚本路径（mint_script） <span className="text-destructive">*</span></Label>
-                    <Input value={form.mint_script} onChange={e => setForm(f => ({ ...f, mint_script: e.target.value }))} placeholder="/app/deploy/your_login.sh" />
                     <p className="text-xs text-muted-foreground">
-                      服务端可执行脚本的绝对路径（在 moss-server 容器内）。脚本从环境变量 <code>MINT_CREDS</code>(JSON) 读取已存凭据，向标准输出打印一行 <code>{'{"access_token":"...","expiresIn":<秒>}'}</code>。需要在 moss-server 容器内可访问（如通过挂载）。
+                      服务端可执行脚本（在 moss-server 容器内）<code>{`${mintScriptsDir.replace(/\/+$/, '')}/${form.pinyin.trim() || '<pinyin>'}_mint.sh`}</code>，请联系系统管理员进行配置。脚本从环境变量 <code>MINT_CREDS</code>(JSON) 读取已存凭据，向标准输出打印一行 <code>{'{"access_token":"...","expiresIn":<秒>}'}</code>。下方“字段定义”是用户需要在「我的凭据」中填写的登录凭据字段（如 username、password），脚本/请求配方会用到它们。
                     </p>
                   </div>
                 )}

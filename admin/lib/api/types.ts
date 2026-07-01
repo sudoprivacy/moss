@@ -216,6 +216,11 @@ export interface SystemSettings {
   /** Max size (bytes) for a single file uploaded into a session workspace.
    *  Enforced server-side (413 when exceeded). Default 20MB. */
   workspaceUploadLimitBytes: number
+  /** Directory (inside the moss-server container) holding the per-service login
+   *  scripts run by the token minter. For a script-type config item with pinyin
+   *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Default
+   *  '/app/scripts'. Not editable in the UI; configured in settings.json. */
+  mintScriptsDir: string
   settingsPath: string
   settingsExists: boolean
   settingsLoaded: boolean
