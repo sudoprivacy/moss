@@ -56,14 +56,22 @@ export function createEnterpriseApi(
     },
 
     /**
-     * Update enterprise configuration. Branding fields persist to the DB;
-     * client_cron_enabled / client_show_tool_calls are routed to settings.json
-     * (clientCronEnabled / clientShowToolCalls).
+     * Update enterprise configuration. Only the branding columns persist to the
+     * DB; the client toggles and workspace upload limit are routed to
+     * settings.json (that's their source of truth in getConfig). Any other key
+     * is ignored — getConfig returns settings-sourced fields (e.g.
+     * workspace_upload_limit_bytes) that the client PATCHes back, and writing
+     * those to `enterprises` would throw "no such column" and fail the save.
      */
     updateConfig: async (patch: any) => {
       try {
         if (patch && typeof patch === 'object') {
-          const { cabin_enabled: _cabinEnabled, client_cron_enabled, client_show_tool_calls, ...rest } = patch
+          const {
+            client_cron_enabled,
+            client_show_tool_calls,
+            workspace_upload_limit_bytes,
+          } = patch
+
           const settingsPatch: Record<string, unknown> = {}
           if (client_cron_enabled !== undefined) {
             settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
@@ -71,11 +79,25 @@ export function createEnterpriseApi(
           if (client_show_tool_calls !== undefined) {
             settingsPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
           }
+          if (workspace_upload_limit_bytes !== undefined) {
+            settingsPatch.workspaceUploadLimitBytes = workspace_upload_limit_bytes
+          }
           if (Object.keys(settingsPatch).length > 0) {
             updateSystemSettings(settingsPatch)
           }
-          if (Object.keys(rest).length > 0) {
-            db.updateEnterprise(rest)
+
+          // Whitelist the actual `enterprises` columns so read-only /
+          // settings-sourced fields in the round-tripped config can't reach SQL.
+          const ENTERPRISE_COLUMNS = [
+            'logo', 'app_name', 'top_name', 'about_name',
+            'app_company_name', 'login_desp', 'client_cron_enabled',
+          ] as const
+          const dbPatch: Record<string, unknown> = {}
+          for (const col of ENTERPRISE_COLUMNS) {
+            if (patch[col] !== undefined) dbPatch[col] = patch[col]
+          }
+          if (Object.keys(dbPatch).length > 0) {
+            db.updateEnterprise(dbPatch)
           }
         } else {
           db.updateEnterprise(patch)
