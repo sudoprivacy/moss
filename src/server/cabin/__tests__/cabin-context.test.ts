@@ -609,7 +609,7 @@ describe('cabin binding context', () => {
       if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
         controlRequests.push(`${url.pathname}?${url.searchParams.toString()}`)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ status: 'accepted', code: 0, message: 'ok' }))
+        res.end(JSON.stringify({ status: 'dispatched', code: 0, message: 'ok' }))
         return
       }
       res.writeHead(404)
@@ -712,7 +712,7 @@ describe('cabin binding context', () => {
       if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
         controlRequests.push(`${url.pathname}?${url.searchParams.toString()}`)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ status: 'accepted', code: 0, message: 'ok' }))
+        res.end(JSON.stringify({ status: 'dispatched', code: 0, message: 'ok' }))
         return
       }
       res.writeHead(404)
@@ -781,7 +781,7 @@ describe('cabin binding context', () => {
     ])
   })
 
-  it('normalizes accepted hardware replies without claiming completion', () => {
+  it('normalizes dispatched hardware replies without claiming completion', () => {
     const reply = normalizeCabinHardwareReply({
       userText: '请打开小桌板',
       reply: '好的，已为您打开小桌板，请稍后。请问还有其他需要帮助的吗？',
@@ -880,7 +880,7 @@ describe('cabin binding context', () => {
       if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
         controlRequests.push(`${url.pathname}?${url.searchParams.toString()}`)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ status: 'accepted', code: 0, message: 'ok' }))
+        res.end(JSON.stringify({ status: 'dispatched', code: 0, message: 'ok' }))
         return
       }
       res.writeHead(404)

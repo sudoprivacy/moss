@@ -373,10 +373,7 @@ function resolveCommand(args) {
 }
 
 function buildPassengerReplyHint(executionStatus, label) {
-  if (executionStatus === 'completed') {
-    return `${label}已完成。`
-  }
-  if (executionStatus === 'accepted') {
+  if (executionStatus === 'dispatched') {
     return `已为您下发${label}的指令，请稍候。`
   }
   return `${label}的指令下发失败，请稍后再试。`
@@ -518,16 +515,8 @@ async function main() {
   const businessMessage = payload && typeof payload === 'object'
     ? (typeof payload.message === 'string' ? payload.message : typeof payload.msg === 'string' ? payload.msg : undefined)
     : undefined
-  const ok = response.ok && (
-    businessCode === undefined ||
-    businessCode === 0 ||
-    businessCode === '0'
-  )
-  const executionStatus = ok && responseData && typeof responseData === 'object' && responseData.status === 'completed'
-    ? 'completed'
-    : ok
-      ? 'accepted'
-      : 'failed'
+  const ok = response.ok && (businessCode === 0 || businessCode === '0')
+  const executionStatus = ok ? 'dispatched' : 'failed'
   const label = command.label(parsedArgs)
 
   logCabinHardware({

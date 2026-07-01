@@ -131,8 +131,7 @@ The script reads:
 
 ## Reply Rules
 
-- If the script returns `"ok": true` and `"execution_status": "accepted"`, tell the passenger the command has been issued and the device is being adjusted. Do not say the action has completed.
+- If the script returns `"ok": true` and `"execution_status": "dispatched"`, tell the passenger the command has been issued and the device is being adjusted. Never say the action has completed — the hardware API only confirms command dispatch, not completion.
 - Prefer the script's `"passenger_reply_hint"` when present.
-- Only say the hardware action is completed when the script returns `"execution_status": "completed"`.
 - If the script returns `"ok": false`, do not claim success. Apologize briefly and say the request has not completed.
 - Never reveal URLs, tokens, headers, raw internal logs, or implementation details to the passenger.

@@ -182,12 +182,8 @@ export class CabinServices {
     const businessCode = payload && typeof payload === 'object' && 'code' in payload
       ? (payload as { code?: unknown }).code
       : undefined
-    const ok = response.ok && (
-      businessCode === undefined ||
-      businessCode === 0 ||
-      businessCode === '0'
-    )
-    const executionStatus = ok && isCompletedPayload(payload) ? 'completed' : ok ? 'accepted' : 'failed'
+    const ok = response.ok && (businessCode === 0 || businessCode === '0')
+    const executionStatus = ok ? 'dispatched' : 'failed'
     this.logOutbound({
       ...input.logContext,
       upstream: 'hardware-control',
@@ -210,11 +206,9 @@ export class CabinServices {
         execution_status: executionStatus,
       },
       toolCall: input.route.toolCall,
-      reply: executionStatus === 'completed'
-        ? `${input.route.label}已完成。`
-        : executionStatus === 'accepted'
-          ? `已为您下发${input.route.label}的指令，请稍候。`
-          : `${input.route.label}的指令下发失败，请稍后再试。`,
+      reply: executionStatus === 'dispatched'
+        ? `已为您下发${input.route.label}的指令，请稍候。`
+        : `${input.route.label}的指令下发失败，请稍后再试。`,
     }
   }
 
@@ -477,7 +471,7 @@ export class CabinServices {
     const socket = await this.options.runtime.connectToAttempt(ready.attempt)
     const start = Date.now()
     try {
-      const reply = await sendPromptToRunnerSocket(
+      const { reply, hardwareResult } = await sendPromptToRunnerSocket(
         socket,
         formatCabinSessionPrompt(input.context, input.text),
         input.timeoutMs ?? 120_000,
@@ -497,6 +491,24 @@ export class CabinServices {
           reply_chars: reply.length,
         },
       })
+      if (hardwareResult) {
+        // The hardware HTTP call is issued inside the cabin-control.mjs subprocess, so
+        // its own log line only lands in the container. Mirror the dispatch outcome here
+        // (from the tool_result) so Path B calls also show up in the server's cabin log.
+        this.logOutbound({
+          ...input.logContext,
+          upstream: 'hardware-control',
+          method: 'POST',
+          status: hardwareResult.httpStatus,
+          ok: hardwareResult.ok,
+          elapsedMs: 0,
+          details: {
+            command: hardwareResult.command,
+            execution_status: hardwareResult.executionStatus ?? (hardwareResult.ok ? 'dispatched' : 'failed'),
+            routed: 'moss-session',
+          },
+        })
+      }
       return reply
     } catch (error) {
       this.logOutbound({
@@ -635,7 +647,53 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     }
   }
 
-  if (hasAnyText(text, ['阅读灯', '读书灯', 'reading light']) || hasAnyText(text, ['灯', 'light'])) {
+  const mentionsCeiling = hasAnyText(text, ['顶灯', '客舱灯', '舱灯', 'ceiling'])
+  if (mentionsCeiling) {
+    const color = extractCeilingColor(text)
+    if (color) {
+      return route({
+        intent: 'ceiling_light_color',
+        command: 'cabin.ceiling.color',
+        label: `客舱顶灯颜色调整为 RGB(${color.r}, ${color.g}, ${color.b})，亮度 ${color.brightness}%`,
+        path: '/admin-api/tcp-client/cmd/cabin/ceiling/color',
+        params: { r: color.r, g: color.g, b: color.b, brightness: color.brightness },
+        slots: { target: 'ceiling_light', action: 'color', ...color },
+      })
+    }
+    const brightness = extractCeilingBrightness(text)
+    if (brightness !== null) {
+      return route({
+        intent: 'ceiling_light_brightness',
+        command: 'cabin.ceiling.color',
+        label: `客舱顶灯亮度调整到 ${brightness}%`,
+        path: '/admin-api/tcp-client/cmd/cabin/ceiling/color',
+        params: { r: 255, g: 255, b: 255, brightness },
+        slots: { target: 'ceiling_light', action: 'brightness', r: 255, g: 255, b: 255, brightness },
+      })
+    }
+    if (hasAnyText(text, ['关闭', '关掉', '关上', '熄灭', 'off'])) {
+      return route({
+        intent: 'ceiling_light_off',
+        command: 'cabin.ceiling.light',
+        label: '关闭客舱顶灯',
+        path: '/admin-api/tcp-client/cmd/cabin/ceiling/light',
+        params: { on: false },
+        slots: { target: 'ceiling_light', action: 'off' },
+      })
+    }
+    if (hasAnyText(text, ['打开', '开启', '开灯', 'on'])) {
+      return route({
+        intent: 'ceiling_light_on',
+        command: 'cabin.ceiling.light',
+        label: '打开客舱顶灯',
+        path: '/admin-api/tcp-client/cmd/cabin/ceiling/light',
+        params: { on: true },
+        slots: { target: 'ceiling_light', action: 'on' },
+      })
+    }
+  }
+
+  if (!mentionsCeiling && (hasAnyText(text, ['阅读灯', '读书灯', 'reading light']) || hasAnyText(text, ['灯', 'light']))) {
     const pwm = extractPwmValue(userText)
     if (pwm !== null || hasAnyText(text, ['亮度', '调亮', '调暗', '亮一点', '暗一点', 'brightness'])) {
       const normalizedPwm = pwm ?? (hasAnyText(text, ['调暗', '暗一点', 'dimmer']) ? 300 : 700)
@@ -673,6 +731,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
   if (hasAnyText(text, ['座椅', '靠背', '坐垫', 'seat'])) {
     const position = extractPercentValue(userText)
       ?? (hasAnyText(text, ['调直', '归位', '直立', '收起', 'upright']) ? 0 : null)
+      ?? (hasAnyText(text, ['后仰一点', '放倒一点', '往后一点', '往后调一点', '稍微后仰', '稍微放倒']) ? 30 : null)
       ?? (hasAnyText(text, ['放倒', '后仰', '躺', '休息', '舒服', 'recline']) ? 60 : null)
     if (position !== null) {
       return route({
@@ -721,6 +780,50 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     })
   }
 
+  if (hasAnyText(text, ['生理检测', '健康检测', '健康监测', '生理采集', '体征采集', '体征监测', 'health'])) {
+    if (hasAnyText(text, ['停止', '结束', '关闭', '停掉', 'stop'])) {
+      return route({
+        intent: 'health_stop',
+        command: 'seat.health.stop',
+        label: '停止生理检测采集',
+        path: '/admin-api/tcp-client/cmd/seat/health/stop',
+        slots: { target: 'health', action: 'stop' },
+      })
+    }
+    if (hasAnyText(text, ['开始', '启动', '打开', '开启', '采集', 'start'])) {
+      return route({
+        intent: 'health_start',
+        command: 'seat.health.start',
+        label: '启动生理检测采集',
+        path: '/admin-api/tcp-client/cmd/seat/health/start',
+        slots: { target: 'health', action: 'start' },
+      })
+    }
+  }
+
+  if (hasAnyText(text, ['场景', 'scene'])) {
+    if (hasAnyText(text, ['清除', '取消', '关闭场景', '退出场景', '默认场景', 'clear'])) {
+      return route({
+        intent: 'cabin_scene_clear',
+        command: 'cabin.scene.clear',
+        label: '清除客舱场景',
+        path: '/admin-api/tcp-client/cmd/cabin/scene/clear',
+        slots: { target: 'cabin_scene', action: 'clear' },
+      })
+    }
+    const preset = extractScenePreset(text)
+    if (preset) {
+      return route({
+        intent: 'cabin_scene_set',
+        command: 'cabin.scene',
+        label: `切换至 ${preset} 客舱场景`,
+        path: '/admin-api/tcp-client/cmd/cabin/scene',
+        params: { preset },
+        slots: { target: 'cabin_scene', action: 'set', preset },
+      })
+    }
+  }
+
   return null
 }
 
@@ -750,6 +853,81 @@ function extractPwmValue(text: string): number | null {
 function extractLevelValue(text: string): number | null {
   const levelMatch = text.match(/(\d{1,2})\s*(?:档|级|level)/i)
   if (levelMatch) return clampInt(Number.parseInt(levelMatch[1], 10), 0, 10)
+  return null
+}
+
+// RGB values mirror cabin-control.mjs COLOR_ALIASES so both paths dispatch identical colors.
+const CEILING_COLORS: Record<string, { r: number; g: number; b: number }> = {
+  蓝: { r: 0, g: 0, b: 255 },
+  蓝色: { r: 0, g: 0, b: 255 },
+  blue: { r: 0, g: 0, b: 255 },
+  红: { r: 255, g: 0, b: 0 },
+  红色: { r: 255, g: 0, b: 0 },
+  red: { r: 255, g: 0, b: 0 },
+  绿: { r: 0, g: 255, b: 0 },
+  绿色: { r: 0, g: 255, b: 0 },
+  green: { r: 0, g: 255, b: 0 },
+  白: { r: 255, g: 255, b: 255 },
+  白色: { r: 255, g: 255, b: 255 },
+  white: { r: 255, g: 255, b: 255 },
+  暖: { r: 255, g: 180, b: 80 },
+  暖色: { r: 255, g: 180, b: 80 },
+  warm: { r: 255, g: 180, b: 80 },
+}
+
+function extractCeilingColor(text: string): { r: number; g: number; b: number; brightness: number } | null {
+  for (const [word, rgb] of Object.entries(CEILING_COLORS)) {
+    if (text.includes(word)) {
+      const percent = extractPercentValue(text)
+      return { ...rgb, brightness: percent ?? 100 }
+    }
+  }
+  return null
+}
+
+function extractCeilingBrightness(text: string): number | null {
+  const percent = extractPercentValue(text)
+  if (percent !== null) return percent
+  if (hasAnyText(text, ['亮度', '调亮', '调暗', '亮一点', '暗一点', 'brightness'])) {
+    return hasAnyText(text, ['调暗', '暗一点', 'dimmer']) ? 30 : 80
+  }
+  return null
+}
+
+// Preset tokens must match the backend's configured cabin scene presets; unknown
+// scene words return null so the request falls through to the LLM path instead of
+// dispatching a guessed preset.
+const SCENE_PRESETS: Record<string, string> = {
+  登机: 'boarding',
+  boarding: 'boarding',
+  巡航: 'cruise',
+  cruise: 'cruise',
+  用餐: 'dining',
+  就餐: 'dining',
+  餐饮: 'dining',
+  dining: 'dining',
+  休息: 'rest',
+  rest: 'rest',
+  睡眠: 'sleep',
+  睡觉: 'sleep',
+  sleep: 'sleep',
+  夜间: 'night',
+  夜晚: 'night',
+  night: 'night',
+  娱乐: 'entertainment',
+  entertainment: 'entertainment',
+  阅读: 'reading',
+  reading: 'reading',
+  欢迎: 'welcome',
+  welcome: 'welcome',
+}
+
+function extractScenePreset(text: string): string | null {
+  for (const [word, preset] of Object.entries(SCENE_PRESETS)) {
+    if (text.includes(word.toLowerCase())) return preset
+  }
+  const explicit = text.match(/(?:preset|场景)\s*(?:切换到|切换为|设为|设置为|=|：|:)?\s*([a-z0-9_.-]{2,32})/i)
+  if (explicit) return explicit[1]
   return null
 }
 
@@ -791,12 +969,6 @@ function parseJsonPayload(text: string): unknown {
   } catch {
     return { raw: text.slice(0, 1000) }
   }
-}
-
-function isCompletedPayload(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') return false
-  const data = (payload as { data?: unknown }).data
-  return !!data && typeof data === 'object' && (data as { status?: unknown }).status === 'completed'
 }
 
 function formatCabinSessionPrompt(context: CabinPassengerContext, text: string): string {
@@ -848,6 +1020,79 @@ function extractAssistantText(line: string): string {
   return ''
 }
 
+type HardwareToolResult = {
+  ok: boolean
+  passengerReplyHint?: string
+  command?: string
+  executionStatus?: string
+  httpStatus?: number
+}
+
+// cabin-control.mjs prints a single-line JSON result to stdout; the runner surfaces
+// it as a tool_result block on a `user` event. This lets Path B decide the passenger
+// reply from the real hardware outcome instead of the model's narration.
+export function extractHardwareToolResult(line: string): HardwareToolResult | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const event = parsed as { type?: string; message?: { content?: unknown } }
+  if (event.type !== 'user') return null
+  const content = event.message?.content
+  if (!Array.isArray(content)) return null
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    if ((block as { type?: string }).type !== 'tool_result') continue
+    const inner = (block as { content?: unknown }).content
+    const texts: string[] = []
+    if (typeof inner === 'string') {
+      texts.push(inner)
+    } else if (Array.isArray(inner)) {
+      for (const item of inner) {
+        const itemText = item && typeof item === 'object' ? (item as { text?: unknown }).text : undefined
+        if (typeof itemText === 'string') texts.push(itemText)
+      }
+    }
+    for (const text of texts) {
+      const result = parseHardwareResultPayload(text)
+      if (result) return result
+    }
+  }
+  return null
+}
+
+function parseHardwareResultPayload(text: string): HardwareToolResult | null {
+  for (const candidate of text.split(/\r?\n/)) {
+    const trimmed = candidate.trim()
+    if (!trimmed.startsWith('{')) continue
+    let obj: {
+      ok?: unknown
+      passenger_reply_hint?: unknown
+      execution_status?: unknown
+      command?: unknown
+      http_status?: unknown
+    }
+    try {
+      obj = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (typeof obj.ok === 'boolean' && (obj.execution_status !== undefined || obj.passenger_reply_hint !== undefined)) {
+      return {
+        ok: obj.ok,
+        passengerReplyHint: typeof obj.passenger_reply_hint === 'string' ? obj.passenger_reply_hint : undefined,
+        command: typeof obj.command === 'string' ? obj.command : undefined,
+        executionStatus: typeof obj.execution_status === 'string' ? obj.execution_status : undefined,
+        httpStatus: typeof obj.http_status === 'number' ? obj.http_status : undefined,
+      }
+    }
+  }
+  return null
+}
+
 export function isCabinHardwareRequest(text: string): boolean {
   return /小桌板|桌板|tray|灯|light|顶灯|座椅|靠背|坐垫|通风|加热|按摩|seat|温度|temperature|空调|air\s*condition|场景|scene|生理|健康|采集/i.test(text)
 }
@@ -865,7 +1110,7 @@ function sanitizeCabinHardwareReply(text: string): string {
     .trim()
 }
 
-function buildAcceptedHardwareReply(text: string): string {
+function buildDispatchedHardwareReply(text: string): string {
   if (/阅读灯|读书灯|reading\s*light/i.test(text)) {
     const lightLabel = /读书灯/i.test(text) ? '读书灯' : '阅读灯'
     if (/关闭|关上|关掉|close|off/i.test(text)) return `已为您下发关闭${lightLabel}的指令，请稍候。`
@@ -897,7 +1142,7 @@ function buildAcceptedHardwareReply(text: string): string {
   return ''
 }
 
-function shouldUseAcceptedHardwareReply(text: string): boolean {
+function shouldUseDispatchedHardwareReply(text: string): boolean {
   if (!text.trim()) return true
   if (/无法|不能|不可用|失败|未成功|没有可用|not available|cannot|can't|failed|error/i.test(text)) {
     return false
@@ -1034,12 +1279,12 @@ export function normalizeCabinHardwareReply(input: {
   const cleanedText = sanitizeCabinHardwareReply(input.reply)
   if (shouldExposeHardwareReply(cleanedText)) return addPassengerSalutation(cleanedText, input.context)
 
-  const acceptedHardwareReply = buildAcceptedHardwareReply(input.userText)
-  if (acceptedHardwareReply && shouldUseAcceptedHardwareReply(cleanedText)) {
-    return addPassengerSalutation(acceptedHardwareReply, input.context)
+  const dispatchedHardwareReply = buildDispatchedHardwareReply(input.userText)
+  if (dispatchedHardwareReply && shouldUseDispatchedHardwareReply(cleanedText)) {
+    return addPassengerSalutation(dispatchedHardwareReply, input.context)
   }
 
-  const reply = cleanedText || acceptedHardwareReply || input.reply.trim()
+  const reply = cleanedText || dispatchedHardwareReply || input.reply.trim()
   return addPassengerSalutation(reply, input.context)
 }
 
@@ -1049,12 +1294,12 @@ function sendPromptToRunnerSocket(
   timeoutMs: number,
   onDelta?: (text: string) => void,
   suppressPreToolText = false,
-): Promise<string> {
+): Promise<{ reply: string; hardwareResult: HardwareToolResult | null }> {
   return new Promise((resolve, reject) => {
     let settled = false
     let assistantText = ''
     let pendingText = ''
-    let sawToolUse = false
+    let hardwareResult: HardwareToolResult | null = null
     let releasedDeltas = !suppressPreToolText
     const rl = createInterface({ input: socket })
 
@@ -1101,10 +1346,12 @@ function sendPromptToRunnerSocket(
         }
       }
 
+      const toolResult = extractHardwareToolResult(message.line)
+      if (toolResult) hardwareResult = toolResult
+
       try {
         const inner = JSON.parse(message.line) as { type?: string; status?: string; input?: unknown }
         if (inner.type === 'tool_use') {
-          sawToolUse = true
           if (suppressPreToolText && typeof inner.input === 'string') {
             pendingText = ''
           }
@@ -1113,12 +1360,20 @@ function sendPromptToRunnerSocket(
           if (inner.status === 'success') {
             if (suppressPreToolText) {
               const cleanedText = sanitizeCabinHardwareReply(pendingText)
-              const acceptedHardwareReply = sawToolUse ? buildAcceptedHardwareReply(text) : ''
-              assistantText = shouldExposeHardwareReply(cleanedText)
-                ? cleanedText
-                : acceptedHardwareReply && shouldUseAcceptedHardwareReply(cleanedText)
-                ? acceptedHardwareReply
-                : cleanedText || acceptedHardwareReply || pendingText.trim()
+              if (hardwareResult) {
+                // Ground the reply in the real hardware outcome, never the model's narration.
+                assistantText = hardwareResult.ok
+                  ? hardwareResult.passengerReplyHint
+                    || buildDispatchedHardwareReply(text)
+                    || '已为您下发指令，请稍候。'
+                  : '抱歉，刚才的操作没有下发成功，请您稍后再试或联系乘务员。'
+              } else if (shouldExposeHardwareReply(cleanedText)) {
+                // Model surfaced an explicit unavailable/failure message — pass it through.
+                assistantText = cleanedText
+              } else {
+                // No hardware tool result observed: do NOT fabricate a "已下发" success.
+                assistantText = cleanedText || '收到，我这就为您处理。'
+              }
               if (assistantText) {
                 onDelta?.(assistantText)
               }
@@ -1126,7 +1381,7 @@ function sendPromptToRunnerSocket(
               assistantText += pendingText
               onDelta?.(pendingText)
             }
-            finish(() => resolve(assistantText.trim() || '收到，我会为您处理。'))
+            finish(() => resolve({ reply: assistantText.trim() || '收到，我会为您处理。', hardwareResult }))
           } else {
             finish(() => reject(new Error(`Moss session result status: ${inner.status || 'unknown'}`)))
           }
