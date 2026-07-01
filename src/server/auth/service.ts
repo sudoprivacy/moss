@@ -25,6 +25,16 @@ import {
 export type AuthRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
 
 /**
+ * The human-facing name for a user: the optional `displayName` when set,
+ * otherwise the login `name` (username). Used for the outgoing login-response
+ * `user.name`, `getUserName`, and the agent's "who am I" identity — so clients
+ * and the agent see e.g. `数牍技术01` while login still matches the username.
+ */
+function resolveDisplayName(user: { name: string; displayName?: string | null }): string {
+  return user.displayName?.trim() || user.name
+}
+
+/**
  * Roles that carry full administrative capability (wildcard scope, cross-org
  * actor resolution, no department-visibility filtering). `super_admin` is a
  * strict superset of `admin`: it additionally may switch its effective org and
@@ -539,7 +549,11 @@ export class AuthService {
         id: userId,
         orgId: targetOrg.id,
         email,
-        name: identity.displayName?.trim() || email,
+        // Login username from the IdP's `username`. Fall back to the legacy
+        // `displayName` (older scripts only emitted that) or email so existing
+        // integrations keep working. The friendly name goes to displayName.
+        name: identity.username?.trim() || identity.displayName?.trim() || email,
+        displayName: identity.displayName?.trim() || null,
         departmentId: null,
         role: 'user',
         status: 'active',
@@ -564,14 +578,20 @@ export class AuthService {
       }
     } else {
       // Existing user: re-sync IdP-authoritative profile fields (org membership,
-      // displayName, email) if any drifted. Empty IdP values are guards — a
-      // momentarily-missing IdP field won't clobber the moss row.
-      const profilePatch: { orgId?: string; name?: string; email?: string } = {}
+      // username, display name, email) if any drifted. Empty IdP values are
+      // guards — a momentarily-missing IdP field won't clobber the moss row.
+      const profilePatch: { orgId?: string; name?: string; displayName?: string; email?: string } = {}
       if (user.orgId !== targetOrg.id) profilePatch.orgId = targetOrg.id
 
-      const incomingName = identity.displayName?.trim() || ''
+      // Login username drift (IdP `username`).
+      const incomingName = identity.username?.trim() || ''
       if (incomingName && incomingName !== user.name) {
         profilePatch.name = incomingName
+      }
+      // Display name drift (IdP `displayName`/nickname).
+      const incomingDisplay = identity.displayName?.trim() || ''
+      if (incomingDisplay && incomingDisplay !== user.displayName) {
+        profilePatch.displayName = incomingDisplay
       }
 
       // Email: only re-sync when the incoming email is real (non-synthetic).
@@ -956,13 +976,14 @@ export class AuthService {
 
   getUserName(userId: string): string | undefined {
     const user = this.db.getUserById(userId)
-    return user?.name
+    return user ? resolveDisplayName(user) : undefined
   }
 
   createUser(input: {
     orgId: string
     email?: string
     name: string
+    displayName?: string | null
     departmentId?: string | null
     role: string
     password: string
@@ -972,6 +993,7 @@ export class AuthService {
   } {
     const email = input.email?.trim() || ''
     const name = input.name.trim()
+    const displayName = input.displayName?.trim() || null
     const departmentId = input.departmentId?.trim() || null
     const role = input.role.trim()
     const extUserId = input.extUserId?.trim() || null
@@ -1017,6 +1039,7 @@ export class AuthService {
       orgId: input.orgId,
       email: email || createSyntheticUserEmail(userId),
       name,
+      displayName,
       departmentId,
       role,
       status: 'active',
@@ -1036,6 +1059,7 @@ export class AuthService {
     orgId: string
     userId: string
     name?: string
+    displayName?: string | null
     departmentId?: string | null
     role?: string
     status?: string
@@ -1051,6 +1075,7 @@ export class AuthService {
 
     const patch: {
       name?: string
+      displayName?: string | null
       departmentId?: string | null
       role?: AuthRole
       status?: 'active' | 'disabled'
@@ -1069,6 +1094,10 @@ export class AuthService {
         throw new AuthServiceError(409, 'Username already exists')
       }
       patch.name = name
+    }
+    if (input.displayName !== undefined) {
+      // Nullable display name: empty/whitespace clears it (resolves back to name).
+      patch.displayName = input.displayName?.trim() || null
     }
     if (typeof input.role === 'string') {
       const role = input.role.trim()
@@ -1133,6 +1162,7 @@ export class AuthService {
 
     if (
       patch.name === undefined &&
+      patch.displayName === undefined &&
       patch.departmentId === undefined &&
       patch.role === undefined &&
       patch.status === undefined &&
@@ -1523,12 +1553,20 @@ export class AuthService {
       'refresh',
     )
 
+    // The outgoing `user.name` is the resolved display name (displayName ||
+    // name) so clients show the friendly name with no client change, while the
+    // DB `name` (login username) is unchanged and still used for login lookup.
+    // The raw `displayName` is included as well for callers that want both.
     return {
       access_token: access.token,
       refresh_token: refresh.token,
       token_type: 'Bearer',
       expires_in: access.expiresAt - Math.floor(Date.now() / 1000),
-      user: sanitizeUser(input.user),
+      user: {
+        ...sanitizeUser(input.user),
+        name: resolveDisplayName(input.user),
+        displayName: input.user.displayName ?? null,
+      },
       organization: this.db.getOrganization(orgId),
       scopes: input.scopes,
     }

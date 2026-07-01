@@ -3629,6 +3629,10 @@ export function startServer(
             orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
+            displayName:
+              body.display_name === null || typeof body.display_name === 'string'
+                ? body.display_name
+                : undefined,
             departmentId:
               body.department_id === null || typeof body.department_id === 'string'
                 ? body.department_id
@@ -3653,6 +3657,10 @@ export function startServer(
           orgId: auth.orgId,
           userId,
           name: typeof body.name === 'string' ? body.name : undefined,
+          displayName:
+            body.display_name === null || typeof body.display_name === 'string'
+              ? body.display_name
+              : undefined,
           departmentId:
             body.department_id === null || typeof body.department_id === 'string'
               ? body.department_id

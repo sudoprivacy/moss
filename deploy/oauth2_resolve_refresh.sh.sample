@@ -120,9 +120,16 @@ mode="${1:-}"
 # │                │          │ extDeptId is set — moss renames the moss row  │
 # │                │          │ to match on drift.                             │
 # │                │          │                                                │
-# │ displayName    │ optional │ User's display name for the moss `users.name`  │
-# │                │          │ column. Authoritative on every login (drift-   │
-# │                │          │ sync). Empty / missing → moss keeps existing.  │
+# │ username       │ optional │ Login username → moss `users.name` column      │
+# │                │          │ (the account's stable login id, e.g. the IdP's │
+# │                │          │ user_name). Authoritative on drift-sync. When  │
+# │                │          │ omitted moss falls back to displayName/email.  │
+# │                │          │                                                │
+# │ displayName    │ optional │ User's human display name → moss               │
+# │                │          │ `users.display_name` column (shown in UIs and  │
+# │                │          │ the agent's "who am I" identity). Authoritative │
+# │                │          │ on every login (drift-sync). Empty / missing → │
+# │                │          │ moss keeps existing.                           │
 # │                │          │                                                │
 # │ email          │ optional │ User's real email. When omitted moss          │
 # │                │          │ synthesizes oauth2-<extUserId>@users.internal. │
@@ -195,13 +202,17 @@ resolve_mode() {
   #
   #   user_id=$(echo "$userinfo" | jq -r '.user_id // empty')
   #   [ -n "$user_id" ] || die "userinfo .user_id is missing or null"
+  #   # Ruigu-style userinfo also carries a login username and a nickname:
+  #   username=$(echo "$userinfo" | jq -r '.user_name // empty')  # → users.name
+  #   nickname=$(echo "$userinfo" | jq -r '.nickname  // empty')  # → users.display_name
   #
   # Optional fields can use the omit-if-empty pattern in the emit step
   # below; only the required ones (extUserId, expiresIn, access_token)
   # warrant a hard die here.
 
   local user_id="REPLACE_ME_user_id"
-  local nickname="REPLACE_ME_display_name"
+  local username="REPLACE_ME_user_name"   # login username → users.name
+  local nickname="REPLACE_ME_nickname"    # display name  → users.display_name
   local email=""                      # leave empty to let moss synthesize
   local biz_org_id=""                 # IdP's org id; empty → omit extOrgId
   local biz_org_name=""               # IdP's org name; empty → omit extOrgName
@@ -214,6 +225,7 @@ resolve_mode() {
     "$expires_in" \
     "$access_token" \
     "$refresh_token" \
+    "$username" \
     "$nickname" \
     "$email" \
     "$biz_org_id" \
@@ -263,19 +275,20 @@ refresh_mode() {
 # sync semantics where missing == "preserve the moss row's value".
 #
 # Args: 1=user_id   2=expires_in   3=access_token  4=refresh_token
-#       5=display   6=email        7=ext_org_id    8=ext_org_name
-#       9=ext_dept  10=department
+#       5=username  6=display      7=email         8=ext_org_id
+#       9=ext_org_name  10=ext_dept  11=department
 emit_identity() {
   local user_id="$1" expires_in="$2" access_token="$3" refresh_token="$4"
-  local display="$5" email="$6"
-  local ext_org_id="$7" ext_org_name="$8"
-  local ext_dept_id="$9" department="${10}"
+  local username="$5" display="$6" email="$7"
+  local ext_org_id="$8" ext_org_name="$9"
+  local ext_dept_id="${10}" department="${11}"
 
   jq -n \
     --arg extUserId "$user_id" \
     --argjson expiresIn "$expires_in" \
     --arg accessToken "$access_token" \
     --arg refreshToken "$refresh_token" \
+    --arg username "$username" \
     --arg displayName "$display" \
     --arg email "$email" \
     --arg extOrgId "$ext_org_id" \
@@ -287,6 +300,7 @@ emit_identity() {
        expiresIn: $expiresIn,
        access_token: $accessToken
      }
+     + (if $username     != "" then { username:     $username     } else {} end)
      + (if $displayName  != "" then { displayName:  $displayName  } else {} end)
      + (if $refreshToken != "" then { refreshToken: $refreshToken } else {} end)
      + (if $email        != "" then { email:        $email        } else {} end)

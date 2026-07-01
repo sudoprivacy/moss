@@ -28,6 +28,11 @@ export type OAuth2Identity = {
   expiresIn: number
   /** Provider access token — stored server-side by moss for resource access. */
   accessToken: string
+  /** IdP login username (e.g. Ruigu's user_name) → moss `users.name`. When
+   *  omitted, moss falls back to displayName/email for the login name. */
+  username?: string
+  /** IdP display name / nickname → moss `users.display_name` (shown in UIs and
+   *  the agent's "who am I" identity). */
   displayName?: string
   refreshToken?: string
   /** Department display name from the IdP. With extDeptId set this is the
@@ -95,6 +100,10 @@ function coerceIdentity(raw: Record<string, unknown>): OAuth2Identity {
     email: email || undefined,
     expiresIn,
     accessToken,
+    username:
+      typeof raw.username === 'string' && raw.username.trim()
+        ? raw.username.trim()
+        : undefined,
     displayName:
       typeof raw.displayName === 'string' ? raw.displayName : undefined,
     refreshToken:

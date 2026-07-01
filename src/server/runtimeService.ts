@@ -1062,7 +1062,8 @@ export class RuntimeService {
                   .departments.find(d => d.id === user.departmentId)?.name ?? null
               : null
             const userProfileMemory = buildUserProfileMemory({
-              userName: user?.name ?? null,
+              // Prefer the human display name; fall back to the login username.
+              userName: user?.displayName?.trim() || user?.name || null,
               role: user?.role ?? null,
               departmentName,
               email: user?.email ?? null,

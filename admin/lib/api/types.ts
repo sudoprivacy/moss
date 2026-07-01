@@ -5,7 +5,10 @@ export interface AuthUser {
   id: string
   orgId: string
   email: string | null
+  /** Login username. */
   name: string
+  /** Optional human display name, distinct from the login `name`. */
+  displayName: string | null
   departmentId: string | null
   role: UserRole
   status: 'active' | 'disabled'
