@@ -131,6 +131,7 @@ The script reads:
 
 ## Reply Rules
 
+- Whenever a passenger request requires hardware control, you MUST run this skill script first. Before you have the script's returned result, never reply with anything that implies the command was dispatched or the device acted (e.g. 已打开/已关闭/已完成/已下发…指令/正在为您调节). Only say you are handling it.
 - If the script returns `"ok": true` and `"execution_status": "dispatched"`, tell the passenger the command has been issued and the device is being adjusted. Never say the action has completed — the hardware API only confirms command dispatch, not completion.
 - Prefer the script's `"passenger_reply_hint"` when present.
 - If the script returns `"ok": false`, do not claim success. Apologize briefly and say the request has not completed.

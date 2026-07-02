@@ -375,8 +375,8 @@ export class CabinServices {
       .map(message => ({ role: message.role, content: message.content }))
     const systemContent = [
       '你是飞机客舱 AI 乘务员。回答要简短、礼貌、明确。',
-      '对于座椅、灯光、温度、服务物品等请求，先确认已收到并说明将处理。',
-      '不要编造真实设备执行结果。',
+      '你在此模式下无法直接控制硬件，只能确认收到乘客请求并转达。',
+      '严禁声称设备已打开/已关闭/已完成/已调好或指令已下发，不要编造任何设备执行结果。',
       `当前上下文: ${JSON.stringify(buildPromptContext(input.context))}`,
     ].join('\n')
 
@@ -974,6 +974,9 @@ function parseJsonPayload(text: string): unknown {
 function formatCabinSessionPrompt(context: CabinPassengerContext, text: string): string {
   return [
     '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧；硬件控制的 seat-no 必须原样使用 cabin_context.seat_no 或 seat_id。',
+    '硬件执行规则：任何涉及座椅/靠背/坐垫/桌板/阅读灯/顶灯/通风/加热/按摩/场景/生理检测的控制请求，必须先调用 cabin-hardware-control 技能，再依据脚本返回结果回复。',
+    '在拿到脚本返回结果之前，严禁使用"已打开/已关闭/已完成/已调好/已下发…指令/正在为您调节"等表示已执行或已下发的措辞；此时只能说"正在为您处理"。',
+    '若判断无需控制硬件（闲聊、咨询），可正常回答，但不得声称对任何设备做了操作。',
     `cabin_context=${JSON.stringify(buildPromptContext(context))}`,
     '用户消息：',
     text,
@@ -1158,6 +1161,36 @@ function shouldExposeHardwareReply(text: string): boolean {
   return false
 }
 
+// A dispatch/completion claim is only trustworthy when a real tool result backs it.
+// When no hardwareResult was observed, any such wording is fabricated and must be dropped.
+export function mentionsHardwareActionClaim(text: string): boolean {
+  if (!text.trim()) return false
+  return /已(?:经)?(?:为您)?(?:打开|关闭|开启|调好|调亮|调暗|调节好|调整好|完成|处理好)|已(?:为您)?下发[^。]*指令|正在(?:为您)?(?:调节|调整|打开|关闭|开启)/u.test(text)
+}
+
+// Detects a tool invocation in either stream shape: a top-level `tool_use` event, or a
+// `tool_use` block nested inside an assistant message's content array.
+export function lineHasToolUse(line: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return false
+  }
+  if (!parsed || typeof parsed !== 'object') return false
+  const event = parsed as { type?: string; message?: { content?: unknown }; content?: unknown }
+  if (event.type === 'tool_use') return true
+  if (event.type === 'assistant') {
+    const content = event.message?.content ?? event.content
+    if (Array.isArray(content)) {
+      return content.some(
+        block => block && typeof block === 'object' && (block as { type?: string }).type === 'tool_use',
+      )
+    }
+  }
+  return false
+}
+
 function buildPassengerSalutation(context?: CabinPassengerContext): string {
   const rawName = context?.passengerName?.trim()
   if (!rawName) return ''
@@ -1300,6 +1333,7 @@ function sendPromptToRunnerSocket(
     let assistantText = ''
     let pendingText = ''
     let hardwareResult: HardwareToolResult | null = null
+    let sawToolUse = false
     let releasedDeltas = !suppressPreToolText
     const rl = createInterface({ input: socket })
 
@@ -1348,6 +1382,7 @@ function sendPromptToRunnerSocket(
 
       const toolResult = extractHardwareToolResult(message.line)
       if (toolResult) hardwareResult = toolResult
+      if (!sawToolUse && lineHasToolUse(message.line)) sawToolUse = true
 
       try {
         const inner = JSON.parse(message.line) as { type?: string; status?: string; input?: unknown }
@@ -1370,6 +1405,11 @@ function sendPromptToRunnerSocket(
               } else if (shouldExposeHardwareReply(cleanedText)) {
                 // Model surfaced an explicit unavailable/failure message — pass it through.
                 assistantText = cleanedText
+              } else if (!sawToolUse && mentionsHardwareActionClaim(cleanedText)) {
+                // Model narrated a dispatch/completion without ever invoking a tool — the
+                // claim is fabricated, so replace it with a non-committal reply. When a tool
+                // WAS invoked but its result just wasn't parseable, we trust the narration.
+                assistantText = '收到，我这就为您处理。'
               } else {
                 // No hardware tool result observed: do NOT fabricate a "已下发" success.
                 assistantText = cleanedText || '收到，我这就为您处理。'
