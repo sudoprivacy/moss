@@ -102,6 +102,15 @@ interface BackendSecret {
   value?: string | null
 }
 
+// Non-user (system/role) secret namespaces are org-bound and look like
+// `org:{orgId}:system:{pinyin}` / `org:{orgId}:role:{pinyin}`. Strip the
+// `org:{orgId}:` prefix so the trailing `system:`/`role:` can be removed to
+// recover the pinyin. Mirrors the backend's stripOrgPrefix().
+function stripOrgPrefix(namespace: string): string {
+  const m = namespace.match(/^org:[^:]+:(.*)$/)
+  return m ? m[1] : namespace
+}
+
 function mapSecretEntry(s: BackendSecret, value?: string | null): SecretEntry {
   return {
     namespace: s.namespace,
@@ -226,7 +235,7 @@ export async function getEnterpriseSecrets(preloadedConfigItems?: ConfigItem[]):
   const secrets = secretsRes.data ?? []
   const configItems = preloadedConfigItems ?? itemsRes as ConfigItem[]
   return secrets.map(s => {
-    const pinyin = s.namespace.replace('system:', '')
+    const pinyin = stripOrgPrefix(s.namespace).replace('system:', '')
     const configItem = configItems.find(c => c.pinyin === pinyin)
     if (!configItem) return null
     return { ...mapSecretEntry(s), config_item: configItem }
@@ -410,7 +419,7 @@ export async function getDepartmentSecrets(preloadedConfigItems?: ConfigItem[]):
   const secrets = secretsRes.data ?? []
   const configItems = preloadedConfigItems ?? itemsRes as ConfigItem[]
   return secrets.map(s => {
-    const pinyin = s.namespace.replace('role:', '')
+    const pinyin = stripOrgPrefix(s.namespace).replace('role:', '')
     const configItem = configItems.find(c => c.pinyin === pinyin)
     if (!configItem) return null
     return { ...mapSecretEntry(s), config_item: configItem }
