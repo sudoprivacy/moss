@@ -591,7 +591,7 @@ export function createCabinApi(options: {
       flightId: context.flightId,
       conversationId: conversation.id,
     }
-    store.appendMessage({
+    const userMessage = store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
       source,
@@ -665,6 +665,8 @@ export function createCabinApi(options: {
       if (cabinConfig.createMossSession) {
         const mossResult = await services.generateReplyWithMossSession({
           mossSessionId: conversation.mossSessionId,
+          conversationId: conversation.id,
+          currentUserMessageId: userMessage.id,
           context,
           text,
           onDelta: writeDelta,

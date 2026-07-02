@@ -12,10 +12,13 @@ import { AuthService } from './auth/service.js'
 import { hasScope } from './auth/token.js'
 import type {
   AttemptRecord,
+  AttemptRuntimeState,
+  DesiredSessionState,
   RunnerManifest,
   ServerConfig,
   SessionCreateInput,
   SessionRecord,
+  SessionStatus,
   SessionSummary,
 } from './types.js'
 import type { VisibilityFilterContext } from './sessionManager.js'
@@ -65,6 +68,22 @@ function safeKill0(pid: number): boolean {
 
 function isTerminalAttemptState(state: AttemptRecord['runtimeState']): boolean {
   return state === 'stopped' || state === 'failed' || state === 'lost'
+}
+
+export type SessionSnapshot = {
+  sessionId: string
+  status: SessionStatus
+  desiredState: DesiredSessionState
+  endedAt: number | null
+  currentAttemptId: string | null
+  attempt?: {
+    runtimeState: AttemptRuntimeState
+    runnerPid: number | null
+    attachPath: string | null
+    lastHeartbeatAt: number | null
+    stopReason: string | null
+    errorText: string | null
+  }
 }
 
 /**
@@ -376,6 +395,36 @@ export class RuntimeService {
 
   getSession(sessionId: string): SessionRecord | null {
     return this.store.getSession(sessionId)
+  }
+
+  /**
+   * Read-only session + current-attempt snapshot for cabin recovery classification.
+   * Never mutates runtime state. Returns null when the session id is unknown, which
+   * the caller must treat as "replace" (mint a fresh session), never "reuse".
+   */
+  getSessionSnapshot(sessionId: string): SessionSnapshot | null {
+    const session = this.store.getSession(sessionId)
+    if (!session) return null
+    const attempt = session.currentAttemptId
+      ? this.store.getAttempt(session.currentAttemptId)
+      : null
+    return {
+      sessionId: session.sessionId,
+      status: session.status,
+      desiredState: session.desiredState,
+      endedAt: session.endedAt,
+      currentAttemptId: session.currentAttemptId,
+      attempt: attempt
+        ? {
+            runtimeState: attempt.runtimeState,
+            runnerPid: attempt.runnerPid,
+            attachPath: attempt.attachPath,
+            lastHeartbeatAt: attempt.lastHeartbeatAt,
+            stopReason: attempt.stopReason,
+            errorText: attempt.errorText,
+          }
+        : undefined,
+    }
   }
 
   countActiveSessions(): number {

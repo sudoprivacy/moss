@@ -332,6 +332,18 @@ export class CabinStore {
     `).run(randomUUID(), conversationId, 'conversation reset', timestamp)
   }
 
+  // Point a conversation at a freshly-minted MOSS session in place, keeping the same
+  // conversation row so cabin_messages (keyed by conversation_id) stay fully intact.
+  // Unlike resetConversation this inserts NO 'conversation reset' marker — session
+  // recovery must be continuous and passenger-invisible.
+  rebindMossSession(conversationId: string, newSessionId: string): void {
+    this.db.prepare(`
+      UPDATE cabin_conversations
+      SET moss_session_id = ?, status = 'active', updated_at = ?
+      WHERE id = ?
+    `).run(newSessionId, now(), conversationId)
+  }
+
   insertVoiceLog(input: {
     conversationId?: string | null
     messageId?: string | null
