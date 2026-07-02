@@ -309,6 +309,7 @@ export interface CreateTenantAssistantRequest {
   skills?: string[]
   enabled_skills?: string[]
   enabled_wikis?: string[]
+  enabled_corp_apps?: string[]
   agent_type?: 'chat' | 'workflow'
   memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo | null
