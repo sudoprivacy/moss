@@ -1338,6 +1338,9 @@ export class RuntimeService {
         runnerEnv.CABIN_CONTROL_AUTH = this.options.config.cabin.controlAuth
       }
       runnerEnv.CABIN_CONTROL_TIMEOUT_MS = String(this.options.config.cabin.controlTimeoutMs)
+      // Intent-first: the skill only emits the structured command; the server performs the
+      // hardware dispatch and authors the confirmation. The LLM never triggers hardware.
+      runnerEnv.CABIN_CONTROL_MODE = 'emit'
       runnerEnv.CABIN_LOG_FILE = this.options.config.cabin.logFile || join(this.options.config.rootDir, 'logs', 'cabin.jsonl')
     }
 

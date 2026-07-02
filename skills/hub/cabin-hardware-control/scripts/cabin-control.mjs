@@ -451,6 +451,8 @@ async function main() {
   }
 
   const parsedArgs = {}
+  const emitParams = {}
+  let seatNo
   const url = new URL(`${baseUrl}${command.path}`)
   try {
     for (const spec of command.params) {
@@ -458,11 +460,31 @@ async function main() {
       if (value === undefined) continue
       parsedArgs[spec.arg.replace(/-/g, '_')] = value
       url.searchParams.set(spec.name, String(value))
+      if (spec.name === 'seatNo') {
+        seatNo = value
+      } else {
+        emitParams[spec.name] = value
+      }
     }
   } catch (error) {
     fail('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error), {
       command: commandName,
     })
+    return
+  }
+
+  // Emit mode: the server owns the hardware dispatch. Resolve the command + params here
+  // (parsing/validation still runs above) but skip the HTTP call and print the structured
+  // command for the server to execute. The LLM never triggers hardware or authors a reply.
+  const controlMode = String(process.env.CABIN_CONTROL_MODE || 'execute').trim().toLowerCase()
+  if (controlMode === 'emit') {
+    console.log(JSON.stringify({
+      ok: true,
+      mode: 'emit',
+      command: commandName,
+      seat_no: seatNo,
+      params: emitParams,
+    }))
     return
   }
 
