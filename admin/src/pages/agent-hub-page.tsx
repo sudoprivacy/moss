@@ -549,6 +549,7 @@ export default function AgentHubPage() {
   const [createWorkflowOutputTargets, setCreateWorkflowOutputTargets] = useState<string[]>([])
   const [createSelectedSkills, setCreateSelectedSkills] = useState<string[]>([])
   const [createSelectedWikis, setCreateSelectedWikis] = useState<string[]>([])
+  const [createSelectedCorpApps, setCreateSelectedCorpApps] = useState<string[]>([])
   const [creatingAssistant, setCreatingAssistant] = useState(false)
 
   const [pendingUninstallAgent, setPendingUninstallAgent] =
@@ -1324,6 +1325,7 @@ export default function AgentHubPage() {
         skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
         enabled_skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
         enabled_wikis: createSelectedWikis.length > 0 ? createSelectedWikis : undefined,
+        enabled_corp_apps: createSelectedCorpApps.length > 0 ? createSelectedCorpApps : undefined,
         agent_type: createAgentType,
         memory_mode: createAgentType === 'chat' ? createMemoryMode : undefined,
         visible_to,
@@ -1350,6 +1352,7 @@ export default function AgentHubPage() {
       setCreateWorkflowOutputTargets([])
       setCreateSelectedSkills([])
       setCreateSelectedWikis([])
+      setCreateSelectedCorpApps([])
       // The new assistant is a tenant (专属) item — land on that tab and refresh
       // both the tenant list and the installed list (it appears in both).
       setActiveTab('exclusive')
@@ -1359,7 +1362,7 @@ export default function AgentHubPage() {
     } finally {
       setCreatingAssistant(false)
     }
-  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, fetchInstalledState, fetchTenantAssistants])
+  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, fetchInstalledState, fetchTenantAssistants])
 
   const handleApproveTenantAssistant = useCallback(async (approved: boolean) => {
     if (!approvingAssistant) return
@@ -1922,7 +1925,11 @@ export default function AgentHubPage() {
               </div>
 
               {activeTab === 'exclusive' ? (
-                <Button onClick={() => setCreateOpen(true)}>
+                <Button onClick={() => {
+                  void loadAvailableWikis()
+                  void loadAvailableCorpApps()
+                  setCreateOpen(true)
+                }}>
                   <Plus className="mr-2 size-4" />
                   创建专属智能体
                 </Button>
@@ -3149,8 +3156,10 @@ export default function AgentHubPage() {
             setCreateWorkflowOutputTargets([])
             setCreateSelectedSkills([])
             setCreateSelectedWikis([])
+            setCreateSelectedCorpApps([])
           } else {
             void loadAvailableWikis()
+            void loadAvailableCorpApps()
           }
         }}
       >
@@ -3544,6 +3553,63 @@ export default function AgentHubPage() {
                               {wiki.description}
                             </p>
                           )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2 pt-4 border-t">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium">关联企业应用</div>
+                <Badge variant="outline">{createSelectedCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                勾选后,该助手可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+              </p>
+              {availableCorpApps.length === 0 ? (
+                <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+                  暂无可用企业应用。请先在「企业应用管理」中配置。
+                </div>
+              ) : (
+                <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-2">
+                  {availableCorpApps.map(app => {
+                    const isEnabled = createSelectedCorpApps.includes(app.id)
+                    const toggle = () => {
+                      setCreateSelectedCorpApps(prev =>
+                        prev.includes(app.id)
+                          ? prev.filter(id => id !== app.id)
+                          : Array.from(new Set([...prev, app.id])),
+                      )
+                    }
+                    return (
+                      <div
+                        key={app.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={toggle}
+                        onKeyDown={(e) => {
+                          if (e.key === ' ' || e.key === 'Enter') {
+                            e.preventDefault()
+                            toggle()
+                          }
+                        }}
+                        className="flex items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent cursor-pointer"
+                      >
+                        <Checkbox
+                          checked={isEnabled}
+                          tabIndex={-1}
+                          aria-hidden="true"
+                          className="mt-0.5 pointer-events-none"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate">{app.name}</span>
+                            <Badge variant="outline" className="text-xs">{app.type}</Badge>
+                          </div>
+                          <p className="text-xs text-muted-foreground line-clamp-1">{app.appKey}</p>
                         </div>
                       </div>
                     )
