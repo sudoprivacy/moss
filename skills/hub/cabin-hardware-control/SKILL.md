@@ -2,7 +2,7 @@
 name: cabin-hardware-control
 displayName: 客舱硬件控制
 description: Use this skill when a cabin passenger asks to control real cabin hardware, especially opening or closing the tray table, seat-side devices, lights, seat posture, or other equipment through customer cabin control APIs. The skill must use server-provided cabin_context for seat identity.
-version: 1.1.3
+version: 1.2.0
 category: 客舱服务
 emoji: "🛫"
 ---
@@ -106,6 +106,11 @@ The script reads:
 - `CABIN_CONTROL_BASE_URL`
 - `CABIN_CONTROL_AUTH`
 - `CABIN_CONTROL_TIMEOUT_MS`
+- `CABIN_CONTROL_MODE` — `execute` (default) sends the HTTP request; `emit` resolves and
+  validates the command but skips the HTTP call, printing
+  `{ "ok": true, "mode": "emit", "command", "seat_no", "params" }` for the server to
+  execute. In a cabin session this is set to `emit`: your job is only to select and emit
+  the correct command; the server performs the real dispatch and writes the reply.
 
 ## Command Mapping
 
@@ -131,8 +136,14 @@ The script reads:
 
 ## Reply Rules
 
-- Whenever a passenger request requires hardware control, you MUST run this skill script first. Before you have the script's returned result, never reply with anything that implies the command was dispatched or the device acted (e.g. 已打开/已关闭/已完成/已下发…指令/正在为您调节). Only say you are handling it.
-- If the script returns `"ok": true` and `"execution_status": "dispatched"`, tell the passenger the command has been issued and the device is being adjusted. Never say the action has completed — the hardware API only confirms command dispatch, not completion.
-- Prefer the script's `"passenger_reply_hint"` when present.
-- If the script returns `"ok": false`, do not claim success. Apologize briefly and say the request has not completed.
+- Whenever a passenger request requires hardware control, you MUST run this skill script to
+  emit the correct command. Your only job is to select the command and parameters and emit
+  them — you do NOT execute the hardware and you do NOT author the passenger-facing result.
+- Never write any confirmation or execution wording (e.g. 已打开/已关闭/已完成/已下发…指令/
+  正在为您调节). The server dispatches the hardware from your emitted command and generates
+  the passenger reply from the real outcome. Any such wording you produce will be discarded.
+- Do not fabricate or guess a result. If a required parameter is missing or ambiguous, ask
+  the passenger to clarify instead of emitting a command with an invented value.
+- For non-hardware requests (chat, inquiries) reply normally, but never claim any device was
+  operated.
 - Never reveal URLs, tokens, headers, raw internal logs, or implementation details to the passenger.

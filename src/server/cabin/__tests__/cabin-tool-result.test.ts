@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { extractHardwareToolResult, lineHasToolUse, mentionsHardwareActionClaim } from '../service.js'
+import {
+  extractHardwareToolResult,
+  extractHardwareCommandSpec,
+  extractHardwareCommandFromToolUse,
+  lineHasToolUse,
+} from '../service.js'
 
 function userEnvelope(toolResultText: string): string {
   return JSON.stringify({
@@ -73,20 +78,132 @@ describe('extractHardwareToolResult', () => {
   })
 })
 
-describe('mentionsHardwareActionClaim', () => {
-  it('flags fabricated dispatch/completion wording', () => {
-    expect(mentionsHardwareActionClaim('已为您下发打开阅读灯的指令，请稍候。')).toBe(true)
-    expect(mentionsHardwareActionClaim('好的，已为您打开阅读灯。')).toBe(true)
-    expect(mentionsHardwareActionClaim('阅读灯已关闭。')).toBe(true)
-    expect(mentionsHardwareActionClaim('座椅已调好啦。')).toBe(true)
-    expect(mentionsHardwareActionClaim('正在为您调节亮度。')).toBe(true)
+describe('extractHardwareCommandSpec', () => {
+  it('parses an emit-mode command payload from a tool_result', () => {
+    const emit = JSON.stringify({
+      ok: true,
+      mode: 'emit',
+      command: 'seat.light',
+      seat_no: 'A',
+      params: { on: true, pwm: 800 },
+    })
+    expect(extractHardwareCommandSpec(userEnvelope(emit))).toEqual({
+      command: 'seat.light',
+      params: { on: true, pwm: 800 },
+      seatNo: 'A',
+    })
   })
 
-  it('does not flag non-committal or clarifying replies', () => {
-    expect(mentionsHardwareActionClaim('收到，我这就为您处理。')).toBe(false)
-    expect(mentionsHardwareActionClaim('请问您需要调节到多亮呢？')).toBe(false)
-    expect(mentionsHardwareActionClaim('阅读灯已经是开着的哦。')).toBe(false)
-    expect(mentionsHardwareActionClaim('')).toBe(false)
+  it('parses a no-param command payload', () => {
+    const emit = JSON.stringify({ ok: true, mode: 'emit', command: 'seat.tray.open', seat_no: 'B', params: {} })
+    expect(extractHardwareCommandSpec(userEnvelope(emit))).toEqual({
+      command: 'seat.tray.open',
+      params: {},
+      seatNo: 'B',
+    })
+  })
+
+  it('ignores execute-mode dispatch results (no mode:emit)', () => {
+    const executeResult = JSON.stringify({ ok: true, execution_status: 'dispatched', command: 'seat.tray.open' })
+    expect(extractHardwareCommandSpec(userEnvelope(executeResult))).toBeNull()
+  })
+
+  it('ignores non-emit and non-JSON lines', () => {
+    expect(extractHardwareCommandSpec(userEnvelope('unrelated output'))).toBeNull()
+    expect(extractHardwareCommandSpec(userEnvelope(JSON.stringify({ mode: 'other', command: 'seat.light' })))).toBeNull()
+    expect(extractHardwareCommandSpec('not json')).toBeNull()
+  })
+
+  it('drops non-primitive param values', () => {
+    const emit = JSON.stringify({
+      ok: true,
+      mode: 'emit',
+      command: 'seat.cushion',
+      seat_no: 'A',
+      params: { position: 30, nested: { x: 1 } },
+    })
+    expect(extractHardwareCommandSpec(userEnvelope(emit))).toEqual({
+      command: 'seat.cushion',
+      params: { position: 30 },
+      seatNo: 'A',
+    })
+  })
+})
+
+describe('extractHardwareCommandFromToolUse', () => {
+  // Mirrors the real scode ACP event: the model emits the bash tool_use with a
+  // stringified JSON input carrying the shell command (with backslash line-continuations
+  // and quoted values), and never waits for the tool_result.
+  it('parses the emit command straight from a top-level bash tool_use event', () => {
+    const line = JSON.stringify({
+      type: 'tool_use',
+      name: 'bash',
+      tool_use_id: 'toolu_01',
+      input: JSON.stringify({
+        command:
+          'node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \\\n  --command seat.cushion \\\n  --seat-no "01A" \\\n  --column-no "A" \\\n  --position 60',
+        dangerouslyDisableSandbox: true,
+      }),
+    })
+    expect(extractHardwareCommandFromToolUse(line)).toEqual({
+      command: 'seat.cushion',
+      params: { position: '60' },
+      seatNo: '01A',
+    })
+  })
+
+  it('parses a bash tool_use nested in an assistant message content array', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: '好的' },
+          {
+            type: 'tool_use',
+            name: 'Bash',
+            input: { command: 'node scripts/cabin-control.mjs --command seat.tray.open --seat-no 01A' },
+          },
+        ],
+      },
+    })
+    expect(extractHardwareCommandFromToolUse(line)).toEqual({
+      command: 'seat.tray.open',
+      params: {},
+      seatNo: '01A',
+    })
+  })
+
+  it('captures on/pwm flags and drops seat identity flags', () => {
+    const line = JSON.stringify({
+      type: 'tool_use',
+      name: 'bash',
+      input: { command: 'node cabin-control.mjs --command seat.light --seat-no 01A --on true --pwm 800' },
+    })
+    expect(extractHardwareCommandFromToolUse(line)).toEqual({
+      command: 'seat.light',
+      params: { on: 'true', pwm: '800' },
+      seatNo: '01A',
+    })
+  })
+
+  it('ignores the Skill tool_use and other non-bash tools', () => {
+    const skill = JSON.stringify({ type: 'tool_use', name: 'Skill', input: '{"skill":"cabin-hardware-control"}' })
+    expect(extractHardwareCommandFromToolUse(skill)).toBeNull()
+  })
+
+  it('ignores bash commands that do not invoke cabin-control', () => {
+    const line = JSON.stringify({ type: 'tool_use', name: 'bash', input: { command: 'ls -la /tmp' } })
+    expect(extractHardwareCommandFromToolUse(line)).toBeNull()
+  })
+
+  it('returns null when the command flag is missing', () => {
+    const line = JSON.stringify({ type: 'tool_use', name: 'bash', input: { command: 'node cabin-control.mjs --seat-no 01A' } })
+    expect(extractHardwareCommandFromToolUse(line)).toBeNull()
+  })
+
+  it('returns null for non-JSON and non-tool_use lines', () => {
+    expect(extractHardwareCommandFromToolUse('not json')).toBeNull()
+    expect(extractHardwareCommandFromToolUse(JSON.stringify({ type: 'assistant', message: { content: 'hi' } }))).toBeNull()
   })
 })
 

@@ -7,7 +7,7 @@ import { CabinDemoState } from './demo.js'
 import { CabinServices, normalizeCabinPassengerReply, shouldBufferCabinReply } from './service.js'
 import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
-import type { CabinPassengerContext, CabinTokenPayload } from './types.js'
+import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -591,7 +591,7 @@ export function createCabinApi(options: {
       flightId: context.flightId,
       conversationId: conversation.id,
     }
-    store.appendMessage({
+    const userMessage = store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
       source,
@@ -647,6 +647,11 @@ export function createCabinApi(options: {
       writeSse(res, 'tool_call', inferredTool.toolCall)
     }
     let reply: string
+    // Path B may resolve a hardware command server-side; the tool_call/intent/slots are
+    // only known after the LLM selects a command, so they are surfaced post-hoc.
+    let mossToolCall: CabinToolCall | undefined
+    let mossIntent: string | undefined
+    let mossSlots: Record<string, unknown> | undefined
     const shouldBufferReply = shouldBufferCabinReply(text)
     const bufferedDeltas: string[] = []
     const writeDelta = (delta: string): void => {
@@ -657,20 +662,31 @@ export function createCabinApi(options: {
       writeSse(res, 'delta', { content: delta })
     }
     try {
-      reply = cabinConfig.createMossSession
-        ? await services.generateReplyWithMossSession({
-            mossSessionId: conversation.mossSessionId,
-            context,
-            text,
-            onDelta: writeDelta,
-            logContext,
-          })
-        : await services.generateReply({
-            context,
-            messages: store.listMessages(conversation.id, 30),
-            text,
-            logContext,
-          })
+      if (cabinConfig.createMossSession) {
+        const mossResult = await services.generateReplyWithMossSession({
+          mossSessionId: conversation.mossSessionId,
+          conversationId: conversation.id,
+          currentUserMessageId: userMessage.id,
+          context,
+          text,
+          onDelta: writeDelta,
+          logContext,
+        })
+        reply = mossResult.reply
+        mossToolCall = mossResult.toolCall
+        mossIntent = mossResult.intent
+        mossSlots = mossResult.slots
+        if (mossToolCall) {
+          writeSse(res, 'tool_call', mossToolCall)
+        }
+      } else {
+        reply = await services.generateReply({
+          context,
+          messages: store.listMessages(conversation.id, 30),
+          text,
+          logContext,
+        })
+      }
     } catch (error) {
       const mapped = mapServiceError(error)
       writeSse(res, 'error', {
@@ -687,9 +703,9 @@ export function createCabinApi(options: {
       role: 'assistant',
       source: 'agent',
       content: reply,
-      intent: inferredTool?.intent,
-      slots: inferredTool?.slots,
-      toolCalls: inferredTool ? [inferredTool.toolCall] : null,
+      intent: inferredTool?.intent ?? mossIntent,
+      slots: inferredTool?.slots ?? mossSlots,
+      toolCalls: inferredTool ? [inferredTool.toolCall] : mossToolCall ? [mossToolCall] : null,
     })
     cabinLogger.log({
       type: 'outbound',
@@ -703,9 +719,13 @@ export function createCabinApi(options: {
         input_chars: text.length,
         reply_chars: reply.length,
         intent: assistantMessage.intent || '',
+        routed: mossToolCall ? 'hardware-control' : undefined,
       },
     })
-    if (shouldBufferReply || !cabinConfig.createMossSession) {
+    // Deltas are streamed live only for free-chat moss turns. Control turns (mossToolCall)
+    // and buffered turns emit the full reply once, after the tool_call.
+    const streamedIncrementally = cabinConfig.createMossSession && !shouldBufferReply && !mossToolCall
+    if (!streamedIncrementally) {
       writeSse(res, 'delta', { content: reply })
     }
     writeSse(res, 'done', {

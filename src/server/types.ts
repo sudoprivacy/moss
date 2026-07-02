@@ -189,6 +189,10 @@ export const serverFileConfigSchema = lazySchema(() =>
       assistantName: z.string().default('cabin-ai-flight-attendant'),
       assistantDisplayName: z.string().optional(),
       createMossSession: z.boolean().default(false),
+      replyTimeoutMs: z.number().int().min(1000).default(45_000),
+      sessionRecoveryEnabled: z.boolean().default(true),
+      sessionRecoveryMaxAttempts: z.number().int().min(0).max(3).default(1),
+      contextReplayTurns: z.number().int().min(0).max(200).default(20),
       flightStateDemoEnabled: z.boolean().default(false),
       demoPlaybackUrl: z.string().optional(),
       demoAlertUrl: z.string().optional(),
@@ -211,6 +215,10 @@ export const serverFileConfigSchema = lazySchema(() =>
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
+      replyTimeoutMs: 45_000,
+      sessionRecoveryEnabled: true,
+      sessionRecoveryMaxAttempts: 1,
+      contextReplayTurns: 20,
       flightStateDemoEnabled: false,
       logEnabled: true,
     }),
@@ -322,6 +330,10 @@ export type ServerConfig = {
     assistantName: string
     assistantDisplayName?: string
     createMossSession: boolean
+    replyTimeoutMs: number
+    sessionRecoveryEnabled: boolean
+    sessionRecoveryMaxAttempts: number
+    contextReplayTurns: number
     flightStateDemoEnabled: boolean
     demoPlaybackUrl?: string
     demoAlertUrl?: string
