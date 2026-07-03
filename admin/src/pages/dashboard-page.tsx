@@ -30,6 +30,7 @@ import type {
   AuthDepartment,
   DashboardStatsResponse,
 } from '@/lib/api/types'
+import { resolveOwnerName } from '@/lib/utils'
 import { Link } from 'react-router-dom'
 import { format, subDays, startOfDay, endOfDay, isWithinInterval } from 'date-fns'
 
@@ -233,17 +234,17 @@ export default function DashboardPage() {
     filteredSessions.reduce((acc, session) => {
       const userId = session.userId
       if (!acc.has(userId)) {
-        acc.set(userId, { userId, sessions: 0, active: 0 })
+        acc.set(userId, { userId, userName: session.userName, sessions: 0, active: 0 })
       }
       const stats = acc.get(userId)!
       stats.sessions++
       if (session.status === 'active') stats.active++
       return acc
-    }, new Map<string, { userId: string; sessions: number; active: number }>())
+    }, new Map<string, { userId: string; userName?: string; sessions: number; active: number }>())
   )
     .map(([, stats]) => ({
       ...stats,
-      name: users.find((u) => u.id === stats.userId)?.name || stats.userId.slice(0, 8),
+      name: resolveOwnerName(users, stats.userId, stats.userName),
     }))
     .sort((a, b) => b.sessions - a.sessions)
     .slice(0, 5)
@@ -270,10 +271,8 @@ export default function DashboardPage() {
     .sort((a, b) => b.sessions - a.sessions)
     .slice(0, 10)
 
-  const getUserName = (userId: string) => {
-    const u = users.find((us) => us.id === userId)
-    return u?.name || userId.slice(0, 8)
-  }
+  const getUserName = (session: Session) =>
+    resolveOwnerName(users, session.userId, session.userName)
 
   if (isLoading) {
     return (
@@ -635,7 +634,7 @@ export default function DashboardPage() {
                         </Badge>
                       </div>
                       <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                        <span>{getUserName(session.userId)}</span>
+                        <span>{getUserName(session)}</span>
                         <span>{format(new Date(session.createdAt), 'MM-dd HH:mm')}</span>
                       </div>
                     </div>

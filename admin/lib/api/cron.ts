@@ -4,6 +4,8 @@ export interface CronJob {
   id: string
   orgId: string
   userId: string
+  /** Owner name resolved server-side (works for owners outside this org's roster). */
+  userName?: string
   name: string
   enabled: boolean
   schedule: {

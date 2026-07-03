@@ -234,3 +234,28 @@ export function hasScope(scopes: string[], requiredScope: string): boolean {
 export function isCronAdminCapable(auth: { role: string; scopes?: string[] }): boolean {
   return auth.role === 'admin' || auth.role === 'super_admin' || hasScope(auth.scopes ?? [], 'admin:cron')
 }
+
+/**
+ * Org-pinned user lookup, except a super_admin resolves regardless of org.
+ * A super_admin may have switched their effective org (see AuthService.switchOrg),
+ * so lookups keyed by the switched org won't find their home-org record — that
+ * broke cron execution and author stamping for resources created while
+ * switched. Every other role stays pinned to its home org to preserve
+ * isolation. Mirrors the requireAuthUser pattern. Lives here (not service.ts)
+ * so it is unit-testable under bun:test, which cannot load node:sqlite.
+ */
+export function resolveUserPinnedOrSuperAdmin<U extends { role: string }>(
+  userId: string,
+  orgId: string,
+  db: {
+    getUserByIdAndOrg(id: string, orgId: string): U | null
+    getUserById(id: string): U | null
+  },
+): U | null {
+  const user = db.getUserByIdAndOrg(userId, orgId)
+  if (user) {
+    return user
+  }
+  const byId = db.getUserById(userId)
+  return byId && byId.role === 'super_admin' ? byId : null
+}

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -41,6 +41,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { getAdminCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
+import { resolveOwnerName } from '@/lib/utils'
 import { getUsers } from '@/lib/api/auth'
 import { getInstalledAgents, type InstalledAgentInfo } from '@/lib/api/agent-hub'
 import type { AuthUser } from '@/lib/api/types'
@@ -257,10 +258,24 @@ export default function CronJobsPage() {
     })
     .sort((a, b) => b.createdAt - a.createdAt)
 
-  const getUserName = (userId: string) => {
-    const user = users.find((u) => u.id === userId)
-    return user?.name || userId.slice(0, 8)
-  }
+  const getUserName = (job: CronJob) =>
+    resolveOwnerName(users, job.userId, job.userName)
+
+  // Job owners not present in this org's roster (e.g. a super_admin who created
+  // jobs while switched into this org), deduplicated by owner id — so the user
+  // filter can still select them. Memoized so it isn't recomputed on every
+  // keystroke of the search box.
+  const extraOwners = useMemo(
+    () =>
+      [
+        ...new Map(
+          jobs
+            .filter((job) => !users.some((u) => u.id === job.userId))
+            .map((job) => [job.userId, job] as const),
+        ).values(),
+      ],
+    [jobs, users],
+  )
 
   const formatSchedule = (job: CronJob) => {
     return job.schedule.description || job.schedule.value
@@ -303,6 +318,11 @@ export default function CronJobsPage() {
                 {users.map((user) => (
                   <SelectItem key={user.id} value={user.id}>
                     {user.name}
+                  </SelectItem>
+                ))}
+                {extraOwners.map((job) => (
+                  <SelectItem key={job.userId} value={job.userId}>
+                    {getUserName(job)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -381,7 +401,7 @@ export default function CronJobsPage() {
                         <div className="text-xs text-muted-foreground">{job.id.slice(0, 8)}</div>
                       </div>
                     </TableCell>
-                    <TableCell>{getUserName(job.userId)}</TableCell>
+                    <TableCell>{getUserName(job)}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Clock className="h-4 w-4 text-muted-foreground" />

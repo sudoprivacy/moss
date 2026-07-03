@@ -87,7 +87,7 @@ RUN test -n "$TARGETARCH" \
 # avoids needing Node/npm/@napi-rs/cli at all, removing every flaky external
 # download from this stage except the unavoidable crates.io fetch (hardened via
 # the sparse protocol + retries below).
-FROM rust:1-bookworm AS napi-builder
+FROM rust:1-slim-bookworm AS napi-builder
 WORKDIR /src
 ARG TARGETARCH
 # Cargo network resilience: sparse crates.io protocol (plain HTTPS, no git index

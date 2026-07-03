@@ -26,6 +26,7 @@ import { getUsers } from '@/lib/api/auth'
 import { getInstalledAgents } from '@/lib/api/agent-hub'
 import type { InstalledAgentInfo } from '@/lib/api/agent-hub'
 import type { Session, AuthUser } from '@/lib/api/types'
+import { resolveOwnerName } from '@/lib/utils'
 import { Search, ArrowRight, Loader2, Power, RefreshCw, Calendar } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -160,10 +161,8 @@ export default function SessionsPage() {
     }
   }
 
-  const getUserName = (userId: string) => {
-    const user = users.find((u) => u.id === userId)
-    return user?.name || userId.slice(0, 8)
-  }
+  const getUserName = (session: Session) =>
+    resolveOwnerName(users, session.userId, session.userName)
 
   if (isLoading) {
     return (
@@ -273,7 +272,7 @@ export default function SessionsPage() {
                 return (
                   <TableRow key={session.sessionId}>
                     <TableCell className="font-mono text-sm">{session.sessionId.slice(0, 12)}...</TableCell>
-                    <TableCell>{getUserName(session.userId)}</TableCell>
+                    <TableCell>{getUserName(session)}</TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">
                         <div className="flex items-center gap-1">
