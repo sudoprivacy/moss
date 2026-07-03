@@ -35,7 +35,7 @@ const COMMANDS = {
     path: '/admin-api/tcp-client/cmd/seat/ventilation',
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
-      { name: 'level', arg: 'level', required: true, type: 'int', min: 0, max: 10 },
+      { name: 'level', arg: 'level', required: true, type: 'int', min: 0, max: 3 },
     ],
     label: args => `座椅通风调整到 ${args.level} 档`,
   },
@@ -45,7 +45,7 @@ const COMMANDS = {
     path: '/admin-api/tcp-client/cmd/seat/heating',
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
-      { name: 'level', arg: 'level', required: true, type: 'int', min: 0, max: 10 },
+      { name: 'level', arg: 'level', required: true, type: 'int', min: 0, max: 3 },
     ],
     label: args => `座椅加热调整到 ${args.level} 档`,
   },
@@ -55,7 +55,7 @@ const COMMANDS = {
     path: '/admin-api/tcp-client/cmd/seat/massage',
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
-      { name: 'level', arg: 'level', required: true, type: 'int', min: 0, max: 10 },
+      { name: 'level', arg: 'level', required: true, type: 'int', min: 0, max: 3 },
     ],
     label: args => `座椅按摩调整到 ${args.level} 档`,
   },

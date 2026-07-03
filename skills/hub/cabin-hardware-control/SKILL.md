@@ -124,9 +124,9 @@ The script reads:
 - 放倒一点/后仰一点/往后调一点: use `--command seat.cushion --position 30` when no explicit percentage is provided。例如：后仰一点、往后一点点、稍微放倒、再往后调一点。
 - 调直座椅/座椅归位/靠背立起来/恢复正常: use `--command seat.cushion --position 0`。例如：座椅调直、把椅子扶正、我要坐正、座椅归位、恢复正常、seat upright。
 - If the passenger only says they are tired, sleepy, or uncomfortable without requesting a concrete action, ask what service they need instead of calling hardware.
-- 座椅通风: `--command seat.ventilation --level 0-10`。乘客未指定档位时默认 `--level 3`；说“关闭/关掉”时用 `--level 0`。例如：打开座椅通风、椅子透透气、座椅吹风、屁股底下有点闷、通风开到5档、seat ventilation。
-- 座椅加热: `--command seat.heating --level 0-10`。乘客未指定档位时默认 `--level 3`；说“关闭/关掉”时用 `--level 0`。例如：打开座椅加热、椅子暖一点、座椅暖一点、座椅热一点、坐着有点凉给座椅升温、加热开到3档、seat heater。
-- 座椅按摩: `--command seat.massage --level 0-10`。乘客未指定档位时默认 `--level 3`；说“关闭/关掉”时用 `--level 0`。例如：打开座椅按摩、按摩一下、椅子给我揉揉、腰按摩、按摩强一点、按摩开到6档、seat massage。
+- 座椅通风: `--command seat.ventilation --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。例如：打开座椅通风、椅子透透气、座椅吹风、屁股底下有点闷、通风开到3档、seat ventilation。
+- 座椅加热: `--command seat.heating --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。例如：打开座椅加热、椅子暖一点、座椅暖一点、座椅热一点、坐着有点凉给座椅升温、加热开到3档、seat heater。
+- 座椅按摩: `--command seat.massage --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。例如：打开座椅按摩、按摩一下、椅子给我揉揉、腰按摩、按摩强一点、按摩开到3档、seat massage。
 - 生理检测开始/停止: `--command seat.health.start` or `--command seat.health.stop`。例如：开始——开始生理检测、测一下身体数据、启动健康监测、采集体征；停止——停止生理检测、别测了、关闭健康监测、结束体征采集。
 - 客舱顶灯打开/关闭: `--command cabin.ceiling.light --on true|false`。例如：打开客舱顶灯、把舱灯打开、关闭顶灯、关掉客舱灯、ceiling light on/off。
 - 客舱顶灯颜色亮度: `--command cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`。例如：顶灯调成暖色、客舱灯光柔和点、顶灯亮度调到40%、换个氛围灯颜色。

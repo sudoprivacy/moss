@@ -796,7 +796,7 @@ const CABIN_COMMAND_SPECS: Record<string, CabinCommandSpec> = {
     intent: 'seat_ventilation',
     target: 'seat',
     action: 'ventilation',
-    params: [{ name: 'level', kind: 'int', min: 0, max: 10, required: true }],
+    params: [{ name: 'level', kind: 'int', min: 0, max: 3, required: true }],
     label: p => `座椅通风调整到 ${p.level} 档`,
   },
   'seat.heating': {
@@ -804,7 +804,7 @@ const CABIN_COMMAND_SPECS: Record<string, CabinCommandSpec> = {
     intent: 'seat_heating',
     target: 'seat',
     action: 'heating',
-    params: [{ name: 'level', kind: 'int', min: 0, max: 10, required: true }],
+    params: [{ name: 'level', kind: 'int', min: 0, max: 3, required: true }],
     label: p => `座椅加热调整到 ${p.level} 档`,
   },
   'seat.massage': {
@@ -812,7 +812,7 @@ const CABIN_COMMAND_SPECS: Record<string, CabinCommandSpec> = {
     intent: 'seat_massage',
     target: 'seat',
     action: 'massage',
-    params: [{ name: 'level', kind: 'int', min: 0, max: 10, required: true }],
+    params: [{ name: 'level', kind: 'int', min: 0, max: 3, required: true }],
     label: p => `座椅按摩调整到 ${p.level} 档`,
   },
   'seat.tray.open': {
@@ -1094,7 +1094,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
 
   const level = extractLevelValue(userText)
   if (hasAnyText(text, ['通风', 'ventilation'])) {
-    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 3)
+    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 2)
     return route({
       intent: 'seat_ventilation',
       command: 'seat.ventilation',
@@ -1105,7 +1105,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     })
   }
   if (hasAnyText(text, ['加热', '热一点', '暖一点', 'heating'])) {
-    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 3)
+    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 2)
     return route({
       intent: 'seat_heating',
       command: 'seat.heating',
@@ -1116,7 +1116,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     })
   }
   if (hasAnyText(text, ['按摩', 'massage'])) {
-    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 3)
+    const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 2)
     return route({
       intent: 'seat_massage',
       command: 'seat.massage',
@@ -1199,7 +1199,7 @@ function extractPwmValue(text: string): number | null {
 
 function extractLevelValue(text: string): number | null {
   const levelMatch = text.match(/(\d{1,2})\s*(?:档|级|level)/i)
-  if (levelMatch) return clampInt(Number.parseInt(levelMatch[1], 10), 0, 10)
+  if (levelMatch) return clampInt(Number.parseInt(levelMatch[1], 10), 0, 3)
   return null
 }
 
