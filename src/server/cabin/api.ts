@@ -4,7 +4,13 @@ import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
 import { CabinDemoState } from './demo.js'
-import { CabinServices, normalizeCabinPassengerReply, shouldBufferCabinReply } from './service.js'
+import {
+  CabinServices,
+  normalizeCabinPassengerReply,
+  shouldBufferCabinReply,
+  isAffirmationReply,
+  looksLikeHardwareOffer,
+} from './service.js'
 import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
@@ -637,6 +643,57 @@ export function createCabinApi(options: {
       })
       res.end()
       return
+    }
+
+    // Passenger confirmed a hardware suggestion offered on the previous turn (e.g. we asked
+    // "需要我为您把座椅放倒到休息角度吗？" and they replied "好"). Re-route the prior assistant
+    // offer through the deterministic Path A router and execute the resolved action. This sits
+    // between Path A and Path B and only fires for a bare affirmation following an offer, so no
+    // existing input path changes behavior.
+    if (isAffirmationReply(text)) {
+      const lastAssistant = [...store.listMessages(conversation.id, 6)]
+        .reverse()
+        .find(message => message.role === 'assistant')
+      if (lastAssistant && looksLikeHardwareOffer(lastAssistant.content)) {
+        const confirmedRoute = services.routeHardwareControl({ context, text: lastAssistant.content })
+        if (confirmedRoute) {
+          writeSse(res, 'tool_call', confirmedRoute.toolCall)
+          const result = await services.executeHardwareControl({ route: confirmedRoute, logContext })
+          const reply = normalizeCabinPassengerReply({ userText: lastAssistant.content, reply: result.reply, context })
+          const assistantMessage = store.appendMessage({
+            conversationId: conversation.id,
+            role: 'assistant',
+            source: 'agent',
+            content: reply,
+            intent: result.intent,
+            slots: result.slots,
+            toolCalls: [result.toolCall],
+          })
+          cabinLogger.log({
+            type: 'outbound',
+            ...logContext,
+            upstream: 'agent-reply',
+            method: 'GENERATE',
+            ok: true,
+            elapsedMs: 0,
+            details: {
+              source,
+              input_chars: text.length,
+              reply_chars: reply.length,
+              intent: assistantMessage.intent || '',
+              routed: 'hardware-confirm',
+            },
+          })
+          writeSse(res, 'delta', { content: reply })
+          writeSse(res, 'done', {
+            intent: assistantMessage.intent || '',
+            slots: assistantMessage.slots || {},
+            reply_text: reply,
+          })
+          res.end()
+          return
+        }
+      }
     }
 
     const inferredTool = cabinConfig.createMossSession

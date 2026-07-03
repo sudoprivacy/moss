@@ -131,7 +131,12 @@ The script reads:
 - 客舱顶灯打开/关闭: `--command cabin.ceiling.light --on true|false`.
 - 客舱顶灯颜色亮度: `--command cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`.
 - 客舱顶灯颜色 such as 蓝色/blue: use `--command cabin.ceiling.color`, not `cabin.ceiling.light`.
-- 客舱场景切换: `--command cabin.scene --preset boarding`; use the preset named by the user when provided.
+- 客舱场景切换: `--command cabin.scene --preset <value>`. `--preset` MUST be exactly one of the four hardware presets — no other value is valid:
+  - `boarding` — 登机 / 上机
+  - `cruise` — 巡航 / 正常
+  - `night` — 睡眠 / 休息 / 夜间
+  - `landing` — 下机 / 降落
+  Map the passenger's words onto the closest preset (e.g. 睡眠/休息 → `night`). Never invent presets like `sleep`, `rest`, `dining`, `reading`, or `none`.
 - 清除客舱场景: `--command cabin.scene.clear`; never approximate this as `cabin.scene --preset none`.
 
 ## Reply Rules

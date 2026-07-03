@@ -760,7 +760,14 @@ type CabinParamSpec = {
   min?: number
   max?: number
   required: boolean
+  // For token params: the only accepted values. A raw value outside this set is
+  // rejected (coerced to null) so an out-of-catalog token is never dispatched.
+  enum?: readonly string[]
 }
+
+// The cabin scene presets the hardware backend actually accepts. Any other preset
+// token (e.g. an LLM-guessed "sleep"/"rest") must never reach the control API.
+const CABIN_SCENE_PRESETS = ['boarding', 'cruise', 'night', 'landing'] as const
 
 type CabinCommandSpec = {
   path: string
@@ -885,7 +892,7 @@ const CABIN_COMMAND_SPECS: Record<string, CabinCommandSpec> = {
     intent: 'cabin_scene_set',
     target: 'cabin_scene',
     action: 'set',
-    params: [{ name: 'preset', kind: 'token', required: true }],
+    params: [{ name: 'preset', kind: 'token', required: true, enum: CABIN_SCENE_PRESETS }],
     label: p => `切换至 ${p.preset} 客舱场景`,
   },
   'cabin.scene.clear': {
@@ -916,6 +923,10 @@ function coerceCommandParam(spec: CabinParamSpec, raw: unknown): string | number
   // token
   const token = String(raw).trim()
   if (!/^[A-Za-z0-9_.:-]+$/.test(token)) return null
+  if (spec.enum) {
+    const match = spec.enum.find(value => value.toLowerCase() === token.toLowerCase())
+    return match ?? null
+  }
   return token
 }
 
@@ -1230,40 +1241,43 @@ function extractCeilingBrightness(text: string): number | null {
   return null
 }
 
-// Preset tokens must match the backend's configured cabin scene presets; unknown
-// scene words return null so the request falls through to the LLM path instead of
-// dispatching a guessed preset.
+// Chinese/English scene synonyms mapped onto the four presets the hardware backend
+// accepts (see CABIN_SCENE_PRESETS). Words for scenes the hardware does not have
+// (e.g. 睡眠/休息) are folded onto the closest supported preset — 睡眠/休息 → night —
+// rather than dispatching an unsupported token the control API would reject.
 const SCENE_PRESETS: Record<string, string> = {
   登机: 'boarding',
+  上机: 'boarding',
+  上飞机: 'boarding',
   boarding: 'boarding',
   巡航: 'cruise',
+  正常: 'cruise',
   cruise: 'cruise',
-  用餐: 'dining',
-  就餐: 'dining',
-  餐饮: 'dining',
-  dining: 'dining',
-  休息: 'rest',
-  rest: 'rest',
-  睡眠: 'sleep',
-  睡觉: 'sleep',
-  sleep: 'sleep',
+  睡眠: 'night',
+  睡觉: 'night',
+  休息: 'night',
+  助眠: 'night',
   夜间: 'night',
   夜晚: 'night',
   night: 'night',
-  娱乐: 'entertainment',
-  entertainment: 'entertainment',
-  阅读: 'reading',
-  reading: 'reading',
-  欢迎: 'welcome',
-  welcome: 'welcome',
+  下机: 'landing',
+  降落: 'landing',
+  落地: 'landing',
+  到达: 'landing',
+  landing: 'landing',
 }
 
 function extractScenePreset(text: string): string | null {
   for (const [word, preset] of Object.entries(SCENE_PRESETS)) {
     if (text.includes(word.toLowerCase())) return preset
   }
+  // An explicitly named preset is only honored when it is one the hardware supports;
+  // otherwise return null so the turn asks for clarification instead of guessing.
   const explicit = text.match(/(?:preset|场景)\s*(?:切换到|切换为|设为|设置为|=|：|:)?\s*([a-z0-9_.-]{2,32})/i)
-  if (explicit) return explicit[1]
+  if (explicit) {
+    const named = explicit[1].toLowerCase()
+    return CABIN_SCENE_PRESETS.find(preset => preset === named) ?? null
+  }
   return null
 }
 
@@ -1674,6 +1688,26 @@ function parseHardwareResultPayload(text: string): HardwareToolResult | null {
 
 export function isCabinHardwareRequest(text: string): boolean {
   return /小桌板|桌板|tray|灯|light|顶灯|座椅|靠背|坐垫|通风|加热|按摩|seat|温度|temperature|空调|air\s*condition|场景|scene|生理|健康|采集/i.test(text)
+}
+
+// A bare passenger confirmation ("好/可以/行/嗯") that carries no concrete action or
+// device keyword. Used to resolve a hardware suggestion offered on the previous turn.
+// Negations ("不用/别/算了") are rejected so a declined offer never triggers execution.
+export function isAffirmationReply(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  if (/不|别|算了|再说|no\b|not\b/i.test(trimmed)) return false
+  return /^(?:好|好的|好呀|好啊|好吧|行|行吧|可以|嗯|嗯嗯|要|需要|来吧|麻烦(?:你|您)?了?|是的|对|ok|okay|yes|yep|yeah|sure|请)[。.！!，,~\s]*$/iu.test(trimmed)
+}
+
+// The previous assistant turn is an *offer* to operate hardware (a yes/no question),
+// not a completed confirmation. Guards against re-firing on "已为您…/正在为您…" replies
+// so a passenger's "好" after a done-confirmation is not mistaken for a fresh command.
+export function looksLikeHardwareOffer(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  if (/已(?:经)?(?:为您)?|已下发|正在为您|完成|已调|好了/.test(trimmed)) return false
+  return /(?:吗|要不要|需不需要|需要我为您|是否需要)[？?]?/u.test(trimmed)
 }
 
 function sanitizeCabinHardwareReply(text: string): string {

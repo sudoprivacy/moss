@@ -4,6 +4,20 @@ import { setTimeout as delay } from 'timers/promises'
 import { mkdir, appendFile } from 'fs/promises'
 import { dirname } from 'path'
 
+// The only cabin scene presets the hardware backend accepts. Must stay in sync with
+// CABIN_SCENE_PRESETS in src/server/cabin/service.ts so both dispatch paths agree.
+const CABIN_SCENE_PRESETS = ['boarding', 'cruise', 'night', 'landing']
+
+// Chinese/English synonyms folded onto a supported preset. Scenes the hardware does
+// not have (睡眠/休息) map to the closest supported one (night) instead of emitting
+// an unsupported token the control API rejects.
+const SCENE_PRESET_ALIASES = {
+  登机: 'boarding', 上机: 'boarding', 上飞机: 'boarding',
+  巡航: 'cruise', 正常: 'cruise',
+  睡眠: 'night', 睡觉: 'night', 休息: 'night', 助眠: 'night', 夜间: 'night', 夜晚: 'night', sleep: 'night', rest: 'night',
+  下机: 'landing', 降落: 'landing', 落地: 'landing', 到达: 'landing',
+}
+
 const COMMANDS = {
   'seat.cushion': {
     device: 'seat',
@@ -131,7 +145,7 @@ const COMMANDS = {
     path: '/admin-api/tcp-client/cmd/cabin/scene',
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
-      { name: 'preset', arg: 'preset', required: true, type: 'token' },
+      { name: 'preset', arg: 'preset', required: true, type: 'token', enum: CABIN_SCENE_PRESETS },
     ],
     label: args => `切换至 ${args.preset} 客舱场景`,
   },
@@ -283,6 +297,10 @@ function normalizeArgs(args) {
   const preset = String(normalized.preset ?? '').trim().toLowerCase()
   if (['none', 'clear', 'off', '关闭', '清除', '取消'].includes(preset)) {
     normalized.command = 'cabin.scene.clear'
+  } else if (normalized.preset !== undefined) {
+    // Fold scene synonyms onto a supported preset before validation (睡眠 → night).
+    const raw = String(normalized.preset).trim()
+    normalized.preset = SCENE_PRESET_ALIASES[raw] || SCENE_PRESET_ALIASES[raw.toLowerCase()] || raw
   }
 
   const color = String(normalized.color ?? '').trim().toLowerCase()
@@ -351,7 +369,15 @@ function parseParam(spec, args) {
   if (spec.type === 'bool') return parseBool(spec.arg, value)
   if (spec.type === 'int') return parseIntRange(spec.arg, value, spec.min, spec.max)
   if (spec.type === 'seat') return parseSafeToken(spec.arg, value, /^[A-Za-z0-9_-]+$/)
-  return parseSafeToken(spec.arg, value, /^[A-Za-z0-9_.:-]+$/)
+  const token = parseSafeToken(spec.arg, value, /^[A-Za-z0-9_.:-]+$/)
+  if (spec.enum) {
+    const match = spec.enum.find(allowed => allowed.toLowerCase() === String(token).toLowerCase())
+    if (!match) {
+      throw new Error(`${spec.arg} must be one of: ${spec.enum.join(', ')}`)
+    }
+    return match
+  }
+  return token
 }
 
 function resolveCommand(args) {
