@@ -42,11 +42,15 @@ function cronDisabledError(auth: CronAuth): { success: false; message: string } 
 
 type SqlRow = Record<string, unknown>
 
-function mapJobToResponse(job: CronJob) {
+function mapJobToResponse(job: CronJob, getUserName?: (userId: string) => string | undefined) {
   return {
     id: job.id,
     orgId: job.orgId,
     userId: job.userId,
+    // Resolved server-side (org-agnostic) so owners outside the viewer's org
+    // roster — e.g. a super_admin who created the job while switched into this
+    // org — still display by name instead of falling back to the raw id.
+    userName: getUserName?.(job.userId),
     name: job.name,
     enabled: job.enabled,
     schedule: {
@@ -123,10 +127,13 @@ export function canManageJob(auth: { orgId: string; userId: string; scopes?: str
 
 export interface CronApiConfig {
   cronService: CronService
+  /** Resolve a user id to a display name for job responses (org-agnostic). */
+  getUserName?: (userId: string) => string | undefined
 }
 
 export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
   const store = new CronStore(db)
+  const mapJob = (job: CronJob) => mapJobToResponse(job, config.getUserName)
 
   return {
     /**
@@ -137,7 +144,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         const jobs = store.listByUser(auth.orgId, auth.userId)
         return {
           success: true,
-          data: jobs.map(mapJobToResponse),
+          data: jobs.map(mapJob),
         }
       } catch (err) {
         console.error('[CronApi] Failed to list jobs:', err)
@@ -162,7 +169,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         }
         return {
           success: true,
-          data: mapJobToResponse(job),
+          data: mapJob(job),
         }
       } catch (err) {
         console.error('[CronApi] Failed to get job:', err)
@@ -188,7 +195,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         config.cronService.addJob(job)
         return {
           success: true,
-          data: mapJobToResponse(job),
+          data: mapJob(job),
         }
       } catch (err) {
         console.error('[CronApi] Failed to create job:', err)
@@ -231,7 +238,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         config.cronService.updateJob(job)
         return {
           success: true,
-          data: mapJobToResponse(job),
+          data: mapJob(job),
         }
       } catch (err) {
         console.error('[CronApi] Failed to update job:', err)
@@ -338,7 +345,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
 
         // We need to use the store to map properly
         const jobs = rows.map(row => {
-          return mapJobToResponse({
+          return mapJob({
             id: String(row.id),
             orgId: String(row.org_id),
             userId: String(row.user_id),

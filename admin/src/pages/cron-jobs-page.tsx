@@ -257,9 +257,12 @@ export default function CronJobsPage() {
     })
     .sort((a, b) => b.createdAt - a.createdAt)
 
-  const getUserName = (userId: string) => {
-    const user = users.find((u) => u.id === userId)
-    return user?.name || userId.slice(0, 8)
+  const getUserName = (job: CronJob) => {
+    // Prefer the server-resolved name: the owner may not be in this org's
+    // roster (e.g. a super_admin who created the job while switched into it).
+    if (job.userName) return job.userName
+    const user = users.find((u) => u.id === job.userId)
+    return user?.name || job.userId.slice(0, 8)
   }
 
   const formatSchedule = (job: CronJob) => {
@@ -305,6 +308,16 @@ export default function CronJobsPage() {
                     {user.name}
                   </SelectItem>
                 ))}
+                {/* Job owners outside this org's roster (e.g. a super_admin
+                    who created jobs while switched into this org) */}
+                {[...new Map(jobs
+                  .filter((job) => !users.some((u) => u.id === job.userId))
+                  .map((job) => [job.userId, job])).values()]
+                  .map((job) => (
+                    <SelectItem key={job.userId} value={job.userId}>
+                      {getUserName(job)}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -381,7 +394,7 @@ export default function CronJobsPage() {
                         <div className="text-xs text-muted-foreground">{job.id.slice(0, 8)}</div>
                       </div>
                     </TableCell>
-                    <TableCell>{getUserName(job.userId)}</TableCell>
+                    <TableCell>{getUserName(job)}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Clock className="h-4 w-4 text-muted-foreground" />

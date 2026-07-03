@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import { hasScope, issueAccessToken, issueWikiSessionToken, verifyAccessToken, type AuthContext } from './token.js'
+import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
 import { buildVisibilityFilter, getUserAncestorIds } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
@@ -228,7 +228,9 @@ export class AuthService {
       throw new AuthServiceError(401, 'Invalid refresh token')
     }
 
-    const user = this.db.getUserByIdAndOrg(auth.userId, auth.orgId)
+    // A super_admin may hold a refresh token scoped to a foreign org (via
+    // switchOrg); resolve them by id and keep the token pinned to that org.
+    const user = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(401, 'User is invalid')
     }
@@ -237,6 +239,7 @@ export class AuthService {
       user,
       scopes: auth.scopes,
       keyId: auth.keyId,
+      orgIdOverride: auth.orgId,
     })
   }
 
@@ -957,7 +960,7 @@ export class AuthService {
     orgId: string,
     auth?: AuthContext,
   ): SanitizedAuthCenterUser | null {
-    const user = this.db.getUserByIdAndOrg(userId, orgId)
+    const user = this.getUserPinnedOrSuperAdmin(userId, orgId)
     if (!user) {
       return null
     }
@@ -965,6 +968,10 @@ export class AuthService {
       return null
     }
     return sanitizeUser(user)
+  }
+
+  private getUserPinnedOrSuperAdmin(userId: string, orgId: string): AuthCenterUser | null {
+    return resolveUserPinnedOrSuperAdmin(userId, orgId, this.db)
   }
 
   /** Get user status by userId only (no orgId or permission check). Used by userStatusCache. */

@@ -1376,7 +1376,12 @@ export function startServer(
   })
 
   // Cron API - for scheduled tasks management
-  const cronApi = createCronApi(runtime.store.db, { cronService })
+  const cronApi = createCronApi(runtime.store.db, {
+    cronService,
+    getUserName: (userId: string) => {
+      try { return authService.getUserName(userId) } catch { return undefined }
+    },
+  })
 
   const mcpStore = new McpStore(runtime.store.db)
   const mcpUserConfigApi = nexusClient ? createMcpUserConfigApi({
