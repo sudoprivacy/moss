@@ -276,6 +276,8 @@ export interface Session {
   status: SessionStatus
   desiredState: DesiredState
   assistantName?: string | null
+  /** Owner name resolved server-side (works for owners outside this org's roster). */
+  userName?: string
   source?: string
   channelChatId?: string
   createdAt: number

@@ -42,6 +42,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { getApiKeys, createApiKey, getUsers } from '@/lib/api/auth'
+import { resolveOwnerName } from '@/lib/utils'
 import type { ApiKey, AuthUser } from '@/lib/api/types'
 import { Plus, Copy, Key, Loader2, MoreHorizontal } from 'lucide-react'
 import {
@@ -141,10 +142,7 @@ export default function ApiKeysPage() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const getUserName = (userId: string) => {
-    const user = users.find((u) => u.id === userId)
-    return user?.name || userId.slice(0, 8)
-  }
+  const getUserName = (userId: string) => resolveOwnerName(users, userId)
 
   if (isLoading) {
     return (

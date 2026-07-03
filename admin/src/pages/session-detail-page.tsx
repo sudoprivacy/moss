@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { getSessionContext, resumeSession, terminateSession } from '@/lib/api/sessions'
 import { getUsers } from '@/lib/api/auth'
 import type { GetSessionContextResponse, AuthUser, SessionMessage, ContentBlock } from '@/lib/api/types'
+import { resolveOwnerName } from '@/lib/utils'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Loader2, Play, Power, Clock, Server, Container, Wrench, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -295,11 +296,6 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
     }
   }
 
-  const getUserName = (userId: string) => {
-    const user = users.find((u) => u.id === userId)
-    return user?.name || userId.slice(0, 8)
-  }
-
   if (isLoading) {
     return (
       <DashboardLayout title="会话详情">
@@ -325,6 +321,7 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
 
   const canResume = ['ended', 'terminated', 'failed', 'lost'].includes(session.status)
   const canTerminate = ['active', 'creating', 'detached'].includes(session.status)
+  const ownerName = resolveOwnerName(users, session.userId, session.userName)
 
   return (
     <DashboardLayout title="会话详情" description={`Session ID: ${session.sessionId}`}>
@@ -363,11 +360,11 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
               <div className="flex items-center gap-3">
                 <Avatar className="size-10">
                   <AvatarFallback className="bg-primary/10 text-primary">
-                    {getUserName(session.userId).slice(0, 1)}
+                    {ownerName.slice(0, 1)}
                   </AvatarFallback>
                 </Avatar>
                 <div>
-                  <p className="font-medium">{getUserName(session.userId)}</p>
+                  <p className="font-medium">{ownerName}</p>
                   <p className="text-sm text-muted-foreground font-mono">{session.userId.slice(0, 12)}...</p>
                 </div>
               </div>

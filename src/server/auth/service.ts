@@ -1723,15 +1723,13 @@ export class AuthService {
   }
 
   private requireAuthUser(auth: AuthContext): AuthCenterUser {
-    // Resolve the actor by id (globally unique). A super_admin may have switched
-    // their effective org (auth.orgId points at a foreign org), so their own
-    // record won't be found via getUserByIdAndOrg — accept it regardless of org.
-    // Every other role stays pinned to its home org to preserve isolation.
-    const user = this.db.getUserById(auth.userId)
+    // Resolve the actor with the shared rule: pinned to their org, except a
+    // super_admin who has switched their effective org resolves regardless of
+    // org (auth.orgId points at a foreign org, so their record won't be found
+    // via getUserByIdAndOrg). A null result means either no such user in this
+    // org or a non-super_admin acting cross-org — both barred here.
+    const user = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!user || user.status !== 'active') {
-      throw new AuthServiceError(403, 'Current user is not allowed to manage users')
-    }
-    if (!isSuperAdmin(user.role) && user.orgId !== auth.orgId) {
       throw new AuthServiceError(403, 'Current user is not allowed to manage users')
     }
     return user

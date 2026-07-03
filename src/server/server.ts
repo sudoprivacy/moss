@@ -276,6 +276,25 @@ function serializeSession(session: {
   }
 }
 
+/**
+ * Build a per-request, memoized user-id -> display-name resolver. Resolution is
+ * org-agnostic (via authService.getUserName), so owners outside the caller's
+ * org roster — e.g. a super_admin who created the resource while switched into
+ * this org — resolve by name instead of a raw id. Memoizing per request
+ * collapses repeated owners in a list to a single DB lookup each (avoids N+1).
+ */
+function makeUserNameResolver(
+  getUserName: (userId: string) => string | undefined,
+): (userId: string) => string | undefined {
+  const cache = new Map<string, string | undefined>()
+  return (userId: string) => {
+    if (cache.has(userId)) return cache.get(userId)
+    const name = getUserName(userId)
+    cache.set(userId, name)
+    return name
+  }
+}
+
 function serializeExternalSource(row: Record<string, unknown>) {
   let configParsed: Record<string, unknown> = {}
   try {
@@ -1375,12 +1394,16 @@ export function startServer(
     },
   })
 
+  // Org-agnostic user-id -> display-name resolver, shared by the API modules
+  // below (cron, mcp admin/user) that surface resource-owner names.
+  const resolveUserName = (userId: string): string | undefined => {
+    try { return authService.getUserName(userId) } catch { return undefined }
+  }
+
   // Cron API - for scheduled tasks management
   const cronApi = createCronApi(runtime.store.db, {
     cronService,
-    getUserName: (userId: string) => {
-      try { return authService.getUserName(userId) } catch { return undefined }
-    },
+    getUserName: resolveUserName,
   })
 
   const mcpStore = new McpStore(runtime.store.db)
@@ -1401,9 +1424,7 @@ export function startServer(
   const mcpAdminApi = createMcpAdminApi({
     mcpStore,
     authService,
-    getUserName: (userId: string) => {
-      try { return authService.getUserName(userId) } catch { return undefined }
-    },
+    getUserName: resolveUserName,
     getUserDepartmentId: (userId: string) => {
       try { const u = authService.getUserById(userId); return u?.departmentId ?? null } catch { return null }
     },
@@ -1411,9 +1432,7 @@ export function startServer(
   const mcpUserApi = createMcpUserApi({
     mcpStore,
     authService,
-    getUserName: (userId: string) => {
-      try { return authService.getUserName(userId) } catch { return undefined }
-    },
+    getUserName: resolveUserName,
     getUserDepartmentId: (userId: string) => {
       try { const u = authService.getUserById(userId); return u?.departmentId ?? null } catch { return null }
     },
@@ -6157,7 +6176,15 @@ export function startServer(
           })
         }
 
-        writeJson(res, 200, { sessions })
+        // Attach an org-agnostic owner name so the admin UI can display owners
+        // outside this org's roster (e.g. a switched super_admin) by name.
+        const resolveName = makeUserNameResolver(resolveUserName)
+        const sessionsWithOwner = sessions.map(session => ({
+          ...session,
+          userName: resolveName(session.userId),
+        }))
+
+        writeJson(res, 200, { sessions: sessionsWithOwner })
         return
       }
 
@@ -6223,7 +6250,10 @@ export function startServer(
           throw new HttpError(404, 'Session context not found')
         }
         writeJson(res, 200, {
-          session: serializeSession(session),
+          session: {
+            ...serializeSession(session),
+            userName: resolveUserName(session.userId),
+          },
           usage: context.usage,
           context: {
             customTitle: context.customTitle,
