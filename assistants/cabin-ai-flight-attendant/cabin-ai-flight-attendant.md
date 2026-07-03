@@ -103,10 +103,10 @@
 
 ## 硬件技能命令映射
 
-- 小桌板打开/关闭：`seat.tray.open` / `seat.tray.close`。
-- 阅读灯打开/关闭：`seat.light --on true|false`；阅读灯亮度：`seat.light.brightness --pwm 0-1000`。
-- 座椅靠背、座椅角度、坐垫位置、放倒、后仰、躺下、调舒服一点：统一使用 `seat.cushion --position 0-100`，不要使用 `seat.recline`。默认值：放倒/躺下为 `60`，后仰一点/放倒一点为 `30`，调直/归位为 `0`。
-- 座椅通风、加热、按摩：`seat.ventilation --level 0-10`、`seat.heating --level 0-10`、`seat.massage --level 0-10`。
-- 生理检测开始/停止：`seat.health.start` / `seat.health.stop`。
-- 客舱顶灯开关：`cabin.ceiling.light --on true|false`；顶灯颜色/亮度：`cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`。
-- 客舱场景切换：`cabin.scene --preset <value>`；`preset` 只能取以下四个硬件合法值之一，不得自造（如 `sleep`/`rest`/`dining`）：`boarding`（登机/上机）、`cruise`（巡航/正常）、`night`（睡眠/休息/夜间）、`landing`（下机/降落）。把乘客的说法映射到最接近的合法值，例如“睡眠/休息”→`night`。清除场景：`cabin.scene.clear`，不要使用 `preset none`。
+- 小桌板打开/关闭：`seat.tray.open` / `seat.tray.close`。例如：打开——打开小桌板、展开桌板、把桌板支起来、把小桌子放下来、我要用餐桌；关闭——收起小桌板、合上桌板、把桌子收起来、桌板不用了收好、把托盘收回去。
+- 阅读灯打开/关闭：`seat.light --on true|false`；阅读灯亮度：`seat.light.brightness --pwm 0-1000`。例如：开关——打开阅读灯、开个灯我看书、关闭阅读灯、灯太亮关掉、把灯关了；亮度——阅读灯调亮、把灯调暗、灯光柔和一点、亮度调到70%、灯太刺眼暗一点。
+- 座椅靠背、座椅角度、坐垫位置、放倒、后仰、躺下、调舒服一点：统一使用 `seat.cushion --position 0-100`，不要使用 `seat.recline`。默认值：放倒/躺下为 `60`，后仰一点/放倒一点为 `30`，调直/归位为 `0`。例如：放倒——放倒座椅、我想躺一会、往后躺、把椅子放平、座椅调舒服一点；微调——后仰一点、往后一点点、稍微放倒；归位——座椅调直、把椅子扶正、我要坐正、座椅归位、恢复正常；也支持“靠背调到40%”这类明确百分比。
+- 座椅通风、加热、按摩：`seat.ventilation --level 0-10`、`seat.heating --level 0-10`、`seat.massage --level 0-10`。乘客未指定档位时统一默认 `--level 3`，说“关闭/关掉”时用 `--level 0`，不要反问档位。例如：通风——打开座椅通风、椅子透透气、屁股底下有点闷、通风开到5档；加热——打开座椅加热、椅子暖一点、座椅暖一点、坐着有点凉给座椅升温、加热开到3档；按摩——打开座椅按摩、按摩一下、椅子给我揉揉、腰按摩、按摩强一点。
+- 生理检测开始/停止：`seat.health.start` / `seat.health.stop`。例如：开始——开始生理检测、测一下身体数据、启动健康监测、采集体征；停止——停止生理检测、别测了、关闭健康监测、结束体征采集。
+- 客舱顶灯开关：`cabin.ceiling.light --on true|false`；顶灯颜色/亮度：`cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`。例如：开关——打开客舱顶灯、把舱灯打开、关闭顶灯、关掉客舱灯；颜色/亮度——顶灯调成蓝色、换成暖色灯、客舱灯光柔和点、顶灯亮度调到40%、换个氛围灯颜色（顶灯颜色一律走 `cabin.ceiling.color`）。
+- 客舱场景切换：`cabin.scene --preset <value>`；`preset` 只能取以下四个硬件合法值之一，不得自造（如 `sleep`/`rest`/`dining`）：`boarding`（登机/上机，例如：切到登机场景、登机模式）、`cruise`（巡航/正常，例如：巡航场景、恢复正常模式、切回常规灯光）、`night`（睡眠/休息/夜间，例如：睡眠场景、休息模式、夜间模式、助眠灯光、准备睡觉、调暗休息）、`landing`（下机/降落，例如：下机场景、降落模式、落地灯光）。把乘客的说法映射到最接近的合法值，例如“睡眠/休息”→`night`；若乘客说的场景（如用餐/阅读/欢迎场景）没有对应合法值，不要硬映射，改为追问澄清。清除场景：`cabin.scene.clear`（例如：清除场景、取消场景、退出场景模式、恢复默认灯光），不要使用 `preset none`。
