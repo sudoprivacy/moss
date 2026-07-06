@@ -2102,11 +2102,19 @@ export function startServer(
             const configuredNs = nexusClient.listConfiguredNamespaces()
             const orgPrefix = `org:${auth.orgId}:`
             result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
-              // Non-user namespaces are org-scoped in Nexus.
+              // User-scope items are populated per-user *from the client*, so they
+              // must be returned even when no value exists yet — otherwise the end
+              // user has no field to fill in (chicken-and-egg). Only enterprise
+              // (system) and department (role) items are admin-configured
+              // server-side and hidden until a value is stored.
+              if (item.scope === 'user') return true
+              // Enterprise (system) / department (role) namespaces are org-scoped
+              // in Nexus. Match each scope explicitly; any unknown future scope is
+              // hidden until it has an explicit handler (safe default).
               const ns = item.scope === 'system' ? `${orgPrefix}system:${item.pinyin}`
                 : item.scope === 'department' ? `${orgPrefix}role:${item.pinyin}`
-                : `user:${auth.userId}:${item.pinyin}`
-              return configuredNs.has(ns)
+                : null
+              return ns !== null && configuredNs.has(ns)
             })
           } catch { /* nexus unavailable — return unfiltered */ }
         }
