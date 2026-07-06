@@ -71,6 +71,15 @@ export async function getAdminCronJobs(): Promise<CronJobsListResponse> {
   return dcClient.get<CronJobsListResponse>('/api/v1/admin/cron/jobs')
 }
 
+/**
+ * The org-wide admin list requires admin:cron. A dept_admin/user uses the
+ * regular list, which the server scopes to their own jobs (plus the dept
+ * subtree for a dept_admin with cron:list:subtree).
+ */
+export async function getCronJobs(): Promise<CronJobsListResponse> {
+  return dcClient.get<CronJobsListResponse>('/api/v1/cron/jobs')
+}
+
 export async function getCronJobRuns(jobId: string, limit?: number): Promise<CronJobRunsListResponse> {
   const query = limit ? `?limit=${limit}` : ''
   return dcClient.get<CronJobRunsListResponse>(`/api/v1/cron/jobs/${jobId}/runs${query}`)

@@ -236,6 +236,54 @@ export function isCronAdminCapable(auth: { role: string; scopes?: string[] }): b
 }
 
 /**
+ * Full-admin capability: the admin/super_admin roles, or a token carrying the
+ * wildcard `*` scope. Used as the shared "is this an unrestricted actor" test
+ * for the split credential/store/cron scopes below, so a dept_admin or user
+ * with a narrow scope is never mistaken for an admin.
+ */
+function isFullAdmin(auth: { role: string; scopes?: string[] }): boolean {
+  return auth.role === 'admin' || auth.role === 'super_admin' || hasScope(auth.scopes ?? [], '*')
+}
+
+/**
+ * May view department-scope credentials (and, per Phase F, set a per-department
+ * value). Full admins qualify via `admin:secrets`; a dept_admin qualifies via
+ * the narrower `secrets:department:read`.
+ */
+export function canReadDepartmentSecrets(auth: { role: string; scopes?: string[] }): boolean {
+  const scopes = auth.scopes ?? []
+  return isFullAdmin(auth) || hasScope(scopes, 'admin:secrets') || hasScope(scopes, 'secrets:department:read')
+}
+
+/**
+ * May set own user-credential values. Full admins qualify via `admin:secrets`;
+ * dept_admin and user qualify via `secrets:user:write`. The per-namespace
+ * ownership check (`user:{userId}:`) still applies on top of this.
+ */
+export function canWriteUserSecrets(auth: { role: string; scopes?: string[] }): boolean {
+  const scopes = auth.scopes ?? []
+  return isFullAdmin(auth) || hasScope(scopes, 'admin:secrets') || hasScope(scopes, 'secrets:user:write')
+}
+
+/**
+ * May view any credential audit / rotation surface (subject to server-side
+ * actor/scope narrowing): a full admin, a dept_admin (department secrets), or a
+ * user (own user secrets).
+ */
+export function canReadSecretAudit(auth: { role: string; scopes?: string[] }): boolean {
+  return canReadDepartmentSecrets(auth) || canWriteUserSecrets(auth)
+}
+
+/**
+ * Full store admin: may install hub items, approve tenant items, sync, and set
+ * arbitrary visibility. A dept_admin/user with `store:read`/`store:tenant:write`
+ * is NOT a store admin — those grant view + scoped tenant/custom management only.
+ */
+export function isStoreAdmin(auth: { role: string; scopes?: string[] }): boolean {
+  return isFullAdmin(auth) || hasScope(auth.scopes ?? [], 'admin:settings')
+}
+
+/**
  * Org-pinned user lookup, except a super_admin resolves regardless of org.
  * A super_admin may have switched their effective org (see AuthService.switchOrg),
  * so lookups keyed by the switched org won't find their home-org record — that

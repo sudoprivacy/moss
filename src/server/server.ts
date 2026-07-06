@@ -10,7 +10,7 @@ import { WebSocketServer } from 'ws'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
-import { hasScope, type AuthContext } from './auth/token.js'
+import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService } from './runtimeService.js'
@@ -4040,24 +4040,41 @@ export function startServer(
           return
         }
 
-        // Department secrets: list
+        // Department secrets: list. A dept_admin may view all department-scope
+        // credentials (admin:secrets stays the admin gate; secrets:department:read
+        // is the dept_admin gate).
         if (req.method === 'GET' && pathname === '/api/v1/department-secrets') {
-          authService.requireScope(auth, 'admin:secrets')
+          if (!canReadDepartmentSecrets(auth)) {
+            authService.requireScope(auth, 'admin:secrets')
+          }
           writeJson(res, 200, await secretsApi.listDepartmentSecrets(auth.orgId, auth.userId))
           return
         }
 
-        // Secret metadata: list + update
+        // Secret metadata: list + update. The list only exposes config_item_id +
+        // expiry (no secret values), so any credential-capable role may read it
+        // to render expiry in their own credential UI.
         if (req.method === 'GET' && pathname === '/api/v1/secret-metadata') {
-          authService.requireScope(auth, 'admin:secrets')
+          if (!canReadSecretAudit(auth)) {
+            authService.requireScope(auth, 'admin:secrets')
+          }
           writeJson(res, 200, secretsApi.listMetadata(auth.orgId, auth.userId))
           return
         }
         const metadataMatch = pathname.match(/^\/api\/v1\/secret-metadata\/(\d+)$/)
         if (req.method === 'PUT' && metadataMatch) {
-          authService.requireScope(auth, 'admin:secrets:write')
+          const itemId = Number(metadataMatch[1])
+          // Admins may set expiry on any config item. A user-credential writer
+          // (dept_admin/user) may set expiry only on user-scope config items —
+          // the same items whose values they own.
+          if (!hasScope(auth.scopes, 'admin:secrets:write') && !hasScope(auth.scopes, '*')) {
+            const item = runtime.store.getConfigItem(itemId, auth.orgId)
+            if (!item || (item.scope as string) !== 'user' || !canWriteUserSecrets(auth)) {
+              throw new HttpError(403, 'Missing scope: admin:secrets:write')
+            }
+          }
           const body = await readJsonBody(req)
-          writeJson(res, 200, secretsApi.updateMetadata(auth.orgId, auth.userId, Number(metadataMatch[1]), body.expires_at ?? null))
+          writeJson(res, 200, secretsApi.updateMetadata(auth.orgId, auth.userId, itemId, body.expires_at ?? null))
           return
         }
 
@@ -4082,11 +4099,20 @@ export function startServer(
           }
         }
 
-        // Audit log
+        // Audit log. Admins see the whole org; a dept_admin sees only actions by
+        // users in their department subtree; a normal user sees only their own.
+        // The actor restriction is computed server-side from the caller's
+        // capability (never from a query param) so it can't be widened.
         if (req.method === 'GET' && pathname === '/api/v1/secrets-audit') {
-          authService.requireScope(auth, 'admin:secrets')
+          if (!canReadSecretAudit(auth)) {
+            authService.requireScope(auth, 'admin:secrets')
+          }
+          const actorIds = canReadDepartmentSecrets(auth)
+            ? authService.listSubtreeUserIds(auth.orgId, auth) ?? undefined
+            : new Set<string>([auth.userId])
           const urlObj = new URL(req.url as string, `http://${req.headers.host}`)
           writeJson(res, 200, secretsApi.listAuditLog(auth.orgId, auth.userId, {
+            actorIds: actorIds ? Array.from(actorIds) : undefined,
             actor_id: urlObj.searchParams.get('actor_id') || undefined,
             config_item_id: urlObj.searchParams.get('config_item_id') ? Number(urlObj.searchParams.get('config_item_id')) : undefined,
             action: urlObj.searchParams.get('action') || undefined,
@@ -4098,10 +4124,19 @@ export function startServer(
           return
         }
 
-        // Rotation alerts
+        // Rotation alerts. Admins see all scopes; a dept_admin sees department +
+        // user credential alerts; a normal user sees only user-scope alerts.
         if (req.method === 'GET' && pathname === '/api/v1/secret-rotation/alerts') {
-          authService.requireScope(auth, 'admin:secrets')
-          writeJson(res, 200, secretsApi.listRotationAlerts(auth.orgId, auth.userId))
+          if (!canReadSecretAudit(auth)) {
+            authService.requireScope(auth, 'admin:secrets')
+          }
+          const isAdmin = hasScope(auth.scopes, 'admin:secrets') || hasScope(auth.scopes, '*')
+          const scopeFilter = isAdmin
+            ? undefined
+            : canReadDepartmentSecrets(auth)
+              ? new Set<'system' | 'department' | 'user'>(['department', 'user'])
+              : new Set<'system' | 'department' | 'user'>(['user'])
+          writeJson(res, 200, secretsApi.listRotationAlerts(auth.orgId, auth.userId, scopeFilter))
           return
         }
 
@@ -4208,11 +4243,21 @@ export function startServer(
           const namespace = decodeURIComponent(meSecretMatch[1])
           const key = decodeURIComponent(meSecretMatch[2])
           const action = meSecretMatch[3]
+          // Writing own user-credential values requires secrets:user:write.
+          // The API additionally enforces `user:{userId}:` namespace ownership,
+          // so this is defense-in-depth and lets the frontend mirror the gate.
+          const requireUserSecretWrite = () => {
+            if (!canWriteUserSecrets(auth)) {
+              throw new HttpError(403, 'Missing scope: secrets:user:write')
+            }
+          }
           if (action === 'enable' && req.method === 'POST') {
+            requireUserSecretWrite()
             writeJson(res, 200, await secretsApi.enableUserSecret(auth.orgId, auth.userId, namespace, key, clientIp))
             return
           }
           if (action === 'disable' && req.method === 'POST') {
+            requireUserSecretWrite()
             writeJson(res, 200, await secretsApi.disableUserSecret(auth.orgId, auth.userId, namespace, key, clientIp))
             return
           }
@@ -4221,11 +4266,13 @@ export function startServer(
             return
           }
           if (req.method === 'PUT') {
+            requireUserSecretWrite()
             const body = await readJsonBody(req)
             writeJson(res, 200, await secretsApi.putUserSecret(auth.orgId, auth.userId, namespace, key, body.value ?? '', clientIp))
             return
           }
           if (req.method === 'DELETE') {
+            requireUserSecretWrite()
             writeJson(res, 200, await secretsApi.deleteUserSecret(auth.orgId, auth.userId, namespace, key, clientIp))
             return
           }
@@ -4606,9 +4653,14 @@ export function startServer(
       }
 
       // ==================== Cron Jobs ====================
-      // List all cron jobs for current user
+      // Department subtree of user ids whose jobs a dept_admin may read/manage,
+      // resolved on the fly from current membership (null for admins, [self] for
+      // a plain user). Shared by every per-job route below.
+      const cronSubtreeUserIds = authService.listSubtreeUserIds(auth.orgId, auth)
+
+      // List all cron jobs for current user (or subtree, for a dept_admin)
       if (req.method === 'GET' && pathname === '/api/v1/cron/jobs') {
-        const result = await cronApi.listJobs(auth)
+        const result = await cronApi.listJobs(auth, cronSubtreeUserIds)
         writeJson(res, 200, result)
         return
       }
@@ -4645,7 +4697,7 @@ export function startServer(
 
         // Get a single cron job
         if (req.method === 'GET') {
-          const result = await cronApi.getJob(auth, jobId)
+          const result = await cronApi.getJob(auth, jobId, cronSubtreeUserIds)
           writeJson(res, 200, result)
           return
         }
@@ -4673,14 +4725,14 @@ export function startServer(
           if (body.runtimeJson !== undefined) updates.runtimeJson = body.runtimeJson
           if (body.maxRetries !== undefined) updates.maxRetries = body.maxRetries
 
-          const result = await cronApi.updateJob(auth, jobId, updates)
+          const result = await cronApi.updateJob(auth, jobId, updates, cronSubtreeUserIds)
           writeJson(res, 200, result)
           return
         }
 
         // Delete a cron job (soft delete)
         if (req.method === 'DELETE') {
-          const result = await cronApi.deleteJob(auth, jobId)
+          const result = await cronApi.deleteJob(auth, jobId, cronSubtreeUserIds)
           writeJson(res, 200, result)
           return
         }
@@ -4690,7 +4742,7 @@ export function startServer(
       const cronTriggerMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/trigger$/)
       if (req.method === 'POST' && cronTriggerMatch) {
         const jobId = cronTriggerMatch[1]
-        const result = await cronApi.triggerJob(auth, jobId)
+        const result = await cronApi.triggerJob(auth, jobId, cronSubtreeUserIds)
         writeJson(res, 200, result)
         return
       }
@@ -4701,7 +4753,7 @@ export function startServer(
         const jobId = cronRunsMatch[1]
         const limitRaw = url.searchParams.get('limit')
         const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
-        const result = await cronApi.listRuns(auth, jobId, Number.isFinite(limit) ? limit : 50)
+        const result = await cronApi.listRuns(auth, jobId, Number.isFinite(limit) ? limit : 50, cronSubtreeUserIds)
         writeJson(res, 200, result)
         return
       }
@@ -4753,7 +4805,7 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/agent-hub/categories') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         writeJson(res, 200, await fetchAgentHubCategories())
         return
       }
@@ -4762,7 +4814,7 @@ export function startServer(
         req.method === 'GET' &&
         pathname === '/api/v1/agent-hub/assistants/cursor'
       ) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const limitRaw = url.searchParams.get('limit')
         const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined
 
@@ -4783,14 +4835,14 @@ export function startServer(
         /^\/api\/v1\/agent-hub\/assistants\/([^/]+)$/,
       )
       if (req.method === 'GET' && agentHubDetailMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const assistantId = decodeURIComponent(agentHubDetailMatch[1] || '')
         writeJson(res, 200, await fetchAgentHubAssistantDetail(assistantId))
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/agent-hub/skills/by-ids') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const body = await readJsonBody(req)
         const skillIds = Array.isArray(body.skillIds)
           ? body.skillIds
@@ -5097,14 +5149,17 @@ export function startServer(
         const filter = authService.buildVisibilityFilter(auth)
         const isAdmin = hasScope(auth.scopes, 'admin:settings')
         const rows = allRows.filter((row: Record<string, unknown>) => {
-          // Pending records are only visible to admins
-          if (row.status === 'pending' && !isAdmin) return false
-          // Approved records are filtered by visibility
+          // A caller can always see items they may manage (author in scope),
+          // even if visibility wouldn't otherwise match — the "or created by
+          // himself/subtree" clause of the spec.
+          const canManage = authService.isCreatorInScope(auth.orgId, row.author_id as string, auth)
+          if (row.status === 'pending') return isAdmin || canManage
           if (row.status === 'approved') {
+            if (canManage) return true
             const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
             return isVisibleTo(visibleTo, filter)
           }
-          return true
+          return canManage || isAdmin
         }).map((row: Record<string, unknown>) => {
           // Parse JSON fields for frontend consumption
           return {
@@ -5115,6 +5170,8 @@ export function startServer(
             enabled_corp_apps: typeof row.enabled_corp_apps === 'string' ? JSON.parse(row.enabled_corp_apps) : row.enabled_corp_apps ?? [],
             workflow: typeof row.workflow === 'string' ? JSON.parse(row.workflow) : row.workflow ?? null,
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
+            // Lets the frontend show edit/delete without re-deriving subtree math.
+            can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
           }
         })
         writeJson(res, 200, rows)
@@ -5291,6 +5348,9 @@ export function startServer(
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
+        // Stamp the publisher's default visibility (dept_admin → own department,
+        // user → self) so it survives approval instead of defaulting to global.
+        const publishVisibility = authService.defaultTenantVisibility(auth)
         // Create tenant assistant record with UUID as id
         runtime.store.createTenantAssistant({
           id: assistantId, // Use UUID as id
@@ -5306,6 +5366,7 @@ export function startServer(
           author_id: auth.userId,
           author_name: authorName,
           status: 'pending',
+          visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
           file_path: assistantResult.dir, // Store source directory path for approval
           org_id: auth.orgId,
         })
@@ -5330,8 +5391,16 @@ export function startServer(
         if (approved) {
           // Update status to approved
           runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
-          // Set visibility to all users (null)
-          runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
+          // Preserve the publisher's default visibility (dept/self) through
+          // approval. An admin may override via visible_to in the approve body;
+          // a legacy record without one falls back to global (null).
+          if (body.visible_to !== undefined) {
+            runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
+              visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
+            })
+          } else if (tenantAssistant.visible_to == null) {
+            runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
+          }
           // Copy assistant to tenant directory using stored file_path
           const sourcePath = tenantAssistant.file_path as string | undefined
           if (sourcePath && existsSync(sourcePath)) {
@@ -5354,9 +5423,30 @@ export function startServer(
       // PATCH /api/v1/agents/tenant/:id - Update tenant assistant meta
       const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
+        const existingAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        if (!existingAssistant) {
+          throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+        }
+        // Non-admins may only manage tenant assistants authored by someone
+        // currently in their scope, within their own org.
+        const agentStoreAdmin = isStoreAdmin(auth)
+        if (!agentStoreAdmin) {
+          if (existingAssistant.org_id != null && existingAssistant.org_id !== auth.orgId) {
+            throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+          }
+          if (!authService.isCreatorInScope(auth.orgId, existingAssistant.author_id as string, auth)) {
+            throw new HttpError(403, 'You cannot manage this tenant assistant')
+          }
+        }
         const body = await readJsonBody(req)
+        // A non-admin cannot widen visibility beyond their own scope: clamp any
+        // visible_to change to their default (own dept / self).
+        if (!agentStoreAdmin && body.visible_to !== undefined) {
+          const clamp = authService.defaultTenantVisibility(auth)
+          body.visible_to = clamp
+        }
 
         const updates: Record<string, unknown> = {}
         if (typeof body.display_name === 'string') {
@@ -5444,9 +5534,19 @@ export function startServer(
 
       // DELETE /api/v1/agents/tenant/:id - Delete tenant assistant
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
         const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        // Non-admins may only delete tenant assistants authored by someone
+        // currently in their scope, within their own org.
+        if (tenantAssistant && !isStoreAdmin(auth)) {
+          if (tenantAssistant.org_id != null && tenantAssistant.org_id !== auth.orgId) {
+            throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+          }
+          if (!authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth)) {
+            throw new HttpError(403, 'You cannot manage this tenant assistant')
+          }
+        }
         if (tenantAssistant) {
           const assistantName = tenantAssistant.name as string
           // Delete from tenant directory if exists
@@ -5496,13 +5596,13 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/skill-hub/categories') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         writeJson(res, 200, await fetchSkillHubCategories())
         return
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/skill-hub/skills/cursor') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const category =
           typeof url.searchParams.get('category') === 'string'
             ? url.searchParams.get('category') || ''
@@ -5528,7 +5628,7 @@ export function startServer(
 
       const skillHubDetailMatch = pathname.match(/^\/api\/v1\/skill-hub\/skills\/([^/]+)$/)
       if (req.method === 'GET' && skillHubDetailMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const skillId = decodeURIComponent(skillHubDetailMatch[1] || '')
         writeJson(res, 200, await fetchSkillHubSkillDetail(skillId))
         return
@@ -5746,16 +5846,25 @@ export function startServer(
         // Filter by visibility for non-admin users
         const filter = authService.buildVisibilityFilter(auth)
         const isAdmin = hasScope(auth.scopes, 'admin:settings')
-        const rows = allRows.filter((row: Record<string, unknown>) => {
-          // Pending records are only visible to admins
-          if (row.status === 'pending' && !isAdmin) return false
-          // Approved records are filtered by visibility
-          if (row.status === 'approved') {
-            const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
-            return isVisibleTo(visibleTo, filter)
-          }
-          return true
-        })
+        const rows = allRows
+          .filter((row: Record<string, unknown>) => {
+            // A caller can always see items they may manage (author in scope),
+            // even if the item's visibility wouldn't otherwise match — this is
+            // the "or created by himself/subtree" clause of the spec.
+            const canManage = authService.isCreatorInScope(auth.orgId, row.author_id as string, auth)
+            if (row.status === 'pending') return isAdmin || canManage
+            if (row.status === 'approved') {
+              if (canManage) return true
+              const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
+              return isVisibleTo(visibleTo, filter)
+            }
+            return canManage || isAdmin
+          })
+          .map((row: Record<string, unknown>) => ({
+            ...row,
+            // Lets the frontend show edit/delete without re-deriving subtree math.
+            can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
+          }))
         writeJson(res, 200, rows)
         return
       }
@@ -5885,7 +5994,11 @@ export function startServer(
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
-        // Create tenant skill record with metadata from source skill
+        // Create tenant skill record with metadata from source skill. Stamp the
+        // publisher's default visibility (dept_admin → own department, user →
+        // self) at publish time so it survives approval instead of defaulting to
+        // global. Admins get null (global), unchanged.
+        const publishVisibility = authService.defaultTenantVisibility(auth)
         const id = `tenant-skill-${Date.now()}`
         runtime.store.createTenantSkill({
           id,
@@ -5897,6 +6010,7 @@ export function startServer(
           author_id: auth.userId,
           author_name: authorName,
           status: 'pending',
+          visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
           org_id: auth.orgId,
         })
         writeJson(res, 200, { id, skillId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
@@ -5920,8 +6034,17 @@ export function startServer(
         if (approved) {
           // Update status to approved
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
-          // Set visibility to all users (null)
-          runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
+          // Preserve the publisher's default visibility (dept/self) through
+          // approval. An admin may still override it by passing visible_to in the
+          // approve body; a record published before this change (no visible_to)
+          // falls back to global (null), the prior behavior.
+          if (body.visible_to !== undefined) {
+            runtime.store.updateTenantSkillMeta(tenantSkillId, {
+              visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
+            })
+          } else if (tenantSkill.visible_to == null) {
+            runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
+          }
           // Copy skill to tenant directory
           const skillName = tenantSkill.name as string
           await copySkillToTenantDir(skillName)
@@ -5936,8 +6059,24 @@ export function startServer(
       // PATCH /api/v1/skills/tenant/:id - Update tenant skill meta
       const skillTenantPatchMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && skillTenantPatchMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
+        const existing = runtime.store.getTenantSkill(tenantSkillId)
+        if (!existing) {
+          throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
+        }
+        // Non-admins may only manage tenant skills authored by someone currently
+        // in their scope (dept subtree for dept_admin, self for user), and only
+        // within their own org.
+        const skillStoreAdmin = isStoreAdmin(auth)
+        if (!skillStoreAdmin) {
+          if (existing.org_id != null && existing.org_id !== auth.orgId) {
+            throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
+          }
+          if (!authService.isCreatorInScope(auth.orgId, existing.author_id as string, auth)) {
+            throw new HttpError(403, 'You cannot manage this tenant skill')
+          }
+        }
         const body = await readJsonBody(req)
 
         const updates: { enabled?: number; visible_to?: string | null } = {}
@@ -5945,7 +6084,15 @@ export function startServer(
           updates.enabled = body.enabled ? 1 : 0
         }
         if (body.visible_to !== undefined) {
-          updates.visible_to = body.visible_to ? JSON.stringify(body.visible_to) : null
+          // A non-admin cannot widen visibility beyond their own scope: clamp to
+          // their default (own dept / self). Admins set it verbatim.
+          const requested = skillStoreAdmin
+            ? (body.visible_to ? JSON.stringify(body.visible_to) : null)
+            : (() => {
+                const clamp = authService.defaultTenantVisibility(auth)
+                return clamp ? JSON.stringify(clamp) : null
+              })()
+          updates.visible_to = requested
         }
 
         runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
@@ -5961,8 +6108,10 @@ export function startServer(
               if (updates.enabled !== undefined) {
                 meta.enabled = updates.enabled === 1
               }
-              if (body.visible_to !== undefined) {
-                meta.visible_to = body.visible_to || null
+              if (updates.visible_to !== undefined) {
+                // Use the clamped value written to the DB, not the raw request,
+                // so a non-admin can't push a wider visibility to the file meta.
+                meta.visible_to = updates.visible_to ? JSON.parse(updates.visible_to) : null
               }
               await writeSkillMeta(skillDir, meta)
             }
@@ -5975,9 +6124,19 @@ export function startServer(
 
       // DELETE /api/v1/skills/tenant/:id - Delete tenant skill
       if (req.method === 'DELETE' && skillTenantPatchMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
         const tenantSkill = runtime.store.getTenantSkill(tenantSkillId)
+        // Non-admins may only delete tenant skills authored by someone currently
+        // in their scope, within their own org.
+        if (tenantSkill && !isStoreAdmin(auth)) {
+          if (tenantSkill.org_id != null && tenantSkill.org_id !== auth.orgId) {
+            throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
+          }
+          if (!authService.isCreatorInScope(auth.orgId, tenantSkill.author_id as string, auth)) {
+            throw new HttpError(403, 'You cannot manage this tenant skill')
+          }
+        }
         if (tenantSkill) {
           const skillName = tenantSkill.name as string
           // Delete from tenant directory if exists

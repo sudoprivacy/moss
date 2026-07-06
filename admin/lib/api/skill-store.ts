@@ -240,6 +240,10 @@ export interface TenantSkillInfo {
   reviewed_at?: number
   enabled: number
   visible_to?: VisibleTo | null
+  /** Server-computed: whether the current viewer may edit/delete this tenant
+   *  skill (admin, or the author is in the viewer's scope). Drives button
+   *  visibility so the client doesn't re-derive subtree membership. */
+  can_manage?: boolean
   created_at: number
   updated_at: number
 }

@@ -272,6 +272,22 @@ export class CronStore {
     return rows.map(mapCronJob)
   }
 
+  /**
+   * List jobs owned by any of the given user ids within an org. Used for a
+   * dept_admin's subtree view. An empty id set returns nothing (fail-closed);
+   * ids are bound as parameters so the IN list is injection-safe.
+   */
+  listBySubtree(orgId: string, userIds: string[]): CronJob[] {
+    if (userIds.length === 0) return []
+    const placeholders = userIds.map(() => '?').join(', ')
+    const rows = this.db.prepare(`
+      SELECT * FROM cron_jobs
+      WHERE org_id = ? AND user_id IN (${placeholders}) AND deleted_at IS NULL
+      ORDER BY created_at DESC
+    `).all(orgId, ...userIds) as SqlRow[]
+    return rows.map(mapCronJob)
+  }
+
   listEnabled(): CronJob[] {
     const rows = this.db.prepare(`
       SELECT * FROM cron_jobs

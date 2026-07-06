@@ -3280,6 +3280,10 @@ export class DirectConnectStore {
 
   queryAuditLog(opts: {
     actor_id?: string
+    /** Restrict to this set of actor ids (credential audit subtree/self gate).
+     *  An empty array matches nothing (fail-closed). Applied in addition to
+     *  actor_id if both are given. */
+    actorIds?: string[]
     config_item_id?: number
     action?: string
     since?: number
@@ -3299,6 +3303,16 @@ export class DirectConnectStore {
     if (opts.actor_id) {
       conditions.push('actor_id = ?')
       params.push(opts.actor_id)
+    }
+    if (opts.actorIds) {
+      // Restrict to the caller's visible actor set (dept subtree / self). An
+      // empty set must match zero rows rather than degrade to "no filter".
+      if (opts.actorIds.length === 0) {
+        conditions.push('1 = 0')
+      } else {
+        conditions.push(`actor_id IN (${opts.actorIds.map(() => '?').join(', ')})`)
+        params.push(...opts.actorIds)
+      }
     }
     if (opts.config_item_id) {
       conditions.push('config_item_id = ?')

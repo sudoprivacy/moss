@@ -400,9 +400,10 @@ export async function getAuthorizedSystemConfigs(): Promise<ConfigItem[]> {
 // Public Config Items (no admin scope required)
 // ============================================================
 
-export async function getPublicConfigItems(): Promise<ConfigItem[]> {
+export async function getPublicConfigItems(scope?: string): Promise<ConfigItem[]> {
   const res = await dcClient.get<{ success: boolean; data?: ConfigItem[] }>('/api/v1/config/items')
-  return res.data ?? []
+  const items = res.data ?? []
+  return scope ? items.filter(i => i.scope === scope) : items
 }
 
 // ============================================================

@@ -70,3 +70,35 @@ describe('cron job access predicates (#85)', () => {
     expect(canManageJob(manager, job())).toBe(true)
   })
 })
+
+// A dept_admin sees/manages jobs owned by members of their department subtree.
+// The subtree user-id set is resolved on the fly (server-side) and passed in.
+describe('cron dept_admin subtree access', () => {
+  const deptAdmin = { orgId: 'org-a', userId: 'da', scopes: ['cron:self', 'cron:list:subtree', 'cron:manage:subtree'] }
+  const subtree = new Set(['da', 'member-1', 'member-2'])
+
+  it('reads and manages a job owned by a subtree member', () => {
+    const j = job({ userId: 'member-1' })
+    expect(canReadJob(deptAdmin, j, subtree)).toBe(true)
+    expect(canManageJob(deptAdmin, j, subtree)).toBe(true)
+  })
+
+  it('cannot touch a job owned by someone outside the subtree', () => {
+    const j = job({ userId: 'outsider' })
+    expect(canReadJob(deptAdmin, j, subtree)).toBe(false)
+    expect(canManageJob(deptAdmin, j, subtree)).toBe(false)
+  })
+
+  it('subtree scopes without a subtree set (undefined) grant nothing beyond ownership', () => {
+    const j = job({ userId: 'member-1' })
+    expect(canReadJob(deptAdmin, j)).toBe(false)
+    expect(canManageJob(deptAdmin, j)).toBe(false)
+  })
+
+  it('a plain user with cron:self never gets subtree access even if a set leaks in', () => {
+    const user = { orgId: 'org-a', userId: 'u1', scopes: ['cron:self'] }
+    const j = job({ userId: 'member-1' })
+    expect(canReadJob(user, j, subtree)).toBe(false)
+    expect(canManageJob(user, j, subtree)).toBe(false)
+  })
+})

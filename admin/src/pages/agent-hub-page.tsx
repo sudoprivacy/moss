@@ -82,6 +82,8 @@ import {
 import type { AuthDepartment, AuthUser } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
 import type { SystemSettings } from '@/lib/api/types'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
 import { resolveIconUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
 import {
@@ -205,6 +207,8 @@ type StoreAgentCardProps = {
   installed: boolean
   installedAgent?: InstalledAgentInfo | null
   busy: boolean
+  /** Whether the viewer may install hub agents (store admins only). */
+  canInstall?: boolean
   onOpen: (agent: AgentHubAssistant) => void
   onInstall: (agent: AgentHubAssistant, skillIds: string[]) => void
   onOpenEdit?: (agent: InstalledAgentInfo) => void
@@ -217,6 +221,7 @@ function StoreAgentCard({
   installed,
   installedAgent,
   busy,
+  canInstall = true,
   onOpen,
   onInstall,
   onOpenEdit,
@@ -320,7 +325,7 @@ function StoreAgentCard({
           <Button size="sm" variant="outline" disabled>
             已安装
           </Button>
-        ) : agent.sourceUrl ? (
+        ) : !canInstall ? null : agent.sourceUrl ? (
           <Button
             size="sm"
             onClick={event => {
@@ -460,6 +465,11 @@ function InstalledAgentCard({
 }
 
 export default function AgentHubPage() {
+  const { scopes } = useAuth()
+  // Full store admin: may install hub agents, approve tenant agents, and sync.
+  // A dept_admin/user sees hub read-only and manages only tenant/custom agents
+  // in scope (server-provided can_manage on tenant rows).
+  const isStoreAdmin = hasScope(scopes, 'admin:settings')
   const [settings, setSettings] = useState<SystemSettings | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [pageError, setPageError] = useState('')
@@ -1857,10 +1867,12 @@ export default function AgentHubPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
-              {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
-              批量同步
-            </Button>
+            {isStoreAdmin ? (
+              <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
+                {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
+                批量同步
+              </Button>
+            ) : null}
             <Button variant="outline" onClick={() => void handleRefresh()}>
               <RefreshCw className="mr-2 size-4" />
               刷新
@@ -2058,6 +2070,7 @@ export default function AgentHubPage() {
                           installed={installed}
                           installedAgent={installedAgentInfo}
                           busy={installingAssistantId === agent.id}
+                          canInstall={isStoreAdmin}
                           onOpen={item => void openDetail(item)}
                           onInstall={(item, skillIds) =>
                             void handleInstall(item, skillIds)
@@ -2174,47 +2187,71 @@ export default function AgentHubPage() {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2" onClick={e => e.stopPropagation()}>
+                            {/* Edit/delete follow the server's can_manage flag
+                                (author in the viewer's scope); approval is a
+                                store-admin-only action. */}
                             {assistant.status === 'pending' ? (
                               <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    setApprovingAssistant(assistant)
-                                    setApprovalDialogOpen(true)
-                                  }}
-                                >
-                                  审批
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={deletingTenantAssistantId === assistant.id}
-                                  onClick={() => void handleDeleteTenantAssistant(assistant)}
-                                >
-                                  {deletingTenantAssistantId === assistant.id ? (
-                                    <Loader2 className="size-4 animate-spin" />
-                                  ) : (
-                                    <Trash2 className="size-4" />
-                                  )}
-                                </Button>
+                                {isStoreAdmin ? (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => {
+                                      setApprovingAssistant(assistant)
+                                      setApprovalDialogOpen(true)
+                                    }}
+                                  >
+                                    审批
+                                  </Button>
+                                ) : null}
+                                {assistant.can_manage !== false ? (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={deletingTenantAssistantId === assistant.id}
+                                    onClick={() => void handleDeleteTenantAssistant(assistant)}
+                                  >
+                                    {deletingTenantAssistantId === assistant.id ? (
+                                      <Loader2 className="size-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="size-4" />
+                                    )}
+                                  </Button>
+                                ) : null}
                               </>
                             ) : assistant.status === 'approved' ? (
-                              <>
+                              assistant.can_manage !== false ? (
+                                <>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    onClick={() => handleOpenTenantVisibilityEdit(assistant)}
+                                  >
+                                    <Shield className="size-4" />
+                                  </Button>
+                                  <Switch
+                                    checked={assistant.enabled === 1}
+                                    disabled={togglingTenantAssistantId === assistant.id}
+                                    onCheckedChange={checked => void handleToggleTenantAssistantEnabled(assistant, checked)}
+                                  />
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    disabled={deletingTenantAssistantId === assistant.id}
+                                    onClick={() => void handleDeleteTenantAssistant(assistant)}
+                                  >
+                                    {deletingTenantAssistantId === assistant.id ? (
+                                      <Loader2 className="size-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="size-4" />
+                                    )}
+                                  </Button>
+                                </>
+                              ) : null
+                            ) : (
+                              assistant.can_manage !== false ? (
                                 <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  onClick={() => handleOpenTenantVisibilityEdit(assistant)}
-                                >
-                                  <Shield className="size-4" />
-                                </Button>
-                                <Switch
-                                  checked={assistant.enabled === 1}
-                                  disabled={togglingTenantAssistantId === assistant.id}
-                                  onCheckedChange={checked => void handleToggleTenantAssistantEnabled(assistant, checked)}
-                                />
-                                <Button
-                                  size="icon"
+                                  size="sm"
                                   variant="ghost"
                                   disabled={deletingTenantAssistantId === assistant.id}
                                   onClick={() => void handleDeleteTenantAssistant(assistant)}
@@ -2225,20 +2262,7 @@ export default function AgentHubPage() {
                                     <Trash2 className="size-4" />
                                   )}
                                 </Button>
-                              </>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                disabled={deletingTenantAssistantId === assistant.id}
-                                onClick={() => void handleDeleteTenantAssistant(assistant)}
-                              >
-                                {deletingTenantAssistantId === assistant.id ? (
-                                  <Loader2 className="size-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="size-4" />
-                                )}
-                              </Button>
+                              ) : null
                             )}
                           </div>
                         </div>

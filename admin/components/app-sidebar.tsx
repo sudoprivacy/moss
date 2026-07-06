@@ -96,7 +96,7 @@ const menuItems: NavItem[] = [
     title: '定时任务',
     url: '/cron',
     icon: Clock,
-    requiredScope: 'admin:cron',
+    requiredAnyScopes: ['admin:cron', 'cron:self'],
   },
   {
     title: 'IM管理',
@@ -113,13 +113,13 @@ const menuItems: NavItem[] = [
     title: '智能体管理',
     url: '/settings/agents',
     icon: Bot,
-    requiredScope: 'admin:settings',
+    requiredAnyScopes: ['admin:settings', 'store:read'],
   },
   {
     title: '技能商店',
     url: '/settings/skill',
     icon: Sparkles,
-    requiredScope: 'admin:settings',
+    requiredAnyScopes: ['admin:settings', 'store:read'],
   },
   {
     title: '文档中心',
@@ -136,14 +136,14 @@ const menuItems: NavItem[] = [
     title: '凭据中心',
     url: '/secrets',
     icon: KeyRound,
-    requiredScope: 'admin:secrets',
+    requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'],
     children: [
-      { title: '配置项列表', url: '/secrets/config-items', icon: KeyRound },
-      { title: '企业凭据', url: '/secrets/enterprise', icon: KeyRound },
-      { title: '部门凭据', url: '/secrets/department', icon: KeyRound },
-      { title: '用户凭据', url: '/secrets/user-credentials', icon: KeyRound },
-      { title: '审计日志', url: '/secrets/audit-log', icon: KeyRound },
-      { title: '轮换告警', url: '/secrets/rotation-alerts', icon: KeyRound },
+      { title: '配置项列表', url: '/secrets/config-items', icon: KeyRound, requiredScope: 'admin:secrets' },
+      { title: '企业凭据', url: '/secrets/enterprise', icon: KeyRound, requiredScope: 'admin:secrets' },
+      { title: '部门凭据', url: '/secrets/department', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read'] },
+      { title: '用户凭据', url: '/secrets/user-credentials', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:user:write'] },
+      { title: '审计日志', url: '/secrets/audit-log', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
+      { title: '轮换告警', url: '/secrets/rotation-alerts', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
     ],
   },
   {
@@ -240,28 +240,28 @@ export function AppSidebar() {
     }
   }
 
+  // Single source of truth for scope-gating a nav item (top-level or child):
+  // an explicit requiredScope / requiredAnyScopes must be satisfied; items with
+  // neither are ungated. Shared by the top-level filters and the child-level
+  // isItemVisible so children honor scope gating identically to their parents.
+  const matchesScope = (item: NavItem): boolean => {
+    if ('requiredScope' in item && item.requiredScope) {
+      return hasScope(scopes, item.requiredScope)
+    }
+    if ('requiredAnyScopes' in item && item.requiredAnyScopes) {
+      return hasAnyScope(scopes, item.requiredAnyScopes)
+    }
+    return true
+  }
+
   const visibleMenuItems = menuItems.filter((item) => {
     if (item.feature === 'cabin' && !cabinEnabled) {
       return false
     }
-    if ('requiredScope' in item && item.requiredScope) {
-      return hasScope(scopes, item.requiredScope)
-    }
-    if ('requiredAnyScopes' in item && item.requiredAnyScopes) {
-      return hasAnyScope(scopes, item.requiredAnyScopes)
-    }
-    return true
+    return matchesScope(item)
   })
 
-  const visibleSystemItems = systemItems.filter((item) => {
-    if ('requiredScope' in item && item.requiredScope) {
-      return hasScope(scopes, item.requiredScope)
-    }
-    if ('requiredAnyScopes' in item && item.requiredAnyScopes) {
-      return hasAnyScope(scopes, item.requiredAnyScopes)
-    }
-    return true
-  })
+  const visibleSystemItems = systemItems.filter(matchesScope)
 
   const handleLogout = async () => {
     await logout()
@@ -283,7 +283,7 @@ export function AppSidebar() {
 
   const isItemVisible = (item: NavItem): boolean => {
     if (item.requiredRole && user?.role !== item.requiredRole) return false
-    return true
+    return matchesScope(item)
   }
 
   const renderNavItem = (item: NavItem, level = 0) => {
