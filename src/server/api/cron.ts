@@ -217,17 +217,11 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        const isOwner = existing.orgId === auth.orgId && existing.userId === auth.userId
-        if (!isOwner) {
-          if (!canManageJob(auth, existing)) {
-            return { success: false, message: 'Access denied' }
-          }
-          const updateKeys = Object.keys(updates)
-          if (updateKeys.length !== 1 || updates.enabled !== false) {
-            return { success: false, message: 'Admins may only disable other users cron jobs' }
-          }
-        }
-        if (!isOwner && updates.enabled !== false) {
+        // Owner or an admin actor may fully update the job — same capability as
+        // delete/trigger (canManageJob). Admins/super_admins hold cron
+        // management via `*`, so the admin console can edit any org job's
+        // schedule/payload/enabled state, not just disable it (#85).
+        if (!canManageJob(auth, existing)) {
           return { success: false, message: 'Access denied' }
         }
 
