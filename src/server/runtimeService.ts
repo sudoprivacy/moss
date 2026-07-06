@@ -1466,7 +1466,10 @@ export class RuntimeService {
         entry.pid = child.pid
         const tokenUser = this.authService.getUserById(session.userId)
         const deptId = tokenUser?.departmentId ?? null
-        this.authProxy.registerToken(entry.token, session.userId, session.orgId, deptId, child.pid)
+        // Admins/super_admins bypass the department-credential policy gate in
+        // the auth proxy (full privileges within org / across orgs).
+        const isAdmin = tokenUser?.role === 'admin' || tokenUser?.role === 'super_admin'
+        this.authProxy.registerToken(entry.token, session.userId, session.orgId, deptId, isAdmin, child.pid)
       }
     }
 
