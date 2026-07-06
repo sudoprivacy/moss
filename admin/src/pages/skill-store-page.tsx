@@ -47,6 +47,8 @@ import type { SystemSettings, AuthUser } from '@/lib/api/types'
 import type { AuthDepartment } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
 import { updateSkillVisibility, approveTenantSkill, deleteTenantSkill, updateTenantSkillMeta } from '@/lib/api/skill-store'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 import {
   CheckCircle2,
@@ -182,6 +184,8 @@ type SkillCardProps = {
   busy: boolean
   toggling?: boolean
   uninstalling?: boolean
+  /** Whether the viewer may install/update hub skills (store admins only). */
+  canInstall?: boolean
   onInstall: (skillId: string) => void
   onUpdate: (skillId: string) => void
   onOpen: (skill: SkillHubSkill) => void
@@ -199,6 +203,7 @@ function SkillCard({
   busy,
   toggling,
   uninstalling,
+  canInstall = true,
   onInstall,
   onUpdate,
   onOpen,
@@ -319,7 +324,7 @@ function SkillCard({
               </Button>
             )}
           </>
-        ) : installed && hasUpdate ? (
+        ) : installed && hasUpdate && canInstall ? (
           <Button
             size="sm"
             variant="outline"
@@ -327,7 +332,7 @@ function SkillCard({
           >
             更新
           </Button>
-        ) : !installed ? (
+        ) : !installed && canInstall ? (
           <Button
             size="sm"
             variant="outline"
@@ -545,6 +550,11 @@ function InstalledSkillSection({
 }
 
 export default function SkillStorePage() {
+  const { scopes } = useAuth()
+  // Full store admin: may install hub skills, approve tenant skills, and sync.
+  // A dept_admin/user (store:read + store:tenant:write) sees the store read-only
+  // for hub and manages only tenant/custom skills they own or are in scope for.
+  const isStoreAdmin = hasScope(scopes, 'admin:settings')
   const [settings, setSettings] = useState<SystemSettings | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -1573,10 +1583,12 @@ export default function SkillStorePage() {
             </Badge>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
-              {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
-              批量同步
-            </Button>
+            {isStoreAdmin ? (
+              <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
+                {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
+                批量同步
+              </Button>
+            ) : null}
             <Button variant="outline" onClick={() => void handleRefresh()}>
               <RefreshCw className="mr-2 size-4" />
               刷新
@@ -1723,6 +1735,7 @@ export default function SkillStorePage() {
                           }
                           toggling={installedSkillInfo ? togglingSkillName === installedSkillInfo.name : false}
                           uninstalling={installedSkillInfo ? pendingUninstallSkill?.name === installedSkillInfo.name : false}
+                          canInstall={isStoreAdmin}
                           onInstall={handleInstall}
                           onUpdate={skillId => void handleUpdate(skillId)}
                           onOpen={item => void openSkillDetail(item)}
@@ -1824,47 +1837,71 @@ export default function SkillStorePage() {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2" onClick={e => e.stopPropagation()}>
+                            {/* Edit/delete follow the server's can_manage flag
+                                (author in the viewer's scope); approval is a
+                                store-admin-only action. */}
                             {skill.status === 'pending' ? (
                               <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    setApprovingSkill(skill)
-                                    setApprovalDialogOpen(true)
-                                  }}
-                                >
-                                  审批
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={deletingTenantSkillId === skill.id}
-                                  onClick={() => void handleDeleteTenantSkill(skill)}
-                                >
-                                  {deletingTenantSkillId === skill.id ? (
-                                    <Loader2 className="size-4 animate-spin" />
-                                  ) : (
-                                    <Trash2 className="size-4" />
-                                  )}
-                                </Button>
+                                {isStoreAdmin ? (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => {
+                                      setApprovingSkill(skill)
+                                      setApprovalDialogOpen(true)
+                                    }}
+                                  >
+                                    审批
+                                  </Button>
+                                ) : null}
+                                {skill.can_manage !== false ? (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={deletingTenantSkillId === skill.id}
+                                    onClick={() => void handleDeleteTenantSkill(skill)}
+                                  >
+                                    {deletingTenantSkillId === skill.id ? (
+                                      <Loader2 className="size-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="size-4" />
+                                    )}
+                                  </Button>
+                                ) : null}
                               </>
                             ) : skill.status === 'approved' ? (
-                              <>
+                              skill.can_manage !== false ? (
+                                <>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    onClick={() => handleOpenTenantVisibilityEdit(skill)}
+                                  >
+                                    <Shield className="size-4" />
+                                  </Button>
+                                  <Switch
+                                    checked={skill.enabled === 1}
+                                    disabled={togglingTenantSkillId === skill.id}
+                                    onCheckedChange={checked => void handleToggleTenantSkillEnabled(skill, checked)}
+                                  />
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    disabled={deletingTenantSkillId === skill.id}
+                                    onClick={() => void handleDeleteTenantSkill(skill)}
+                                  >
+                                    {deletingTenantSkillId === skill.id ? (
+                                      <Loader2 className="size-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="size-4" />
+                                    )}
+                                  </Button>
+                                </>
+                              ) : null
+                            ) : (
+                              skill.can_manage !== false ? (
                                 <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  onClick={() => handleOpenTenantVisibilityEdit(skill)}
-                                >
-                                  <Shield className="size-4" />
-                                </Button>
-                                <Switch
-                                  checked={skill.enabled === 1}
-                                  disabled={togglingTenantSkillId === skill.id}
-                                  onCheckedChange={checked => void handleToggleTenantSkillEnabled(skill, checked)}
-                                />
-                                <Button
-                                  size="icon"
+                                  size="sm"
                                   variant="ghost"
                                   disabled={deletingTenantSkillId === skill.id}
                                   onClick={() => void handleDeleteTenantSkill(skill)}
@@ -1875,20 +1912,7 @@ export default function SkillStorePage() {
                                     <Trash2 className="size-4" />
                                   )}
                                 </Button>
-                              </>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                disabled={deletingTenantSkillId === skill.id}
-                                onClick={() => void handleDeleteTenantSkill(skill)}
-                              >
-                                {deletingTenantSkillId === skill.id ? (
-                                  <Loader2 className="size-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="size-4" />
-                                )}
-                              </Button>
+                              ) : null
                             )}
                           </div>
                         </div>

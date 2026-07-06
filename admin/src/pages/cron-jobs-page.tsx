@@ -40,10 +40,13 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { getAdminCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
+import { getAdminCronJobs, getCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
 import { resolveOwnerName } from '@/lib/utils'
 import { getUsers } from '@/lib/api/auth'
 import { getInstalledAgents, type InstalledAgentInfo } from '@/lib/api/agent-hub'
+import { getSystemSettings } from '@/lib/api/settings'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
 import type { AuthUser } from '@/lib/api/types'
 import { Search, RefreshCw, Clock, Pause, Play, History, Loader2, ExternalLink, Plus, Pencil, Trash2, Zap } from 'lucide-react'
 import { toast } from 'sonner'
@@ -77,6 +80,14 @@ function CronJobsSkeleton() {
 }
 
 export default function CronJobsPage() {
+  const { scopes } = useAuth()
+  // Admins list the whole org via /admin/cron/jobs; everyone else uses the
+  // regular list (own jobs, plus the dept subtree for a dept_admin).
+  const isCronAdmin = hasScope(scopes, 'admin:cron')
+  // Creating/editing jobs is blocked when the org disables client cron, unless
+  // the actor is admin-capable. We hide the create affordance to match.
+  const [clientCronEnabled, setClientCronEnabled] = useState(true)
+  const canCreateJob = isCronAdmin || clientCronEnabled
   const [jobs, setJobs] = useState<CronJob[]>([])
   const [users, setUsers] = useState<AuthUser[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -104,16 +115,20 @@ export default function CronJobsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [jobsRes, usersRes, agentsRes] = await Promise.all([
-        getAdminCronJobs(),
+      const [jobsRes, usersRes, agentsRes, settingsRes] = await Promise.all([
+        (isCronAdmin ? getAdminCronJobs() : getCronJobs()),
         getUsers().catch(() => ({ users: [] })),
         getInstalledAgents().catch(() => [] as InstalledAgentInfo[]),
+        getSystemSettings().catch(() => null),
       ])
       if (jobsRes.success && jobsRes.data) {
         setJobs(jobsRes.data)
       }
       setUsers(usersRes.users)
       setAgents(agentsRes)
+      if (settingsRes) {
+        setClientCronEnabled(settingsRes.clientCronEnabled)
+      }
     } catch (error) {
       console.error('Failed to fetch cron jobs:', error)
       toast.error('获取定时任务列表失败')
@@ -121,7 +136,7 @@ export default function CronJobsPage() {
       setIsLoading(false)
       setIsRefreshing(false)
     }
-  }, [])
+  }, [isCronAdmin])
 
   useEffect(() => {
     fetchData()
@@ -344,10 +359,12 @@ export default function CronJobsPage() {
               <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
               刷新
             </Button>
-            <Button onClick={openCreateForm}>
-              <Plus className="mr-2 h-4 w-4" />
-              新建任务
-            </Button>
+            {canCreateJob ? (
+              <Button onClick={openCreateForm}>
+                <Plus className="mr-2 h-4 w-4" />
+                新建任务
+              </Button>
+            ) : null}
           </div>
         </div>
 

@@ -15,7 +15,7 @@ import {
   Shield, Eye, EyeOff, Loader2, AlertTriangle, Clock, Ban, CheckCircle,
 } from 'lucide-react'
 import {
-  getUserSecrets, getSecretMetadata, getConfigItems,
+  getUserSecrets, getSecretMetadata, getPublicConfigItems,
   putUserSecret, enableUserSecret, disableUserSecret, updateSecretMetadata,
   type SecretEntry, type ConfigItem, type SecretMetadata,
 } from '@/lib/api/secrets'
@@ -54,8 +54,9 @@ export default function UserCredentialsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const itemsRes = await getConfigItems({ scope: 'user', status: '1' })
-      const userItems = itemsRes.items
+      // Use the public config endpoint so a normal user (without admin:secrets)
+      // can still populate their own user-scope credential values.
+      const userItems = await getPublicConfigItems('user')
       const [secretsRes, metaRes] = await Promise.all([
         getUserSecrets(userItems),
         getSecretMetadata(userItems),
