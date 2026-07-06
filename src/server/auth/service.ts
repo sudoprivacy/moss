@@ -968,10 +968,10 @@ export class AuthService {
   }
 
   /** Get user status by userId only (no orgId or permission check). Used by userStatusCache. */
-  getUserById(userId: string): { status: string; departmentId: string | null } | null {
+  getUserById(userId: string): { status: string; departmentId: string | null; role: string } | null {
     const user = this.db.getUserById(userId)
     if (!user) return null
-    return { status: user.status || 'active', departmentId: user.departmentId ?? null }
+    return { status: user.status || 'active', departmentId: user.departmentId ?? null, role: user.role }
   }
 
   getUserName(userId: string): string | undefined {

@@ -18,6 +18,10 @@ interface SecretsApiContext {
   userId: string
   orgId: string
   departmentId: string | null
+  // Owner carries full administrative capability (admin/super_admin). Admins
+  // may use any department credential in their org, so the listing skips the
+  // department-policy filter for them — matching the auth-proxy request gate.
+  isAdmin: boolean
 }
 
 interface SecretSummary {
@@ -110,21 +114,29 @@ async function handleList(res: ServerResponse, context: SecretsApiContext): Prom
       .filter(s => s.namespace.startsWith(`${orgPrefix}system:`))
       .map(s => ({ namespace: s.namespace, key: s.key, status: s.status, version: s.version }))
 
-    // Department (role) secrets: org-bound + filtered by department policy.
+    // Department (role) secrets: org-bound. Admins see every department config
+    // item in the org (all privileges within org); non-admins are filtered by
+    // their own department's policy. Matches the auth-proxy request-time gate.
     let department: SecretSummary[] = []
-    if (context.departmentId) {
-      const authorizedIds = policyProvider!.getAuthorizedConfigItemIds(context.departmentId)
-      if (authorizedIds.length > 0) {
-        // Only this org's department config items (user-scope excluded anyway).
-        const items = getAllActiveConfigItemsFn!().filter(
-          i => (i as { org_id?: string | null }).org_id == null || (i as { org_id?: string | null }).org_id === context.orgId,
-        )
-        const authorizedPinyins = new Set<string>()
-        for (const item of items) {
-          if (item.scope === 'department' && authorizedIds.includes(item.id) && typeof item.pinyin === 'string') {
-            authorizedPinyins.add(item.pinyin)
-          }
+    if (context.isAdmin || context.departmentId) {
+      // Only this org's department config items (user-scope excluded anyway).
+      const items = getAllActiveConfigItemsFn!().filter(
+        i => (i as { org_id?: string | null }).org_id == null || (i as { org_id?: string | null }).org_id === context.orgId,
+      )
+      const authorizedIds = context.isAdmin
+        ? null // admin: no policy filter
+        : new Set(policyProvider!.getAuthorizedConfigItemIds(context.departmentId!))
+      const authorizedPinyins = new Set<string>()
+      for (const item of items) {
+        if (
+          item.scope === 'department' &&
+          (authorizedIds === null || authorizedIds.has(item.id)) &&
+          typeof item.pinyin === 'string'
+        ) {
+          authorizedPinyins.add(item.pinyin)
         }
+      }
+      if (authorizedPinyins.size > 0) {
         const deptRaw = await nexusClient!.listSecrets(
           undefined,
           secretSubject(`${orgPrefix}role:`, context.userId),

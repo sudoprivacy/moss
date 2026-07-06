@@ -4083,7 +4083,7 @@ export function startServer(
           const testUserId = body?.user_id || auth.userId
           // Scope the test token to the caller's org so proxy rule matching is
           // org-correct (matches production registerToken semantics).
-          ap.registerToken(testToken, testUserId, auth.orgId, body?.department_id || null, null)
+          ap.registerToken(testToken, testUserId, auth.orgId, body?.department_id || null, Boolean(body?.is_admin), null)
           writeJson(res, 200, { success: true, token: testToken })
           return
         }
@@ -4141,6 +4141,11 @@ export function startServer(
             const orgActiveItems = runtime.store.getAllActiveConfigItems(auth.orgId)
             const allSystemItems = orgActiveItems.filter(i => (i.scope as string) === 'system')
             const allDeptItems = orgActiveItems.filter(i => (i.scope as string) === 'department')
+            // Admins/super_admins hold all privileges within the org, so they
+            // may use any department credential regardless of their own (or no)
+            // department membership — matching the auth-proxy department gate.
+            const isAdmin =
+              auth.role === 'admin' || auth.role === 'super_admin' || hasScope(auth.scopes, '*')
             const user = authService.getUserById(auth.userId)
             const deptId = user?.departmentId ?? null
             let authorizedDeptIds: Set<number> = new Set()
@@ -4150,7 +4155,7 @@ export function startServer(
             }
             let visible = [
               ...allSystemItems,
-              ...allDeptItems.filter(i => authorizedDeptIds.has(i.id as number))
+              ...allDeptItems.filter(i => isAdmin || authorizedDeptIds.has(i.id as number))
             ]
             if (nexusClient) {
               const configuredNs = nexusClient.listConfiguredNamespaces()

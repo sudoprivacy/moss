@@ -83,12 +83,46 @@ interface TokenEntry {
   userId: string
   orgId: string
   departmentId: string | null
+  // Owner carries full administrative capability (admin/super_admin). Admins
+  // have all privileges within their org (super_admin across orgs), so their
+  // sessions bypass the department-credential policy gate regardless of which
+  // department — if any — they belong to.
+  isAdmin: boolean
   pid: number | null
   registeredAt: number
 }
 
 interface DepartmentPolicyProvider {
   getAuthorizedConfigItemIds(departmentId: string): number[]
+}
+
+/**
+ * Decide whether a request may use a matched credential rule, applying the
+ * department-policy gate. Only department-scoped credentials are gated:
+ * enterprise (system) creds are visible to all users and user-scoped creds are
+ * authorized by possession of the secret itself.
+ *
+ * Admins/super_admins bypass the gate entirely — they hold all privileges
+ * within their org (super_admin across orgs), so a job they own may use any
+ * department's credential regardless of the owner's own (or absent) department
+ * membership.
+ *
+ * A department-less non-admin is left as-is (allowed): the policy gate only
+ * applies once a user belongs to a department, preserving the proxy's prior
+ * behavior for that edge — this change adds only the admin bypass.
+ *
+ * Extracted as a pure function so the decision is unit-testable without
+ * standing up the HTTP proxy, nexus, and token minting.
+ */
+export function isDepartmentCredentialAllowed(
+  match: { scope: string; configItemId: number },
+  actor: { isAdmin: boolean; departmentId: string | null },
+  getAuthorizedConfigItemIds: (departmentId: string) => number[],
+): boolean {
+  if (match.scope !== 'department') return true
+  if (actor.isAdmin) return true
+  if (!actor.departmentId) return true
+  return getAuthorizedConfigItemIds(actor.departmentId).includes(match.configItemId)
 }
 
 const CONTROL_HEADERS = new Set([
@@ -138,8 +172,8 @@ export class AuthProxyServer {
     }
   }
 
-  registerToken(token: string, userId: string, orgId: string, departmentId: string | null, pid: number | null): void {
-    this.tokenRegistry.set(token, { userId, orgId, departmentId, pid, registeredAt: Date.now() })
+  registerToken(token: string, userId: string, orgId: string, departmentId: string | null, isAdmin: boolean, pid: number | null): void {
+    this.tokenRegistry.set(token, { userId, orgId, departmentId, isAdmin, pid, registeredAt: Date.now() })
   }
 
   revokeToken(token: string): void {
@@ -241,6 +275,7 @@ export class AuthProxyServer {
         userId: tokenEntry.userId,
         orgId: tokenEntry.orgId,
         departmentId: tokenEntry.departmentId,
+        isAdmin: tokenEntry.isAdmin,
       })
       return
     }
@@ -326,16 +361,21 @@ export class AuthProxyServer {
         return
       }
 
-      // 4. Department policy check — only for department credentials.
-      // Enterprise (system) credentials are now visible to all users;
-      // user-scoped credentials are authorized by possession of the secret itself.
-      if (match.scope === 'department' && tokenEntry.departmentId && this.policyProvider) {
-        const authorizedIds = this.policyProvider.getAuthorizedConfigItemIds(tokenEntry.departmentId)
-        if (!authorizedIds.includes(match.configItemId)) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'rejected_no_policy', message: 'Department not authorized for this resource' }))
-          return
-        }
+      // 4. Department policy check — see isDepartmentCredentialAllowed. Only
+      // department credentials are gated; admins bypass; a department-less
+      // non-admin has no authorized department creds. Guarded on policyProvider
+      // so a misconfigured proxy (no provider) fails open exactly as before.
+      if (
+        this.policyProvider &&
+        !isDepartmentCredentialAllowed(
+          match,
+          { isAdmin: tokenEntry.isAdmin, departmentId: tokenEntry.departmentId },
+          deptId => this.policyProvider!.getAuthorizedConfigItemIds(deptId),
+        )
+      ) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'rejected_no_policy', message: 'Department not authorized for this resource' }))
+        return
       }
 
       matchedConfigItemId = match.configItemId
