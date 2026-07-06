@@ -29,6 +29,9 @@ import {
   getOrganizations,
 } from '@/lib/api/auth'
 import type { AuthDepartment, AuthOrgWithCounts } from '@/lib/api/types'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
+import { DeptAdminDepartmentSecrets } from './dept-admin-department-secrets'
 
 // ============================================================
 // Department tree types (reused from old department-policies-page)
@@ -103,6 +106,23 @@ function DepartmentSkeleton() {
 // ============================================================
 
 export default function DepartmentSecretsPage() {
+  const { scopes } = useAuth()
+  // An admin sets the org-wide department value + department-authorization
+  // policy (existing flow). A dept_admin (secrets:department:read, no
+  // admin:secrets) instead sets a value specific to a department in their
+  // subtree — a different, narrower surface.
+  const isSecretsAdmin = hasScope(scopes, 'admin:secrets')
+  if (!isSecretsAdmin) {
+    return (
+      <DashboardLayout title="部门凭据" description="为您管理的部门设置专属凭据值">
+        <DeptAdminDepartmentSecrets />
+      </DashboardLayout>
+    )
+  }
+  return <DepartmentSecretsAdminPage />
+}
+
+function DepartmentSecretsAdminPage() {
   const [configItems, setConfigItems] = useState<ConfigItem[]>([])
   const [secrets, setSecrets] = useState<(SecretEntry & { config_item: ConfigItem })[]>([])
   const [metadata, setMetadata] = useState<(SecretMetadata & { config_item: ConfigItem })[]>([])

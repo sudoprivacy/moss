@@ -5,7 +5,7 @@ import { URL } from 'url'
 import { validateRemoteUrl } from './ssrfGuard.js'
 import { injectAuth, injectMultiAuth, type InjectAuthResult } from './authInjectors.js'
 import { handleSecretsRequest } from './secretsApi.js'
-import { secretSubject, orgScopedNamespace } from '../secrets/secretSubject.js'
+import { secretSubject, orgScopedNamespace, deptSecretNamespace } from '../secrets/secretSubject.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { TokenMinter } from './tokenMinter.js'
 import { getSystemSettings } from '../systemSettings.js'
@@ -380,18 +380,34 @@ export class AuthProxyServer {
 
       matchedConfigItemId = match.configItemId
 
-      // 5. Resolve secrets from Nexus
+      // 5. Resolve secrets from Nexus.
       const resolvedNamespace = match.secretNamespace.replaceAll('{userId}', tokenEntry.userId)
+      // For a department-scoped credential, prefer a value specific to the
+      // consumer's current department (`role:@{deptId}:{pinyin}`) and fall back
+      // to the legacy org-wide value (`role:{pinyin}`) when the dept-specific one
+      // is unset — so pre-migration values keep working and departments without
+      // their own value inherit the org default. The candidate list is tried in
+      // order per config key.
+      const namespaceCandidates: string[] = []
+      if (match.scope === 'department' && tokenEntry.departmentId && match.pinyin && match.orgId) {
+        namespaceCandidates.push(
+          orgScopedNamespace(deptSecretNamespace(tokenEntry.departmentId, match.pinyin), match.orgId),
+        )
+      }
+      namespaceCandidates.push(resolvedNamespace)
+
       const secrets: Array<{ configKey: string; value: string }> = []
       for (const entry of match.entries) {
-        if (this.nexusClient) {
+        if (!this.nexusClient) continue
+        for (const ns of namespaceCandidates) {
           try {
-            const secret = await this.nexusClient.getSecret(resolvedNamespace, entry.configKey, secretSubject(resolvedNamespace, tokenEntry.userId))
+            const secret = await this.nexusClient.getSecret(ns, entry.configKey, secretSubject(ns, tokenEntry.userId))
             if (secret?.value) {
               secrets.push({ configKey: entry.configKey, value: secret.value })
+              break // first namespace with a value wins (per-dept over org default)
             }
           } catch {
-            // Secret not found, skip
+            // Secret not found in this namespace; try the next candidate.
           }
         }
       }

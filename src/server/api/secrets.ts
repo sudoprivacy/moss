@@ -7,6 +7,11 @@ import {
   orgScopedNamespace,
   orgNamespacePrefix,
   stripOrgPrefix,
+  deptSecretNamespace,
+  legacyDeptSecretNamespace,
+  namespaceDeptId,
+  deptNamespacePinyin,
+  DEPT_NAMESPACE_MARKER,
 } from '../secrets/secretSubject.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 
@@ -59,8 +64,15 @@ export function createSecretsApi(db: {
   const resolveConfigItemId = (namespace: string, orgId?: string): number | undefined => {
     const base = stripOrgPrefix(namespace)
     const parts = base.split(':')
-    if (parts[0] === 'system' || parts[0] === 'role') {
+    if (parts[0] === 'system') {
       const item = db.getConfigItemByPinyin(parts.slice(1).join(':'), orgId)
+      return item ? (item.id as number) : undefined
+    }
+    if (parts[0] === 'role') {
+      // Handles both legacy `role:{pinyin}` and per-dept `role:@{deptId}:{pinyin}`.
+      const pinyin = deptNamespacePinyin(base)
+      if (!pinyin) return undefined
+      const item = db.getConfigItemByPinyin(pinyin, orgId)
       return item ? (item.id as number) : undefined
     }
     if (parts[0] === 'user' && parts.length >= 3) {
@@ -117,13 +129,76 @@ export function createSecretsApi(db: {
         // Department secrets are org-bound: list only this org's namespace.
         const secrets = await nexus.listSecrets(`${orgNamespacePrefix(orgId)}role`)
         const enriched = secrets.map(s => {
-          const pinyin = stripOrgPrefix(s.namespace).replace('role:', '')
-          return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
+          // Handles both legacy `role:{pinyin}` and per-dept
+          // `role:@{deptId}:{pinyin}`; surface the deptId when present so the
+          // admin UI can group values by department.
+          const pinyin = deptNamespacePinyin(s.namespace) ?? stripOrgPrefix(s.namespace).replace('role:', '')
+          const deptId = namespaceDeptId(s.namespace)
+          return { ...s, enabled: s.status === 'enabled', department_id: deptId, config_item: { pinyin } }
         })
         return { success: true, data: enriched }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
       }
+    },
+
+    /**
+     * List a specific department's secret values (per-dept namespace only).
+     * Used by the department-credentials editor so a dept_admin sees the values
+     * they set for a department in their subtree.
+     */
+    async listDepartmentSecretsForDept(orgId: string, userId: string, deptId: string) {
+      try {
+        // Prefix WITHOUT a trailing colon: nexus.listSecrets matches
+        // `namespace = prefix OR namespace LIKE prefix:%`, so `role:@{deptId}`
+        // catches every `role:@{deptId}:{pinyin}` value for this department.
+        const prefix = orgScopedNamespace(`role:${DEPT_NAMESPACE_MARKER}${deptId}`, orgId)
+        const secrets = await nexus.listSecrets(prefix)
+        const enriched = secrets.map(s => {
+          const pinyin = deptNamespacePinyin(s.namespace) ?? ''
+          return { ...s, enabled: s.status === 'enabled', department_id: deptId, config_item: { pinyin } }
+        })
+        return { success: true, data: enriched }
+      } catch {
+        return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
+      }
+    },
+
+    /**
+     * Get a department credential value, resolving the per-department value
+     * first and falling back to the legacy org-wide value when the dept-specific
+     * one is unset. Keeps pre-migration values working during rollout.
+     */
+    async getDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, ip?: string) {
+      try {
+        const perDeptNs = orgScopedNamespace(deptSecretNamespace(deptId, pinyin), orgId)
+        const perDept = await nexus.getSecret(perDeptNs, key, secretSubject(perDeptNs, userId)).catch(() => null)
+        if (perDept) {
+          writeAudit(userId, undefined, 'read', resolveConfigItemId(perDeptNs, orgId), perDeptNs, key, undefined, ip, orgId)
+          return { success: true, data: perDept }
+        }
+        // Fallback to the legacy org-wide value.
+        const legacyNs = orgScopedNamespace(legacyDeptSecretNamespace(pinyin), orgId)
+        const legacy = await nexus.getSecret(legacyNs, key, secretSubject(legacyNs, userId)).catch(() => null)
+        if (legacy) {
+          return { success: true, data: { ...legacy, is_org_default: true } }
+        }
+        return { success: false, error: { code: 'not_found', message: '凭据不存在' } }
+      } catch {
+        return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
+      }
+    },
+
+    /** Set a department credential value specific to one department. */
+    async putDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, value: string, ip?: string) {
+      const ns = deptSecretNamespace(deptId, pinyin)
+      return api.putSecret(orgId, userId, ns, key, value, undefined, ip)
+    },
+
+    /** Delete a department's per-dept credential value (does not touch the org default). */
+    async deleteDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, ip?: string) {
+      const ns = deptSecretNamespace(deptId, pinyin)
+      return api.deleteSecret(orgId, userId, ns, key, ip)
     },
 
     async getSecret(orgId: string, userId: string, namespace: string, key: string, ip?: string) {

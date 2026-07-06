@@ -432,6 +432,42 @@ export async function getConfigItemDepartments(configItemId: number): Promise<st
   return res.data ?? []
 }
 
+// ============================================================
+// Per-department credential values (a value specific to one department)
+// ============================================================
+
+/** Fetch a department's own per-dept credential value (resolves per-dept first,
+ *  falls back to the org-wide default; `is_org_default` marks the fallback). */
+export async function getDepartmentSecretValue(
+  deptId: string,
+  pinyin: string,
+  key: string,
+): Promise<(BackendSecret & { value?: string; is_org_default?: boolean }) | null> {
+  const res = await dcClient.get<{ success: boolean; data?: BackendSecret & { value?: string; is_org_default?: boolean } }>(
+    `/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`,
+  )
+  return res.data ?? null
+}
+
+/** Set a credential value specific to one department (dept must be in scope). */
+export async function putDepartmentSecretValue(
+  deptId: string,
+  pinyin: string,
+  key: string,
+  value: string,
+): Promise<void> {
+  const res = await dcClient.put<{ success: boolean; error?: { code: string; message: string } }>(
+    `/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`,
+    { value },
+  )
+  if (!res.success) throw new Error(res.error?.message || '写入失败')
+}
+
+/** Delete a department's per-dept value (leaves the org-wide default intact). */
+export async function deleteDepartmentSecretValue(deptId: string, pinyin: string, key: string): Promise<void> {
+  await dcClient.delete(`/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`)
+}
+
 export async function updateConfigItemDepartments(configItemId: number, departmentIds: string[]): Promise<void> {
   await dcClient.put(`/api/v1/config-items/${configItemId}/authorized-departments`, { department_ids: departmentIds })
 }

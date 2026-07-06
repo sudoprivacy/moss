@@ -11,6 +11,7 @@ import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
 import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
+import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService } from './runtimeService.js'
@@ -4051,6 +4052,44 @@ export function startServer(
           return
         }
 
+        // Per-department credential values: view/set a value specific to one
+        // department (in the caller's subtree) for a department-scope config
+        // item. requireDepartmentInScope confines a dept_admin to their subtree;
+        // admins are unrestricted in-org.
+        const deptSecretListMatch = pathname.match(/^\/api\/v1\/department-secrets\/([^/]+)$/)
+        if (req.method === 'GET' && deptSecretListMatch) {
+          if (!canReadDepartmentSecrets(auth)) {
+            authService.requireScope(auth, 'admin:secrets')
+          }
+          const deptId = decodeURIComponent(deptSecretListMatch[1] || '')
+          authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+          writeJson(res, 200, await secretsApi.listDepartmentSecretsForDept(auth.orgId, auth.userId, deptId))
+          return
+        }
+        const deptSecretMatch = pathname.match(/^\/api\/v1\/department-secrets\/([^/]+)\/([^/]+)\/([^/]+)$/)
+        if (deptSecretMatch) {
+          const deptId = decodeURIComponent(deptSecretMatch[1] || '')
+          const pinyin = decodeURIComponent(deptSecretMatch[2] || '')
+          const key = decodeURIComponent(deptSecretMatch[3] || '')
+          if (!canReadDepartmentSecrets(auth)) {
+            authService.requireScope(auth, 'admin:secrets')
+          }
+          authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+          if (req.method === 'GET') {
+            writeJson(res, 200, await secretsApi.getDepartmentSecret(auth.orgId, auth.userId, deptId, pinyin, key, clientIp))
+            return
+          }
+          if (req.method === 'PUT') {
+            const body = await readJsonBody(req)
+            writeJson(res, 200, await secretsApi.putDepartmentSecret(auth.orgId, auth.userId, deptId, pinyin, key, body.value ?? '', clientIp))
+            return
+          }
+          if (req.method === 'DELETE') {
+            writeJson(res, 200, await secretsApi.deleteDepartmentSecret(auth.orgId, auth.userId, deptId, pinyin, key, clientIp))
+            return
+          }
+        }
+
         // Secret metadata: list + update. The list only exposes config_item_id +
         // expiry (no secret values), so any credential-capable role may read it
         // to render expiry in their own credential UI.
@@ -4228,8 +4267,15 @@ export function startServer(
               const configuredNs = nexusClient.listConfiguredNamespaces()
               const orgPrefix = `org:${auth.orgId}:`
               visible = visible.filter(i => {
-                const base = (i.scope as string) === 'department' ? `role:${i.pinyin}` : `system:${i.pinyin}`
-                return configuredNs.has(`${orgPrefix}${base}`)
+                if ((i.scope as string) === 'department') {
+                  // A department item is usable if this user's department has a
+                  // per-dept value (`role:@{deptId}:{pinyin}`) OR the legacy
+                  // org-wide value (`role:{pinyin}`) exists.
+                  const legacy = `${orgPrefix}role:${i.pinyin}`
+                  const perDept = deptId ? `${orgPrefix}${deptSecretNamespace(deptId, i.pinyin as string)}` : null
+                  return configuredNs.has(legacy) || (perDept ? configuredNs.has(perDept) : false)
+                }
+                return configuredNs.has(`${orgPrefix}system:${i.pinyin}`)
               })
             }
             writeJson(res, 200, { success: true, data: visible })

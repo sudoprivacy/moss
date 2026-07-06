@@ -37,6 +37,48 @@ export function namespaceOrgId(namespace: string): string | null {
 }
 
 /**
+ * Department (role) secret namespaces come in two shapes:
+ *  - legacy, org-wide:  `role:{pinyin}`            (one value shared by the org)
+ *  - per-department:    `role:@{deptId}:{pinyin}`  (a value specific to a dept)
+ *
+ * The `@` marker makes the two unambiguous: a pinyin is validated to
+ * `^[a-z0-9_-]+$` (see configItems.ts), so it never starts with `@` and never
+ * contains `:`. deptId is a UUID (colon-free). Consumers resolve the per-dept
+ * value first and fall back to the legacy org-wide value when it is unset.
+ */
+export const DEPT_NAMESPACE_MARKER = '@'
+
+/** Build the base (pre-org-prefix) department namespace for a specific dept. */
+export function deptSecretNamespace(deptId: string, pinyin: string): string {
+  return `role:${DEPT_NAMESPACE_MARKER}${deptId}:${pinyin}`
+}
+
+/** The legacy org-wide department namespace (fallback target). */
+export function legacyDeptSecretNamespace(pinyin: string): string {
+  return `role:${pinyin}`
+}
+
+/**
+ * Extract the deptId from a per-department namespace (`role:@{deptId}:...`,
+ * with or without an `org:{orgId}:` prefix), or null for a legacy/other
+ * namespace.
+ */
+export function namespaceDeptId(namespace: string): string | null {
+  const base = stripOrgPrefix(namespace)
+  const m = base.match(/^role:@([^:]+):/)
+  return m ? m[1] : null
+}
+
+/** The pinyin (config-item slug) of a department namespace, either shape. */
+export function deptNamespacePinyin(namespace: string): string | null {
+  const base = stripOrgPrefix(namespace)
+  const perDept = base.match(/^role:@[^:]+:(.+)$/)
+  if (perDept) return perDept[1]
+  const legacy = base.match(/^role:(.+)$/)
+  return legacy ? legacy[1] : null
+}
+
+/**
  * 命名空间 → Nexus 调用主体。
  * system:* 共享一个固定主体，使企业秘钥与具体管理员解耦；
  * role:* 共享一个固定主体，使部门秘钥与具体管理员解耦；

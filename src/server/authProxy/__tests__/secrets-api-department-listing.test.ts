@@ -113,3 +113,72 @@ describe('handleSecretsRequest GET /secrets — department listing', () => {
     expect(namespaces).toEqual([])
   })
 })
+
+// Per-department credential values: the store may hold both a legacy org-wide
+// value (`role:{pinyin}`) and per-department values (`role:@{deptId}:{pinyin}`).
+// A non-admin sees their own department's per-dept value (which shadows the
+// legacy one for the same pinyin) plus legacy values for pinyins where they have
+// no per-dept value; a per-dept value for another department is hidden.
+function makeNexusPerDept() {
+  const roleSubject = secretSubject(`${ORG_PREFIX}role:`, 'ignored-user')
+  return {
+    async listSecrets(_namespace: string | undefined, subject?: string) {
+      if (subject === roleSubject) {
+        return [
+          // deptalpha: legacy org default + a value specific to dept-x.
+          { namespace: `${ORG_PREFIX}role:deptalpha`, key: 'password', value: null, status: 'set', version: 1 },
+          { namespace: `${ORG_PREFIX}role:@dept-x:deptalpha`, key: 'password', value: null, status: 'set', version: 2 },
+          // deptalpha: a value for a different department (must be hidden from dept-x).
+          { namespace: `${ORG_PREFIX}role:@dept-y:deptalpha`, key: 'password', value: null, status: 'set', version: 1 },
+        ]
+      }
+      return []
+    },
+  }
+}
+
+function setupPerDept() {
+  setSecretsApiDependencies(
+    makeNexusPerDept() as never,
+    policyProvider as never,
+    () => CONFIG_ITEMS as never,
+  )
+}
+
+async function listPerDeptFor(context: {
+  userId: string
+  orgId: string
+  departmentId: string | null
+  isAdmin: boolean
+}): Promise<string[]> {
+  setupPerDept()
+  const captured: Captured = { status: 0, body: {} }
+  const req = { method: 'GET' } as IncomingMessage
+  await handleSecretsRequest(req, fakeRes(captured), '/secrets', {} as URL, context)
+  const data = captured.body.data ?? []
+  return data.map(s => s.namespace).filter(ns => ns.includes('role:')).sort()
+}
+
+describe('handleSecretsRequest GET /secrets — per-department values', () => {
+  it("shows a member their own department's value, shadowing the legacy one", async () => {
+    const namespaces = await listPerDeptFor({ userId: 'u', orgId: ORG, departmentId: 'dept-x', isAdmin: false })
+    // deptalpha is authorized; dept-x's per-dept value wins over the legacy one,
+    // and dept-y's value is not visible.
+    expect(namespaces).toEqual([`${ORG_PREFIX}role:@dept-x:deptalpha`])
+  })
+
+  it('falls back to the legacy value for a department with no per-dept value', async () => {
+    const namespaces = await listPerDeptFor({ userId: 'u', orgId: ORG, departmentId: 'dept-z', isAdmin: false })
+    // dept-z has no per-dept deptalpha value, so it inherits the org default.
+    expect(namespaces).toEqual([`${ORG_PREFIX}role:deptalpha`])
+  })
+
+  it('an admin sees every value including all departments’ per-dept ones', async () => {
+    const namespaces = await listPerDeptFor({ userId: 'a', orgId: ORG, departmentId: null, isAdmin: true })
+    expect(namespaces).toEqual([
+      `${ORG_PREFIX}role:@dept-x:deptalpha`,
+      `${ORG_PREFIX}role:@dept-y:deptalpha`,
+      `${ORG_PREFIX}role:deptalpha`,
+    ])
+  })
+})
