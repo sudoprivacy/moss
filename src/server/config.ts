@@ -87,6 +87,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
+      automationEnabled: false,
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
@@ -205,6 +206,15 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       controlTimeoutMs: process.env.CABIN_CONTROL_TIMEOUT_MS
         ? Number.parseInt(process.env.CABIN_CONTROL_TIMEOUT_MS, 10)
         : raw.cabin.controlTimeoutMs,
+      automationEnabled: process.env.CABIN_AUTOMATION_ENABLED
+        ? process.env.CABIN_AUTOMATION_ENABLED === '1' || process.env.CABIN_AUTOMATION_ENABLED === 'true'
+        : raw.cabin.automationEnabled,
+      flightStateWsUrl: process.env.CABIN_FLIGHT_STATE_WS_URL || raw.cabin.flightStateWsUrl,
+      managedSeats: process.env.CABIN_MANAGED_SEATS || raw.cabin.managedSeats,
+      broadcastBaseUrl: process.env.CABIN_BROADCAST_BASE_URL || raw.cabin.broadcastBaseUrl,
+      automationLogFile: (process.env.CABIN_AUTOMATION_LOG_FILE || raw.cabin.automationLogFile)
+        ? normalizePath((process.env.CABIN_AUTOMATION_LOG_FILE || raw.cabin.automationLogFile)!)
+        : undefined,
       assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
       assistantDisplayName:
         process.env.CABIN_ASSISTANT_DISPLAY_NAME || raw.cabin.assistantDisplayName,

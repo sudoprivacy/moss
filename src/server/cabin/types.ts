@@ -63,6 +63,41 @@ export type CabinToolCall = {
   arguments: Record<string, unknown>
 }
 
+export type CabinManagedSeat = {
+  id: string
+  aircraftNo: string | null
+  flightId: string
+  flightDate: string
+  seatNo: string
+  columnNo: string | null
+  flightSeatId: string | null
+  aircraftSeatId: string | null
+  tabletId: string | null
+  tabletType: string | null
+  status: 'active' | 'inactive'
+  lastSeenAt: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type CabinAlert = {
+  id: string
+  aircraftNo: string | null
+  flightId: string
+  flightDate: string | null
+  phaseCode: number | null
+  phaseName: string
+  seatNo: string | null
+  alertType: string
+  severity: 'info' | 'warning' | 'critical'
+  message: string
+  status: 'active' | 'resolved'
+  sourceEventId: string | null
+  details: Record<string, unknown> | null
+  createdAt: number
+  resolvedAt: number | null
+}
+
 export type CabinTokenPayload = {
   tabletToken: string
   tabletId: string

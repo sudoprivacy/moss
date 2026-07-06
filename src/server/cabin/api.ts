@@ -1,5 +1,7 @@
 import http from 'http'
 import { randomUUID } from 'crypto'
+import { readFile, stat } from 'fs/promises'
+import path from 'path'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
@@ -277,6 +279,10 @@ function formatCabinTime(ms: number): string {
   return `${date.toISOString().slice(0, 19)}+08:00`
 }
 
+function todayFlightDate(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
 function objectField(value: unknown, key: string): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const child = (value as Record<string, unknown>)[key]
@@ -499,10 +505,65 @@ export function createCabinApi(options: {
   })
   const demoState = new CabinDemoState(options.config, services, cabinLogger)
 
+  function registerManagedSeatFromToken(
+    body: JsonBody,
+    tablet: { tabletToken: string; tabletId: string },
+    tokenContext: Omit<CabinTokenPayload, 'tabletToken' | 'tabletId' | 'issuedAt' | 'expiresAt'>,
+    requestId: string,
+  ): void {
+    try {
+      const seat = store.upsertManagedSeat({
+        aircraftNo: tokenContext.aircraftNo,
+        flightId: stringBodyField(body, 'flightId') || stringBodyField(body, 'flight_id') || 'AUTO',
+        flightDate: stringBodyField(body, 'flightDate') || stringBodyField(body, 'flight_date') || todayFlightDate(),
+        seatNo: tokenContext.seatNo,
+        columnNo: tokenContext.columnNo,
+        flightSeatId: tokenContext.flightSeatId,
+        aircraftSeatId: tokenContext.aircraftSeatId,
+        tabletId: tablet.tabletId,
+        tabletType: tokenContext.tabletType,
+      })
+      cabinLogger.log({
+        type: 'outbound',
+        requestId,
+        tabletId: tablet.tabletId,
+        upstream: 'cabin-managed-seat',
+        method: 'UPSERT',
+        ok: true,
+        elapsedMs: 0,
+        details: {
+          source: 'auth-token',
+          flight_id: seat.flightId,
+          flight_date: seat.flightDate,
+          seat_no: seat.seatNo,
+          flight_seat_id: seat.flightSeatId,
+        },
+      })
+    } catch (error) {
+      cabinLogger.log({
+        type: 'outbound',
+        requestId,
+        tabletId: tablet.tabletId,
+        upstream: 'cabin-managed-seat',
+        method: 'UPSERT',
+        ok: false,
+        elapsedMs: 0,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: {
+          source: 'auth-token',
+          seat_no: tokenContext.seatNo,
+          flight_seat_id: tokenContext.flightSeatId,
+        },
+      })
+      throw new CabinHttpError(500, 'MANAGED_SEAT_REGISTER_FAILED', 'Failed to register cabin managed seat')
+    }
+  }
+
   async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
     const tokenContext = optionalCabinTokenFields(body)
+    registerManagedSeatFromToken(body, tablet, tokenContext, requestId)
     const token = issueCabinToken({
       ...tablet,
       ...tokenContext,
@@ -1000,6 +1061,34 @@ export function createCabinApi(options: {
     })
   }
 
+  async function handleBroadcastAsset(res: http.ServerResponse, filename: string): Promise<void> {
+    if (!/^[A-Za-z0-9_.-]+$/.test(filename)) {
+      throw new CabinHttpError(400, 'INVALID_BROADCAST_FILE', 'Invalid broadcast filename')
+    }
+    const filePath = path.join(options.config.rootDir, 'cabin-broadcasts', filename)
+    let fileStat: Awaited<ReturnType<typeof stat>>
+    try {
+      fileStat = await stat(filePath)
+    } catch {
+      throw new CabinHttpError(404, 'BROADCAST_NOT_FOUND', 'Cabin broadcast asset not found')
+    }
+    if (!fileStat.isFile()) {
+      throw new CabinHttpError(404, 'BROADCAST_NOT_FOUND', 'Cabin broadcast asset not found')
+    }
+    const data = await readFile(filePath)
+    const contentType = filename.endsWith('.wav')
+      ? 'audio/wav'
+      : filename.endsWith('.mp3')
+        ? 'audio/mpeg'
+        : 'text/plain; charset=utf-8'
+    res.writeHead(200, {
+      'content-type': contentType,
+      'content-length': data.length,
+      'cache-control': 'public, max-age=3600',
+    })
+    res.end(data)
+  }
+
   return {
     async handle(req, res, pathname) {
       if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
@@ -1031,6 +1120,7 @@ export function createCabinApi(options: {
       }
       try {
         const url = new URL(req.url || '/', 'http://localhost')
+        const isHead = req.method === 'HEAD'
         if (req.method === 'POST' && pathname === '/v1/auth/token') {
           await handleAuthToken(req, res, requestId)
           logInbound({ status: 200, ok: true })
@@ -1078,6 +1168,12 @@ export function createCabinApi(options: {
         }
         if (req.method === 'GET' && pathname === '/v1/cabin-demo/broadcasts') {
           handleDemoBroadcasts(res)
+          logInbound({ status: 200, ok: true })
+          return true
+        }
+        const broadcastMatch = pathname.match(/^\/v1\/cabin\/broadcasts\/([^/]+)$/)
+        if ((req.method === 'GET' || isHead) && broadcastMatch) {
+          await handleBroadcastAsset(res, decodeURIComponent(broadcastMatch[1] || ''))
           logInbound({ status: 200, ok: true })
           return true
         }

@@ -195,6 +195,11 @@ export const serverFileConfigSchema = lazySchema(() =>
       controlBaseUrl: z.string().optional(),
       controlAuth: z.string().optional(),
       controlTimeoutMs: z.number().int().min(1000).default(10_000),
+      automationEnabled: z.boolean().default(false),
+      flightStateWsUrl: z.string().optional(),
+      managedSeats: z.string().optional(),
+      broadcastBaseUrl: z.string().optional(),
+      automationLogFile: z.string().optional(),
       assistantName: z.string().default('cabin-ai-flight-attendant'),
       assistantDisplayName: z.string().optional(),
       createMossSession: z.boolean().default(false),
@@ -221,6 +226,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
+      automationEnabled: false,
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
@@ -343,6 +349,11 @@ export type ServerConfig = {
     controlBaseUrl?: string
     controlAuth?: string
     controlTimeoutMs: number
+    automationEnabled: boolean
+    flightStateWsUrl?: string
+    managedSeats?: string
+    broadcastBaseUrl?: string
+    automationLogFile?: string
     assistantName: string
     assistantDisplayName?: string
     createMossSession: boolean

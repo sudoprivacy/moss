@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type {
   CabinConversation,
+  CabinAlert,
+  CabinManagedSeat,
   CabinMessage,
   CabinMessageRole,
   CabinMessageSource,
@@ -32,6 +34,47 @@ function mapConversation(row: Row): CabinConversation {
     summary: row.summary == null ? null : String(row.summary),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+  }
+}
+
+function mapManagedSeat(row: Row): CabinManagedSeat {
+  return {
+    id: String(row.id),
+    aircraftNo: row.aircraft_no == null ? null : String(row.aircraft_no),
+    flightId: String(row.flight_id),
+    flightDate: String(row.flight_date),
+    seatNo: String(row.seat_no),
+    columnNo: row.column_no == null ? null : String(row.column_no),
+    flightSeatId: row.flight_seat_id == null ? null : String(row.flight_seat_id),
+    aircraftSeatId: row.aircraft_seat_id == null ? null : String(row.aircraft_seat_id),
+    tabletId: row.tablet_id == null ? null : String(row.tablet_id),
+    tabletType: row.tablet_type == null ? null : String(row.tablet_type),
+    status: String(row.status) === 'inactive' ? 'inactive' : 'active',
+    lastSeenAt: Number(row.last_seen_at),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
+function mapAlert(row: Row): CabinAlert {
+  return {
+    id: String(row.id),
+    aircraftNo: row.aircraft_no == null ? null : String(row.aircraft_no),
+    flightId: String(row.flight_id),
+    flightDate: row.flight_date == null ? null : String(row.flight_date),
+    phaseCode: row.phase_code == null ? null : Number(row.phase_code),
+    phaseName: String(row.phase_name),
+    seatNo: row.seat_no == null ? null : String(row.seat_no),
+    alertType: String(row.alert_type),
+    severity: ['info', 'critical'].includes(String(row.severity))
+      ? String(row.severity) as CabinAlert['severity']
+      : 'warning',
+    message: String(row.message),
+    status: String(row.status) === 'resolved' ? 'resolved' : 'active',
+    sourceEventId: row.source_event_id == null ? null : String(row.source_event_id),
+    details: parseObjectJson(row.details_json),
+    createdAt: Number(row.created_at),
+    resolvedAt: row.resolved_at == null ? null : Number(row.resolved_at),
   }
 }
 
@@ -132,6 +175,51 @@ export function ensureCabinTables(db: DatabaseSync): void {
       elapsed_ms INTEGER,
       created_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS cabin_managed_seats (
+      id TEXT PRIMARY KEY,
+      aircraft_no TEXT,
+      flight_id TEXT NOT NULL,
+      flight_date TEXT NOT NULL,
+      seat_no TEXT NOT NULL,
+      column_no TEXT,
+      flight_seat_id TEXT,
+      aircraft_seat_id TEXT,
+      tablet_id TEXT,
+      tablet_type TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_seen_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(flight_id, flight_date, seat_no)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cabin_managed_seats_flight
+      ON cabin_managed_seats(flight_id, flight_date, status);
+
+    CREATE INDEX IF NOT EXISTS idx_cabin_managed_seats_aircraft
+      ON cabin_managed_seats(aircraft_no, status);
+
+    CREATE TABLE IF NOT EXISTS cabin_alerts (
+      id TEXT PRIMARY KEY,
+      aircraft_no TEXT,
+      flight_id TEXT NOT NULL,
+      flight_date TEXT,
+      phase_code INTEGER,
+      phase_name TEXT NOT NULL,
+      seat_no TEXT,
+      alert_type TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'warning',
+      message TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      source_event_id TEXT,
+      details_json TEXT,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cabin_alerts_flight_created
+      ON cabin_alerts(flight_id, flight_date, created_at);
   `)
   const messageColumns = db.prepare('PRAGMA table_info(cabin_messages)').all() as Row[]
   if (!messageColumns.some(column => column.name === 'tool_calls_json')) {
@@ -199,7 +287,211 @@ export class CabinStore {
     }
     const created = this.getConversationByKey(conversationKey)
     if (!created) throw new Error('Failed to create cabin conversation')
+    this.upsertManagedSeatFromContext(input)
     return created
+  }
+
+  upsertManagedSeatFromContext(input: CabinPassengerContext): CabinManagedSeat | null {
+    if (!input.flightId || !input.flightDate || !input.seatId) return null
+    return this.upsertManagedSeat({
+      aircraftNo: input.aircraftNo,
+      flightId: input.flightId,
+      flightDate: input.flightDate,
+      seatNo: input.seatId,
+      columnNo: input.columnNo,
+      flightSeatId: input.flightSeatId,
+      aircraftSeatId: input.aircraftSeatId,
+      tabletId: input.tabletId,
+      tabletType: input.tabletType,
+    })
+  }
+
+  upsertManagedSeat(input: {
+    aircraftNo?: string | null
+    flightId: string
+    flightDate: string
+    seatNo: string
+    columnNo?: string | null
+    flightSeatId?: string | null
+    aircraftSeatId?: string | null
+    tabletId?: string | null
+    tabletType?: string | null
+  }): CabinManagedSeat {
+    const timestamp = now()
+    const existing = this.db.prepare(`
+      SELECT * FROM cabin_managed_seats
+      WHERE flight_id = ? AND flight_date = ? AND seat_no = ?
+    `).get(input.flightId, input.flightDate, input.seatNo) as Row | undefined
+    if (existing) {
+      this.db.prepare(`
+        UPDATE cabin_managed_seats
+        SET aircraft_no = COALESCE(?, aircraft_no),
+            column_no = COALESCE(?, column_no),
+            flight_seat_id = COALESCE(?, flight_seat_id),
+            aircraft_seat_id = COALESCE(?, aircraft_seat_id),
+            tablet_id = COALESCE(?, tablet_id),
+            tablet_type = COALESCE(?, tablet_type),
+            status = 'active',
+            last_seen_at = ?,
+            updated_at = ?
+        WHERE id = ?
+      `).run(
+        input.aircraftNo ?? null,
+        input.columnNo ?? null,
+        input.flightSeatId ?? null,
+        input.aircraftSeatId ?? null,
+        input.tabletId ?? null,
+        input.tabletType ?? null,
+        timestamp,
+        timestamp,
+        String(existing.id),
+      )
+      const row = this.db.prepare('SELECT * FROM cabin_managed_seats WHERE id = ?').get(String(existing.id)) as Row | undefined
+      if (!row) throw new Error('Failed to update cabin managed seat')
+      return mapManagedSeat(row)
+    }
+    const id = randomUUID()
+    this.db.prepare(`
+      INSERT INTO cabin_managed_seats (
+        id, aircraft_no, flight_id, flight_date, seat_no, column_no,
+        flight_seat_id, aircraft_seat_id, tablet_id, tablet_type,
+        status, last_seen_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    `).run(
+      id,
+      input.aircraftNo ?? null,
+      input.flightId,
+      input.flightDate,
+      input.seatNo,
+      input.columnNo ?? null,
+      input.flightSeatId ?? null,
+      input.aircraftSeatId ?? null,
+      input.tabletId ?? null,
+      input.tabletType ?? null,
+      timestamp,
+      timestamp,
+      timestamp,
+    )
+    const row = this.db.prepare('SELECT * FROM cabin_managed_seats WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Failed to create cabin managed seat')
+    return mapManagedSeat(row)
+  }
+
+  listManagedSeats(input: {
+    aircraftNo?: string
+    flightId?: string
+    flightDate?: string
+    activeOnly?: boolean
+  } = {}): CabinManagedSeat[] {
+    const clauses: string[] = []
+    const params: unknown[] = []
+    if (input.aircraftNo) {
+      clauses.push('(aircraft_no = ? OR aircraft_no IS NULL)')
+      params.push(input.aircraftNo)
+    }
+    if (input.flightId) {
+      clauses.push('flight_id = ?')
+      params.push(input.flightId)
+    }
+    if (input.flightDate) {
+      clauses.push('flight_date = ?')
+      params.push(input.flightDate)
+    }
+    if (input.activeOnly !== false) {
+      clauses.push('status = ?')
+      params.push('active')
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const rows = this.db.prepare(`
+      SELECT * FROM cabin_managed_seats
+      ${where}
+      ORDER BY seat_no ASC
+    `).all(...params) as Row[]
+    return rows.map(mapManagedSeat)
+  }
+
+  createAlert(input: {
+    aircraftNo?: string | null
+    flightId: string
+    flightDate?: string | null
+    phaseCode?: number | null
+    phaseName: string
+    seatNo?: string | null
+    alertType: string
+    severity?: CabinAlert['severity']
+    message: string
+    sourceEventId?: string | null
+    details?: Record<string, unknown> | null
+  }): CabinAlert {
+    const id = randomUUID()
+    const timestamp = now()
+    this.db.prepare(`
+      INSERT INTO cabin_alerts (
+        id, aircraft_no, flight_id, flight_date, phase_code, phase_name,
+        seat_no, alert_type, severity, message, status, source_event_id,
+        details_json, created_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, NULL)
+    `).run(
+      id,
+      input.aircraftNo ?? null,
+      input.flightId,
+      input.flightDate ?? null,
+      input.phaseCode ?? null,
+      input.phaseName,
+      input.seatNo ?? null,
+      input.alertType,
+      input.severity ?? 'warning',
+      input.message,
+      input.sourceEventId ?? null,
+      input.details ? JSON.stringify(input.details) : null,
+      timestamp,
+    )
+    const row = this.db.prepare('SELECT * FROM cabin_alerts WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Failed to create cabin alert')
+    return mapAlert(row)
+  }
+
+  listAlerts(input: {
+    flightId?: string
+    flightDate?: string
+    seatNo?: string
+    status?: 'active' | 'resolved'
+    limit?: number
+    offset?: number
+  } = {}): { alerts: CabinAlert[]; total: number } {
+    const clauses: string[] = []
+    const params: unknown[] = []
+    if (input.flightId) {
+      clauses.push('flight_id LIKE ?')
+      params.push(`%${input.flightId}%`)
+    }
+    if (input.flightDate) {
+      clauses.push('flight_date = ?')
+      params.push(input.flightDate)
+    }
+    if (input.seatNo) {
+      clauses.push('seat_no = ?')
+      params.push(input.seatNo)
+    }
+    if (input.status) {
+      clauses.push('status = ?')
+      params.push(input.status)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const totalRow = this.db.prepare(`SELECT COUNT(*) AS total FROM cabin_alerts ${where}`)
+      .get(...params) as Row | undefined
+    const limit = Math.max(1, Math.min(input.limit ?? 50, 200))
+    const offset = Math.max(0, input.offset ?? 0)
+    const rows = this.db.prepare(`
+      SELECT * FROM cabin_alerts
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as Row[]
+    return {
+      alerts: rows.map(mapAlert),
+      total: Number(totalRow?.total ?? 0),
+    }
   }
 
   touchConversation(conversationId: string): void {
