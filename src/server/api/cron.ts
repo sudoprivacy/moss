@@ -112,17 +112,37 @@ function mapRunWithSessionToResponse(run: CronJobRunWithSession) {
   }
 }
 
-export function canReadJob(auth: { orgId: string; userId: string; scopes?: string[] }, job: CronJob): boolean {
+// Read capability: same org AND (owner OR admin-cron OR, for a dept_admin with
+// cron:list:subtree, the job owner is in the actor's department subtree). The
+// subtree set is resolved from *current* department membership at request time
+// (never frozen), so a member moving out of the subtree drops out immediately.
+export function canReadJob(
+  auth: { orgId: string; userId: string; scopes?: string[] },
+  job: CronJob,
+  subtreeUserIds?: Set<string> | null,
+): boolean {
   const scopes = auth.scopes ?? []
-  return job.orgId === auth.orgId && (job.userId === auth.userId || hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:list:any'))
+  if (job.orgId !== auth.orgId) return false
+  if (job.userId === auth.userId) return true
+  if (hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:list:any')) return true
+  if (hasScope(scopes, 'cron:list:subtree') && subtreeUserIds?.has(job.userId)) return true
+  return false
 }
 
-// Management capability (update/delete/trigger): the owner, or an admin actor.
-// Needed so the admin console can manage org jobs while clientCronEnabled=false
-// leaves admins as the only actors who can (#85).
-export function canManageJob(auth: { orgId: string; userId: string; scopes?: string[] }, job: CronJob): boolean {
+// Management capability (update/delete/trigger): the owner, an admin actor, or a
+// dept_admin with cron:manage:subtree whose subtree contains the job owner.
+// Admins can manage org jobs even while clientCronEnabled=false (#85).
+export function canManageJob(
+  auth: { orgId: string; userId: string; scopes?: string[] },
+  job: CronJob,
+  subtreeUserIds?: Set<string> | null,
+): boolean {
   const scopes = auth.scopes ?? []
-  return job.orgId === auth.orgId && (job.userId === auth.userId || hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:disable:any'))
+  if (job.orgId !== auth.orgId) return false
+  if (job.userId === auth.userId) return true
+  if (hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:disable:any')) return true
+  if (hasScope(scopes, 'cron:manage:subtree') && subtreeUserIds?.has(job.userId)) return true
+  return false
 }
 
 export interface CronApiConfig {
@@ -139,9 +159,19 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * List all cron jobs for the current user
      */
-    listJobs: async (auth: { orgId: string; userId: string }) => {
+    listJobs: async (
+      auth: { orgId: string; userId: string; scopes?: string[] },
+      subtreeUserIds?: Set<string> | null,
+    ) => {
       try {
-        const jobs = store.listByUser(auth.orgId, auth.userId)
+        // A dept_admin with cron:list:subtree sees every job owned by a member
+        // of their department subtree; everyone else sees only their own. Admins
+        // use the separate /admin/cron/jobs route for the org-wide view.
+        const canListSubtree =
+          !!subtreeUserIds && subtreeUserIds.size > 0 && hasScope(auth.scopes ?? [], 'cron:list:subtree')
+        const jobs = canListSubtree
+          ? store.listBySubtree(auth.orgId, Array.from(subtreeUserIds))
+          : store.listByUser(auth.orgId, auth.userId)
         return {
           success: true,
           data: jobs.map(mapJob),
@@ -158,13 +188,17 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Get a single cron job by ID
      */
-    getJob: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string) => {
+    getJob: async (
+      auth: { orgId: string; userId: string; scopes?: string[] },
+      jobId: string,
+      subtreeUserIds?: Set<string> | null,
+    ) => {
       try {
         const job = store.getById(jobId)
         if (!job) {
           return { success: false, message: 'Job not found' }
         }
-        if (!canReadJob(auth, job)) {
+        if (!canReadJob(auth, job, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
         return {
@@ -209,7 +243,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Update a cron job
      */
-    updateJob: async (auth: CronAuth, jobId: string, updates: UpdateCronJobInput) => {
+    updateJob: async (auth: CronAuth, jobId: string, updates: UpdateCronJobInput, subtreeUserIds?: Set<string> | null) => {
       try {
         const blocked = cronDisabledError(auth)
         if (blocked) return blocked
@@ -217,11 +251,11 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        // Owner or an admin actor may fully update the job — same capability as
-        // delete/trigger (canManageJob). Admins/super_admins hold cron
+        // Owner, an admin actor, or a dept_admin managing a subtree member's job
+        // may fully update it (canManageJob). Admins/super_admins hold cron
         // management via `*`, so the admin console can edit any org job's
         // schedule/payload/enabled state, not just disable it (#85).
-        if (!canManageJob(auth, existing)) {
+        if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
 
@@ -246,7 +280,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Delete (soft) a cron job
      */
-    deleteJob: async (auth: CronAuth, jobId: string) => {
+    deleteJob: async (auth: CronAuth, jobId: string, subtreeUserIds?: Set<string> | null) => {
       try {
         const blocked = cronDisabledError(auth)
         if (blocked) return blocked
@@ -254,7 +288,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        if (!canManageJob(auth, existing)) {
+        if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
 
@@ -273,7 +307,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Trigger a job immediately
      */
-    triggerJob: async (auth: CronAuth, jobId: string) => {
+    triggerJob: async (auth: CronAuth, jobId: string, subtreeUserIds?: Set<string> | null) => {
       try {
         const blocked = cronDisabledError(auth)
         if (blocked) return blocked
@@ -281,7 +315,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        if (!canManageJob(auth, existing)) {
+        if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
 
@@ -302,13 +336,13 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * List runs for a job
      */
-    listRuns: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string, limit = 50) => {
+    listRuns: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string, limit = 50, subtreeUserIds?: Set<string> | null) => {
       try {
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        if (!canReadJob(auth, existing)) {
+        if (!canReadJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
 

@@ -228,6 +228,11 @@ export function createSecretsApi(db: {
 
     listAuditLog(orgId: string, userId: string, params: {
       actor_id?: string
+      /** When set, restrict the log to actions performed by these user ids
+       *  (dept subtree for a dept_admin, or [self] for a normal user). Undefined
+       *  means no restriction (full admin). The route computes this from the
+       *  caller's capability so a non-admin can't widen it via query params. */
+      actorIds?: string[]
       config_item_id?: number
       action?: string
       since?: number
@@ -237,6 +242,7 @@ export function createSecretsApi(db: {
     }) {
       const { items, total } = db.queryAuditLog({
         actor_id: params.actor_id,
+        actorIds: params.actorIds,
         config_item_id: params.config_item_id,
         action: params.action,
         since: params.since,
@@ -262,12 +268,18 @@ export function createSecretsApi(db: {
 
     // --- Rotation Alerts ---
 
-    listRotationAlerts(orgId: string, userId: string) {
+    listRotationAlerts(orgId: string, userId: string, scopeFilter?: Set<'system' | 'department' | 'user'>) {
       const oneDayFromNow = Date.now() + 86400000
       const rows = db.getExpiringSecretMetadata(oneDayFromNow, orgId)
       const data = rows.map(r => {
         const itemId = r.config_item_id as number
         const item = db.getConfigItem(itemId, orgId)
+        // Scope narrowing: rotation metadata is keyed by config item, so a
+        // non-admin only sees alerts for credential scopes they manage
+        // (dept_admin: department + user; user: user only). Undefined = admin.
+        if (item && scopeFilter && !scopeFilter.has(item.scope as 'system' | 'department' | 'user')) {
+          return { config_item_id: itemId, expires_at: r.expires_at as number, config_item: null }
+        }
         const entries = item ? db.getConfigEntries(itemId) : []
         return {
           config_item_id: itemId,

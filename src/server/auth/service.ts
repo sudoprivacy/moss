@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
-import { buildVisibilityFilter, getUserAncestorIds } from '../visibilityFilter.js'
+import { buildVisibilityFilter, getUserAncestorIds, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
   AuthCenterDb,
@@ -110,13 +110,41 @@ function defaultScopesForRole(role: string): string[] {
       'sessions:list',
       'admin:users',
       'admin:api_keys',
-      'admin:secrets',
+      // Credential center is split: a dept_admin no longer holds the full
+      // `admin:secrets` (which grants config-item + enterprise-credential
+      // access). Instead it may view/set department-scope credentials and set
+      // its own user-credential values.
+      'secrets:department:read',
+      'secrets:user:write',
+      // Skills/agents store: view (hub is view-only), publish tenant items and
+      // manage them when the creator is in the dept subtree, and manage own
+      // custom items. Full store admin (`admin:settings`) stays admin-only.
+      'store:read',
+      'store:tenant:write',
+      'store:custom:write',
+      // Cron: own jobs (subject to client_cron_enabled) plus read/manage of
+      // jobs whose owner is in the dept subtree. `admin:cron` stays admin-only.
+      'cron:self',
+      'cron:list:subtree',
+      'cron:manage:subtree',
       'admin:mcp',
       'admin:mcp:write',
       'admin:mcp:audit',
     ]
   }
-  return ['sessions:create', 'sessions:attach', 'sessions:list']
+  return [
+    'sessions:create',
+    'sessions:attach',
+    'sessions:list',
+    // A normal user may set only its own user-credential values, view the
+    // skills/agents store (hub view-only) and manage its own tenant/custom
+    // items, and manage its own cron jobs (subject to client_cron_enabled).
+    'secrets:user:write',
+    'store:read',
+    'store:tenant:write',
+    'store:custom:write',
+    'cron:self',
+  ]
 }
 
 const DEFAULT_SCOPES_FOR_USER_ROLE = defaultScopesForRole('user')
@@ -1720,6 +1748,79 @@ export class AuthService {
     }
 
     return visibleIds
+  }
+
+  /**
+   * The set of user ids whose activity an actor may see when a resource is
+   * scoped by "action user": `null` for a full admin (no restriction), the
+   * actor's own id only for a plain user, or the actor plus every user-role
+   * member of their department subtree for a dept_admin. Computed on the fly
+   * from *current* department membership (never a stored department), so a
+   * member moving out of the subtree immediately drops out of the set.
+   *
+   * Used by the credential audit log (Phase B) and cron subtree visibility
+   * (Phase D). The actor's own id is always included so a dept_admin sees their
+   * own actions even though they are not a `user`-role account.
+   */
+  listSubtreeUserIds(orgId: string, auth: AuthContext): Set<string> | null {
+    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+    if (visibleDepartmentIds === null) {
+      return null // admin / super_admin: unrestricted
+    }
+    const ids = new Set<string>([auth.userId])
+    for (const user of this.db.listUsersByOrg(orgId)) {
+      if (
+        user.role === 'user' &&
+        user.departmentId !== null &&
+        visibleDepartmentIds.has(user.departmentId)
+      ) {
+        ids.add(user.id)
+      }
+    }
+    return ids
+  }
+
+  /**
+   * Whether the actor may manage a resource created by `creatorUserId`
+   * (tenant skill/agent edit/delete). Resolves the creator's *current*
+   * department on the fly (never a department frozen at creation), so a member
+   * who moves out of the subtree immediately loses management access:
+   * - full admin → always true.
+   * - dept_admin → the creator's current department is in the actor's subtree.
+   * - user (or any other non-admin) → only their own resources.
+   */
+  isCreatorInScope(orgId: string, creatorUserId: string, auth: AuthContext): boolean {
+    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+    if (visibleDepartmentIds === null) {
+      return true // admin / super_admin
+    }
+    if (creatorUserId === auth.userId) {
+      return true // own resource — always manageable
+    }
+    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, orgId)
+    if (actor?.role !== 'dept_admin') {
+      return false // plain user: self only (handled above)
+    }
+    const creator = this.db.getUserByIdAndOrg(creatorUserId, orgId)
+    return !!creator?.departmentId && visibleDepartmentIds.has(creator.departmentId)
+  }
+
+  /**
+   * The default `visible_to` a non-admin gets when they publish a tenant
+   * skill/agent: a dept_admin scopes it to their own department, a user to
+   * themselves. A full admin gets `null` (global) — unchanged behavior. The
+   * caller applies this at publish time so the value survives approval instead
+   * of being reset to global.
+   */
+  defaultTenantVisibility(auth: AuthContext): VisibleTo {
+    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+    if (!actor || ADMIN_ROLES.has(actor.role)) {
+      return null
+    }
+    if (actor.role === 'dept_admin' && actor.departmentId) {
+      return { department_ids: [actor.departmentId], user_ids: null }
+    }
+    return { department_ids: null, user_ids: [auth.userId] }
   }
 
   private requireAuthUser(auth: AuthContext): AuthCenterUser {
