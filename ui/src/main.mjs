@@ -85,10 +85,10 @@ const DEFAULT_DESKTOP_SETTINGS = Object.freeze({
   url: '',
   apiKey: '',
   image: {
-    provider: 'minimax',
-    url: 'https://api.minimaxi.com/v1/image_generation',
+    provider: 'openai',
+    url: '',
     apiKey: '',
-    model: '',
+    model: 'gpt-image-1',
   },
   remoteDirectServerUrl: '',
   remoteDirectCredentialMode: 'password',

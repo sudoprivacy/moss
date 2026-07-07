@@ -94,10 +94,10 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   url: '',
   apiKey: '',
   image: {
-    provider: 'minimax',
-    url: 'https://api.minimaxi.com/v1/image_generation',
+    provider: 'openai',
+    url: '',
     apiKey: '',
-    model: '',
+    model: 'gpt-image-1',
   },
   skillStore: {
     tenantId: '',

@@ -768,7 +768,7 @@ export default function SystemSettingsPage() {
           title="图片模型"
           description="设置图片生成的供应商、接口地址和默认模型。"
         >
-          <SettingField label="图片厂商" description="当前与桌面端保持一致，只支持 MiniMax。">
+          <SettingField label="图片厂商" description="与桌面端保持一致，支持 OpenAI 与 Google (Gemini)。">
             <Select
               value={draft.image.provider}
               onValueChange={(value) =>
@@ -789,7 +789,8 @@ export default function SystemSettingsPage() {
                 <SelectValue placeholder="选择图片厂商" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="minimax">MiniMax</SelectItem>
+                <SelectItem value="openai">OpenAI</SelectItem>
+                <SelectItem value="google">Google (Gemini)</SelectItem>
               </SelectContent>
             </Select>
           </SettingField>
@@ -810,7 +811,7 @@ export default function SystemSettingsPage() {
                     : current,
                 )
               }
-              placeholder="https://api.minimaxi.com/v1/image_generation"
+              placeholder="https://hk.sudorouter.ai/v1"
             />
           </SettingField>
 
@@ -868,7 +869,7 @@ export default function SystemSettingsPage() {
                     : current,
                 )
               }
-              placeholder="image-01"
+              placeholder="gpt-image-1"
             />
           </SettingField>
         </SettingSection>
