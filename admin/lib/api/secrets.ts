@@ -432,6 +432,48 @@ export async function getConfigItemDepartments(configItemId: number): Promise<st
   return res.data ?? []
 }
 
+// ============================================================
+// Per-department credential values (a value specific to one department)
+// ============================================================
+
+/** How a department credential value was resolved for the queried department:
+ *  its own value, inherited from an ancestor department, or the org-wide default. */
+export type DeptSecretSource = 'own' | 'inherited' | 'org_default'
+
+/** Fetch a department's effective credential value. Resolution walks the dept
+ *  tree: the department's own value, then the nearest ancestor with a value,
+ *  then the org-wide default. `source`/`inherited_from` describe where the
+ *  effective value came from so the editor can show own vs inherited. */
+export async function getDepartmentSecretValue(
+  deptId: string,
+  pinyin: string,
+  key: string,
+): Promise<(BackendSecret & { value?: string; is_org_default?: boolean; source?: DeptSecretSource; inherited_from?: string }) | null> {
+  const res = await dcClient.get<{ success: boolean; data?: BackendSecret & { value?: string; is_org_default?: boolean; source?: DeptSecretSource; inherited_from?: string } }>(
+    `/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`,
+  )
+  return res.data ?? null
+}
+
+/** Set a credential value specific to one department (dept must be in scope). */
+export async function putDepartmentSecretValue(
+  deptId: string,
+  pinyin: string,
+  key: string,
+  value: string,
+): Promise<void> {
+  const res = await dcClient.put<{ success: boolean; error?: { code: string; message: string } }>(
+    `/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`,
+    { value },
+  )
+  if (!res.success) throw new Error(res.error?.message || '写入失败')
+}
+
+/** Delete a department's per-dept value (leaves the org-wide default intact). */
+export async function deleteDepartmentSecretValue(deptId: string, pinyin: string, key: string): Promise<void> {
+  await dcClient.delete(`/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`)
+}
+
 export async function updateConfigItemDepartments(configItemId: number, departmentIds: string[]): Promise<void> {
   await dcClient.put(`/api/v1/config-items/${configItemId}/authorized-departments`, { department_ids: departmentIds })
 }

@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
-import { buildVisibilityFilter, getUserAncestorIds, type VisibleTo } from '../visibilityFilter.js'
+import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
   AuthCenterDb,
@@ -2002,6 +2002,19 @@ export class AuthService {
       userId,
       orgId,
       (uid, oid) => this.db.getUserByIdAndOrg(uid, oid),
+      (oid) => this.db.listDepartmentsByOrg(oid),
+    )
+  }
+
+  /**
+   * The ordered department chain `[deptId, parent, grandparent, ...]` up to the
+   * org root. Used for hierarchical department-credential value inheritance: a
+   * consumer resolves the nearest department in this chain that has a value.
+   */
+  getDepartmentAncestorChain(orgId: string, deptId: string | null): string[] {
+    return getDepartmentAncestorChain(
+      orgId,
+      deptId,
       (oid) => this.db.listDepartmentsByOrg(oid),
     )
   }

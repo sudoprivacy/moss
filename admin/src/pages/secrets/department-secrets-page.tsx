@@ -16,7 +16,7 @@ import { toast } from 'sonner'
 import { Link } from 'react-router-dom'
 import {
   Shield, Eye, EyeOff, Loader2, AlertTriangle, Clock, ExternalLink, Ban, CheckCircle,
-  ChevronRight, ChevronDown, FolderTree,
+  ChevronRight, ChevronDown, FolderTree, Minus,
 } from 'lucide-react'
 import {
   getDepartmentSecrets, getSecretMetadata, getConfigItems, putSecret,
@@ -29,6 +29,9 @@ import {
   getOrganizations,
 } from '@/lib/api/auth'
 import type { AuthDepartment, AuthOrgWithCounts } from '@/lib/api/types'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
+import { DeptAdminDepartmentSecrets } from './dept-admin-department-secrets'
 
 // ============================================================
 // Department tree types (reused from old department-policies-page)
@@ -103,6 +106,23 @@ function DepartmentSkeleton() {
 // ============================================================
 
 export default function DepartmentSecretsPage() {
+  const { scopes } = useAuth()
+  // An admin sets the org-wide department value + department-authorization
+  // policy (existing flow). A dept_admin (secrets:department:read, no
+  // admin:secrets) instead sets a value specific to a department in their
+  // subtree — a different, narrower surface.
+  const isSecretsAdmin = hasScope(scopes, 'admin:secrets')
+  if (!isSecretsAdmin) {
+    return (
+      <DashboardLayout title="部门凭据" description="为您管理的部门设置专属凭据值">
+        <DeptAdminDepartmentSecrets />
+      </DashboardLayout>
+    )
+  }
+  return <DepartmentSecretsAdminPage />
+}
+
+function DepartmentSecretsAdminPage() {
   const [configItems, setConfigItems] = useState<ConfigItem[]>([])
   const [secrets, setSecrets] = useState<(SecretEntry & { config_item: ConfigItem })[]>([])
   const [metadata, setMetadata] = useState<(SecretMetadata & { config_item: ConfigItem })[]>([])
@@ -245,10 +265,34 @@ export default function DepartmentSecretsPage() {
     })
   }
 
-  const toggleDeptSelection = (deptId: string) => {
-    setSelectedDeptIds(prev =>
-      prev.includes(deptId) ? prev.filter(id => id !== deptId) : [...prev, deptId]
-    )
+  // All department ids in a node's subtree (the node itself + every descendant
+  // department; org wrappers are skipped since they aren't selectable).
+  const collectDeptSubtreeIds = (node: TreeNode): string[] => {
+    const ids: string[] = []
+    const walk = (n: TreeNode) => {
+      if (n.kind === 'dept') ids.push(n.id)
+      n.children?.forEach(walk)
+    }
+    walk(node)
+    return ids
+  }
+
+  // Toggling a department cascades to its whole subtree: selecting adds the
+  // department and all sub-departments; deselecting removes them all. The user
+  // can still expand and toggle individual sub-departments afterward to
+  // fine-tune the selection.
+  const toggleDeptSelection = (node: TreeNode) => {
+    const subtreeIds = collectDeptSubtreeIds(node)
+    setSelectedDeptIds(prev => {
+      const isSelected = prev.includes(node.id)
+      if (isSelected) {
+        const remove = new Set(subtreeIds)
+        return prev.filter(id => !remove.has(id))
+      }
+      const next = new Set(prev)
+      subtreeIds.forEach(id => next.add(id))
+      return [...next]
+    })
   }
 
   const renderTree = (nodes: TreeNode[], level = 0) => (
@@ -258,6 +302,12 @@ export default function DepartmentSecretsPage() {
         const isExpanded = expandedDepts.has(node.id)
         const isSelected = selectedDeptIds.includes(node.id)
         const isOrg = node.kind === 'org'
+        // A department is "partially" selected when it isn't itself selected but
+        // some of its descendants are — surfaced as an indeterminate checkbox so
+        // the cascade state is legible when the user has drilled in.
+        const subtreeIds = !isOrg ? collectDeptSubtreeIds(node) : []
+        const someDescendantSelected = subtreeIds.some(id => selectedDeptIds.includes(id))
+        const isPartial = !isSelected && someDescendantSelected
         return (
           <li key={node.id}>
             <div
@@ -269,11 +319,22 @@ export default function DepartmentSecretsPage() {
               style={{ paddingLeft: `${level * 16 + 8}px` }}
             >
               {!isOrg && (
-                <Checkbox
-                  checked={isSelected}
-                  onCheckedChange={() => toggleDeptSelection(node.id)}
-                  className="shrink-0"
-                />
+                isPartial ? (
+                  <button
+                    type="button"
+                    aria-label="部分选中，点击全选"
+                    onClick={() => toggleDeptSelection(node)}
+                    className="shrink-0 flex size-4 items-center justify-center rounded-[4px] border border-primary bg-primary/20 text-primary"
+                  >
+                    <Minus className="size-3" />
+                  </button>
+                ) : (
+                  <Checkbox
+                    checked={isSelected}
+                    onCheckedChange={() => toggleDeptSelection(node)}
+                    className="shrink-0"
+                  />
+                )
               )}
               <button
                 onClick={() => {

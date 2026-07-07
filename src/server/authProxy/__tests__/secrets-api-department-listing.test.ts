@@ -113,3 +113,133 @@ describe('handleSecretsRequest GET /secrets — department listing', () => {
     expect(namespaces).toEqual([])
   })
 })
+
+// Per-department credential values: the store may hold both a legacy org-wide
+// value (`role:{pinyin}`) and per-department values (`role:@{deptId}:{pinyin}`).
+// A non-admin sees their own department's per-dept value (which shadows the
+// legacy one for the same pinyin) plus legacy values for pinyins where they have
+// no per-dept value; a per-dept value for another department is hidden.
+function makeNexusPerDept() {
+  const roleSubject = secretSubject(`${ORG_PREFIX}role:`, 'ignored-user')
+  return {
+    async listSecrets(_namespace: string | undefined, subject?: string) {
+      if (subject === roleSubject) {
+        return [
+          // deptalpha: legacy org default + a value specific to dept-x.
+          { namespace: `${ORG_PREFIX}role:deptalpha`, key: 'password', value: null, status: 'set', version: 1 },
+          { namespace: `${ORG_PREFIX}role:@dept-x:deptalpha`, key: 'password', value: null, status: 'set', version: 2 },
+          // deptalpha: a value for a different department (must be hidden from dept-x).
+          { namespace: `${ORG_PREFIX}role:@dept-y:deptalpha`, key: 'password', value: null, status: 'set', version: 1 },
+        ]
+      }
+      return []
+    },
+  }
+}
+
+function setupPerDept() {
+  setSecretsApiDependencies(
+    makeNexusPerDept() as never,
+    policyProvider as never,
+    () => CONFIG_ITEMS as never,
+  )
+}
+
+async function listPerDeptFor(context: {
+  userId: string
+  orgId: string
+  departmentId: string | null
+  isAdmin: boolean
+}): Promise<string[]> {
+  setupPerDept()
+  const captured: Captured = { status: 0, body: {} }
+  const req = { method: 'GET' } as IncomingMessage
+  await handleSecretsRequest(req, fakeRes(captured), '/secrets', {} as URL, context)
+  const data = captured.body.data ?? []
+  return data.map(s => s.namespace).filter(ns => ns.includes('role:')).sort()
+}
+
+describe('handleSecretsRequest GET /secrets — per-department values', () => {
+  it("shows a member their own department's value, shadowing the legacy one", async () => {
+    const namespaces = await listPerDeptFor({ userId: 'u', orgId: ORG, departmentId: 'dept-x', isAdmin: false })
+    // deptalpha is authorized; dept-x's per-dept value wins over the legacy one,
+    // and dept-y's value is not visible.
+    expect(namespaces).toEqual([`${ORG_PREFIX}role:@dept-x:deptalpha`])
+  })
+
+  it('falls back to the legacy value for a department with no per-dept value', async () => {
+    const namespaces = await listPerDeptFor({ userId: 'u', orgId: ORG, departmentId: 'dept-z', isAdmin: false })
+    // dept-z has no per-dept deptalpha value, so it inherits the org default.
+    expect(namespaces).toEqual([`${ORG_PREFIX}role:deptalpha`])
+  })
+
+  it('an admin sees every value including all departments’ per-dept ones', async () => {
+    const namespaces = await listPerDeptFor({ userId: 'a', orgId: ORG, departmentId: null, isAdmin: true })
+    expect(namespaces).toEqual([
+      `${ORG_PREFIX}role:@dept-x:deptalpha`,
+      `${ORG_PREFIX}role:@dept-y:deptalpha`,
+      `${ORG_PREFIX}role:deptalpha`,
+    ])
+  })
+})
+
+// Hierarchical inheritance: a sub-department without its own value inherits the
+// NEAREST ancestor department's value (not just the org default). Tree:
+//   sales -> sales-eu (has own value), sales-us (no own value)
+// deptalpha values: legacy org default + a value on `sales`.
+function makeNexusHierarchy() {
+  const roleSubject = secretSubject(`${ORG_PREFIX}role:`, 'ignored-user')
+  return {
+    async listSecrets(_namespace: string | undefined, subject?: string) {
+      if (subject === roleSubject) {
+        return [
+          { namespace: `${ORG_PREFIX}role:deptalpha`, key: 'password', value: null, status: 'set', version: 1 },
+          { namespace: `${ORG_PREFIX}role:@sales:deptalpha`, key: 'password', value: null, status: 'set', version: 2 },
+          { namespace: `${ORG_PREFIX}role:@sales-eu:deptalpha`, key: 'password', value: null, status: 'set', version: 3 },
+        ]
+      }
+      return []
+    },
+  }
+}
+
+// deptId -> ordered chain [self, parent, ...].
+const ANCESTORS: Record<string, string[]> = {
+  sales: ['sales'],
+  'sales-eu': ['sales-eu', 'sales'],
+  'sales-us': ['sales-us', 'sales'],
+  'eng': ['eng'],
+}
+
+async function listHierarchyFor(departmentId: string): Promise<string[]> {
+  setSecretsApiDependencies(
+    makeNexusHierarchy() as never,
+    { getAuthorizedConfigItemIds: () => [1] } as never, // deptalpha authorized
+    () => CONFIG_ITEMS as never,
+    (_orgId, deptId) => ANCESTORS[deptId] ?? [deptId],
+  )
+  const captured: Captured = { status: 0, body: {} }
+  const req = { method: 'GET' } as IncomingMessage
+  await handleSecretsRequest(req, fakeRes(captured), '/secrets', {} as URL, { userId: 'u', orgId: ORG, departmentId, isAdmin: false })
+  const data = captured.body.data ?? []
+  return data.map(s => s.namespace).filter(ns => ns.includes('role:')).sort()
+}
+
+describe('handleSecretsRequest GET /secrets — hierarchical inheritance', () => {
+  it('a sub-dept with its own value uses it', async () => {
+    expect(await listHierarchyFor('sales-eu')).toEqual([`${ORG_PREFIX}role:@sales-eu:deptalpha`])
+  })
+
+  it('a sub-dept WITHOUT its own value inherits the nearest ancestor (parent) value', async () => {
+    // sales-us has no value; its parent `sales` does -> inherit sales', NOT the org default.
+    expect(await listHierarchyFor('sales-us')).toEqual([`${ORG_PREFIX}role:@sales:deptalpha`])
+  })
+
+  it('the department that owns the value uses its own', async () => {
+    expect(await listHierarchyFor('sales')).toEqual([`${ORG_PREFIX}role:@sales:deptalpha`])
+  })
+
+  it('an unrelated dept with no chain value falls back to the org default', async () => {
+    expect(await listHierarchyFor('eng')).toEqual([`${ORG_PREFIX}role:deptalpha`])
+  })
+})

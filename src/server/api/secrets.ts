@@ -7,6 +7,11 @@ import {
   orgScopedNamespace,
   orgNamespacePrefix,
   stripOrgPrefix,
+  deptSecretNamespace,
+  legacyDeptSecretNamespace,
+  namespaceDeptId,
+  deptNamespacePinyin,
+  DEPT_NAMESPACE_MARKER,
 } from '../secrets/secretSubject.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 
@@ -59,8 +64,15 @@ export function createSecretsApi(db: {
   const resolveConfigItemId = (namespace: string, orgId?: string): number | undefined => {
     const base = stripOrgPrefix(namespace)
     const parts = base.split(':')
-    if (parts[0] === 'system' || parts[0] === 'role') {
+    if (parts[0] === 'system') {
       const item = db.getConfigItemByPinyin(parts.slice(1).join(':'), orgId)
+      return item ? (item.id as number) : undefined
+    }
+    if (parts[0] === 'role') {
+      // Handles both legacy `role:{pinyin}` and per-dept `role:@{deptId}:{pinyin}`.
+      const pinyin = deptNamespacePinyin(base)
+      if (!pinyin) return undefined
+      const item = db.getConfigItemByPinyin(pinyin, orgId)
       return item ? (item.id as number) : undefined
     }
     if (parts[0] === 'user' && parts.length >= 3) {
@@ -117,13 +129,88 @@ export function createSecretsApi(db: {
         // Department secrets are org-bound: list only this org's namespace.
         const secrets = await nexus.listSecrets(`${orgNamespacePrefix(orgId)}role`)
         const enriched = secrets.map(s => {
-          const pinyin = stripOrgPrefix(s.namespace).replace('role:', '')
-          return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
+          // Handles both legacy `role:{pinyin}` and per-dept
+          // `role:@{deptId}:{pinyin}`; surface the deptId when present so the
+          // admin UI can group values by department.
+          const pinyin = deptNamespacePinyin(s.namespace) ?? stripOrgPrefix(s.namespace).replace('role:', '')
+          const deptId = namespaceDeptId(s.namespace)
+          return { ...s, enabled: s.status === 'enabled', department_id: deptId, config_item: { pinyin } }
         })
         return { success: true, data: enriched }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
       }
+    },
+
+    /**
+     * List a specific department's secret values (per-dept namespace only).
+     * Used by the department-credentials editor so a dept_admin sees the values
+     * they set for a department in their subtree.
+     */
+    async listDepartmentSecretsForDept(orgId: string, userId: string, deptId: string) {
+      try {
+        // Prefix WITHOUT a trailing colon: nexus.listSecrets matches
+        // `namespace = prefix OR namespace LIKE prefix:%`, so `role:@{deptId}`
+        // catches every `role:@{deptId}:{pinyin}` value for this department.
+        const prefix = orgScopedNamespace(`role:${DEPT_NAMESPACE_MARKER}${deptId}`, orgId)
+        const secrets = await nexus.listSecrets(prefix)
+        const enriched = secrets.map(s => {
+          const pinyin = deptNamespacePinyin(s.namespace) ?? ''
+          return { ...s, enabled: s.status === 'enabled', department_id: deptId, config_item: { pinyin } }
+        })
+        return { success: true, data: enriched }
+      } catch {
+        return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
+      }
+    },
+
+    /**
+     * Get a department credential value with hierarchical resolution: the
+     * department's own value, then each ancestor in `ancestorChain` (self-first,
+     * so the nearest ancestor with a value wins), then the legacy org-wide
+     * default. The response marks the source so the editor can show "own value"
+     * vs "inherited from {deptId}" vs "org default".
+     *
+     * `ancestorChain` defaults to `[deptId]` (own only) when not supplied, so a
+     * caller without the department tree still gets own-then-org-default.
+     */
+    async getDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, ip?: string, ancestorChain?: string[]) {
+      try {
+        const chain = ancestorChain && ancestorChain.length > 0 ? ancestorChain : [deptId]
+        for (const chainDeptId of chain) {
+          const ns = orgScopedNamespace(deptSecretNamespace(chainDeptId, pinyin), orgId)
+          const found = await nexus.getSecret(ns, key, secretSubject(ns, userId)).catch(() => null)
+          if (found) {
+            if (chainDeptId === deptId) {
+              writeAudit(userId, undefined, 'read', resolveConfigItemId(ns, orgId), ns, key, undefined, ip, orgId)
+              return { success: true, data: { ...found, source: 'own' as const } }
+            }
+            // Inherited from an ancestor department.
+            return { success: true, data: { ...found, source: 'inherited' as const, inherited_from: chainDeptId } }
+          }
+        }
+        // Fallback to the legacy org-wide value.
+        const legacyNs = orgScopedNamespace(legacyDeptSecretNamespace(pinyin), orgId)
+        const legacy = await nexus.getSecret(legacyNs, key, secretSubject(legacyNs, userId)).catch(() => null)
+        if (legacy) {
+          return { success: true, data: { ...legacy, is_org_default: true, source: 'org_default' as const } }
+        }
+        return { success: false, error: { code: 'not_found', message: '凭据不存在' } }
+      } catch {
+        return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
+      }
+    },
+
+    /** Set a department credential value specific to one department. */
+    async putDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, value: string, ip?: string) {
+      const ns = deptSecretNamespace(deptId, pinyin)
+      return api.putSecret(orgId, userId, ns, key, value, undefined, ip)
+    },
+
+    /** Delete a department's per-dept credential value (does not touch the org default). */
+    async deleteDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, ip?: string) {
+      const ns = deptSecretNamespace(deptId, pinyin)
+      return api.deleteSecret(orgId, userId, ns, key, ip)
     },
 
     async getSecret(orgId: string, userId: string, namespace: string, key: string, ip?: string) {
