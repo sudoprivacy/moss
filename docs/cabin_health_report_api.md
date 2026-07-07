@@ -80,25 +80,19 @@ POST /v1/health-reports/start
 | `started_at` | number | 开始采集时间，Unix 毫秒时间戳。 |
 | `estimated_completed_at` | number | 预计采集完成时间，Unix 毫秒时间戳。 |
 
-### 重复点击响应
+### 重复开始说明
 
-同一个座位同一时间只允许一个正在采集或生成中的报告。如果 Pad 重复点击开始，服务端返回当前已有报告：
+服务端不判断 Pad 是首次检测、关闭页面后重新打开，还是用户主动重新检测。只要 Pad 调用本接口，就表示开始一次新的检测。
 
-```json
-{
-  "status": "ok",
-  "report_id": "hr_4f8f7f2c8b1a",
-  "report_status": "collecting",
-  "collect_duration_seconds": 30,
-  "started_at": 1783420000000,
-  "estimated_completed_at": 1783420030000,
-  "deduplicated": true
-}
+同一个座位如果已有未完成的 `collecting` 或 `generating` 报告，Moss 会自动把旧报告标记为 `cancelled`，然后创建新的 `report_id` 并重新采集 30 秒数据。
+
+也就是说：
+
+```text
+每次 POST /v1/health-reports/start 都会返回新的 report_id。
+同一座位以最后一次 start 为准。
+旧的未完成报告不再继续接收 WS 样本，也不会生成 completed 报告。
 ```
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `deduplicated` | boolean | 为 `true` 表示没有创建新报告，而是返回了当前座位已有的采集任务。 |
 
 ## 4. 获取检测报告
 
@@ -252,6 +246,22 @@ Pad 建议在 `collecting` 或 `generating` 状态下每 1-2 秒轮询一次。
 }
 ```
 
+### 已取消响应
+
+如果 Pad 查询的旧报告已被同座位的新检测覆盖，返回：
+
+```json
+{
+  "status": "ok",
+  "report_id": "hr_old",
+  "report_status": "cancelled",
+  "seat_no": "B",
+  "error_code": "SUPERSEDED_BY_NEW_REPORT",
+  "error_message": "已开始新的检测，本次检测已取消。",
+  "sample_count": 8
+}
+```
+
 ## 5. 报告字段说明
 
 ### 顶层字段
@@ -333,6 +343,7 @@ Pad 渲染建议：
 | `generating` | 采集已结束，正在计算并生成报告。 |
 | `completed` | 报告已生成，可渲染完整页面。 |
 | `failed` | 报告生成失败，查看 `error_code` 和 `error_message`。 |
+| `cancelled` | 同座位发起了新的检测，本报告已取消。 |
 | `expired` | 报告已过期，预留状态。 |
 
 ### `metrics.*.level`
@@ -392,6 +403,7 @@ Pad 渲染建议：
 | error_code | 说明 |
 | --- | --- |
 | `INSUFFICIENT_SAMPLES` | 30 秒内没有采集到足够有效样本。 |
+| `SUPERSEDED_BY_NEW_REPORT` | 同座位发起了新的检测，旧报告被取消。 |
 | `REPORT_GENERATION_FAILED` | 报告生成过程异常。 |
 | `WS_NOT_CONFIGURED` | 服务端未配置 WS 数据源。 |
 
@@ -430,7 +442,53 @@ Moss 只会采集当前处于 `collecting` 状态的座位数据。
 
 如果 A 座和 B 座同时检测，Moss 会根据 `seatNo` 分别写入各自的 `report_id`。
 
-## 10. 调用示例
+## 10. 日志记录与排查
+
+Moss 会为生理检测报告记录完整链路日志，便于 Pad 端、Moss 服务端和外部 WS 数据源一起排查问题。
+
+建议联调时同时记录并传递以下关键字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `request_id` | Moss 为每次 HTTP 请求生成的请求 ID。接口响应头中可返回，日志中也会记录。 |
+| `report_id` | 本次报告 ID，是排查单次检测问题的主键。 |
+| `previous_report_id` | 新检测取消旧检测时，旧报告 ID。 |
+| `tablet_id` | Pad 设备 ID，对应请求头 `X-Cabin-Tablet-Id`。 |
+| `seat_no` | 座位号，用于匹配 WS `telemetry.health` 数据。 |
+| `flight_id` / `flight_date` | 航班上下文。 |
+| `report_status` | 当前报告状态。 |
+| `sample_count` | 当前报告已接收的有效样本数。 |
+| `ignored_reason` | WS 样本被忽略的原因。 |
+| `elapsed_ms` | 模型调用、报告生成等步骤耗时。 |
+
+主要日志事件：
+
+| 事件 | 触发时机 | 关键内容 |
+| --- | --- | --- |
+| `health_report.start` | Pad 调用开始接口并创建新报告 | `request_id`、`report_id`、`tablet_id`、`seat_no`、采集时长、预计完成时间 |
+| `health_report.cancel_previous` | 新 start 取消同座位旧报告 | `previous_report_id`、新 `report_id`、旧状态、旧 `sample_count`、`SUPERSEDED_BY_NEW_REPORT` |
+| `health_report.sample.accepted` | WS health 样本进入当前报告 | `report_id`、`seat_no`、`sample_count`、包含哪些指标 |
+| `health_report.sample.ignored` | WS health 样本被忽略 | `seat_no`、`ignored_reason`、topic、是否存在 active report |
+| `health_report.finalize.start` | 30 秒采集结束，开始聚合 | `report_id`、`sample_count` |
+| `health_report.finalize.completed` | 报告生成完成 | `report_id`、四项指标等级、score、是否使用模型 fallback |
+| `health_report.finalize.failed` | 报告生成失败 | `report_id`、`error_code`、错误信息 |
+| `health_report.model.request` | 请求模型生成报告文案 | `report_id`、model、输入指标摘要 |
+| `health_report.model.response` | 模型返回 | `report_id`、耗时、JSON 是否有效 |
+| `health_report.model.fallback` | 模型不可用或返回非法 JSON | `report_id`、fallback 原因 |
+
+常见 `ignored_reason`：
+
+| 值 | 说明 |
+| --- | --- |
+| `no_active_report` | 当前座位没有正在采集的报告。 |
+| `seat_mismatch` | WS 样本座位号和当前报告座位号不一致。 |
+| `invalid_topic` | WS 消息不是 `telemetry.health`。 |
+| `invalid_metric` | 指标值缺失或超出有效范围。 |
+| `report_not_collecting` | 报告已完成、失败或取消，不再接收样本。 |
+
+日志默认不高频记录每一条原始生理数值，避免日志过大。建议记录样本计数、指标是否存在、被忽略原因；如现场需要深度排查，可临时打开 debug 日志记录原始样本。
+
+## 11. 调用示例
 
 ### 开始检测
 

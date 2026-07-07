@@ -119,23 +119,9 @@ Successful response:
 }
 ```
 
-Duplicate collection for the same seat:
+Every start request creates a new report. If the same seat already has an unfinished `collecting` or `generating` report, Moss marks the old report as `cancelled` with `error_code=SUPERSEDED_BY_NEW_REPORT`, removes it from the active collection map, and only the new report receives subsequent WS samples.
 
-Recommended behavior: return the existing active report rather than creating a second one.
-
-```json
-{
-  "status": "ok",
-  "report_id": "hr_existing",
-  "report_status": "collecting",
-  "collect_duration_seconds": 30,
-  "started_at": 1783420000000,
-  "estimated_completed_at": 1783420030000,
-  "deduplicated": true
-}
-```
-
-Rationale: repeated Pad taps should not create competing 30 second windows for the same seat. Returning the active report is friendlier than `409` and easier for Pad retry logic.
+Rationale: the server does not need to infer whether the Pad is recovering a closed page or starting over. `POST /v1/health-reports/start` always means "begin a new collection window", and the newest report wins for that seat.
 
 ### 6.2 Get Health Report
 
@@ -276,11 +262,21 @@ Failed response:
 }
 ```
 
-### 6.3 Optional: Get Latest Health Report
+Cancelled response:
 
-`GET /v1/health-reports/latest`
+```json
+{
+  "status": "ok",
+  "report_id": "hr_old",
+  "report_status": "cancelled",
+  "seat_no": "B",
+  "error_code": "SUPERSEDED_BY_NEW_REPORT",
+  "error_message": "已开始新的检测，本次检测已取消。",
+  "sample_count": 8
+}
+```
 
-Returns the latest report for the authenticated seat. This is optional for v1, but useful if Pad loses the `report_id` after page refresh.
+There is no `latest` API in v1. Pad should keep and poll the `report_id` returned by each start call. If Pad starts again, it receives a new `report_id`.
 
 ## 7. Enums
 
@@ -291,6 +287,7 @@ collecting
 generating
 completed
 failed
+cancelled
 expired
 ```
 
@@ -300,6 +297,7 @@ Meanings:
 - `generating`: sample window closed; averages are computed; model text is being generated.
 - `completed`: final report is available.
 - `failed`: collection or report generation failed.
+- `cancelled`: a newer start request for the same seat superseded this report.
 - `expired`: reserved for future retention rules.
 
 ### 7.2 Metric Level
@@ -420,6 +418,7 @@ CREATE TABLE IF NOT EXISTS cabin_health_reports (
   summary_json TEXT,
   error_code TEXT,
   error_message TEXT,
+  cancelled_at INTEGER,
   started_at INTEGER NOT NULL,
   collect_until INTEGER NOT NULL,
   generated_at INTEGER,
@@ -459,11 +458,10 @@ Add a focused service:
 
 Responsibilities:
 
-- `startReport(context, options)`: create or return active report for seat.
+- `startReport(context, options)`: cancel unfinished reports for the seat, then create a new active report.
 - `handleTelemetry(envelope)`: parse WS `telemetry.health`, route sample to active report by `seatNo`.
 - `finalizeReport(reportId)`: compute averages, levels, score, model text, and persist report.
 - `getReport(reportId, context)`: enforce Pad access control and return API payload.
-- `getLatestReport(context)`: optional helper for latest report API.
 
 The service should own the in-memory active map:
 
@@ -489,7 +487,8 @@ Routing rule:
 Concurrency rule:
 
 - One active `collecting` or `generating` report per `(flight_id, flight_date, seat_no)`.
-- Start API returns the existing active report when duplicate start arrives.
+- A new start request cancels any unfinished report for that seat before creating the new report.
+- Cancelled reports stay queryable by `report_id`, but they no longer receive WS samples or generate a final report.
 
 ## 12. WS Integration
 
@@ -612,7 +611,7 @@ Use existing `CabinLogger` style.
 Log events:
 
 - `health_report.start`
-- `health_report.duplicate`
+- `health_report.cancel_previous`
 - `health_report.sample.accepted`
 - `health_report.sample.ignored`
 - `health_report.finalize.start`
@@ -622,7 +621,36 @@ Log events:
 - `health_report.model.response`
 - `health_report.model.fallback`
 
-Avoid logging sensitive passenger medical-like data at high volume. For sample logs, include counters and metric presence, not every raw value, unless debug mode is enabled.
+Common log fields:
+
+| Field | Description |
+| --- | --- |
+| `request_id` | HTTP request id for Pad API calls, or generated WS/finalize id for background work. |
+| `report_id` | Health report id. This is the primary correlation key for Pad-side troubleshooting. |
+| `previous_report_id` | Old report id when a new start cancels an unfinished report. |
+| `tablet_id` | Pad tablet id from request headers. |
+| `seat_no` | Seat number used for WS sample routing. |
+| `flight_id` / `flight_date` | Flight scope resolved from cabin context. |
+| `report_status` | Report status after the event. |
+| `sample_count` | Number of accepted samples currently attached to the report. |
+| `ignored_reason` | Why a WS sample was ignored, such as `no_active_report`, `seat_mismatch`, `invalid_topic`, `invalid_metric`, or `report_not_collecting`. |
+| `elapsed_ms` | Upstream/model/finalization duration where relevant. |
+| `model` | LLM model used for report text generation. |
+
+Event details:
+
+- `health_report.start`: log every Pad start request, including newly created `report_id`, seat, tablet, flight, collection duration, and estimated completion.
+- `health_report.cancel_previous`: log when a new start cancels an unfinished report for the same seat, including `previous_report_id`, new `report_id`, old status, old sample count, and `error_code=SUPERSEDED_BY_NEW_REPORT`.
+- `health_report.sample.accepted`: log accepted WS samples at a throttled cadence, for example first sample and every 10th sample, with metric presence flags and `sample_count`.
+- `health_report.sample.ignored`: log ignored WS samples with `ignored_reason`; throttle repeated noisy reasons by seat/topic.
+- `health_report.finalize.start`: log when the 30 second timer closes and final aggregation begins.
+- `health_report.finalize.completed`: log final sample count, metric levels, score, and whether model text came from LLM or fallback.
+- `health_report.finalize.failed`: log failure reason and error code.
+- `health_report.model.request`: log model request metadata, not raw prompt if it contains passenger-sensitive context.
+- `health_report.model.response`: log model status, elapsed time, and whether returned JSON was valid.
+- `health_report.model.fallback`: log when deterministic template text is used.
+
+Avoid logging high-volume raw physiological values by default. For sample logs, include counters and metric presence, not every raw value, unless an explicit debug mode is enabled for onsite troubleshooting.
 
 ## 17. Configuration
 
@@ -661,7 +689,9 @@ Unit tests:
 - Ignores non-health telemetry.
 - Ignores health telemetry for seats without active reports.
 - Routes simultaneous seat A and seat B samples to separate reports.
-- Duplicate start for same seat returns existing report.
+- New start for same seat cancels the previous unfinished report and creates a new report.
+- Cancelled reports no longer receive samples.
+- Cancelled reports remain queryable by `report_id`.
 - Computes averages and rounds correctly.
 - Classifies boundary values correctly.
 - Produces `missing` for absent metrics.
@@ -699,7 +729,7 @@ Resolved:
 - Start API returns immediately with `report_id`.
 - Pad polls a get API for final report.
 - Concurrent users are separated by WS `seatNo`.
-- Same seat can have only one active report at a time.
+- Same seat can have only one active report at a time; new start cancels old unfinished report.
 - Report response uses English field names and stable enums.
 - Score uses the v1 soft-penalty algorithm.
 
