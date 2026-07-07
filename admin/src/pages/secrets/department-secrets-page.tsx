@@ -16,7 +16,7 @@ import { toast } from 'sonner'
 import { Link } from 'react-router-dom'
 import {
   Shield, Eye, EyeOff, Loader2, AlertTriangle, Clock, ExternalLink, Ban, CheckCircle,
-  ChevronRight, ChevronDown, FolderTree,
+  ChevronRight, ChevronDown, FolderTree, Minus,
 } from 'lucide-react'
 import {
   getDepartmentSecrets, getSecretMetadata, getConfigItems, putSecret,
@@ -265,10 +265,34 @@ function DepartmentSecretsAdminPage() {
     })
   }
 
-  const toggleDeptSelection = (deptId: string) => {
-    setSelectedDeptIds(prev =>
-      prev.includes(deptId) ? prev.filter(id => id !== deptId) : [...prev, deptId]
-    )
+  // All department ids in a node's subtree (the node itself + every descendant
+  // department; org wrappers are skipped since they aren't selectable).
+  const collectDeptSubtreeIds = (node: TreeNode): string[] => {
+    const ids: string[] = []
+    const walk = (n: TreeNode) => {
+      if (n.kind === 'dept') ids.push(n.id)
+      n.children?.forEach(walk)
+    }
+    walk(node)
+    return ids
+  }
+
+  // Toggling a department cascades to its whole subtree: selecting adds the
+  // department and all sub-departments; deselecting removes them all. The user
+  // can still expand and toggle individual sub-departments afterward to
+  // fine-tune the selection.
+  const toggleDeptSelection = (node: TreeNode) => {
+    const subtreeIds = collectDeptSubtreeIds(node)
+    setSelectedDeptIds(prev => {
+      const isSelected = prev.includes(node.id)
+      if (isSelected) {
+        const remove = new Set(subtreeIds)
+        return prev.filter(id => !remove.has(id))
+      }
+      const next = new Set(prev)
+      subtreeIds.forEach(id => next.add(id))
+      return [...next]
+    })
   }
 
   const renderTree = (nodes: TreeNode[], level = 0) => (
@@ -278,6 +302,12 @@ function DepartmentSecretsAdminPage() {
         const isExpanded = expandedDepts.has(node.id)
         const isSelected = selectedDeptIds.includes(node.id)
         const isOrg = node.kind === 'org'
+        // A department is "partially" selected when it isn't itself selected but
+        // some of its descendants are — surfaced as an indeterminate checkbox so
+        // the cascade state is legible when the user has drilled in.
+        const subtreeIds = !isOrg ? collectDeptSubtreeIds(node) : []
+        const someDescendantSelected = subtreeIds.some(id => selectedDeptIds.includes(id))
+        const isPartial = !isSelected && someDescendantSelected
         return (
           <li key={node.id}>
             <div
@@ -289,11 +319,22 @@ function DepartmentSecretsAdminPage() {
               style={{ paddingLeft: `${level * 16 + 8}px` }}
             >
               {!isOrg && (
-                <Checkbox
-                  checked={isSelected}
-                  onCheckedChange={() => toggleDeptSelection(node.id)}
-                  className="shrink-0"
-                />
+                isPartial ? (
+                  <button
+                    type="button"
+                    aria-label="部分选中，点击全选"
+                    onClick={() => toggleDeptSelection(node)}
+                    className="shrink-0 flex size-4 items-center justify-center rounded-[4px] border border-primary bg-primary/20 text-primary"
+                  >
+                    <Minus className="size-3" />
+                  </button>
+                ) : (
+                  <Checkbox
+                    checked={isSelected}
+                    onCheckedChange={() => toggleDeptSelection(node)}
+                    className="shrink-0"
+                  />
+                )
               )}
               <button
                 onClick={() => {
