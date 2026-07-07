@@ -99,10 +99,10 @@ type ThemePresetButtonProps = {
 };
 
 const DEFAULT_IMAGE_SETTINGS: DesktopSettings['image'] = {
-  provider: 'minimax',
+  provider: 'openai',
   url: '',
   apiKey: '',
-  model: '',
+  model: 'gpt-image-1',
 };
 
 const SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
@@ -903,10 +903,11 @@ export function SettingsView({
                       >
                         <select
                           className={SELECT_CLASS_NAME}
-                          value={imageDraft.provider ?? 'minimax'}
+                          value={imageDraft.provider ?? 'openai'}
                           onChange={(event) => updateImageSettings({ provider: event.target.value })}
                         >
-                          <option value="minimax">MiniMax</option>
+                          <option value="openai">OpenAI</option>
+                          <option value="google">Google (Gemini)</option>
                         </select>
                       </SettingsRow>
 
@@ -918,7 +919,7 @@ export function SettingsView({
                           className={FIELD_CLASS_NAME}
                           value={imageDraft.url || ''}
                           onChange={(event) => updateImageSettings({ url: event.target.value })}
-                          placeholder="https://api.minimaxi.com/v1/image_generation"
+                          placeholder="https://hk.sudorouter.ai/v1"
                         />
                       </SettingsRow>
 
@@ -955,7 +956,7 @@ export function SettingsView({
                           className={FIELD_CLASS_NAME}
                           value={imageDraft.model || ''}
                           onChange={(event) => updateImageSettings({ model: event.target.value })}
-                          placeholder="image-01"
+                          placeholder="gpt-image-1"
                         />
                       </SettingsRow>
                     </SettingsGroup>

@@ -29,19 +29,23 @@ async function generateImageWithProvider({
   url,
   model,
 }) {
-  const normalizedProvider = typeof provider === 'string' ? provider.trim().toLowerCase() : 'minimax'
+  const normalizedProvider = typeof provider === 'string' ? provider.trim().toLowerCase() : 'openai'
   const normalizedApiKey = typeof apiKey === 'string' ? apiKey.trim() : ''
   const normalizedUrl = typeof url === 'string' ? url.trim() : ''
   const normalizedModel = typeof model === 'string' ? model.trim() : ''
 
-  if (normalizedProvider === 'minimax') {
-    return generateMinimaxImage({ prompt, aspect_ratio, subject_reference, apiKey: normalizedApiKey, url: normalizedUrl, model: normalizedModel })
+  if (normalizedProvider === 'openai') {
+    return generateOpenAiImage({ prompt, apiKey: normalizedApiKey, url: normalizedUrl, model: normalizedModel })
+  }
+
+  if (normalizedProvider === 'google') {
+    return generateGeminiImage({ prompt, apiKey: normalizedApiKey, url: normalizedUrl, model: normalizedModel })
   }
 
   throw new Error(`Unsupported image provider: ${provider}`)
 }
 
-async function generateMinimaxImage({ prompt, aspect_ratio, subject_reference, apiKey, url, model }) {
+function assertImageConfig({ apiKey, url, model }) {
   if (!model) {
     throw new Error('Image model is not configured in desktop settings (image.model)')
   }
@@ -51,8 +55,16 @@ async function generateMinimaxImage({ prompt, aspect_ratio, subject_reference, a
   if (!url) {
     throw new Error('Image URL is not configured in desktop settings (image.url)')
   }
+}
 
-  const response = await fetch(url, {
+// OpenAI-compatible image generation (gpt-image-1, gpt-image-2, ...).
+// `url` is the OpenAI base (e.g. https://hk.sudorouter.ai/v1); we POST to
+// `${base}/images/generations` and read base64 from data[].b64_json.
+async function generateOpenAiImage({ prompt, apiKey, url, model }) {
+  assertImageConfig({ apiKey, url, model })
+
+  const endpoint = `${url.replace(/\/+$/, '')}/images/generations`
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -61,9 +73,7 @@ async function generateMinimaxImage({ prompt, aspect_ratio, subject_reference, a
     body: JSON.stringify({
       model,
       prompt,
-      aspect_ratio: aspect_ratio || '1:1',
-      subject_reference,
-      response_format: 'base64',
+      n: 1,
     }),
   })
 
@@ -73,9 +83,55 @@ async function generateMinimaxImage({ prompt, aspect_ratio, subject_reference, a
   }
 
   const payload = await response.json()
-  const images = Array.isArray(payload?.data?.image_base64)
-    ? payload.data.image_base64
+  const images = Array.isArray(payload?.data)
+    ? payload.data.map((item) => item?.b64_json).filter((b64) => typeof b64 === 'string' && b64.length > 0)
     : []
+  if (images.length === 0) {
+    throw new Error('Image generation returned no images')
+  }
+
+  return images
+}
+
+// Google Gemini image models (gemini-*-image) are served through the
+// chat/completions endpoint and return the image as a markdown data-URI
+// embedded in choices[0].message.content, e.g.
+//   ![image](data:image/png;base64,<...>)
+async function generateGeminiImage({ prompt, apiKey, url, model }) {
+  assertImageConfig({ apiKey, url, model })
+
+  const endpoint = `${url.replace(/\/+$/, '')}/chat/completions`
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: 'user',
+          content: `Generate an image: ${prompt}`,
+        },
+      ],
+    }),
+  })
+
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Image generation failed: ${response.status} ${detail}`)
+  }
+
+  const payload = await response.json()
+  const content = payload?.choices?.[0]?.message?.content
+  const text = typeof content === 'string' ? content : ''
+  const images = []
+  const dataUriRegex = /data:image\/[^;]+;base64,([A-Za-z0-9+/=]+)/g
+  let match
+  while ((match = dataUriRegex.exec(text)) !== null) {
+    if (match[1]) images.push(match[1])
+  }
   if (images.length === 0) {
     throw new Error('Image generation returned no images')
   }
@@ -1135,7 +1191,7 @@ export function createMossAppEventHandler(windows, events, options = {}) {
           const imageProvider =
             typeof imageSettings.provider === 'string'
               ? imageSettings.provider.trim()
-              : 'minimax'
+              : 'openai'
 
           const images = await generateImageWithProvider({
             provider: imageProvider,
