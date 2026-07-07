@@ -568,6 +568,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             cache_read_input_tokens: rawUsage.cachedReadTokens || 0,
             cache_creation_input_tokens: rawUsage.cachedWriteTokens || 0,
           }
+          const usageHasTokens =
+            usage.input_tokens > 0 ||
+            usage.output_tokens > 0 ||
+            usage.cache_read_input_tokens > 0 ||
+            usage.cache_creation_input_tokens > 0
           const assistantUuid = randomUUID()
 
           if (currentAssistantText && !currentTurnUsedSendUserMessage) {
@@ -589,6 +594,32 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               },
             }
             void writeTranscript(assistantEvent)
+            lastPersistedUuid = assistantUuid
+          } else if (usageHasTokens) {
+            // The turn reported token usage but produced no assistant text event
+            // to attach it to (e.g. a turn that ended via SendUserMessage, whose
+            // assistant event was already emitted without usage). Persist a
+            // usage-only assistant event so these tokens are not dropped from
+            // budget stats. It carries no visible text, so it does not affect
+            // the rendered transcript.
+            const usageEvent = {
+              type: 'assistant',
+              sessionId,
+              uuid: assistantUuid,
+              parentUuid: lastPersistedUuid,
+              isSidechain: false,
+              timestamp: new Date().toISOString(),
+              cwd,
+              userType: 'external',
+              version: 'unknown',
+              message: {
+                role: 'assistant',
+                content: [],
+                usage,
+                model,
+              },
+            }
+            void writeTranscript(usageEvent)
             lastPersistedUuid = assistantUuid
           }
 

@@ -300,7 +300,6 @@ export interface SessionUsage {
   cacheReadInputTokens: number
   cacheCreationInputTokens: number
   totalTokens: number
-  costUSD: number
   webSearchRequests: number
   assistantMessageCount: number
   filesRead: number
@@ -428,7 +427,6 @@ export interface BudgetUsageTotals {
   cacheReadInputTokens: number
   cacheCreationInputTokens: number
   totalTokens: number
-  costUSD: number
 }
 
 export interface BudgetUserStats extends BudgetUsageTotals {

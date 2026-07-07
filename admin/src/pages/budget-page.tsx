@@ -52,7 +52,6 @@ import {
   Search,
   TrendingUp,
   Users,
-  Wallet,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -72,7 +71,6 @@ type BudgetDisplayDept = {
   cacheReadInputTokens: number
   cacheCreationInputTokens: number
   totalTokens: number
-  costUSD: number
 }
 
 type BudgetDisplayUser = BudgetStatsResponse['users'][number] & {
@@ -112,13 +110,6 @@ const compactNumberFormatter = new Intl.NumberFormat('zh-CN', {
   notation: 'compact',
   maximumFractionDigits: 1,
 })
-const usdFormatter = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-})
-
 function formatTokens(value: number): string {
   return numberFormatter.format(Math.round(value))
 }
@@ -128,19 +119,6 @@ function formatCompactTokens(value: number): string {
     return '0'
   }
   return compactNumberFormatter.format(Math.round(value))
-}
-
-function formatCostUSD(value: number): string {
-  if (value == null) {
-    return usdFormatter.format(0)
-  }
-  if (value === 0) {
-    return usdFormatter.format(0)
-  }
-  if (value < 0.01) {
-    return `$${value.toFixed(4)}`
-  }
-  return usdFormatter.format(value)
 }
 
 function formatTimestamp(value: number | null): string {
@@ -179,8 +157,8 @@ function formatBucketRange(
 function BudgetSkeleton() {
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {[...Array(4)].map((_, index) => (
+      <div className="grid gap-4 md:grid-cols-3">
+        {[...Array(3)].map((_, index) => (
           <Card key={index}>
             <CardHeader>
               <Skeleton className="h-4 w-24" />
@@ -334,7 +312,6 @@ export default function BudgetPage() {
           cacheReadInputTokens: 0,
           cacheCreationInputTokens: 0,
           totalTokens: 0,
-          costUSD: 0,
         })
       }
 
@@ -347,7 +324,6 @@ export default function BudgetPage() {
       entry.cacheReadInputTokens += userStat.cacheReadInputTokens
       entry.cacheCreationInputTokens += userStat.cacheCreationInputTokens
       entry.totalTokens += userStat.totalTokens
-      entry.costUSD += userStat.costUSD
     }
 
     return Array.from(deptMap.values())
@@ -484,18 +460,12 @@ export default function BudgetPage() {
       description="按用户分组展示 Token 消耗，并支持按日、周、月查看趋势变化"
     >
       <div className="space-y-6">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-3">
           <StatCard
             title="总 Token 消耗"
             value={formatTokens(budgetStats?.summary.totalTokens ?? 0)}
             description="当前统计范围内全部用户累计 Token"
             icon={Coins}
-          />
-          <StatCard
-            title="累计费用"
-            value={formatCostUSD(budgetStats?.summary.costUSD ?? 0)}
-            description="根据模型计费口径估算"
-            icon={Wallet}
           />
           <StatCard
             title="覆盖用户数"
@@ -652,7 +622,6 @@ export default function BudgetPage() {
                     <TableHead className="text-right">输出</TableHead>
                     <TableHead className="text-right">缓存命中</TableHead>
                     <TableHead className="text-right">缓存写入</TableHead>
-                    <TableHead className="text-right">费用</TableHead>
                     <TableHead className="text-right">会话数</TableHead>
                     <TableHead className="text-right">最近活跃</TableHead>
                   </TableRow>
@@ -683,9 +652,6 @@ export default function BudgetPage() {
                       <TableCell className="text-right">
                         {formatTokens(user.cacheCreationInputTokens)}
                       </TableCell>
-                      <TableCell className="text-right">
-                        {formatCostUSD(user.costUSD)}
-                      </TableCell>
                       <TableCell className="text-right">{user.sessionCount}</TableCell>
                       <TableCell className="text-right">
                         {formatTimestamp(user.lastActiveAt)}
@@ -695,7 +661,7 @@ export default function BudgetPage() {
                   {displayUsers.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={9}
+                        colSpan={8}
                         className="py-10 text-center text-muted-foreground"
                       >
                         当前没有匹配的用户预算数据
@@ -807,7 +773,6 @@ export default function BudgetPage() {
                     <TableHead className="text-right">输出</TableHead>
                     <TableHead className="text-right">缓存命中</TableHead>
                     <TableHead className="text-right">缓存写入</TableHead>
-                    <TableHead className="text-right">费用</TableHead>
                     <TableHead className="text-right">用户数</TableHead>
                     <TableHead className="text-right">会话数</TableHead>
                   </TableRow>
@@ -821,14 +786,13 @@ export default function BudgetPage() {
                       <TableCell className="text-right">{formatTokens(dept.outputTokens)}</TableCell>
                       <TableCell className="text-right">{formatTokens(dept.cacheReadInputTokens)}</TableCell>
                       <TableCell className="text-right">{formatTokens(dept.cacheCreationInputTokens)}</TableCell>
-                      <TableCell className="text-right">{formatCostUSD(dept.costUSD)}</TableCell>
                       <TableCell className="text-right">{dept.userCount}</TableCell>
                       <TableCell className="text-right">{dept.sessionCount}</TableCell>
                     </TableRow>
                   ))}
                   {displayDepts.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
+                      <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                         当前没有匹配的部门预算数据
                       </TableCell>
                     </TableRow>
@@ -938,7 +902,6 @@ export default function BudgetPage() {
                     <TableHead className="text-right">输出</TableHead>
                     <TableHead className="text-right">缓存命中</TableHead>
                     <TableHead className="text-right">缓存写入</TableHead>
-                    <TableHead className="text-right">费用</TableHead>
                     <TableHead className="text-right">会话数</TableHead>
                     <TableHead className="text-right">最近活跃</TableHead>
                   </TableRow>
@@ -952,14 +915,13 @@ export default function BudgetPage() {
                       <TableCell className="text-right">{formatTokens(agent.outputTokens)}</TableCell>
                       <TableCell className="text-right">{formatTokens(agent.cacheReadInputTokens)}</TableCell>
                       <TableCell className="text-right">{formatTokens(agent.cacheCreationInputTokens)}</TableCell>
-                      <TableCell className="text-right">{formatCostUSD(agent.costUSD)}</TableCell>
                       <TableCell className="text-right">{agent.sessionCount}</TableCell>
                       <TableCell className="text-right">{formatTimestamp(agent.lastActiveAt)}</TableCell>
                     </TableRow>
                   ))}
                   {displayAgents.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
+                      <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                         当前没有匹配的智能体预算数据
                       </TableCell>
                     </TableRow>

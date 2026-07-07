@@ -474,10 +474,6 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
                   <p className="text-sm text-muted-foreground">总 Token</p>
                   <p className="text-xl font-bold">{usage.totalTokens.toLocaleString()}</p>
                 </div>
-                <div className="p-3 rounded-lg bg-muted/50">
-                  <p className="text-sm text-muted-foreground">费用</p>
-                  <p className="text-xl font-bold">${(usage.costUSD ?? 0).toFixed(4)}</p>
-                </div>
               </div>
 
               <div className="mt-4 pt-4 border-t space-y-2">
