@@ -5,7 +5,6 @@ import pMap from 'p-map'
 import type { Entry, TranscriptMessage } from '../types/logs.js'
 import { errorMessage, isENOENT } from '../utils/errors.js'
 import { readJSONLFile } from '../utils/json.js'
-import { calculateUSDCost } from '../utils/modelCost.js'
 import { SYNTHETIC_MODEL } from '../utils/syntheticModel.js'
 import { isTranscriptMessage } from '../utils/sessionStorage.js'
 import type { SessionRecord } from './types.js'
@@ -28,7 +27,6 @@ export type BudgetUsageTotals = {
   cacheReadInputTokens: number
   cacheCreationInputTokens: number
   totalTokens: number
-  costUSD: number
 }
 
 export type BudgetUserStats = BudgetUsageTotals & {
@@ -90,7 +88,6 @@ function createEmptyUsageTotals(): BudgetUsageTotals {
     cacheReadInputTokens: 0,
     cacheCreationInputTokens: 0,
     totalTokens: 0,
-    costUSD: 0,
   }
 }
 
@@ -103,7 +100,6 @@ function addUsageTotals(
   target.cacheReadInputTokens += delta.cacheReadInputTokens
   target.cacheCreationInputTokens += delta.cacheCreationInputTokens
   target.totalTokens += delta.totalTokens
-  target.costUSD += delta.costUSD
 }
 
 function startOfUtcDay(timestamp: number): number {
@@ -212,24 +208,12 @@ function parseMessageUsage(
     cacheReadInputTokens +
     cacheCreationInputTokens
 
-  // Ensure we pass a normalized usage object to calculation
-  const normalizedUsage = {
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    cache_read_input_tokens: cacheReadInputTokens,
-    cache_creation_input_tokens: cacheCreationInputTokens,
-    server_tool_use: usage.server_tool_use
-  }
-
-  const cost = calculateUSDCost(model, normalizedUsage as any)
-
   return {
     inputTokens,
     outputTokens,
     cacheReadInputTokens,
     cacheCreationInputTokens,
     totalTokens,
-    costUSD: isNaN(cost) ? 0 : cost,
   }
 }
 
