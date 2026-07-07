@@ -196,6 +196,59 @@ describe('AcpBridge.destroy (C2 dispatch)', () => {
     }
   })
 
+  it('forwards pasted image blocks into session/prompt as ACP image content', async () => {
+    const { child, stdin, stdout } = makeFakeChild()
+    const cwd = await mkdtemp(path.join(tmpdir(), 'moss-acp-bridge-'))
+    const stdinWrites: string[] = []
+    stdin.on('data', chunk => { stdinWrites.push(chunk.toString('utf8')) })
+    try {
+      const handle = createAcpBridgeHandle({
+        child,
+        sessionId: 'sid',
+        cwd,
+        model: 'proxy/fake',
+        runtime: userRuntime,
+        containerMode: 'user',
+      })
+
+      await waitTick()
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-init', result: {} })
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'm-session-new', result: { sessionId: 'acp-sid' } })
+      await waitTick()
+
+      // Client sends an Anthropic-shaped image block alongside text.
+      handle.writeStdin(JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: '这张图里有什么' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'AAAABBBB' },
+            },
+          ],
+        },
+        uuid: 'user-1',
+      }) + '\n')
+
+      await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/prompt"')))
+      const promptLine = stdinWrites.find(line => line.includes('"method":"session/prompt"'))!
+      const parsed = JSON.parse(promptLine)
+      const prompt = parsed.params.prompt as Array<Record<string, unknown>>
+
+      // The image must be forwarded as an ACP image block (bare data + mimeType),
+      // ahead of the text block, so scode delivers it as vision input.
+      const imageBlock = prompt.find(block => block.type === 'image')
+      expect(imageBlock).toBeDefined()
+      expect(imageBlock!.data).toBe('AAAABBBB')
+      expect(imageBlock!.mimeType).toBe('image/png')
+      expect(prompt.some(block => block.type === 'text')).toBe(true)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('maps SendUserMessage to assistant output and suppresses fallback chunks', async () => {
     const { child, stdin, stdout } = makeFakeChild()
     const cwd = await mkdtemp(path.join(tmpdir(), 'moss-acp-bridge-'))
