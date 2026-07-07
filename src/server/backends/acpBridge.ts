@@ -137,6 +137,37 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     return typeof message === 'string' && message.trim() ? message : null
   }
 
+  // ACP image content block, as expected by scode's `extract_content_from_blocks`
+  // (bare `data` base64 + camelCase `mimeType`, not the Anthropic `source: {}`
+  // nesting the client sends us).
+  type AcpImageBlock = { type: 'image'; data: string; mimeType: string }
+
+  // Extract Anthropic-style image blocks from a client content array and map
+  // them to the ACP shape. The client sends images as
+  //   { type: 'image', source: { type: 'base64', media_type, data } }
+  // (iOS may send `mediaType` instead of `media_type` — mobile-apps#5825).
+  // These have no `.text`, so the text-flatten below drops them; without this
+  // they never reach scode and image analysis silently fails in remote mode.
+  const extractAcpImageBlocks = (content: unknown): AcpImageBlock[] => {
+    if (!Array.isArray(content)) return []
+    const blocks: AcpImageBlock[] = []
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as Record<string, any>
+      if (b.type !== 'image') continue
+      const source = b.source
+      if (!source || typeof source !== 'object') continue
+      const data = source.data
+      if (typeof data !== 'string' || data.length === 0) continue
+      const mimeType =
+        (typeof source.media_type === 'string' && source.media_type) ||
+        (typeof source.mediaType === 'string' && source.mediaType) ||
+        'image/png'
+      blocks.push({ type: 'image', data, mimeType })
+    }
+    return blocks
+  }
+
   const writeTranscript = async (event: any) => {
     if (!transcriptPath) return
     try {
@@ -223,6 +254,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     let userUuid = randomUUID()
     let structuredContent: any[] | null = null
     let parentToolUseId: string | null = null
+    let imageBlocks: AcpImageBlock[] = []
     try {
       const parsed = JSON.parse(data)
       if (parsed.type === 'user') {
@@ -232,6 +264,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         }
         if (Array.isArray(content)) {
           structuredContent = content
+          imageBlocks = extractAcpImageBlocks(content)
         }
         if (Array.isArray(content)) {
           cleanText = content.map((c: any) => c.text || '').join('\n')
@@ -425,10 +458,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     void writeTranscript(userEvent)
     lastPersistedUuid = userUuid
 
-    // 发送给 agent 的是包含系统提示词的 finalText
+    // 发送给 agent 的是包含系统提示词的 finalText。若用户消息附带图片，
+    // 将图片块与文本一起发送，scode 会把它们作为 vision 输入交给模型。
     sendRpc('session/prompt', {
       sessionId: acpSessionId,
-      prompt: [{ type: 'text', text: finalText }],
+      prompt: [...imageBlocks, { type: 'text', text: finalText }],
     })
   }
 
