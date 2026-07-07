@@ -17,7 +17,7 @@ Moss does not call the external health start/stop hardware endpoints for this wo
 - Collect 30 seconds of `telemetry.topic=health` samples from the existing WS connection.
 - Support multiple seats collecting at the same time, separated by `seatNo`.
 - Compute average values for heart rate, respiratory rate, SpO2, and body temperature.
-- Classify each metric with stable enums and numeric level codes for Pad rendering.
+- Classify each metric with stable enums for Pad rendering.
 - Generate and store a structured report payload that the Pad can poll and render.
 - Keep core report fields deterministic; use the model only for controlled narrative text.
 - Reuse existing cabin token/tablet context for seat identity and access control.
@@ -191,52 +191,48 @@ Completed response:
   "sample_count": 26,
   "metrics": {
     "heart_rate": {
-      "label": "Heart Rate",
-      "display_name": "心率",
       "unit": "bpm",
       "value": 120,
       "level": "high",
-      "level_code": 3,
-      "normal_min": 60,
-      "normal_max": 100,
-      "range_min": 20,
-      "range_max": 180
+      "range": {
+        "min": 20,
+        "max": 180,
+        "normal_min": 60,
+        "normal_max": 100
+      }
     },
     "respiratory_rate": {
-      "label": "Respiratory Rate",
-      "display_name": "呼吸率",
       "unit": "breaths_per_min",
       "value": 22,
       "level": "high",
-      "level_code": 3,
-      "normal_min": 16,
-      "normal_max": 20,
-      "range_min": 6,
-      "range_max": 30
+      "range": {
+        "min": 6,
+        "max": 30,
+        "normal_min": 16,
+        "normal_max": 20
+      }
     },
     "spo2": {
-      "label": "Oxygen Saturation",
-      "display_name": "血氧饱和度",
       "unit": "percent",
       "value": 94,
       "level": "low",
-      "level_code": 1,
-      "normal_min": 95,
-      "normal_max": 100,
-      "range_min": 80,
-      "range_max": 110
+      "range": {
+        "min": 80,
+        "max": 110,
+        "normal_min": 95,
+        "normal_max": 100
+      }
     },
     "body_temperature": {
-      "label": "Body Temperature",
-      "display_name": "体温",
       "unit": "celsius",
       "value": 37.8,
       "level": "high",
-      "level_code": 3,
-      "normal_min": 36.1,
-      "normal_max": 37.2,
-      "range_min": 20,
-      "range_max": 45
+      "range": {
+        "min": 20,
+        "max": 45,
+        "normal_min": 36.1,
+        "normal_max": 37.2
+      }
     }
   },
   "summary": {
@@ -316,14 +312,7 @@ invalid
 missing
 ```
 
-`level_code` mapping:
-
-```text
-0 = invalid or missing
-1 = low
-2 = normal
-3 = high
-```
+The report does not return a numeric level code. Pad should render directly from the `level` enum to avoid conflicting duplicated state.
 
 ### 7.3 Score Level
 
@@ -380,7 +369,7 @@ The report uses these configured metric bands:
 | `spo2` | `[80, 95)` | `[95, 100]` | `(100, 110]` | `[80, 110]` |
 | `body_temperature` | `[20, 36.1)` | `[36.1, 37.2]` | `(37.2, 45]` | `[20, 45]` |
 
-Values outside the valid range are ignored for averages. If a metric has no valid samples, return `level=missing`, `level_code=0`, and omit or set `value=null`.
+Values outside the valid range are ignored for averages. If a metric has no valid samples, return `level=missing` and set `value=null`.
 
 Rounding:
 
