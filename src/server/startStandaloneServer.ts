@@ -95,10 +95,17 @@ export async function startStandaloneDirectConnectServer(
     },
   }
   authProxy.setPolicyProvider(policyProvider)
+  // Hierarchical department-credential value inheritance: resolve a department's
+  // ordered ancestor chain so an authorized consumer inherits the nearest
+  // ancestor's value when their own department has none.
+  authProxy.setDeptAncestorProvider((orgId, departmentId) =>
+    authService.getDepartmentAncestorChain(orgId, departmentId),
+  )
   setSecretsApiDependencies(
     nexusClient,
     policyProvider,
     () => store.getAllActiveConfigItems() as unknown as Array<{ id: number; scope: string; pinyin: string }>,
+    (orgId, departmentId) => authService.getDepartmentAncestorChain(orgId, departmentId),
   )
   const runtime = new RuntimeService({
     config,

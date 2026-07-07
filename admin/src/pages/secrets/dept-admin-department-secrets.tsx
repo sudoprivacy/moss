@@ -17,7 +17,7 @@ import { Eye, EyeOff, Loader2, KeyRound, Info } from 'lucide-react'
 import {
   getPublicConfigItems,
   getDepartmentSecretValue, putDepartmentSecretValue,
-  type ConfigItem,
+  type ConfigItem, type DeptSecretSource,
 } from '@/lib/api/secrets'
 import { getDepartments as getAuthDepartments } from '@/lib/api/auth'
 import type { AuthDepartment } from '@/lib/api/types'
@@ -38,7 +38,9 @@ export function DeptAdminDepartmentSecrets() {
   const [editItem, setEditItem] = useState<ConfigItem | null>(null)
   const [editValues, setEditValues] = useState<Record<string, string>>({})
   const [showValues, setShowValues] = useState<Record<string, boolean>>({})
-  const [usingOrgDefault, setUsingOrgDefault] = useState<Record<string, boolean>>({})
+  // Per config-key: where the department's current effective value comes from
+  // (its own value, an inherited ancestor value, the org default, or none).
+  const [valueSource, setValueSource] = useState<Record<string, { source: DeptSecretSource; inheritedFrom?: string } | null>>({})
   const [isSaving, setIsSaving] = useState(false)
 
   const load = useCallback(async () => {
@@ -67,22 +69,25 @@ export function DeptAdminDepartmentSecrets() {
   const handleConfigure = async (item: ConfigItem) => {
     setEditItem(item)
     const vals: Record<string, string> = {}
-    const orgDefault: Record<string, boolean> = {}
     item.entries.forEach(e => { vals[e.config_key] = '' })
     setEditValues(vals)
     setShowValues({})
-    // Surface whether each key currently resolves to a per-dept value or the
-    // inherited org default, so the dept_admin knows what they're overriding.
+    // Surface where each key's effective value currently comes from (own /
+    // inherited from an ancestor / org default / none), so the dept_admin knows
+    // what they'd be overriding.
+    const sources: Record<string, { source: DeptSecretSource; inheritedFrom?: string } | null> = {}
     await Promise.all(item.entries.map(async e => {
       try {
         const cur = await getDepartmentSecretValue(selectedDeptId, item.pinyin, e.config_key)
-        orgDefault[e.config_key] = !!cur?.is_org_default || !cur
+        sources[e.config_key] = cur?.source ? { source: cur.source, inheritedFrom: cur.inherited_from } : null
       } catch {
-        orgDefault[e.config_key] = true
+        sources[e.config_key] = null
       }
     }))
-    setUsingOrgDefault(orgDefault)
+    setValueSource(sources)
   }
+
+  const deptName = (id?: string) => departments.find(d => d.id === id)?.name ?? id ?? '上级部门'
 
   const handleSave = async () => {
     if (!editItem || !selectedDeptId) return
@@ -188,17 +193,19 @@ export function DeptAdminDepartmentSecrets() {
                 <Label className="flex items-center gap-2">
                   {entry.name}
                   {entry.required ? <span className="text-destructive">*</span> : null}
-                  {usingOrgDefault[entry.config_key] ? (
-                    <Badge variant="secondary" className="text-[10px]">当前沿用企业默认</Badge>
-                  ) : (
-                    <Badge variant="outline" className="text-[10px]">已有本部门值</Badge>
-                  )}
+                  {(() => {
+                    const src = valueSource[entry.config_key]
+                    if (src?.source === 'own') return <Badge variant="outline" className="text-[10px]">已有本部门值</Badge>
+                    if (src?.source === 'inherited') return <Badge variant="secondary" className="text-[10px]">继承自「{deptName(src.inheritedFrom)}」</Badge>
+                    if (src?.source === 'org_default') return <Badge variant="secondary" className="text-[10px]">当前沿用企业默认</Badge>
+                    return <Badge variant="secondary" className="text-[10px]">未配置</Badge>
+                  })()}
                 </Label>
                 <div className="relative">
                   <Input
                     type={showValues[entry.config_key] ? 'text' : 'password'}
                     value={editValues[entry.config_key] ?? ''}
-                    placeholder={usingOrgDefault[entry.config_key] ? '留空则继续沿用企业默认值' : '留空则保持现有本部门值'}
+                    placeholder={valueSource[entry.config_key]?.source === 'own' ? '留空则保持现有本部门值' : '留空则继续沿用当前来源的值'}
                     onChange={e => setEditValues(v => ({ ...v, [entry.config_key]: e.target.value }))}
                   />
                   <button

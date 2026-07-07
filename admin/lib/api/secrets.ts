@@ -436,14 +436,20 @@ export async function getConfigItemDepartments(configItemId: number): Promise<st
 // Per-department credential values (a value specific to one department)
 // ============================================================
 
-/** Fetch a department's own per-dept credential value (resolves per-dept first,
- *  falls back to the org-wide default; `is_org_default` marks the fallback). */
+/** How a department credential value was resolved for the queried department:
+ *  its own value, inherited from an ancestor department, or the org-wide default. */
+export type DeptSecretSource = 'own' | 'inherited' | 'org_default'
+
+/** Fetch a department's effective credential value. Resolution walks the dept
+ *  tree: the department's own value, then the nearest ancestor with a value,
+ *  then the org-wide default. `source`/`inherited_from` describe where the
+ *  effective value came from so the editor can show own vs inherited. */
 export async function getDepartmentSecretValue(
   deptId: string,
   pinyin: string,
   key: string,
-): Promise<(BackendSecret & { value?: string; is_org_default?: boolean }) | null> {
-  const res = await dcClient.get<{ success: boolean; data?: BackendSecret & { value?: string; is_org_default?: boolean } }>(
+): Promise<(BackendSecret & { value?: string; is_org_default?: boolean; source?: DeptSecretSource; inherited_from?: string }) | null> {
+  const res = await dcClient.get<{ success: boolean; data?: BackendSecret & { value?: string; is_org_default?: boolean; source?: DeptSecretSource; inherited_from?: string } }>(
     `/api/v1/department-secrets/${encodeURIComponent(deptId)}/${encodeURIComponent(pinyin)}/${encodeURIComponent(key)}`,
   )
   return res.data ?? null

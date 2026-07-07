@@ -148,6 +148,10 @@ export class AuthProxyServer {
   private rules = new Map<number, AuthProxyRule>()
   private nexusClient: NexusClient | null = null
   private policyProvider: DepartmentPolicyProvider | null = null
+  // Resolves a department's ordered ancestor chain `[deptId, parent, ...]` for
+  // hierarchical department-credential value inheritance. Null → no inheritance
+  // (value resolution stays own-dept-then-org-default).
+  private deptAncestorProvider: ((orgId: string, deptId: string) => string[]) | null = null
   private tokenMinter: TokenMinter | null = null
   private tokenCleanupTimer: ReturnType<typeof setInterval> | null = null
 
@@ -163,6 +167,10 @@ export class AuthProxyServer {
 
   setPolicyProvider(provider: DepartmentPolicyProvider): void {
     this.policyProvider = provider
+  }
+
+  setDeptAncestorProvider(provider: (orgId: string, deptId: string) => string[]): void {
+    this.deptAncestorProvider = provider
   }
 
   updateRules(rules: AuthProxyRule[]): void {
@@ -390,10 +398,20 @@ export class AuthProxyServer {
       // order per config key.
       const namespaceCandidates: string[] = []
       if (match.scope === 'department' && tokenEntry.departmentId && match.pinyin && match.orgId) {
-        namespaceCandidates.push(
-          orgScopedNamespace(deptSecretNamespace(tokenEntry.departmentId, match.pinyin), match.orgId),
-        )
+        // Hierarchical inheritance: try the consumer's own department, then walk
+        // UP each ancestor department, using the nearest one that has a value.
+        // (Access is already gated by the exact-department policy above; this
+        // only chooses which value an authorized consumer receives.)
+        const chain = this.deptAncestorProvider
+          ? this.deptAncestorProvider(match.orgId, tokenEntry.departmentId)
+          : [tokenEntry.departmentId]
+        for (const deptId of chain) {
+          namespaceCandidates.push(
+            orgScopedNamespace(deptSecretNamespace(deptId, match.pinyin), match.orgId),
+          )
+        }
       }
+      // Finally the legacy org-wide default value.
       namespaceCandidates.push(resolvedNamespace)
 
       const secrets: Array<{ configKey: string; value: string }> = []

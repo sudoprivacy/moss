@@ -4076,7 +4076,8 @@ export function startServer(
           }
           authService.requireDepartmentInScope(auth.orgId, deptId, auth)
           if (req.method === 'GET') {
-            writeJson(res, 200, await secretsApi.getDepartmentSecret(auth.orgId, auth.userId, deptId, pinyin, key, clientIp))
+            const ancestorChain = authService.getDepartmentAncestorChain(auth.orgId, deptId)
+            writeJson(res, 200, await secretsApi.getDepartmentSecret(auth.orgId, auth.userId, deptId, pinyin, key, clientIp, ancestorChain))
             return
           }
           if (req.method === 'PUT') {
@@ -4266,14 +4267,15 @@ export function startServer(
             if (nexusClient) {
               const configuredNs = nexusClient.listConfiguredNamespaces()
               const orgPrefix = `org:${auth.orgId}:`
+              // The user's department chain (self-first) for hierarchical
+              // inheritance: an item is usable if the user's own dept OR any
+              // ancestor OR the legacy org-wide value is configured.
+              const deptChain = authService.getDepartmentAncestorChain(auth.orgId, deptId)
               visible = visible.filter(i => {
                 if ((i.scope as string) === 'department') {
-                  // A department item is usable if this user's department has a
-                  // per-dept value (`role:@{deptId}:{pinyin}`) OR the legacy
-                  // org-wide value (`role:{pinyin}`) exists.
                   const legacy = `${orgPrefix}role:${i.pinyin}`
-                  const perDept = deptId ? `${orgPrefix}${deptSecretNamespace(deptId, i.pinyin as string)}` : null
-                  return configuredNs.has(legacy) || (perDept ? configuredNs.has(perDept) : false)
+                  if (configuredNs.has(legacy)) return true
+                  return deptChain.some(d => configuredNs.has(`${orgPrefix}${deptSecretNamespace(d, i.pinyin as string)}`))
                 }
                 return configuredNs.has(`${orgPrefix}system:${i.pinyin}`)
               })

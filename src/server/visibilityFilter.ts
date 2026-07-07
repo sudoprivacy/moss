@@ -83,6 +83,32 @@ export function buildVisibilityFilter(
   return { isAdmin: false, userId: auth.userId, departmentId, visibleDepartmentIds }
 }
 
+/**
+ * The ordered department chain from a department up to the org root:
+ * `[deptId, parentId, grandparentId, ...]`. Self first, so callers that resolve
+ * "the nearest department with a value" (e.g. hierarchical credential
+ * inheritance) can walk the array in order. Cycles are guarded against.
+ */
+export function getDepartmentAncestorChain(
+  orgId: string,
+  deptId: string | null,
+  listDepartmentsByOrg: (
+    orgId: string,
+  ) => Array<{ id: string; parentId: string | null }>,
+): string[] {
+  if (!deptId) return []
+  const byId = new Map(listDepartmentsByOrg(orgId).map(d => [d.id, d]))
+  const chain: string[] = []
+  const seen = new Set<string>()
+  let current = byId.get(deptId) ?? null
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    chain.push(current.id)
+    current = current.parentId ? byId.get(current.parentId) ?? null : null
+  }
+  return chain
+}
+
 export function getUserAncestorIds(
   userId: string,
   orgId: string,

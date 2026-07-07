@@ -165,23 +165,35 @@ export function createSecretsApi(db: {
     },
 
     /**
-     * Get a department credential value, resolving the per-department value
-     * first and falling back to the legacy org-wide value when the dept-specific
-     * one is unset. Keeps pre-migration values working during rollout.
+     * Get a department credential value with hierarchical resolution: the
+     * department's own value, then each ancestor in `ancestorChain` (self-first,
+     * so the nearest ancestor with a value wins), then the legacy org-wide
+     * default. The response marks the source so the editor can show "own value"
+     * vs "inherited from {deptId}" vs "org default".
+     *
+     * `ancestorChain` defaults to `[deptId]` (own only) when not supplied, so a
+     * caller without the department tree still gets own-then-org-default.
      */
-    async getDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, ip?: string) {
+    async getDepartmentSecret(orgId: string, userId: string, deptId: string, pinyin: string, key: string, ip?: string, ancestorChain?: string[]) {
       try {
-        const perDeptNs = orgScopedNamespace(deptSecretNamespace(deptId, pinyin), orgId)
-        const perDept = await nexus.getSecret(perDeptNs, key, secretSubject(perDeptNs, userId)).catch(() => null)
-        if (perDept) {
-          writeAudit(userId, undefined, 'read', resolveConfigItemId(perDeptNs, orgId), perDeptNs, key, undefined, ip, orgId)
-          return { success: true, data: perDept }
+        const chain = ancestorChain && ancestorChain.length > 0 ? ancestorChain : [deptId]
+        for (const chainDeptId of chain) {
+          const ns = orgScopedNamespace(deptSecretNamespace(chainDeptId, pinyin), orgId)
+          const found = await nexus.getSecret(ns, key, secretSubject(ns, userId)).catch(() => null)
+          if (found) {
+            if (chainDeptId === deptId) {
+              writeAudit(userId, undefined, 'read', resolveConfigItemId(ns, orgId), ns, key, undefined, ip, orgId)
+              return { success: true, data: { ...found, source: 'own' as const } }
+            }
+            // Inherited from an ancestor department.
+            return { success: true, data: { ...found, source: 'inherited' as const, inherited_from: chainDeptId } }
+          }
         }
         // Fallback to the legacy org-wide value.
         const legacyNs = orgScopedNamespace(legacyDeptSecretNamespace(pinyin), orgId)
         const legacy = await nexus.getSecret(legacyNs, key, secretSubject(legacyNs, userId)).catch(() => null)
         if (legacy) {
-          return { success: true, data: { ...legacy, is_org_default: true } }
+          return { success: true, data: { ...legacy, is_org_default: true, source: 'org_default' as const } }
         }
         return { success: false, error: { code: 'not_found', message: '凭据不存在' } }
       } catch {
