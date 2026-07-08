@@ -13,6 +13,7 @@ import {
   isAffirmationReply,
   looksLikeHardwareOffer,
 } from './service.js'
+import { CabinHealthReportService } from './healthReports.js'
 import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
@@ -51,6 +52,15 @@ function mapServiceError(error: unknown): CabinHttpError {
   }
   if (/LLM request failed|Moss session|runner|socket/i.test(message)) {
     return new CabinHttpError(500, 'AGENT_FAILED', message)
+  }
+  if (message === 'MISSING_SEAT_CONTEXT') {
+    return new CabinHttpError(400, 'MISSING_SEAT_CONTEXT', 'Seat context is required to start a health report')
+  }
+  if (message === 'HEALTH_REPORT_NOT_FOUND') {
+    return new CabinHttpError(404, 'HEALTH_REPORT_NOT_FOUND', 'Health report was not found')
+  }
+  if (message === 'HEALTH_REPORT_FORBIDDEN') {
+    return new CabinHttpError(403, 'HEALTH_REPORT_FORBIDDEN', 'Health report does not belong to this seat')
   }
   return new CabinHttpError(500, 'INTERNAL_ERROR', message)
 }
@@ -467,12 +477,18 @@ async function contextFromToken(
 export function createCabinApi(options: {
   config: ServerConfig
   runtime: RuntimeService
+  healthReports?: CabinHealthReportService
 }): {
   handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
 } {
   const cabinConfig = options.config.cabin
   const store = new CabinStore(options.runtime.store.db)
   const cabinLogger = new CabinLogger(options.config)
+  const healthReports = options.healthReports ?? new CabinHealthReportService({
+    config: cabinConfig,
+    store,
+    logger: cabinLogger,
+  })
   const services = new CabinServices({
     config: cabinConfig,
     store,
@@ -1028,6 +1044,45 @@ export function createCabinApi(options: {
     res.end(result.audio)
   }
 
+  async function handleHealthReportStart(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
+    if (!cabinConfig.healthReportEnabled) {
+      throw new CabinHttpError(404, 'HEALTH_REPORT_DISABLED', 'Health report API is disabled')
+    }
+    const tablet = requireTabletHeaders(req)
+    const payload = requireCabinToken(req, cabinConfig)
+    const body = await readJsonBody(req)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    try {
+      const result = healthReports.startReport(context, {
+        requestId,
+        language: stringBodyField(body, 'language'),
+      })
+      writeJson(res, 200, result)
+    } catch (error) {
+      throw mapServiceError(error)
+    }
+  }
+
+  async function handleHealthReportGet(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    reportId: string,
+    requestId: string,
+  ): Promise<void> {
+    if (!cabinConfig.healthReportEnabled) {
+      throw new CabinHttpError(404, 'HEALTH_REPORT_DISABLED', 'Health report API is disabled')
+    }
+    const tablet = requireTabletHeaders(req)
+    const payload = requireCabinToken(req, cabinConfig)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    try {
+      const result = healthReports.getReport(reportId, context)
+      writeJson(res, 200, result)
+    } catch (error) {
+      throw mapServiceError(error)
+    }
+  }
+
   async function handleDemoFlightState(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     if (!cabinConfig.flightStateDemoEnabled) {
       throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
@@ -1153,6 +1208,17 @@ export function createCabinApi(options: {
         }
         if (req.method === 'POST' && pathname === '/v1/tts/speech') {
           await handleSpeech(req, res, requestId)
+          logInbound({ status: 200, ok: true })
+          return true
+        }
+        if (req.method === 'POST' && pathname === '/v1/health-reports/start') {
+          await handleHealthReportStart(req, res, requestId)
+          logInbound({ status: 200, ok: true })
+          return true
+        }
+        const healthReportMatch = pathname.match(/^\/v1\/health-reports\/([^/]+)$/)
+        if (req.method === 'GET' && healthReportMatch) {
+          await handleHealthReportGet(req, res, decodeURIComponent(healthReportMatch[1] || ''), requestId)
           logInbound({ status: 200, ok: true })
           return true
         }

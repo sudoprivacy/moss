@@ -222,8 +222,8 @@ Completed response:
     }
   },
   "summary": {
-    "score": 55,
-    "score_level": "poor",
+    "score": 76.5,
+    "score_level": "pass",
     "emotion_status": "failed",
     "physiology_status": "abnormal",
     "metric_levels": {
@@ -315,20 +315,20 @@ The report does not return a numeric level code. Pad should render directly from
 ### 7.3 Score Level
 
 ```text
-excellent
 good
-fair
-poor
+pass
+fail
 ```
 
-Suggested mapping:
+Customer scoring mapping:
 
 ```text
-90-100 excellent
-75-89  good
-60-74  fair
-0-59   poor
+80-100 good
+60-79  pass
+0-59   fail
 ```
+
+The total score follows the customer health scoring document: SpO2 contributes 40%, heart rate 30%, respiratory rate 15%, and body temperature 15%. Each metric is scored with the customer-provided segmented quadratic function across normal, warning, and danger zones before weighting. Red-line caps are applied after weighting: SpO2 `< 90` caps the final score at 30; heart rate `> 150` or `< 40` caps the final score at 35.
 
 ### 7.4 Summary Status
 
@@ -544,7 +544,7 @@ Prompt input should include the deterministic computed payload:
     "spo2": { "value": 94, "level": "low", "unit": "percent" },
     "body_temperature": { "value": 37.8, "level": "high", "unit": "celsius" }
   },
-  "score": 55,
+  "score": 76.5,
   "language": "zh"
 }
 ```

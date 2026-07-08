@@ -120,6 +120,8 @@ import { getAvailableModels, getCacheStatus, refreshModelCache } from './modelLi
 import { createCabinApi } from './cabin/api.js'
 import { CabinStore } from './cabin/store.js'
 import { CabinFlightAutomation } from './cabin/automation.js'
+import { CabinHealthReportService } from './cabin/healthReports.js'
+import { CabinLogger } from './cabin/logger.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -1601,11 +1603,15 @@ export function startServer(
     console.error('[Server] Failed to start enabled plugins:', error)
   })
 
-  const channelsApi = createChannelsApi(runtime.store)
-  const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime }) : null
   const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.db) : null
+  const cabinLogger = config.cabin.enabled ? new CabinLogger(config) : undefined
+  const cabinHealthReports = config.cabin.enabled && config.cabin.healthReportEnabled && cabinAdminStore
+    ? new CabinHealthReportService({ config: config.cabin, store: cabinAdminStore, logger: cabinLogger })
+    : undefined
+  const channelsApi = createChannelsApi(runtime.store)
+  const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime, healthReports: cabinHealthReports }) : null
   const cabinFlightAutomation = config.cabin.enabled && cabinAdminStore
-    ? new CabinFlightAutomation(config, cabinAdminStore)
+    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports)
     : null
   cabinFlightAutomation?.start()
 

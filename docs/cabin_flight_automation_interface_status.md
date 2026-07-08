@@ -1,6 +1,6 @@
 # 客舱飞行阶段自动化接口现状与缺口
 
-更新时间：2026-07-06
+更新时间：2026-07-07
 
 本文用于记录 Moss 当前针对外部飞行状态、硬件状态查询、硬件控制、语音播报、告警与托管座位的实现现状，方便后续现场联调和与对方确认接口边界。
 
@@ -13,9 +13,12 @@
 -> Moss 记录托管座位
 -> Moss 订阅外部飞行状态 WS
 -> 解析飞行阶段
+-> TTS 生成或复用阶段广播音频
+-> 调用对方全机广播接口推送播放
 -> 读取托管座位
 -> 查询 safety/posture/tray 硬件状态
 -> 生成内部告警
+-> 调用对方座位异常接口推送到指定 Pad
 -> 必要时下发座椅调直、小桌板收起控制
 -> 写入自动化日志，方便现场排查
 ```
@@ -40,12 +43,13 @@ flowchart TD
     L --> M{"该阶段是否需要执行任务?"}
     M -- "否" --> Z["记录 phase.task.skipped"]
     M -- "是" --> N["读取托管座位表<br/>按 seatNo 去重"]
-    N --> O["准备语音资源<br/>生成 /v1/cabin/broadcasts/*.wav URL"]
-    O --> P["记录 broadcast.ready 日志<br/>当前未主动通知对方播放"]
+    N --> O["TTS 生成或复用阶段广播音频<br/>按文案/音色/版本缓存"]
+    O --> P["调用 audio-all<br/>全机广播到在线 Pad"]
     P --> Q["逐座位查询硬件状态<br/>safety/posture/tray"]
     Q --> R["生成内部告警<br/>安全带/在席/座椅/桌板"]
-    R --> S["必要时下发硬件控制<br/>调直座椅/收起桌板"]
-    S --> T["记录 phase.task.summary<br/>告警数/控制数/失败数"]
+    R --> U["按座位聚合异常<br/>调用 error-seat 推送到指定 Pad"]
+    U --> S["必要时下发硬件控制<br/>调直座椅/收起桌板"]
+    S --> T["记录 phase.task.summary<br/>告警/广播/控制/失败数"]
 ```
 
 ## 2. 已实现，部署时主要替换接口地址即可
@@ -63,6 +67,8 @@ flowchart TD
 | 小桌板收起控制 | `POST /admin-api/tcp-client/cmd/seat/tray/close?seatNo=` | 已实现。在滑行、起飞前准备、起飞、进近/降落等阶段，发现桌板未收起时下发。 |
 | 自动化日志 | Moss 本地 JSONL | 已实现。默认写入 `<rootDir>/logs/cabin-automation.jsonl`，可通过 `cabin.automationLogFile` 配置。 |
 | 告警记录 | Moss 内部表 `cabin_alerts` | 已实现。告警可通过 Moss admin API 查询。 |
+| 全机阶段广播 | `POST /admin-api/cabin/broadcast/audio-all` | 已实现。阶段变化后按客户中英文文案生成 TTS 音频；相同文案、音色、模型、版本命中缓存直接复用；再以 multipart 上传到对方接口广播。 |
+| 座位异常推送 | `POST /admin-api/cabin/broadcast/error-seat` | 已实现。内部告警仍逐条记录，对 Pad 推送按座位聚合为一条异常信息，减少重复弹窗。 |
 | 托管座位查询 | Moss admin API | 已实现。可通过 `/api/v1/cabin/managed-seats` 查询。 |
 
 部署时关键配置：
@@ -75,7 +81,13 @@ flowchart TD
     "flightStateWsUrl": "ws://对方内网地址/infra/ws",
     "controlBaseUrl": "http://对方内网地址",
     "controlAuth": "test1",
+    "aircraftNo": "B-WITHFLIGHT-01",
     "broadcastBaseUrl": "http://Moss可被对方访问的地址/v1/cabin/broadcasts",
+    "broadcastApiBaseUrl": "http://对方内网地址",
+    "broadcastApiKey": "对方 yudao.security.hardware-api-key",
+    "broadcastAuth": "test1",
+    "broadcastEnabled": true,
+    "broadcastTtsVersion": "flight-phase-v1",
     "automationLogFile": "/var/log/moss/cabin-automation.jsonl"
   }
 }
@@ -85,7 +97,12 @@ flowchart TD
 
 - `automationEnabled` 不是必填；不配置时默认开启。生产建议显式配置为 `true` 或 `false`。
 - `automationLogFile` 不是必填；不配置时默认写到 `<rootDir>/logs/cabin-automation.jsonl`。生产建议配置到持久化日志目录。
-- `broadcastBaseUrl` 用于生成语音文件下载 URL。当前只生成 URL 并记录日志，还没有主动通知对方播放。
+- `aircraftNo` 用于配置托管座位没有携带飞机号时的默认飞机号；若座位上下文本身已有 `aircraftNo`，优先使用座位上下文。
+- `broadcastApiBaseUrl` 不配置时会复用 `controlBaseUrl`。
+- `broadcastApiKey` 会作为 `X-Hardware-Api-Key` 请求头发送，是对方广播接口要求的鉴权字段。
+- `broadcastAuth` 是可选 `Authorization` 请求头；不配置时复用 `controlAuth`。
+- `broadcastBaseUrl` 仍用于记录和调试本地生成的音频文件 URL；真实播放通过 `audio-all` 上传文件触发。
+- `broadcastTtsVersion` 用于 TTS 缓存失效。客户文案或音色策略整体升级时，可以改版本强制重新生成。
 
 ## 3. 对方已有接口，但 Moss 当前还未纳入阶段自动化
 
@@ -102,29 +119,33 @@ flowchart TD
 
 | 缺口 | 为什么需要 | 建议接口形态 |
 | --- | --- | --- |
-| 语音播报播放通知接口 | Moss 现在只能准备 `/v1/cabin/broadcasts/*.wav` 下载地址，并写 `broadcast.ready` 日志；对方系统并不知道何时播放。 | 对方提供 `POST /broadcast/play`，Moss 传 `phaseCode`、`phaseName`、`text`、`audioUrl`。 |
 | 播放结果回调/状态查询 | 现场需要确认语音是否真正播放成功。 | 对方回调 Moss，或提供 `GET /broadcast/status?taskId=`。 |
 | 座椅调整禁用/解除禁用 | 起飞阶段要求禁用座椅调整，目前只有调位置接口，没有 lock/unlock。 | `POST /cmd/seat/lock`、`POST /cmd/seat/unlock`。 |
 | 小桌板调整禁用/解除禁用 | 起飞阶段要求禁用桌板调整，目前只有 open/close，没有禁止乘客操作的接口。 | `POST /cmd/tray/lock`、`POST /cmd/tray/unlock`。 |
 | 卫生间占用查询 | 滑行、下降阶段要求检查卫生间占用。 | `GET /admin-api/tcp/hardware/status?target=lavatory&key=occupancy` 或同等接口。 |
 | 卫生间限制/解除限制 | 下降阶段限制卫生间使用，巡航阶段解除限制。 | `POST /cmd/lavatory/lock`、`POST /cmd/lavatory/unlock`。 |
 | 安全带信号/限制控制 | 巡航阶段要求解除安全带限制，下降阶段要求提示紧扣。如果需要控制安全带灯，需要接口。 | `POST /cmd/seatbelt-sign/on`、`POST /cmd/seatbelt-sign/off`。 |
-| 告警主动推送接口 | 当前 Moss 只内部记录告警，外部系统若要实时显示，需要接收告警。 | 对方提供 `POST /alerts`，Moss 推送告警；或对方轮询 Moss admin API。 |
 | 控制命令异步状态查询 | 当前控制接口只能确认请求是否成功，无法确认硬件最终执行完成。 | 控制接口返回 `commandId`，再通过 `GET /cmd/status?commandId=` 查询。 |
 | 乘客偏好接口 | 巡航阶段要求个性化匹配乘客偏好。 | 在 passengerInfo 中补偏好字段，或提供 `GET /passenger/preferences`。 |
+
+说明：
+
+- 全机语音播放通知已由 `audio-all` 补齐。
+- 座位异常主动推送已由 `error-seat` 补齐。
+- 如果需要确认 Pad 是否真正播放/展示成功，仍需要对方补播放状态回调或状态查询。
 
 ## 5. 阶段策略当前覆盖情况
 
 | 飞行阶段 | 当前 Moss 动作 | 当前缺口 |
 | --- | --- | --- |
 | `1` 滑入 | 检查 `safety/posture/tray`；告警；必要时调直座椅、收桌板。 | 卫生间占用查询；卫生间限制；语音播放通知。 |
-| `16` 滑行/划出 | 准备滑行播报 URL；检查 `safety/posture/tray`；告警；必要时调直座椅、收桌板。 | 语音播放通知；卫生间占用查询；舷窗检查/控制。 |
+| `16` 滑行/划出 | TTS 生成/复用滑行中英文广播音频；调用 `audio-all` 全机广播；检查 `safety/posture/tray`；内部告警；调用 `error-seat` 推送座位异常；必要时调直座椅、收桌板。 | 卫生间占用查询；舷窗检查/控制。 |
 | `2` 起飞前准备 | 检查 `safety/posture/tray`；告警；必要时调直座椅、收桌板。 | 座椅/桌板禁用接口；舷窗控制接口。 |
 | `3/4` 起飞 | 检查 `safety/posture/tray`；告警；必要时调直座椅、收桌板。 | 座椅/桌板禁用接口；舷窗控制接口。 |
-| `5/6` 爬升 | 准备爬升播报 URL；检查 `safety`；告警。 | 语音播放通知；解除座椅/桌板限制接口。 |
+| `5/6` 爬升 | TTS 生成/复用爬升中英文广播音频；调用 `audio-all` 全机广播；检查 `safety`；内部告警；调用 `error-seat` 推送座位异常。 | 解除座椅/桌板限制接口。 |
 | `7` 巡航 | 当前跳过自动化任务。 | 客舱服务策略；卫生间解除限制；安全带限制解除；乘客偏好。 |
-| `8` 下降 | 准备下降播报 URL；检查 `safety`；告警。 | 语音播放通知；卫生间限制接口；安全带信号/限制接口。 |
-| `9-15` 进近/降落 | 准备进近/降落播报 URL；检查 `safety/posture/tray`；告警；必要时调直座椅、收桌板。 | 语音播放通知；舷窗检查/控制；座椅/桌板禁用接口。 |
+| `8` 下降 | TTS 生成/复用下降中英文广播音频；调用 `audio-all` 全机广播；检查 `safety`；内部告警；调用 `error-seat` 推送座位异常。 | 卫生间限制接口；安全带信号/限制接口。 |
+| `9-15` 进近/降落 | TTS 生成/复用降落进近中英文广播音频；调用 `audio-all` 全机广播；检查 `safety/posture/tray`；内部告警；调用 `error-seat` 推送座位异常；必要时调直座椅、收桌板。 | 舷窗检查/控制；座椅/桌板禁用接口。 |
 | `17` 复飞 | 已映射阶段，但当前不执行任务。 | 复飞专用播报和安全策略待确认。 |
 
 ## 6. Moss 查询接口
@@ -174,8 +195,10 @@ offset=0
 3. 看 `flight.phase.changed` 和 `phase.task.summary`，确认阶段变化是否触发任务。
 4. 看 `hardware.status.request/response`，确认硬件状态接口地址、鉴权、返回结构是否符合预期。
 5. 看 `/api/v1/cabin/alerts`，确认异常状态是否转成告警。
-6. 看 `hardware.control.request/response`，确认座椅调直、小桌板收起指令是否下发成功。
-7. 看 `broadcast.ready`，确认播报 URL 是否生成；若需要真正播放，需要补对方播放通知接口。
+6. 看 `broadcast.tts.cache_hit`、`broadcast.tts.generated`，确认 TTS 是否命中缓存或生成成功。
+7. 看 `broadcast.audio_all.request/success/failed`，确认全机广播是否调用成功，以及对方返回的 `requestId/matchedCount/sentCount`。
+8. 看 `broadcast.error_seat.request/success/failed`，确认座位异常是否推送到对应 Pad。
+9. 看 `hardware.control.request/response`，确认座椅调直、小桌板收起指令是否下发成功。
 
 ## 8. 当前结论
 
@@ -185,8 +208,11 @@ offset=0
 飞行状态订阅
 -> 阶段识别
 -> 托管座位加载
+-> TTS 阶段广播生成/复用
+-> 对方全机广播接口播放
 -> 安全带/在席/座椅/桌板状态检查
 -> 内部告警
+-> 对方指定座位异常推送
 -> 座椅调直/小桌板收起
 -> 完整日志排查
 ```
@@ -194,11 +220,10 @@ offset=0
 还不能完整闭环的部分是：
 
 ```text
-语音真正播放
 座椅/桌板禁用与解除
 卫生间占用与限制
 舷窗阶段策略
-告警主动推送
+Pad 播放/展示结果回调
 硬件控制最终执行结果确认
 ```
 

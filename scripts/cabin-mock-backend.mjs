@@ -4,7 +4,10 @@
 // - passenger-info HTTP API
 // - hardware status query API
 // - hardware control API
+// - cabin broadcast API
+// - TTS HTTP API
 // - flight-data WebSocket subscription at /infra/ws
+// - health telemetry broadcast helper at /_mock/health
 //
 // Useful env vars:
 //   MOCK_PORT=49250
@@ -22,6 +25,7 @@ const PHASES = String(process.env.MOCK_PHASES || '7,16')
 const PHASE_INTERVAL_MS = Number(process.env.MOCK_PHASE_INTERVAL_MS || 1000)
 
 const controlLog = []
+const broadcastLog = []
 const wsClients = new Set()
 
 const seatState = new Map([
@@ -59,6 +63,12 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj))
 }
 
+function extractMultipartText(body, name) {
+  const pattern = new RegExp(`name="${name}"\\r\\n\\r\\n([\\s\\S]*?)\\r\\n--`)
+  const match = body.match(pattern)
+  return match ? match[1].trim() : ''
+}
+
 function ensureSeat(seatNo) {
   if (!seatState.has(seatNo)) {
     seatState.set(seatNo, {
@@ -86,12 +96,42 @@ function flightDataMessage(phase) {
   })
 }
 
+function healthTelemetryMessage(input = {}) {
+  const seatNo = String(input.seatNo || input.seat_no || 'A')
+  const message = {
+    online: input.online ?? true,
+    collecting: input.collecting ?? true,
+    frame_count: Number.isFinite(Number(input.frame_count)) ? Number(input.frame_count) : Date.now() % 100000,
+    heart_rate: Number.isFinite(Number(input.heart_rate)) ? Number(input.heart_rate) : 72,
+    spo2: Number.isFinite(Number(input.spo2)) ? Number(input.spo2) : 98,
+    respiratory_rate: Number.isFinite(Number(input.respiratory_rate)) ? Number(input.respiratory_rate) : 16,
+    body_temperature: Number.isFinite(Number(input.body_temperature)) ? Number(input.body_temperature) : 36.5,
+  }
+  return JSON.stringify({
+    type: 'telemetry',
+    content: {
+      topic: 'health',
+      title: 'seat',
+      seatNo,
+      message,
+    },
+  })
+}
+
 function broadcastPhase(phase) {
   const payload = flightDataMessage(phase)
   for (const ws of wsClients) {
     if (ws.readyState === ws.OPEN) ws.send(payload)
   }
   process.stderr.write(`[mock-ws] phase=${phase} clients=${wsClients.size}\n`)
+}
+
+function broadcastHealth(input) {
+  const payload = healthTelemetryMessage(input)
+  for (const ws of wsClients) {
+    if (ws.readyState === ws.OPEN) ws.send(payload)
+  }
+  process.stderr.write(`[mock-ws] health seat=${input.seatNo || input.seat_no || 'A'} clients=${wsClients.size}\n`)
 }
 
 const server = http.createServer(async (req, res) => {
@@ -110,6 +150,22 @@ const server = http.createServer(async (req, res) => {
         passenger: { displayName: '张先生', gender: 'male', seatNo: 'A', language: 'zh' },
       },
     })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/audio/speech') {
+    const body = await readBody(req)
+    let input = ''
+    try {
+      input = String(JSON.parse(body).input || '')
+    } catch {}
+    process.stderr.write(`[mock-tts] chars=${input.length}\n`)
+    const audio = Buffer.from('RIFF_MOCK_TTS_WAVE')
+    res.writeHead(200, {
+      'content-type': 'audio/wav',
+      'content-length': audio.length,
+    })
+    res.end(audio)
+    return
   }
 
   if (req.method === 'GET' && url.pathname === '/admin-api/tcp/hardware/status') {
@@ -152,6 +208,58 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { code: 0, msg: '', data: '指令下发成功' })
   }
 
+  if (req.method === 'POST' && url.pathname === '/admin-api/cabin/broadcast/audio-all') {
+    const body = await readBody(req)
+    const entry = {
+      at: new Date().toISOString(),
+      type: 'audio-all',
+      title: extractMultipartText(body, 'title'),
+      aircraftNo: extractMultipartText(body, 'aircraftNo'),
+      bytes: Buffer.byteLength(body),
+      apiKey: req.headers['x-hardware-api-key'] || '',
+      authorization: req.headers.authorization || '',
+    }
+    broadcastLog.push(entry)
+    process.stderr.write(`[mock-broadcast] audio-all ${JSON.stringify({ title: entry.title, aircraftNo: entry.aircraftNo, bytes: entry.bytes })}\n`)
+    return json(res, 200, {
+      code: 0,
+      msg: 'success',
+      data: {
+        requestId: `BC-${Date.now()}`,
+        matchedCount: wsClients.size || 2,
+        sentCount: wsClients.size || 2,
+        audioUrl: `http://127.0.0.1:${PORT}/mock-audio/${Date.now()}.wav`,
+        fileName: 'announcement.wav',
+      },
+    })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin-api/cabin/broadcast/error-seat') {
+    const body = await readBody(req)
+    let payload = {}
+    try {
+      payload = JSON.parse(body)
+    } catch {}
+    const entry = {
+      at: new Date().toISOString(),
+      type: 'error-seat',
+      payload,
+      apiKey: req.headers['x-hardware-api-key'] || '',
+      authorization: req.headers.authorization || '',
+    }
+    broadcastLog.push(entry)
+    process.stderr.write(`[mock-broadcast] error-seat ${JSON.stringify(payload)}\n`)
+    return json(res, 200, {
+      code: 0,
+      msg: 'success',
+      data: {
+        requestId: `BC-${Date.now()}`,
+        matchedCount: 1,
+        sentCount: 1,
+      },
+    })
+  }
+
   if (req.method === 'POST' && url.pathname === '/_mock/phase') {
     const body = await readBody(req)
     let phase = Number.parseInt(url.searchParams.get('phase') || '', 10)
@@ -165,11 +273,35 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, phase })
   }
 
+  if (req.method === 'POST' && url.pathname === '/_mock/health') {
+    const body = await readBody(req)
+    let input = Object.fromEntries(url.searchParams.entries())
+    if (body) {
+      try {
+        input = { ...input, ...JSON.parse(body) }
+      } catch {
+        return json(res, 400, { ok: false, msg: 'invalid JSON body' })
+      }
+    }
+    const count = Number.isFinite(Number(input.count)) ? Math.max(1, Number(input.count)) : 1
+    for (let index = 0; index < count; index += 1) {
+      broadcastHealth({ ...input, frame_count: Number(input.frame_count || 0) + index })
+    }
+    return json(res, 200, { ok: true, count, seatNo: input.seatNo || input.seat_no || 'A' })
+  }
+
   if (req.method === 'GET' && url.pathname === '/_mock/control-log') {
     return json(res, 200, { count: controlLog.length, entries: controlLog })
   }
   if (req.method === 'POST' && url.pathname === '/_mock/control-log/reset') {
     controlLog.length = 0
+    return json(res, 200, { ok: true })
+  }
+  if (req.method === 'GET' && url.pathname === '/_mock/broadcast-log') {
+    return json(res, 200, { count: broadcastLog.length, entries: broadcastLog })
+  }
+  if (req.method === 'POST' && url.pathname === '/_mock/broadcast-log/reset') {
+    broadcastLog.length = 0
     return json(res, 200, { ok: true })
   }
   if (req.method === 'GET' && url.pathname === '/_mock/state') {

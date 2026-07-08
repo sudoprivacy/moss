@@ -3,6 +3,11 @@ import type { DatabaseSync } from 'node:sqlite'
 import type {
   CabinConversation,
   CabinAlert,
+  CabinHealthReport,
+  CabinHealthReportStatus,
+  CabinHealthMetricKey,
+  CabinHealthMetricResult,
+  CabinHealthReportSummary,
   CabinManagedSeat,
   CabinMessage,
   CabinMessageRole,
@@ -78,6 +83,33 @@ function mapAlert(row: Row): CabinAlert {
   }
 }
 
+function mapHealthReport(row: Row): CabinHealthReport {
+  return {
+    id: String(row.id),
+    aircraftNo: row.aircraft_no == null ? null : String(row.aircraft_no),
+    flightId: String(row.flight_id),
+    flightDate: String(row.flight_date),
+    seatNo: String(row.seat_no),
+    tabletId: row.tablet_id == null ? null : String(row.tablet_id),
+    passengerId: row.passenger_id == null ? null : String(row.passenger_id),
+    passengerRef: row.passenger_ref == null ? null : String(row.passenger_ref),
+    status: String(row.status) as CabinHealthReportStatus,
+    language: row.language == null ? null : String(row.language),
+    sampleCount: Number(row.sample_count ?? 0),
+    samples: parseArrayJson(row.samples_json),
+    metrics: parseObjectJson(row.metrics_json) as Record<CabinHealthMetricKey, CabinHealthMetricResult> | null,
+    summary: parseHealthReportSummary(row.summary_json),
+    errorCode: row.error_code == null ? null : String(row.error_code),
+    errorMessage: row.error_message == null ? null : String(row.error_message),
+    cancelledAt: row.cancelled_at == null ? null : Number(row.cancelled_at),
+    startedAt: Number(row.started_at),
+    collectUntil: Number(row.collect_until),
+    generatedAt: row.generated_at == null ? null : Number(row.generated_at),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
 function parseObjectJson(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'string' || !value.trim()) return null
   try {
@@ -88,6 +120,21 @@ function parseObjectJson(value: unknown): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+function parseArrayJson(value: unknown): Record<string, unknown>[] | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return null
+    return parsed.filter(item => item && typeof item === 'object' && !Array.isArray(item)) as Record<string, unknown>[]
+  } catch {
+    return null
+  }
+}
+
+function parseHealthReportSummary(value: unknown): CabinHealthReportSummary | null {
+  return parseObjectJson(value) as CabinHealthReportSummary | null
 }
 
 function parseToolCallsJson(value: unknown): CabinToolCall[] | null {
@@ -220,6 +267,37 @@ export function ensureCabinTables(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_cabin_alerts_flight_created
       ON cabin_alerts(flight_id, flight_date, created_at);
+
+    CREATE TABLE IF NOT EXISTS cabin_health_reports (
+      id TEXT PRIMARY KEY,
+      aircraft_no TEXT,
+      flight_id TEXT NOT NULL,
+      flight_date TEXT NOT NULL,
+      seat_no TEXT NOT NULL,
+      tablet_id TEXT,
+      passenger_id TEXT,
+      passenger_ref TEXT,
+      status TEXT NOT NULL,
+      language TEXT,
+      sample_count INTEGER NOT NULL DEFAULT 0,
+      samples_json TEXT,
+      metrics_json TEXT,
+      summary_json TEXT,
+      error_code TEXT,
+      error_message TEXT,
+      cancelled_at INTEGER,
+      started_at INTEGER NOT NULL,
+      collect_until INTEGER NOT NULL,
+      generated_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cabin_health_reports_seat_status
+      ON cabin_health_reports(flight_id, flight_date, seat_no, status);
+
+    CREATE INDEX IF NOT EXISTS idx_cabin_health_reports_created
+      ON cabin_health_reports(created_at);
   `)
   const messageColumns = db.prepare('PRAGMA table_info(cabin_messages)').all() as Row[]
   if (!messageColumns.some(column => column.name === 'tool_calls_json')) {
@@ -492,6 +570,140 @@ export class CabinStore {
       alerts: rows.map(mapAlert),
       total: Number(totalRow?.total ?? 0),
     }
+  }
+
+  createHealthReport(input: {
+    aircraftNo?: string | null
+    flightId: string
+    flightDate: string
+    seatNo: string
+    tabletId?: string | null
+    passengerId?: string | null
+    passengerRef?: string | null
+    language?: string | null
+    startedAt: number
+    collectUntil: number
+  }): CabinHealthReport {
+    const id = `hr_${randomUUID().replace(/-/g, '').slice(0, 16)}`
+    const timestamp = now()
+    this.db.prepare(`
+      INSERT INTO cabin_health_reports (
+        id, aircraft_no, flight_id, flight_date, seat_no, tablet_id,
+        passenger_id, passenger_ref, status, language, sample_count,
+        samples_json, metrics_json, summary_json, error_code, error_message,
+        cancelled_at, started_at, collect_until, generated_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, ?, ?)
+    `).run(
+      id,
+      input.aircraftNo ?? null,
+      input.flightId,
+      input.flightDate,
+      input.seatNo,
+      input.tabletId ?? null,
+      input.passengerId ?? null,
+      input.passengerRef ?? null,
+      input.language ?? null,
+      input.startedAt,
+      input.collectUntil,
+      timestamp,
+      timestamp,
+    )
+    const report = this.getHealthReport(id)
+    if (!report) throw new Error('Failed to create cabin health report')
+    return report
+  }
+
+  getHealthReport(reportId: string): CabinHealthReport | null {
+    const row = this.db.prepare('SELECT * FROM cabin_health_reports WHERE id = ?').get(reportId) as Row | undefined
+    return row ? mapHealthReport(row) : null
+  }
+
+  cancelUnfinishedHealthReports(input: {
+    flightId: string
+    flightDate: string
+    seatNo: string
+    newReportId?: string
+  }): CabinHealthReport[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM cabin_health_reports
+      WHERE flight_id = ? AND flight_date = ? AND seat_no = ?
+        AND status IN ('collecting', 'generating')
+      ORDER BY created_at ASC
+    `).all(input.flightId, input.flightDate, input.seatNo) as Row[]
+    if (!rows.length) return []
+    const timestamp = now()
+    const cancelled = rows.map(mapHealthReport)
+    this.db.prepare(`
+      UPDATE cabin_health_reports
+      SET status = 'cancelled',
+          error_code = 'SUPERSEDED_BY_NEW_REPORT',
+          error_message = '已开始新的检测，本次检测已取消。',
+          cancelled_at = ?,
+          updated_at = ?
+      WHERE flight_id = ? AND flight_date = ? AND seat_no = ?
+        AND status IN ('collecting', 'generating')
+    `).run(timestamp, timestamp, input.flightId, input.flightDate, input.seatNo)
+    return cancelled
+  }
+
+  updateHealthReportSamples(reportId: string, samples: Record<string, unknown>[]): CabinHealthReport | null {
+    this.db.prepare(`
+      UPDATE cabin_health_reports
+      SET sample_count = ?, samples_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'collecting'
+    `).run(samples.length, samples.length ? JSON.stringify(samples) : null, now(), reportId)
+    return this.getHealthReport(reportId)
+  }
+
+  markHealthReportGenerating(reportId: string): CabinHealthReport | null {
+    this.db.prepare(`
+      UPDATE cabin_health_reports
+      SET status = 'generating', updated_at = ?
+      WHERE id = ? AND status = 'collecting'
+    `).run(now(), reportId)
+    return this.getHealthReport(reportId)
+  }
+
+  completeHealthReport(input: {
+    reportId: string
+    metrics: Record<CabinHealthMetricKey, CabinHealthMetricResult>
+    summary: CabinHealthReportSummary
+  }): CabinHealthReport | null {
+    const timestamp = now()
+    this.db.prepare(`
+      UPDATE cabin_health_reports
+      SET status = 'completed',
+          metrics_json = ?,
+          summary_json = ?,
+          generated_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify(input.metrics),
+      JSON.stringify(input.summary),
+      timestamp,
+      timestamp,
+      input.reportId,
+    )
+    return this.getHealthReport(input.reportId)
+  }
+
+  failHealthReport(input: {
+    reportId: string
+    errorCode: string
+    errorMessage: string
+  }): CabinHealthReport | null {
+    const timestamp = now()
+    this.db.prepare(`
+      UPDATE cabin_health_reports
+      SET status = 'failed',
+          error_code = ?,
+          error_message = ?,
+          generated_at = ?,
+          updated_at = ?
+      WHERE id = ? AND status IN ('collecting', 'generating')
+    `).run(input.errorCode, input.errorMessage, timestamp, timestamp, input.reportId)
+    return this.getHealthReport(input.reportId)
   }
 
   touchConversation(conversationId: string): void {

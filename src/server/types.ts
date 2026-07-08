@@ -181,6 +181,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       passengerInfoUrl: z.string().optional(),
       passengerInfoAuth: z.string().optional(),
       passengerInfoPrivacyLevel: z.number().int().min(1).max(3).default(2),
+      aircraftNo: z.string().optional(),
       asrUrl: z.string().default('http://127.0.0.1:8002/v1/audio/transcriptions'),
       asrModel: z.string().default('Qwen/Qwen3-ASR-1.7B'),
       asrApiKey: z.string().optional(),
@@ -199,7 +200,16 @@ export const serverFileConfigSchema = lazySchema(() =>
       flightStateWsUrl: z.string().optional(),
       managedSeats: z.string().optional(),
       broadcastBaseUrl: z.string().optional(),
+      broadcastApiBaseUrl: z.string().optional(),
+      broadcastApiKey: z.string().optional(),
+      broadcastAuth: z.string().optional(),
+      broadcastEnabled: z.boolean().default(true),
+      broadcastTtsCacheDir: z.string().optional(),
+      broadcastTtsVersion: z.string().default('flight-phase-v1'),
       automationLogFile: z.string().optional(),
+      healthReportEnabled: z.boolean().default(false),
+      healthReportCollectSeconds: z.number().int().min(1).default(30),
+      healthReportMinSamples: z.number().int().min(1).default(1),
       assistantName: z.string().default('cabin-ai-flight-attendant'),
       assistantDisplayName: z.string().optional(),
       createMossSession: z.boolean().default(false),
@@ -227,6 +237,11 @@ export const serverFileConfigSchema = lazySchema(() =>
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
       automationEnabled: false,
+      broadcastEnabled: true,
+      broadcastTtsVersion: 'flight-phase-v1',
+      healthReportEnabled: false,
+      healthReportCollectSeconds: 30,
+      healthReportMinSamples: 1,
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
@@ -335,6 +350,7 @@ export type ServerConfig = {
     passengerInfoUrl?: string
     passengerInfoAuth?: string
     passengerInfoPrivacyLevel: number
+    aircraftNo?: string
     asrUrl: string
     asrModel: string
     asrApiKey?: string
@@ -353,7 +369,16 @@ export type ServerConfig = {
     flightStateWsUrl?: string
     managedSeats?: string
     broadcastBaseUrl?: string
+    broadcastApiBaseUrl?: string
+    broadcastApiKey?: string
+    broadcastAuth?: string
+    broadcastEnabled?: boolean
+    broadcastTtsCacheDir?: string
+    broadcastTtsVersion?: string
     automationLogFile?: string
+    healthReportEnabled: boolean
+    healthReportCollectSeconds: number
+    healthReportMinSamples: number
     assistantName: string
     assistantDisplayName?: string
     createMossSession: boolean

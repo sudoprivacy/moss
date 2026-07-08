@@ -1,11 +1,13 @@
 import { appendFile, mkdir, writeFile, access } from 'fs/promises'
 import { dirname, join } from 'path'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import WebSocket from 'ws'
 
 import type { ServerConfig } from '../types.js'
 import { CabinStore } from './store.js'
 import type { CabinManagedSeat } from './types.js'
+import type { CabinHealthReportService } from './healthReports.js'
+import { CabinBroadcastClient } from './broadcastClient.js'
 
 type FlightDataMessage = {
   mavpacktype?: string
@@ -56,6 +58,22 @@ type AutomationLogEvent = {
   details?: Record<string, unknown>
 }
 
+type SeatProblem = {
+  type: string
+  severity: 'warning' | 'critical'
+  message: string
+  details?: Record<string, unknown>
+}
+
+type BroadcastAsset = {
+  file: string
+  url: string
+  text: string
+  title: string
+  cacheKey: string
+  cacheHit: boolean
+}
+
 const PHASE_LABELS: Record<number, string> = {
   1: '滑入',
   2: '起飞前准备',
@@ -76,11 +94,27 @@ const PHASE_LABELS: Record<number, string> = {
   17: '复飞',
 }
 
-const BROADCAST_TEXT: Record<string, string> = {
-  'taxiing.zh': '女士们，先生们：飞机已经开始滑行。为了您的安全，请您尽快在座位上坐好，系紧安全带。同时，请您收起小桌板，调正座椅靠背，将调光窗保持在全开状态。在“系好安全带”信号灯熄灭前，请勿离开座位。谢谢您的配合。',
-  'climb.zh': '女士们，先生们：飞机正处于爬升阶段。在此期间可能伴有颠簸，请您在座位上坐好并全程系紧安全带。现在您可以调低座椅靠背或使用小桌板。当飞机达到巡航高度后，我们将为您提供客舱服务。谢谢。',
-  'descent.zh': '女士们，先生们：飞机已经开始下降。请您回到座位坐好，系紧安全带。为了确保洗手间锁扣状态安全，即刻起客舱洗手间将停止使用，请您配合。谢谢。',
-  'landing_approach.zh': '女士们，先生们：飞机已进入最终进近阶段，即将着陆。请您再次确认安全带已扣好并系紧。现在请您收起小桌板和脚踏板，调正座椅靠背，并将调光窗保持在全开状态。为了安全起见，所有的电子设备请调至飞行模式或关闭。谢谢。',
+const BROADCAST_SPECS: Partial<Record<PhaseName, { title: string; zh: string; en: string }>> = {
+  taxiing: {
+    title: '滑行阶段广播',
+    zh: '女士们，先生们：飞机已经开始滑行。为了您的安全，请您尽快在座位上坐好，系紧安全带。同时，请您收起小桌板，调正座椅靠背，将调光窗保持在全开状态。在“系好安全带”信号灯熄灭前，请勿离开座位。谢谢您的配合。',
+    en: 'Ladies and gentlemen, the aircraft is now taxiing. For your safety, please be seated and fasten your seat belt. Please ensure your tray table is closed, your seat back is in the full upright position, and your window shade is fully open. Please remain seated until the seat belt sign is turned off. Thank you for your cooperation.',
+  },
+  climb: {
+    title: '爬升阶段广播',
+    zh: '女士们，先生们：飞机正处于爬升阶段。在此期间可能伴有颠簸，请您在座位上坐好并全程系紧安全带。现在您可以调低座椅靠背或使用小桌板。当飞机达到巡航高度后，我们将为您提供客舱服务。谢谢。',
+    en: 'Ladies and gentlemen, we are currently climbing to our cruise altitude. As we may encounter turbulence, please remain seated with your seat belt securely fastened. You may now adjust your seat back and use your tray table. Our cabin service will begin shortly once we reach our cruising altitude. Thank you.',
+  },
+  descent: {
+    title: '下降阶段广播',
+    zh: '女士们，先生们：飞机已经开始下降，预计稍后着陆。请您回到座位坐好，系紧安全带。为了确保洗手间锁扣状态安全，即刻起客舱洗手间将停止使用，请您配合。谢谢。',
+    en: 'Ladies and gentlemen, the aircraft has started its descent and we expect to land shortly. Please return to your seat and fasten your seat belt securely. For safety reasons, the lavatories are now closed for the remainder of the flight. Thank you for your cooperation.',
+  },
+  landing_approach: {
+    title: '降落进近阶段广播',
+    zh: '女士们，先生们：飞机已进入最终进近阶段，即将着陆。请您再次确认安全带已扣好并系紧。现在请您收起小桌板和脚踏板，调正座椅靠背，并将调光窗保持在全开状态。为了安全起见，所有的电子设备请调至飞行模式或关闭。谢谢。',
+    en: 'Ladies and gentlemen, we are on our final approach for landing. Please ensure that your seat belt is securely fastened. At this time, please stow your tray table, return your seat back to the full upright position, and open your window shade. All electronic devices must be set to flight mode or turned off for landing. Thank you.',
+  },
 }
 
 export class CabinFlightAutomation {
@@ -89,12 +123,16 @@ export class CabinFlightAutomation {
   private reconnectTimer: NodeJS.Timeout | null = null
   private lastPhaseCode: number | null = null
   private readonly logFile: string
+  private readonly broadcastClient: CabinBroadcastClient
+  private readonly ttsInflight = new Map<string, Promise<BroadcastAsset>>()
 
   constructor(
     private readonly config: ServerConfig,
     private readonly store: CabinStore,
+    private readonly healthReports?: CabinHealthReportService,
   ) {
     this.logFile = config.cabin.automationLogFile || join(config.rootDir, 'logs', 'cabin-automation.jsonl')
+    this.broadcastClient = new CabinBroadcastClient(config.cabin)
   }
 
   start(): void {
@@ -161,6 +199,7 @@ export class CabinFlightAutomation {
       this.log({ event: 'ws.message.invalid_envelope', requestId, ok: false, details: { envelope } })
       return
     }
+    this.healthReports?.handleWsEnvelope(envelope)
     const type = String((envelope as Record<string, unknown>).type || '')
     if (type !== 'flight_data') {
       this.log({ event: 'ws.message.ignored', requestId, ok: true, details: { type } })
@@ -230,13 +269,17 @@ export class CabinFlightAutomation {
     const seats = this.resolveSeats()
     const flightId = seats[0]?.flightId || 'AUTO'
     const flightDate = seats[0]?.flightDate || today()
-    const aircraftNo = seats[0]?.aircraftNo ?? null
+    const aircraftNo = seats[0]?.aircraftNo || this.config.cabin.aircraftNo || null
     const summary = {
       seats: seats.length,
       alerts: 0,
       controls: 0,
       controlFailures: 0,
       statusFailures: 0,
+      broadcasts: 0,
+      broadcastFailures: 0,
+      alertPushes: 0,
+      alertPushFailures: 0,
     }
     this.log({
       event: 'seat.registry.loaded',
@@ -250,7 +293,23 @@ export class CabinFlightAutomation {
       details: { seats: seats.map(seat => seat.seatNo) },
     })
 
-    const broadcast = await this.ensureBroadcast(phaseName, requestId)
+    let broadcast: BroadcastAsset | null = null
+    try {
+      broadcast = await this.ensureBroadcast(phaseName, requestId)
+    } catch (error) {
+      summary.broadcastFailures += 1
+      this.log({
+        event: 'broadcast.ready.failed',
+        requestId,
+        aircraftNo,
+        flightId,
+        flightDate,
+        phaseCode,
+        phaseName,
+        ok: false,
+        error: stringifyError(error),
+      })
+    }
     if (broadcast) {
       this.log({
         event: 'broadcast.ready',
@@ -263,6 +322,17 @@ export class CabinFlightAutomation {
         ok: true,
         details: broadcast,
       })
+      summary.broadcasts += 1
+      const sent = await this.sendAudioAllBroadcast({
+        requestId,
+        aircraftNo,
+        flightId,
+        flightDate,
+        phaseCode,
+        phaseName,
+        broadcast,
+      })
+      if (!sent) summary.broadcastFailures += 1
     }
 
     for (const seat of seats) {
@@ -296,6 +366,17 @@ export class CabinFlightAutomation {
           details: { alert_type: problem.type, message: problem.message },
         })
       }
+      if (checks.problems.length) {
+        summary.alertPushes += 1
+        const pushed = await this.sendSeatErrorBroadcast({
+          seat,
+          problems: checks.problems,
+          requestId,
+          phaseCode,
+          phaseName,
+        })
+        if (!pushed) summary.alertPushFailures += 1
+      }
       for (const control of checks.controls) {
         const result = await this.sendControl(seat, control, requestId, phaseCode, phaseName)
         summary.controls += 1
@@ -321,10 +402,11 @@ export class CabinFlightAutomation {
     if (managed.length) return dedupeSeats(managed)
     const configured = parseManagedSeats(this.config.cabin.managedSeats)
     for (const seatNo of configured) {
-      this.store.upsertManagedSeat({
-        flightId: 'AUTO',
-        flightDate: today(),
-        seatNo,
+        this.store.upsertManagedSeat({
+          aircraftNo: this.config.cabin.aircraftNo,
+          flightId: 'AUTO',
+          flightDate: today(),
+          seatNo,
         columnNo: seatNo,
       })
     }
@@ -334,6 +416,7 @@ export class CabinFlightAutomation {
   private seedConfiguredSeats(): void {
     for (const seatNo of parseManagedSeats(this.config.cabin.managedSeats)) {
       this.store.upsertManagedSeat({
+        aircraftNo: this.config.cabin.aircraftNo,
         flightId: 'AUTO',
         flightDate: today(),
         seatNo,
@@ -348,12 +431,12 @@ export class CabinFlightAutomation {
     phaseCode: number
     phaseName: PhaseName
   }): Promise<{
-    problems: Array<{ type: string; severity: 'warning' | 'critical'; message: string; details?: Record<string, unknown> }>
+    problems: SeatProblem[]
     controls: Array<{ command: 'seat.cushion' | 'seat.tray.close'; params: Record<string, string> }>
     statusFailures: number
   }> {
     const { seat, requestId, phaseCode, phaseName } = input
-    const problems: Array<{ type: string; severity: 'warning' | 'critical'; message: string; details?: Record<string, unknown> }> = []
+    const problems: SeatProblem[] = []
     const controls: Array<{ command: 'seat.cushion' | 'seat.tray.close'; params: Record<string, string> }> = []
     let statusFailures = 0
 
@@ -568,26 +651,287 @@ export class CabinFlightAutomation {
     }
   }
 
-  private async ensureBroadcast(phaseName: PhaseName, requestId: string): Promise<{ file: string; url: string; text: string } | null> {
-    const key = `${phaseName}.zh`
-    const text = BROADCAST_TEXT[key]
-    if (!text) return null
-    const filename = `${key}.wav`
-    const dir = join(this.config.rootDir, 'cabin-broadcasts')
-    const file = join(dir, filename)
+  private async ensureBroadcast(phaseName: PhaseName, requestId: string): Promise<BroadcastAsset | null> {
+    const spec = BROADCAST_SPECS[phaseName]
+    if (!spec) return null
+    const text = `${spec.zh}\n\n${spec.en}`
+    const cacheKey = createBroadcastCacheKey({
+      phaseName,
+      title: spec.title,
+      text,
+      model: this.config.cabin.ttsModel,
+      voice: this.config.cabin.ttsVoice,
+      language: this.config.cabin.ttsLanguage,
+      version: this.config.cabin.broadcastTtsVersion || 'flight-phase-v1',
+    })
+    const existing = this.ttsInflight.get(cacheKey)
+    if (existing) return existing
+    const promise = this.ensureBroadcastAudioFile({
+      phaseName,
+      title: spec.title,
+      text,
+      cacheKey,
+      requestId,
+    })
+    this.ttsInflight.set(cacheKey, promise)
     try {
-      await access(file)
-    } catch {
-      await mkdir(dir, { recursive: true })
-      await writeFile(file, createSilentWav())
-      await writeFile(join(dir, `${key}.txt`), text, 'utf8')
+      return await promise
+    } finally {
+      this.ttsInflight.delete(cacheKey)
     }
+  }
+
+  private async ensureBroadcastAudioFile(input: {
+    phaseName: PhaseName
+    title: string
+    text: string
+    cacheKey: string
+    requestId: string
+  }): Promise<BroadcastAsset> {
+    const { phaseName, title, text, cacheKey, requestId } = input
+    const filename = `${phaseName}_${cacheKey.slice(0, 12)}.wav`
+    const dir = this.config.cabin.broadcastTtsCacheDir || join(this.config.rootDir, 'cabin-broadcasts')
+    const file = join(dir, filename)
     const baseUrl = this.config.cabin.broadcastBaseUrl?.replace(/\/+$/, '')
     const url = baseUrl
       ? `${baseUrl}/${filename}`
       : `/v1/cabin/broadcasts/${filename}`
-    this.log({ event: 'broadcast.asset.ensure', requestId, phaseName, ok: true, details: { file, url } })
-    return { file, url, text }
+    try {
+      await access(file)
+      this.log({
+        event: 'broadcast.tts.cache_hit',
+        requestId,
+        phaseName,
+        ok: true,
+        details: { file, url, cache_key: cacheKey, text_hash: cacheKey.slice(0, 12), title },
+      })
+      return { file, url, text, title, cacheKey, cacheHit: true }
+    } catch {}
+
+    await mkdir(dir, { recursive: true })
+    const start = Date.now()
+    this.log({
+      event: 'broadcast.tts.request',
+      requestId,
+      phaseName,
+      method: 'POST',
+      url: this.config.cabin.ttsUrl,
+      ok: true,
+      details: {
+        model: this.config.cabin.ttsModel,
+        voice: this.config.cabin.ttsVoice,
+        language: this.config.cabin.ttsLanguage,
+        cache_key: cacheKey,
+        input_chars: text.length,
+      },
+    })
+    try {
+      const response = await fetch(this.config.cabin.ttsUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.config.cabin.ttsApiKey
+            ? { authorization: `Bearer ${this.config.cabin.ttsApiKey}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          model: this.config.cabin.ttsModel,
+          voice: this.config.cabin.ttsVoice,
+          input: text,
+          response_format: 'wav',
+          language: this.config.cabin.ttsLanguage,
+        }),
+      })
+      if (!response.ok) {
+        const errorText = await response.text()
+        this.log({
+          event: 'broadcast.tts.failed',
+          requestId,
+          phaseName,
+          method: 'POST',
+          url: this.config.cabin.ttsUrl,
+          status: response.status,
+          ok: false,
+          elapsedMs: Date.now() - start,
+          error: errorText,
+          details: { cache_key: cacheKey },
+        })
+        throw new Error(`TTS request failed: ${response.status} ${errorText}`)
+      }
+      const audio = Buffer.from(await response.arrayBuffer())
+      await writeFile(file, audio)
+      await writeFile(join(dir, `${phaseName}_${cacheKey.slice(0, 12)}.json`), JSON.stringify({
+        title,
+        text,
+        cacheKey,
+        model: this.config.cabin.ttsModel,
+        voice: this.config.cabin.ttsVoice,
+        language: this.config.cabin.ttsLanguage,
+        version: this.config.cabin.broadcastTtsVersion || 'flight-phase-v1',
+        contentType: response.headers.get('content-type') || 'audio/wav',
+        generatedAt: new Date().toISOString(),
+      }, null, 2), 'utf8')
+      this.log({
+        event: 'broadcast.tts.generated',
+        requestId,
+        phaseName,
+        method: 'POST',
+        url: this.config.cabin.ttsUrl,
+        status: response.status,
+        ok: true,
+        elapsedMs: Date.now() - start,
+        details: { file, cache_key: cacheKey, audio_bytes: audio.length, title },
+      })
+      return { file, url, text, title, cacheKey, cacheHit: false }
+    } catch (error) {
+      if (!(error instanceof Error && error.message.startsWith('TTS request failed:'))) {
+        this.log({
+          event: 'broadcast.tts.error',
+          requestId,
+          phaseName,
+          method: 'POST',
+          url: this.config.cabin.ttsUrl,
+          ok: false,
+          elapsedMs: Date.now() - start,
+          error: stringifyError(error),
+          details: { cache_key: cacheKey },
+        })
+      }
+      throw error
+    }
+  }
+
+  private async sendAudioAllBroadcast(input: {
+    requestId: string
+    aircraftNo: string | null
+    flightId: string
+    flightDate: string | null
+    phaseCode: number
+    phaseName: PhaseName
+    broadcast: BroadcastAsset
+  }): Promise<boolean> {
+    const { requestId, aircraftNo, flightId, flightDate, phaseCode, phaseName, broadcast } = input
+    if (!aircraftNo) {
+      this.log({
+        event: 'broadcast.audio_all.skipped',
+        requestId,
+        flightId,
+        flightDate,
+        phaseCode,
+        phaseName,
+        ok: false,
+        error: 'aircraftNo is required',
+        details: { title: broadcast.title, cache_key: broadcast.cacheKey },
+      })
+      return false
+    }
+    this.log({
+      event: 'broadcast.audio_all.request',
+      requestId,
+      aircraftNo,
+      flightId,
+      flightDate,
+      phaseCode,
+      phaseName,
+      method: 'POST',
+      ok: true,
+      details: { title: broadcast.title, file: broadcast.file, cache_key: broadcast.cacheKey },
+    })
+    const result = await this.broadcastClient.sendAudioAll({
+      aircraftNo,
+      title: broadcast.title,
+      filePath: broadcast.file,
+    })
+    this.log({
+      event: result.ok ? 'broadcast.audio_all.success' : result.skipped ? 'broadcast.audio_all.skipped' : 'broadcast.audio_all.failed',
+      requestId,
+      aircraftNo,
+      flightId,
+      flightDate,
+      phaseCode,
+      phaseName,
+      method: 'POST',
+      url: result.url,
+      status: result.status,
+      ok: result.ok,
+      elapsedMs: result.elapsedMs,
+      error: result.error,
+      details: {
+        title: broadcast.title,
+        file: broadcast.file,
+        cache_key: broadcast.cacheKey,
+        payload: result.payload,
+      },
+    })
+    return result.ok
+  }
+
+  private async sendSeatErrorBroadcast(input: {
+    seat: CabinManagedSeat
+    problems: SeatProblem[]
+    requestId: string
+    phaseCode: number
+    phaseName: PhaseName
+  }): Promise<boolean> {
+    const { seat, problems, requestId, phaseCode, phaseName } = input
+    const aircraftNo = seat.aircraftNo || this.config.cabin.aircraftNo || null
+    if (!aircraftNo) {
+      this.log({
+        event: 'broadcast.error_seat.skipped',
+        requestId,
+        flightId: seat.flightId,
+        flightDate: seat.flightDate,
+        phaseCode,
+        phaseName,
+        seatNo: seat.seatNo,
+        ok: false,
+        error: 'aircraftNo is required',
+        details: { alert_types: problems.map(problem => problem.type) },
+      })
+      return false
+    }
+    const content = `${seat.seatNo} 座位安全检查异常：${problems.map(describeSeatProblem).join('；')}。`
+    this.log({
+      event: 'broadcast.error_seat.request',
+      requestId,
+      aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      method: 'POST',
+      ok: true,
+      details: { title: '座位告警', content, alert_types: problems.map(problem => problem.type) },
+    })
+    const result = await this.broadcastClient.sendErrorSeat({
+      aircraftNo,
+      seatNo: seat.seatNo,
+      title: '座位告警',
+      content,
+    })
+    this.log({
+      event: result.ok ? 'broadcast.error_seat.success' : result.skipped ? 'broadcast.error_seat.skipped' : 'broadcast.error_seat.failed',
+      requestId,
+      aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      method: 'POST',
+      url: result.url,
+      status: result.status,
+      ok: result.ok,
+      elapsedMs: result.elapsedMs,
+      error: result.error,
+      details: {
+        title: '座位告警',
+        alert_types: problems.map(problem => problem.type),
+        payload: result.payload,
+      },
+    })
+    return result.ok
   }
 
   private log(event: AutomationLogEvent): void {
@@ -690,6 +1034,21 @@ function isTrayClosed(value: unknown): boolean {
   return ['closed', 'close', '0', '收起', '关闭'].includes(value.trim().toLowerCase())
 }
 
+function describeSeatProblem(problem: SeatProblem): string {
+  switch (problem.type) {
+    case 'PASSENGER_NOT_PRESENT':
+      return '乘客未在席'
+    case 'SEATBELT_NOT_FASTENED':
+      return '安全带未扣合'
+    case 'SEAT_NOT_UPRIGHT':
+      return '座椅未归位'
+    case 'TRAY_NOT_CLOSED':
+      return '小桌板未收起'
+    default:
+      return problem.message
+  }
+}
+
 function today(): string {
   return new Date().toISOString().slice(0, 10)
 }
@@ -711,24 +1070,16 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function createSilentWav(): Buffer {
-  const sampleRate = 8000
-  const seconds = 1
-  const samples = sampleRate * seconds
-  const dataSize = samples * 2
-  const buffer = Buffer.alloc(44 + dataSize)
-  buffer.write('RIFF', 0)
-  buffer.writeUInt32LE(36 + dataSize, 4)
-  buffer.write('WAVE', 8)
-  buffer.write('fmt ', 12)
-  buffer.writeUInt32LE(16, 16)
-  buffer.writeUInt16LE(1, 20)
-  buffer.writeUInt16LE(1, 22)
-  buffer.writeUInt32LE(sampleRate, 24)
-  buffer.writeUInt32LE(sampleRate * 2, 28)
-  buffer.writeUInt16LE(2, 32)
-  buffer.writeUInt16LE(16, 34)
-  buffer.write('data', 36)
-  buffer.writeUInt32LE(dataSize, 40)
-  return buffer
+function createBroadcastCacheKey(input: {
+  phaseName: string
+  title: string
+  text: string
+  model: string
+  voice: string
+  language: string
+  version: string
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify(input))
+    .digest('hex')
 }

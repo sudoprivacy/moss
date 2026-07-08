@@ -10,7 +10,9 @@ ui/node_modules/
 bin/
 data/
 data-cabin-dev/
+data-cabin-mock/
 server.cabin.local.json
+server.cabin.mock.json
 sudocode/
 .scode/
 ui/electron-direct.mjs

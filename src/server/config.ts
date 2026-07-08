@@ -88,6 +88,11 @@ export function getDefaultServerConfig(): ServerFileConfig {
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
       automationEnabled: false,
+      broadcastEnabled: true,
+      broadcastTtsVersion: 'flight-phase-v1',
+      healthReportEnabled: false,
+      healthReportCollectSeconds: 30,
+      healthReportMinSamples: 1,
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
@@ -190,6 +195,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       passengerInfoPrivacyLevel: process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL
         ? Number.parseInt(process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL, 10)
         : raw.cabin.passengerInfoPrivacyLevel,
+      aircraftNo: process.env.CABIN_AIRCRAFT_NO || raw.cabin.aircraftNo,
       asrUrl: process.env.CABIN_ASR_URL || raw.cabin.asrUrl,
       asrModel: process.env.CABIN_ASR_MODEL || raw.cabin.asrModel,
       asrApiKey: process.env.CABIN_ASR_API_KEY || raw.cabin.asrApiKey,
@@ -212,9 +218,28 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       flightStateWsUrl: process.env.CABIN_FLIGHT_STATE_WS_URL || raw.cabin.flightStateWsUrl,
       managedSeats: process.env.CABIN_MANAGED_SEATS || raw.cabin.managedSeats,
       broadcastBaseUrl: process.env.CABIN_BROADCAST_BASE_URL || raw.cabin.broadcastBaseUrl,
+      broadcastApiBaseUrl: process.env.CABIN_BROADCAST_API_BASE_URL || raw.cabin.broadcastApiBaseUrl,
+      broadcastApiKey: process.env.CABIN_BROADCAST_API_KEY || raw.cabin.broadcastApiKey,
+      broadcastAuth: process.env.CABIN_BROADCAST_AUTH || raw.cabin.broadcastAuth,
+      broadcastEnabled: process.env.CABIN_BROADCAST_ENABLED
+        ? process.env.CABIN_BROADCAST_ENABLED === '1' || process.env.CABIN_BROADCAST_ENABLED === 'true'
+        : raw.cabin.broadcastEnabled,
+      broadcastTtsCacheDir: (process.env.CABIN_BROADCAST_TTS_CACHE_DIR || raw.cabin.broadcastTtsCacheDir)
+        ? normalizePath((process.env.CABIN_BROADCAST_TTS_CACHE_DIR || raw.cabin.broadcastTtsCacheDir)!)
+        : undefined,
+      broadcastTtsVersion: process.env.CABIN_BROADCAST_TTS_VERSION || raw.cabin.broadcastTtsVersion,
       automationLogFile: (process.env.CABIN_AUTOMATION_LOG_FILE || raw.cabin.automationLogFile)
         ? normalizePath((process.env.CABIN_AUTOMATION_LOG_FILE || raw.cabin.automationLogFile)!)
         : undefined,
+      healthReportEnabled: process.env.CABIN_HEALTH_REPORT_ENABLED
+        ? process.env.CABIN_HEALTH_REPORT_ENABLED === '1' || process.env.CABIN_HEALTH_REPORT_ENABLED === 'true'
+        : raw.cabin.healthReportEnabled,
+      healthReportCollectSeconds: process.env.CABIN_HEALTH_REPORT_COLLECT_SECONDS
+        ? Number.parseInt(process.env.CABIN_HEALTH_REPORT_COLLECT_SECONDS, 10)
+        : raw.cabin.healthReportCollectSeconds,
+      healthReportMinSamples: process.env.CABIN_HEALTH_REPORT_MIN_SAMPLES
+        ? Number.parseInt(process.env.CABIN_HEALTH_REPORT_MIN_SAMPLES, 10)
+        : raw.cabin.healthReportMinSamples,
       assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
       assistantDisplayName:
         process.env.CABIN_ASSISTANT_DISPLAY_NAME || raw.cabin.assistantDisplayName,
