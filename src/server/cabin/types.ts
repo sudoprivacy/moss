@@ -119,6 +119,7 @@ export type CabinHealthMetricResult = {
 export type CabinHealthReportSummary = {
   score: number
   scoreLevel: 'good' | 'pass' | 'fail'
+  emotionStatus: 'good' | 'pass' | 'fail' | 'unknown'
   physiologyStatus: 'normal' | 'abnormal' | 'unknown'
   metricLevels: Record<CabinHealthMetricKey, CabinHealthMetricLevel>
   overview: string

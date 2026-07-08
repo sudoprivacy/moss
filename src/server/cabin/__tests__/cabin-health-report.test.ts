@@ -145,6 +145,7 @@ describe('CabinHealthReportService', () => {
     })
     expect(report.metrics?.spo2).toMatchObject({ value: 94, level: 'low' })
     expect(report.summary?.score).toBe(76.5)
+    expect(report.summary?.emotion_status).toBe('pass')
     expect(report.summary?.overview).toBe('心率、呼吸率偏快，血氧饱和度偏低，体温偏高。')
     expect(report.summary).not.toHaveProperty('metrics')
   })
@@ -190,6 +191,7 @@ describe('CabinHealthReportService', () => {
 
     expect(report.summary?.score).toBe(88.68)
     expect(report.summary?.score_level).toBe('good')
+    expect(report.summary?.emotion_status).toBe('good')
     expect(report.summary?.physiology_status).toBe('abnormal')
   })
 
@@ -218,6 +220,7 @@ describe('CabinHealthReportService', () => {
     await service.finalizeReport(highHeartRate.report_id, { requestId: 'req-finalize-high-hr' })
 
     expect(service.getReport(lowSpo2.report_id, createContext('A')).summary?.score).toBe(30)
+    expect(service.getReport(lowSpo2.report_id, createContext('A')).summary?.emotion_status).toBe('fail')
     expect(service.getReport(highHeartRate.report_id, createContext('A')).summary?.score).toBe(35)
   })
 

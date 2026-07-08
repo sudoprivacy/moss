@@ -356,6 +356,7 @@ export class CabinHealthReportService {
         summary: {
           score: report.summary.score,
           score_level: report.summary.scoreLevel,
+          emotion_status: report.summary.emotionStatus,
           physiology_status: report.summary.physiologyStatus,
           metric_levels: report.summary.metricLevels,
           overview: report.summary.overview,
@@ -527,12 +528,14 @@ function round(value: number, decimals: number): number {
   return Math.round(value * factor) / factor
 }
 
-function buildSummary(metrics: Record<CabinHealthMetricKey, CabinHealthMetricResult>): Pick<CabinHealthReportSummary, 'score' | 'scoreLevel' | 'physiologyStatus' | 'metricLevels'> {
+function buildSummary(metrics: Record<CabinHealthMetricKey, CabinHealthMetricResult>): Pick<CabinHealthReportSummary, 'score' | 'scoreLevel' | 'emotionStatus' | 'physiologyStatus' | 'metricLevels'> {
   const metricLevels = Object.fromEntries(METRIC_KEYS.map(key => [key, metrics[key].level])) as Record<CabinHealthMetricKey, CabinHealthMetricLevel>
   const score = calculateCustomerHealthScore(metrics)
+  const scoreLevel = score >= 80 ? 'good' : score >= 60 ? 'pass' : 'fail'
   return {
     score,
-    scoreLevel: score >= 80 ? 'good' : score >= 60 ? 'pass' : 'fail',
+    scoreLevel,
+    emotionStatus: scoreLevel,
     physiologyStatus: METRIC_KEYS.every(key => metrics[key].level === 'normal') ? 'normal' : 'abnormal',
     metricLevels,
   }

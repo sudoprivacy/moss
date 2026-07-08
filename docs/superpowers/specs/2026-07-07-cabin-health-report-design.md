@@ -224,7 +224,7 @@ Completed response:
   "summary": {
     "score": 76.5,
     "score_level": "pass",
-    "emotion_status": "failed",
+    "emotion_status": "fail",
     "physiology_status": "abnormal",
     "metric_levels": {
       "heart_rate": "high",
@@ -343,17 +343,17 @@ unknown
 `emotion_status`:
 
 ```text
-passed
-warning
-failed
+good
+pass
+fail
 unknown
 ```
 
-For v1, `emotion_status` is derived from physiological score only because no independent emotion signal is available:
+Customer confirmed that `emotion_status` follows the same health grade as `score_level`:
 
-- `passed` when score >= 75.
-- `warning` when score >= 60 and score < 75.
-- `failed` when score < 60.
+- `good` when score is 80-100.
+- `pass` when score is 60-79.
+- `fail` when score is 0-59.
 - `unknown` when report has insufficient valid data.
 
 ## 8. Metric Rules
@@ -737,4 +737,4 @@ Confirm during implementation:
 
 - Exact Pad route names expected by frontend.
 - Whether `flight_id/flight_date` should be strict on report get when current passenger context changes mid-flight.
-- Whether `emotion_status` should remain derived from health score or be removed until there is a real emotion signal.
+- Whether a future independent emotion signal should override the current health-grade-based `emotion_status`.

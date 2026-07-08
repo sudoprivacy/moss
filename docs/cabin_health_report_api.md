@@ -207,6 +207,7 @@ Pad 建议在 `collecting` 或 `generating` 状态下每 1-2 秒轮询一次。
   "summary": {
     "score": 76.5,
     "score_level": "pass",
+    "emotion_status": "pass",
     "physiology_status": "abnormal",
     "metric_levels": {
       "heart_rate": "high",
@@ -315,6 +316,7 @@ Pad 渲染建议：
 | --- | --- | --- |
 | `score` | number | 综合健康评分，范围 0-100。 |
 | `score_level` | enum | 评分等级，按客户健康评分规则映射，Pad 可决定仪表盘颜色。 |
+| `emotion_status` | enum | 情绪状态。当前按客户确认规则，与健康等级保持一致。 |
 | `physiology_status` | enum | 生理指标整体状态。 |
 | `metric_levels` | object | 四项指标等级摘要，便于 Pad 快速渲染“健康小结”。 |
 | `overview` | string | 智能分析报告总览。 |
@@ -365,6 +367,24 @@ Pad 渲染建议：
 | `fail` | 0-59 | 不合格 |
 
 综合评分按客户规则计算：血氧 40%、心率 30%、呼吸率 15%、体温 15%。各指标先按正常区、警告区、危险区的分段二次函数计算单项分，再加权合成总分。若血氧 `< 90`，最终分数强制不高于 30；若心率 `> 150` 或 `< 40`，最终分数强制不高于 35。
+
+### `emotion_status`
+
+| 值 | 说明 |
+| --- | --- |
+| `good` | 良好 |
+| `pass` | 合格 |
+| `fail` | 不合格 |
+| `unknown` | 暂无法判断 |
+
+客户确认情绪状态与健康等级一致：
+
+```text
+80 <= score <= 100    good
+60 <= score <= 79     pass
+0 <= score <= 59      fail
+样本不足/无法判断       unknown
+```
 
 ### `physiology_status`
 
