@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdtemp, rm } from 'fs/promises'
+import { mkdtemp, readFile, rm } from 'fs/promises'
 import net from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -8,6 +8,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { WebSocketServer } from 'ws'
 
 import { CabinFlightAutomation } from '../automation.js'
+import { CabinBroadcastClient } from '../broadcastClient.js'
 import { CabinStore } from '../store.js'
 import type { ServerConfig } from '../../types.js'
 
@@ -298,5 +299,107 @@ describe('CabinFlightAutomation external broadcasts', () => {
     } finally {
       automation.stop()
     }
+  })
+
+  it('serializes overlapping phase tasks from concurrent websocket messages', async () => {
+    const rootDir = await makeTempDir()
+    const config = createConfig(rootDir)
+    config.cabin.broadcastEnabled = false
+    const db = new Database(':memory:') as unknown as DatabaseSync
+    const store = new CabinStore(db)
+    store.upsertManagedSeat({
+      aircraftNo: 'B-WITHFLIGHT-01',
+      flightId: 'CA1234',
+      flightDate: '2026-07-07',
+      seatNo: 'A',
+      columnNo: 'A',
+    })
+
+    let activeStatusRequests = 0
+    let maxActiveStatusRequests = 0
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/admin-api/tcp/hardware/status') {
+        activeStatusRequests += 1
+        maxActiveStatusRequests = Math.max(maxActiveStatusRequests, activeStatusRequests)
+        await new Promise(resolve => setTimeout(resolve, 25))
+        activeStatusRequests -= 1
+        const key = url.searchParams.get('key')
+        return Response.json({
+          code: 0,
+          data: {
+            target: 'A',
+            key,
+            aircraftNo: 'B-WITHFLIGHT-01',
+            data: key === 'safety'
+              ? { presence: 'true', seatbelt: 'true' }
+              : key === 'posture'
+                ? { position: '0' }
+                : { tray_state: 'closed' },
+          },
+        })
+      }
+      return Response.json({ code: 0, data: 'ok' })
+    }) as typeof fetch
+
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = fetchImpl
+    try {
+      const automation = new CabinFlightAutomation(config, store)
+      await Promise.all([
+        (automation as unknown as { handleRawMessage(raw: string): Promise<void> }).handleRawMessage(flightMessage(16)),
+        (automation as unknown as { handleRawMessage(raw: string): Promise<void> }).handleRawMessage(flightMessage(2)),
+      ])
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+
+    expect(maxActiveStatusRequests).toBe(1)
+  })
+
+  it('times out stalled broadcast API requests', async () => {
+    const rootDir = await makeTempDir()
+    const config = createConfig(rootDir)
+    config.cabin.controlTimeoutMs = 20
+    const audioFile = join(rootDir, 'audio.wav')
+    await Bun.write(audioFile, Buffer.from('RIFF_TEST_WAVE'))
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = (async () => new Promise<Response>(() => {})) as typeof fetch
+    try {
+      const client = new CabinBroadcastClient(config.cabin)
+      const startedAt = Date.now()
+      const result = await client.sendAudioAll({
+        aircraftNo: 'B-WITHFLIGHT-01',
+        title: '测试广播',
+        filePath: audioFile,
+      })
+      expect(result.ok).toBe(false)
+      expect(result.elapsedMs).toBeLessThan(500)
+      expect(Date.now() - startedAt).toBeLessThan(500)
+      expect(result.error).toContain('timeout')
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  it('persists raw health telemetry in automation logs for troubleshooting', async () => {
+    const rootDir = await makeTempDir()
+    const config = createConfig(rootDir)
+    const automation = new CabinFlightAutomation(config, new CabinStore(new Database(':memory:') as unknown as DatabaseSync))
+    await (automation as unknown as { handleRawMessage(raw: string): Promise<void> }).handleRawMessage(JSON.stringify({
+      type: 'telemetry',
+      content: {
+        topic: 'health',
+        seatNo: 'B',
+        message: { heart_rate: 120, spo2: 94, respiratory_rate: 22, body_temperature: 37.8 },
+      },
+    }))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const logs = await readFile(config.cabin.automationLogFile!, 'utf8')
+    expect(logs).toContain('health')
+    expect(logs).toContain('heart_rate')
+    expect(logs).toContain('120')
+    expect(logs).toContain('body_temperature')
+    expect(logs).toContain('37.8')
   })
 })

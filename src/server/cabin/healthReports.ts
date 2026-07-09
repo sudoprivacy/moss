@@ -9,6 +9,7 @@ import type {
 } from './types.js'
 import { CabinStore } from './store.js'
 import type { CabinLogger } from './logger.js'
+import { fetchWithTimeout } from './http.js'
 
 type FetchLike = typeof fetch
 
@@ -18,11 +19,14 @@ type HealthReportLogContext = {
 
 type ActiveReport = {
   reportId: string
+  aircraftNo?: string | null
   seatNo: string
   flightId: string
   flightDate: string
   samples: HealthSample[]
+  lastFlushedCount: number
   timer?: NodeJS.Timeout
+  flushTimer?: NodeJS.Timeout
 }
 
 type HealthSample = {
@@ -65,11 +69,13 @@ const METRICS: Record<CabinHealthMetricKey, {
 }
 
 const METRIC_KEYS = Object.keys(METRICS) as CabinHealthMetricKey[]
+const SAMPLE_FLUSH_INTERVAL_MS = 1_000
+const SAMPLE_FLUSH_BATCH_SIZE = 10
 
 export class CabinHealthReportService {
   private readonly fetchImpl: FetchLike
   private readonly scheduleFinalize: boolean
-  private readonly activeReportsBySeatNo = new Map<string, ActiveReport>()
+  private readonly activeReportsByKey = new Map<string, ActiveReport>()
 
   constructor(private readonly options: CabinHealthReportServiceOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch
@@ -82,15 +88,21 @@ export class CabinHealthReportService {
     const now = Date.now()
     const collectSeconds = this.options.config.healthReportCollectSeconds ?? 30
     const collectUntil = now + collectSeconds * 1000
-    const existing = this.activeReportsBySeatNo.get(seatNo)
+    const reportKey = activeReportKey({
+      aircraftNo: context.aircraftNo,
+      flightId: context.flightId,
+      flightDate: context.flightDate,
+      seatNo,
+    })
+    const existing = this.activeReportsByKey.get(reportKey)
     const cancelled = this.options.store.cancelUnfinishedHealthReports({
       flightId: context.flightId,
       flightDate: context.flightDate,
       seatNo,
     })
     if (existing) {
-      if (existing.timer) clearTimeout(existing.timer)
-      this.activeReportsBySeatNo.delete(seatNo)
+      this.clearActiveTimers(existing)
+      this.activeReportsByKey.delete(reportKey)
     }
 
     const report = this.options.store.createHealthReport({
@@ -123,10 +135,12 @@ export class CabinHealthReportService {
 
     const active: ActiveReport = {
       reportId: report.id,
+      aircraftNo: context.aircraftNo,
       seatNo,
       flightId: context.flightId,
       flightDate: context.flightDate,
       samples: [],
+      lastFlushedCount: 0,
     }
     if (this.scheduleFinalize) {
       active.timer = setTimeout(() => {
@@ -134,7 +148,7 @@ export class CabinHealthReportService {
       }, collectSeconds * 1000)
       active.timer.unref?.()
     }
-    this.activeReportsBySeatNo.set(seatNo, active)
+    this.activeReportsByKey.set(reportKey, active)
     this.log('health_report.start', {
       request_id: input.requestId,
       report_id: report.id,
@@ -150,6 +164,7 @@ export class CabinHealthReportService {
   }
 
   getReport(reportId: string, context: CabinPassengerContext): HealthReportApiResponse {
+    this.flushActiveReportById(reportId)
     const report = this.options.store.getHealthReport(reportId)
     if (!report) throw new Error('HEALTH_REPORT_NOT_FOUND')
     if (context.seatId && report.seatNo !== context.seatId) throw new Error('HEALTH_REPORT_FORBIDDEN')
@@ -164,7 +179,7 @@ export class CabinHealthReportService {
     if (!content || content.topic !== 'health') return
     const seatNo = stringField(content, 'seatNo')
     if (!seatNo) return
-    const active = this.activeReportsBySeatNo.get(seatNo)
+    const active = this.findActiveReportForSample(content, seatNo)
     if (!active) {
       this.log('health_report.sample.ignored', { seat_no: seatNo, ignored_reason: 'no_active_report' })
       return
@@ -189,7 +204,10 @@ export class CabinHealthReportService {
       return
     }
     active.samples.push(sample)
-    this.options.store.updateHealthReportSamples(active.reportId, active.samples)
+    this.scheduleSampleFlush(active)
+    if (active.samples.length - active.lastFlushedCount >= SAMPLE_FLUSH_BATCH_SIZE) {
+      this.flushActiveReport(active)
+    }
     if (active.samples.length === 1 || active.samples.length % 10 === 0) {
       this.log('health_report.sample.accepted', {
         report_id: active.reportId,
@@ -202,7 +220,57 @@ export class CabinHealthReportService {
     }
   }
 
+  private findActiveReportForSample(content: Record<string, unknown>, seatNo: string): ActiveReport | null {
+    const aircraftNo = stringField(content, 'aircraftNo')
+    const flightId = stringField(content, 'flightId', 'flight_id')
+    const flightDate = stringField(content, 'flightDate', 'flight_date')
+    const matches = Array.from(this.activeReportsByKey.values()).filter(active => {
+      if (active.seatNo !== seatNo) return false
+      if (aircraftNo && active.aircraftNo && active.aircraftNo !== aircraftNo) return false
+      if (flightId && active.flightId !== flightId) return false
+      if (flightDate && active.flightDate !== flightDate) return false
+      return true
+    })
+    if (matches.length === 1) return matches[0]
+    if (matches.length > 1) {
+      this.log('health_report.sample.ignored', {
+        seat_no: seatNo,
+        ignored_reason: 'ambiguous_active_report',
+        active_report_count: matches.length,
+      })
+    }
+    return null
+  }
+
+  private scheduleSampleFlush(active: ActiveReport): void {
+    if (active.flushTimer) return
+    active.flushTimer = setTimeout(() => {
+      active.flushTimer = undefined
+      this.flushActiveReport(active)
+    }, SAMPLE_FLUSH_INTERVAL_MS)
+    active.flushTimer.unref?.()
+  }
+
+  private flushActiveReportById(reportId: string): void {
+    const active = Array.from(this.activeReportsByKey.values()).find(item => item.reportId === reportId)
+    if (active) this.flushActiveReport(active)
+  }
+
+  private flushActiveReport(active: ActiveReport): void {
+    if (active.samples.length === active.lastFlushedCount) return
+    const updated = this.options.store.updateHealthReportSamples(active.reportId, active.samples)
+    if (updated) active.lastFlushedCount = active.samples.length
+  }
+
+  private clearActiveTimers(active: ActiveReport): void {
+    if (active.timer) clearTimeout(active.timer)
+    if (active.flushTimer) clearTimeout(active.flushTimer)
+    active.timer = undefined
+    active.flushTimer = undefined
+  }
+
   async finalizeReport(reportId: string, input: HealthReportLogContext = {}): Promise<HealthReportApiResponse> {
+    this.flushActiveReportById(reportId)
     const report = this.options.store.getHealthReport(reportId)
     if (!report) throw new Error('HEALTH_REPORT_NOT_FOUND')
     if (report.status !== 'collecting') return this.toApiResponse(report)
@@ -255,10 +323,10 @@ export class CabinHealthReportService {
   }
 
   private removeActiveReport(report: CabinHealthReport): void {
-    const active = this.activeReportsBySeatNo.get(report.seatNo)
+    const active = this.activeReportsByKey.get(activeReportKey(report))
     if (active?.reportId === report.id) {
-      if (active.timer) clearTimeout(active.timer)
-      this.activeReportsBySeatNo.delete(report.seatNo)
+      this.clearActiveTimers(active)
+      this.activeReportsByKey.delete(activeReportKey(report))
     }
   }
 
@@ -281,7 +349,7 @@ export class CabinHealthReportService {
     const start = Date.now()
     try {
       this.log('health_report.model.request', { request_id: input.requestId, url, model: this.options.config.llmModel })
-      const response = await this.fetchImpl(url, {
+      const response = await fetchWithTimeout(this.fetchImpl, url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -293,7 +361,7 @@ export class CabinHealthReportService {
           temperature: 0.2,
           stream: false,
         }),
-      })
+      }, this.options.config.controlTimeoutMs ?? 10_000, 'health report model')
       const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> }
       const content = extractModelContent(payload)
       const parsed = parseModelJson(content)
@@ -460,10 +528,15 @@ function objectField(input: unknown, key: string): Record<string, unknown> | nul
     : null
 }
 
-function stringField(input: unknown, key: string): string | undefined {
+function stringField(input: unknown, ...keys: string[]): string | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
-  const value = (input as Record<string, unknown>)[key]
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+  const record = input as Record<string, unknown>
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return undefined
 }
 
 function numberField(input: unknown, key: string): number | null {
@@ -490,6 +563,20 @@ function normalizeHealthSample(message: Record<string, unknown> | null): HealthS
     sample[key] = value
   }
   return METRIC_KEYS.some(key => sample[key] !== undefined) ? sample : null
+}
+
+function activeReportKey(input: {
+  aircraftNo?: string | null
+  flightId: string
+  flightDate: string
+  seatNo: string
+}): string {
+  return [
+    input.aircraftNo || '',
+    input.flightId,
+    input.flightDate,
+    input.seatNo,
+  ].join('|')
 }
 
 function computeMetrics(samples: Record<string, unknown>[]): Record<CabinHealthMetricKey, CabinHealthMetricResult> {

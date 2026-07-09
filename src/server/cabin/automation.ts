@@ -1,4 +1,4 @@
-import { appendFile, mkdir, writeFile, access } from 'fs/promises'
+import { appendFile, mkdir, writeFile, access, rename, stat } from 'fs/promises'
 import { dirname, join } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import WebSocket from 'ws'
@@ -8,6 +8,7 @@ import { CabinStore } from './store.js'
 import type { CabinManagedSeat } from './types.js'
 import type { CabinHealthReportService } from './healthReports.js'
 import { CabinBroadcastClient } from './broadcastClient.js'
+import { fetchWithTimeout } from './http.js'
 
 type FlightDataMessage = {
   mavpacktype?: string
@@ -117,6 +118,8 @@ const BROADCAST_SPECS: Partial<Record<PhaseName, { title: string; zh: string; en
   },
 }
 
+const MAX_AUTOMATION_LOG_BYTES = 50 * 1024 * 1024
+
 export class CabinFlightAutomation {
   private ws: WebSocket | null = null
   private stopped = false
@@ -129,6 +132,7 @@ export class CabinFlightAutomation {
   private readonly logFile: string
   private readonly broadcastClient: CabinBroadcastClient
   private readonly ttsInflight = new Map<string, Promise<BroadcastAsset>>()
+  private phaseTaskQueue: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly config: ServerConfig,
@@ -274,7 +278,6 @@ export class CabinFlightAutomation {
 
   private async handleRawMessage(raw: string): Promise<void> {
     const requestId = `auto_${randomUUID().replace(/-/g, '').slice(0, 16)}`
-    this.log({ event: 'ws.message.raw', requestId, ok: true, details: { raw: truncate(raw, 4000) } })
 
     let envelope: unknown
     try {
@@ -287,6 +290,7 @@ export class CabinFlightAutomation {
       this.log({ event: 'ws.message.invalid_envelope', requestId, ok: false, details: { envelope } })
       return
     }
+    this.logWsMessage(envelope, raw, requestId)
     this.healthReports?.handleWsEnvelope(envelope)
     const type = String((envelope as Record<string, unknown>).type || '')
     if (type !== 'flight_data') {
@@ -307,6 +311,29 @@ export class CabinFlightAutomation {
     }
     this.log({ event: 'ws.message.parsed', requestId, ok: true, details: { content } })
     await this.handleFlightData(content, requestId)
+  }
+
+  private logWsMessage(envelope: unknown, raw: string, requestId: string): void {
+    const record = envelope as Record<string, unknown>
+    const type = String(record.type || '')
+    const content = parseContent(record.content)
+    if (type === 'telemetry' && content?.topic === 'health') {
+      const message = objectField(content, 'message')
+      this.log({
+        event: 'ws.message.raw',
+        requestId,
+        ok: true,
+        details: {
+          type,
+          topic: 'health',
+          seat_no: stringField(content, 'seatNo'),
+          frame_count: toNumber(message?.frame_count),
+          raw: truncate(raw, 4000),
+        },
+      })
+      return
+    }
+    this.log({ event: 'ws.message.raw', requestId, ok: true, details: { type, raw: truncate(raw, 4000) } })
   }
 
   private async handleFlightData(content: FlightDataMessage, requestId: string): Promise<void> {
@@ -339,7 +366,29 @@ export class CabinFlightAutomation {
       ok: true,
       details: { previous_phase_code: previousPhaseCode, label: PHASE_LABELS[phaseCode] || '未知' },
     })
-    await this.runPhaseTask({ requestId, phaseCode, phaseName, content })
+    await this.enqueuePhaseTask({ requestId, phaseCode, phaseName, content })
+  }
+
+  private enqueuePhaseTask(input: {
+    requestId: string
+    phaseCode: number
+    phaseName: PhaseName
+    content: FlightDataMessage
+  }): Promise<void> {
+    const run = this.phaseTaskQueue
+      .catch(() => {})
+      .then(() => this.runPhaseTask(input))
+    this.phaseTaskQueue = run.catch(error => {
+      this.log({
+        event: 'phase.task.error',
+        requestId: input.requestId,
+        phaseCode: input.phaseCode,
+        phaseName: input.phaseName,
+        ok: false,
+        error: stringifyError(error),
+      })
+    })
+    return run
   }
 
   private async runPhaseTask(input: {
@@ -596,10 +645,10 @@ export class CabinFlightAutomation {
       ok: true,
     })
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(fetch, url, {
         method: 'GET',
         headers: this.config.cabin.controlAuth ? { Authorization: this.config.cabin.controlAuth } : {},
-      })
+      }, this.config.cabin.controlTimeoutMs ?? 10_000, 'hardware status')
       const payload = await parseResponse(response)
       this.log({
         event: 'hardware.status.response',
@@ -680,10 +729,10 @@ export class CabinFlightAutomation {
       details: { command: control.command },
     })
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(fetch, url, {
         method: 'POST',
         headers: this.config.cabin.controlAuth ? { Authorization: this.config.cabin.controlAuth } : {},
-      })
+      }, this.config.cabin.controlTimeoutMs ?? 10_000, 'hardware control')
       const payload = await parseResponse(response)
       const ok = response.ok && isOkEnvelope(payload)
       this.log({
@@ -719,6 +768,19 @@ export class CabinFlightAutomation {
       }
       return ok
     } catch (error) {
+      this.store.createAlert({
+        aircraftNo: seat.aircraftNo,
+        flightId: seat.flightId,
+        flightDate: seat.flightDate,
+        phaseCode,
+        phaseName,
+        seatNo: seat.seatNo,
+        alertType: 'HARDWARE_CONTROL_FAILED',
+        severity: 'critical',
+        message: `${seat.seatNo} ${control.command} 指令下发异常`,
+        sourceEventId: requestId,
+        details: { error: stringifyError(error), command: control.command },
+      })
       this.log({
         event: 'hardware.control.error',
         requestId,
@@ -786,6 +848,8 @@ export class CabinFlightAutomation {
       : `/v1/cabin/broadcasts/${filename}`
     try {
       await access(file)
+      const fileStat = await stat(file)
+      if (fileStat.size <= 0) throw new Error('empty cached audio')
       this.log({
         event: 'broadcast.tts.cache_hit',
         requestId,
@@ -814,7 +878,7 @@ export class CabinFlightAutomation {
       },
     })
     try {
-      const response = await fetch(this.config.cabin.ttsUrl, {
+      const response = await fetchWithTimeout(fetch, this.config.cabin.ttsUrl, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -829,7 +893,7 @@ export class CabinFlightAutomation {
           response_format: 'wav',
           language: this.config.cabin.ttsLanguage,
         }),
-      })
+      }, this.config.cabin.controlTimeoutMs ?? 10_000, 'broadcast tts')
       if (!response.ok) {
         const errorText = await response.text()
         this.log({
@@ -847,8 +911,13 @@ export class CabinFlightAutomation {
         throw new Error(`TTS request failed: ${response.status} ${errorText}`)
       }
       const audio = Buffer.from(await response.arrayBuffer())
-      await writeFile(file, audio)
-      await writeFile(join(dir, `${phaseName}_${cacheKey.slice(0, 12)}.json`), JSON.stringify({
+      if (!audio.length) throw new Error('TTS response was empty')
+      const metadataFile = join(dir, `${phaseName}_${cacheKey.slice(0, 12)}.json`)
+      const tmpSuffix = `${process.pid}.${Date.now()}.tmp`
+      const tmpAudioFile = `${file}.${tmpSuffix}`
+      const tmpMetadataFile = `${metadataFile}.${tmpSuffix}`
+      await writeFile(tmpAudioFile, audio)
+      await writeFile(tmpMetadataFile, JSON.stringify({
         title,
         text,
         cacheKey,
@@ -859,6 +928,8 @@ export class CabinFlightAutomation {
         contentType: response.headers.get('content-type') || 'audio/wav',
         generatedAt: new Date().toISOString(),
       }, null, 2), 'utf8')
+      await rename(tmpAudioFile, file)
+      await rename(tmpMetadataFile, metadataFile)
       this.log({
         event: 'broadcast.tts.generated',
         requestId,
@@ -1079,6 +1150,22 @@ function objectField(input: unknown, key: string): Record<string, unknown> | nul
     : null
 }
 
+function parseContent(content: unknown): Record<string, unknown> | null {
+  if (typeof content === 'string') {
+    try {
+      const parsed = JSON.parse(content) as unknown
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null
+    } catch {
+      return null
+    }
+  }
+  return content && typeof content === 'object' && !Array.isArray(content)
+    ? content as Record<string, unknown>
+    : null
+}
+
 function stringField(input: unknown, key: string): string | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
   const value = (input as Record<string, unknown>)[key]
@@ -1144,9 +1231,22 @@ function today(): string {
 async function appendJsonLine(file: string, payload: Record<string, unknown>): Promise<void> {
   try {
     await mkdir(dirname(file), { recursive: true })
+    await rotateJsonLineLog(file, MAX_AUTOMATION_LOG_BYTES)
     await appendFile(file, `${JSON.stringify(payload)}\n`, 'utf8')
   } catch (error) {
     console.warn('[CabinFlightAutomation] Failed to write automation log:', error)
+  }
+}
+
+async function rotateJsonLineLog(file: string, maxBytes: number): Promise<void> {
+  if (maxBytes <= 0) return
+  try {
+    const info = await stat(file)
+    if (info.size < maxBytes) return
+    const rotated = `${file}.${new Date().toISOString().replace(/[:.]/g, '-')}`
+    await rename(file, rotated)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
 }
 

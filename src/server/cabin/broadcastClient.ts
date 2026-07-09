@@ -2,6 +2,7 @@ import { basename } from 'path'
 import { readFile } from 'fs/promises'
 
 import type { CabinConfig } from './types.js'
+import { fetchWithTimeout } from './http.js'
 
 export type CabinBroadcastResult = {
   ok: boolean
@@ -39,11 +40,11 @@ export class CabinBroadcastClient {
       form.set('file', new Blob([new Uint8Array(audio)], { type: 'audio/wav' }), basename(input.filePath))
       form.set('title', input.title)
       form.set('aircraftNo', input.aircraftNo)
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(fetch, url, {
         method: 'POST',
         headers: this.headers(),
         body: form,
-      })
+      }, this.config.controlTimeoutMs ?? 10_000, 'broadcast audio-all')
       const payload = await parseResponse(response)
       return {
         ok: response.ok && isOkEnvelope(payload),
@@ -75,14 +76,14 @@ export class CabinBroadcastClient {
     const url = `${baseUrl}/admin-api/cabin/broadcast/error-seat`
     const start = Date.now()
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(fetch, url, {
         method: 'POST',
         headers: {
           ...this.headers(),
           'content-type': 'application/json',
         },
         body: JSON.stringify(input),
-      })
+      }, this.config.controlTimeoutMs ?? 10_000, 'broadcast error-seat')
       const payload = await parseResponse(response)
       return {
         ok: response.ok && isOkEnvelope(payload),

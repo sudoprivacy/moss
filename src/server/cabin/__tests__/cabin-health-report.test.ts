@@ -42,7 +42,7 @@ function createConfig(): CabinConfig {
     ttsLanguage: 'zh',
     llmBaseUrl: 'http://llm.test/v1',
     llmModel: 'llm-test',
-    controlTimeoutMs: 10_000,
+    controlTimeoutMs: 100,
     automationEnabled: true,
     assistantName: 'cabin-ai-flight-attendant',
     assistantDisplayName: '客舱 AI 乘务员',
@@ -82,6 +82,22 @@ function createService(fetchImpl?: typeof fetch): { service: CabinHealthReportSe
     scheduleFinalize: false,
   })
   return { service, store }
+}
+
+function createServiceWithConfig(
+  overrides: Partial<CabinConfig>,
+  fetchImpl?: typeof fetch,
+): { service: CabinHealthReportService; store: CabinStore; config: CabinConfig } {
+  const db = new Database(':memory:') as unknown as DatabaseSync
+  const store = new CabinStore(db)
+  const config = { ...createConfig(), ...overrides }
+  const service = new CabinHealthReportService({
+    config,
+    store,
+    fetchImpl,
+    scheduleFinalize: false,
+  })
+  return { service, store, config }
 }
 
 function createServerConfig(baseUrl: string): ServerConfig {
@@ -244,6 +260,55 @@ describe('CabinHealthReportService', () => {
 
     expect(report.report_status).toBe('completed')
     expect(report.summary?.overview).toBe('本次检测四项生理指标均在正常范围内。')
+  })
+
+  it('falls back to deterministic text when model generation times out', async () => {
+    const fetchImpl = (async () => new Promise<Response>(() => {})) as typeof fetch
+    const { service } = createServiceWithConfig({ controlTimeoutMs: 20 }, fetchImpl)
+    const started = service.startReport(createContext('A'), { requestId: 'req-start' })
+    service.handleWsEnvelope({
+      type: 'telemetry',
+      content: {
+        topic: 'health',
+        seatNo: 'A',
+        message: { heart_rate: 72, spo2: 98, respiratory_rate: 16, body_temperature: 36.5 },
+      },
+    })
+
+    const startedAt = Date.now()
+    await service.finalizeReport(started.report_id, { requestId: 'req-finalize' })
+    const report = service.getReport(started.report_id, createContext('A'))
+
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(report.report_status).toBe('completed')
+    expect(report.summary?.overview).toBe('本次检测四项生理指标均在正常范围内。')
+  })
+
+  it('buffers health samples and flushes them when the report is read', () => {
+    const { service, store } = createService()
+    const updateCalls: number[] = []
+    const originalUpdate = store.updateHealthReportSamples.bind(store)
+    store.updateHealthReportSamples = ((reportId, samples) => {
+      updateCalls.push(samples.length)
+      return originalUpdate(reportId, samples)
+    }) as typeof store.updateHealthReportSamples
+    const started = service.startReport(createContext('B'), { requestId: 'req-start' })
+
+    for (let index = 0; index < 5; index += 1) {
+      service.handleWsEnvelope({
+        type: 'telemetry',
+        content: {
+          topic: 'health',
+          seatNo: 'B',
+          message: { heart_rate: 70 + index, spo2: 98, respiratory_rate: 16, body_temperature: 36.5 },
+        },
+      })
+    }
+
+    expect(updateCalls).toEqual([])
+    const report = service.getReport(started.report_id, createContext('B'))
+    expect(report.sample_count).toBe(5)
+    expect(updateCalls).toEqual([5])
   })
 
   it('normalizes model string lists into report arrays', async () => {
