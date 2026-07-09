@@ -345,8 +345,14 @@ export class CabinHealthReportService {
       '字段格式必须为：overview 字符串；interpretations 字符串数组；suggestions 字符串数组；disclaimer 字符串。',
       'interpretations 每项为一条分项解读文本，不要输出对象、嵌套结构或额外字段。',
       'suggestions 每项为一条建议文本，不要输出对象、嵌套结构或额外字段。',
+      'interpretations 固定输出 4 条，顺序必须为 heart_rate、respiratory_rate、spo2、body_temperature。',
+      'suggestions 输出 2 到 4 条，不得多于 4 条，每条不超过 40 个中文字符。',
+      'disclaimer 必须固定为：本报告仅用于客舱健康状态辅助提示，不作为医疗诊断依据。',
       '不得修改、推断或重新计算任何指标值、等级、分数。',
       '不得输出诊断结论，只能给客舱健康状态辅助提示。',
+      '不得推断病因，例如焦虑、感染、炎症、呼吸系统疾病、心血管疾病等。',
+      '不得输出医疗诊断、治疗、用药、就医、医院、医生、地面医疗团队等处置措辞。',
+      '只能给出客舱内温和建议，例如静坐休息、放松呼吸、稍后复测、联系乘务人员。',
       JSON.stringify({ metrics: compactMetrics(metrics), score, language }),
     ].join('\n')
     const start = Date.now()
