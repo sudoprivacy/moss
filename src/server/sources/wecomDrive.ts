@@ -121,9 +121,15 @@ export class WecomDriveConnector implements ExternalSourceConnector {
     try {
       const token = await this.getAccessToken()
       if (!token) return { ok: false, message: '无法获取 access_token' }
-      // Optionally verify by listing the root folder; we just check token
-      // here so testConnection stays cheap.
-      return { ok: true, message: 'access_token 获取成功' }
+      // Actually list the root folder too: gettoken succeeding doesn't prove
+      // the app has 微盘 access or that spaceid is valid. Listing surfaces
+      // missing-spaceid / permission errors (WeCom errcode) as a failed test
+      // instead of a misleading green.
+      if (!this.spaceId) {
+        return { ok: false, message: '缺少 spaceid:企业微信微盘 file_list 接口必须提供空间 ID' }
+      }
+      await this.callFileList(this.rootFileId || '')
+      return { ok: true, message: '连接成功,已可列出微盘根目录' }
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : String(err) }
     }
@@ -272,8 +278,12 @@ export class WecomDriveConnector implements ExternalSourceConnector {
         limit: PAGE_SIZE,
         sort_type: 1,
       }
-      if (fatherId) body.fatherid = fatherId
       if (this.spaceId) body.spaceid = this.spaceId
+      // WeCom's file_list requires a fatherid. To list the space root, the
+      // fatherid must be the spaceid itself (an empty/absent fatherid returns
+      // errcode 640021 "Invalid fatherid"). Deeper folders pass their own
+      // fileid.
+      body.fatherid = fatherId || this.spaceId
       const json = await this.post('/cgi-bin/wedrive/file_list', body)
       const list = Array.isArray(json.file_list) ? (json.file_list as WecomFileInfo[]) : []
       collected.push(...list)

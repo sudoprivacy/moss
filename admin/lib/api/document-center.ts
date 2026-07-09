@@ -33,6 +33,8 @@ export type DocumentRecord = {
   storagePath: string
   uploadedBy: string
   uploadedAt: number
+  // External source this doc came from, or null/undefined if manually uploaded.
+  sourceId?: string | null
 }
 
 export type WikiBuildStatus = 'pending' | 'running' | 'succeeded' | 'failed'
@@ -51,9 +53,23 @@ export type WikiRecord = {
   createdBy: string
   createdAt: number
   updatedAt: number
-  // Document Center v2: set to true by SourceSyncWorker when a referenced
-  // document's sha256 changes. Shown as "建议重建" badge in AdminHub.
+  // Document Center v2: wiki source mode.
+  //   'files' — build from the picked document list
+  //   'dir'   — track a node's recursive subtree (cloud-drive sources)
+  sourceMode: 'files' | 'dir'
+  /** Legacy single tracked node for 'dir' mode. Superseded by sourceNodeIds. */
+  sourceNodeId: string | null
+  /** Included dir nodes for 'dir' mode (each tracked recursively). */
+  sourceNodeIds: string[]
+  /** Excluded node ids (persistent subtree exclusions) for 'dir' mode. */
+  sourceExcludeNodeIds: string[]
+  /** Per-wiki auto-rebuild toggle (dir/synced sources only). */
+  autoRebuild: boolean
+  // Document Center v2: whether the wiki is stale (Track 1: sync flag;
+  // Track 2: current picks differ from last-built set). Shown as 需重新构建.
   needsRebuild?: boolean
+  /** True once a successful build exists — drives the 已构建 tag. */
+  hasBuilt?: boolean
 }
 
 export type WikiBuildJob = {
@@ -136,6 +152,15 @@ export async function listDocumentsForNode(nodeId: string): Promise<DocumentReco
   return data.documents
 }
 
+/** All documents under a node's whole subtree (recursive) — for the wiki
+ *  external-source files picker (files across subfolders). */
+export async function listDocumentsUnderNode(nodeId: string): Promise<DocumentRecord[]> {
+  const data = await authClient.get<{ documents: DocumentRecord[] }>(
+    `/api/v1/documents/tree/nodes/${nodeId}/documents?recursive=1`,
+  )
+  return data.documents
+}
+
 export function uploadDocument(nodeId: string, input: {
   file_name: string
   mime_type: string
@@ -198,7 +223,11 @@ export function createWiki(input: {
   name: string
   description?: string
   node_id?: string | null
-  source_document_ids: string[]
+  source_document_ids?: string[]
+  source_mode?: 'files' | 'dir'
+  source_node_ids?: string[]
+  source_exclude_node_ids?: string[]
+  auto_rebuild?: boolean
 }): Promise<WikiRecord> {
   return authClient.post<WikiRecord>('/api/v1/wikis', input)
 }
@@ -210,6 +239,10 @@ export function updateWiki(
     description?: string | null
     node_id?: string | null
     source_document_ids?: string[]
+    source_mode?: 'files' | 'dir'
+    source_node_ids?: string[]
+    source_exclude_node_ids?: string[]
+    auto_rebuild?: boolean
   },
 ): Promise<WikiRecord> {
   return authClient.patch<WikiRecord>(`/api/v1/wikis/${id}`, input)

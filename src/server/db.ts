@@ -716,6 +716,28 @@ export class DirectConnectStore {
       // already exists
     }
 
+    // Document Center v2 — wiki source modes.
+    //   source_mode: 'files' (frozen pick list) | 'dir' (track a node's recursive subtree)
+    //   source_node_id: tracked node for 'dir' mode (distinct from node_id display-anchor)
+    //   auto_rebuild: per-wiki auto-rebuild toggle (only meaningful for synced/dir sources)
+    //   source_node_ids: JSON array of tracked dir node ids (dir mode, multi-dir).
+    //     Supersedes the single source_node_id; each is tracked recursively.
+    //   source_exclude_node_ids: JSON array of node ids to exclude (persistent
+    //     subtree exclusions under an included dir).
+    for (const alter of [
+      `ALTER TABLE wikis ADD COLUMN source_mode TEXT NOT NULL DEFAULT 'files'`,
+      `ALTER TABLE wikis ADD COLUMN source_node_id TEXT`,
+      `ALTER TABLE wikis ADD COLUMN auto_rebuild INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE wikis ADD COLUMN source_node_ids TEXT NOT NULL DEFAULT '[]'`,
+      `ALTER TABLE wikis ADD COLUMN source_exclude_node_ids TEXT NOT NULL DEFAULT '[]'`,
+    ]) {
+      try {
+        this.db.exec(alter)
+      } catch {
+        // already exists
+      }
+    }
+
     // ============================================================
     // Secrets Management Tables
     // ============================================================
@@ -2282,14 +2304,21 @@ export class DirectConnectStore {
     description?: string | null
     storage_path: string
     source_document_ids?: string[]
+    source_mode?: 'files' | 'dir'
+    source_node_id?: string | null
+    source_node_ids?: string[]
+    source_exclude_node_ids?: string[]
+    auto_rebuild?: boolean
     created_by: string
   }): void {
     const ts = now()
     this.db.prepare(`
       INSERT INTO wikis (
         id, org_id, node_id, name, description, storage_path,
-        build_status, source_document_ids, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+        build_status, source_document_ids, source_mode, source_node_id, auto_rebuild,
+        source_node_ids, source_exclude_node_ids,
+        created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.org_id,
@@ -2298,6 +2327,11 @@ export class DirectConnectStore {
       row.description ?? null,
       row.storage_path,
       JSON.stringify(row.source_document_ids ?? []),
+      row.source_mode ?? 'files',
+      row.source_node_id ?? null,
+      row.auto_rebuild ? 1 : 0,
+      JSON.stringify(row.source_node_ids ?? []),
+      JSON.stringify(row.source_exclude_node_ids ?? []),
       row.created_by,
       ts,
       ts,
@@ -2309,13 +2343,20 @@ export class DirectConnectStore {
     description?: string | null
     node_id?: string | null
     source_document_ids?: string[]
+    source_mode?: 'files' | 'dir'
+    source_node_id?: string | null
+    source_node_ids?: string[]
+    source_exclude_node_ids?: string[]
+    auto_rebuild?: boolean
   }): void {
     const ts = now()
     const existing = this.getWiki(id, orgId)
     if (!existing) return
     this.db.prepare(`
       UPDATE wikis
-      SET name = ?, description = ?, node_id = ?, source_document_ids = ?, updated_at = ?
+      SET name = ?, description = ?, node_id = ?, source_document_ids = ?,
+          source_mode = ?, source_node_id = ?, auto_rebuild = ?,
+          source_node_ids = ?, source_exclude_node_ids = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
     `).run(
       updates.name ?? (existing.name as string),
@@ -2324,6 +2365,17 @@ export class DirectConnectStore {
       updates.source_document_ids !== undefined
         ? JSON.stringify(updates.source_document_ids)
         : (existing.source_document_ids as string),
+      updates.source_mode ?? (existing.source_mode as string),
+      updates.source_node_id !== undefined ? updates.source_node_id : (existing.source_node_id as string | null),
+      updates.auto_rebuild !== undefined
+        ? (updates.auto_rebuild ? 1 : 0)
+        : (existing.auto_rebuild as number),
+      updates.source_node_ids !== undefined
+        ? JSON.stringify(updates.source_node_ids)
+        : (existing.source_node_ids as string),
+      updates.source_exclude_node_ids !== undefined
+        ? JSON.stringify(updates.source_exclude_node_ids)
+        : (existing.source_exclude_node_ids as string),
       ts,
       id,
       orgId,
@@ -2820,6 +2872,23 @@ export class DirectConnectStore {
       .all(sourceId) as SqlRow[]
   }
 
+  /** The top-level (parent_id IS NULL) node that is the source's auto-created root. */
+  findSourceRootNode(sourceId: string): SqlRow | null {
+    return (this.db
+      .prepare(
+        `SELECT * FROM document_tree_nodes
+         WHERE source_id = ? AND parent_id IS NULL AND deleted_at IS NULL LIMIT 1`,
+      )
+      .get(sourceId) as SqlRow) ?? null
+  }
+
+  /** Rename a tree node (used to keep the source root node named after the source). */
+  renameTreeNode(id: string, name: string): void {
+    this.db
+      .prepare(`UPDATE document_tree_nodes SET name = ?, updated_at = ? WHERE id = ?`)
+      .run(name, now(), id)
+  }
+
   /** Document Center v2: update an existing document row's content (sha/etag/path). */
   updateDocumentContent(id: string, updates: {
     external_etag?: string | null
@@ -2873,6 +2942,96 @@ export class DirectConnectStore {
     return this.db
       .prepare(`SELECT * FROM wikis WHERE source_document_ids LIKE ?`)
       .all(`%"${docId}"%`) as SqlRow[]
+  }
+
+  /**
+   * Document Center v2 — recursively list all non-deleted documents under a
+   * tree node (the node's whole subtree). Used to materialize a dir-mode
+   * wiki's inputs at build time. Collects descendant node IDs by walking
+   * parent_id from the org's node list, then selects documents in that set.
+   */
+  /** Build a parent→children adjacency map for the org's tree once. */
+  private childrenByParentMap(orgId: string): Map<string | null, string[]> {
+    const nodes = this.listDocumentTreeNodes(orgId)
+    const m = new Map<string | null, string[]>()
+    for (const n of nodes) {
+      const parent = (n.parent_id as string | null) ?? null
+      const arr = m.get(parent) ?? []
+      arr.push(String(n.id))
+      m.set(parent, arr)
+    }
+    return m
+  }
+
+  /** All node ids in the subtree rooted at `rootId` (inclusive). */
+  private subtreeNodeIds(rootId: string, childrenByParent: Map<string | null, string[]>): Set<string> {
+    const out = new Set<string>()
+    const stack = [rootId]
+    while (stack.length > 0) {
+      const id = stack.pop()!
+      if (out.has(id)) continue
+      out.add(id)
+      for (const child of childrenByParent.get(id) ?? []) stack.push(child)
+    }
+    return out
+  }
+
+  listDocumentsUnderNode(rootNodeId: string, orgId: string): SqlRow[] {
+    return this.listDocumentsUnderNodes([rootNodeId], [], orgId)
+  }
+
+  /**
+   * Document Center v2 — non-deleted documents under any of `includeIds`'
+   * subtrees, minus documents under any of `excludeIds`' subtrees. Used to
+   * materialize a dir-mode wiki's inputs (multi-dir with persistent exclusions)
+   * at build time.
+   */
+  listDocumentsUnderNodes(includeIds: string[], excludeIds: string[], orgId: string): SqlRow[] {
+    if (includeIds.length === 0) return []
+    const childrenByParent = this.childrenByParentMap(orgId)
+    const included = new Set<string>()
+    for (const id of includeIds) for (const n of this.subtreeNodeIds(id, childrenByParent)) included.add(n)
+    for (const id of excludeIds) for (const n of this.subtreeNodeIds(id, childrenByParent)) included.delete(n)
+    const ids = [...included]
+    if (ids.length === 0) return []
+    const placeholders = ids.map(() => '?').join(',')
+    return this.db
+      .prepare(
+        `SELECT * FROM documents
+         WHERE org_id = ? AND deleted_at IS NULL AND node_id IN (${placeholders})
+         ORDER BY node_id, file_name`,
+      )
+      .all(orgId, ...ids) as SqlRow[]
+  }
+
+  /**
+   * Document Center v2 — find dir-mode wikis whose *effective tracked set*
+   * includes the given changed node. A wiki matches if one of its included dir
+   * nodes (source_node_ids) is the changed node or an ancestor of it, AND none
+   * of its excluded nodes is the changed node or an ancestor (i.e. the change
+   * isn't inside an excluded subtree). `nodeIdChain` = changed node + ancestors.
+   */
+  findDirWikisForNode(nodeIdChain: string[]): SqlRow[] {
+    if (nodeIdChain.length === 0) return []
+    const chain = new Set(nodeIdChain)
+    const dirWikis = this.db
+      .prepare(`SELECT * FROM wikis WHERE source_mode = 'dir'`)
+      .all() as SqlRow[]
+    const parseIds = (v: unknown): string[] => {
+      if (typeof v !== 'string' || !v.trim()) return []
+      try { const a = JSON.parse(v); return Array.isArray(a) ? a.filter(x => typeof x === 'string') : [] } catch { return [] }
+    }
+    return dirWikis.filter((w) => {
+      // Back-compat: fold legacy single source_node_id into the include set.
+      const includes = parseIds(w.source_node_ids)
+      const legacy = typeof w.source_node_id === 'string' ? [w.source_node_id] : []
+      const include = [...includes, ...legacy]
+      const exclude = parseIds(w.source_exclude_node_ids)
+      const includedHit = include.some(id => chain.has(id))
+      if (!includedHit) return false
+      const excludedHit = exclude.some(id => chain.has(id))
+      return !excludedHit
+    })
   }
 
   markWikiNeedsRebuild(wikiId: string, needs: boolean): void {
