@@ -1,8 +1,16 @@
-import { describe, it, expect, beforeEach } from 'bun:test'
+import { describe, it, expect, beforeEach, mock } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { createCronApi } from '../api/cron.js'
 import { CronStore } from '../services/cron/CronStore.js'
 import type { CronService } from '../services/cron/CronService.js'
+
+// The "owner updates their own job" case drives the cronDisabledError gate,
+// which reads getSystemSettings().clientCronEnabled. Pin it to true so this
+// suite doesn't depend on the developer's ~/.moss/settings.json (which may set
+// it false); the admin cases bypass the gate regardless.
+mock.module('../systemSettings.js', () => ({
+  getSystemSettings: () => ({ clientCronEnabled: true }),
+}))
 
 // #85 follow-up: an admin console must be able to FULLY update any cron job in
 // its org — edit schedule/payload/name and re-enable — not merely disable it.
@@ -19,6 +27,8 @@ function makeDb(): DatabaseSync {
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
+      co_owner_ids TEXT,
+      executor_user_id TEXT,
       name TEXT NOT NULL,
       enabled INTEGER NOT NULL,
       deleted_at INTEGER,

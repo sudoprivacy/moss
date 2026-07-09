@@ -39,6 +39,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { getAdminCronJobs, getCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
 import { resolveOwnerName } from '@/lib/utils'
@@ -80,7 +81,8 @@ function CronJobsSkeleton() {
 }
 
 export default function CronJobsPage() {
-  const { scopes } = useAuth()
+  const { scopes, user } = useAuth()
+  const currentUserId = user?.id ?? ''
   // Admins list the whole org via /admin/cron/jobs; everyone else uses the
   // regular list (own jobs, plus the dept subtree for a dept_admin).
   const isCronAdmin = hasScope(scopes, 'admin:cron')
@@ -102,7 +104,8 @@ export default function CronJobsPage() {
   const [triggeringJobId, setTriggeringJobId] = useState<string | null>(null)
 
   // Create/edit form dialog
-  const emptyForm: CronJobFormInput = { name: '', scheduleValue: '', scheduleDescription: '', payloadMessage: '', conversationMode: 'new', boundSessionId: '', assistantName: '' }
+  // Executor defaults to the creator (current user); co-owners start empty.
+  const emptyForm: CronJobFormInput = { name: '', scheduleValue: '', scheduleDescription: '', payloadMessage: '', conversationMode: 'new', boundSessionId: '', assistantName: '', coOwnerIds: [], executorUserId: currentUserId || null }
   const [agents, setAgents] = useState<InstalledAgentInfo[]>([])
   const [formOpen, setFormOpen] = useState(false)
   const [editingJob, setEditingJob] = useState<CronJob | null>(null)
@@ -214,6 +217,8 @@ export default function CronJobsPage() {
       conversationMode: job.conversationMode,
       boundSessionId: job.boundSessionId || '',
       assistantName: job.assistantName || '',
+      coOwnerIds: job.coOwnerIds ?? [],
+      executorUserId: job.executorUserId ?? job.userId,
     })
     setFormOpen(true)
   }
@@ -257,6 +262,45 @@ export default function CronJobsPage() {
     } finally {
       setDeleteBusy(false)
     }
+  }
+
+  // A user's display label for the co-owner/executor pickers.
+  const userLabel = useCallback(
+    (id: string) => {
+      const u = users.find((x) => x.id === id)
+      return u ? (u.displayName || u.name) : id
+    },
+    [users],
+  )
+
+  // The job's creator: current user on create, the job's owner on edit. The
+  // creator is always a valid executor and is never listed as a co-owner.
+  const creatorId = editingJob ? editingJob.userId : currentUserId
+  // Co-owner candidates = org users other than the creator.
+  const coOwnerCandidates = useMemo(
+    () => users.filter((u) => u.id !== creatorId),
+    [users, creatorId],
+  )
+  const selectedCoOwnerIds = form.coOwnerIds ?? []
+  // Executor options = creator ∪ selected co-owners (matches the backend constraint).
+  const executorOptions = useMemo(
+    () => [creatorId, ...selectedCoOwnerIds].filter(Boolean),
+    [creatorId, selectedCoOwnerIds],
+  )
+
+  const toggleCoOwner = (id: string, checked: boolean) => {
+    const next = checked
+      ? Array.from(new Set([...selectedCoOwnerIds, id]))
+      : selectedCoOwnerIds.filter((x) => x !== id)
+    // If the current executor was just removed from co-owners, repoint to creator
+    // so the form never holds an invalid executor (the backend enforces this too).
+    const executorStillValid =
+      form.executorUserId === creatorId || next.includes(form.executorUserId ?? '')
+    setForm({
+      ...form,
+      coOwnerIds: next,
+      executorUserId: executorStillValid ? form.executorUserId : creatorId || null,
+    })
   }
 
   const filteredJobs = jobs
@@ -418,7 +462,29 @@ export default function CronJobsPage() {
                         <div className="text-xs text-muted-foreground">{job.id.slice(0, 8)}</div>
                       </div>
                     </TableCell>
-                    <TableCell>{getUserName(job)}</TableCell>
+                    <TableCell>
+                      <div className="text-sm">{getUserName(job)}</div>
+                      {(() => {
+                        const execId = job.executorUserId ?? job.userId
+                        const execLabel =
+                          job.executorName ?? resolveOwnerName(users, execId, undefined)
+                        const isCreatorExec = execId === job.userId
+                        return (
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                            {!isCreatorExec && (
+                              <Badge variant="outline" className="text-[10px] font-normal">
+                                执行者：{execLabel}
+                              </Badge>
+                            )}
+                            {job.coOwnerIds?.length > 0 && (
+                              <span className="text-xs text-muted-foreground">
+                                协作者 {job.coOwnerIds.length}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })()}
+                    </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Clock className="h-4 w-4 text-muted-foreground" />
@@ -445,7 +511,7 @@ export default function CronJobsPage() {
                           size="sm"
                           onClick={() => handleTriggerJob(job)}
                           disabled={triggeringJobId === job.id}
-                          title="立即触发"
+                          title="立即触发（使用你的用户凭证运行；定时运行则使用执行者的凭证）"
                         >
                           {triggeringJobId === job.id ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -669,6 +735,48 @@ export default function CronJobsPage() {
                 />
               </div>
             )}
+            <div className="space-y-2">
+              <Label>协作者</Label>
+              <p className="text-xs text-muted-foreground">
+                协作者可查看、编辑、删除并手动运行此任务（与创建者权限相同）。
+              </p>
+              <div className="max-h-40 overflow-y-auto rounded-md border p-2 space-y-1">
+                {coOwnerCandidates.length === 0 ? (
+                  <p className="text-xs text-muted-foreground px-1 py-2">暂无其他可选用户</p>
+                ) : (
+                  coOwnerCandidates.map((u) => (
+                    <label key={u.id} className="flex items-center gap-2 px-1 py-1 text-sm cursor-pointer">
+                      <Checkbox
+                        checked={selectedCoOwnerIds.includes(u.id)}
+                        onCheckedChange={(c) => toggleCoOwner(u.id, c === true)}
+                      />
+                      <span>{u.displayName || u.name}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>执行者</Label>
+              <Select
+                value={form.executorUserId || creatorId || ''}
+                onValueChange={(v) => setForm({ ...form, executorUserId: v })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {executorOptions.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {userLabel(id)}{id === creatorId ? '（创建者）' : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                定时（自动）运行时使用执行者的用户凭证；手动运行时使用点击运行者的凭证。执行者须为创建者或协作者之一。
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFormOpen(false)} disabled={saving}>

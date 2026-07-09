@@ -862,6 +862,15 @@ export class DirectConnectStore {
         org_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
 
+        -- co_owner_ids: JSON array of user ids granted flat parity (view/manage/
+        -- trigger) with the creator. NULL/absent = no co-owners. Excludes the
+        -- creator (creator stays user_id).
+        co_owner_ids TEXT,
+        -- executor_user_id: identity a SCHEDULED run executes under (its user
+        -- credentials/workspace/scopes). Set equal to the creator on create;
+        -- transferable to any co-owner. NULL (legacy rows) falls back to user_id.
+        executor_user_id TEXT,
+
         name TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         deleted_at INTEGER,
@@ -933,6 +942,18 @@ export class DirectConnectStore {
     if (!cronJobsColumns.some(col => col.name === 'lease_until')) {
       this.db.exec(`ALTER TABLE cron_jobs ADD COLUMN lease_until INTEGER;`)
       console.log('[DB] Added lease_until column to cron_jobs')
+    }
+
+    // Migration: add co_owner_ids + executor_user_id to cron_jobs. Legacy rows
+    // keep NULL for both — no co-owners, and the executor falls back to user_id
+    // (the creator) at runtime, so their behavior is unchanged.
+    if (!cronJobsColumns.some(col => col.name === 'co_owner_ids')) {
+      this.db.exec(`ALTER TABLE cron_jobs ADD COLUMN co_owner_ids TEXT;`)
+      console.log('[DB] Added co_owner_ids column to cron_jobs')
+    }
+    if (!cronJobsColumns.some(col => col.name === 'executor_user_id')) {
+      this.db.exec(`ALTER TABLE cron_jobs ADD COLUMN executor_user_id TEXT;`)
+      console.log('[DB] Added executor_user_id column to cron_jobs')
     }
 
     // MCP Management tables

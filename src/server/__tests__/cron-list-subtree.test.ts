@@ -14,6 +14,8 @@ function makeDb(): DatabaseSync {
       id TEXT PRIMARY KEY,
       org_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
+      co_owner_ids TEXT,
+      executor_user_id TEXT,
       name TEXT NOT NULL,
       enabled INTEGER NOT NULL DEFAULT 1,
       deleted_at INTEGER,
