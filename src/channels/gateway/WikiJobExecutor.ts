@@ -157,6 +157,11 @@ export class WikiJobExecutor {
     this.docStore.setWikiBuildResult(job.wikiId, { status: 'running' })
 
     let wiki: WikiRecord | null = null
+    // The document IDs actually staged for this build. For 'files' mode this
+    // equals the pick list; for 'dir' mode it's the live subtree resolved at
+    // build time. Recorded into _moss_meta.json so Track 2 staleness diffs and
+    // dir-mode meta stay truthful.
+    let builtDocIds: string[] = []
     // Private staging dir for this build. Built in full here; only swapped
     // into the live wiki dir on success (see publishStaged). Cleaned up on
     // every exit path (success swap consumes it; failure rm -rf's it).
@@ -165,9 +170,11 @@ export class WikiJobExecutor {
       wiki = this.docStore.getWikiById(job.wikiId)
       if (!wiki) throw new Error(`wiki ${job.wikiId} not found`)
 
-      // Stage 1: prepare cwd/input with predigested markdown
+      // Stage 1: prepare cwd/input with predigested markdown. Capture the
+      // resolved doc set (dir mode expands to the live subtree) so meta records
+      // exactly what was built.
       await mkdir(stageDir, { recursive: true })
-      await this.prepareInputs(wiki, stageDir)
+      builtDocIds = await this.prepareInputs(wiki, stageDir)
       this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
 
       // Stage 2: spawn agent session
@@ -273,7 +280,7 @@ export class WikiJobExecutor {
       // `startedAt`, which publishStaged uses to avoid clobbering a newer
       // build. If it fails, fail the whole build rather than publish a wiki
       // with no recency marker.
-      await this.writeWikiMeta(wiki, stageDir, startedAt)
+      await this.writeWikiMeta(wiki, stageDir, startedAt, builtDocIds)
 
       // Stage 6: atomically publish the staging dir into the live wiki dir.
       // Fail-safe against concurrent same-wiki swaps (see publishStaged).
@@ -334,7 +341,12 @@ export class WikiJobExecutor {
    * `dir` is the staging dir being built (not the live wiki dir): meta is
    * written alongside the pages it describes, then published atomically.
    */
-  private async writeWikiMeta(wiki: WikiRecord, dir: string, startedAt: number): Promise<void> {
+  private async writeWikiMeta(
+    wiki: WikiRecord,
+    dir: string,
+    startedAt: number,
+    builtDocIds: string[],
+  ): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true })
     const mdFiles = entries
       .filter((e) => e.isFile() && e.name.endsWith('.md'))
@@ -388,7 +400,9 @@ export class WikiJobExecutor {
       description: wiki.description,
       startedAt,
       builtAt: Date.now(),
-      sourceDocumentIds: wiki.sourceDocumentIds,
+      // Record the doc set that was actually built (dir mode resolves live),
+      // so Track 2 staleness diffs and dir-mode inspection stay accurate.
+      sourceDocumentIds: builtDocIds,
       pages,
       images,
     }
@@ -581,13 +595,41 @@ export class WikiJobExecutor {
    *   - parser failure / no parser found → raw bytes copied with original
    *     name as a last resort, so the agent can at least see the file
    */
-  private async prepareInputs(wiki: WikiRecord, baseDir: string): Promise<void> {
+  /**
+   * Stage the wiki's source documents as markdown under `<baseDir>/input/`.
+   *
+   * Resolves the input document set based on the wiki's source mode:
+   *   - 'files' → the frozen `sourceDocumentIds` pick list.
+   *   - 'dir'   → every non-deleted document under the tracked node's subtree,
+   *               resolved live at build time (so new files auto-join and
+   *               deleted files drop out).
+   *
+   * Returns the resolved document IDs actually staged, so the caller can
+   * record the truthful built set in _moss_meta.json.
+   */
+  private async prepareInputs(wiki: WikiRecord, baseDir: string): Promise<string[]> {
     const inputDir = path.join(baseDir, 'input')
     await mkdir(inputDir, { recursive: true })
 
     const { parseAndWrite } = await import('../../server/sources/docParsers.js')
 
-    for (const docId of wiki.sourceDocumentIds) {
+    // Resolve the input doc set for this build.
+    let docIds: string[]
+    if (wiki.sourceMode === 'dir' && wiki.sourceNodeIds.length > 0) {
+      // Multi-dir with persistent exclusions: union of included subtrees minus
+      // excluded subtrees, resolved live so new files auto-join / deleted drop.
+      const rows = this.db.listDocumentsUnderNodes(
+        wiki.sourceNodeIds,
+        wiki.sourceExcludeNodeIds,
+        wiki.orgId,
+      )
+      docIds = rows.map((r) => String(r.id))
+    } else {
+      docIds = wiki.sourceDocumentIds
+    }
+
+    const staged: string[] = []
+    for (const docId of docIds) {
       // Cross-org lookup: build runs as system, document still has org_id
       const docRow = this.db.getDocument(docId, wiki.orgId)
       if (!docRow) {
@@ -612,10 +654,12 @@ export class WikiJobExecutor {
             `[WikiJobExecutor] no parser for ${safeName}; copied raw bytes`,
           )
         }
+        staged.push(docId)
       } catch (err) {
         console.warn(`[WikiJobExecutor] failed to stage source doc ${docId}:`, err)
       }
     }
+    return staged
   }
 
   /**

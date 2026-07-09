@@ -46,7 +46,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
 
 import {
   type ExternalSource,
@@ -90,9 +89,15 @@ const CONNECTOR_FIELDS: Record<string, FieldSpec[]> = {
     { key: 'agentId', label: 'AgentID', bucket: 'credentials' },
     { key: 'agentSecret', label: 'AgentSecret', type: 'password', bucket: 'credentials' },
     {
+      key: 'spaceid',
+      label: '微盘空间 ID (spaceid,必填)',
+      placeholder: '企业微信微盘空间 ID',
+      bucket: 'config',
+    },
+    {
       key: 'rootPath',
-      label: '微盘内根目录(可留空,默认根)',
-      placeholder: '/',
+      label: '微盘内根目录 fileid(可留空,默认空间根)',
+      placeholder: '文件夹 fileid',
       bucket: 'config',
       optional: true,
     },
@@ -256,9 +261,6 @@ export default function ExternalSourcesPage() {
                       <span className="truncate">{s.name}</span>
                       <Badge variant="outline">{CONNECTOR_LABELS[s.type] ?? s.type}</Badge>
                       {!s.enabled && <Badge variant="secondary">已停用</Badge>}
-                      {s.autoBuildEnabled && (
-                        <Badge variant="default" className="bg-amber-500/90">自动构建</Badge>
-                      )}
                     </CardTitle>
                     <div className="mt-1 text-xs text-muted-foreground flex flex-wrap items-center gap-3">
                       <span className="flex items-center gap-1">
@@ -409,7 +411,6 @@ function SourceDialog({
   const [syncMinutes, setSyncMinutes] = useState<number>(
     existing ? Math.max(1, Math.round(existing.syncIntervalSec / 60)) : 60,
   )
-  const [autoBuild, setAutoBuild] = useState<boolean>(existing?.autoBuildEnabled ?? false)
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
 
@@ -418,7 +419,6 @@ function SourceDialog({
     setType(existing?.type ?? connectorTypes[0] ?? '')
     setName(existing?.name ?? '')
     setSyncMinutes(existing ? Math.max(1, Math.round(existing.syncIntervalSec / 60)) : 60)
-    setAutoBuild(existing?.autoBuildEnabled ?? false)
     // Prefill config (rootPath etc.) from existing. Credentials are NEVER
     // returned from the server, so they stay blank — leaving them blank
     // on edit means "keep current creds", typing a value rotates.
@@ -464,7 +464,6 @@ function SourceDialog({
           // means "keep current credentials".
           credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
           sync_interval_sec: syncMinutes * 60,
-          auto_build_enabled: autoBuild,
         })
         toast.success('已更新')
       } else {
@@ -474,7 +473,6 @@ function SourceDialog({
           config,
           credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
           sync_interval_sec: syncMinutes * 60,
-          auto_build_enabled: autoBuild,
         })
         toast.success('已创建')
       }
@@ -560,15 +558,10 @@ function SourceDialog({
               默认 60 分钟。频繁同步会增加外部 API 调用,建议每小时一次。
             </p>
           </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <Label>自动构建 Wiki</Label>
-              <p className="text-xs text-muted-foreground">
-                源内容变化导致 Wiki 需要重建时,自动入队构建。默认关闭以避免烧 token。
-              </p>
-            </div>
-            <Switch checked={autoBuild} onCheckedChange={setAutoBuild} />
-          </div>
+          <p className="text-xs text-muted-foreground">
+            数据源只负责同步文档。是否在内容变化时自动重建 Wiki,现在由每个 Wiki 自己的
+            「自动重新构建」开关控制(在文档中心创建/编辑 Wiki 时设置)。
+          </p>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>

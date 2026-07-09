@@ -1501,8 +1501,8 @@ export function startServer(
     documentStore,
     (wikiId, _orgId, _sourceId) => {
       // Auto-build path: enqueue a build job. The WikiJobExecutor will
-      // pick it up on its next tick. Only fires when the source has
-      // auto_build_enabled = 1.
+      // pick it up on its next tick. The sync worker only calls this hook
+      // when the affected wiki's own `auto_rebuild` toggle is on.
       try {
         const wiki = documentStore.getWikiById(wikiId)
         if (!wiki) return
@@ -2295,6 +2295,17 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/documents/tree/nodes') {
         authService.requireScope(auth, 'admin:documents')
         const body = await readJsonBody(req)
+        // Can't add manual children under a source-managed node — the whole
+        // synced subtree is owned by the external source.
+        if (typeof body.parent_id === 'string' && body.parent_id) {
+          const parent = documentStore.getNode(body.parent_id, auth.orgId)
+          if (parent?.autoManaged) {
+            writeJson(res, 400, {
+              error: { code: 'auto_managed', message: '该节点由外部数据源管理,无法在其下新建子节点。' },
+            })
+            return
+          }
+        }
         try {
           const node = documentStore.createNode({
             orgId: auth.orgId,
@@ -2406,13 +2417,28 @@ export function startServer(
       if (req.method === 'GET' && documentsByNodeMatch) {
         authService.requireScope(auth, 'admin:documents')
         const nodeId = documentsByNodeMatch[1] || ''
-        writeJson(res, 200, { documents: documentStore.listDocumentsForNode(nodeId, auth.orgId) })
+        // ?recursive=1 lists the whole subtree (used by the wiki external-source
+        // files picker); default lists this node's direct documents.
+        const recursive = new URL(req.url ?? '', 'http://localhost').searchParams.get('recursive') === '1'
+        const docs = recursive
+          ? documentStore.listDocumentsUnderNode(nodeId, auth.orgId)
+          : documentStore.listDocumentsForNode(nodeId, auth.orgId)
+        writeJson(res, 200, { documents: docs })
         return
       }
 
       if (req.method === 'POST' && documentsByNodeMatch) {
         authService.requireScope(auth, 'admin:documents')
         const nodeId = documentsByNodeMatch[1] || ''
+        // Can't upload into a source-managed node — content there is owned by
+        // the external source (synced only).
+        const targetNode = documentStore.getNode(nodeId, auth.orgId)
+        if (targetNode?.autoManaged) {
+          writeJson(res, 400, {
+            error: { code: 'auto_managed', message: '该节点由外部数据源管理,无法手动上传文档。' },
+          })
+          return
+        }
         const body = await readJsonBody(req)
         const fileName = typeof body.file_name === 'string' ? body.file_name : ''
         const mimeType = typeof body.mime_type === 'string' ? body.mime_type : 'application/octet-stream'
@@ -2466,7 +2492,9 @@ export function startServer(
         const nodeId = url.searchParams.get('node_id') ?? undefined
         const buildStatus = url.searchParams.get('build_status') ?? undefined
         writeJson(res, 200, {
-          wikis: documentStore.listWikis(auth.orgId, {
+          // Enriched: recomputes Track 2 (files-mode) staleness against
+          // _moss_meta.json so 已构建 / 需重新构建 tags are accurate.
+          wikis: await documentStore.listWikisEnriched(auth.orgId, {
             nodeId,
             buildStatus: buildStatus as any,
           }),
@@ -2482,9 +2510,25 @@ export function startServer(
           writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name is required' } })
           return
         }
-        const sourceDocumentIds = Array.isArray(body.source_document_ids)
-          ? body.source_document_ids.filter((v: unknown) => typeof v === 'string')
-          : []
+        const strArr = (v: unknown): string[] =>
+          Array.isArray(v) ? v.filter((x: unknown): x is string => typeof x === 'string') : []
+        const sourceDocumentIds = strArr(body.source_document_ids)
+        const sourceMode = body.source_mode === 'dir' ? 'dir' : 'files'
+        // Multi-dir: source_node_ids[]; back-compat: fold single source_node_id.
+        const sourceNodeIds = strArr(body.source_node_ids)
+        if (sourceNodeIds.length === 0 && typeof body.source_node_id === 'string') {
+          sourceNodeIds.push(body.source_node_id)
+        }
+        const sourceExcludeNodeIds = strArr(body.source_exclude_node_ids)
+        // Validate per mode: dir needs >=1 dir node; files needs >=1 doc.
+        if (sourceMode === 'dir' && sourceNodeIds.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_node_ids must be non-empty for dir mode' } })
+          return
+        }
+        if (sourceMode === 'files' && sourceDocumentIds.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_document_ids must be non-empty for files mode' } })
+          return
+        }
         try {
           const wiki = await documentStore.createWiki({
             orgId: auth.orgId,
@@ -2497,6 +2541,10 @@ export function startServer(
             name,
             description: typeof body.description === 'string' ? body.description : undefined,
             sourceDocumentIds,
+            sourceMode,
+            sourceNodeIds,
+            sourceExcludeNodeIds,
+            autoRebuild: body.auto_rebuild === true,
             createdBy: auth.userId,
           })
           writeJson(res, 200, wiki)
@@ -2510,7 +2558,7 @@ export function startServer(
       if (req.method === 'GET' && wikiItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiItemMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWikiEnriched(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -2523,6 +2571,25 @@ export function startServer(
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiItemMatch[1] || ''
         const body = await readJsonBody(req)
+        const strArr = (v: unknown): string[] =>
+          Array.isArray(v) ? v.filter((x: unknown): x is string => typeof x === 'string') : []
+        const sourceMode =
+          body.source_mode === 'dir' ? 'dir' : body.source_mode === 'files' ? 'files' : undefined
+        const sourceDocumentIds =
+          body.source_document_ids !== undefined ? strArr(body.source_document_ids) : undefined
+        const sourceNodeIds =
+          body.source_node_ids !== undefined ? strArr(body.source_node_ids) : undefined
+        const sourceExcludeNodeIds =
+          body.source_exclude_node_ids !== undefined ? strArr(body.source_exclude_node_ids) : undefined
+        // Switching to files → require picks; switching to dir → require dir nodes.
+        if (sourceMode === 'files' && sourceDocumentIds !== undefined && sourceDocumentIds.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_document_ids must be non-empty for files mode' } })
+          return
+        }
+        if (sourceMode === 'dir' && sourceNodeIds !== undefined && sourceNodeIds.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_node_ids must be non-empty for dir mode' } })
+          return
+        }
         try {
           const wiki = documentStore.updateWiki(wikiId, auth.orgId, {
             name: typeof body.name === 'string' ? body.name : undefined,
@@ -2540,9 +2607,11 @@ export function startServer(
                   : typeof body.node_id === 'string'
                     ? body.node_id
                     : undefined,
-            sourceDocumentIds: Array.isArray(body.source_document_ids)
-              ? body.source_document_ids.filter((v: unknown) => typeof v === 'string')
-              : undefined,
+            sourceDocumentIds,
+            sourceMode,
+            sourceNodeIds,
+            sourceExcludeNodeIds,
+            autoRebuild: body.auto_rebuild === undefined ? undefined : body.auto_rebuild === true,
           })
           writeJson(res, 200, wiki)
         } catch (err) {

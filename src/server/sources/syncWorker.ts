@@ -231,6 +231,39 @@ export class SourceSyncWorker {
   }
 
   // ============================================================
+  // Source root node
+  // ============================================================
+
+  /**
+   * Ensure the source's top-level, locked, source-named root node exists and
+   * is named after the source. All synced content mounts under it. Returns the
+   * root node's DB id.
+   */
+  private ensureSourceRootNode(source: ExternalSourceRow): string {
+    const existing = this.db.findSourceRootNode(source.id) as Record<string, unknown> | null
+    if (existing) {
+      const id = String(existing.id)
+      // Keep the root named after the source (rename-follow).
+      if (existing.name !== source.name) {
+        this.db.renameTreeNode(id, source.name)
+      }
+      return id
+    }
+    const id = randomUUID()
+    this.db.createDocumentTreeNode({
+      id,
+      org_id: source.org_id,
+      parent_id: null,
+      name: source.name,
+      source_id: source.id,
+      source_path: '',
+      auto_managed: 1,
+      last_synced_at: Date.now(),
+    })
+    return id
+  }
+
+  // ============================================================
   // Per-source sync run
   // ============================================================
 
@@ -252,15 +285,18 @@ export class SourceSyncWorker {
       // Track what we've seen so the reverse-sweep can find missing ones.
       const seenDocIds = new Set<string>()
       const seenNodeIds = new Set<string>()
+      // Tree nodes touched this run (file/folder add/update/delete). Dir-mode
+      // wikis tracking any of these (or an ancestor) are flagged once after the
+      // walk + reverse-sweep, avoiding per-file rebuild storms.
+      const dirtyNodeIds = new Set<string>()
 
       // externalId → tree-node DB id mapping, populated as we walk.
       // Used so children can look up their parent's DB id.
       const folderExternalIdToDbId = new Map<string, string>()
-      // The root mount point (mountedNodeId in config, or null = top-level)
-      const rootParentDbId: string | null =
-        typeof config.mountedNodeId === 'string' && config.mountedNodeId
-          ? config.mountedNodeId
-          : null
+      // Every source gets its own auto-created, locked, source-named root node.
+      // All synced content mounts under it (no separate mount node).
+      const rootParentDbId = this.ensureSourceRootNode(source)
+      seenNodeIds.add(rootParentDbId)
 
       for await (const node of connector.walkTree('')) {
         const parentDbId =
@@ -275,21 +311,16 @@ export class SourceSyncWorker {
             seenNodeIds.add(dbId)
           }
         } else {
-          // File: needs a parent node. If we have none and no rootParentDbId,
-          // we skip — top-level files in mode without mountedNodeId would have
-          // no anchor in the tree.
-          if (!parentDbId) {
-            // Auto-create a root folder named after the source on first encounter.
-            // (This rarely happens — typically rootPath in walkTree yields folders first.)
-            continue
-          }
-          const dbId = await this.upsertFile(source, node, parentDbId, connector, stats)
+          const dbId = await this.upsertFile(source, node, parentDbId, connector, stats, dirtyNodeIds)
           if (dbId) seenDocIds.add(dbId)
         }
       }
 
       // Reverse sweep: soft-delete anything for this source not seen this run.
-      this.reverseSweep(source, seenNodeIds, seenDocIds, stats)
+      this.reverseSweep(source, seenNodeIds, seenDocIds, stats, dirtyNodeIds)
+
+      // Flush dir-mode wiki rebuilds once for all nodes touched this run.
+      this.flushDirtyWikis(source, dirtyNodeIds, stats)
 
       this.db.updateExternalSourceSyncStatus(source.id, {
         last_sync_at: Date.now(),
@@ -391,6 +422,7 @@ export class SourceSyncWorker {
     parentDbId: string,
     connector: { download: (externalId: string) => Promise<Buffer> },
     stats: SyncRunStats,
+    dirtyNodeIds: Set<string>,
   ): Promise<string | null> {
     const existing = this.db.findDocumentBySource(source.id, node.externalId)
 
@@ -458,17 +490,15 @@ export class SourceSyncWorker {
         size_bytes: bytes.byteLength,
       })
 
-      // If sha256 actually changed, mark referencing wikis as needing rebuild.
+      // If sha256 actually changed: mark file-list wikis referencing this doc,
+      // and record this doc's node as dirty so dir-mode wikis get flagged in
+      // the post-run flush.
       if (sha !== existingSha) {
         const wikis = this.db.findWikisReferencingDocument(existingId)
         for (const w of wikis) {
-          const wikiId = String(w.id)
-          this.db.markWikiNeedsRebuild(wikiId, true)
-          stats.wikisMarked++
-          if (source.auto_build_enabled === 1 && this.onWikiNeedsRebuild) {
-            this.onWikiNeedsRebuild(wikiId, source.org_id, source.id)
-          }
+          this.markAndMaybeEnqueue(String(w.id), source, stats)
         }
+        dirtyNodeIds.add(parentDbId)
       }
 
       stats.filesUpdated++
@@ -531,6 +561,8 @@ export class SourceSyncWorker {
         content_sha256: sha,
       })
       stats.filesCreated++
+      // New file under this node — dir-mode wikis tracking it should rebuild.
+      dirtyNodeIds.add(parentDbId)
       return id
     } catch (err) {
       console.error(
@@ -551,6 +583,7 @@ export class SourceSyncWorker {
     seenNodeIds: Set<string>,
     seenDocIds: Set<string>,
     stats: SyncRunStats,
+    dirtyNodeIds: Set<string>,
   ): void {
     // Documents
     const existingDocs = this.db.listDocumentsBySource(source.id)
@@ -559,6 +592,9 @@ export class SourceSyncWorker {
       if (seenDocIds.has(id)) continue
       this.db.softDeleteDocument(id)
       stats.filesDeleted++
+      // Deleted file → its containing node is dirty for dir-mode wikis.
+      const nodeId = typeof d.node_id === 'string' ? d.node_id : null
+      if (nodeId) dirtyNodeIds.add(nodeId)
     }
     // Folders
     const existingNodes = this.db.listTreeNodesBySource(source.id)
@@ -567,6 +603,71 @@ export class SourceSyncWorker {
       if (seenNodeIds.has(id)) continue
       this.db.softDeleteTreeNode(id)
       stats.foldersDeleted++
+      // Deleted folder → mark the folder itself and its parent dirty so a
+      // dir-mode wiki tracking either (or an ancestor) rebuilds.
+      dirtyNodeIds.add(id)
+      const parentId = typeof n.parent_id === 'string' ? n.parent_id : null
+      if (parentId) dirtyNodeIds.add(parentId)
+    }
+  }
+
+  // ============================================================
+  // Wiki rebuild flagging
+  // ============================================================
+
+  /**
+   * Mark one wiki as needing rebuild and — if its own `auto_rebuild` toggle is
+   * on — enqueue a build via the onWikiNeedsRebuild hook. Rebuild policy is now
+   * per-wiki, not per-source.
+   */
+  private markAndMaybeEnqueue(
+    wikiId: string,
+    source: ExternalSourceRow,
+    stats: SyncRunStats,
+  ): void {
+    this.db.markWikiNeedsRebuild(wikiId, true)
+    stats.wikisMarked++
+    const wikiRow = this.db.getWikiById(wikiId) as Record<string, unknown> | null
+    const autoRebuild = wikiRow ? Number(wikiRow.auto_rebuild ?? 0) === 1 : false
+    if (autoRebuild && this.onWikiNeedsRebuild) {
+      this.onWikiNeedsRebuild(wikiId, source.org_id, source.id)
+    }
+  }
+
+  /**
+   * After a sync run, flag every dir-mode wiki that tracks any touched node or
+   * an ancestor of one. Deduped so each wiki is marked/enqueued at most once.
+   */
+  private flushDirtyWikis(
+    source: ExternalSourceRow,
+    dirtyNodeIds: Set<string>,
+    stats: SyncRunStats,
+  ): void {
+    if (dirtyNodeIds.size === 0) return
+    // Build a child→parent map once from the org's node list so we can expand
+    // each dirty node to its full ancestor chain (root-ward).
+    const nodes = this.db.listDocumentTreeNodes(source.org_id)
+    const parentOf = new Map<string, string | null>()
+    for (const n of nodes) {
+      parentOf.set(String(n.id), (n.parent_id as string | null) ?? null)
+    }
+    const chain = new Set<string>()
+    for (const start of dirtyNodeIds) {
+      let cur: string | null = start
+      const guard = new Set<string>()
+      while (cur && !guard.has(cur)) {
+        guard.add(cur)
+        chain.add(cur)
+        cur = parentOf.get(cur) ?? null
+      }
+    }
+    const wikis = this.db.findDirWikisForNode([...chain])
+    const marked = new Set<string>()
+    for (const w of wikis) {
+      const wikiId = String(w.id)
+      if (marked.has(wikiId)) continue
+      marked.add(wikiId)
+      this.markAndMaybeEnqueue(wikiId, source, stats)
     }
   }
 

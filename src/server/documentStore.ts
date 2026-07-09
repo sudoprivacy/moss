@@ -1,10 +1,11 @@
-import { mkdir, rm, writeFile } from 'fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'fs/promises'
 import path from 'path'
 import { randomUUID } from 'crypto'
 import type { DirectConnectStore } from './db.js'
 import {
   MOSS_DOCS_DIR,
   MOSS_WIKIS_DIR,
+  WIKI_META_FILE,
   getDocumentDir,
   getDocumentStoragePath,
   getWikiDir,
@@ -42,6 +43,12 @@ export type DocumentRecord = {
   storagePath: string
   uploadedBy: string
   uploadedAt: number
+  /**
+   * External source this document came from, or null if manually uploaded.
+   * Lets the wiki UI distinguish external-source files from uploaded files
+   * (the two 'files'-mode variants).
+   */
+  sourceId: string | null
 }
 
 export type WikiRecord = {
@@ -58,8 +65,25 @@ export type WikiRecord = {
   createdBy: string
   createdAt: number
   updatedAt: number
-  // Document Center v2: set by SourceSyncWorker when a source doc changes.
+  // Document Center v2: wiki source mode.
+  //   'files' — build from the frozen `sourceDocumentIds` pick list (both tracks)
+  //   'dir'   — track a node's recursive subtree; inputs resolved at build time
+  sourceMode: 'files' | 'dir'
+  /** Legacy single tracked node for 'dir' mode. Superseded by sourceNodeIds. */
+  sourceNodeId: string | null
+  /** Included dir nodes for 'dir' mode (each tracked recursively). */
+  sourceNodeIds: string[]
+  /** Excluded node ids (persistent subtree exclusions) for 'dir' mode. */
+  sourceExcludeNodeIds: string[]
+  /** Per-wiki auto-rebuild toggle (only meaningful for synced/dir sources). */
+  autoRebuild: boolean
+  // Document Center v2: whether the wiki is stale.
+  //   Track 1 ('dir' or synced files) — the stored flag set by SourceSyncWorker.
+  //   Track 2 (uploaded files) — computed by diffing current picks vs the
+  //   last-built set recorded in _moss_meta.json.
   needsRebuild: boolean
+  /** True once a successful build exists (drives the 已构建 tag). */
+  hasBuilt: boolean
 }
 
 export type WikiBuildJob = {
@@ -118,6 +142,7 @@ function mapDocument(row: SqlRow): DocumentRecord {
     storagePath: String(row.storage_path),
     uploadedBy: String(row.uploaded_by),
     uploadedAt: Number(row.uploaded_at),
+    sourceId: typeof row.source_id === 'string' ? row.source_id : null,
   }
 }
 
@@ -149,7 +174,67 @@ function mapWiki(row: SqlRow): WikiRecord {
     createdBy: String(row.created_by),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+    sourceMode: row.source_mode === 'dir' ? 'dir' : 'files',
+    sourceNodeId: typeof row.source_node_id === 'string' ? row.source_node_id : null,
+    // Fold legacy single source_node_id into the array for callers.
+    sourceNodeIds: (() => {
+      const arr = parseDocIds(row.source_node_ids)
+      if (arr.length > 0) return arr
+      return typeof row.source_node_id === 'string' && row.source_node_id ? [row.source_node_id] : []
+    })(),
+    sourceExcludeNodeIds: parseDocIds(row.source_exclude_node_ids),
+    autoRebuild: Number(row.auto_rebuild ?? 0) === 1,
+    // needsRebuild here reflects only the stored Track-1 flag; Track 2 wikis
+    // get it recomputed against _moss_meta.json by the DocumentStore enrich step.
     needsRebuild: Number(row.needs_rebuild ?? 0) === 1,
+    hasBuilt: row.last_built_at != null,
+  }
+}
+
+/**
+ * Read the `sourceDocumentIds` recorded in a built wiki's _moss_meta.json.
+ * Returns null when there is no meta (never built) — the caller treats that
+ * as "needs build". Kept best-effort; any read/parse error → null.
+ */
+async function readBuiltDocIds(storagePath: string): Promise<string[] | null> {
+  try {
+    const raw = await readFile(path.join(storagePath, WIKI_META_FILE), 'utf-8')
+    const meta = JSON.parse(raw) as { sourceDocumentIds?: unknown }
+    return Array.isArray(meta.sourceDocumentIds)
+      ? meta.sourceDocumentIds.filter((v): v is string => typeof v === 'string')
+      : []
+  } catch {
+    return null
+  }
+}
+
+function sameStringSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const setB = new Set(b)
+  return a.every(x => setB.has(x))
+}
+
+/**
+ * Recompute wiki staleness for display.
+ *
+ * - 'dir' mode: keep the stored, sync-event-driven `needs_rebuild` flag (set
+ *   by SourceSyncWorker when the tracked subtree changes).
+ * - 'files' mode: a wiki is stale if EITHER
+ *     (a) its picked set differs from the last-built set (membership change),
+ *         computed by diffing against _moss_meta.json, OR
+ *     (b) the stored `needs_rebuild` flag is set — which SourceSyncWorker
+ *         raises when a *picked external-source file's content* changed.
+ *   A never-built wiki (no meta) is always stale. Uploaded-files wikis never
+ *   get the flag (uploads don't sync), so they're stale only on (a).
+ */
+async function enrichWikiStaleness(w: WikiRecord): Promise<WikiRecord> {
+  if (w.sourceMode === 'dir') return w
+  const built = await readBuiltDocIds(w.storagePath)
+  const membershipChanged = built === null ? true : !sameStringSet(w.sourceDocumentIds, built)
+  return {
+    ...w,
+    needsRebuild: membershipChanged || w.needsRebuild,
+    hasBuilt: built !== null && w.lastBuiltAt != null,
   }
 }
 
@@ -324,6 +409,18 @@ export class DocumentStore {
     return this.store.listDocumentsByNode(nodeId, orgId).map(mapDocument)
   }
 
+  /** All non-deleted documents under a node's whole subtree (recursive). Used by
+   *  the wiki 'external-source files' picker to list files across subfolders. */
+  listDocumentsUnderNode(nodeId: string, orgId: string): DocumentRecord[] {
+    return this.store.listDocumentsUnderNode(nodeId, orgId).map(mapDocument)
+  }
+
+  /** Documents under any of `includeIds`' subtrees minus `excludeIds`' subtrees.
+   *  Materializes a multi-dir dir-mode wiki's inputs at build time. */
+  listDocumentsUnderNodes(includeIds: string[], excludeIds: string[], orgId: string): DocumentRecord[] {
+    return this.store.listDocumentsUnderNodes(includeIds, excludeIds, orgId).map(mapDocument)
+  }
+
   getDocument(id: string, orgId: string): DocumentRecord | null {
     const row = this.store.getDocument(id, orgId)
     return row ? mapDocument(row) : null
@@ -389,9 +486,28 @@ export class DocumentStore {
     return this.store.listWikis(orgId, filter).map(mapWiki)
   }
 
+  /**
+   * Like `listWikis` but recomputes Track 2 (files-mode) staleness against
+   * each wiki's _moss_meta.json. Use this for API/display so the
+   * 已构建 / 需重新构建 tags are accurate. Dir-mode wikis keep the stored flag.
+   */
+  async listWikisEnriched(
+    orgId: string,
+    filter?: { nodeId?: string; buildStatus?: WikiRecord['buildStatus'] },
+  ): Promise<WikiRecord[]> {
+    const wikis = this.listWikis(orgId, filter)
+    return Promise.all(wikis.map(enrichWikiStaleness))
+  }
+
   getWiki(id: string, orgId: string): WikiRecord | null {
     const row = this.store.getWiki(id, orgId)
     return row ? mapWiki(row) : null
+  }
+
+  /** Like `getWiki` but with Track 2 staleness recomputed (for API/display). */
+  async getWikiEnriched(id: string, orgId: string): Promise<WikiRecord | null> {
+    const wiki = this.getWiki(id, orgId)
+    return wiki ? enrichWikiStaleness(wiki) : null
   }
 
   /** Cross-org getter for runtime / build worker. Caller is responsible for auth. */
@@ -406,6 +522,10 @@ export class DocumentStore {
     name: string
     description?: string
     sourceDocumentIds: string[]
+    sourceMode?: 'files' | 'dir'
+    sourceNodeIds?: string[]
+    sourceExcludeNodeIds?: string[]
+    autoRebuild?: boolean
     createdBy: string
   }): Promise<WikiRecord> {
     if (input.nodeId) {
@@ -413,6 +533,16 @@ export class DocumentStore {
       if (!node) {
         throw new Error(`node not found: ${input.nodeId}`)
       }
+    }
+    const sourceMode = input.sourceMode ?? 'files'
+    const includeIds = input.sourceNodeIds ?? []
+    if (sourceMode === 'dir') {
+      if (includeIds.length === 0) throw new Error('dir-mode wiki requires at least one source node')
+      for (const nid of includeIds) {
+        if (!this.getNode(nid, input.orgId)) throw new Error(`source node not found: ${nid}`)
+      }
+    } else if (input.sourceDocumentIds.length === 0) {
+      throw new Error('files-mode wiki requires at least one document')
     }
     const id = randomUUID()
     const storagePath = getWikiDir(id)
@@ -425,7 +555,13 @@ export class DocumentStore {
       name: input.name,
       description: input.description ?? null,
       storage_path: storagePath,
-      source_document_ids: input.sourceDocumentIds,
+      source_document_ids: sourceMode === 'files' ? input.sourceDocumentIds : [],
+      source_mode: sourceMode,
+      source_node_id: null,
+      source_node_ids: sourceMode === 'dir' ? includeIds : [],
+      source_exclude_node_ids: sourceMode === 'dir' ? (input.sourceExcludeNodeIds ?? []) : [],
+      // auto_rebuild valid for dir + external-files; UI sends false for uploads.
+      auto_rebuild: Boolean(input.autoRebuild),
       created_by: input.createdBy,
     })
 
@@ -437,12 +573,38 @@ export class DocumentStore {
     description?: string | null
     nodeId?: string | null
     sourceDocumentIds?: string[]
+    sourceMode?: 'files' | 'dir'
+    sourceNodeIds?: string[]
+    sourceExcludeNodeIds?: string[]
+    autoRebuild?: boolean
   }): WikiRecord {
+    const existing = this.getWiki(id, orgId)
+    if (!existing) throw new Error(`wiki not found: ${id}`)
+    const nextMode = updates.sourceMode ?? existing.sourceMode
+    const nextIncludes =
+      updates.sourceNodeIds !== undefined ? updates.sourceNodeIds : existing.sourceNodeIds
+    if (nextMode === 'dir') {
+      if (nextIncludes.length === 0) throw new Error('dir-mode wiki requires at least one source node')
+      for (const nid of nextIncludes) {
+        if (!this.getNode(nid, orgId)) throw new Error(`source node not found: ${nid}`)
+      }
+    }
     this.store.updateWiki(id, orgId, {
       name: updates.name,
       description: updates.description,
       node_id: updates.nodeId,
-      source_document_ids: updates.sourceDocumentIds,
+      source_document_ids: nextMode === 'files' ? updates.sourceDocumentIds : [],
+      source_mode: updates.sourceMode,
+      source_node_id: null,
+      source_node_ids: nextMode === 'dir' ? nextIncludes : [],
+      source_exclude_node_ids:
+        nextMode === 'dir'
+          ? (updates.sourceExcludeNodeIds !== undefined
+              ? updates.sourceExcludeNodeIds
+              : existing.sourceExcludeNodeIds)
+          : [],
+      auto_rebuild:
+        updates.autoRebuild !== undefined ? updates.autoRebuild : existing.autoRebuild,
     })
     const wiki = this.getWiki(id, orgId)
     if (!wiki) throw new Error(`wiki ${id} disappeared after update`)

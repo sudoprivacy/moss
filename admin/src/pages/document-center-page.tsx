@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -42,6 +42,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
 import {
@@ -57,11 +58,13 @@ import {
   getDocumentTree,
   getWikiBuildStatus,
   listDocumentsForNode,
+  listDocumentsUnderNode,
   listWikis,
   setDocumentTreeNodeAlias,
   subscribeWikiBuildEvents,
   triggerWikiBuild,
   updateDocumentTreeNode,
+  updateWiki,
   uploadDocument,
 } from '@/lib/api/document-center'
 
@@ -85,8 +88,11 @@ function buildTree(nodes: DocumentTreeNode[]): DocTreeBranch[] {
       roots.push(branch)
     }
   }
+  // Alphabetical among siblings (case-insensitive, numeric-aware).
+  const cmp = (a: { name: string }, b: { name: string }) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
   const sortBranches = (list: DocTreeBranch[]) => {
-    list.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+    list.sort(cmp)
     for (const b of list) sortBranches(b.children)
   }
   sortBranches(roots)
@@ -124,9 +130,25 @@ export default function DocumentCenterPage() {
   const [aliasValue, setAliasValue] = useState('')
 
   const [createWikiOpen, setCreateWikiOpen] = useState(false)
+  // When set, the dialog is editing this existing wiki (updateWiki); when null,
+  // it's creating a new one.
+  const [editingWikiId, setEditingWikiId] = useState<string | null>(null)
   const [wikiName, setWikiName] = useState('')
   const [wikiDesc, setWikiDesc] = useState('')
   const [wikiSourceDocIds, setWikiSourceDocIds] = useState<Set<string>>(new Set())
+  const [wikiAutoRebuild, setWikiAutoRebuild] = useState(false)
+  // Wiki source UI mode. Provenance-driven by the node the wiki is created on:
+  //   - source-managed node -> 'dir' or 'files' over its subtree
+  //   - plain node          -> 'upload' (uploaded files under the node)
+  const [wikiUiMode, setWikiUiMode] = useState<'dir' | 'files' | 'upload'>('upload')
+  // Dir-mode tree-checkbox state: the exact set of CHECKED node ids (full +
+  // partial). Converted to {include, exclude} on save. Includes the wiki's
+  // source root scope implicitly via wikiScopeNodeId.
+  const [wikiCheckedNodes, setWikiCheckedNodes] = useState<Set<string>>(new Set())
+  // Docs under the current node's subtree (files/upload pickers).
+  const [subtreeDocs, setSubtreeDocs] = useState<DocumentRecord[]>([])
+  // The node whose subtree scopes the pickers (the node 新建 Wiki was clicked on).
+  const [wikiScopeNodeId, setWikiScopeNodeId] = useState<string | null>(null)
 
   const tree = useMemo(() => buildTree(nodes), [nodes])
   const selectedNode = useMemo(
@@ -322,37 +344,230 @@ export default function DocumentCenterPage() {
 
   // ---------- Wiki handlers ----------
 
-  const handleOpenCreateWiki = () => {
+  // A node is source-managed if it (or the source) owns it. Its subtree is the
+  // external source's content; wikis on it use dir/files mode.
+  const nodeIsSource = useCallback(
+    (n: DocumentTreeNode | null | undefined): boolean =>
+      !!(n && (n.autoManaged || n.sourceId)),
+    [],
+  )
+
+  // Immediate children of a node.
+  const childrenOf = useCallback(
+    (id: string): DocumentTreeNode[] =>
+      nodes
+        .filter(n => n.parentId === id)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+    [nodes],
+  )
+
+  // All node ids in a subtree (inclusive).
+  const subtreeIds = useCallback(
+    (rootId: string): string[] => {
+      const out: string[] = []
+      const stack = [rootId]
+      const seen = new Set<string>()
+      while (stack.length) {
+        const id = stack.pop()!
+        if (seen.has(id)) continue
+        seen.add(id); out.push(id)
+        for (const c of nodes.filter(n => n.parentId === id)) stack.push(c.id)
+      }
+      return out
+    },
+    [nodes],
+  )
+
+  // Path of a node relative to a scope root, e.g. "handbook/test".
+  const nodeRelPath = useCallback(
+    (nodeId: string, rootId: string): string => {
+      const segs: string[] = []
+      let cur = nodes.find(n => n.id === nodeId)
+      while (cur && cur.id !== rootId) {
+        segs.unshift(cur.name)
+        cur = cur.parentId ? nodes.find(n => n.id === cur!.parentId) : undefined
+      }
+      return segs.join('/')
+    },
+    [nodes],
+  )
+
+  const docRelPath = useCallback(
+    (doc: DocumentRecord, rootId: string): string => {
+      const dir = nodeRelPath(doc.nodeId, rootId)
+      return dir ? `${dir}/${doc.fileName}` : doc.fileName
+    },
+    [nodeRelPath],
+  )
+
+  // Convert the exact checked-node set into {include, exclude} for the backend.
+  //  - include = checked nodes whose parent is NOT checked (top-most checked).
+  //  - exclude = unchecked nodes whose parent IS checked (holes under an
+  //    included subtree). Only the top-most such holes are needed.
+  const computeIncludeExclude = useCallback(
+    (checked: Set<string>, scopeRoot: string): { include: string[]; exclude: string[] } => {
+      const inScope = new Set(subtreeIds(scopeRoot))
+      const parentChecked = (id: string): boolean => {
+        const p = nodes.find(n => n.id === id)?.parentId
+        return !!p && checked.has(p)
+      }
+      const include: string[] = []
+      const exclude: string[] = []
+      for (const id of inScope) {
+        const isChecked = checked.has(id)
+        if (isChecked && !parentChecked(id)) include.push(id)
+        if (!isChecked && parentChecked(id)) exclude.push(id)
+      }
+      return { include, exclude }
+    },
+    [nodes, subtreeIds],
+  )
+
+  // Reconstruct the checked-node set from stored {include, exclude} for edit.
+  const checkedFromIncludeExclude = useCallback(
+    (include: string[], exclude: string[]): Set<string> => {
+      const checked = new Set<string>()
+      for (const inc of include) for (const id of subtreeIds(inc)) checked.add(id)
+      for (const exc of exclude) for (const id of subtreeIds(exc)) checked.delete(id)
+      return checked
+    },
+    [subtreeIds],
+  )
+
+  const resetWikiDialog = () => {
     setWikiName('')
     setWikiDesc('')
-    setWikiSourceDocIds(new Set(documents.map(d => d.id)))
+    setWikiSourceDocIds(new Set())
+    setWikiCheckedNodes(new Set())
+    setWikiAutoRebuild(false)
+    setSubtreeDocs([])
+  }
+
+  // Load the scope node's subtree docs (files/upload pickers).
+  const loadSubtreeDocs = useCallback(async (nodeId: string, sourceScoped: boolean) => {
+    try {
+      const docs = sourceScoped
+        ? await listDocumentsUnderNode(nodeId)     // recursive for source subtree
+        : await listDocumentsForNode(nodeId)        // node's direct uploads
+      setSubtreeDocs(docs)
+    } catch {
+      setSubtreeDocs([])
+    }
+  }, [])
+
+  const handleOpenCreateWiki = () => {
+    if (!selectedId || !selectedNode) return
+    setEditingWikiId(null)
+    resetWikiDialog()
+    setWikiScopeNodeId(selectedId)
+    const isSource = nodeIsSource(selectedNode)
+    if (isSource) {
+      // Default to dir mode with the whole scope checked.
+      setWikiUiMode('dir')
+      setWikiCheckedNodes(new Set(subtreeIds(selectedId)))
+      void loadSubtreeDocs(selectedId, true)
+    } else {
+      setWikiUiMode('upload')
+      setWikiSourceDocIds(new Set(documents.map(d => d.id)))
+      void loadSubtreeDocs(selectedId, false)
+    }
     setCreateWikiOpen(true)
   }
 
-  const handleCreateWiki = async () => {
-    if (!selectedId) return
-    const name = wikiName.trim()
-    if (!name) {
-      toast.error('请输入 Wiki 名称')
-      return
+  const handleOpenEditWiki = (wiki: WikiRecord) => {
+    setEditingWikiId(wiki.id)
+    resetWikiDialog()
+    setWikiName(wiki.name)
+    setWikiDesc(wiki.description ?? '')
+    setWikiAutoRebuild(wiki.autoRebuild)
+    setWikiSourceDocIds(new Set(wiki.sourceDocumentIds))
+    // Scope = the wiki's placement node (where the card shows). For dir mode we
+    // scope to the smallest node that contains all included dirs' common root;
+    // simplest: use the wiki's node_id (its placement) or the first include's
+    // top ancestor. We use node_id for both.
+    const scope = wiki.nodeId ?? selectedId ?? null
+    setWikiScopeNodeId(scope)
+    if (wiki.sourceMode === 'dir') {
+      setWikiUiMode('dir')
+      setWikiCheckedNodes(
+        checkedFromIncludeExclude(wiki.sourceNodeIds, wiki.sourceExcludeNodeIds),
+      )
+      if (scope) void loadSubtreeDocs(scope, true)
+    } else {
+      // files mode — external vs uploaded from picked docs' provenance.
+      const firstDoc = documents.find(d => d.id === wiki.sourceDocumentIds[0])
+      const isExternal = wiki.autoRebuild || !!firstDoc?.sourceId
+      setWikiUiMode(isExternal ? 'files' : 'upload')
+      if (scope) void loadSubtreeDocs(scope, isExternal)
     }
-    if (wikiSourceDocIds.size === 0) {
-      toast.error('请至少选择一个源文档')
-      return
+    setCreateWikiOpen(true)
+  }
+
+  const handleSaveWiki = async () => {
+    const scope = wikiScopeNodeId
+    if (!scope) return
+    const name = wikiName.trim()
+    if (!name) { toast.error('请输入 Wiki 名称'); return }
+
+    let payload: {
+      name: string
+      description?: string
+      source_mode: 'dir' | 'files'
+      source_document_ids?: string[]
+      source_node_ids?: string[]
+      source_exclude_node_ids?: string[]
+      auto_rebuild: boolean
+    }
+    if (wikiUiMode === 'dir') {
+      const { include, exclude } = computeIncludeExclude(wikiCheckedNodes, scope)
+      if (include.length === 0) { toast.error('请至少选择一个目录'); return }
+      payload = {
+        name, description: wikiDesc.trim() || undefined,
+        source_mode: 'dir', source_node_ids: include, source_exclude_node_ids: exclude,
+        auto_rebuild: wikiAutoRebuild,
+      }
+    } else {
+      const picked = Array.from(wikiSourceDocIds).filter(id => subtreeDocs.some(d => d.id === id))
+      if (picked.length === 0) {
+        toast.error(subtreeDocs.length === 0 ? '该节点下暂无文档,请先上传' : '请至少选择一个源文档')
+        return
+      }
+      payload = {
+        name, description: wikiDesc.trim() || undefined,
+        source_mode: 'files', source_document_ids: picked,
+        // Auto-rebuild only for external files; uploads always manual.
+        auto_rebuild: wikiUiMode === 'files' ? wikiAutoRebuild : false,
+      }
     }
     try {
-      const wiki = await createWiki({
-        name,
-        description: wikiDesc.trim() || undefined,
-        node_id: selectedId,
-        source_document_ids: Array.from(wikiSourceDocIds),
-      })
+      if (editingWikiId) {
+        const wiki = await updateWiki(editingWikiId, payload)
+        setWikis(prev => prev.map(w => (w.id === wiki.id ? wiki : w)))
+        toast.success(`Wiki 已更新：${wiki.name}`)
+      } else {
+        const wiki = await createWiki({ ...payload, node_id: scope })
+        setWikis(prev => [wiki, ...prev])
+        toast.success(`Wiki 已创建：${wiki.name}`)
+      }
       setCreateWikiOpen(false)
-      setWikis(prev => [wiki, ...prev])
-      toast.success(`Wiki 已创建：${wiki.name}`)
+      setEditingWikiId(null)
     } catch (err) {
-      toast.error(`创建失败：${err instanceof Error ? err.message : String(err)}`)
+      toast.error(
+        `${editingWikiId ? '更新' : '创建'}失败：${err instanceof Error ? err.message : String(err)}`,
+      )
     }
+  }
+
+  // Toggle a node in the dir tree-checkbox with cascade to its subtree.
+  const toggleDirNode = (nodeId: string, checked: boolean) => {
+    setWikiCheckedNodes(prev => {
+      const next = new Set(prev)
+      for (const id of subtreeIds(nodeId)) {
+        if (checked) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
   }
 
   const handleBuildWiki = async (wiki: WikiRecord) => {
@@ -531,31 +746,36 @@ export default function DocumentCenterPage() {
                       <FileText className="size-4" />
                       文档（{documents.length}）
                     </h3>
-                    <div>
-                      <input
-                        id="doc-upload-input"
-                        type="file"
-                        multiple
-                        className="hidden"
-                        onChange={async (e) => {
-                          const files = Array.from(e.target.files ?? [])
-                          for (const f of files) {
-                            await handleUploadDocument(f)
-                          }
-                          e.target.value = '' // reset so same file can re-upload
-                        }}
-                      />
-                      <Button asChild size="sm" variant="outline">
-                        <label htmlFor="doc-upload-input" className="cursor-pointer">
-                          <Upload className="mr-2 size-4" />
-                          上传文档
-                        </label>
-                      </Button>
-                    </div>
+                    {/* Source-managed nodes are synced-only — no manual upload. */}
+                    {!(selectedNode.autoManaged || selectedNode.sourceId) && (
+                      <div>
+                        <input
+                          id="doc-upload-input"
+                          type="file"
+                          multiple
+                          className="hidden"
+                          onChange={async (e) => {
+                            const files = Array.from(e.target.files ?? [])
+                            for (const f of files) {
+                              await handleUploadDocument(f)
+                            }
+                            e.target.value = '' // reset so same file can re-upload
+                          }}
+                        />
+                        <Button asChild size="sm" variant="outline">
+                          <label htmlFor="doc-upload-input" className="cursor-pointer">
+                            <Upload className="mr-2 size-4" />
+                            上传文档
+                          </label>
+                        </Button>
+                      </div>
+                    )}
                   </div>
                   {documents.length === 0 ? (
                     <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-                      该节点下还没有文档，点击右上角「上传文档」(支持 docx/pdf/md/txt，单文件 ≤ 50MB)。
+                      {selectedNode.autoManaged || selectedNode.sourceId
+                        ? '该节点由外部数据源同步管理,内容随源更新,无法手动上传。'
+                        : '该节点下还没有文档，点击右上角「上传文档」(支持 docx/pdf/md/txt，单文件 ≤ 50MB)。'}
                     </div>
                   ) : (
                     <ul className="divide-y rounded-md border">
@@ -593,7 +813,6 @@ export default function DocumentCenterPage() {
                       size="sm"
                       variant="outline"
                       onClick={handleOpenCreateWiki}
-                      disabled={documents.length === 0}
                     >
                       <Plus className="mr-2 size-4" />
                       新建 Wiki
@@ -601,7 +820,7 @@ export default function DocumentCenterPage() {
                   </div>
                   {wikisForNode.length === 0 ? (
                     <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-                      该节点下还没有 Wiki。先上传文档，再「新建 Wiki」由 AI 构建子知识库。
+                      该节点下还没有 Wiki。可基于已上传文档，或外部数据源的目录/文件，「新建 Wiki」由 AI 构建子知识库。
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -611,13 +830,22 @@ export default function DocumentCenterPage() {
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-sm font-medium">{wiki.name}</p>
                               <div className="flex items-center gap-1.5">
+                                <Badge variant="outline" title="Wiki 源类型">
+                                  {wiki.sourceMode === 'dir' ? '目录' : '文档'}
+                                </Badge>
+                                {/* WikiStatusBadge renders 已构建 for succeeded builds; this
+                                    is the independent staleness signal that co-shows with it. */}
                                 {wiki.needsRebuild && (
                                   <Badge
                                     variant="secondary"
                                     className="bg-amber-100 text-amber-700 border-amber-200"
-                                    title="源文档已更新,建议重新构建以获取最新内容"
+                                    title={
+                                      wiki.sourceMode === 'dir'
+                                        ? '目录内文档有增改删,需重新构建以获取最新内容'
+                                        : '所选文档与上次构建不一致,需重新构建'
+                                    }
                                   >
-                                    建议重建
+                                    需重新构建
                                   </Badge>
                                 )}
                                 <WikiStatusBadge status={wiki.buildStatus} />
@@ -632,7 +860,10 @@ export default function DocumentCenterPage() {
                               <p className="text-xs text-muted-foreground">{wiki.description}</p>
                             )}
                             <p className="text-xs text-muted-foreground">
-                              源文档 {wiki.sourceDocumentIds.length} 份 ·{' '}
+                              {wiki.sourceMode === 'dir'
+                                ? '源:整个目录(自动跟随)'
+                                : `源文档 ${wiki.sourceDocumentIds.length} 份`}{' '}
+                              ·{' '}
                               {wiki.lastBuiltAt
                                 ? `上次构建 ${new Date(wiki.lastBuiltAt).toLocaleString('zh-CN')}`
                                 : '尚未构建'}
@@ -650,6 +881,14 @@ export default function DocumentCenterPage() {
                               >
                                 <Sparkles className="mr-2 size-4" />
                                 {wiki.buildStatus === 'succeeded' ? '重新构建' : '构建'}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleOpenEditWiki(wiki)}
+                              >
+                                <Pencil className="mr-2 size-4" />
+                                编辑
                               </Button>
                               <Button
                                 size="sm"
@@ -781,12 +1020,19 @@ export default function DocumentCenterPage() {
       </AlertDialog>
 
       {/* Create wiki dialog */}
-      <Dialog open={createWikiOpen} onOpenChange={setCreateWikiOpen}>
+      <Dialog
+        open={createWikiOpen}
+        onOpenChange={open => {
+          setCreateWikiOpen(open)
+          if (!open) setEditingWikiId(null)
+        }}
+      >
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>新建 Wiki</DialogTitle>
+            <DialogTitle>{editingWikiId ? '编辑 Wiki' : '新建 Wiki'}</DialogTitle>
             <DialogDescription>
-              从当前节点的文档中选择一组，AI 会把它们整理成一个子知识库（含多份 md + 总结）。
+              选择数据来源（外部数据源的目录/文件，或已上传文件），AI 会整理成一个子知识库（含多份 md + 总结）。
+              {editingWikiId ? '改动源后需重新构建才会生效。' : ''}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
@@ -810,36 +1056,131 @@ export default function DocumentCenterPage() {
                 placeholder="例如：涵盖返厂申请、物流追踪、售后异常处理流程"
               />
             </div>
-            <div className="space-y-1">
-              <Label>源文档（{wikiSourceDocIds.size} / {documents.length} 选中）</Label>
-              <div className="max-h-48 overflow-auto rounded border p-2 space-y-1">
-                {documents.map(doc => (
-                  <label key={doc.id} className="flex items-center gap-2 text-sm">
-                    <Checkbox
-                      checked={wikiSourceDocIds.has(doc.id)}
-                      onCheckedChange={(checked) => {
-                        setWikiSourceDocIds(prev => {
-                          const next = new Set(prev)
-                          if (checked) next.add(doc.id)
-                          else next.delete(doc.id)
-                          return next
-                        })
-                      }}
-                    />
-                    <span className="truncate">{doc.fileName}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {formatSize(doc.sizeBytes)}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
+
+            {/* Source picker — provenance-driven by the wiki's scope node. */}
+            {(() => {
+              const scopeNode = nodes.find(n => n.id === wikiScopeNodeId) ?? null
+              const isSource = nodeIsSource(scopeNode)
+              return (
+                <>
+                  {/* Mode selector: source node -> 目录/文件; plain node -> 上传文件. */}
+                  <div className="space-y-1.5">
+                    <Label>数据来源</Label>
+                    {isSource ? (
+                      <div className="flex gap-2">
+                        <Button
+                          type="button" size="sm"
+                          variant={wikiUiMode === 'dir' ? 'default' : 'outline'}
+                          onClick={() => setWikiUiMode('dir')}
+                        >
+                          目录（自动跟随）
+                        </Button>
+                        <Button
+                          type="button" size="sm"
+                          variant={wikiUiMode === 'files' ? 'default' : 'outline'}
+                          onClick={() => setWikiUiMode('files')}
+                        >
+                          选择文件
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        上传文件：从「{scopeNode?.name ?? '该节点'}」下已上传的文档中选择。
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Dir mode — recursive tree-checkbox with cascade select.
+                      A non-root scope node renders itself as selectable; a
+                      top-level source root shows only its children (selecting all
+                      children == the whole source). */}
+                  {isSource && wikiUiMode === 'dir' && wikiScopeNodeId && scopeNode && (
+                    <div className="space-y-1">
+                      <Label>跟随目录（勾选目录，递归其所有子目录，跟随后续变化）</Label>
+                      <div className="max-h-56 overflow-auto rounded border p-2">
+                        <WikiDirNode
+                          node={scopeNode}
+                          childrenOf={childrenOf}
+                          checked={wikiCheckedNodes}
+                          onToggle={toggleDirNode}
+                          depth={0}
+                          hideSelf={scopeNode.parentId === null}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Files mode (source) + upload mode — flat checklist over the
+                      scope's subtree (source) or node uploads. */}
+                  {(wikiUiMode === 'files' || wikiUiMode === 'upload') && (
+                    <div className="space-y-1">
+                      <Label>
+                        源文档（
+                        {Array.from(wikiSourceDocIds).filter(id => subtreeDocs.some(d => d.id === id)).length}
+                        {' / '}{subtreeDocs.length} 选中）
+                      </Label>
+                      <div className="max-h-48 overflow-auto rounded border p-2 space-y-1">
+                        {subtreeDocs.length === 0 ? (
+                          <p className="text-xs text-muted-foreground px-1 py-2">
+                            {isSource ? '该数据源下暂无文件（可能尚未同步）。' : '该节点下没有已上传文档,请先上传。'}
+                          </p>
+                        ) : [...subtreeDocs]
+                          // Sort by display path so the list matches the tree order.
+                          .map(doc => ({
+                            doc,
+                            label: isSource && wikiScopeNodeId ? docRelPath(doc, wikiScopeNodeId) : doc.fileName,
+                          }))
+                          .sort((a, b) =>
+                            a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }),
+                          )
+                          .map(({ doc, label }) => {
+                          return (
+                            <label key={doc.id} className="flex items-center gap-2 text-sm">
+                              <Checkbox
+                                checked={wikiSourceDocIds.has(doc.id)}
+                                onCheckedChange={(checked) => {
+                                  setWikiSourceDocIds(prev => {
+                                    const next = new Set(prev)
+                                    if (checked) next.add(doc.id)
+                                    else next.delete(doc.id)
+                                    return next
+                                  })
+                                }}
+                              />
+                              <span className="truncate" title={label}>{label}</span>
+                              <span className="ml-auto text-xs text-muted-foreground shrink-0">
+                                {formatSize(doc.sizeBytes)}
+                              </span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Auto-rebuild — external source modes only. */}
+                  {isSource && (wikiUiMode === 'dir' || wikiUiMode === 'files') && (
+                    <div className="flex items-center justify-between rounded border p-3">
+                      <div className="pr-3">
+                        <Label>自动重新构建</Label>
+                        <p className="text-xs text-muted-foreground">
+                          数据源内容变化时自动重建（会消耗 token）；关闭则只标记「需重新构建」，由你手动构建。
+                        </p>
+                      </div>
+                      <Switch checked={wikiAutoRebuild} onCheckedChange={setWikiAutoRebuild} />
+                    </div>
+                  )}
+                </>
+              )
+            })()}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateWikiOpen(false)}>
               取消
             </Button>
-            <Button onClick={() => void handleCreateWiki()}>创建</Button>
+            <Button onClick={() => void handleSaveWiki()}>
+              {editingWikiId ? '保存' : '创建'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1002,6 +1343,78 @@ function TreeRow({
 // ============================================================
 // Small helpers
 // ============================================================
+
+// Recursive dir tree-checkbox node for the wiki dir-mode picker. Renders THIS
+// node (so the current/scope node is itself selectable) then its children.
+// Checkbox reflects the node's OWN selection; cascade is downward only:
+//   - checked        → this node is selected (and its subtree, via cascade)
+//   - indeterminate  → this node is NOT selected, but some descendant is (a
+//                      visual hint only; selecting a child never selects a parent)
+//   - unchecked      → nothing here is selected
+function WikiDirNode({
+  node,
+  childrenOf,
+  checked,
+  onToggle,
+  depth,
+  hideSelf = false,
+}: {
+  node: DocumentTreeNode
+  childrenOf: (id: string) => DocumentTreeNode[]
+  checked: Set<string>
+  onToggle: (id: string, checked: boolean) => void
+  depth: number
+  // When true, don't render THIS node's own checkbox (used for the top-level
+  // source root — it isn't itself selectable; only its children are).
+  hideSelf?: boolean
+}) {
+  const kids = childrenOf(node.id)
+  const childDepth = hideSelf ? depth : depth + 1
+  let self: ReactNode = null
+  if (!hideSelf) {
+    const selfChecked = checked.has(node.id)
+    let descendantChecked = false
+    if (!selfChecked) {
+      const stack = [...childrenOf(node.id).map(c => c.id)]
+      while (stack.length) {
+        const id = stack.pop()!
+        if (checked.has(id)) { descendantChecked = true; break }
+        for (const c of childrenOf(id)) stack.push(c.id)
+      }
+    }
+    // Only 'checked' means selected. 'indeterminate' is a faint hint that a
+    // descendant is selected — it does NOT select this node.
+    const state: boolean | 'indeterminate' =
+      selfChecked ? true : descendantChecked ? 'indeterminate' : false
+    self = (
+      <label
+        className="flex items-center gap-2 text-sm py-0.5"
+        style={{ paddingLeft: `${depth * 16}px` }}
+      >
+        <Checkbox checked={state} onCheckedChange={c => onToggle(node.id, c === true)} />
+        <span className={cn('truncate', state === 'indeterminate' && 'text-muted-foreground')}>
+          {node.name}
+        </span>
+      </label>
+    )
+  }
+  return (
+    <div>
+      {self}
+      {kids.map(child => (
+        <WikiDirNode
+          key={child.id}
+          node={child}
+          childrenOf={childrenOf}
+          checked={checked}
+          onToggle={onToggle}
+          depth={childDepth}
+          hideSelf={false}
+        />
+      ))}
+    </div>
+  )
+}
 
 function WikiStatusBadge({ status }: { status: WikiRecord['buildStatus'] }) {
   if (status === 'succeeded') {
