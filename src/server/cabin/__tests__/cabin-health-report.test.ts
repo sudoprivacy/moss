@@ -343,6 +343,54 @@ describe('CabinHealthReportService', () => {
     expect(report.summary?.suggestions).toEqual(['保持放松', '按需复测'])
   })
 
+  it('normalizes model object sections into report arrays', async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            overview: '模型生成的小结。',
+            interpretations: {
+              heart_rate: '心率为120次/分钟，属于偏高。',
+              respiratory_rate: '呼吸率为22次/分钟，属于偏高。',
+              spo2: '血氧饱和度为94%，属于偏低。',
+              body_temperature: '体温为37.8摄氏度，属于偏高。',
+            },
+            suggestions: {
+              rest: '建议先静坐休息 5-10 分钟后重新测量。',
+              crew: '如持续不适或指标继续异常，请联系乘务人员。',
+            },
+            disclaimer: '本报告仅用于客舱健康状态辅助提示，不作为医疗诊断依据。',
+          }),
+        },
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch
+    const { service } = createService(fetchImpl)
+    const started = service.startReport(createContext('A'), { requestId: 'req-start' })
+    service.handleWsEnvelope({
+      type: 'telemetry',
+      content: {
+        topic: 'health',
+        seatNo: 'A',
+        message: { heart_rate: 120, spo2: 94, respiratory_rate: 22, body_temperature: 37.8 },
+      },
+    })
+
+    await service.finalizeReport(started.report_id, { requestId: 'req-finalize' })
+    const report = service.getReport(started.report_id, createContext('A'))
+
+    expect(report.summary?.overview).toBe('模型生成的小结。')
+    expect(report.summary?.interpretations).toEqual([
+      '心率为120次/分钟，属于偏高。',
+      '呼吸率为22次/分钟，属于偏高。',
+      '血氧饱和度为94%，属于偏低。',
+      '体温为37.8摄氏度，属于偏高。',
+    ])
+    expect(report.summary?.suggestions).toEqual([
+      '建议先静坐休息 5-10 分钟后重新测量。',
+      '如持续不适或指标继续异常，请联系乘务人员。',
+    ])
+  })
+
   it('starts and returns a report through the Pad HTTP APIs', async () => {
     const upstream = http.createServer((req, res) => {
       if (req.url === '/passenger') {

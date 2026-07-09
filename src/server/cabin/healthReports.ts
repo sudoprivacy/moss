@@ -342,6 +342,9 @@ export class CabinHealthReportService {
       '你是客舱健康报告文案生成器。',
       '只输出严格 JSON，不要 Markdown，不要多余文本。',
       '只能包含 overview、interpretations、suggestions、disclaimer 四个字段。',
+      '字段格式必须为：overview 字符串；interpretations 字符串数组；suggestions 字符串数组；disclaimer 字符串。',
+      'interpretations 每项为一条分项解读文本，不要输出对象、嵌套结构或额外字段。',
+      'suggestions 每项为一条建议文本，不要输出对象、嵌套结构或额外字段。',
       '不得修改、推断或重新计算任何指标值、等级、分数。',
       '不得输出诊断结论，只能给客舱健康状态辅助提示。',
       JSON.stringify({ metrics: compactMetrics(metrics), score, language }),
@@ -704,6 +707,16 @@ function normalizeTextList(value: unknown): string[] {
     return value
       .filter(item => typeof item === 'string' && item.trim())
       .map(item => String(item).trim())
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const orderedKeys = [
+      ...METRIC_KEYS.filter(key => Object.prototype.hasOwnProperty.call(record, key)),
+      ...Object.keys(record).filter(key => !METRIC_KEYS.includes(key as CabinHealthMetricKey)),
+    ]
+    return orderedKeys
+      .map(key => record[key])
+      .flatMap(item => normalizeTextList(item))
   }
   if (typeof value !== 'string' || !value.trim()) return []
   const text = value.trim()
