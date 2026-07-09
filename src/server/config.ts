@@ -216,6 +216,21 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? process.env.CABIN_AUTOMATION_ENABLED === '1' || process.env.CABIN_AUTOMATION_ENABLED === 'true'
         : raw.cabin.automationEnabled,
       flightStateWsUrl: process.env.CABIN_FLIGHT_STATE_WS_URL || raw.cabin.flightStateWsUrl,
+      flightStateWsConnectTimeoutMs: process.env.CABIN_FLIGHT_STATE_WS_CONNECT_TIMEOUT_MS
+        ? Number.parseInt(process.env.CABIN_FLIGHT_STATE_WS_CONNECT_TIMEOUT_MS, 10)
+        : raw.cabin.flightStateWsConnectTimeoutMs,
+      flightStateWsHeartbeatIntervalMs: process.env.CABIN_FLIGHT_STATE_WS_HEARTBEAT_INTERVAL_MS
+        ? Number.parseInt(process.env.CABIN_FLIGHT_STATE_WS_HEARTBEAT_INTERVAL_MS, 10)
+        : raw.cabin.flightStateWsHeartbeatIntervalMs,
+      flightStateWsIdleTimeoutMs: process.env.CABIN_FLIGHT_STATE_WS_IDLE_TIMEOUT_MS
+        ? Number.parseInt(process.env.CABIN_FLIGHT_STATE_WS_IDLE_TIMEOUT_MS, 10)
+        : raw.cabin.flightStateWsIdleTimeoutMs,
+      flightStateWsReconnectMinMs: process.env.CABIN_FLIGHT_STATE_WS_RECONNECT_MIN_MS
+        ? Number.parseInt(process.env.CABIN_FLIGHT_STATE_WS_RECONNECT_MIN_MS, 10)
+        : raw.cabin.flightStateWsReconnectMinMs,
+      flightStateWsReconnectMaxMs: process.env.CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS
+        ? Number.parseInt(process.env.CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS, 10)
+        : raw.cabin.flightStateWsReconnectMaxMs,
       managedSeats: process.env.CABIN_MANAGED_SEATS || raw.cabin.managedSeats,
       broadcastBaseUrl: process.env.CABIN_BROADCAST_BASE_URL || raw.cabin.broadcastBaseUrl,
       broadcastApiBaseUrl: process.env.CABIN_BROADCAST_API_BASE_URL || raw.cabin.broadcastApiBaseUrl,

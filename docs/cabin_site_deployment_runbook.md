@@ -74,6 +74,11 @@
 
     "automationEnabled": true,
     "flightStateWsUrl": "ws://对方服务地址/infra/ws",
+    "flightStateWsConnectTimeoutMs": 10000,
+    "flightStateWsHeartbeatIntervalMs": 15000,
+    "flightStateWsIdleTimeoutMs": 60000,
+    "flightStateWsReconnectMinMs": 3000,
+    "flightStateWsReconnectMaxMs": 30000,
     "managedSeats": "A,B",
 
     "broadcastApiKey": "对方提供的 hardware api key",
@@ -118,6 +123,11 @@
 | `controlTimeoutMs` | 硬件控制超时时间，毫秒。 | `10000` |
 | `automationEnabled` | 是否启用飞行状态 WS 自动化。 | `false` |
 | `flightStateWsUrl` | 飞行状态 WS 地址。 | 空 |
+| `flightStateWsConnectTimeoutMs` | WS 建连超时时间，超时后主动断开并进入重连。 | `10000` |
+| `flightStateWsHeartbeatIntervalMs` | WS 协议级 ping 间隔；配置为 `0` 可关闭主动 ping。 | `15000` |
+| `flightStateWsIdleTimeoutMs` | WS 无消息/无 pong 的空闲超时，超时后主动重连；配置为 `0` 可关闭空闲检测。 | `60000` |
+| `flightStateWsReconnectMinMs` | WS 重连最小间隔。 | `3000` |
+| `flightStateWsReconnectMaxMs` | WS 退避重连最大间隔。 | `30000` |
 | `managedSeats` | 兜底托管座位，逗号分隔。Pad 登录带座位号后也会自动写入托管座位。 | 空 |
 | `broadcastApiKey` | 调 `audio-all`、`error-seat` 的 `X-Hardware-Api-Key`。 | 空；外部广播会跳过/失败 |
 | `broadcastEnabled` | 是否启用外部广播接口调用。 | `true` |
@@ -180,7 +190,12 @@ details
 | 事件 | 含义 |
 | --- | --- |
 | `ws.connect` | 开始连接飞行状态 WS。 |
+| `ws.connect.timeout` | WS 建连超时，服务会主动断开并进入重连。 |
 | `ws.open` | WS 已连接。 |
+| `ws.heartbeat.ping` | 服务端向对方 WS 发送协议级 ping。 |
+| `ws.heartbeat.pong` | 收到对方 WS 协议级 pong。 |
+| `ws.idle.timeout` | 超过空闲时间未收到消息或 pong，服务主动断开重连。 |
+| `ws.reconnect.scheduled` | WS 已安排下一次重连。 |
 | `ws.message.raw` | 收到 WS 原始消息。 |
 | `ws.message.parsed` | WS 消息解析成功。 |
 | `flight.phase.changed` | 飞行阶段发生变化，开始触发阶段任务。 |

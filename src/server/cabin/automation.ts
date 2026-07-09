@@ -121,6 +121,10 @@ export class CabinFlightAutomation {
   private ws: WebSocket | null = null
   private stopped = false
   private reconnectTimer: NodeJS.Timeout | null = null
+  private connectTimeoutTimer: NodeJS.Timeout | null = null
+  private heartbeatTimer: NodeJS.Timeout | null = null
+  private reconnectAttempts = 0
+  private lastActivityAt = 0
   private lastPhaseCode: number | null = null
   private readonly logFile: string
   private readonly broadcastClient: CabinBroadcastClient
@@ -148,6 +152,7 @@ export class CabinFlightAutomation {
     this.stopped = true
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+    this.clearWsTimers()
     this.ws?.close()
     this.ws = null
   }
@@ -158,17 +163,34 @@ export class CabinFlightAutomation {
     this.log({ event: 'ws.connect', url, ok: true })
     const ws = new WebSocket(url)
     this.ws = ws
+    this.lastActivityAt = Date.now()
+    this.startConnectTimeout(ws, url)
 
     ws.on('open', () => {
+      this.clearConnectTimeout()
+      this.reconnectAttempts = 0
+      this.lastActivityAt = Date.now()
       this.log({ event: 'ws.open', url, ok: true })
+      this.startHeartbeat(ws, url)
     })
     ws.on('message', data => {
+      this.lastActivityAt = Date.now()
       void this.handleRawMessage(data.toString())
+    })
+    ws.on('ping', () => {
+      this.lastActivityAt = Date.now()
+      this.log({ event: 'ws.heartbeat.ping_received', url, ok: true })
+    })
+    ws.on('pong', () => {
+      this.lastActivityAt = Date.now()
+      this.log({ event: 'ws.heartbeat.pong', url, ok: true })
     })
     ws.on('error', error => {
       this.log({ event: 'ws.error', url, ok: false, error: error instanceof Error ? error.message : String(error) })
     })
     ws.on('close', (code, reason) => {
+      this.clearWsTimers()
+      const wasCurrent = this.ws === ws
       this.log({
         event: 'ws.close',
         url,
@@ -176,12 +198,78 @@ export class CabinFlightAutomation {
         status: code,
         details: { reason: reason.toString() },
       })
-      this.ws = null
-      if (!this.stopped) {
-        this.reconnectTimer = setTimeout(() => this.connect(), 3000)
-        this.reconnectTimer.unref?.()
+      if (wasCurrent) this.ws = null
+      if (!this.stopped && wasCurrent) {
+        this.scheduleReconnect(url)
       }
     })
+  }
+
+  private startConnectTimeout(ws: WebSocket, url: string): void {
+    this.clearConnectTimeout()
+    const timeoutMs = this.config.cabin.flightStateWsConnectTimeoutMs ?? 10_000
+    if (timeoutMs <= 0) return
+    this.connectTimeoutTimer = setTimeout(() => {
+      if (this.stopped || this.ws !== ws || ws.readyState !== WebSocket.CONNECTING) return
+      this.log({ event: 'ws.connect.timeout', url, ok: false, error: `connect timeout after ${timeoutMs}ms` })
+      this.clearWsTimers()
+      this.ws = null
+      ws.terminate()
+      if (!this.stopped) this.scheduleReconnect(url)
+    }, timeoutMs)
+    this.connectTimeoutTimer.unref?.()
+  }
+
+  private startHeartbeat(ws: WebSocket, url: string): void {
+    this.clearHeartbeat()
+    const heartbeatIntervalMs = this.config.cabin.flightStateWsHeartbeatIntervalMs ?? 15_000
+    if (heartbeatIntervalMs <= 0) return
+    this.heartbeatTimer = setInterval(() => {
+      if (this.stopped || this.ws !== ws) return
+      const idleTimeoutMs = this.config.cabin.flightStateWsIdleTimeoutMs ?? 60_000
+      const idleMs = Date.now() - this.lastActivityAt
+      if (idleTimeoutMs > 0 && idleMs > idleTimeoutMs) {
+        this.log({ event: 'ws.idle.timeout', url, ok: false, error: `no websocket activity for ${idleMs}ms`, details: { idle_ms: idleMs, idle_timeout_ms: idleTimeoutMs } })
+        ws.terminate()
+        return
+      }
+      if (ws.readyState !== WebSocket.OPEN) return
+      try {
+        ws.ping()
+        this.log({ event: 'ws.heartbeat.ping', url, ok: true })
+      } catch (error) {
+        this.log({ event: 'ws.heartbeat.ping_failed', url, ok: false, error: stringifyError(error) })
+        ws.terminate()
+      }
+    }, heartbeatIntervalMs)
+    this.heartbeatTimer.unref?.()
+  }
+
+  private scheduleReconnect(url: string): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    const minMs = this.config.cabin.flightStateWsReconnectMinMs ?? 3_000
+    const maxMs = this.config.cabin.flightStateWsReconnectMaxMs ?? 30_000
+    const attempt = this.reconnectAttempts + 1
+    this.reconnectAttempts = attempt
+    const delayMs = Math.min(Math.max(maxMs, minMs), Math.max(0, minMs) * 2 ** (attempt - 1))
+    this.log({ event: 'ws.reconnect.scheduled', url, ok: true, details: { attempt, delay_ms: delayMs } })
+    this.reconnectTimer = setTimeout(() => this.connect(), delayMs)
+    this.reconnectTimer.unref?.()
+  }
+
+  private clearWsTimers(): void {
+    this.clearConnectTimeout()
+    this.clearHeartbeat()
+  }
+
+  private clearConnectTimeout(): void {
+    if (this.connectTimeoutTimer) clearTimeout(this.connectTimeoutTimer)
+    this.connectTimeoutTimer = null
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = null
   }
 
   private async handleRawMessage(raw: string): Promise<void> {

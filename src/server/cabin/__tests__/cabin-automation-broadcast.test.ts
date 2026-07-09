@@ -1,17 +1,32 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtemp, rm } from 'fs/promises'
+import net from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { DatabaseSync } from 'node:sqlite'
+import { WebSocketServer } from 'ws'
 
 import { CabinFlightAutomation } from '../automation.js'
 import { CabinStore } from '../store.js'
 import type { ServerConfig } from '../../types.js'
 
 const tempDirs: string[] = []
+const wsServers: WebSocketServer[] = []
+const netServers: net.Server[] = []
+const netSockets = new Set<net.Socket>()
 
 afterEach(async () => {
+  for (const server of wsServers) {
+    for (const client of server.clients) client.terminate()
+    server.close()
+  }
+  wsServers.length = 0
+  for (const socket of netSockets) socket.destroy()
+  netSockets.clear()
+  for (const server of netServers) server.close()
+  netServers.length = 0
+  await new Promise(resolve => setTimeout(resolve, 30))
   await Promise.all(tempDirs.map(dir => rm(dir, { recursive: true, force: true })))
   tempDirs.length = 0
 })
@@ -75,6 +90,39 @@ function createConfig(rootDir: string): ServerConfig {
       healthReportMinSamples: 1,
     },
   } as unknown as ServerConfig
+}
+
+function listenWs(server: WebSocketServer): Promise<string> {
+  wsServers.push(server)
+  return new Promise(resolve => {
+    const finish = () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('Unexpected server address')
+      resolve(`ws://127.0.0.1:${address.port}`)
+    }
+    if (server.address()) finish()
+    else server.once('listening', finish)
+  })
+}
+
+function listenNet(server: net.Server): Promise<string> {
+  netServers.push(server)
+  return new Promise(resolve => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('Unexpected server address')
+      resolve(`ws://127.0.0.1:${address.port}`)
+    })
+  })
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  expect(predicate()).toBe(true)
 }
 
 describe('CabinFlightAutomation external broadcasts', () => {
@@ -176,5 +224,79 @@ describe('CabinFlightAutomation external broadcasts', () => {
     expect(String(seatError.content)).toContain('安全带未扣合')
     expect(String(seatError.content)).toContain('座椅未归位')
     expect(String(seatError.content)).toContain('小桌板未收起')
+  })
+
+  it('sends protocol ping frames while the flight state websocket is open', async () => {
+    const rootDir = await makeTempDir()
+    const config = createConfig(rootDir)
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    let pings = 0
+    server.on('connection', socket => {
+      socket.on('ping', () => {
+        pings += 1
+      })
+    })
+    config.cabin.flightStateWsUrl = await listenWs(server)
+    config.cabin.flightStateWsHeartbeatIntervalMs = 20
+    config.cabin.flightStateWsIdleTimeoutMs = 500
+    config.cabin.flightStateWsConnectTimeoutMs = 200
+    const automation = new CabinFlightAutomation(config, new CabinStore(new Database(':memory:') as unknown as DatabaseSync))
+
+    try {
+      automation.start()
+      await waitFor(() => pings > 0)
+    } finally {
+      automation.stop()
+    }
+  })
+
+  it('uses the configured reconnect delay after the flight state websocket closes', async () => {
+    const rootDir = await makeTempDir()
+    const config = createConfig(rootDir)
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    let connections = 0
+    server.on('connection', socket => {
+      connections += 1
+      if (connections === 1) {
+        setTimeout(() => socket.close(1012, 'restart'), 20)
+      }
+    })
+    config.cabin.flightStateWsUrl = await listenWs(server)
+    config.cabin.flightStateWsReconnectMinMs = 20
+    config.cabin.flightStateWsReconnectMaxMs = 20
+    config.cabin.flightStateWsHeartbeatIntervalMs = 200
+    config.cabin.flightStateWsIdleTimeoutMs = 500
+    const automation = new CabinFlightAutomation(config, new CabinStore(new Database(':memory:') as unknown as DatabaseSync))
+
+    try {
+      automation.start()
+      await waitFor(() => connections >= 2)
+    } finally {
+      automation.stop()
+    }
+  })
+
+  it('times out stalled flight state websocket handshakes and retries', async () => {
+    const rootDir = await makeTempDir()
+    const config = createConfig(rootDir)
+    let connections = 0
+    const server = net.createServer(socket => {
+      netSockets.add(socket)
+      connections += 1
+      socket.on('close', () => netSockets.delete(socket))
+      socket.on('error', () => {})
+    })
+    config.cabin.flightStateWsUrl = await listenNet(server)
+    config.cabin.flightStateWsConnectTimeoutMs = 30
+    config.cabin.flightStateWsReconnectMinMs = 20
+    config.cabin.flightStateWsReconnectMaxMs = 20
+    const automation = new CabinFlightAutomation(config, new CabinStore(new Database(':memory:') as unknown as DatabaseSync))
+
+    try {
+      automation.start()
+      await waitFor(() => connections >= 2, 800)
+    } finally {
+      automation.stop()
+    }
   })
 })

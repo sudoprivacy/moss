@@ -198,6 +198,11 @@ export const serverFileConfigSchema = lazySchema(() =>
       controlTimeoutMs: z.number().int().min(1000).default(10_000),
       automationEnabled: z.boolean().default(false),
       flightStateWsUrl: z.string().optional(),
+      flightStateWsConnectTimeoutMs: z.number().int().min(1000).default(10_000),
+      flightStateWsHeartbeatIntervalMs: z.number().int().min(0).default(15_000),
+      flightStateWsIdleTimeoutMs: z.number().int().min(0).default(60_000),
+      flightStateWsReconnectMinMs: z.number().int().min(100).default(3_000),
+      flightStateWsReconnectMaxMs: z.number().int().min(100).default(30_000),
       managedSeats: z.string().optional(),
       broadcastBaseUrl: z.string().optional(),
       broadcastApiBaseUrl: z.string().optional(),
@@ -367,6 +372,11 @@ export type ServerConfig = {
     controlTimeoutMs: number
     automationEnabled: boolean
     flightStateWsUrl?: string
+    flightStateWsConnectTimeoutMs: number
+    flightStateWsHeartbeatIntervalMs: number
+    flightStateWsIdleTimeoutMs: number
+    flightStateWsReconnectMinMs: number
+    flightStateWsReconnectMaxMs: number
     managedSeats?: string
     broadcastBaseUrl?: string
     broadcastApiBaseUrl?: string
