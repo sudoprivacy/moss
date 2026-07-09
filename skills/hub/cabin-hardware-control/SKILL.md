@@ -117,19 +117,20 @@ The script reads:
 - 小桌板打开/展开: `--command seat.tray.open`。例如：打开小桌板、展开桌板、把桌板支起来、把小桌子放下来、我要用餐桌、open the tray。
 - 小桌板关闭/收起: `--command seat.tray.close`。例如：收起小桌板、合上桌板、把桌子收起来、桌板不用了收好、把托盘收回去、fold the tray。
 - 阅读灯打开/关闭: `--command seat.light --on true|false`; if brightness is requested together, add `--pwm 0-1000`。例如：打开阅读灯、开个灯我看书、关闭阅读灯、灯太亮关掉、把灯关了、reading light on/off。
-- 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-1000`。例如：阅读灯调亮、把灯调暗、灯光柔和一点、亮度调到70%、灯太刺眼暗一点、再亮一些。
+- 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-1000`。`pwm=0` 最暗，`pwm=1000` 最亮。乘客未给具体数值时，按固定默认值选择：灯太刺眼/柔和一点/暗一点/不要太亮 → `--pwm 300`；正常/中等亮度 → `--pwm 500`；亮一点/看不清/调亮/再亮一些 → `--pwm 700`。例如：阅读灯调亮、把灯调暗、灯光柔和一点、亮度调到70%、灯太刺眼暗一点、再亮一些。
 - 座椅靠背/坐垫位置百分比: `--command seat.cushion --position 0-100`。例如：靠背调到40%、座椅放到一半、后仰70。
 - 座椅靠背/backrest/recline: always use `--command seat.cushion --position 0-100`; never use `seat.recline`。
 - 放倒座椅/躺下/往后躺/后仰/调舒服一点: use `--command seat.cushion`. If the passenger does not provide a percentage, use `--position 60`。例如：放倒座椅、往后躺、把椅子放平、座椅调舒服一点、recline my seat。（注意：仅当乘客给出明确控制动作时才发射；若只是“我想躺一会/我困了/想睡”等状态表达，按状态反问处理，不要直接发射。）
 - 放倒一点/后仰一点/往后调一点: use `--command seat.cushion --position 30` when no explicit percentage is provided。例如：后仰一点、往后一点点、稍微放倒、再往后调一点。
 - 调直座椅/座椅归位/靠背立起来/恢复正常: use `--command seat.cushion --position 0`。例如：座椅调直、把椅子扶正、我要坐正、座椅归位、恢复正常、seat upright。
 - If the passenger only says they are tired, sleepy, or uncomfortable without requesting a concrete action, ask what service they need instead of calling hardware.
-- 座椅通风: `--command seat.ventilation --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。例如：打开座椅通风、椅子透透气、座椅吹风、屁股底下有点闷、通风开到3档、seat ventilation。
-- 座椅加热: `--command seat.heating --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。例如：打开座椅加热、椅子暖一点、座椅暖一点、座椅热一点、坐着有点凉给座椅升温、加热开到3档、seat heater。
-- 座椅按摩: `--command seat.massage --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。例如：打开座椅按摩、按摩一下、椅子给我揉揉、腰按摩、按摩强一点、按摩开到3档、seat massage。
+- Comfort-state-only messages are not hardware commands. Do NOT emit for these exact-style messages: `这儿有点冷`, `坐着有点凉`, `有点热`, `有点闷`, `腰有点酸`, `我困了想睡会`. Ask a yes/no confirmation question first. Emit only after the passenger confirms, or when the same turn contains an explicit control action such as `打开`, `开启`, `帮我`, `给我`, `把座椅`, `开通风`, `给座椅升温`, or `帮我揉揉`.
+- 座椅通风: `--command seat.ventilation --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。仅当乘客明确要求控制座椅通风时 emit，例如：打开座椅通风、椅子透透气、给我开通风、座椅吹风、通风开到3档、seat ventilation。若乘客只说“有点热/有点闷/屁股底下有点闷”这类状态表达，先反问是否需要开启座椅通风，不要直接 emit。
+- 座椅加热: `--command seat.heating --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。仅当乘客明确要求控制座椅加热时 emit，例如：打开座椅加热、椅子暖一点、座椅暖一点、座椅热一点、给座椅升温、加热开到3档、seat heater。若乘客只说“这儿有点冷/坐着有点凉/有点冻”这类状态表达，先反问是否需要开启座椅加热或送毛毯，不要直接 emit。
+- 座椅按摩: `--command seat.massage --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。仅当乘客明确要求控制座椅按摩时 emit，例如：打开座椅按摩、按摩一下、帮我揉揉、椅子给我揉揉、腰按摩、按摩强一点、按摩开到3档、seat massage。若乘客只说“腰有点酸/背有点疼/肩颈不舒服”这类状态表达，先反问是否需要开启座椅按摩，不要直接 emit。
 - 生理检测开始/停止: `--command seat.health.start` or `--command seat.health.stop`。例如：开始——开始生理检测、测一下身体数据、启动健康监测、采集体征；停止——停止生理检测、别测了、关闭健康监测、结束体征采集。
 - 客舱顶灯打开/关闭: `--command cabin.ceiling.light --on true|false`。例如：打开客舱顶灯、把舱灯打开、关闭顶灯、关掉客舱灯、ceiling light on/off。
-- 客舱顶灯颜色亮度: `--command cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`。例如：顶灯调成暖色、客舱灯光柔和点、顶灯亮度调到40%、换个氛围灯颜色。
+- 客舱顶灯颜色亮度: `--command cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`。RGB 表示颜色，不表示亮度；乘客说“亮度低一点/暗一点/柔和一点”时只降低 `--brightness`，不要把 RGB 改小。常用颜色固定值：暖色/warm `--r 255 --g 180 --b 80`；白色/white `255 255 255`；蓝色/blue `0 0 255`；红色/red `255 0 0`；绿色/green `0 255 0`。未给亮度时默认 `--brightness 100`；柔和/低一点/暗一点默认 `--brightness 40`。例如：顶灯调成暖色、客舱灯光柔和点、顶灯亮度调到40%、换个氛围灯颜色。
 - 客舱顶灯颜色 such as 蓝色/blue: use `--command cabin.ceiling.color`, not `cabin.ceiling.light`。例如：顶灯调成蓝色、换成白色灯、把顶灯变成红色。
 - 客舱场景切换: `--command cabin.scene --preset <value>`. `--preset` MUST be exactly one of the four hardware presets — no other value is valid:
   - `boarding` — 登机 / 上机。例如：切到登机场景、登机模式、登机灯光。

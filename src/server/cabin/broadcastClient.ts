@@ -68,6 +68,7 @@ export class CabinBroadcastClient {
     seatNo: string
     title: string
     content: string
+    contentEN: string
   }): Promise<CabinBroadcastResult> {
     const baseUrl = this.baseUrl()
     if (!this.isConfigured() || !baseUrl) {

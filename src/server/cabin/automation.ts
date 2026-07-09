@@ -1050,6 +1050,7 @@ export class CabinFlightAutomation {
       return false
     }
     const content = `${seat.seatNo} 座位安全检查异常：${problems.map(describeSeatProblem).join('；')}。`
+    const contentEN = `${seat.seatNo} seat safety check abnormal: ${problems.map(describeSeatProblemEN).join('; ')}.`
     this.log({
       event: 'broadcast.error_seat.request',
       requestId,
@@ -1061,13 +1062,14 @@ export class CabinFlightAutomation {
       seatNo: seat.seatNo,
       method: 'POST',
       ok: true,
-      details: { title: '座位告警', content, alert_types: problems.map(problem => problem.type) },
+      details: { title: '座位告警', content, contentEN, alert_types: problems.map(problem => problem.type) },
     })
     const result = await this.broadcastClient.sendErrorSeat({
       aircraftNo,
       seatNo: seat.seatNo,
       title: '座位告警',
       content,
+      contentEN,
     })
     this.log({
       event: result.ok ? 'broadcast.error_seat.success' : result.skipped ? 'broadcast.error_seat.skipped' : 'broadcast.error_seat.failed',
@@ -1219,6 +1221,21 @@ function describeSeatProblem(problem: SeatProblem): string {
       return '座椅未归位'
     case 'TRAY_NOT_CLOSED':
       return '小桌板未收起'
+    default:
+      return problem.message
+  }
+}
+
+function describeSeatProblemEN(problem: SeatProblem): string {
+  switch (problem.type) {
+    case 'PASSENGER_NOT_PRESENT':
+      return 'passenger is not seated'
+    case 'SEATBELT_NOT_FASTENED':
+      return 'seat belt is not fastened'
+    case 'SEAT_NOT_UPRIGHT':
+      return 'seat back is not upright'
+    case 'TRAY_NOT_CLOSED':
+      return 'tray table is not stowed'
     default:
       return problem.message
   }

@@ -225,6 +225,9 @@ describe('CabinFlightAutomation external broadcasts', () => {
     expect(String(seatError.content)).toContain('安全带未扣合')
     expect(String(seatError.content)).toContain('座椅未归位')
     expect(String(seatError.content)).toContain('小桌板未收起')
+    expect(String(seatError.contentEN)).toContain('seat belt is not fastened')
+    expect(String(seatError.contentEN)).toContain('seat back is not upright')
+    expect(String(seatError.contentEN)).toContain('tray table is not stowed')
   })
 
   it('sends protocol ping frames while the flight state websocket is open', async () => {
