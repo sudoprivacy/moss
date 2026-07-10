@@ -329,19 +329,21 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     updateJob: async (auth: CronAuth, jobId: string, updates: UpdateCronJobInput, subtreeUserIds?: Set<string> | null) => {
       try {
-        const blocked = cronDisabledError(auth)
-        if (blocked) return blocked
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
-        // Owner, an admin actor, or a dept_admin managing a subtree member's job
-        // may fully update it (canManageJob). Admins/super_admins hold cron
-        // management via `*`, so the admin console can edit any org job's
-        // schedule/payload/enabled state, not just disable it (#85).
+        // Owner, a co-owner, an admin actor, or a dept_admin managing a subtree
+        // member's job may fully update it (canManageJob). Admins/super_admins
+        // hold cron management via `*`, so the admin console can edit any org
+        // job's schedule/payload/enabled state, not just disable it (#85).
         if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
+        // NOTE: the cron_disabled_by_org gate (#83) is intentionally NOT applied
+        // here. It gates *creating* jobs while client cron is off; managing an
+        // EXISTING job is allowed for anyone who passes canManageJob (owner,
+        // co-owner, admin), regardless of the flag.
 
         // Resolve the effective co-owner set + executor after this update, so the
         // constraint is checked against the post-update state (a caller may edit
@@ -404,8 +406,6 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     deleteJob: async (auth: CronAuth, jobId: string, subtreeUserIds?: Set<string> | null) => {
       try {
-        const blocked = cronDisabledError(auth)
-        if (blocked) return blocked
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
@@ -413,6 +413,8 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
+        // cron_disabled_by_org (#83) gates creation, not management of an
+        // existing job — owner/co-owner/admin may delete regardless of the flag.
 
         store.softDelete(jobId)
         config.cronService.removeJob(jobId)
@@ -431,8 +433,6 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     triggerJob: async (auth: CronAuth, jobId: string, subtreeUserIds?: Set<string> | null) => {
       try {
-        const blocked = cronDisabledError(auth)
-        if (blocked) return blocked
         const existing = store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
@@ -440,6 +440,8 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
+        // cron_disabled_by_org (#83) gates creation, not manual runs of an
+        // existing job — owner/co-owner/admin may trigger regardless of the flag.
 
         // Manual runs execute under the identity of whoever clicked (auth),
         // not the job's scheduled executor. canManageJob above guarantees the

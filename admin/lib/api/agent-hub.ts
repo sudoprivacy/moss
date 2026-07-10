@@ -322,8 +322,8 @@ export interface CreateTenantAssistantRequest {
 
 export function createTenantAssistant(
   data: CreateTenantAssistantRequest,
-): Promise<{ success: boolean; data: TenantAssistantInfo }> {
-  return authClient.post<{ success: boolean; data: TenantAssistantInfo }>(
+): Promise<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }> {
+  return authClient.post<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }>(
     '/api/v1/agents/tenant/create',
     data,
   )

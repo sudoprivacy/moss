@@ -264,13 +264,34 @@ export default function CronJobsPage() {
     }
   }
 
-  // A user's display label for the co-owner/executor pickers.
+  // Server-resolved id→name map from the job being edited. The backend resolves
+  // these org-agnostically (userName/executorName/coOwnerNames), so they work
+  // even for a non-admin editor who can't call GET /api/v1/users (admin:users).
+  const serverNameById = useMemo(() => {
+    const m = new Map<string, string>()
+    const j = editingJob
+    if (j) {
+      if (j.userName) m.set(j.userId, j.userName)
+      const execId = j.executorUserId ?? j.userId
+      if (j.executorName) m.set(execId, j.executorName)
+      ;(j.coOwnerIds ?? []).forEach((id, i) => {
+        const name = j.coOwnerNames?.[i]
+        if (name) m.set(id, name)
+      })
+    }
+    return m
+  }, [editingJob])
+
+  // A user's display label for the co-owner/executor pickers. Prefer the local
+  // roster (has displayName); fall back to the server-resolved name from the job;
+  // finally the raw id.
   const userLabel = useCallback(
     (id: string) => {
       const u = users.find((x) => x.id === id)
-      return u ? (u.displayName || u.name) : id
+      if (u) return u.displayName || u.name
+      return serverNameById.get(id) ?? id
     },
-    [users],
+    [users, serverNameById],
   )
 
   // The job's creator: current user on create, the job's owner on edit. The
@@ -463,25 +484,24 @@ export default function CronJobsPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="text-sm">{getUserName(job)}</div>
                       {(() => {
+                        // Comma-separated "owner, co-owner, …" — owner first
+                        // (untagged); the executor's name gets a trailing '*'.
                         const execId = job.executorUserId ?? job.userId
-                        const execLabel =
-                          job.executorName ?? resolveOwnerName(users, execId, undefined)
-                        const isCreatorExec = execId === job.userId
+                        const coOwnerIds = job.coOwnerIds ?? []
+                        const entries: Array<{ id: string; name: string }> = [
+                          { id: job.userId, name: resolveOwnerName(users, job.userId, job.userName) },
+                          ...coOwnerIds.map((id, i) => ({
+                            id,
+                            name: resolveOwnerName(users, id, job.coOwnerNames?.[i]),
+                          })),
+                        ]
                         return (
-                          <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                            {!isCreatorExec && (
-                              <Badge variant="outline" className="text-[10px] font-normal">
-                                执行者：{execLabel}
-                              </Badge>
-                            )}
-                            {job.coOwnerIds?.length > 0 && (
-                              <span className="text-xs text-muted-foreground">
-                                协作者 {job.coOwnerIds.length}
-                              </span>
-                            )}
-                          </div>
+                          <span className="text-sm">
+                            {entries
+                              .map(e => (e.id === execId ? `${e.name}*` : e.name))
+                              .join(', ')}
+                          </span>
                         )
                       })()}
                     </TableCell>

@@ -17,7 +17,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { getSystemSettings } from '@/lib/api/settings'
+import { getStoreConfig, type StoreConfig } from '@/lib/api/settings'
 import {
   batchSyncSkills,
   getInstalledSkills,
@@ -43,7 +43,7 @@ import {
   type SkillStoreTab,
   type SkillSyncProgress,
 } from '@/lib/api/skill-store'
-import type { SystemSettings, AuthUser } from '@/lib/api/types'
+import type { AuthUser } from '@/lib/api/types'
 import type { AuthDepartment } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
 import { updateSkillVisibility, approveTenantSkill, deleteTenantSkill, updateTenantSkillMeta } from '@/lib/api/skill-store'
@@ -555,7 +555,7 @@ export default function SkillStorePage() {
   // A dept_admin/user (store:read + store:tenant:write) sees the store read-only
   // for hub and manages only tenant/custom skills they own or are in scope for.
   const isStoreAdmin = hasScope(scopes, 'admin:settings')
-  const [settings, setSettings] = useState<SystemSettings | null>(null)
+  const [settings, setSettings] = useState<StoreConfig | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [activeTab, setActiveTab] = useState<SkillStoreTab>('store')
@@ -823,7 +823,7 @@ export default function SkillStorePage() {
 
     const [settingsResult, categoriesResult, installedResult, tenantSkillsResult] =
       await Promise.allSettled([
-        getSystemSettings(),
+        getStoreConfig(),
         getSkillHubCategories(),
         getInstalledSkills(),
         getTenantSkills(),
@@ -1250,12 +1250,16 @@ export default function SkillStorePage() {
         const archiveBase64 = await fileToBase64(file)
 
         if (activeTab === 'exclusive') {
-          // Upload to tenant skills (auto-approved)
+          // Admin → live tenant skill; non-admin → pending approval request.
           const result = await uploadTenantSkillArchive({
             fileName: file.name,
             archiveBase64,
           })
-          toast.success(`已上传专属技能 ${result.skillName}`)
+          toast.success(
+            result.status === 'pending'
+              ? (result.message || '发布申请已提交，等待管理员审批')
+              : `已上传专属技能 ${result.skillName}`,
+          )
           await fetchTenantSkills()
         } else {
           // Upload to custom skills
@@ -1294,9 +1298,13 @@ export default function SkillStorePage() {
         )
 
         if (activeTab === 'exclusive') {
-          // Upload to tenant skills (auto-approved)
+          // Admin → live tenant skill; non-admin → pending approval request.
           const result = await uploadTenantSkillDirectory({ entries })
-          toast.success(`已上传专属技能 ${result.skillName}`)
+          toast.success(
+            result.status === 'pending'
+              ? (result.message || '发布申请已提交，等待管理员审批')
+              : `已上传专属技能 ${result.skillName}`,
+          )
           await fetchTenantSkills()
         } else {
           // Upload to custom skills
@@ -2130,10 +2138,12 @@ export default function SkillStorePage() {
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>上传专属技能</DialogTitle>
+            <DialogTitle>{activeTab === 'exclusive' && !isStoreAdmin ? '提交专属技能发布申请' : '上传专属技能'}</DialogTitle>
             <DialogDescription>
               {activeTab === 'exclusive'
-                ? '上传技能到专属技能，自动审批通过后全员可见。支持 ZIP 压缩包或本地技能目录。'
+                ? (isStoreAdmin
+                    ? '上传技能到专属技能，自动审批通过后按可见范围可见。支持 ZIP 压缩包或本地技能目录。'
+                    : '提交一个专属技能发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。支持 ZIP 压缩包或本地技能目录。')
                 : '支持导入 ZIP 压缩包，或直接上传本地技能目录。'}
             </DialogDescription>
           </DialogHeader>

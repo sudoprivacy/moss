@@ -22,6 +22,10 @@ const ASSISTANT_CUSTOM_DIR = path.join(
   'custom',
 )
 const ASSISTANT_TENANT_DIR = path.join(MOSS_ASSISTANTS_DIR, 'tenant')
+// Staging area for non-admin-published tenant assistants awaiting approval.
+// Deliberately excluded from ASSISTANT_SEARCH_DIRS so pending files stay invisible
+// to the runtime scan until approval MOVES them into ASSISTANT_TENANT_DIR.
+export const ASSISTANT_TENANT_PENDING_DIR = path.join(MOSS_ASSISTANTS_DIR, 'tenant-pending')
 const ASSISTANT_SEARCH_DIRS = [
   ASSISTANT_CUSTOM_DIR,
   ASSISTANT_HUB_DIR,
