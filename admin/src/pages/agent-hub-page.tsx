@@ -71,7 +71,7 @@ import {
   type InstalledAgentInfo,
   type AgentSyncProgress,
 } from '@/lib/api/agent-hub'
-import { getSystemSettings } from '@/lib/api/settings'
+import { getStoreConfig, type StoreConfig } from '@/lib/api/settings'
 import {
   getInstalledSkills,
   getSkillHubDetail,
@@ -81,7 +81,6 @@ import {
 } from '@/lib/api/skill-store'
 import type { AuthDepartment, AuthUser } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
-import type { SystemSettings } from '@/lib/api/types'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { hasScope } from '@/lib/api/client'
 import { resolveIconUrl } from '@/lib/config'
@@ -470,7 +469,7 @@ export default function AgentHubPage() {
   // A dept_admin/user sees hub read-only and manages only tenant/custom agents
   // in scope (server-provided can_manage on tenant rows).
   const isStoreAdmin = hasScope(scopes, 'admin:settings')
-  const [settings, setSettings] = useState<SystemSettings | null>(null)
+  const [settings, setSettings] = useState<StoreConfig | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [pageError, setPageError] = useState('')
 
@@ -741,7 +740,7 @@ export default function AgentHubPage() {
 
     const [settingsResult, categoriesResult, installedResult, tenantAssistantsResult] =
       await Promise.allSettled([
-        getSystemSettings(),
+        getStoreConfig(),
         getAgentHubCategories(),
         fetchInstalledState(false),
         getTenantAssistants(),
@@ -1325,7 +1324,7 @@ export default function AgentHubPage() {
       // Creating on moss authors a TENANT (org-shared) assistant — the org's
       // internal library. Custom assistants are client-authored and synced up,
       // so they are not created here (mirrors how tenant vs custom skills work).
-      await createTenantAssistant({
+      const createRes = await createTenantAssistant({
         name,
         display_name: displayName,
         description: createDescription.trim() || undefined,
@@ -1341,7 +1340,12 @@ export default function AgentHubPage() {
         visible_to,
         workflow,
       })
-      toast.success(`已创建专属智能体 ${displayName}`)
+      // Non-admins submit a pending approval request; admins create it live.
+      toast.success(
+        createRes.status === 'pending'
+          ? (createRes.message || '发布申请已提交，等待管理员审批')
+          : `已创建专属智能体 ${displayName}`,
+      )
       setCreateOpen(false)
       setCreateName('')
       setCreateDisplayName('')
@@ -3189,9 +3193,11 @@ export default function AgentHubPage() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>创建专属智能体</DialogTitle>
+            <DialogTitle>{isStoreAdmin ? '创建专属智能体' : '提交专属智能体发布申请'}</DialogTitle>
             <DialogDescription>
-              创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。
+              {isStoreAdmin
+                ? '创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。'
+                : '提交一个专属智能体发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。'}
             </DialogDescription>
           </DialogHeader>
 
@@ -3655,10 +3661,10 @@ export default function AgentHubPage() {
               {creatingAssistant ? (
                 <>
                   <Loader2 className="mr-2 size-4 animate-spin" />
-                  创建中
+                  {isStoreAdmin ? '创建中' : '提交中'}
                 </>
               ) : (
-                '创建'
+                isStoreAdmin ? '创建' : '提交发布申请'
               )}
             </Button>
           </DialogFooter>

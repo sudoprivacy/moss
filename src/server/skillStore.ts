@@ -8,6 +8,7 @@ import type { VisibleTo } from './visibilityFilter.js'
 import {
   MANAGED_SKILL_SEARCH_DIRS,
   MOSS_SKILLS_CUSTOM_DIR,
+  MOSS_SKILLS_TENANT_PENDING_DIR,
   MOSS_SKILLS_HUB_DIR,
   MOSS_SKILLS_SYSTEM_DIR,
   MOSS_SKILLS_TENANT_DIR,
@@ -1161,32 +1162,34 @@ export type ImportTenantSkillResult = {
 }
 
 export async function importTenantSkillArchive(
-  payload: ImportSkillArchivePayload & { userId: string; authorName?: string },
+  payload: ImportSkillArchivePayload & { userId: string; authorName?: string; pending?: boolean },
 ): Promise<ImportTenantSkillResult> {
   if (!payload.archiveBase64?.trim()) {
     throw new Error('archiveBase64 is required')
   }
 
+  const targetBaseDir = payload.pending ? MOSS_SKILLS_TENANT_PENDING_DIR : MOSS_SKILLS_TENANT_DIR
   const tempDir = await mkdtemp(path.join(tmpdir(), 'moss-tenant-skill-import-'))
   try {
     await extractSkillZip(Buffer.from(payload.archiveBase64, 'base64'), tempDir)
-    return await installTenantSkillFromTemp(tempDir, payload.fileName, payload.userId, payload.authorName)
+    return await installTenantSkillFromTemp(tempDir, payload.fileName, payload.userId, payload.authorName, targetBaseDir)
   } finally {
     await rm(tempDir, { recursive: true, force: true })
   }
 }
 
 export async function importTenantSkillDirectory(
-  payload: ImportSkillDirectoryPayload & { userId: string; authorName?: string },
+  payload: ImportSkillDirectoryPayload & { userId: string; authorName?: string; pending?: boolean },
 ): Promise<ImportTenantSkillResult> {
   if (!Array.isArray(payload.entries) || payload.entries.length === 0) {
     throw new Error('entries is required')
   }
 
+  const targetBaseDir = payload.pending ? MOSS_SKILLS_TENANT_PENDING_DIR : MOSS_SKILLS_TENANT_DIR
   const tempDir = await mkdtemp(path.join(tmpdir(), 'moss-tenant-skill-import-'))
   try {
     await writeDirectoryEntries(tempDir, payload.entries)
-    return await installTenantSkillFromTemp(tempDir, undefined, payload.userId, payload.authorName)
+    return await installTenantSkillFromTemp(tempDir, undefined, payload.userId, payload.authorName, targetBaseDir)
   } finally {
     await rm(tempDir, { recursive: true, force: true })
   }
@@ -1197,6 +1200,9 @@ async function installTenantSkillFromTemp(
   preferredName?: string,
   userId?: string,
   authorName?: string,
+  // Where to install: the live tenant dir (admin, immediately approved) or the
+  // tenant-pending staging dir (non-admin submission awaiting approval).
+  targetBaseDir: string = MOSS_SKILLS_TENANT_DIR,
 ): Promise<ImportTenantSkillResult> {
   const skillDir = await findSkillDirWithSkillMd(tempDir)
   if (!skillDir) {
@@ -1230,15 +1236,15 @@ async function installTenantSkillFromTemp(
     throw new Error('无法确定技能名称，请在 SKILL.md 中指定 name 或 displayName 字段')
   }
 
-  // Check if skill already exists in tenant directory
-  const existingTenantPath = path.join(MOSS_SKILLS_TENANT_DIR, skillName)
+  // Check if skill already exists in the chosen target directory
+  const existingTenantPath = path.join(targetBaseDir, skillName)
   if (existsSync(existingTenantPath)) {
     throw new Error(`专属技能已存在: ${skillName}`)
   }
 
-  // Install to tenant directory
-  const targetDir = path.join(MOSS_SKILLS_TENANT_DIR, skillName)
-  await mkdir(MOSS_SKILLS_TENANT_DIR, { recursive: true })
+  // Install to the chosen target directory (tenant or tenant-pending)
+  const targetDir = path.join(targetBaseDir, skillName)
+  await mkdir(targetBaseDir, { recursive: true })
   await rm(targetDir, { recursive: true, force: true })
   await copyDirectoryRecursive(skillDir, targetDir)
 

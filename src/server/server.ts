@@ -107,7 +107,7 @@ import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
-import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR } from '../utils/skills/localSkillDirectories.js'
+import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
   getUserModelPreference,
@@ -402,8 +402,13 @@ async function readJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
   return parsed
 }
 
-async function copySkillToTenantDir(skillName: string): Promise<void> {
-  const sourceDir = join(MOSS_SKILLS_CUSTOM_DIR, skillName)
+async function copySkillToTenantDir(skillName: string, sourcePathOverride?: string): Promise<void> {
+  // Prefer the record's stored file_path (a pending skill is staged in the
+  // tenant-pending dir); fall back to the custom dir by name for legacy
+  // publish-from-custom records.
+  const sourceDir = sourcePathOverride && existsSync(sourcePathOverride)
+    ? sourcePathOverride
+    : join(MOSS_SKILLS_CUSTOM_DIR, skillName)
   const targetDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
 
   if (!existsSync(sourceDir)) {
@@ -4758,6 +4763,17 @@ export function startServer(
         return
       }
 
+      // Non-secret store config for the skills/agents pages. GET /settings/system
+      // requires admin:settings (it returns model API keys); dept_admins/users
+      // with store:read need only skillStore.tenantId to fetch hub content, so
+      // expose that slim, secret-free subset behind store:read (admins too).
+      if (req.method === 'GET' && pathname === '/api/v1/store/config') {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const s = getSystemSettings()
+        writeJson(res, 200, { skillStore: { tenantId: s.skillStore.tenantId } })
+        return
+      }
+
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
@@ -5337,9 +5353,15 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/tenant/create - Create tenant assistant directly (admin only)
+      // POST /api/v1/agents/tenant/create - Create a tenant assistant.
+      // Admins (admin:settings) create it directly as approved (files in the
+      // tenant dir, live immediately). Non-admins (store:tenant:write) instead
+      // submit it as a PENDING approval request: files are staged in the
+      // tenant-pending dir (invisible to the runtime scan) and only moved into
+      // the tenant dir when an admin approves.
       if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
+        const storeAdmin = isStoreAdmin(auth)
         const body = await readJsonBody(req)
 
         // Validate required fields
@@ -5363,12 +5385,22 @@ export function startServer(
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
-        // Create assistant directory in tenant folder using name (not UUID)
+        // Admin → tenant dir (live now). Non-admin → tenant-pending staging dir
+        // (invisible to the scan; moved to tenant on approval).
         const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
         const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
-        const assistantDir = join(ASSISTANT_TENANT_DIR, name)
+        const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
+        const assistantDir = join(storeAdmin ? ASSISTANT_TENANT_DIR : ASSISTANT_TENANT_PENDING_DIR, name)
 
         await mkdir(assistantDir, { recursive: true })
+
+        // A non-admin cannot self-approve a globally-visible tenant item: clamp
+        // its visibility to their default scope (dept_admin → own dept, user →
+        // self), matching the publish path. Survives approval unless an admin
+        // overrides it at approve time.
+        const clampedVisibleTo = storeAdmin
+          ? (body.visible_to ?? null)
+          : (authService.defaultTenantVisibility(auth) ?? null)
 
         // Create metadata
         const rules = typeof body.rules === 'string' ? body.rules : ''
@@ -5389,7 +5421,7 @@ export function startServer(
           enableCorpAuth: body.enable_corp_auth === true,
           agent_type: body.agent_type || 'chat',
           memory_mode: body.memory_mode || 'session',
-          visible_to: body.visible_to || null,
+          visible_to: clampedVisibleTo,
           workflow: body.workflow || null,
         }
 
@@ -5401,7 +5433,7 @@ export function startServer(
           : `# ${displayName}\n\n${typeof body.description === 'string' ? body.description : '这是一个专属智能体。'}\n`
         await writeFile(join(assistantDir, 'system.md'), rulesContent)
 
-        // Create database record with approved status
+        // Admin → approved (live). Non-admin → pending (awaits approval).
         runtime.store.createTenantAssistant({
           id: assistantId,
           name,
@@ -5409,7 +5441,7 @@ export function startServer(
           description: meta.description,
           author_id: auth.userId,
           author_name: authorName,
-          status: 'approved',
+          status: storeAdmin ? 'approved' : 'pending',
           file_path: assistantDir,
           skills: meta.skills && meta.skills.length > 0 ? JSON.stringify(meta.skills) : null,
           enabled_skills: meta.enabledSkills && meta.enabledSkills.length > 0 ? JSON.stringify(meta.enabledSkills) : null,
@@ -5423,7 +5455,12 @@ export function startServer(
         })
 
         const result = runtime.store.getTenantAssistant(assistantId)
-        writeJson(res, 200, { success: true, data: result })
+        writeJson(res, 200, {
+          success: true,
+          data: result,
+          status: storeAdmin ? 'approved' : 'pending',
+          message: storeAdmin ? undefined : '发布申请已提交，等待管理员审批',
+        })
         return
       }
 
@@ -5539,15 +5576,29 @@ export function startServer(
           const sourcePath = tenantAssistant.file_path as string | undefined
           if (sourcePath && existsSync(sourcePath)) {
             await copyAssistantToTenantDirByPath(sourcePath)
-            // Update file_path to point to tenant directory after copy
+            // Update file_path to the copied location (tenant/<dir name>).
             const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-            const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', tenantAssistantId)
+            const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
+            const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', basename(sourcePath))
             runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
+            // MOVE semantics for non-admin-created pending items: remove the
+            // staged source so it lives only in the tenant dir. Items published
+            // from a real custom/ item keep their custom original (copy).
+            if (isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath)) {
+              rmSync(sourcePath, { recursive: true, force: true })
+            }
           } else {
             throw new HttpError(404, `Source assistant directory not found: ${sourcePath}`)
           }
         } else {
           runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
+          // Clean up staged files for a rejected non-admin submission.
+          const sourcePath = tenantAssistant.file_path as string | undefined
+          const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
+          const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
+          if (sourcePath && isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
+            rmSync(sourcePath, { recursive: true, force: true })
+          }
         }
 
         writeJson(res, 200, { id: tenantAssistantId, status: approved ? 'approved' : 'rejected' })
@@ -6028,14 +6079,25 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/skills/tenant/upload - Upload tenant skill (auto-approved)
+      // POST /api/v1/skills/tenant/upload - Upload a tenant skill.
+      // Admin → approved immediately (installed into the tenant dir). Non-admin →
+      // pending: staged in the tenant-pending dir (invisible until approved),
+      // visibility clamped to the publisher's scope.
       if (req.method === 'POST' && pathname === '/api/v1/skills/tenant/upload') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
+        const storeAdmin = isStoreAdmin(auth)
         const body = await readJsonBody(req)
 
         // Get author name from user info
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
+        // Non-admin submissions are pending + visibility-clamped.
+        const skillStatus = storeAdmin ? 'approved' : 'pending'
+        const clampedVisibleTo = storeAdmin ? null : (authService.defaultTenantVisibility(auth) ?? null)
+        const skillResponse = (result: unknown) =>
+          storeAdmin
+            ? result
+            : { ...(result as Record<string, unknown>), status: 'pending', message: '发布申请已提交，等待管理员审批' }
 
         // Handle ZIP archive upload
         if (typeof body.archiveBase64 === 'string' && body.archiveBase64) {
@@ -6044,9 +6106,9 @@ export function startServer(
             archiveBase64: body.archiveBase64,
             userId: auth.userId,
             authorName,
+            pending: !storeAdmin,
           })
 
-          // Create tenant_skills record with approved status
           runtime.store.createTenantSkill({
             id: result.id,
             name: result.skillName,
@@ -6055,13 +6117,14 @@ export function startServer(
             version: result.version,
             author_id: auth.userId,
             author_name: authorName,
-            status: 'approved',
+            status: skillStatus,
             enabled: 1,
             file_path: result.filePath,
+            visible_to: clampedVisibleTo ? JSON.stringify(clampedVisibleTo) : null,
             org_id: auth.orgId,
           })
 
-          writeJson(res, 200, result)
+          writeJson(res, 200, skillResponse(result))
           return
         }
 
@@ -6079,9 +6142,9 @@ export function startServer(
             entries,
             userId: auth.userId,
             authorName,
+            pending: !storeAdmin,
           })
 
-          // Create tenant_skills record with approved status
           runtime.store.createTenantSkill({
             id: result.id,
             name: result.skillName,
@@ -6090,13 +6153,14 @@ export function startServer(
             version: result.version,
             author_id: auth.userId,
             author_name: authorName,
-            status: 'approved',
+            status: skillStatus,
             enabled: 1,
             file_path: result.filePath,
+            visible_to: clampedVisibleTo ? JSON.stringify(clampedVisibleTo) : null,
             org_id: auth.orgId,
           })
 
-          writeJson(res, 200, result)
+          writeJson(res, 200, skillResponse(result))
           return
         }
 
@@ -6179,11 +6243,31 @@ export function startServer(
           } else if (tenantSkill.visible_to == null) {
             runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
           }
-          // Copy skill to tenant directory
+          // Copy skill to tenant directory using the record's staged file_path
+          // (tenant-pending for non-admin submissions), falling back to the
+          // custom dir by name for legacy publish-from-custom records.
           const skillName = tenantSkill.name as string
-          await copySkillToTenantDir(skillName)
+          const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
+          await copySkillToTenantDir(skillName, sourcePath)
+          // Point file_path at the tenant copy, and MOVE (remove the staged
+          // source) for tenant-pending items so the skill lives only in tenant.
+          const tenantSkillPath = join(MOSS_SKILLS_TENANT_DIR, skillName)
+          runtime.store.updateTenantSkillFilePath(
+            tenantSkillId,
+            tenantSkillPath,
+            typeof tenantSkill.source_url === 'string' ? tenantSkill.source_url : '',
+            typeof tenantSkill.checksum === 'string' ? tenantSkill.checksum : '',
+          )
+          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
+            rmSync(sourcePath, { recursive: true, force: true })
+          }
         } else {
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
+          // Clean up staged files for a rejected non-admin submission.
+          const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
+          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
+            rmSync(sourcePath, { recursive: true, force: true })
+          }
         }
 
         writeJson(res, 200, { id: tenantSkillId, status: approved ? 'approved' : 'rejected' })

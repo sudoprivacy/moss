@@ -284,8 +284,8 @@ export function deleteTenantSkill(id: string): Promise<{ ok: boolean }> {
 export function uploadTenantSkillArchive(data: {
   fileName: string
   archiveBase64: string
-}): Promise<{ skillName: string; id: string; status: string; version: string }> {
-  return authClient.post<{ skillName: string; id: string; status: string; version: string }>(
+}): Promise<{ skillName: string; id: string; status: string; version: string; message?: string }> {
+  return authClient.post<{ skillName: string; id: string; status: string; version: string; message?: string }>(
     '/api/v1/skills/tenant/upload',
     data,
   )
@@ -293,8 +293,8 @@ export function uploadTenantSkillArchive(data: {
 
 export function uploadTenantSkillDirectory(data: {
   entries: ImportDirectoryEntry[]
-}): Promise<{ skillName: string; id: string; status: string; version: string }> {
-  return authClient.post<{ skillName: string; id: string; status: string; version: string }>(
+}): Promise<{ skillName: string; id: string; status: string; version: string; message?: string }> {
+  return authClient.post<{ skillName: string; id: string; status: string; version: string; message?: string }>(
     '/api/v1/skills/tenant/upload',
     data,
   )

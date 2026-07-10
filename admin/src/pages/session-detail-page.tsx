@@ -248,9 +248,13 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
 
   const fetchData = useCallback(async () => {
     try {
+      // getUsers() requires admin:users; a non-admin (e.g. a cron co-owner
+      // viewing a run they triggered) can't call it. It's only used to prettify
+      // the owner name, which already falls back to session.userName from the
+      // context response — so treat it as best-effort, never fatal.
       const [contextRes, usersRes] = await Promise.all([
         getSessionContext(sessionId),
-        getUsers(),
+        getUsers().catch(() => ({ users: [] as AuthUser[] })),
       ])
       setData(contextRes)
       setUsers(usersRes.users)
