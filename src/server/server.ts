@@ -5394,13 +5394,19 @@ export function startServer(
 
         await mkdir(assistantDir, { recursive: true })
 
-        // A non-admin cannot self-approve a globally-visible tenant item: clamp
-        // its visibility to their default scope (dept_admin → own dept, user →
-        // self), matching the publish path. Survives approval unless an admin
-        // overrides it at approve time.
-        const clampedVisibleTo = storeAdmin
+        // Visibility policy for the pending request:
+        //  - admin: as submitted (they create live).
+        //  - dept_admin: as submitted (a request the admin approves); when they
+        //    submit nothing, fall back to their default scope (own department).
+        //  - normal user: ALWAYS self-only, enforced server-side regardless of
+        //    what was submitted (they have no picker; the roster is admin-only).
+        const requestedVisibleTo = storeAdmin
           ? (body.visible_to ?? null)
-          : (authService.defaultTenantVisibility(auth) ?? null)
+          : authService.isDeptAdmin(auth)
+            ? (body.visible_to !== undefined
+                ? body.visible_to
+                : (authService.defaultTenantVisibility(auth) ?? null))
+            : (authService.defaultTenantVisibility(auth) ?? null)
 
         // Create metadata
         const rules = typeof body.rules === 'string' ? body.rules : ''
@@ -5421,7 +5427,7 @@ export function startServer(
           enableCorpAuth: body.enable_corp_auth === true,
           agent_type: body.agent_type || 'chat',
           memory_mode: body.memory_mode || 'session',
-          visible_to: clampedVisibleTo,
+          visible_to: requestedVisibleTo,
           workflow: body.workflow || null,
         }
 
@@ -6047,6 +6053,9 @@ export function startServer(
           })
           .map((row: Record<string, unknown>) => ({
             ...row,
+            // Parse visible_to so the approval page receives an object (matches
+            // the /agents/tenant shape), not a raw JSON string.
+            visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
             // Lets the frontend show edit/delete without re-deriving subtree math.
             can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
           }))
@@ -6091,9 +6100,17 @@ export function startServer(
         // Get author name from user info
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
-        // Non-admin submissions are pending + visibility-clamped.
+        // Visibility policy (same as agent create): admin as submitted;
+        // dept_admin as submitted (default own dept when unset); normal user
+        // ALWAYS self-only, enforced server-side (no picker; roster is admin-only).
         const skillStatus = storeAdmin ? 'approved' : 'pending'
-        const clampedVisibleTo = storeAdmin ? null : (authService.defaultTenantVisibility(auth) ?? null)
+        const requestedVisibleTo = storeAdmin
+          ? (body.visible_to ?? null)
+          : authService.isDeptAdmin(auth)
+            ? (body.visible_to !== undefined
+                ? body.visible_to
+                : (authService.defaultTenantVisibility(auth) ?? null))
+            : (authService.defaultTenantVisibility(auth) ?? null)
         const skillResponse = (result: unknown) =>
           storeAdmin
             ? result
@@ -6120,7 +6137,7 @@ export function startServer(
             status: skillStatus,
             enabled: 1,
             file_path: result.filePath,
-            visible_to: clampedVisibleTo ? JSON.stringify(clampedVisibleTo) : null,
+            visible_to: requestedVisibleTo ? JSON.stringify(requestedVisibleTo) : null,
             org_id: auth.orgId,
           })
 
@@ -6156,7 +6173,7 @@ export function startServer(
             status: skillStatus,
             enabled: 1,
             file_path: result.filePath,
-            visible_to: clampedVisibleTo ? JSON.stringify(clampedVisibleTo) : null,
+            visible_to: requestedVisibleTo ? JSON.stringify(requestedVisibleTo) : null,
             org_id: auth.orgId,
           })
 
@@ -6547,11 +6564,23 @@ export function startServer(
         authService.requireAnyScope(auth, ['sessions:list', 'sessions:list:any'])
         const activeOnly = url.searchParams.get('active_only') === 'true'
         const source = url.searchParams.get('source') || undefined
-        let sessions = runtime.listSessions({
-          orgId: auth.orgId,
-          userId: hasScope(auth.scopes, 'sessions:list:any') ? undefined : auth.userId,
-          activeOnly,
-        })
+        // Visibility tiers: sessions:list:any → whole org; a dept_admin →
+        // sessions of every user in their department subtree (self + descendants,
+        // dept_admins included); everyone else → their own only.
+        const sessionSubtree = hasScope(auth.scopes, 'sessions:list:any')
+          ? null
+          : authService.listSubtreeUserIds(auth.orgId, auth)
+        let sessions: ReturnType<typeof runtime.listSessions>
+        if (hasScope(auth.scopes, 'sessions:list:any')) {
+          sessions = runtime.listSessions({ orgId: auth.orgId, activeOnly })
+        } else if (sessionSubtree && sessionSubtree.size > 1) {
+          // dept_admin: list the whole org, then narrow to the subtree set.
+          sessions = runtime
+            .listSessions({ orgId: auth.orgId, activeOnly })
+            .filter(session => sessionSubtree.has(session.userId))
+        } else {
+          sessions = runtime.listSessions({ orgId: auth.orgId, userId: auth.userId, activeOnly })
+        }
 
         // Filter by source if provided
         if (source) {
@@ -6613,15 +6642,32 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/budget/stats') {
         authService.requireAnyScope(auth, ['sessions:list', 'sessions:list:any'])
-        const sessions = runtime.listSessionRecords({
-          orgId: auth.orgId,
-          userId: hasScope(auth.scopes, 'sessions:list:any')
-            ? undefined
-            : auth.userId,
-        })
+        // Same visibility tiers as the session list: org-wide, dept subtree, or
+        // own only. Budget is derived from sessions, so it follows the same rule.
+        const budgetSubtree = hasScope(auth.scopes, 'sessions:list:any')
+          ? null
+          : authService.listSubtreeUserIds(auth.orgId, auth)
+        let sessions: ReturnType<typeof runtime.listSessionRecords>
+        if (hasScope(auth.scopes, 'sessions:list:any')) {
+          sessions = runtime.listSessionRecords({ orgId: auth.orgId })
+        } else if (budgetSubtree && budgetSubtree.size > 1) {
+          sessions = runtime
+            .listSessionRecords({ orgId: auth.orgId })
+            .filter(session => budgetSubtree.has(session.userId))
+        } else {
+          sessions = runtime.listSessionRecords({ orgId: auth.orgId, userId: auth.userId })
+        }
 
         const stats = await loadBudgetStats(sessions)
-        writeJson(res, 200, stats)
+        // Attach an org-agnostic owner name per user row so the page shows names
+        // without depending on the admin:users roster (a normal user / dept_admin
+        // may lack it, which otherwise fell back to a raw UUID).
+        const resolveName = makeUserNameResolver(resolveUserName)
+        const statsWithNames = {
+          ...stats,
+          users: stats.users.map(u => ({ ...u, userName: resolveName(u.userId) })),
+        }
+        writeJson(res, 200, statsWithNames)
         return
       }
 

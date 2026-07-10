@@ -271,7 +271,9 @@ export default function BudgetPage() {
         if (!keyword) {
           return true
         }
-        const label = userNameMap.get(user.userId) || user.userId
+        // Prefer the local roster (has displayName) then the server-resolved
+        // userName, so names show even without the admin:users roster.
+        const label = userNameMap.get(user.userId) || user.userName || user.userId
         return (
           label.toLowerCase().includes(keyword) ||
           user.userId.toLowerCase().includes(keyword)
@@ -280,7 +282,7 @@ export default function BudgetPage() {
       .map((user, index) => ({
         ...user,
         chartKey: `user_${index}`,
-        label: userNameMap.get(user.userId) || user.userId.slice(0, 8),
+        label: userNameMap.get(user.userId) || user.userName || user.userId.slice(0, 8),
       }))
   }, [budgetStats, searchQuery, userNameMap])
 

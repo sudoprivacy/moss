@@ -257,10 +257,13 @@ export function approveTenantSkill(
   id: string,
   approved: boolean,
   reviewNote?: string,
+  // When approving, the admin may override the requested visibility. Omit to
+  // preserve the value the publisher requested.
+  visible_to?: VisibleTo | null,
 ): Promise<{ id: string; status: string }> {
   return authClient.post<{ id: string; status: string }>(
     `/api/v1/admin/skills/tenant/${encodeURIComponent(id)}/approve`,
-    { approved, reviewNote },
+    visible_to !== undefined ? { approved, reviewNote, visible_to } : { approved, reviewNote },
   )
 }
 
@@ -284,6 +287,7 @@ export function deleteTenantSkill(id: string): Promise<{ ok: boolean }> {
 export function uploadTenantSkillArchive(data: {
   fileName: string
   archiveBase64: string
+  visible_to?: VisibleTo | null
 }): Promise<{ skillName: string; id: string; status: string; version: string; message?: string }> {
   return authClient.post<{ skillName: string; id: string; status: string; version: string; message?: string }>(
     '/api/v1/skills/tenant/upload',
@@ -293,6 +297,7 @@ export function uploadTenantSkillArchive(data: {
 
 export function uploadTenantSkillDirectory(data: {
   entries: ImportDirectoryEntry[]
+  visible_to?: VisibleTo | null
 }): Promise<{ skillName: string; id: string; status: string; version: string; message?: string }> {
   return authClient.post<{ skillName: string; id: string; status: string; version: string; message?: string }>(
     '/api/v1/skills/tenant/upload',
