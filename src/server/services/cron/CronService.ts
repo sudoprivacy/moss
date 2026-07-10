@@ -7,7 +7,7 @@
 import { Cron } from 'croner'
 import path from 'path'
 import type { DatabaseSync } from 'node:sqlite'
-import { CronStore, type CronJob, type CronJobRun, type CronJobSchedule } from './CronStore.js'
+import { CronStore, resolveExecutorId, type CronJob, type CronJobRun, type CronJobSchedule } from './CronStore.js'
 import type { RuntimeService } from '../runtimeService.js'
 import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
 import { getSystemSettings } from '../../systemSettings.js'
@@ -356,27 +356,36 @@ export class CronService {
       return
     }
 
-    // Create run record
-    const run = this.store.createRun(job.id, job.orgId, job.userId)
+    // A scheduled run executes under the EXECUTOR's identity (its
+    // credentials/workspace/scopes), which may differ from the creator after a
+    // transfer. The executor defaults to the creator for legacy/unset rows.
+    const executorId = resolveExecutorId(job)
+
+    // Create run record (attributed to the executor — the identity that runs)
+    const run = this.store.createRun(job.id, job.orgId, executorId)
     console.log(`[CronService] Starting job ${job.id} (name: ${job.name}), run ${run.id}`)
 
     // Mark run as running
     this.store.startRun(run.id)
 
     try {
-      // Get user auth context
-      const userAuth = await this.config.getUserAuth(job.userId, job.orgId)
+      // Get the EXECUTOR's auth context — this is what the session runs as.
+      const userAuth = await this.config.getUserAuth(executorId, job.orgId)
       if (!userAuth) {
-        throw new Error(`User auth not found for ${job.userId}`)
+        throw new Error(`User auth not found for executor ${executorId}`)
       }
 
       // clientCronEnabled pauses user-owned jobs while admin-owned automations
-      // keep running. The owner's CURRENT capability decides (promotions and
-      // demotions take effect at the next fire), and the schedule still
-      // advances so the job resumes cleanly when the flag is re-enabled.
-      // Manual triggers are unaffected — triggerJob() is a separate path
-      // behind the admin-bypassed API route. (#83)
-      if (!getSystemSettings().clientCronEnabled && !isCronAdminCapable(userAuth)) {
+      // keep running. The gate keys off the CREATOR's current capability (not the
+      // executor's), so an admin-created task keeps firing on schedule even after
+      // its executor is transferred to a normal user — while the run still uses
+      // the executor's credentials. Promotions/demotions take effect at the next
+      // fire, and the schedule still advances so the job resumes cleanly when the
+      // flag is re-enabled. Manual triggers are unaffected — triggerJob() is a
+      // separate path behind the admin-bypassed API route. (#83)
+      const creatorAuth =
+        executorId === job.userId ? userAuth : await this.config.getUserAuth(job.userId, job.orgId)
+      if (!getSystemSettings().clientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
         this.store.updateRunStatus(run.id, {
           status: 'skipped',
           summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',
@@ -465,7 +474,10 @@ export class CronService {
     const session = await this.config.runtimeService.createSession({
       cwd,
       dangerouslySkipPermissions: false,
-      userId: job.userId,
+      // The run identity (executor for scheduled fires, the clicking user for
+      // manual triggers) drives credential/secret/visibility resolution. run.userId
+      // is stamped with that identity by createRun; userAuth matches it.
+      userId: run.userId,
       orgId: job.orgId,
       role: userAuth.role,
       scopes: userAuth.scopes,
@@ -648,9 +660,14 @@ export class CronService {
   }
 
   /**
-   * Trigger a job manually
+   * Trigger a job manually. Unlike a scheduled fire (which runs as the job's
+   * executor), a manual trigger runs under the identity of the user who clicked
+   * — passed as `actor`. Only co-owners/creator/admins reach here (the API's
+   * canManageJob gate runs first), so the actor always has access to the job.
+   * When `actor` is omitted, falls back to the executor (used by internal
+   * callers/tests that have no human triggerer).
    */
-  async triggerJob(jobId: string): Promise<CronJobRun> {
+  async triggerJob(jobId: string, actor?: { userId: string; orgId: string }): Promise<CronJobRun> {
     const job = this.store.getById(jobId)
     if (!job) {
       throw new Error(`Job ${jobId} not found`)
@@ -663,17 +680,20 @@ export class CronService {
       throw new Error('A run for this job is already in progress')
     }
 
-    // Create run record
-    const run = this.store.createRun(job.id, job.orgId, job.userId)
+    // The clicking user's identity drives this run; fall back to the executor.
+    const runUserId = actor?.userId ?? resolveExecutorId(job)
+
+    // Create run record (attributed to whoever triggered it)
+    const run = this.store.createRun(job.id, job.orgId, runUserId)
 
     // Mark run as running
     this.store.startRun(run.id)
 
     try {
-      // Get user auth context
-      const userAuth = await this.config.getUserAuth(job.userId, job.orgId)
+      // Get the triggering user's auth context — this is what the session runs as.
+      const userAuth = await this.config.getUserAuth(runUserId, job.orgId)
       if (!userAuth) {
-        throw new Error(`User auth not found for ${job.userId}`)
+        throw new Error(`User auth not found for ${runUserId}`)
       }
 
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `manual trigger of job ${job.id}`)

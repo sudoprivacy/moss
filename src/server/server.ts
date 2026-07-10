@@ -1405,6 +1405,9 @@ export function startServer(
   const cronApi = createCronApi(runtime.store.db, {
     cronService,
     getUserName: resolveUserName,
+    // A user may be a co-owner/executor only if they belong to the job's org.
+    // getUserOrNull (no auth arg) resolves org membership without a viewer check.
+    isOrgUser: (userId: string, orgId: string) => authService.getUserOrNull(userId, orgId) != null,
   })
 
   const mcpStore = new McpStore(runtime.store.db)
@@ -4788,6 +4791,11 @@ export function startServer(
         const result = await cronApi.createJob(auth, {
           name: String(body.name || ''),
           enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
+          coOwnerIds: Array.isArray(body.coOwnerIds)
+            ? body.coOwnerIds.map(id => String(id || '').trim()).filter(Boolean)
+            : undefined,
+          executorUserId:
+            typeof body.executorUserId === 'string' ? body.executorUserId : undefined,
           schedule: {
             kind: String((body.schedule as any)?.kind || 'cron'),
             value: String((body.schedule as any)?.value || ''),
@@ -4825,6 +4833,15 @@ export function startServer(
           const updates: any = {}
           if (body.name !== undefined) updates.name = String(body.name)
           if (body.enabled !== undefined) updates.enabled = Boolean(body.enabled)
+          if (body.coOwnerIds !== undefined) {
+            updates.coOwnerIds = Array.isArray(body.coOwnerIds)
+              ? body.coOwnerIds.map(id => String(id || '').trim()).filter(Boolean)
+              : []
+          }
+          if (body.executorUserId !== undefined) {
+            updates.executorUserId =
+              body.executorUserId === null ? null : String(body.executorUserId)
+          }
           if (body.schedule !== undefined) {
             updates.schedule = {
               kind: String((body.schedule as any)?.kind || 'cron'),

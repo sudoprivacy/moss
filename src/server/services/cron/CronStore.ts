@@ -23,6 +23,13 @@ export interface CronJob {
   id: string
   orgId: string
   userId: string
+  /** User ids granted flat parity (view/manage/trigger) with the creator. */
+  coOwnerIds: string[]
+  /**
+   * Identity a SCHEDULED run executes under (its credentials/workspace/scopes).
+   * null (legacy rows) falls back to userId — use `resolveExecutorId(job)`.
+   */
+  executorUserId: string | null
   name: string
   enabled: boolean
   deletedAt: number | null
@@ -72,6 +79,9 @@ export interface CronJobRunWithSession extends CronJobRun {
 export interface CreateCronJobInput {
   orgId: string
   userId: string
+  coOwnerIds?: string[]
+  /** Defaults to userId (creator) when omitted; see CronJob.executorUserId. */
+  executorUserId?: string | null
   name: string
   enabled?: boolean
   schedule: CronJobSchedule
@@ -86,6 +96,8 @@ export interface CreateCronJobInput {
 }
 
 export interface UpdateCronJobInput {
+  coOwnerIds?: string[]
+  executorUserId?: string | null
   name?: string
   enabled?: boolean
   schedule?: CronJobSchedule
@@ -103,11 +115,33 @@ function now(): number {
   return Date.now()
 }
 
+/** Parse the co_owner_ids JSON column into a string[] (empty on null/garbage). */
+function parseCoOwnerIds(raw: unknown): string[] {
+  if (typeof raw !== 'string' || raw.trim() === '') return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The identity a run uses: the explicit executor, or the creator (userId) as a
+ * fallback for legacy rows. Callers resolving the scheduled-run identity should
+ * use this rather than reading executorUserId directly.
+ */
+export function resolveExecutorId(job: Pick<CronJob, 'userId' | 'executorUserId'>): string {
+  return job.executorUserId ?? job.userId
+}
+
 function mapCronJob(row: SqlRow): CronJob {
   return {
     id: String(row.id),
     orgId: String(row.org_id),
     userId: String(row.user_id),
+    coOwnerIds: parseCoOwnerIds(row.co_owner_ids),
+    executorUserId: typeof row.executor_user_id === 'string' ? row.executor_user_id : null,
     name: String(row.name),
     enabled: Boolean(row.enabled),
     deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
@@ -176,20 +210,27 @@ export class CronStore {
     const ts = now()
     const schedule = input.schedule
 
+    // Initial executor equals the creator unless explicitly given (both are
+    // still validated for org membership + co-owner constraint at the API layer).
+    const executorUserId = input.executorUserId ?? input.userId
+    const coOwnerIds = input.coOwnerIds ?? []
+
     this.db.prepare(`
       INSERT INTO cron_jobs (
-        id, org_id, user_id, name, enabled, deleted_at,
+        id, org_id, user_id, co_owner_ids, executor_user_id, name, enabled, deleted_at,
         schedule_kind, schedule_value, schedule_tz, schedule_description,
         payload_message, conversation_mode, bound_session_id, last_session_id,
         assistant_id, assistant_name, workspace, runtime_json,
         next_run_at, lease_until, last_run_at, last_status, last_error,
         run_count, retry_count, max_retries,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 0, 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 0, 0, ?, ?, ?)
     `).run(
       id,
       input.orgId,
       input.userId,
+      JSON.stringify(coOwnerIds),
+      executorUserId,
       input.name,
       input.enabled ?? true ? 1 : 0,
       schedule.kind,
@@ -218,9 +259,14 @@ export class CronStore {
     const ts = now()
     const schedule = input.schedule ?? existing.schedule
 
+    const coOwnerIds = input.coOwnerIds !== undefined ? input.coOwnerIds : existing.coOwnerIds
+    const executorUserId =
+      input.executorUserId !== undefined ? input.executorUserId : existing.executorUserId
+
     this.db.prepare(`
       UPDATE cron_jobs
       SET name = ?, enabled = ?,
+          co_owner_ids = ?, executor_user_id = ?,
           schedule_kind = ?, schedule_value = ?, schedule_tz = ?, schedule_description = ?,
           payload_message = ?, conversation_mode = ?, bound_session_id = ?,
           assistant_id = ?, assistant_name = ?, workspace = ?, runtime_json = ?,
@@ -229,6 +275,8 @@ export class CronStore {
     `).run(
       input.name ?? existing.name,
       input.enabled !== undefined ? (input.enabled ? 1 : 0) : (existing.enabled ? 1 : 0),
+      JSON.stringify(coOwnerIds ?? []),
+      executorUserId,
       schedule.kind,
       schedule.value,
       schedule.tz ?? null,
@@ -263,28 +311,47 @@ export class CronStore {
     return row ? mapCronJob(row) : null
   }
 
+  /**
+   * List jobs a user may see as owner OR co-owner. The co-owner match uses
+   * json_each over the co_owner_ids JSON array (JSON1 ships with node:sqlite);
+   * the id is bound as a parameter so it is injection-safe.
+   */
   listByUser(orgId: string, userId: string): CronJob[] {
     const rows = this.db.prepare(`
       SELECT * FROM cron_jobs
-      WHERE org_id = ? AND user_id = ? AND deleted_at IS NULL
+      WHERE org_id = ? AND deleted_at IS NULL
+        AND (
+          user_id = ?
+          OR EXISTS (
+            SELECT 1 FROM json_each(COALESCE(cron_jobs.co_owner_ids, '[]'))
+            WHERE json_each.value = ?
+          )
+        )
       ORDER BY created_at DESC
-    `).all(orgId, userId) as SqlRow[]
+    `).all(orgId, userId, userId) as SqlRow[]
     return rows.map(mapCronJob)
   }
 
   /**
-   * List jobs owned by any of the given user ids within an org. Used for a
-   * dept_admin's subtree view. An empty id set returns nothing (fail-closed);
-   * ids are bound as parameters so the IN list is injection-safe.
+   * List jobs owned OR co-owned by any of the given user ids within an org.
+   * Used for a dept_admin's subtree view. An empty id set returns nothing
+   * (fail-closed); ids are bound as parameters so the IN list is injection-safe.
    */
   listBySubtree(orgId: string, userIds: string[]): CronJob[] {
     if (userIds.length === 0) return []
     const placeholders = userIds.map(() => '?').join(', ')
     const rows = this.db.prepare(`
       SELECT * FROM cron_jobs
-      WHERE org_id = ? AND user_id IN (${placeholders}) AND deleted_at IS NULL
+      WHERE org_id = ? AND deleted_at IS NULL
+        AND (
+          user_id IN (${placeholders})
+          OR EXISTS (
+            SELECT 1 FROM json_each(COALESCE(cron_jobs.co_owner_ids, '[]'))
+            WHERE json_each.value IN (${placeholders})
+          )
+        )
       ORDER BY created_at DESC
-    `).all(orgId, ...userIds) as SqlRow[]
+    `).all(orgId, ...userIds, ...userIds) as SqlRow[]
     return rows.map(mapCronJob)
   }
 

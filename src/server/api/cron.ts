@@ -42,7 +42,20 @@ function cronDisabledError(auth: CronAuth): { success: false; message: string } 
 
 type SqlRow = Record<string, unknown>
 
+/** Parse a co_owner_ids JSON column value into string[] (used by adminListJobs,
+ * which builds CronJob objects from raw rows rather than via CronStore). */
+function parseCoOwnerIdsRow(raw: unknown): string[] {
+  if (typeof raw !== 'string' || raw.trim() === '') return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function mapJobToResponse(job: CronJob, getUserName?: (userId: string) => string | undefined) {
+  const executorUserId = job.executorUserId ?? job.userId
   return {
     id: job.id,
     orgId: job.orgId,
@@ -51,6 +64,11 @@ function mapJobToResponse(job: CronJob, getUserName?: (userId: string) => string
     // roster — e.g. a super_admin who created the job while switched into this
     // org — still display by name instead of falling back to the raw id.
     userName: getUserName?.(job.userId),
+    coOwnerIds: job.coOwnerIds,
+    coOwnerNames: job.coOwnerIds.map(id => getUserName?.(id) ?? id),
+    // Executor for scheduled runs; defaults to the creator when unset.
+    executorUserId,
+    executorName: getUserName?.(executorUserId),
     name: job.name,
     enabled: job.enabled,
     schedule: {
@@ -124,6 +142,8 @@ export function canReadJob(
   const scopes = auth.scopes ?? []
   if (job.orgId !== auth.orgId) return false
   if (job.userId === auth.userId) return true
+  // Co-owners have flat parity with the creator: they can view (and manage).
+  if (job.coOwnerIds?.includes(auth.userId)) return true
   if (hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:list:any')) return true
   if (hasScope(scopes, 'cron:list:subtree') && subtreeUserIds?.has(job.userId)) return true
   return false
@@ -140,15 +160,68 @@ export function canManageJob(
   const scopes = auth.scopes ?? []
   if (job.orgId !== auth.orgId) return false
   if (job.userId === auth.userId) return true
+  // Co-owners have flat parity: view + edit + delete + trigger + manage co-owners.
+  if (job.coOwnerIds?.includes(auth.userId)) return true
   if (hasScope(scopes, 'admin:cron') || hasScope(scopes, 'cron:disable:any')) return true
   if (hasScope(scopes, 'cron:manage:subtree') && subtreeUserIds?.has(job.userId)) return true
   return false
+}
+
+/**
+ * Validate a proposed co-owner set + executor for a job. Enforces:
+ *  - every co-owner id is a member of the job's org (fail closed on unknown/foreign),
+ *  - the executor (when set) is the creator or one of the co-owners
+ *    (executor ∈ {creator} ∪ co_owners).
+ * Returns null when valid, or an error message. `isOrgUser` may be undefined
+ * (membership check skipped) so unit tests can exercise the constraint logic
+ * without a user store.
+ */
+export function validateCoOwnersAndExecutor(params: {
+  orgId: string
+  creatorUserId: string
+  coOwnerIds?: string[]
+  executorUserId?: string | null
+  isOrgUser?: (userId: string, orgId: string) => boolean
+}): string | null {
+  const { orgId, creatorUserId, coOwnerIds, executorUserId, isOrgUser } = params
+
+  const normalizedCoOwners = coOwnerIds ? Array.from(new Set(coOwnerIds)) : undefined
+
+  if (normalizedCoOwners && isOrgUser) {
+    for (const id of normalizedCoOwners) {
+      if (!isOrgUser(id, orgId)) {
+        return `Co-owner ${id} is not a member of this organization`
+      }
+    }
+  }
+
+  if (executorUserId != null) {
+    if (isOrgUser && !isOrgUser(executorUserId, orgId)) {
+      return `Executor ${executorUserId} is not a member of this organization`
+    }
+    // The effective co-owner set for the constraint is the proposed set when
+    // one is given, else nothing extra beyond the creator (update may change
+    // only the executor). The creator is always a valid executor.
+    const effectiveCoOwners = normalizedCoOwners ?? []
+    const allowed = executorUserId === creatorUserId || effectiveCoOwners.includes(executorUserId)
+    if (!allowed) {
+      return 'Executor must be the creator or one of the co-owners'
+    }
+  }
+
+  return null
 }
 
 export interface CronApiConfig {
   cronService: CronService
   /** Resolve a user id to a display name for job responses (org-agnostic). */
   getUserName?: (userId: string) => string | undefined
+  /**
+   * True when `userId` is a member of `orgId` (so it may be a co-owner or
+   * executor). Backed by authService.getUserOrNull. When omitted, membership
+   * validation is skipped (tests may pass a stub or leave it unset).
+   */
+  isOrgUser?: (userId: string, orgId: string) => boolean
 }
 
 export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
@@ -221,10 +294,21 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
       try {
         const blocked = cronDisabledError(auth)
         if (blocked) return blocked
+        // Executor defaults to the creator; validate any co-owners/executor the
+        // caller supplied (org membership + executor ∈ {creator} ∪ co_owners).
+        const validationError = validateCoOwnersAndExecutor({
+          orgId: auth.orgId,
+          creatorUserId: auth.userId,
+          coOwnerIds: input.coOwnerIds,
+          executorUserId: input.executorUserId,
+          isOrgUser: config.isOrgUser,
+        })
+        if (validationError) return { success: false, message: validationError }
         const job = store.insert({
           ...input,
           orgId: auth.orgId,
           userId: auth.userId,
+          executorUserId: input.executorUserId ?? auth.userId,
         })
         config.cronService.addJob(job)
         return {
@@ -257,6 +341,44 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         // schedule/payload/enabled state, not just disable it (#85).
         if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
+        }
+
+        // Resolve the effective co-owner set + executor after this update, so the
+        // constraint is checked against the post-update state (a caller may edit
+        // only one of the two). If the executor is being removed from the
+        // co-owner set (and is not the creator), repoint it to the creator
+        // rather than leaving a dangling executor.
+        if (updates.coOwnerIds !== undefined || updates.executorUserId !== undefined) {
+          const nextCoOwners =
+            updates.coOwnerIds !== undefined
+              ? Array.from(new Set(updates.coOwnerIds))
+              : existing.coOwnerIds
+          let nextExecutor =
+            updates.executorUserId !== undefined
+              ? updates.executorUserId
+              : existing.executorUserId ?? existing.userId
+          // If the executor became invalid only as a SIDE EFFECT of removing it
+          // from the co-owner set (the caller didn't set executor explicitly),
+          // repoint to the creator rather than failing the whole update. An
+          // explicitly-set invalid executor still falls through to validation
+          // below and is rejected.
+          if (
+            updates.executorUserId === undefined &&
+            nextExecutor != null &&
+            nextExecutor !== existing.userId &&
+            !nextCoOwners.includes(nextExecutor)
+          ) {
+            nextExecutor = existing.userId
+          }
+          const validationError = validateCoOwnersAndExecutor({
+            orgId: existing.orgId,
+            creatorUserId: existing.userId,
+            coOwnerIds: nextCoOwners,
+            executorUserId: nextExecutor,
+            isOrgUser: config.isOrgUser,
+          })
+          if (validationError) return { success: false, message: validationError }
+          updates = { ...updates, coOwnerIds: nextCoOwners, executorUserId: nextExecutor }
         }
 
         const job = store.update(jobId, updates)
@@ -319,7 +441,13 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
           return { success: false, message: 'Access denied' }
         }
 
-        const run = await config.cronService.triggerJob(jobId)
+        // Manual runs execute under the identity of whoever clicked (auth),
+        // not the job's scheduled executor. canManageJob above guarantees the
+        // actor is the creator, a co-owner, or an admin.
+        const run = await config.cronService.triggerJob(jobId, {
+          userId: auth.userId,
+          orgId: auth.orgId,
+        })
         return {
           success: true,
           data: mapRunToResponse(run),
@@ -377,6 +505,8 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
             id: String(row.id),
             orgId: String(row.org_id),
             userId: String(row.user_id),
+            coOwnerIds: parseCoOwnerIdsRow(row.co_owner_ids),
+            executorUserId: typeof row.executor_user_id === 'string' ? row.executor_user_id : null,
             name: String(row.name),
             enabled: Boolean(row.enabled),
             deletedAt: null,

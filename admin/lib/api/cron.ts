@@ -6,6 +6,14 @@ export interface CronJob {
   userId: string
   /** Owner name resolved server-side (works for owners outside this org's roster). */
   userName?: string
+  /** Co-owners: flat parity with the creator (view/edit/delete/trigger/manage). */
+  coOwnerIds: string[]
+  /** Co-owner display names, resolved server-side (index-aligned with coOwnerIds). */
+  coOwnerNames?: string[]
+  /** Executor for scheduled runs (its credentials are used); defaults to creator. */
+  executorUserId: string | null
+  /** Executor display name, resolved server-side. */
+  executorName?: string
   name: string
   enabled: boolean
   schedule: {
@@ -111,6 +119,10 @@ export interface CronJobFormInput {
   boundSessionId?: string
   /** Assistant to run the task as (stable name/id; '' = default) */
   assistantName?: string
+  /** User ids granted co-ownership (view/edit/delete/trigger parity). */
+  coOwnerIds?: string[]
+  /** Executor for scheduled runs; must be the creator or a co-owner. */
+  executorUserId?: string | null
 }
 
 /** Create an admin-owned job — it runs under the creating admin's identity,
@@ -127,6 +139,8 @@ export async function createCronJob(input: CronJobFormInput): Promise<{ success:
     // server resolves it (name or UUID) to a display name at execution time.
     assistantId: input.assistantName || undefined,
     assistantName: input.assistantName || undefined,
+    coOwnerIds: input.coOwnerIds ?? undefined,
+    executorUserId: input.executorUserId ?? undefined,
   })
 }
 
@@ -140,6 +154,8 @@ export async function updateCronJob(jobId: string, input: CronJobFormInput): Pro
     boundSessionId: input.conversationMode === 'reuse' ? (input.boundSessionId || null) : null,
     assistantId: input.assistantName || '',
     assistantName: input.assistantName || '',
+    coOwnerIds: input.coOwnerIds ?? [],
+    executorUserId: input.executorUserId ?? null,
   })
 }
 
