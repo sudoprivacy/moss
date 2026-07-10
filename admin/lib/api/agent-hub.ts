@@ -296,10 +296,13 @@ export function approveTenantAssistant(
   id: string,
   approved: boolean,
   reviewNote?: string,
+  // When approving, the admin may override the requested visibility. Omit to
+  // preserve the value the publisher requested.
+  visible_to?: VisibleTo | null,
 ): Promise<{ id: string; status: string }> {
   return authClient.post<{ id: string; status: string }>(
     `/api/v1/admin/agents/tenant/${encodeURIComponent(id)}/approve`,
-    { approved, reviewNote },
+    visible_to !== undefined ? { approved, reviewNote, visible_to } : { approved, reviewNote },
   )
 }
 

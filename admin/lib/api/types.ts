@@ -431,6 +431,8 @@ export interface BudgetUsageTotals {
 
 export interface BudgetUserStats extends BudgetUsageTotals {
   userId: string
+  /** Owner name resolved server-side (works without the admin:users roster). */
+  userName?: string
   sessionCount: number
   lastActiveAt: number
 }

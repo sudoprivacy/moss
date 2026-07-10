@@ -1703,8 +1703,11 @@ export class AuthService {
       return users
     }
 
+    // A dept_admin sees ALL users in their department subtree — both normal
+    // users AND other dept_admins — not just role==='user'. Org admins /
+    // super_admins are excluded (they aren't scoped to a department).
     return users.filter(user =>
-      user.role === 'user' &&
+      (user.role === 'user' || user.role === 'dept_admin') &&
       user.departmentId !== null &&
       visibleDepartmentIds.has(user.departmentId),
     )
@@ -1770,7 +1773,7 @@ export class AuthService {
     const ids = new Set<string>([auth.userId])
     for (const user of this.db.listUsersByOrg(orgId)) {
       if (
-        user.role === 'user' &&
+        (user.role === 'user' || user.role === 'dept_admin') &&
         user.departmentId !== null &&
         visibleDepartmentIds.has(user.departmentId)
       ) {
@@ -1823,6 +1826,12 @@ export class AuthService {
     return { department_ids: null, user_ids: [auth.userId] }
   }
 
+  /** True when the actor is a dept_admin (not a full admin, not a plain user). */
+  isDeptAdmin(auth: AuthContext): boolean {
+    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+    return actor?.role === 'dept_admin'
+  }
+
   private requireAuthUser(auth: AuthContext): AuthCenterUser {
     // Resolve the actor with the shared rule: pinned to their org, except a
     // super_admin who has switched their effective org resolves regardless of
@@ -1850,7 +1859,7 @@ export class AuthService {
     }
 
     return (
-      user.role === 'user' &&
+      (user.role === 'user' || user.role === 'dept_admin') &&
       user.departmentId !== null &&
       visibleDepartmentIds.has(user.departmentId)
     )
