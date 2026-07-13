@@ -2,7 +2,9 @@
   "server": {
     "host": "0.0.0.0",
     "port": 43127,
-    "advertisedHost": "0.0.0.0"
+    "advertisedHost": "0.0.0.0",
+    "//publicBaseUrl": "Public origin (scheme+host[:port], no trailing slash) prepended to browser-loadable wiki-image URLs. Leave empty for root-relative URLs when the client shares the server's origin. Env: MOSS_PUBLIC_BASE_URL.",
+    "publicBaseUrl": ""
   },
   "auth": {
     "mode": "local",
