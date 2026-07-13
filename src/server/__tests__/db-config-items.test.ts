@@ -16,6 +16,32 @@ describe('DirectConnectStore config_items bootstrap ordering', () => {
     expect(firstCreate).toBeLessThan(migration)
   })
 
+  it('persists org_id when writing department authorization policies', async () => {
+    // Regression: replaceConfigItemDepartments historically omitted org_id, but
+    // the org-scoped readers (getDepartmentPolicies with an orgId) filter
+    // WHERE org_id = ?, so NULL rows were invisible and dept credentials never
+    // surfaced for their authorized department. The INSERT must include org_id.
+    const dbSource = await readFile(
+      path.resolve(__dirname, '..', 'db.ts'),
+      'utf8',
+    )
+    const writer = dbSource.slice(
+      dbSource.indexOf('replaceConfigItemDepartments('),
+      dbSource.indexOf('// --- Secret Audit Log ---'),
+    )
+    expect(writer).toContain('replaceConfigItemDepartments(configItemId: number, departmentIds: string[], orgId')
+    expect(writer).toContain('INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)')
+  })
+
+  it('backfills org_id on legacy department_secret_policies rows', async () => {
+    const dbSource = await readFile(
+      path.resolve(__dirname, '..', 'db.ts'),
+      'utf8',
+    )
+    expect(dbSource).toContain('UPDATE department_secret_policies')
+    expect(dbSource).toContain('Backfilled org_id on')
+  })
+
   it('adds org_id before creating org-scoped indexes on legacy tables', async () => {
     const dbSource = await readFile(
       path.resolve(__dirname, '..', 'db.ts'),

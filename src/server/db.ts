@@ -300,6 +300,32 @@ export class DirectConnectStore {
       console.log('[DB] Added client_cron_enabled column to enterprises')
     }
 
+    // Migration: backfill org_id on department_secret_policies rows written by
+    // replaceConfigItemDepartments (the admin "authorized departments" flow),
+    // which historically inserted without org_id. The org-scoped readers filter
+    // WHERE org_id = ?, so these NULL rows were invisible — a dept credential
+    // authorized for a department would never surface for that department's
+    // users. config_items.org_id is the source of truth (department_id is
+    // globally unique, so the join is unambiguous).
+    try {
+      const orphanCount = (this.db.prepare(
+        `SELECT COUNT(*) AS n FROM department_secret_policies WHERE org_id IS NULL`,
+      ).get() as { n: number }).n
+      if (orphanCount > 0) {
+        this.db.exec(`
+          UPDATE department_secret_policies
+          SET org_id = (
+            SELECT org_id FROM config_items
+            WHERE config_items.id = department_secret_policies.config_item_id
+          )
+          WHERE org_id IS NULL
+        `)
+        console.log(`[DB] Backfilled org_id on ${orphanCount} department_secret_policies row(s)`)
+      }
+    } catch (err) {
+      console.error('[DB] Failed to backfill department_secret_policies.org_id:', err)
+    }
+
     // Migration: add user_id to channel_pairing_requests
     const pairingRequestsColumns = this.db.prepare(`PRAGMA table_info(channel_pairing_requests)`).all() as { name: string }[]
     if (!pairingRequestsColumns.some(col => col.name === 'user_id')) {
@@ -3422,15 +3448,18 @@ export class DirectConnectStore {
     this.db.prepare('DELETE FROM department_secret_policies WHERE config_item_id = ?').run(configItemId)
   }
 
-  replaceConfigItemDepartments(configItemId: number, departmentIds: string[]): void {
+  replaceConfigItemDepartments(configItemId: number, departmentIds: string[], orgId?: string | null): void {
     const ts = now()
     this.db.prepare('DELETE FROM department_secret_policies WHERE config_item_id = ?').run(configItemId)
+    // org_id must be persisted: the org-scoped readers (getDepartmentPolicies
+    // with an orgId, used by config-item visibility and credential-usage gates)
+    // filter WHERE org_id = ?, so a NULL here makes the policy invisible.
     const stmt = this.db.prepare(`
-      INSERT INTO department_secret_policies (department_id, config_item_id, created_at)
-      VALUES (?, ?, ?)
+      INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)
+      VALUES (?, ?, ?, ?)
     `)
     for (const deptId of departmentIds) {
-      stmt.run(deptId, configItemId, ts)
+      stmt.run(deptId, configItemId, orgId ?? null, ts)
     }
   }
 

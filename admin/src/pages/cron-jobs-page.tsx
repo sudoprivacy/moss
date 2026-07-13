@@ -45,7 +45,7 @@ import { getAdminCronJobs, getCronJobs, getCronJobRuns, disableCronJob, enableCr
 import { resolveOwnerName } from '@/lib/utils'
 import { getUsers } from '@/lib/api/auth'
 import { getInstalledAgents, type InstalledAgentInfo } from '@/lib/api/agent-hub'
-import { getSystemSettings } from '@/lib/api/settings'
+import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { hasScope } from '@/lib/api/client'
 import type { AuthUser } from '@/lib/api/types'
@@ -122,15 +122,20 @@ export default function CronJobsPage() {
         (isCronAdmin ? getAdminCronJobs() : getCronJobs()),
         getUsers().catch(() => ({ users: [] })),
         getInstalledAgents().catch(() => [] as InstalledAgentInfo[]),
-        getSystemSettings().catch(() => null),
+        // Read client_cron_enabled from the unauthenticated enterprise-config
+        // endpoint, not getSystemSettings() (admin:settings only) — otherwise a
+        // dept_admin / normal user 401s, the value defaults to enabled, and the
+        // create button stays visible even when the org disabled client cron.
+        getEnterpriseConfig().catch(() => null),
       ])
       if (jobsRes.success && jobsRes.data) {
         setJobs(jobsRes.data)
       }
       setUsers(usersRes.users)
       setAgents(agentsRes)
-      if (settingsRes) {
-        setClientCronEnabled(settingsRes.clientCronEnabled)
+      if (settingsRes?.data) {
+        // null/true = enabled; only an explicit false disables client cron.
+        setClientCronEnabled(settingsRes.data.client_cron_enabled !== false)
       }
     } catch (error) {
       console.error('Failed to fetch cron jobs:', error)
