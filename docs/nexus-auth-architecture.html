@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus 认证架构 — moss 集成对齐</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1f2328; --muted: #656d76; --line: #d8dee4;
+    --accent: #0969da; --warn: #9a6700; --warn-bg: #fff8c5; --warn-line: #d4a72c;
+    --ok: #1a7f37; --ok-bg: #dafbe1; --ok-line: #4ac26b;
+    --bad: #cf222e; --bad-bg: #ffebe9; --bad-line: #ff8182;
+    --code-bg: #f0f1f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8d96a0; --line: #30363d;
+      --accent: #4493f8; --warn: #d29922; --warn-bg: #2d2410; --warn-line: #9e6a03;
+      --ok: #3fb950; --ok-bg: #12261e; --ok-line: #2ea043;
+      --bad: #f85149; --bad-bg: #291415; --bad-line: #da3633;
+      --code-bg: #161b22;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 20px 120px; background: var(--bg); color: var(--fg);
+    font: 16px/1.75 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; }
+  header { padding: 56px 0 28px; border-bottom: 1px solid var(--line); margin-bottom: 40px; }
+  h1 { font-size: 30px; line-height: 1.3; margin: 0 0 12px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 15px; margin: 0; }
+  h2 {
+    font-size: 22px; margin: 56px 0 16px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line); letter-spacing: -0.01em;
+  }
+  h3 { font-size: 17px; margin: 32px 0 10px; }
+  p, li { margin: 10px 0; }
+  code {
+    background: var(--code-bg); padding: 2px 6px; border-radius: 4px;
+    font: 13.5px/1.5 ui-monospace, "SF Mono", Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+    overflow-x: auto; border: 1px solid var(--line);
+  }
+  pre code { background: none; padding: 0; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 15px; }
+  th, td { border: 1px solid var(--line); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; }
+  .box { border-radius: 8px; padding: 14px 18px; margin: 20px 0; border-left: 4px solid; }
+  .box p:first-child { margin-top: 0; } .box p:last-child { margin-bottom: 0; }
+  .warn { background: var(--warn-bg); border-color: var(--warn-line); }
+  .ok   { background: var(--ok-bg);   border-color: var(--ok-line); }
+  .bad  { background: var(--bad-bg);  border-color: var(--bad-line); }
+  .mermaid { margin: 26px 0; text-align: center; }
+  .tag {
+    display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 20px;
+    border: 1px solid var(--line); color: var(--muted); margin-left: 6px; vertical-align: middle;
+  }
+  .tag.done { color: var(--ok); border-color: var(--ok-line); }
+  .tag.todo { color: var(--warn); border-color: var(--warn-line); }
+  .tag.ask  { color: var(--accent); border-color: var(--accent); }
+  a { color: var(--accent); }
+  footer { margin-top: 72px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Nexus 认证架构 — moss 集成对齐</h1>
+  <p class="sub">写给 moss / nexus 两边的工程同学。目的:把「nexus 到底需不需要 auth、需要什么样的 auth」这件事一次讲清,并把要一起拍的决定摊出来。</p>
+</header>
+
+<div class="box ok">
+<p><strong>一句话结论。</strong>就 moss 今天的拓扑而言,<strong>nexus 的 auth 是纵深防御,不是在补一个开着的门</strong>。真正承重的那面墙是 <code>:2126</code> 的 <strong>loopback 绑定</strong>。所以我们要做的第一件事不是「上 auth」,而是<strong>让「无 auth + 非 loopback」这个组合在内核里不可能存在</strong>。</p>
+</div>
+
+<h2>1. 今天的真实拓扑</h2>
+
+<p>下面这张图是对着 moss 代码逐行核过的(<code>nexusManager.ts</code> / <code>startStandaloneServer.ts</code> / <code>nexusClient.ts</code> / <code>authProxyServer.ts</code>),不是设计意图,是现状。</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph host["moss-server 容器"]
+    direction TB
+    AP["Auth Proxy<br/>secrets API / mcpUser / runtimeSvc"]
+    NC["NexusClient<br/>authToken = '' "]
+    ND["nexusd<br/>--bind-addr 127.0.0.1:2126<br/>--no-tls"]
+    AP -->|"进程内 · 单一信任域"| NC
+    NC -->|"gRPC · loopback"| ND
+  end
+  SC["sudocode session<br/>(独立容器)"]
+  SC -->|"HTTP :12013<br/>per-session bearer<br/>+ org / dept policy"| AP
+  SC -. "永远够不到 :2126" .-x ND
+  ND --> FS[("/secrets/{ns}/{key}.json<br/>VFS")]
+</pre>
+
+<table>
+<tr><th>问题</th><th>今天的答案</th><th>代码位置</th></tr>
+<tr><td>谁能连 <code>:2126</code>?</td><td>只有 moss-server 容器内的进程</td><td><code>nexusManager.ts:84</code> — <code>--bind-addr 127.0.0.1</code></td></tr>
+<tr><td>连的时候带什么凭证?</td><td><strong>空字符串</strong></td><td><code>startStandaloneServer.ts:46</code> — <code>new NexusClient(grpcUrl)</code>,构造函数默认 <code>authToken = ''</code></td></tr>
+<tr><td>nexus 检查这个 token 吗?</td><td><strong>不检查</strong>(<code>NoAuth</code>:任何 token,包括空的,都返回 system admin)</td><td>nexus-vfs <code>profiles/cluster/src/main.rs</code></td></tr>
+<tr><td>多租户(org)隔离靠什么?</td><td><strong>Auth Proxy 的 per-session bearer + policy</strong>,以及路径里那个 <code>org:{orgId}:</code> 前缀</td><td><code>secretSubject.ts:9</code></td></tr>
+<tr><td>sudocode session 能直连 nexus 吗?</td><td><strong>不能</strong>,只见 Auth Proxy</td><td><code>authProxyServer.ts:161</code> — 只有 proxy 和 secrets API 持有 nexusClient</td></tr>
+</table>
+
+<div class="box ok">
+<p><strong>所以「org 隔离靠一个字符串前缀」不是一个可被利用的洞。</strong>我一开始判断错了。session container 根本够不到 <code>:2126</code>,真正的访问控制边界是 Auth Proxy,那道墙是完好的。</p>
+</div>
+
+<h2>2. 但承重墙只有一面</h2>
+
+<p>整个隔离模型压在<strong>一个假设</strong>上:「除了 proxy,没有别的东西能碰到 <code>:2126</code>」。</p>
+
+<div class="box bad">
+<p><strong>这个假设离失效只有一行配置。</strong></p>
+<p>把 <code>MOSS_NEXUS_GRPC_PORT</code> 指到非 loopback、或者把 nexus 挂进 <code>moss-network</code>、或者 proxy 出一个 SSRF/RCE —— <strong>空 token 意味着任何 session container 可以直接读写<em>所有</em>租户的 secrets</strong>,绕过整个 proxy 策略层。而且<strong>没有第二道防线</strong>。</p>
+</div>
+
+<p>这是 moss 侧同学自己指出来的,原话是 <em>"The single load-bearing control is the loopback bind ... it's one config line away from a serious multi-tenant breach"</em>。这个判断是对的,而且比「要不要上 auth」本身更要紧。</p>
+
+<h2>3. 提议:把这条不变量焊进内核 <span class="tag todo">本周做</span></h2>
+
+<p>与其靠 code review 盯住那行配置,不如让内核<strong>拒绝这个组合存在</strong>:</p>
+
+<div class="box warn">
+<p><strong>无 auth 只允许在 loopback 上。绑非 loopback 地址,必须开 auth(<code>sk-</code> token)或 mTLS —— 否则 daemon 拒绝启动。</strong></p>
+</div>
+
+<pre class="mermaid">
+flowchart TD
+  B["nexusd 启动"] --> S{"NEXUS_API_KEY_SECRET<br/>有吗?"}
+  S -->|有| A["ApiKeyAuthProvider<br/>(sk- token 校验)"]
+  S -->|没有| L{"bind 是 loopback 吗?"}
+  L -->|"是 (127.0.0.1)"| OK["NoAuth + 一条 WARN<br/>✅ 允许 — moss 现状"]
+  L -->|"否 (0.0.0.0 / 容器网)"| M{"mTLS 开着吗?"}
+  M -->|开| A2["peer 平面认证<br/>✅ 允许 — 联邦节点"]
+  M -->|"关 (--no-tls)"| F["❌ 拒绝启动<br/>除非显式 --insecure-no-auth"]
+  A --> OK2["✅ 允许"]
+
+  style OK fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+  style OK2 fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+  style A2 fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+  style F fill:#ffebe9,stroke:#ff8182,color:#cf222e
+</pre>
+
+<h3>为什么这个形状是对的</h3>
+
+<table>
+<tr><th>场景</th><th>要改什么</th></tr>
+<tr><td><strong>moss 现状</strong>(loopback + <code>--no-tls</code> + 空 token)</td><td><strong>零改动。</strong>连 flag 都不用加,照常启动,多一条 WARN</td></tr>
+<tr><td>有人把 bind 改成非 loopback</td><td><strong>daemon 直接启动失败。</strong>「一行配置就全租户裸奔」在物理上不成立了</td></tr>
+<tr><td>联邦 peer(绑外网)</td><td>不受影响 —— 它们本来就跑 mTLS</td></tr>
+<tr><td>docker E2E / CI(非 loopback + <code>--no-tls</code>)</td><td>需要显式加 <code>--insecure-no-auth</code>。<strong>它们本来就在裸奔</strong>,这个 flag 只是把事实写出来</td></tr>
+</table>
+
+<p>注意我们<strong>不改 <code>DEFAULT_BIND</code> 的默认值</strong>(改了会打断联邦部署)。危险的不是 <code>0.0.0.0</code> 本身,而是「<code>0.0.0.0</code> + 无 auth + 无 TLS」这个<strong>组合</strong>。所以我们让组合非法,而不是让默认值变窄。</p>
+
+<h2>4. 服务端的 auth,已经做完了 <span class="tag done">已 merge</span></h2>
+
+<p>moss 侧提过一个很关键的更正:<em>「populate authToken 而不改服务端,等于什么都没做」</em> —— 完全正确,因为 <code>NoAuth</code> 根本不看那个字段。</p>
+
+<p><strong>服务端那一半我们已经做完并 merge 进 <code>nexus-vfs</code> main 了</strong>(PR #141 + #142)。nexusd 现在真的会校验并拒绝。</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph planes["两个身份平面 — 一次判定"]
+    direction TB
+    P1["<b>peer 平面</b><br/>mTLS 客户端证书<br/>(rustls 已验签)"]
+    P2["<b>token 平面</b><br/>sk- API key"]
+  end
+  P1 -->|"空 token 也放行<br/>← 联邦 fan-out 靠这条活着"| CTX
+  P2 --> G["四道 fail-closed 门<br/>格式 → HMAC → 记录存在<br/>→ 未吊销/未过期 → zone 授权"]
+  G --> CTX["OperationContext<br/>{subject, agent_id, zone_perms, is_admin}"]
+  CTX --> K["内核 syscall"]
+  N["两者都没有"] --> X["❌ UNAUTHENTICATED"]
+
+  style X fill:#ffebe9,stroke:#ff8182,color:#cf222e
+</pre>
+
+<table>
+<tr><th></th><th>实现</th></tr>
+<tr><td>凭证格式</td><td><code>sk-</code> + 128-bit 随机,HMAC-SHA256 存储(和 Python 侧字节兼容)</td></tr>
+<tr><td>记录存哪</td><td><strong>raft 专用树 <code>TREE_AUTH_KEYS</code></strong> —— 不在文件元数据路径上,<code>sys_write</code> 伪造不了;复制到每个副本,所以<strong>吊销会传播</strong></td></tr>
+<tr><td>自带能力</td><td>吊销、过期、per-key 的 zone 授权、审计视图(<code>/__sys__/auth/keys/</code>,admin-only 只读)</td></tr>
+<tr><td>管理接口</td><td><code>nexusd auth mint | revoke | list</code>(离线子命令,<code>useradd</code> 语义)</td></tr>
+<tr><td>验证</td><td>CI 里有一条真 E2E:铸 key → 带 key 调 gRPC 通过 → <strong>空 token 被拒</strong> → 吊销 → 同一把 key 被拒</td></tr>
+</table>
+
+<h2>5. Tier 1 / Tier 2 — 映射到我们的机制</h2>
+
+<p>moss 侧提的两层方案,我们的机制都能直接承接:</p>
+
+<table>
+<tr><th></th><th>moss 侧的提法</th><th>我们的对应物</th><th>判断</th></tr>
+<tr>
+  <td><strong>Tier 1</strong></td>
+  <td>daemon 全局 auth token(一个共享 secret,常数时间比对)</td>
+  <td><strong>直接用 <code>sk-</code> key</strong>:moss 在 <code>NexusManager.start()</code> 里铸一把,传给 daemon 和 <code>NexusClient</code></td>
+  <td class="tag done">开箱即用。代码量和「共享 secret」一样,但白送吊销/过期,以后要按 org 拆也不用换机制</td>
+</tr>
+<tr>
+  <td><strong>Tier 2</strong></td>
+  <td>per-namespace scoped token(签名 token 里带 <code>allow: ["/secrets/org/{orgId}/*"]</code>,每次 RPC 校验路径前缀)</td>
+  <td><strong><code>OperationContext.zone_perms</code> + 内核权限门</strong> —— 这个接缝已经在 context 里了</td>
+  <td class="tag ask">同意<strong>不急</strong>。它只有在「你不完全信任 proxy 的 namespace 解析」时才值。真要上的时候接口已经在那儿了</td>
+</tr>
+</table>
+
+<div class="box warn">
+<p><strong>有了第 3 节那条不变量之后,Tier 1 对 moss 就变成了<em>可选</em>的纵深防御</strong>(因为 loopback + 无 auth 已经合法且安全)。所以这里需要 moss 侧拍一下:<strong>是现在就上 Tier 1,还是先只要 loopback 守卫?</strong></p>
+</div>
+
+<h2>6. 对 moss 的具体影响 <span class="tag ask">要你们确认</span></h2>
+
+<h3>6.1 必须改:<code>--bootstrap-mode</code> 已经被删了</h3>
+
+<div class="box bad">
+<p>moss 现在传 <code>--bootstrap-mode static</code>(<code>nexusManager.ts:87</code>)。这个 flag 在 nexus 的 <strong>Phase G 已经删除</strong> —— 现在 daemon 自己从磁盘状态推断,不需要 operator 声明。</p>
+<p>意味着你们 pin 的是<strong>旧版 nexusd</strong>;<strong>下次 bump 到当前 release,clap 会直接报 <code>unexpected argument</code> 起不来。</strong>升级前必须把这个参数拿掉。</p>
+</div>
+
+<h3>6.2 会变:root zone 现在无条件创建</h3>
+
+<p>凭证记录存在 raft 树里,所以 daemon 必须有一个 raft group。我们刚把「无联邦时不建 root zone」这个模式删掉了 —— <strong>现在每次启动都会建一个 SOLO 单-voter 的 root zone</strong>。</p>
+
+<ul>
+<li>数据目录里会多出 <code>&lt;data_dir&gt;/root/raft/</code>(一个 redb 文件)</li>
+<li>多一个 10ms tick 的 transport loop(<strong>不在任何 syscall 路径上</strong>)</li>
+<li><strong>文件 syscall 的热路径不受影响</strong> —— <code>/</code> 仍然走本地 redb metastore,不进共识。root 的 raft group 是控制面,不是数据面</li>
+</ul>
+
+<h3>6.3 可能是白捡的:<code>Readdir</code> 是有的,SQLite 索引可以删</h3>
+
+<p>moss 侧的判断是「the Rust VFS has no list/readdir」,因此维护了 <code>~/.moss/nexus/secrets_index.db</code> 这个 SQLite 索引。<strong>这个前提不成立。</strong></p>
+
+<p>我用真 daemon 对着 moss 的路径形状验过:</p>
+
+<pre><code>写入 /secrets/{ns}/openai.json, anthropic.json, slack.json
+
+Readdir("/secrets/{ns}")  → is_error=False
+                          → ['/secrets/{ns}/anthropic.json',
+                             '/secrets/{ns}/openai.json',
+                             '/secrets/{ns}/slack.json']
+
+Readdir("/secrets")       → is_error=False
+                          → ['/secrets/{ns}']</code></pre>
+
+<p>namespace 层和 key 层都能列。<strong>那个 SQLite 索引是冗余的,而且它是一个需要和 VFS 保持同步的第二 SSOT</strong> —— 删掉它是净收益。</p>
+
+<div class="box warn">
+<p><strong>一个 API wart:</strong><code>ReaddirEntry.name</code> 返回的是<strong>全路径</strong>而不是裸文件名。迁移时注意。</p>
+</div>
+
+<h3>6.4 一个隐含约束:namespace 里的冒号</h3>
+
+<p><code>orgNamespacePrefix()</code> 产出的是 <code>org:{orgId}:</code>,路径里带冒号。VFS 会把路径映射成宿主文件名 —— <strong>Linux 上合法,Windows 上直接 <code>InvalidFilename</code> 写不进去</strong>。你们跑 Docker 所以今天没事,但这意味着 moss 的 nexus 数据目录<strong>不能在 Windows 宿主上落地</strong>。</p>
+
+<h2>7. 不归 nexus 管、但更严重的那条</h2>
+
+<div class="box bad">
+<p>moss 侧自己排的第一风险:<strong><code>SYS_ADMIN</code> + <code>seccomp:unconfined</code> + 挂载 <code>/var/run/docker.sock</code> 到 moss-server</strong>(<code>deploy/docker-compose.yml:11,17,19</code>)。</p>
+<p>任何在 moss-server 内取得代码执行的人,不但能碰到 loopback 的 nexus,还能<strong>控制 Docker daemon → 完整宿主机沦陷</strong>。<strong>nexus 的 auth 挡不住这个。</strong></p>
+<p>这条我同意确实比 nexus 这边严重得多,建议 moss 侧单独立项 —— 不在本文档范围内,但不写出来不诚实。</p>
+</div>
+
+<h2>8. 要一起拍的</h2>
+
+<table>
+<tr><th>#</th><th>问题</th><th>我的倾向</th></tr>
+<tr>
+  <td>1</td>
+  <td>第 3 节那条 loopback 不变量 —— 认吗?</td>
+  <td><strong>认。</strong>moss 零改动,但把「一行配置的距离」变成不可能。这周做</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td>Tier 1(moss 铸一把 <code>sk-</code> key)—— 现在上,还是先只要 loopback 守卫?</td>
+  <td>看你们。上了是纵深防御,不上也不算有洞(有了守卫之后)</td>
+</tr>
+<tr>
+  <td>3</td>
+  <td>Tier 2(内核按 org 强制隔离)</td>
+  <td><strong>不急。</strong>接缝(<code>zone_perms</code>)已经在 context 里,等你们真要第二道墙再接</td>
+</tr>
+<tr>
+  <td>4</td>
+  <td>6.1 的 <code>--bootstrap-mode</code> 定时炸弹 —— 谁来拆?</td>
+  <td>moss 侧改一行即可(删掉那个参数)。<strong>下次 bump nexus 之前必须做</strong></td>
+</tr>
+<tr>
+  <td>5</td>
+  <td>6.3 的 SQLite 索引 —— 删吗?</td>
+  <td>建议删。少一个 SSOT。但这是 moss 的活,你们评估</td>
+</tr>
+</table>
+
+<footer>
+  <p>源文件:<code>moss/docs/nexus-auth-architecture.html</code> —— 这个页面通过 ShareOne 的 remote-URL 机制托管,<strong>改动合进 moss 就自动生效,不用重新发布</strong>。有异议直接在 moss 提 PR 改这个文件。</p>
+  <p>相关代码:<code>nexus-vfs</code> PR #141(身份地基)、#142(<code>sk-</code> 认证策略)。</p>
+</footer>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({
+    startOnLoad: true,
+    look: 'handDrawn',
+    theme: dark ? 'dark' : 'default',
+    themeVariables: { fontFamily: '-apple-system, "Segoe UI", "PingFang SC", sans-serif' },
+    flowchart: { curve: 'basis', htmlLabels: true },
+  });
+</script>
+</body>
+</html>
