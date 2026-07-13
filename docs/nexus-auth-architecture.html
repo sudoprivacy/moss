@@ -134,7 +134,7 @@ flowchart LR
 <p><strong>所以「org 隔离靠一个字符串前缀」不是一个可被利用的洞。</strong>我一开始判断错了。session container 根本够不到 <code>:2126</code>,真正的访问控制边界是 Auth Proxy,那道墙是完好的。</p>
 </div>
 
-<h2>2. 但承重墙只有一面 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></h2>
+<h2>2. 但承重墙只有一面 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">对 moss 今天跑的 v0.4.0 仍成立</span></h2>
 
 <p>整个隔离模型压在<strong>一个假设</strong>上:「除了 proxy,没有别的东西能碰到 <code>:2126</code>」。</p>
 
@@ -144,6 +144,10 @@ flowchart LR
 </div>
 
 <p>这是 moss 侧同学自己指出来的,原话是 <em>"The single load-bearing control is the loopback bind ... it's one config line away from a serious multi-tenant breach"</em>。这个判断是对的,而且比「要不要上 auth」本身更要紧。</p>
+
+<div class="box ok">
+<p><strong>✅ 这个洞已经在 <code>main</code> 上堵住了</strong>(§3,<a href="https://github.com/nexi-lab/nexus-vfs/pull/143">PR #143</a>)。<strong>但 moss 今天跑的 <code>v0.4.0</code> 里还没有</strong> —— 所以本节描述的仍然是你们生产上的现状,直到 bump。</p>
+</div>
 
 <h2>3. 这条不变量已经焊进内核了 <span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></h2>
 
@@ -251,7 +255,7 @@ flowchart LR
 <tr><td>验证</td><td>CI 里有一条真 E2E:铸 key → 带 key 调 gRPC 通过 → <strong>空 token 被拒</strong> → 吊销 → 同一把 key 被拒</td></tr>
 </table>
 
-<h2>5. Tier 1 / Tier 2 — 映射到我们的机制</h2>
+<h2>5. Tier 1 / Tier 2 — 映射到我们的机制 <span class="tag" style="color:#9a6700;border-color:#d4a72c">Tier 1 已就绪 · Tier 2 未实现</span></h2>
 
 <p>moss 侧提的两层方案,我们的机制都能直接承接:</p>
 
@@ -361,34 +365,75 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 <p>这条我同意确实比 nexus 这边严重得多,建议 moss 侧单独立项 —— 不在本文档范围内,但不写出来不诚实。</p>
 </div>
 
-<h2>8. 要一起拍的</h2>
+<h2>8. 状态与下一步</h2>
+
+<h3>8.1 已经做完的 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">已合并到 main</span></h3>
 
 <table>
-<tr><th>#</th><th>问题</th><th>我的倾向</th></tr>
+<tr><th></th><th>做了什么</th><th>PR</th></tr>
+<tr>
+  <td><strong>loopback 不变量</strong></td>
+  <td>无 auth 只准 loopback;绑可达地址必须有 auth 或 mTLS,否则<strong>拒绝启动</strong>。四条路径用真 daemon 验过,进 CI。<strong>moss 零改动。</strong></td>
+  <td><a href="https://github.com/nexi-lab/nexus-vfs/pull/143">#143</a></td>
+</tr>
+<tr>
+  <td><strong>auth 折进 <code>nexusd-cluster</code></strong></td>
+  <td>collaboration profile <strong>删除</strong>。「认不认证」是<strong>运行时姿态</strong>,不是编译期 feature。+134 KiB,姿态为 Open 时运行时成本 0。</td>
+  <td><a href="https://github.com/nexi-lab/nexus-vfs/pull/143">#143</a></td>
+</tr>
+<tr>
+  <td><strong>moss 形状的容器 E2E</strong></td>
+  <td>你们的参数 / 真实路径(带冒号)/ 零改动承诺 / <code>0.0.0.0</code> 必须拒启 —— 每次改内核都跑(§6.5)。</td>
+  <td><a href="https://github.com/nexi-lab/nexus-vfs/pull/144">#144</a></td>
+</tr>
+<tr>
+  <td><code>sk-</code> 认证策略 + 凭证存储</td>
+  <td>HMAC + raft 复制 + 吊销/过期 + <code>auth mint|revoke|list</code> + 审计视图(§4)。</td>
+  <td>#141 #142</td>
+</tr>
+</table>
+
+<h3>8.2 唯一还挡着 moss 的一步 <span class="tag" style="color:#cf222e;border-color:#ff8182">阻塞中</span></h3>
+
+<div class="box bad">
+<p><strong>发一个 nexus-vfs release。</strong></p>
+<p>最新 release 仍是 <code>v0.4.0</code>(6/24)。上面 8.1 里的<strong>每一件</strong>都在 <code>main</code> 上,<strong>没有任何一件在 release 里</strong>。所以 moss 今天拿到的 <code>nexusd-cluster</code> 里,auth 和 loopback 守卫<strong>一个都没有</strong>。</p>
+<p>发版之后,moss 一次 bump 到位,<strong>同一个 PR 里</strong>删掉 <code>--bootstrap-mode</code>(§6.1 —— 这两件事必须原子完成)。</p>
+</div>
+
+<h3>8.3 还要拍的</h3>
+
+<table>
+<tr><th>#</th><th>问题</th><th>谁拍</th><th>倾向</th></tr>
 <tr>
   <td>1</td>
-  <td>第 3 节那条 loopback 不变量 —— 认吗?</td>
-  <td><strong>认。</strong>moss 零改动,但把「一行配置的距离」变成不可能。这周做</td>
+  <td><strong>Tier 1</strong> —— moss 铸一把 <code>sk-</code> key 当全局 token?</td>
+  <td><strong>moss</strong></td>
+  <td>可选。有了 loopback 守卫之后,不上也不算有洞;上了是纵深防御。机制已就绪(§5)</td>
 </tr>
 <tr>
   <td>2</td>
-  <td>Tier 1(moss 铸一把 <code>sk-</code> key)—— 现在上,还是先只要 loopback 守卫?</td>
-  <td>看你们。上了是纵深防御,不上也不算有洞(有了守卫之后)</td>
+  <td><strong>SQLite 索引</strong> —— 删吗?</td>
+  <td><strong>moss</strong></td>
+  <td>建议删。<code>Readdir</code> 已在<strong>你们的真实路径形状上、容器里</strong>验过(§6.3)。少一个要同步的 SSOT</td>
 </tr>
 <tr>
   <td>3</td>
-  <td>Tier 2(内核按 org 强制隔离)</td>
-  <td><strong>不急。</strong>接缝(<code>zone_perms</code>)已经在 context 里,等你们真要第二道墙再接</td>
+  <td><strong>Tier 2</strong> —— 内核按 org 强制隔离(权限门 + <code>zone_perms</code> + ReBAC)</td>
+  <td>双方</td>
+  <td><strong>不急</strong>,且我同意 moss 的判断:它与 Auth Proxy 现有的 org-scoping 基本冗余,只有在你们不完全信任 proxy 的 namespace 解析时才值。接缝已在 <code>OperationContext</code> 里</td>
 </tr>
 <tr>
   <td>4</td>
-  <td>6.1 的 <code>--bootstrap-mode</code> 定时炸弹 —— 谁来拆?</td>
-  <td>moss 侧改一行即可(删掉那个参数)。<strong>下次 bump nexus 之前必须做</strong></td>
+  <td><code>--bootstrap-mode</code> + bump —— <strong>同一个 PR</strong></td>
+  <td><strong>moss</strong></td>
+  <td>等 8.2 发版后做。<strong>单独做任何一个都会挂</strong>(§6.1)</td>
 </tr>
 <tr>
   <td>5</td>
-  <td>6.3 的 SQLite 索引 —— 删吗?</td>
-  <td>建议删。少一个 SSOT。但这是 moss 的活,你们评估</td>
+  <td>契约:改了 <code>nexusManager.ts</code> 参数 / <code>secretSubject.ts</code> 命名空间,告诉我们</td>
+  <td><strong>moss</strong></td>
+  <td>否则 §6.5 那个测试会测化石而且照样绿(见该节的警告框)</td>
 </tr>
 </table>
 
