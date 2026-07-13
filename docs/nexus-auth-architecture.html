@@ -83,19 +83,33 @@
 
 <pre class="mermaid">
 flowchart LR
-  subgraph host["moss-server 容器"]
-    direction TB
-    AP["Auth Proxy<br/>secrets API / mcpUser / runtimeSvc"]
-    NC["NexusClient<br/>authToken = '' "]
-    ND["nexusd<br/>--bind-addr 127.0.0.1:2126<br/>--no-tls"]
-    AP -->|"进程内 · 单一信任域"| NC
-    NC -->|"gRPC · loopback"| ND
+  subgraph laptop["用户笔记本"]
+    SW["<b>sudowork</b><br/>Electron 客户端<br/>单 session"]
   end
-  SC["sudocode session<br/>(独立容器)"]
-  SC -->|"HTTP :12013<br/>per-session bearer<br/>+ org / dept policy"| AP
+  subgraph server["企业服务器"]
+    direction TB
+    subgraph mc["moss-server 容器"]
+      direction TB
+      AP["<b>Auth Proxy</b><br/>OAuth2 · per-session bearer<br/>org / dept policy"]
+      NC["NexusClient<br/>authToken = '' "]
+      ND["nexusd<br/>--bind-addr 127.0.0.1:2126<br/>--no-tls"]
+      AP -->|"进程内 · 单一信任域"| NC
+      NC -->|"gRPC · loopback"| ND
+    end
+    SC["sudocode session<br/>(per-user 容器)"]
+  end
+  SW ==>|"<b>WebSocket · 网络边界在这里</b><br/>MossWsConnection"| AP
+  SC -->|"HTTP :12013<br/>per-session bearer"| AP
   SC -. "永远够不到 :2126" .-x ND
-  ND --> FS[("/secrets/{ns}/{key}.json<br/>VFS")]
+  ND --> FS[("/secrets/{ns}/{key}.json")]
+
+  style AP fill:#fff8c5,stroke:#d4a72c,color:#9a6700
+  style ND fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
 </pre>
+
+<div class="box ok">
+<p><strong>注意 nexus 离任何用户有<em>两跳</em>。</strong>网络边界是 moss 的 <strong>Auth Proxy + OAuth2</strong>(<code>MossWsConnection.ts</code>:sudowork 通过 WebSocket 连远端 <code>serverUrl</code>,每个连接持有<strong>单个</strong> <code>sessionId</code>)。nexus 自己不面向任何网络 —— 它坐在 moss-server 容器的 loopback 上。</p>
+</div>
 
 <table>
 <tr><th>问题</th><th>今天的答案</th><th>代码位置</th></tr>
@@ -157,6 +171,30 @@ flowchart TD
 </table>
 
 <p>注意我们<strong>不改 <code>DEFAULT_BIND</code> 的默认值</strong>(改了会打断联邦部署)。危险的不是 <code>0.0.0.0</code> 本身,而是「<code>0.0.0.0</code> + 无 auth + 无 TLS」这个<strong>组合</strong>。所以我们让组合非法,而不是让默认值变窄。</p>
+
+<h3>3.1 澄清:<code>--no-tls</code> 和 auth 是<strong>正交</strong>的</h3>
+
+<div class="box warn">
+<p>一个自然但会带偏的理解:「moss 从 <code>--no-tls</code> 转为不给这个参数、改给 token」。<strong>不是这样 —— 这两件事互不相干。</strong></p>
+</div>
+
+<table>
+<tr><th></th><th>回答的问题</th><th>moss 该怎么做</th></tr>
+<tr><td><code>--no-tls</code></td><td><strong>链路加不加密</strong></td><td><strong>继续保留。</strong>loopback 上的明文是标准的「可信本地后端」模式,不用改</td></tr>
+<tr><td><code>sk-</code> token</td><td><strong>调用方是谁</strong></td><td>可选。给了就是 Tier 1 纵深防御,不给也合法(loopback 守卫允许)</td></tr>
+</table>
+
+<p>所以 moss 有两个都正确的选择:</p>
+
+<table>
+<tr><th></th><th>daemon 参数</th><th>NexusClient</th><th>要做什么</th></tr>
+<tr><td><strong>A. 零改动</strong></td><td><code>--bind-addr 127.0.0.1 --no-tls</code></td><td><code>authToken = ''</code></td><td><strong>什么都不用做。</strong>loopback + 无 auth 被守卫允许,照常启动,多一条 WARN</td></tr>
+<tr><td><strong>B. Tier 1</strong></td><td>同上 <strong>+ <code>NEXUS_API_KEY_SECRET=&lt;per-boot 随机&gt;</code></strong>(环境变量)</td><td><code>new NexusClient(url, token)</code></td><td>① <code>NexusManager.start()</code> 里生成随机 secret 并注入 env<br/>② 用 <code>nexusd auth mint</code> 铸一把 key<br/>③ 把 key 传给 <code>NexusClient</code></td></tr>
+</table>
+
+<div class="box ok">
+<p><strong>顺便更正一处术语</strong>(因为它会影响你们读我们的架构):<code>AuthProvider</code> <strong>不是 HAL</strong>,它是 <strong>transport 层的一个 DI 槽</strong>(<code>Arc&lt;dyn AuthProvider&gt;</code>) —— 内核根本不消费它。真正的 HAL 是 <code>AuthKeyStore</code>(§3.B.3),那是<strong>凭证记录的复制存储</strong>。两者正交:换存储不动策略,换策略(JWT/OIDC)不动存储。</p>
+</div>
 
 <h2>4. 服务端的 auth,已经做完了 <span class="tag done">已 merge</span></h2>
 
