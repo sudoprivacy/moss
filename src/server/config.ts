@@ -71,6 +71,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       modelId: 'Xenova/multilingual-e5-small',
       maxPassagesPerWiki: 20_000,
       topKVector: 50,
+      resourceTokenSecret: 'dev-resource-token-secret',
     },
     cabin: {
       enabled: false,
@@ -105,6 +106,10 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     host: raw.server.host,
     port: raw.server.port,
     advertisedHost: raw.server.advertisedHost,
+    // Public origin for wiki-asset URLs. Trailing slashes stripped so callers
+    // can always join with a leading-slash path. Empty → root-relative URLs.
+    publicBaseUrl: (process.env.MOSS_PUBLIC_BASE_URL ?? raw.server.publicBaseUrl ?? '')
+      .replace(/\/+$/, ''),
     authMode: 'local',
     tokenTtlSec: raw.auth.tokenTtlSec,
     bootstrapAdmin: {
@@ -168,6 +173,8 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       modelMirror: process.env.MOSS_MODEL_MIRROR || raw.wikiIndex.modelMirror,
       maxPassagesPerWiki: raw.wikiIndex.maxPassagesPerWiki,
       topKVector: raw.wikiIndex.topKVector,
+      resourceTokenSecret:
+        process.env.MOSS_RESOURCE_TOKEN_SECRET || raw.wikiIndex.resourceTokenSecret,
     },
     cabin: {
       enabled: process.env.CABIN_ENABLED

@@ -82,6 +82,8 @@ import { WikiJobExecutor } from '../channels/gateway/WikiJobExecutor.js'
 import { loadIndex, vectorSearch, rrfFuse, createQuerySemaphore, runWikiGrep } from './wikiIndex/query.js'
 import { ensureEmbedder } from './wikiIndex/embedder.js'
 import { MOSS_MODELS_DIR } from '../utils/wikis/localWikiDirectories.js'
+import { decodeResourceToken } from './wikiResourceToken.js'
+import { rewriteWikiImageRefs, isMarkdownPath, RESOURCE_PREFIX } from './wikiImageRefs.js'
 import { SourceSyncWorker } from './sources/syncWorker.js'
 import { storeSecret, deleteSecret } from './sources/secrets.js'
 // Connector implementations register themselves on import.
@@ -209,7 +211,10 @@ const WORKSPACE_PREVIEW_MIME_TYPES: Record<string, string> = {
 }
 
 const MIME_TYPES: Record<string, string> = {
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
   '.css': 'text/css; charset=utf-8',
+  '.gif': 'image/gif',
   '.html': 'text/html; charset=utf-8',
   '.ico': 'image/x-icon',
   '.jpeg': 'image/jpeg',
@@ -2101,6 +2106,62 @@ export function startServer(
         }
       }
 
+      // ---- Public wiki-asset serving: /api/v1/resources/:token/* (no auth) ----
+      //
+      // Serves wiki images (and other binary assets) by opaque token. The token
+      // (see wikiResourceToken.ts) carries `(wikiId, relPath)` plus an integrity
+      // tag; the trailing path segment is a cosmetic filename only and is
+      // ignored for lookup. Intentionally PUBLIC — the unguessable, unforgeable
+      // token is the only gate, so a client rendering agent-relayed markdown can
+      // load images without an auth header. MUST stay above the auth boundary
+      // below. Path traversal is independently blocked by the containment check.
+      const resourceMatch = pathname.match(
+        new RegExp(`^${RESOURCE_PREFIX}/([^/]+)(?:/.*)?$`),
+      )
+      if (resourceMatch && req.method === 'GET') {
+        // decodeURIComponent throws URIError on a malformed %-escape; a crafted
+        // URL must 404, not 500. base64url tokens never contain %, so decoding
+        // is only defensive.
+        let rawToken: string
+        try {
+          rawToken = decodeURIComponent(resourceMatch[1]!)
+        } catch {
+          throw new HttpError(404, 'Not found')
+        }
+        const decoded = decodeResourceToken(rawToken, config.wikiIndex.resourceTokenSecret)
+        if (!decoded) throw new HttpError(404, 'Not found')
+
+        // Cross-org getter: the token is the gate, not org membership.
+        const wiki = documentStore.getWikiById(decoded.wikiId)
+        if (!wiki) throw new HttpError(404, 'Not found')
+
+        const root = resolve(wiki.storagePath)
+        const target = resolve(root, decoded.relPath.replace(/^\/+/, ''))
+        if (target !== root && !target.startsWith(root + sep)) {
+          throw new HttpError(400, 'Invalid path')
+        }
+
+        let fileContent: Buffer
+        try {
+          const info = await stat(target)
+          if (!info.isFile()) throw new HttpError(404, 'Not found')
+          fileContent = await readFile(target)
+        } catch (err) {
+          if (err instanceof HttpError) throw err
+          throw new HttpError(404, 'Not found')
+        }
+
+        res.writeHead(200, {
+          'content-type': contentTypeForPath(target),
+          // Token encodes the path, so a given URL always maps to the same
+          // asset; cache aggressively. (In-place wiki edits are an operational
+          // rebuild event, not a per-request concern.)
+          'cache-control': 'public, max-age=86400',
+        })
+        res.end(fileContent)
+        return
+      }
+
       // Public: Config Items (JWT auth, no admin scope)
       if (req.method === 'GET' && pathname === '/api/v1/config/items') {
         const auth = authenticateRequest(req, authService)
@@ -3307,7 +3368,18 @@ export function startServer(
           return
         }
         try {
-          const content = await readFile(resolved, 'utf-8')
+          const raw = await readFile(resolved, 'utf-8')
+          // Rewrite relative image refs to public, tokenized resource URLs so the
+          // agent relays markdown that already points at browser-loadable images.
+          const content = isMarkdownPath(filePath)
+            ? rewriteWikiImageRefs(
+                raw,
+                wikiId,
+                filePath,
+                config.publicBaseUrl,
+                config.wikiIndex.resourceTokenSecret,
+              )
+            : raw
           writeJson(res, 200, { wiki_id: wikiId, path: filePath, content })
         } catch {
           writeJson(res, 404, { error: { code: 'not_found', message: 'file not found' } })
@@ -3374,7 +3446,16 @@ export function startServer(
           const matches = fused.map((h) => ({
             file: h.file,
             line_no: h.line_no,
-            line: h.line,
+            // A matched line can carry an inline image ref (`![](images/x.png)`).
+            // Rewrite per match using the match's own file as the base for
+            // relative-path resolution, so snippets contain loadable URLs.
+            line: rewriteWikiImageRefs(
+              h.line,
+              wikiId,
+              h.file,
+              config.publicBaseUrl,
+              config.wikiIndex.resourceTokenSecret,
+            ),
           }))
           writeJson(res, 200, { wiki_id: wikiId, query, matches })
         } catch (err) {

@@ -51,6 +51,10 @@ export const serverFileConfigSchema = lazySchema(() =>
       host: z.string().default('0.0.0.0'),
       port: z.number().int().min(0).default(43127),
       advertisedHost: z.string().min(1).optional(),
+      // Public origin (scheme+host[:port], no trailing slash) prepended to
+      // browser-loadable wiki-asset URLs. Empty → root-relative URLs (works
+      // when client and server share an origin). Env: MOSS_PUBLIC_BASE_URL.
+      publicBaseUrl: z.string().optional(),
     }).default({
       host: '0.0.0.0',
       port: 43127,
@@ -159,11 +163,16 @@ export const serverFileConfigSchema = lazySchema(() =>
       modelMirror: z.string().url().optional(),
       maxPassagesPerWiki: z.number().int().min(100).default(20_000),
       topKVector: z.number().int().min(1).max(200).default(50),
+      // HMAC secret keying the opaque tokens in public wiki-image URLs. Change
+      // it and every previously-issued image URL 404s. Env:
+      // MOSS_RESOURCE_TOKEN_SECRET.
+      resourceTokenSecret: z.string().default('dev-resource-token-secret'),
     }).default({
       enabled: true,
       modelId: 'Xenova/multilingual-e5-small',
       maxPassagesPerWiki: 20_000,
       topKVector: 50,
+      resourceTokenSecret: 'dev-resource-token-secret',
     }),
     cabin: z.object({
       enabled: z.boolean().default(false),
@@ -238,6 +247,11 @@ export type ServerConfig = {
    */
   callbackPort?: number
   advertisedHost?: string
+  /**
+   * Public origin prepended to browser-loadable wiki-asset URLs (see
+   * server.publicBaseUrl in the file config). Empty string → root-relative.
+   */
+  publicBaseUrl: string
   authMode: 'local'
   tokenTtlSec: number
   bootstrapAdmin: {
@@ -305,6 +319,8 @@ export type ServerConfig = {
     modelMirror?: string
     maxPassagesPerWiki: number
     topKVector: number
+    /** HMAC secret keying opaque tokens in public wiki-image URLs. */
+    resourceTokenSecret: string
   }
   cabin: {
     enabled: boolean
