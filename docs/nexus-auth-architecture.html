@@ -219,7 +219,21 @@ flowchart LR
 
 <div class="box bad">
 <p>moss 现在传 <code>--bootstrap-mode static</code>(<code>nexusManager.ts:87</code>)。这个 flag 在 nexus 的 <strong>Phase G 已经删除</strong> —— 现在 daemon 自己从磁盘状态推断,不需要 operator 声明。</p>
-<p>意味着你们 pin 的是<strong>旧版 nexusd</strong>;<strong>下次 bump 到当前 release,clap 会直接报 <code>unexpected argument</code> 起不来。</strong>升级前必须把这个参数拿掉。</p>
+<p>意味着你们 pin 的是<strong>旧版 nexusd</strong>(<code>nexus-vfs 0.4.0</code>,经由 <code>copyFromSudowork()</code> 从 sudowork 的安装拷过来)。<strong>下次 bump 到当前 release,clap 会直接报 <code>unexpected argument</code> 起不来。</strong></p>
+</div>
+
+<div class="box warn">
+<p><strong>⚠ 这两件事必须原子地一起做,单独做任何一个都会挂。</strong></p>
+<ul>
+<li><strong>现在就删掉参数</strong> → v0.4.0 里 <code>--bootstrap-mode</code> 是<strong>必需</strong>的(<code>"--bootstrap-mode (or NEXUS_BOOTSTRAP_MODE) is required"</code>),删了当场起不来</li>
+<li><strong>先 bump 不删参数</strong> → 新版里这个 flag 不存在,clap 报 <code>unexpected argument</code>,同样起不来</li>
+</ul>
+<p>所以:<strong>删参数 + bump 版本,同一个 PR。</strong></p>
+</div>
+
+<div class="box ok">
+<p><strong>而且现在还不是 bump 的时候</strong> —— nexus-vfs 最新 release 是 <code>v0.4.0</code>(6/24),而所有 auth 工作在 <code>main</code> 上,<strong>落后 215 个 commit,还没发版</strong>。等我们把 loopback 守卫 + auth 折进 <code>nexusd-cluster</code> 做完并发一个 release,你们<strong>一次 bump 到位</strong>,不用做两遍。</p>
+<p>另注:bump 实际要动的是 <strong>sudowork 的 <code>runtime-versions.json</code> + COS 上的产物</strong>(moss 的 nexusd 是 <code>copyFromSudowork()</code> 拷来的),不是 moss 自己。</p>
 </div>
 
 <h3>6.2 会变:root zone 现在无条件创建</h3>
