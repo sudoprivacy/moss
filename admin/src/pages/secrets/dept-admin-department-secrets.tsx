@@ -29,6 +29,8 @@ import type { AuthDepartment } from '@/lib/api/types'
  * list is already narrowed to the caller's subtree by the server
  * (getDepartments), and writes are gated to that subtree server-side.
  */
+type ValueSource = { source: DeptSecretSource; inheritedFrom?: string } | null
+
 export function DeptAdminDepartmentSecrets() {
   const [departments, setDepartments] = useState<AuthDepartment[]>([])
   const [configItems, setConfigItems] = useState<ConfigItem[]>([])
@@ -40,7 +42,10 @@ export function DeptAdminDepartmentSecrets() {
   const [showValues, setShowValues] = useState<Record<string, boolean>>({})
   // Per config-key: where the department's current effective value comes from
   // (its own value, an inherited ancestor value, the org default, or none).
-  const [valueSource, setValueSource] = useState<Record<string, { source: DeptSecretSource; inheritedFrom?: string } | null>>({})
+  const [valueSource, setValueSource] = useState<Record<string, ValueSource>>({})
+  // Same info, prefetched for every listed item so each card can surface its
+  // per-key source badge without opening the dialog. Keyed by item id → key.
+  const [cardSources, setCardSources] = useState<Record<number, Record<string, ValueSource>>>({})
   const [isSaving, setIsSaving] = useState(false)
 
   const load = useCallback(async () => {
@@ -75,7 +80,7 @@ export function DeptAdminDepartmentSecrets() {
     // Surface where each key's effective value currently comes from (own /
     // inherited from an ancestor / org default / none), so the dept_admin knows
     // what they'd be overriding.
-    const sources: Record<string, { source: DeptSecretSource; inheritedFrom?: string } | null> = {}
+    const sources: Record<string, ValueSource> = {}
     await Promise.all(item.entries.map(async e => {
       try {
         const cur = await getDepartmentSecretValue(selectedDeptId, item.pinyin, e.config_key)
@@ -88,6 +93,39 @@ export function DeptAdminDepartmentSecrets() {
   }
 
   const deptName = (id?: string) => departments.find(d => d.id === id)?.name ?? id ?? '上级部门'
+
+  // Prefetch each item's per-key value source for the selected department so the
+  // cards can show the source badge without opening the dialog. Re-runs when the
+  // department changes (source is per-department) or the item list loads.
+  useEffect(() => {
+    if (!selectedDeptId || configItems.length === 0) return
+    let cancelled = false
+    void (async () => {
+      const next: Record<number, Record<string, ValueSource>> = {}
+      await Promise.all(configItems.map(async item => {
+        const keys: Record<string, ValueSource> = {}
+        await Promise.all(item.entries.map(async e => {
+          try {
+            const cur = await getDepartmentSecretValue(selectedDeptId, item.pinyin, e.config_key)
+            keys[e.config_key] = cur?.source ? { source: cur.source, inheritedFrom: cur.inherited_from } : null
+          } catch {
+            keys[e.config_key] = null
+          }
+        }))
+        next[item.id] = keys
+      }))
+      if (!cancelled) setCardSources(next)
+    })()
+    return () => { cancelled = true }
+  }, [selectedDeptId, configItems, departments])
+
+  // Shared source badge so the card and the dialog stay consistent.
+  const renderSourceBadge = (src: ValueSource) => {
+    if (src?.source === 'own') return <Badge variant="outline" className="text-[10px]">已有本部门值</Badge>
+    if (src?.source === 'inherited') return <Badge variant="secondary" className="text-[10px]">继承自「{deptName(src.inheritedFrom)}」</Badge>
+    if (src?.source === 'org_default') return <Badge variant="secondary" className="text-[10px]">当前沿用企业默认</Badge>
+    return <Badge variant="secondary" className="text-[10px]">未配置</Badge>
+  }
 
   const handleSave = async () => {
     if (!editItem || !selectedDeptId) return
@@ -167,9 +205,14 @@ export function DeptAdminDepartmentSecrets() {
                 {item.icon ? <img src={item.icon} alt={item.name} className="size-full object-cover" /> : <KeyRound className="size-5" />}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{item.name}</span>
-                  <Badge variant="outline" className="text-[10px]">{item.pinyin}</Badge>
+                  {item.entries.map(e => (
+                    <span key={e.config_key} className="inline-flex items-center gap-1">
+                      {item.entries.length > 1 ? <span className="text-[10px] text-muted-foreground">{e.name}:</span> : null}
+                      {renderSourceBadge(cardSources[item.id]?.[e.config_key] ?? null)}
+                    </span>
+                  ))}
                 </div>
                 {item.description ? <p className="mt-0.5 line-clamp-1 text-sm text-muted-foreground">{item.description}</p> : null}
               </div>
@@ -193,13 +236,7 @@ export function DeptAdminDepartmentSecrets() {
                 <Label className="flex items-center gap-2">
                   {entry.name}
                   {entry.required ? <span className="text-destructive">*</span> : null}
-                  {(() => {
-                    const src = valueSource[entry.config_key]
-                    if (src?.source === 'own') return <Badge variant="outline" className="text-[10px]">已有本部门值</Badge>
-                    if (src?.source === 'inherited') return <Badge variant="secondary" className="text-[10px]">继承自「{deptName(src.inheritedFrom)}」</Badge>
-                    if (src?.source === 'org_default') return <Badge variant="secondary" className="text-[10px]">当前沿用企业默认</Badge>
-                    return <Badge variant="secondary" className="text-[10px]">未配置</Badge>
-                  })()}
+                  {renderSourceBadge(valueSource[entry.config_key] ?? null)}
                 </Label>
                 <div className="relative">
                   <Input

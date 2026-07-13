@@ -4092,7 +4092,7 @@ export function startServer(
         if (req.method === 'PUT') {
           authService.requireScope(auth, 'admin:secrets:write')
           const body = await readJsonBody(req)
-          runtime.store.replaceConfigItemDepartments(itemId, body.department_ids ?? [])
+          runtime.store.replaceConfigItemDepartments(itemId, body.department_ids ?? [], auth.orgId)
           writeJson(res, 200, { success: true })
           return
         }
