@@ -312,19 +312,20 @@ flowchart LR
 
 <p>moss 侧的判断是「the Rust VFS has no list/readdir」,因此维护了 <code>~/.moss/nexus/secrets_index.db</code> 这个 SQLite 索引。<strong>这个前提不成立。</strong></p>
 
-<p>我用真 daemon 对着 moss 的路径形状验过:</p>
+<div class="box bad">
+<p><strong>我先认领一个我自己的不合格。</strong>我最早给你们这条建议时,验证是<strong>打了折的</strong>:你们的命名空间是 <code>org:{orgId}:system</code>,<strong>路径里带冒号</strong>;而 VFS 会把路径映射成宿主文件名,<strong>Windows 直接 <code>InvalidFilename</code> 拒绝</strong>。所以我当时把命名空间换成了无冒号的形状才验通 —— <strong>也就是说,你们的真实路径形状,我从来没验过。</strong></p>
+<p>拿一个「为了通过而改了输入」的测试,去建议外部团队删代码,这不合格。已经补上了。</p>
+</div>
 
-<pre><code>写入 /secrets/{ns}/openai.json, anthropic.json, slack.json
+<p>现在是<strong>在 Linux 容器里、用你们的真实路径形状(带冒号)</strong>验的,而且<strong>进了 CI</strong>(<a href="https://github.com/nexi-lab/nexus-vfs/pull/144">nexus-vfs PR #144</a>):</p>
 
-Readdir("/secrets/{ns}")  → is_error=False
-                          → ['/secrets/{ns}/anthropic.json',
-                             '/secrets/{ns}/openai.json',
-                             '/secrets/{ns}/slack.json']
+<pre><code>写入  /secrets/org:acme:system/{openai,anthropic,slack}.json   → ok(空 token)
+读回  /secrets/org:acme:system/openai.json                     → 逐字节一致
 
-Readdir("/secrets")       → is_error=False
-                          → ['/secrets/{ns}']</code></pre>
+Readdir("/secrets/org:acme:system")  → ['anthropic.json', 'openai.json', 'slack.json']
+Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pre>
 
-<p>namespace 层和 key 层都能列。<strong>那个 SQLite 索引是冗余的,而且它是一个需要和 VFS 保持同步的第二 SSOT</strong> —— 删掉它是净收益。</p>
+<p>namespace 层和 key 层都能列。<strong>那个 SQLite 索引确实是冗余的,而且它是一个需要和 VFS 保持同步的第二 SSOT</strong> —— 删掉它是净收益。</p>
 
 <div class="box warn">
 <p><strong>一个 API wart:</strong><code>ReaddirEntry.name</code> 返回的是<strong>全路径</strong>而不是裸文件名。迁移时注意。</p>
@@ -333,6 +334,24 @@ Readdir("/secrets")       → is_error=False
 <h3>6.4 一个隐含约束:namespace 里的冒号</h3>
 
 <p><code>orgNamespacePrefix()</code> 产出的是 <code>org:{orgId}:</code>,路径里带冒号。VFS 会把路径映射成宿主文件名 —— <strong>Linux 上合法,Windows 上直接 <code>InvalidFilename</code> 写不进去</strong>。你们跑 Docker 所以今天没事,但这意味着 moss 的 nexus 数据目录<strong>不能在 Windows 宿主上落地</strong>。</p>
+
+<h2>6.5 我们替你们守着这个形状 <span class="tag" style="color:#0969da;border-color:#0969da">已合并</span></h2>
+
+<p><code>nexus-vfs</code> 的 CI 里现在有一个 job,叫 <strong>"moss's deployment shape, in a container"</strong>。它在容器里跑<strong>你们的真实形状</strong>:</p>
+
+<ul>
+<li><strong>你们的调用参数</strong>(<code>nexusManager.ts:84-88</code> 逐字照抄,减去要删的 <code>--bootstrap-mode</code>)—— <strong>这等于我们替你们把 bump 先跑了一遍</strong></li>
+<li><strong>你们的真实路径</strong> <code>/secrets/org:{orgId}:system/{key}.json</code>,带冒号</li>
+<li><strong>你们的零改动承诺</strong>:loopback + <code>--no-tls</code> + 空 token,不加任何 flag 能起</li>
+<li><strong>那个致命错误</strong>:容器里绑 <code>0.0.0.0</code>(= 挂进 <code>moss-network</code>)—— 必须<strong>拒绝启动</strong></li>
+</ul>
+
+<p><strong>为什么放在 nexus-vfs 而不是 moss:</strong>你们 pin 的是 <code>v0.4.0</code>,binary 还是 <code>copyFromSudowork()</code> 拷来的。放在 moss 的测试<strong>测的是一个旧二进制,对我们 <code>main</code> 上的改动一无所知</strong> —— 它抓不到「我们打破了 moss」,而那恰恰是<strong>每周都在发生</strong>的事(我们周周改内核,你们冻在 6 月)。所以它是一个 <strong>consumer-driven contract test:由被依赖方持有,保护依赖方。</strong></p>
+
+<div class="box warn">
+<p><strong>⚠ 但这个测试的 fixture 是<em>你们的</em>代码。</strong>如果你们改了 <code>nexusManager.ts</code> 的启动参数、或 <code>secretSubject.ts</code> 的命名空间形状,<strong>我们这个测试会继续测一个化石,而且照样绿</strong> —— 然后你们 bump 的时候才发现。</p>
+<p><strong>所以这是一条契约:改了这两处,请告诉我们一声</strong>(或者直接在 <code>nexus-vfs/tests/docker/moss_shape_probe.py</code> 提个 PR 改掉)。我们会同步。</p>
+</div>
 
 <h2>7. 不归 nexus 管、但更严重的那条</h2>
 
