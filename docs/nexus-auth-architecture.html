@@ -78,8 +78,8 @@
 <table style="margin:10px 0 0">
 <tr><th>标记</th><th>含义</th><th>哪几节</th></tr>
 <tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></td><td><strong>今天线上就是这样</strong>,代码可查</td><td>§1 §2 §6</td></tr>
-<tr><td><span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></td><td>代码在 <code>nexus-vfs</code> <code>main</code> 上,但<strong>只在 <code>nexusd-collaboration</code> profile 里</strong>,而且<strong>没有任何 release 包含它</strong>。moss 今天拿到的 <code>nexusd-cluster</code> 里<strong>一行 auth 都没有</strong></td><td>§4</td></tr>
-<tr><td><span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></td><td><strong>还没写。</strong>这是我准备做的,拿出来先对齐</td><td>§3 §5</td></tr>
+<tr><td><span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></td><td>代码在 <code>nexus-vfs</code> <code>main</code> 上,但<strong>只在 <code>nexusd-collaboration</code> profile 里</strong>,而且<strong>没有任何 release 包含它</strong>。moss 今天拿到的 <code>nexusd-cluster</code> 里<strong>一行 auth 都没有</strong></td><td>§3 §4</td></tr>
+<tr><td><span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></td><td><strong>还没写。</strong>这是我准备做的,拿出来先对齐</td><td>§5</td></tr>
 </table>
 </div>
 
@@ -145,11 +145,11 @@ flowchart LR
 
 <p>这是 moss 侧同学自己指出来的,原话是 <em>"The single load-bearing control is the loopback bind ... it's one config line away from a serious multi-tenant breach"</em>。这个判断是对的,而且比「要不要上 auth」本身更要紧。</p>
 
-<h2>3. 提议:把这条不变量焊进内核 <span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></h2>
+<h2>3. 这条不变量已经焊进内核了 <span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></h2>
 
-<div class="box warn">
-<p><strong>⚠ 下面这张决策树是【提议】,不是现状。一行代码都还没写。</strong></p>
-<p>今天的事实是<strong>第 1 章</strong>那张图:<code>NoAuth</code> 对任何 token(包括空的)都返回 system admin,不做任何检查。第 3 章是我准备本周写进内核的东西,拿出来先跟你们对齐。</p>
+<div class="box ok">
+<p><strong>✅ 已实现并合并</strong>(<a href="https://github.com/nexi-lab/nexus-vfs/pull/143">nexus-vfs PR #143</a>)。下面这张决策树现在是 <code>nexusd-cluster</code> 的真实行为,四条路径都用真 daemon 验过,并且进了 CI。</p>
+<p><strong>但 moss 今天还拿不到</strong> —— 它<strong>不在任何 release 里</strong>(最新 release 仍是 <code>v0.4.0</code>)。这是 §8 里「发 release」那一步要解的。</p>
 </div>
 
 <p>与其靠 code review 盯住那行配置,不如让内核<strong>拒绝这个组合存在</strong>:</p>
@@ -220,10 +220,10 @@ flowchart TD
 <div class="box bad">
 <p><strong>⚠ 但 moss 今天拿不到它。</strong>两个原因,都要清楚:</p>
 <ul>
-<li>它目前<strong>只在 <code>nexusd-collaboration</code> 这个 profile 里</strong>。moss 跑的是 <code>nexusd-cluster</code>,那个 binary 里<strong>连 <code>auth</code> crate 都没编译进去</strong>,仍然是 <code>NoAuth</code>。(把 auth 折进 <code>nexusd-cluster</code>、删掉 collaboration profile,是我接下来要做的)</li>
-<li>而且<strong>没有任何 release 包含它</strong> —— 最新 release 是 <code>v0.4.0</code>(6/24),<strong>落后 <code>main</code> 215 个 commit</strong>。</li>
+<li><s>它只在 <code>nexusd-collaboration</code> 这个 profile 里</s> —— <strong>已解决</strong>:PR #143 把 <code>auth</code> 折进了 <code>nexusd-cluster</code>,<strong>collaboration profile 已删除</strong>。「认不认证」现在是<strong>运行时姿态</strong>,不是编译期 feature —— 没人为可信内网发一个不同的 <code>sshd</code>,他们配置它。</li>
+<li><strong>但没有任何 release 包含它</strong> —— 最新 release 仍是 <code>v0.4.0</code>(6/24)。<strong>这是唯一还挡着的一步。</strong></li>
 </ul>
-<p>所以:<strong>今天 moss 的 nexusd 里,auth 相关的东西一个都没有。</strong></p>
+<p>所以:<strong>今天 moss 拿到的 nexusd 里,auth 相关的东西仍然一个都没有 —— 但原因只剩「没发版」这一个了。</strong></p>
 </div>
 
 <pre class="mermaid">
