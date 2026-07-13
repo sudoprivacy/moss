@@ -73,11 +73,21 @@
   <p class="sub">写给 moss / nexus 两边的工程同学。目的:把「nexus 到底需不需要 auth、需要什么样的 auth」这件事一次讲清,并把要一起拍的决定摊出来。</p>
 </header>
 
+<div class="box bad">
+<p><strong>⚠ 先读这个:这份文档混了三种状态,别读串。</strong></p>
+<table style="margin:10px 0 0">
+<tr><th>标记</th><th>含义</th><th>哪几节</th></tr>
+<tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></td><td><strong>今天线上就是这样</strong>,代码可查</td><td>§1 §2 §6</td></tr>
+<tr><td><span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></td><td>代码在 <code>nexus-vfs</code> <code>main</code> 上,但<strong>只在 <code>nexusd-collaboration</code> profile 里</strong>,而且<strong>没有任何 release 包含它</strong>。moss 今天拿到的 <code>nexusd-cluster</code> 里<strong>一行 auth 都没有</strong></td><td>§4</td></tr>
+<tr><td><span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></td><td><strong>还没写。</strong>这是我准备做的,拿出来先对齐</td><td>§3 §5</td></tr>
+</table>
+</div>
+
 <div class="box ok">
 <p><strong>一句话结论。</strong>就 moss 今天的拓扑而言,<strong>nexus 的 auth 是纵深防御,不是在补一个开着的门</strong>。真正承重的那面墙是 <code>:2126</code> 的 <strong>loopback 绑定</strong>。所以我们要做的第一件事不是「上 auth」,而是<strong>让「无 auth + 非 loopback」这个组合在内核里不可能存在</strong>。</p>
 </div>
 
-<h2>1. 今天的真实拓扑</h2>
+<h2>1. 今天的真实拓扑 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></h2>
 
 <p>下面这张图是对着 moss 代码逐行核过的(<code>nexusManager.ts</code> / <code>startStandaloneServer.ts</code> / <code>nexusClient.ts</code> / <code>authProxyServer.ts</code>),不是设计意图,是现状。</p>
 
@@ -124,7 +134,7 @@ flowchart LR
 <p><strong>所以「org 隔离靠一个字符串前缀」不是一个可被利用的洞。</strong>我一开始判断错了。session container 根本够不到 <code>:2126</code>,真正的访问控制边界是 Auth Proxy,那道墙是完好的。</p>
 </div>
 
-<h2>2. 但承重墙只有一面</h2>
+<h2>2. 但承重墙只有一面 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></h2>
 
 <p>整个隔离模型压在<strong>一个假设</strong>上:「除了 proxy,没有别的东西能碰到 <code>:2126</code>」。</p>
 
@@ -135,7 +145,12 @@ flowchart LR
 
 <p>这是 moss 侧同学自己指出来的,原话是 <em>"The single load-bearing control is the loopback bind ... it's one config line away from a serious multi-tenant breach"</em>。这个判断是对的,而且比「要不要上 auth」本身更要紧。</p>
 
-<h2>3. 提议:把这条不变量焊进内核 <span class="tag todo">本周做</span></h2>
+<h2>3. 提议:把这条不变量焊进内核 <span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></h2>
+
+<div class="box warn">
+<p><strong>⚠ 下面这张决策树是【提议】,不是现状。一行代码都还没写。</strong></p>
+<p>今天的事实是<strong>第 1 章</strong>那张图:<code>NoAuth</code> 对任何 token(包括空的)都返回 system admin,不做任何检查。第 3 章是我准备本周写进内核的东西,拿出来先跟你们对齐。</p>
+</div>
 
 <p>与其靠 code review 盯住那行配置,不如让内核<strong>拒绝这个组合存在</strong>:</p>
 
@@ -196,11 +211,20 @@ flowchart TD
 <p><strong>顺便更正一处术语</strong>(因为它会影响你们读我们的架构):<code>AuthProvider</code> <strong>不是 HAL</strong>,它是 <strong>transport 层的一个 DI 槽</strong>(<code>Arc&lt;dyn AuthProvider&gt;</code>) —— 内核根本不消费它。真正的 HAL 是 <code>AuthKeyStore</code>(§3.B.3),那是<strong>凭证记录的复制存储</strong>。两者正交:换存储不动策略,换策略(JWT/OIDC)不动存储。</p>
 </div>
 
-<h2>4. 服务端的 auth,已经做完了 <span class="tag done">已 merge</span></h2>
+<h2>4. 服务端的 auth <span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></h2>
 
 <p>moss 侧提过一个很关键的更正:<em>「populate authToken 而不改服务端,等于什么都没做」</em> —— 完全正确,因为 <code>NoAuth</code> 根本不看那个字段。</p>
 
-<p><strong>服务端那一半我们已经做完并 merge 进 <code>nexus-vfs</code> main 了</strong>(PR #141 + #142)。nexusd 现在真的会校验并拒绝。</p>
+<p><strong>服务端那一半我们已经做完并 merge 进 <code>nexus-vfs</code> <code>main</code> 了</strong>(PR #141 + #142)。nexusd 现在真的会校验并拒绝。</p>
+
+<div class="box bad">
+<p><strong>⚠ 但 moss 今天拿不到它。</strong>两个原因,都要清楚:</p>
+<ul>
+<li>它目前<strong>只在 <code>nexusd-collaboration</code> 这个 profile 里</strong>。moss 跑的是 <code>nexusd-cluster</code>,那个 binary 里<strong>连 <code>auth</code> crate 都没编译进去</strong>,仍然是 <code>NoAuth</code>。(把 auth 折进 <code>nexusd-cluster</code>、删掉 collaboration profile,是我接下来要做的)</li>
+<li>而且<strong>没有任何 release 包含它</strong> —— 最新 release 是 <code>v0.4.0</code>(6/24),<strong>落后 <code>main</code> 215 个 commit</strong>。</li>
+</ul>
+<p>所以:<strong>今天 moss 的 nexusd 里,auth 相关的东西一个都没有。</strong></p>
+</div>
 
 <pre class="mermaid">
 flowchart LR
