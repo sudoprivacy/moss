@@ -87,6 +87,12 @@ export function getDefaultServerConfig(): ServerFileConfig {
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
+      automationEnabled: false,
+      broadcastEnabled: true,
+      broadcastTtsVersion: 'flight-phase-v1',
+      healthReportEnabled: false,
+      healthReportCollectSeconds: 30,
+      healthReportMinSamples: 1,
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
@@ -98,6 +104,13 @@ export function getDefaultServerConfig(): ServerFileConfig {
 
 function normalizePath(input: string): string {
   return expandPath(input)
+}
+
+function readIntEnv(name: string, fallback: number | undefined): number | undefined {
+  const raw = process.env[name]
+  if (!raw || !raw.trim()) return fallback
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) ? parsed : fallback
 }
 
 function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
@@ -181,14 +194,11 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? process.env.CABIN_ENABLED === '1' || process.env.CABIN_ENABLED === 'true'
         : raw.cabin.enabled,
       tokenSecret: process.env.CABIN_TOKEN_SECRET || raw.cabin.tokenSecret,
-      tokenTtlSeconds: process.env.CABIN_TOKEN_TTL_SECONDS
-        ? Number.parseInt(process.env.CABIN_TOKEN_TTL_SECONDS, 10)
-        : raw.cabin.tokenTtlSeconds,
+      tokenTtlSeconds: readIntEnv('CABIN_TOKEN_TTL_SECONDS', raw.cabin.tokenTtlSeconds),
       passengerInfoUrl: process.env.CABIN_PASSENGER_INFO_URL || raw.cabin.passengerInfoUrl,
       passengerInfoAuth: process.env.CABIN_PASSENGER_INFO_AUTH || raw.cabin.passengerInfoAuth,
-      passengerInfoPrivacyLevel: process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL
-        ? Number.parseInt(process.env.CABIN_PASSENGER_INFO_PRIVACY_LEVEL, 10)
-        : raw.cabin.passengerInfoPrivacyLevel,
+      passengerInfoPrivacyLevel: readIntEnv('CABIN_PASSENGER_INFO_PRIVACY_LEVEL', raw.cabin.passengerInfoPrivacyLevel),
+      aircraftNo: process.env.CABIN_AIRCRAFT_NO || raw.cabin.aircraftNo,
       asrUrl: process.env.CABIN_ASR_URL || raw.cabin.asrUrl,
       asrModel: process.env.CABIN_ASR_MODEL || raw.cabin.asrModel,
       asrApiKey: process.env.CABIN_ASR_API_KEY || raw.cabin.asrApiKey,
@@ -202,9 +212,36 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       llmApiKey: process.env.CABIN_LLM_API_KEY || raw.cabin.llmApiKey,
       controlBaseUrl: process.env.CABIN_CONTROL_BASE_URL || raw.cabin.controlBaseUrl,
       controlAuth: process.env.CABIN_CONTROL_AUTH || raw.cabin.controlAuth,
-      controlTimeoutMs: process.env.CABIN_CONTROL_TIMEOUT_MS
-        ? Number.parseInt(process.env.CABIN_CONTROL_TIMEOUT_MS, 10)
-        : raw.cabin.controlTimeoutMs,
+      controlTimeoutMs: readIntEnv('CABIN_CONTROL_TIMEOUT_MS', raw.cabin.controlTimeoutMs),
+      automationEnabled: process.env.CABIN_AUTOMATION_ENABLED
+        ? process.env.CABIN_AUTOMATION_ENABLED === '1' || process.env.CABIN_AUTOMATION_ENABLED === 'true'
+        : raw.cabin.automationEnabled,
+      flightStateWsUrl: process.env.CABIN_FLIGHT_STATE_WS_URL || raw.cabin.flightStateWsUrl,
+      flightStateWsConnectTimeoutMs: readIntEnv('CABIN_FLIGHT_STATE_WS_CONNECT_TIMEOUT_MS', raw.cabin.flightStateWsConnectTimeoutMs),
+      flightStateWsHeartbeatIntervalMs: readIntEnv('CABIN_FLIGHT_STATE_WS_HEARTBEAT_INTERVAL_MS', raw.cabin.flightStateWsHeartbeatIntervalMs),
+      flightStateWsIdleTimeoutMs: readIntEnv('CABIN_FLIGHT_STATE_WS_IDLE_TIMEOUT_MS', raw.cabin.flightStateWsIdleTimeoutMs),
+      flightStateWsReconnectMinMs: readIntEnv('CABIN_FLIGHT_STATE_WS_RECONNECT_MIN_MS', raw.cabin.flightStateWsReconnectMinMs),
+      flightStateWsReconnectMaxMs: readIntEnv('CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS', raw.cabin.flightStateWsReconnectMaxMs),
+      managedSeats: process.env.CABIN_MANAGED_SEATS || raw.cabin.managedSeats,
+      broadcastBaseUrl: process.env.CABIN_BROADCAST_BASE_URL || raw.cabin.broadcastBaseUrl,
+      broadcastApiBaseUrl: process.env.CABIN_BROADCAST_API_BASE_URL || raw.cabin.broadcastApiBaseUrl,
+      broadcastApiKey: process.env.CABIN_BROADCAST_API_KEY || raw.cabin.broadcastApiKey,
+      broadcastAuth: process.env.CABIN_BROADCAST_AUTH || raw.cabin.broadcastAuth,
+      broadcastEnabled: process.env.CABIN_BROADCAST_ENABLED
+        ? process.env.CABIN_BROADCAST_ENABLED === '1' || process.env.CABIN_BROADCAST_ENABLED === 'true'
+        : raw.cabin.broadcastEnabled,
+      broadcastTtsCacheDir: (process.env.CABIN_BROADCAST_TTS_CACHE_DIR || raw.cabin.broadcastTtsCacheDir)
+        ? normalizePath((process.env.CABIN_BROADCAST_TTS_CACHE_DIR || raw.cabin.broadcastTtsCacheDir)!)
+        : undefined,
+      broadcastTtsVersion: process.env.CABIN_BROADCAST_TTS_VERSION || raw.cabin.broadcastTtsVersion,
+      automationLogFile: (process.env.CABIN_AUTOMATION_LOG_FILE || raw.cabin.automationLogFile)
+        ? normalizePath((process.env.CABIN_AUTOMATION_LOG_FILE || raw.cabin.automationLogFile)!)
+        : undefined,
+      healthReportEnabled: process.env.CABIN_HEALTH_REPORT_ENABLED
+        ? process.env.CABIN_HEALTH_REPORT_ENABLED === '1' || process.env.CABIN_HEALTH_REPORT_ENABLED === 'true'
+        : raw.cabin.healthReportEnabled,
+      healthReportCollectSeconds: readIntEnv('CABIN_HEALTH_REPORT_COLLECT_SECONDS', raw.cabin.healthReportCollectSeconds),
+      healthReportMinSamples: readIntEnv('CABIN_HEALTH_REPORT_MIN_SAMPLES', raw.cabin.healthReportMinSamples),
       assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
       assistantDisplayName:
         process.env.CABIN_ASSISTANT_DISPLAY_NAME || raw.cabin.assistantDisplayName,

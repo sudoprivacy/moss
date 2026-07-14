@@ -119,6 +119,9 @@ import {
 import { getAvailableModels, getCacheStatus, refreshModelCache } from './modelListCache.js'
 import { createCabinApi } from './cabin/api.js'
 import { CabinStore } from './cabin/store.js'
+import { CabinFlightAutomation } from './cabin/automation.js'
+import { CabinHealthReportService } from './cabin/healthReports.js'
+import { CabinLogger } from './cabin/logger.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -1600,9 +1603,17 @@ export function startServer(
     console.error('[Server] Failed to start enabled plugins:', error)
   })
 
-  const channelsApi = createChannelsApi(runtime.store)
-  const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime }) : null
   const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.db) : null
+  const cabinLogger = config.cabin.enabled ? new CabinLogger(config) : undefined
+  const cabinHealthReports = config.cabin.enabled && config.cabin.healthReportEnabled && cabinAdminStore
+    ? new CabinHealthReportService({ config: config.cabin, store: cabinAdminStore, logger: cabinLogger })
+    : undefined
+  const channelsApi = createChannelsApi(runtime.store)
+  const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime, healthReports: cabinHealthReports }) : null
+  const cabinFlightAutomation = config.cabin.enabled && cabinAdminStore
+    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports)
+    : null
+  cabinFlightAutomation?.start()
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -2008,6 +2019,79 @@ export function startServer(
           total: result.total,
           limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
           offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+        })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/cabin/alerts') {
+        if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
+        const auth = authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        authService.requireScope(auth, 'admin:settings')
+        const limit = Number.parseInt(url.searchParams.get('limit') || '50', 10)
+        const offset = Number.parseInt(url.searchParams.get('offset') || '0', 10)
+        const statusParam = url.searchParams.get('status') || undefined
+        const result = cabinAdminStore.listAlerts({
+          flightId: url.searchParams.get('flight_id') || undefined,
+          flightDate: url.searchParams.get('flight_date') || undefined,
+          seatNo: url.searchParams.get('seat_no') || undefined,
+          status: statusParam === 'active' || statusParam === 'resolved' ? statusParam : undefined,
+          limit: Number.isFinite(limit) ? limit : 50,
+          offset: Number.isFinite(offset) ? offset : 0,
+        })
+        writeJson(res, 200, {
+          alerts: result.alerts.map(alert => ({
+            id: alert.id,
+            aircraft_no: alert.aircraftNo,
+            flight_id: alert.flightId,
+            flight_date: alert.flightDate,
+            phase_code: alert.phaseCode,
+            phase_name: alert.phaseName,
+            seat_no: alert.seatNo,
+            alert_type: alert.alertType,
+            severity: alert.severity,
+            message: alert.message,
+            status: alert.status,
+            source_event_id: alert.sourceEventId,
+            details: alert.details,
+            created_at: alert.createdAt,
+            resolved_at: alert.resolvedAt,
+          })),
+          total: result.total,
+          limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+          offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+        })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/cabin/managed-seats') {
+        if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
+        const auth = authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        authService.requireScope(auth, 'admin:settings')
+        const seats = cabinAdminStore.listManagedSeats({
+          aircraftNo: url.searchParams.get('aircraft_no') || undefined,
+          flightId: url.searchParams.get('flight_id') || undefined,
+          flightDate: url.searchParams.get('flight_date') || undefined,
+          activeOnly: url.searchParams.get('active') !== 'false',
+        })
+        writeJson(res, 200, {
+          seats: seats.map(seat => ({
+            id: seat.id,
+            aircraft_no: seat.aircraftNo,
+            flight_id: seat.flightId,
+            flight_date: seat.flightDate,
+            seat_no: seat.seatNo,
+            column_no: seat.columnNo,
+            flight_seat_id: seat.flightSeatId,
+            aircraft_seat_id: seat.aircraftSeatId,
+            tablet_id: seat.tabletId,
+            tablet_type: seat.tabletType,
+            status: seat.status,
+            last_seen_at: seat.lastSeenAt,
+            created_at: seat.createdAt,
+            updated_at: seat.updatedAt,
+          })),
         })
         return
       }
@@ -7245,6 +7329,7 @@ export function startServer(
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()
       cronService.stop()
+      cabinFlightAutomation?.stop()
       wss.close()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {

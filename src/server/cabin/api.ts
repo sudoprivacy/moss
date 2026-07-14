@@ -1,5 +1,7 @@
 import http from 'http'
 import { randomUUID } from 'crypto'
+import { readFile, stat } from 'fs/promises'
+import path from 'path'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
 import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
@@ -11,6 +13,7 @@ import {
   isAffirmationReply,
   looksLikeHardwareOffer,
 } from './service.js'
+import { CabinHealthReportService } from './healthReports.js'
 import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
@@ -49,6 +52,15 @@ function mapServiceError(error: unknown): CabinHttpError {
   }
   if (/LLM request failed|Moss session|runner|socket/i.test(message)) {
     return new CabinHttpError(500, 'AGENT_FAILED', message)
+  }
+  if (message === 'MISSING_SEAT_CONTEXT') {
+    return new CabinHttpError(400, 'MISSING_SEAT_CONTEXT', 'Seat context is required to start a health report')
+  }
+  if (message === 'HEALTH_REPORT_NOT_FOUND') {
+    return new CabinHttpError(404, 'HEALTH_REPORT_NOT_FOUND', 'Health report was not found')
+  }
+  if (message === 'HEALTH_REPORT_FORBIDDEN') {
+    return new CabinHttpError(403, 'HEALTH_REPORT_FORBIDDEN', 'Health report does not belong to this seat')
   }
   return new CabinHttpError(500, 'INTERNAL_ERROR', message)
 }
@@ -277,6 +289,10 @@ function formatCabinTime(ms: number): string {
   return `${date.toISOString().slice(0, 19)}+08:00`
 }
 
+function todayFlightDate(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
 function objectField(value: unknown, key: string): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const child = (value as Record<string, unknown>)[key]
@@ -461,12 +477,18 @@ async function contextFromToken(
 export function createCabinApi(options: {
   config: ServerConfig
   runtime: RuntimeService
+  healthReports?: CabinHealthReportService
 }): {
   handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
 } {
   const cabinConfig = options.config.cabin
   const store = new CabinStore(options.runtime.store.db)
   const cabinLogger = new CabinLogger(options.config)
+  const healthReports = options.healthReports ?? new CabinHealthReportService({
+    config: cabinConfig,
+    store,
+    logger: cabinLogger,
+  })
   const services = new CabinServices({
     config: cabinConfig,
     store,
@@ -499,10 +521,65 @@ export function createCabinApi(options: {
   })
   const demoState = new CabinDemoState(options.config, services, cabinLogger)
 
+  function registerManagedSeatFromToken(
+    body: JsonBody,
+    tablet: { tabletToken: string; tabletId: string },
+    tokenContext: Omit<CabinTokenPayload, 'tabletToken' | 'tabletId' | 'issuedAt' | 'expiresAt'>,
+    requestId: string,
+  ): void {
+    try {
+      const seat = store.upsertManagedSeat({
+        aircraftNo: tokenContext.aircraftNo,
+        flightId: stringBodyField(body, 'flightId') || stringBodyField(body, 'flight_id') || 'AUTO',
+        flightDate: stringBodyField(body, 'flightDate') || stringBodyField(body, 'flight_date') || todayFlightDate(),
+        seatNo: tokenContext.seatNo,
+        columnNo: tokenContext.columnNo,
+        flightSeatId: tokenContext.flightSeatId,
+        aircraftSeatId: tokenContext.aircraftSeatId,
+        tabletId: tablet.tabletId,
+        tabletType: tokenContext.tabletType,
+      })
+      cabinLogger.log({
+        type: 'outbound',
+        requestId,
+        tabletId: tablet.tabletId,
+        upstream: 'cabin-managed-seat',
+        method: 'UPSERT',
+        ok: true,
+        elapsedMs: 0,
+        details: {
+          source: 'auth-token',
+          flight_id: seat.flightId,
+          flight_date: seat.flightDate,
+          seat_no: seat.seatNo,
+          flight_seat_id: seat.flightSeatId,
+        },
+      })
+    } catch (error) {
+      cabinLogger.log({
+        type: 'outbound',
+        requestId,
+        tabletId: tablet.tabletId,
+        upstream: 'cabin-managed-seat',
+        method: 'UPSERT',
+        ok: false,
+        elapsedMs: 0,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: {
+          source: 'auth-token',
+          seat_no: tokenContext.seatNo,
+          flight_seat_id: tokenContext.flightSeatId,
+        },
+      })
+      throw new CabinHttpError(500, 'MANAGED_SEAT_REGISTER_FAILED', 'Failed to register cabin managed seat')
+    }
+  }
+
   async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
     const tokenContext = optionalCabinTokenFields(body)
+    registerManagedSeatFromToken(body, tablet, tokenContext, requestId)
     const token = issueCabinToken({
       ...tablet,
       ...tokenContext,
@@ -967,6 +1044,45 @@ export function createCabinApi(options: {
     res.end(result.audio)
   }
 
+  async function handleHealthReportStart(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
+    if (!cabinConfig.healthReportEnabled) {
+      throw new CabinHttpError(404, 'HEALTH_REPORT_DISABLED', 'Health report API is disabled')
+    }
+    const tablet = requireTabletHeaders(req)
+    const payload = requireCabinToken(req, cabinConfig)
+    const body = await readJsonBody(req)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    try {
+      const result = healthReports.startReport(context, {
+        requestId,
+        language: stringBodyField(body, 'language'),
+      })
+      writeJson(res, 200, result)
+    } catch (error) {
+      throw mapServiceError(error)
+    }
+  }
+
+  async function handleHealthReportGet(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    reportId: string,
+    requestId: string,
+  ): Promise<void> {
+    if (!cabinConfig.healthReportEnabled) {
+      throw new CabinHttpError(404, 'HEALTH_REPORT_DISABLED', 'Health report API is disabled')
+    }
+    const tablet = requireTabletHeaders(req)
+    const payload = requireCabinToken(req, cabinConfig)
+    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    try {
+      const result = healthReports.getReport(reportId, context)
+      writeJson(res, 200, result)
+    } catch (error) {
+      throw mapServiceError(error)
+    }
+  }
+
   async function handleDemoFlightState(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     if (!cabinConfig.flightStateDemoEnabled) {
       throw new CabinHttpError(404, 'NOT_FOUND', 'Cabin flight state demo is disabled')
@@ -1000,6 +1116,34 @@ export function createCabinApi(options: {
     })
   }
 
+  async function handleBroadcastAsset(res: http.ServerResponse, filename: string): Promise<void> {
+    if (!/^[A-Za-z0-9_.-]+$/.test(filename)) {
+      throw new CabinHttpError(400, 'INVALID_BROADCAST_FILE', 'Invalid broadcast filename')
+    }
+    const filePath = path.join(options.config.rootDir, 'cabin-broadcasts', filename)
+    let fileStat: Awaited<ReturnType<typeof stat>>
+    try {
+      fileStat = await stat(filePath)
+    } catch {
+      throw new CabinHttpError(404, 'BROADCAST_NOT_FOUND', 'Cabin broadcast asset not found')
+    }
+    if (!fileStat.isFile()) {
+      throw new CabinHttpError(404, 'BROADCAST_NOT_FOUND', 'Cabin broadcast asset not found')
+    }
+    const data = await readFile(filePath)
+    const contentType = filename.endsWith('.wav')
+      ? 'audio/wav'
+      : filename.endsWith('.mp3')
+        ? 'audio/mpeg'
+        : 'text/plain; charset=utf-8'
+    res.writeHead(200, {
+      'content-type': contentType,
+      'content-length': data.length,
+      'cache-control': 'public, max-age=3600',
+    })
+    res.end(data)
+  }
+
   return {
     async handle(req, res, pathname) {
       if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
@@ -1031,6 +1175,7 @@ export function createCabinApi(options: {
       }
       try {
         const url = new URL(req.url || '/', 'http://localhost')
+        const isHead = req.method === 'HEAD'
         if (req.method === 'POST' && pathname === '/v1/auth/token') {
           await handleAuthToken(req, res, requestId)
           logInbound({ status: 200, ok: true })
@@ -1066,6 +1211,17 @@ export function createCabinApi(options: {
           logInbound({ status: 200, ok: true })
           return true
         }
+        if (req.method === 'POST' && pathname === '/v1/health-reports/start') {
+          await handleHealthReportStart(req, res, requestId)
+          logInbound({ status: 200, ok: true })
+          return true
+        }
+        const healthReportMatch = pathname.match(/^\/v1\/health-reports\/([^/]+)$/)
+        if (req.method === 'GET' && healthReportMatch) {
+          await handleHealthReportGet(req, res, decodeURIComponent(healthReportMatch[1] || ''), requestId)
+          logInbound({ status: 200, ok: true })
+          return true
+        }
         if (req.method === 'POST' && pathname === '/v1/cabin-demo/flight-state') {
           await handleDemoFlightState(req, res, requestId)
           logInbound({ status: 200, ok: true })
@@ -1078,6 +1234,12 @@ export function createCabinApi(options: {
         }
         if (req.method === 'GET' && pathname === '/v1/cabin-demo/broadcasts') {
           handleDemoBroadcasts(res)
+          logInbound({ status: 200, ok: true })
+          return true
+        }
+        const broadcastMatch = pathname.match(/^\/v1\/cabin\/broadcasts\/([^/]+)$/)
+        if ((req.method === 'GET' || isHead) && broadcastMatch) {
+          await handleBroadcastAsset(res, decodeURIComponent(broadcastMatch[1] || ''))
           logInbound({ status: 200, ok: true })
           return true
         }

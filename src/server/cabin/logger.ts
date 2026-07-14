@@ -1,4 +1,4 @@
-import { mkdir, appendFile } from 'fs/promises'
+import { mkdir, appendFile, rename, stat } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 
@@ -31,6 +31,8 @@ type CabinLogEvent = CabinLogContext & {
   command?: string
   details?: Record<string, unknown>
 }
+
+const MAX_CABIN_LOG_BYTES = 50 * 1024 * 1024
 
 export class CabinLogger {
   private readonly filePath: string
@@ -76,6 +78,7 @@ export class CabinLogger {
   private async append(payload: Record<string, unknown>): Promise<void> {
     try {
       await mkdir(dirname(this.filePath), { recursive: true })
+      await rotateLog(this.filePath, MAX_CABIN_LOG_BYTES)
       await appendFile(this.filePath, `${JSON.stringify(payload)}\n`, 'utf8')
     } catch (error) {
       console.warn('[CabinLogger] Failed to write cabin log:', error)
@@ -110,4 +113,16 @@ function sanitizeUrl(value: string): string {
 
 function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}...` : value
+}
+
+async function rotateLog(filePath: string, maxBytes: number): Promise<void> {
+  if (maxBytes <= 0) return
+  try {
+    const info = await stat(filePath)
+    if (info.size < maxBytes) return
+    const rotated = `${filePath}.${new Date().toISOString().replace(/[:.]/g, '-')}`
+    await rename(filePath, rotated)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
 }

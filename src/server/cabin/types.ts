@@ -63,6 +63,96 @@ export type CabinToolCall = {
   arguments: Record<string, unknown>
 }
 
+export type CabinManagedSeat = {
+  id: string
+  aircraftNo: string | null
+  flightId: string
+  flightDate: string
+  seatNo: string
+  columnNo: string | null
+  flightSeatId: string | null
+  aircraftSeatId: string | null
+  tabletId: string | null
+  tabletType: string | null
+  status: 'active' | 'inactive'
+  lastSeenAt: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type CabinAlert = {
+  id: string
+  aircraftNo: string | null
+  flightId: string
+  flightDate: string | null
+  phaseCode: number | null
+  phaseName: string
+  seatNo: string | null
+  alertType: string
+  severity: 'info' | 'warning' | 'critical'
+  message: string
+  status: 'active' | 'resolved'
+  sourceEventId: string | null
+  details: Record<string, unknown> | null
+  createdAt: number
+  resolvedAt: number | null
+}
+
+export type CabinHealthReportStatus = 'collecting' | 'generating' | 'completed' | 'failed' | 'cancelled' | 'expired'
+
+export type CabinHealthMetricLevel = 'low' | 'normal' | 'high' | 'invalid' | 'missing'
+
+export type CabinHealthMetricKey = 'heart_rate' | 'respiratory_rate' | 'spo2' | 'body_temperature'
+
+export type CabinHealthMetricResult = {
+  value: number | null
+  unit: string
+  level: CabinHealthMetricLevel
+  range: {
+    min: number
+    max: number
+    normal_min: number
+    normal_max: number
+  }
+}
+
+export type CabinHealthReportSummary = {
+  score: number
+  scoreLevel: 'good' | 'pass' | 'fail'
+  emotionStatus: 'good' | 'pass' | 'fail' | 'unknown'
+  physiologyStatus: 'normal' | 'abnormal' | 'unknown'
+  metricLevels: Record<CabinHealthMetricKey, CabinHealthMetricLevel>
+  overview: string
+  interpretations: string[]
+  suggestions: string[]
+  disclaimer: string
+}
+
+export type CabinHealthReport = {
+  id: string
+  aircraftNo: string | null
+  flightId: string
+  flightDate: string
+  seatNo: string
+  tabletId: string | null
+  passengerId: string | null
+  passengerRef: string | null
+  status: CabinHealthReportStatus
+  language: string | null
+  sampleCount: number
+  samples: Record<string, unknown>[] | null
+  metrics: Record<CabinHealthMetricKey, CabinHealthMetricResult> | null
+  summary: CabinHealthReportSummary | null
+  errorCode: string | null
+  errorMessage: string | null
+  cancelledAt: number | null
+  startedAt: number
+  collectUntil: number
+  generatedAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
 export type CabinTokenPayload = {
   tabletToken: string
   tabletId: string

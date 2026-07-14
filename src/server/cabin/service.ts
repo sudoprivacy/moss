@@ -39,7 +39,10 @@ export class CabinServices {
   async ensureConversation(context: CabinPassengerContext) {
     const key = buildConversationKey(context)
     const existing = this.options.store.getConversationByKey(key)
-    if (existing) return existing
+    if (existing) {
+      this.options.store.upsertManagedSeatFromContext(context)
+      return existing
+    }
     const mossSessionId = this.options.createMossSession
       ? await this.options.createMossSession(context)
       : randomUUID()
