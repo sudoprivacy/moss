@@ -53,7 +53,7 @@ export function createSecretsApi(db: {
   getAllSecretMetadata: (orgId?: string) => SqlRow[]
   getExpiringSecretMetadata: (beforeTs: number, orgId?: string) => SqlRow[]
   insertAuditLog: (row: { id: string; actor_id: string; actor_name?: string; action: string; config_item_id?: number; org_id?: string | null; namespace: string; key: string; detail?: string; ip_address?: string }) => void
-  queryAuditLog: (opts: { actor_id?: string; config_item_id?: number; action?: string; since?: number; until?: number; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
+  queryAuditLog: (opts: { actor_id?: string; actorIds?: string[]; config_item_id?: number; scopes?: string[]; action?: string; since?: number; until?: number; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
   getDepartmentPolicies: (departmentId: string, orgId?: string) => SqlRow[]
   replaceDepartmentPolicies: (departmentId: string, configItemIds: number[], orgId?: string | null) => void
 }, nexus: NexusClient, getUserName: (userId: string) => string | undefined) {
@@ -321,6 +321,10 @@ export function createSecretsApi(db: {
        *  caller's capability so a non-admin can't widen it via query params. */
       actorIds?: string[]
       config_item_id?: number
+      /** Restrict the log to audit rows whose config item scope is in this set
+       *  (dept_admin => department+user, user => user). Undefined = full admin.
+       *  The route computes this so a non-admin can't widen it via query params. */
+      scopes?: string[]
       action?: string
       since?: number
       until?: number
@@ -331,6 +335,7 @@ export function createSecretsApi(db: {
         actor_id: params.actor_id,
         actorIds: params.actorIds,
         config_item_id: params.config_item_id,
+        scopes: params.scopes,
         action: params.action,
         since: params.since,
         until: params.until,

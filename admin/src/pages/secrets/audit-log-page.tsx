@@ -47,20 +47,26 @@ export default function AuditLogPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [logRes, itemsRes] = await Promise.all([
-        getAuditLog({
-          action: actionFilter !== 'all' ? actionFilter : undefined,
-          config_item_id: configItemFilter !== 'all' ? Number(configItemFilter) : undefined,
-        }),
-        getConfigItems(),
-      ])
+      const logRes = await getAuditLog({
+        action: actionFilter !== 'all' ? actionFilter : undefined,
+        config_item_id: configItemFilter !== 'all' ? Number(configItemFilter) : undefined,
+      })
       setEntries(logRes.items)
       setTotal(logRes.total)
-      setConfigItems(itemsRes.items)
     } catch {
       toast.error('获取审计日志失败')
     } finally {
       setIsLoading(false)
+    }
+    // Config items only power the filter dropdown + id→name display and are
+    // admin-only (non-admins get 403). Fetch separately so a failure here never
+    // blocks the audit log itself; the dropdown just stays empty and ids fall
+    // back to `#id`.
+    try {
+      const itemsRes = await getConfigItems()
+      setConfigItems(itemsRes.items)
+    } catch {
+      setConfigItems([])
     }
   }, [actionFilter, configItemFilter])
 

@@ -3494,6 +3494,11 @@ export class DirectConnectStore {
      *  actor_id if both are given. */
     actorIds?: string[]
     config_item_id?: number
+    /** Restrict to audit rows whose config item has one of these scopes
+     *  (credential audit scope gate: dept_admin => department+user, user => user).
+     *  Rows with a null/unresolvable config_item_id are excluded (fail-closed).
+     *  Undefined means no scope restriction (full admin). */
+    scopes?: string[]
     action?: string
     since?: number
     until?: number
@@ -3526,6 +3531,19 @@ export class DirectConnectStore {
     if (opts.config_item_id) {
       conditions.push('config_item_id = ?')
       params.push(opts.config_item_id)
+    }
+    if (opts.scopes) {
+      // Restrict to rows whose config item is in the caller's visible scope set.
+      // Empty set matches nothing; null config_item_id rows are excluded so a
+      // non-admin never sees audit entries for credentials outside their scope.
+      if (opts.scopes.length === 0) {
+        conditions.push('1 = 0')
+      } else {
+        conditions.push(
+          `config_item_id IN (SELECT id FROM config_items WHERE scope IN (${opts.scopes.map(() => '?').join(', ')}))`,
+        )
+        params.push(...opts.scopes)
+      }
     }
     if (opts.action) {
       conditions.push('action = ?')
