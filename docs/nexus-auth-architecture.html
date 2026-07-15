@@ -393,7 +393,7 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 </tr>
 </table>
 
-<h3>8.2 发布 + bump — 已在进行 <span class="tag" style="color:#0969da;border-color:#0969da">PR 已开,待合并</span></h3>
+<h3>8.2 发布 + bump — 完成 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">已全部合并</span></h3>
 
 <table>
 <tr><th></th><th>状态</th></tr>
@@ -412,7 +412,7 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 </table>
 
 <div class="box warn">
-<p><strong>⚠ #1001 和 #131 必须一起合。</strong>binary 经 <code>copyFromSudowork()</code> 到 moss,所以 pin 在 sudowork;而 flag 在 moss。任一单独合都会让启动挂(§6.1 的原子性)。</p>
+<p><strong>✅ #1001 和 #131 已原子合并(相隔 7 秒)。</strong>下一个从 sudowork 冷装的用户拿到的就是 <code>nexusd-cluster v0.5.0</code> —— 带 auth + loopback 守卫。moss 经 <code>copyFromSudowork()</code> 同步获得。</p>
 </div>
 
 <div class="box ok">
