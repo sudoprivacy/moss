@@ -250,8 +250,8 @@ export default function CorpAppsPage() {
                     <Button variant="outline" size="sm" onClick={() => setEditingId(a.id)}>
                       <Pencil className="size-3.5" />
                     </Button>
-                    <Button variant="outline" size="sm" onClick={() => setDeletingId(a.id)}>
-                      <Trash2 className="size-3.5 text-red-500" />
+                    <Button variant="destructive" size="sm" onClick={() => setDeletingId(a.id)}>
+                      <Trash2 className="size-3.5" />
                     </Button>
                   </div>
                 </div>

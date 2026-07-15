@@ -444,7 +444,7 @@ function InstalledAgentCard({
         {!agent.isBuiltin ? (
           <Button
             size="icon"
-            variant="ghost"
+            variant="destructive"
             disabled={uninstalling}
             onClick={event => {
               event.stopPropagation()
@@ -454,7 +454,7 @@ function InstalledAgentCard({
             {uninstalling ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
-              <Trash2 className="size-4 text-destructive" />
+              <Trash2 className="size-4" />
             )}
           </Button>
         ) : null}

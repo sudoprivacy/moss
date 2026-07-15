@@ -324,11 +324,11 @@ export default function ExternalSourcesPage() {
                       <Pencil className="size-3.5" />
                     </Button>
                     <Button
-                      variant="outline"
+                      variant="destructive"
                       size="sm"
                       onClick={() => setDeletingId(s.id)}
                     >
-                      <Trash2 className="size-3.5 text-red-500" />
+                      <Trash2 className="size-3.5" />
                     </Button>
                   </div>
                 </div>
