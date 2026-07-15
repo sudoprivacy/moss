@@ -559,7 +559,7 @@ export class AuthService {
     if (!user && !isSynthetic) {
       // Email-link guard: only link when the existing row has never been
       // claimed by any IdP AND isn't a local-auth (password) user. This keeps
-      // the bootstrap admin@local from being pulled into a Ruigu org by an
+      // the bootstrap admin@local from being pulled into an IdP org by an
       // accidental email collision, and protects manually-created password
       // users from silent IdP-takeover.
       const byEmail = this.db.getUserByEmail(email)

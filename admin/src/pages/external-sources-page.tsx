@@ -63,6 +63,12 @@ const CONNECTOR_LABELS: Record<string, string> = {
   wecom_drive: '企微微盘',
 }
 
+// Connector types the server may advertise but that aren't ready for users to
+// create yet. They're filtered out of the "new source" type picker and the
+// supported-types badges. Existing sources of these types keep rendering and
+// stay fully manageable (label lookup above still resolves).
+const HIDDEN_CONNECTOR_TYPES = new Set(['wecom_drive'])
+
 // Connector-specific config field hints. Filesystem only needs rootPath;
 // wecom_drive needs CorpID/AgentID/AgentSecret in credentials. The form
 // renders these dynamically.
@@ -133,7 +139,7 @@ export default function ExternalSourcesPage() {
         listConnectorTypes(),
       ])
       setSources(list)
-      setConnectorTypes(types)
+      setConnectorTypes(types.filter((t) => !HIDDEN_CONNECTOR_TYPES.has(t)))
     } catch (err) {
       toast.error(`加载失败:${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -212,7 +218,7 @@ export default function ExternalSourcesPage() {
   return (
     <DashboardLayout
       title="外部数据源"
-      description="配置企微微盘 / 本地挂载目录等外部数据源,自动同步到文档中心"
+      description="配置本地挂载目录等外部数据源,自动同步到文档中心"
     >
       <div className="mb-4 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
@@ -243,7 +249,7 @@ export default function ExternalSourcesPage() {
             <Plug className="size-10 text-muted-foreground mb-3" />
             <p className="text-base font-medium mb-1">还没有配置数据源</p>
             <p className="text-sm text-muted-foreground mb-4">
-              支持企微微盘、本地挂载目录等。配置后系统会定时拉取并同步到文档中心。
+              支持本地挂载目录等。配置后系统会定时拉取并同步到文档中心。
             </p>
             <Button onClick={() => setCreating(true)} disabled={connectorTypes.length === 0}>
               <Plus className="mr-1.5 size-4" /> 新建第一个数据源
@@ -523,7 +529,7 @@ function SourceDialog({
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="例如:锐锢企微微盘"
+              placeholder="例如:产品文档目录"
             />
           </div>
           {fields.map((f) => (

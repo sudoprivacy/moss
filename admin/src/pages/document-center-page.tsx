@@ -990,7 +990,7 @@ export default function DocumentCenterPage() {
               id="alias-input"
               value={aliasValue}
               onChange={e => setAliasValue(e.target.value)}
-              placeholder="例如:运营 SOP(锐锢)"
+              placeholder="例如:运营 SOP"
               autoFocus
             />
           </div>
