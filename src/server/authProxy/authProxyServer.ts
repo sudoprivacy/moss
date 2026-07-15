@@ -79,6 +79,113 @@ export function configItemToRule(
   }
 }
 
+/**
+ * Selection rank for a credential scope: higher wins. A user's own credential
+ * takes precedence over a department one, which takes precedence over the
+ * corp/enterprise (system) default. Unknown scopes rank lowest. Used only to
+ * break ties between rules whose URL patterns are equally specific.
+ */
+function scopeRank(scope: string): number {
+  switch (scope) {
+    case 'user':
+      return 3
+    case 'department':
+      return 2
+    case 'system':
+      return 1
+    default:
+      return 0
+  }
+}
+
+/**
+ * Convert a glob-style URL pattern (supporting `*` = any chars, `?` = single
+ * char) to a regex and test it against `url`. Invalid patterns never match.
+ */
+export function matchUrlPattern(pattern: string, url: string): boolean {
+  const regexStr = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
+  try {
+    return new RegExp(`^${regexStr}$`).test(url)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Compare two matching rules by the selection precedence (see
+ * {@link selectRuleForUrl}): longer urlPattern first, then scope
+ * (user > department > system). Returns >0 if `a` outranks `b`, <0 if `b`
+ * outranks `a`, 0 if they tie on both dimensions (in which case configItemId is
+ * the remaining tie-break). configItemId is intentionally NOT compared here so
+ * the caller can detect the tie and warn.
+ */
+function compareRulePriority(a: AuthProxyRule, b: AuthProxyRule): number {
+  if (a.urlPattern.length !== b.urlPattern.length) {
+    return a.urlPattern.length - b.urlPattern.length
+  }
+  return scopeRank(a.scope) - scopeRank(b.scope)
+}
+
+/**
+ * Pick the best matching credential rule for a URL from `rules`.
+ *
+ * Precedence among all matching rules, in order:
+ *   1. Longest urlPattern (most specific match).
+ *   2. Scope: user > department > system. A user's own credential beats a
+ *      department one, which beats the corp/enterprise (system) default.
+ *   3. Latest created (highest configItemId).
+ *
+ * Org isolation: only rules belonging to `orgId`, or global user-scope rules
+ * (orgId === null), are considered — so two orgs' identical URL patterns never
+ * collide.
+ *
+ * When the top two rules tie on both length AND scope, only configItemId (3)
+ * separated them — an arbitrary choice from the admin's point of view — so we
+ * emit a warning naming every rule in that tied group to flag the likely
+ * misconfiguration. Extracted as a pure function so the ranking is unit-testable
+ * without the HTTP proxy, nexus, and token minting.
+ */
+export function selectRuleForUrl(
+  rules: Iterable<AuthProxyRule>,
+  url: string,
+  orgId: string,
+): AuthProxyRule | null {
+  const matches: AuthProxyRule[] = []
+  for (const rule of rules) {
+    if (!rule.urlPattern) continue
+    if (rule.orgId !== null && rule.orgId !== orgId) continue
+    if (matchUrlPattern(rule.urlPattern, url)) matches.push(rule)
+  }
+  if (matches.length === 0) return null
+
+  // Highest priority first: longest pattern, then scope (user>dept>system),
+  // then latest created (highest id).
+  matches.sort((a, b) => {
+    const cmp = compareRulePriority(a, b)
+    if (cmp !== 0) return -cmp
+    return b.configItemId - a.configItemId
+  })
+
+  const best = matches[0]
+
+  const tied = matches.filter(r => compareRulePriority(r, best) === 0)
+  if (tied.length > 1) {
+    const desc = tied
+      .map(r => `#${r.configItemId} '${r.name}' (${r.scope}, pattern='${r.urlPattern}')`)
+      .join(', ')
+    console.warn(
+      `[AuthProxy] Ambiguous credential match for ${url}: ${tied.length} rules tie on ` +
+        `URL-pattern length and scope: ${desc}. Using #${best.configItemId} (latest created). ` +
+        `Disambiguate by URL pattern or scope.`,
+    )
+  }
+
+  return best
+}
+
 interface TokenEntry {
   userId: string
   orgId: string
@@ -538,30 +645,13 @@ export class AuthProxyServer {
   }
 
   /**
-   * Find the best matching rule for a URL.
-   * Uses longest-path-first matching: among all matching rules, the one with
-   * the longest urlPattern string wins (most specific match).
+   * Find the best matching rule for a URL, applying the credential-selection
+   * precedence. Delegates to the pure {@link selectRuleForUrl} so the ranking
+   * logic is unit-testable without the HTTP proxy. See that function for the
+   * full precedence rules.
    */
   private findRuleForUrl(url: string, orgId: string): AuthProxyRule | null {
-    let bestMatch: AuthProxyRule | null = null
-    let bestLength = -1
-    let bestId = -1
-
-    for (const rule of this.rules.values()) {
-      if (!rule.urlPattern) continue
-      // Org isolation: only consider rules belonging to the requester's org, or
-      // global (user-scope) rules (orgId === null). This is what prevents one
-      // org's credential from matching another org's identical URL pattern.
-      if (rule.orgId !== null && rule.orgId !== orgId) continue
-      if (this.matchUrl(rule.urlPattern, url)) {
-        if (rule.urlPattern.length > bestLength || (rule.urlPattern.length === bestLength && rule.configItemId > bestId)) {
-          bestMatch = rule
-          bestLength = rule.urlPattern.length
-          bestId = rule.configItemId
-        }
-      }
-    }
-    return bestMatch
+    return selectRuleForUrl(this.rules.values(), url, orgId)
   }
 
   /**
@@ -569,15 +659,7 @@ export class AuthProxyServer {
    * Supports * (any chars) and ? (single char) wildcards.
    */
   private matchUrl(pattern: string, url: string): boolean {
-    const regexStr = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.')
-    try {
-      return new RegExp(`^${regexStr}$`).test(url)
-    } catch {
-      return false
-    }
+    return matchUrlPattern(pattern, url)
   }
 
   /** Clean up tokens for processes that no longer exist */
