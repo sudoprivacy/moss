@@ -8,6 +8,7 @@ import {
   PlayCircle,
   RefreshCw,
   RotateCcw,
+  Square,
   XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -35,6 +36,7 @@ import {
   type WikiBuildJobListItem,
   listWikiBuildJobs,
   retryWikiBuildJob,
+  cancelWikiBuildJob,
 } from '@/lib/api/document-center'
 
 const STATUS_LABELS: Record<WikiBuildJob['status'], string> = {
@@ -97,6 +99,7 @@ export default function BuildJobsPage() {
   const [status, setStatus] = useState<WikiBuildJob['status'] | 'all'>('all')
   const [selectedJob, setSelectedJob] = useState<WikiBuildJobListItem | null>(null)
   const [retryingId, setRetryingId] = useState<string | null>(null)
+  const [cancellingId, setCancellingId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -147,6 +150,19 @@ export default function BuildJobsPage() {
       toast.error(`重试失败：${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setRetryingId(null)
+    }
+  }
+
+  const handleCancel = async (job: WikiBuildJobListItem) => {
+    setCancellingId(job.id)
+    try {
+      await cancelWikiBuildJob(job.id)
+      toast.success('已发送终止请求')
+      await refresh()
+    } catch (err) {
+      toast.error(`终止失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setCancellingId(null)
     }
   }
 
@@ -265,6 +281,18 @@ export default function BuildJobsPage() {
                   <Eye className="size-3.5" />
                   <span className="ml-1">详情</span>
                 </Button>
+                {(job.status === 'running' || job.status === 'queued') && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => void handleCancel(job)}
+                    disabled={cancellingId === job.id}
+                  >
+                    {cancellingId === job.id ? <Loader2 className="size-3.5 animate-spin" /> : <Square className="size-3.5" />}
+                    <span className="ml-1">终止</span>
+                  </Button>
+                )}
                 {job.status === 'failed' && (
                   <Button variant="outline" size="sm" onClick={() => void handleRetry(job)} disabled={retryingId === job.id}>
                     {retryingId === job.id ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
