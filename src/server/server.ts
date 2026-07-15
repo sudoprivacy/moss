@@ -2830,6 +2830,36 @@ export function startServer(
         return
       }
 
+      const wikiBuildJobCancelMatch = pathname.match(/^\/api\/v1\/wiki-build-jobs\/([^/]+)\/cancel$/)
+      if (req.method === 'POST' && wikiBuildJobCancelMatch) {
+        authService.requireScope(auth, 'admin:documents')
+        const jobId = wikiBuildJobCancelMatch[1] || ''
+        const job = documentStore.getBuildJobForOrg(jobId, auth.orgId)
+        if (!job) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'build job not found' } })
+          return
+        }
+        if (job.status !== 'running' && job.status !== 'queued') {
+          writeJson(res, 409, {
+            error: { code: 'not_cancellable', message: 'job is not in progress' },
+          })
+          return
+        }
+        // Running job: signal the executor to terminate its session and unwind.
+        // Not in the running set (queued, or owned by another instance): mark
+        // it cancelled directly so the executor skips it when a slot frees.
+        const signalled = await wikiJobExecutor.cancelJob(jobId)
+        if (!signalled) {
+          documentStore.updateBuildJob(jobId, {
+            status: 'cancelled',
+            currentStep: '已终止',
+            finishedAt: Date.now(),
+          })
+        }
+        writeJson(res, 200, { job_id: jobId, status: 'cancelling' })
+        return
+      }
+
       const wikiBuildJobsByWikiMatch = pathname.match(/^\/api\/v1\/wikis\/([^/]+)\/build-jobs$/)
       if (req.method === 'GET' && wikiBuildJobsByWikiMatch) {
         authService.requireScope(auth, 'admin:documents')

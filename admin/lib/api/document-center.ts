@@ -292,6 +292,10 @@ export function retryWikiBuildJob(id: string): Promise<{ job_id: string; wiki_id
   return authClient.post(`/api/v1/wiki-build-jobs/${id}/retry`, undefined)
 }
 
+export function cancelWikiBuildJob(id: string): Promise<{ job_id: string; status: string }> {
+  return authClient.post(`/api/v1/wiki-build-jobs/${id}/cancel`, undefined)
+}
+
 export function getWikiBuildStatus(id: string): Promise<{
   wiki_build_status: WikiBuildStatus
   last_built_at: number | null

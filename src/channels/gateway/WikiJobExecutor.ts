@@ -32,7 +32,33 @@ const STAGE_DIR = path.join(MOSS_WIKIS_DIR, '.stage')
 
 const MAX_CONCURRENT_BUILDS = 2
 const TICK_INTERVAL_MS = 3_000
-const BUILD_TIMEOUT_MS = 30 * 60_000 // 30 minutes hard cap
+const BUILD_TIMEOUT_MS = 60 * 60_000 // 60 minutes hard cap
+
+// Idle-nudge watchdog. Large image-heavy builds occasionally leave the agent
+// session idle mid-run — the model finishes a turn but never starts the next
+// (a runner/model-stream hiccup), so the build hangs without failing. The
+// watchdog sends a "continue" nudge after a sustained silence, then requires
+// another full silent window before nudging again.
+//
+// The cap is on *consecutive unproductive* nudges, not total nudges: if a
+// nudge produces real agent activity (a tool call / assistant output), the
+// counter resets to zero. So a build that keeps inching forward — nudge,
+// caption a few more images, stall, nudge again — gets revived as many times
+// as it needs, while a genuinely-wedged session (nudges yield nothing) is
+// abandoned after just a few tries and left to the hard timeout. This is what
+// keeps us from either giving up too early on a slow-but-alive build or
+// spamming a dead one.
+//
+// IDLE_NUDGE_MS is deliberately generous: a working agent streams a stdout
+// line for every tool call and every assistant delta, so multi-minute total
+// silence is a strong "stuck" signal, not normal think time.
+const IDLE_NUDGE_MS = 3 * 60_000 // silence before a nudge
+const IDLE_CHECK_INTERVAL_MS = 30_000 // how often the watchdog samples
+const MAX_UNPRODUCTIVE_NUDGES = 3 // consecutive no-progress nudges before giving up
+const IDLE_NUDGE_MESSAGE =
+  '看起来你停顿了。如果还有图片或 chunk 没处理完,请继续:每写完一个 chunk 就' +
+  '立刻打开该 chunk 的图片、看图后把条目追加进 _moss_images.md,再继续下一批;' +
+  '若所有内容都已完成,请输出完成确认。'
 
 // ============================================================
 // Wiki-builder trigger message.
@@ -49,12 +75,24 @@ const BUILD_TIMEOUT_MS = 30 * 60_000 // 30 minutes hard cap
 // ============================================================
 const WIKI_BUILDER_TRIGGER = '请开始构建 Wiki。'
 
+/** Thrown inside runJob when a cancel has been requested, so the catch block
+ * can distinguish a user-initiated stop from a genuine build failure. */
+class BuildCancelledError extends Error {
+  constructor() {
+    super('build cancelled')
+    this.name = 'BuildCancelledError'
+  }
+}
+
 // ============================================================
 
 type JobState = {
   jobId: string
   wikiId: string
   startedAt: number
+  /** Runtime session id, once the agent session has been created. Used to
+   * terminate the runner on cancel. */
+  sessionId?: string
 }
 
 export interface WikiVectorIndexOptions {
@@ -66,6 +104,10 @@ export interface WikiVectorIndexOptions {
 
 export class WikiJobExecutor {
   private running = new Map<string, JobState>()
+  /** Job ids for which a cancel has been requested. runJob checks this at its
+   * stage boundaries and after the agent session settles, and aborts with a
+   * `cancelled` status instead of publishing. */
+  private cancelRequested = new Set<string>()
   private timer: NodeJS.Timeout | null = null
   private stopped = false
 
@@ -194,6 +236,11 @@ export class WikiJobExecutor {
         assistantName: 'wiki-builder',
       })
 
+      // Track the session id in the in-memory state so cancelJob can
+      // terminate the runner mid-build.
+      const state = this.running.get(job.id)
+      if (state) state.sessionId = created.sessionId
+
       this.docStore.updateBuildJob(job.id, {
         sessionId: created.sessionId,
         progress: 40,
@@ -206,6 +253,12 @@ export class WikiJobExecutor {
 
       const result = await this.driveSession(socket, job.id, WIKI_BUILDER_TRIGGER)
       socket.destroy()
+
+      // Cancel requested while the agent was running: stop before the
+      // expensive index/publish stages and mark the job cancelled.
+      if (this.cancelRequested.has(job.id)) {
+        throw new BuildCancelledError()
+      }
 
       if (!result.ok) {
         throw new Error(result.error ?? 'build session failed')
@@ -301,14 +354,20 @@ export class WikiJobExecutor {
       this.db.markWikiNeedsRebuild(job.wikiId, false)
       console.log(`[WikiJobExecutor] job ${job.id} succeeded`)
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.error(`[WikiJobExecutor] job ${job.id} failed:`, message)
-      this.failJob(job.id, job.wikiId, message)
+      if (err instanceof BuildCancelledError || this.cancelRequested.has(job.id)) {
+        console.log(`[WikiJobExecutor] job ${job.id} cancelled`)
+        this.cancelJobRecord(job.id, job.wikiId)
+      } else {
+        const message = err instanceof Error ? err.message : String(err)
+        console.error(`[WikiJobExecutor] job ${job.id} failed:`, message)
+        this.failJob(job.id, job.wikiId, message)
+      }
     } finally {
+      this.cancelRequested.delete(job.id)
       // Always reclaim the staging dir. On a successful publish it has
       // already been renamed into the live dir (rm of a missing path is a
-      // no-op with force); on failure or a lost recency race it's still
-      // here and must be removed so .stage/ doesn't accumulate orphans.
+      // no-op with force); on failure, cancel, or a lost recency race it's
+      // still here and must be removed so .stage/ doesn't accumulate orphans.
       await rm(stageDir, { recursive: true, force: true }).catch((e) => {
         console.error(`[WikiJobExecutor] failed to clean staging dir ${stageDir}:`, e)
       })
@@ -676,14 +735,71 @@ export class WikiJobExecutor {
       let lastProgress = 40
       let settled = false
 
+      // Idle-nudge watchdog state.
+      //   lastActivityAt      — bumped on any meaningful agent output; drives
+      //                         the "is it silent?" check.
+      //   unproductiveNudges  — consecutive nudges that produced no progress;
+      //                         reset to 0 whenever real agent activity lands.
+      //   awaitingNudgeProof  — true after we nudge, until we see activity that
+      //                         proves the nudge worked (then we credit it).
+      let lastActivityAt = Date.now()
+      let unproductiveNudges = 0
+      let awaitingNudgeProof = false
+      let idleTimer: NodeJS.Timeout | null = null
+
       const settle = (r: { ok: boolean; error?: string }) => {
         if (settled) return
         settled = true
+        if (idleTimer) {
+          clearInterval(idleTimer)
+          idleTimer = null
+        }
         socket.removeAllListeners('data')
         socket.removeAllListeners('error')
         socket.removeAllListeners('close')
         resolve(r)
       }
+
+      // Called when a meaningful agent line (tool call / assistant output)
+      // arrives. Marks the session live and, if we were waiting to see whether
+      // the last nudge helped, credits it — resetting the unproductive streak
+      // so a slowly-advancing build never trips the cap.
+      const markProgress = () => {
+        lastActivityAt = Date.now()
+        if (awaitingNudgeProof) {
+          awaitingNudgeProof = false
+          unproductiveNudges = 0
+        }
+      }
+
+      // Watchdog: sample periodically; nudge once per sustained-silence window.
+      // Resetting lastActivityAt after a nudge forces a fresh full IDLE_NUDGE_MS
+      // of silence before the next one (never a tight loop). We give up only
+      // after MAX_UNPRODUCTIVE_NUDGES *consecutive* nudges that yielded no
+      // activity — a nudge that revives the agent resets that streak via
+      // markProgress().
+      idleTimer = setInterval(() => {
+        if (settled) return
+        // Don't fight a cancel-in-progress.
+        if (this.cancelRequested.has(jobId)) return
+        const idleFor = Date.now() - lastActivityAt
+        if (idleFor < IDLE_NUDGE_MS) return
+        if (unproductiveNudges >= MAX_UNPRODUCTIVE_NUDGES) return
+        if (!socket.writable) return
+        unproductiveNudges++
+        awaitingNudgeProof = true
+        // Reset the clock so the next nudge needs another full silent window.
+        lastActivityAt = Date.now()
+        console.warn(
+          `[WikiJobExecutor] job ${jobId}: session idle ~${Math.round(idleFor / 1000)}s, ` +
+            `sending continue-nudge (unproductive streak ${unproductiveNudges}/${MAX_UNPRODUCTIVE_NUDGES})`,
+        )
+        try {
+          socket.write(JSON.stringify({ type: 'stdin', data: IDLE_NUDGE_MESSAGE + '\n' }) + '\n')
+        } catch (err) {
+          console.warn(`[WikiJobExecutor] job ${jobId}: idle-nudge write failed:`, err)
+        }
+      }, IDLE_CHECK_INTERVAL_MS)
 
       socket.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf8')
@@ -697,6 +813,8 @@ export class WikiJobExecutor {
           try {
             const parsed = JSON.parse(line)
             if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
+              // A parsed agent line is real progress for the watchdog.
+              markProgress()
               this.handleAgentLine(parsed.line, jobId, (step) => {
                 lastProgress = Math.min(lastProgress + 5, 90)
                 this.docStore.updateBuildJob(jobId, {
@@ -748,6 +866,50 @@ export class WikiJobExecutor {
     } catch {
       // ignore
     }
+  }
+
+  /**
+   * Request cancellation of an in-progress build. Terminates the agent
+   * session (if any) so the runner stops immediately, and flags the job so
+   * runJob aborts with a `cancelled` status instead of publishing.
+   *
+   * Returns true if the job was running/queued and a cancel was initiated,
+   * false if it was not found in the active set (already terminal, or picked
+   * up by a different server instance).
+   */
+  async cancelJob(jobId: string): Promise<boolean> {
+    const state = this.running.get(jobId)
+    if (!state) return false
+    this.cancelRequested.add(jobId)
+    // Best-effort progress hint; the terminal `cancelled` status is written
+    // when runJob unwinds.
+    this.docStore.updateBuildJob(jobId, { currentStep: '正在终止…' })
+    if (state.sessionId) {
+      try {
+        await this.runtime.terminateSession(state.sessionId)
+      } catch (err) {
+        console.warn(`[WikiJobExecutor] cancelJob: terminateSession failed for ${jobId}:`, err)
+      }
+    }
+    return true
+  }
+
+  private cancelJobRecord(jobId: string, wikiId: string): void {
+    this.docStore.updateBuildJob(jobId, {
+      status: 'cancelled',
+      currentStep: '已终止',
+      finishedAt: Date.now(),
+    })
+    // Reset the wiki's build indicator off "running". We deliberately do NOT
+    // mark it failed: a cancelled build never touched the live wiki dir, so
+    // the previously published build (if any) is still intact and serving.
+    // Restore 'succeeded' when a prior good build exists, else 'pending' —
+    // never leave it stuck on 'running' or imply an error.
+    const wiki = this.docStore.getWikiById(wikiId)
+    this.docStore.setWikiBuildResult(wikiId, {
+      status: wiki?.lastBuiltAt != null ? 'succeeded' : 'pending',
+      lastBuildError: null,
+    })
   }
 
   private failJob(jobId: string, wikiId: string, message: string): void {
