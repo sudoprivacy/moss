@@ -4422,9 +4422,18 @@ export function startServer(
           const actorIds = canReadDepartmentSecrets(auth)
             ? authService.listSubtreeUserIds(auth.orgId, auth) ?? undefined
             : new Set<string>([auth.userId])
+          // Config-item scope gate: admins see every scope; a dept_admin sees
+          // department + user credential audit rows; a normal user only user.
+          const isSecretsAdmin = hasScope(auth.scopes, 'admin:secrets') || hasScope(auth.scopes, '*')
+          const scopes = isSecretsAdmin
+            ? undefined
+            : canReadDepartmentSecrets(auth)
+              ? ['department', 'user']
+              : ['user']
           const urlObj = new URL(req.url as string, `http://${req.headers.host}`)
           writeJson(res, 200, secretsApi.listAuditLog(auth.orgId, auth.userId, {
             actorIds: actorIds ? Array.from(actorIds) : undefined,
+            scopes,
             actor_id: urlObj.searchParams.get('actor_id') || undefined,
             config_item_id: urlObj.searchParams.get('config_item_id') ? Number(urlObj.searchParams.get('config_item_id')) : undefined,
             action: urlObj.searchParams.get('action') || undefined,

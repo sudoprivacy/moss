@@ -412,7 +412,7 @@ export default function ConfigItemsPage() {
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button variant="ghost" size="icon" onClick={() => handleEdit(item)} title="编辑"><Pencil className="size-4" /></Button>
-                      <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(item)} title="删除"><Trash2 className="size-4 text-destructive" /></Button>
+                      <Button variant="destructive" size="icon" onClick={() => setDeleteTarget(item)} title="删除"><Trash2 className="size-4" /></Button>
                     </div>
                   </TableCell>
                 </TableRow>

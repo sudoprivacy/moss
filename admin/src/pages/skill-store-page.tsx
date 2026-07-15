@@ -2076,6 +2076,11 @@ export default function SkillStorePage() {
                         <Badge variant="outline">已禁用</Badge>
                       ) : null}
                     </div>
+                    {(detailSkill?.name || detailResolvedInstalledSkill?.name) && (
+                      <p className="text-xs text-muted-foreground">
+                        标识名称：<code className="rounded bg-muted px-1 py-0.5 font-mono">{detailSkill?.name || detailResolvedInstalledSkill?.name}</code>
+                      </p>
+                    )}
                     <p className="text-sm leading-6 text-muted-foreground">
                       {detailData?.description ||
                         detailResolvedInstalledSkill?.description ||
