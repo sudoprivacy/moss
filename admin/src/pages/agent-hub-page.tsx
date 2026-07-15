@@ -2423,6 +2423,11 @@ export default function AgentHubPage() {
                           </Badge>
                         ))}
                       </div>
+                      {(detailData?.name || detailAgent?.name) && (
+                        <p className="text-xs text-muted-foreground">
+                          标识名称：<code className="rounded bg-muted px-1 py-0.5 font-mono">{detailData?.name || detailAgent?.name}</code>
+                        </p>
+                      )}
                       <p className="text-sm leading-6 text-muted-foreground">
                         {detailDescription || '暂无描述'}
                       </p>
@@ -2599,6 +2604,14 @@ export default function AgentHubPage() {
 
           <ScrollArea className="max-h-[65vh] pr-4">
           <div className="space-y-5">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">标识名称</label>
+              <Input value={editingAgent?.name ?? ''} readOnly disabled className="font-mono" />
+              <p className="text-xs text-muted-foreground">
+                智能体的唯一标识与目录名称，创建后不可修改。
+              </p>
+            </div>
+
             <div className="space-y-2">
               <label className="text-sm font-medium">显示名称</label>
               <Input
@@ -4224,6 +4237,11 @@ export default function AgentHubPage() {
               </div>
 
               <div>
+                <h4 className="text-sm font-medium text-muted-foreground mb-1">标识名称</h4>
+                <p className="text-sm"><code className="rounded bg-muted px-1 py-0.5 font-mono">{tenantAssistantDetail.name}</code></p>
+              </div>
+
+              <div>
                 <h4 className="text-sm font-medium text-muted-foreground mb-1">描述</h4>
                 <p className="text-sm">{tenantAssistantDetail.description || '暂无描述'}</p>
               </div>
@@ -4305,6 +4323,14 @@ export default function AgentHubPage() {
 
           <ScrollArea className="max-h-[65vh] pr-4">
             <div className="space-y-5">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">标识名称</label>
+                <Input value={editingTenantAgent?.name ?? ''} readOnly disabled className="font-mono" />
+                <p className="text-xs text-muted-foreground">
+                  智能体的唯一标识与目录名称，创建后不可修改。
+                </p>
+              </div>
+
               <div className="space-y-2">
                 <label className="text-sm font-medium">显示名称</label>
                 <Input
