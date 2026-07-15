@@ -393,12 +393,30 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 </tr>
 </table>
 
-<h3>8.2 唯一还挡着 moss 的一步 <span class="tag" style="color:#cf222e;border-color:#ff8182">阻塞中</span></h3>
+<h3>8.2 发布 + bump — 已在进行 <span class="tag" style="color:#0969da;border-color:#0969da">PR 已开,待合并</span></h3>
 
-<div class="box bad">
-<p><strong>发一个 nexus-vfs release。</strong></p>
-<p>最新 release 仍是 <code>v0.4.0</code>(6/24)。上面 8.1 里的<strong>每一件</strong>都在 <code>main</code> 上,<strong>没有任何一件在 release 里</strong>。所以 moss 今天拿到的 <code>nexusd-cluster</code> 里,auth 和 loopback 守卫<strong>一个都没有</strong>。</p>
-<p>发版之后,moss 一次 bump 到位,<strong>同一个 PR 里</strong>删掉 <code>--bootstrap-mode</code>(§6.1 —— 这两件事必须原子完成)。</p>
+<table>
+<tr><th></th><th>状态</th></tr>
+<tr>
+  <td><strong><code>nexus-vfs v0.5.0</code> release</strong></td>
+  <td>✅ <strong>已发布</strong>(<a href="https://github.com/nexi-lab/nexus-vfs/releases/tag/v0.5.0">tag</a>)。6 平台归档,并已<strong>自动镜像到 COS</strong>(<code>publish-cos</code> job) — sudowork 的 <code>download-nexus-vfs.js</code> 从那里拉。</td>
+</tr>
+<tr>
+  <td><strong>sudowork pin bump</strong></td>
+  <td>✅ PR <a href="https://github.com/sudoprivacy/sudowork/pull/1001">#1001</a>。<code>runtime-versions.json</code> + <code>runtime-sha256.json</code> → v0.5.0,并删掉 sudowork 侧所有 <code>--bootstrap-mode</code>(运行时 <code>DynamicNexusVfsService.ts</code> + 4 处 CI/脚本)。<strong>Cold Start Smoke 三平台全绿</strong>(真从 COS 拉 v0.5.0 起集群)。</td>
+</tr>
+<tr>
+  <td><strong>moss <code>--bootstrap-mode</code> drop</strong></td>
+  <td>✅ PR <a href="https://github.com/sudoprivacy/moss/pull/131">#131</a>。<code>nexusManager.ts</code> 删掉那两行。用真 v0.5.0 binary 验过:删了能起、不删报 <code>unexpected argument</code>。</td>
+</tr>
+</table>
+
+<div class="box warn">
+<p><strong>⚠ #1001 和 #131 必须一起合。</strong>binary 经 <code>copyFromSudowork()</code> 到 moss,所以 pin 在 sudowork;而 flag 在 moss。任一单独合都会让启动挂(§6.1 的原子性)。</p>
+</div>
+
+<div class="box ok">
+<p><strong>顺带发现并修掉的:</strong>v0.5.0 的 loopback 守卫在 CI 里咬了一口 —— sudowork 的 cold-start smoke 绑 <code>0.0.0.0</code> + <code>--no-tls</code> 无 auth,正是守卫拒绝的组合。这些是合法的 wide-open 测试集群,已加 <code>--insecure-no-auth</code>(escape hatch 的本职)。<strong>守卫在这里咬人是特性,不是回归。</strong></p>
 </div>
 
 <h3>8.3 还要拍的</h3>
