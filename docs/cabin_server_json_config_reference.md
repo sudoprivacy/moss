@@ -101,7 +101,7 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 | `healthReportEnabled` | `false` | 开启生理检测报告时必须为 `true` | `true` | 是否启用 Pad 生理检测报告接口。 | `CABIN_HEALTH_REPORT_ENABLED` |
 | `healthReportCollectSeconds` | `30` | 否 | `30` | Pad 点击开始后采集 WS 健康遥测的持续时间，单位秒。 | `CABIN_HEALTH_REPORT_COLLECT_SECONDS` |
 | `healthReportMinSamples` | `1` | 否 | `1` | 生成报告所需最少有效样本数。低于该值报告失败。 | `CABIN_HEALTH_REPORT_MIN_SAMPLES` |
-| `assistantName` | `cabin-ai-flight-attendant` | 否 | 默认值 | cabin AI 乘务员内部 assistant 标识。 | `CABIN_ASSISTANT_NAME` |
+| `assistantName` | `cabin-ai-flight-attendant` | 否 | 默认值 | cabin AI 乘务员内部 agent 标识。 | `CABIN_ASSISTANT_NAME` |
 | `assistantDisplayName` | `客舱 AI 乘务员` | 否 | 默认值 | 展示名称。 | `CABIN_ASSISTANT_DISPLAY_NAME` |
 | `createMossSession` | `false` | 否 | `false` | 是否为 cabin 聊天创建完整 Moss session。当前现场建议保持关闭，优先走确定性硬件路由和本地生成逻辑。 | `CABIN_CREATE_MOSS_SESSION` |
 | `replyTimeoutMs` | `45000` | 否 | `45000` | cabin 聊天等待模型/会话回复的超时时间。 | 无 |

@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: file: https:; img-src 'self' data: blob: file: https:; media-src 'self' data: blob: file: https:; font-src 'self' data: blob: file: https:; connect-src 'self' data: blob: file: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'; frame-src 'self' https:;">
-  <title>助手商店</title>
+  <title>智能体商店</title>
   <script type="application/ld+json">
   {
     "@context": "urn:goose.ai:schema",
     "@type": "GooseApp",
     "name": "agent-store",
     "icon": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>",
-    "description": "助手商店 - 浏览和安装来自 Hub 的数字助手",
+    "description": "智能体商店 - 浏览和安装来自 Hub 的数字智能体",
     "width": 980,
     "height": 680,
     "resizable": true,
@@ -660,10 +660,10 @@
     <div class="header">
       <div class="tabs">
         <button class="tab active" data-tab="store">
-          助手库
+          智能体库
         </button>
         <button class="tab" data-tab="installed">
-          我的助手
+          我的智能体
           <span class="badge" id="installedBadge">0</span>
         </button>
       </div>
@@ -699,7 +699,7 @@
   <div class="modal-overlay hidden" id="editModal">
     <div class="modal">
       <div class="modal-header">
-        <span style="font-size:14px;font-weight:500;color:var(--text)">编辑助手</span>
+        <span style="font-size:14px;font-weight:500;color:var(--text)">编辑智能体</span>
         <button class="modal-close" id="editModalClose">✕</button>
       </div>
       <div class="modal-body" id="editModalBody">
@@ -849,7 +849,7 @@
       try {
         const sourceUrl = assistant._sourceUrl;
         if (!sourceUrl) {
-          alert('该助手暂不支持安装');
+          alert('该智能体暂不支持安装');
           return;
         }
 
@@ -891,7 +891,7 @@
     }
 
     async function uninstallAssistant(assistantName) {
-      if (!confirm('确认卸载该助手？')) return;
+      if (!confirm('确认卸载该智能体？')) return;
 
       try {
         const res = await window.mossApp.agentStore.uninstall(assistantName);
@@ -926,7 +926,7 @@
         content.innerHTML = `
           <div class="empty">
             <div class="icon">🤖</div>
-            <p>暂无助手</p>
+            <p>暂无智能体</p>
           </div>
         `;
         return;
@@ -953,7 +953,7 @@
         content.innerHTML = `
           <div class="empty">
             <div class="icon">🤖</div>
-            <p>暂无已安装的助手</p>
+            <p>暂无已安装的智能体</p>
           </div>
         `;
         return;
@@ -962,7 +962,7 @@
       const html = `
         <div class="installed-section">
           <div class="installed-section-header">
-            <span class="installed-section-title">已安装助手</span>
+            <span class="installed-section-title">已安装智能体</span>
             <span class="installed-section-count">${state.installedList.length}</span>
           </div>
           <div class="agent-grid">
@@ -1170,7 +1170,7 @@
           <div class="modal-section">
             <div class="modal-section-title"><span class="icon">⚡</span> 关联技能 <span style="font-weight:400;color:var(--text-tertiary)">(${skills.length})</span></div>
             <div style="display:flex;flex-direction:column;gap:6px">${skillBadges}</div>
-            <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">安装助手时会自动安装关联的技能</div>
+            <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">安装智能体时会自动安装关联的技能</div>
           </div>
         `;
       }
@@ -1183,7 +1183,7 @@
         </div>
 
         <div class="modal-section">
-          <div class="modal-section-title"><span class="icon">✦</span> 助手介绍</div>
+          <div class="modal-section-title"><span class="icon">✦</span> 智能体介绍</div>
           <div class="modal-section-desc">${escapeHtml(assistant.description || '')}</div>
         </div>
 
@@ -1218,11 +1218,11 @@
         `;
       } else if (hasSourceUrl) {
         modalFooter.innerHTML = `
-          <button class="btn btn-primary" data-action="install" data-assistant-id="${assistant.id}" data-skill-ids="${skillIds.join(',')}">安装助手</button>
+          <button class="btn btn-primary" data-action="install" data-assistant-id="${assistant.id}" data-skill-ids="${skillIds.join(',')}">安装智能体</button>
         `;
       } else {
         modalFooter.innerHTML = `
-          <span style="color:var(--text-tertiary);font-size:12px">该助手暂不支持安装</span>
+          <span style="color:var(--text-tertiary);font-size:12px">该智能体暂不支持安装</span>
         `;
       }
 

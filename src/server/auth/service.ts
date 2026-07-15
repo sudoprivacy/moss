@@ -1612,7 +1612,7 @@ export class AuthService {
    * sessions to call /api/v1/agent/wikis* via the `wiki` CLI.
    *
    * The token carries an `assistant_id` claim (= `assistantName`) so the
-   * server-side handler can filter wikis by the assistant's
+   * server-side handler can filter wikis by the agent's
    * `enabledWikis` field in `_moss_meta.json`.
    *
    * Caller (`RuntimeService.spawnAttempt`) wires the result into

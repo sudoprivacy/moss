@@ -149,7 +149,7 @@ function findAssistantDir(name) {
     }
   }
 
-  // Fallback: scan assistant metadata and match by logical meta.name.
+  // Fallback: scan agent metadata and match by logical meta.name.
   for (const { dir, category } of searchDirs) {
     try {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -276,7 +276,7 @@ export function registerAgentIpcHandlers() {
           },
         };
       }
-      return { success: false, error: result.message || 'Failed to fetch assistants' };
+      return { success: false, error: result.message || 'Failed to fetch agents' };
     } catch (err) {
       console.error('[AgentStore] Fetch error:', err);
       return { success: false, error: err.message };
@@ -296,7 +296,7 @@ export function registerAgentIpcHandlers() {
     }
   });
 
-  // Fetch assistant detail
+  // Fetch agent detail
   ipcMain.handle('agent:fetchAssistantDetail', async (_event, { assistantId }) => {
     try {
       const response = await fetch(`${ASSISTANT_HUB_BASE_URL}/${assistantId}`, {
@@ -306,7 +306,7 @@ export function registerAgentIpcHandlers() {
       // Handle different response structures
       let assistantData = result.data;
       if (!assistantData) {
-        // Maybe the response has assistant directly or no wrapper
+        // Maybe the response has agent directly or no wrapper
         assistantData = result.assistant || result;
       }
       return { success: true, data: assistantData };
@@ -325,7 +325,7 @@ export function registerAgentIpcHandlers() {
     }
   });
 
-  // Download and install assistant
+  // Download and install agent
   ipcMain.handle('agent:downloadAndInstall', async (_event, { assistantName, sourceUrl, version, checksum, assistantMeta, selectedSkillIds = [] }) => {
     try {
       console.log('[AgentStore IPC] downloadAndInstall:', { assistantName, sourceUrl, selectedSkillIds });
@@ -462,7 +462,7 @@ export function registerAgentIpcHandlers() {
     }
   });
 
-  // Uninstall assistant
+  // Uninstall agent
   ipcMain.handle('agent:uninstall', async (_event, { assistantName, sourcePath }) => {
     try {
       const result = sourcePath
@@ -470,7 +470,7 @@ export function registerAgentIpcHandlers() {
         : findAssistantDir(assistantName);
 
       if (!result) {
-        return { success: false, error: 'Assistant not found' };
+        return { success: false, error: 'Agent not found' };
       }
 
       // Check if builtin
@@ -479,7 +479,7 @@ export function registerAgentIpcHandlers() {
         const metaContent = await fsp.readFile(metaPath, 'utf-8');
         const meta = JSON.parse(metaContent);
         if (meta.is_builtin === true) {
-          return { success: false, error: 'Builtin assistants cannot be uninstalled' };
+          return { success: false, error: 'Builtin agents cannot be uninstalled' };
         }
       } catch {
         // No meta file, allow uninstall
@@ -492,12 +492,12 @@ export function registerAgentIpcHandlers() {
     }
   });
 
-  // Update assistant meta
+  // Update agent meta
   ipcMain.handle('agent:updateAssistantMeta', async (_event, { assistantName, updates }) => {
     try {
       const result = findAssistantDir(assistantName);
       if (!result) {
-        return { success: false, error: 'Assistant not found' };
+        return { success: false, error: 'Agent not found' };
       }
 
       const metaPath = path.join(result.dir, ASSISTANT_META_FILE);
@@ -547,12 +547,12 @@ export function registerAgentIpcHandlers() {
     }
   });
 
-  // Read assistant rule file content
+  // Read agent rule file content
   ipcMain.handle('agent:getAssistantContext', async (_event, { assistantName }) => {
     try {
       const assistantDir = await findAssistantDirByName(assistantName, ASSISTANT_SEARCH_DIRS);
       if (!assistantDir) {
-        return { success: false, error: 'Assistant not found' };
+        return { success: false, error: 'Agent not found' };
       }
 
       const assistantContext = await readAssistantContext(assistantDir, assistantName);
@@ -576,7 +576,7 @@ export function registerAgentIpcHandlers() {
     }
   });
 
-  // Get assistant context (rules) + skills info combined
+  // Get agent context (rules) + skills info combined
   ipcMain.handle('agent:getAssistantContextWithSkills', async (_event, { assistantName }) => {
     try {
       if (!assistantName) {

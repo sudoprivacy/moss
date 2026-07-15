@@ -35,8 +35,8 @@ export class ScodeBackend implements SessionBackend {
 
     // 确定最终使用的 enabledSkills
     // 优先级（与个人模式一致）：
-    // 1. 如果指定了助手，使用助手的 enabledSkills（助手配置优先）
-    // 2. 如果没有指定助手，使用客户端传递的 enabledSkillNames
+    // 1. 如果指定了智能体，使用智能体的 enabledSkills（智能体配置优先）
+    // 2. 如果没有指定智能体，使用客户端传递的 enabledSkillNames
     // 3. 如果都没有，使用所有可用 skills（已在 getAssistantRuntimeConfig 中处理）
     const enabledSkills = options.assistantName
       ? assistantConfig.enabledSkills
@@ -125,7 +125,7 @@ export class ScodeBackend implements SessionBackend {
 
     // 同步技能到工作空间目录（新方案）
     // 在工作空间的 .nexus/sudocode/skills/ 目录创建符号链接
-    // enabledSkills: 客户端传递 > 助手配置 > 默认（所有可用 skills）
+    // enabledSkills: 客户端传递 > 智能体配置 > 默认（所有可用 skills）
     // visibilityFilter: 过滤用户无权访问的技能
     let workspaceSkillLinks: WorkspaceSkillLink[] = []
     try {

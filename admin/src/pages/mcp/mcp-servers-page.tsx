@@ -265,7 +265,7 @@ function MultiSelectList({ options, selected, onChange, emptyText }: MultiSelect
   )
 }
 
-// 列表列：把绑定的助手/技能 id 翻译成名称，单行省略号展示，hover 浮现全部。
+// 列表列：把绑定的智能体/技能 id 翻译成名称，单行省略号展示，hover 浮现全部。
 // 映射里查不到的 id（如历史用 UUID 绑定的旧数据）按原样回退显示。
 function BoundNamesCell({
   ids,
@@ -442,7 +442,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
     loadServers()
   }, [loadServers])
 
-  // Filter bar dropdowns (department / assistant / creator) need their option
+  // Filter bar dropdowns (department / agent / creator) need their option
   // lists available before any dialog is opened, so load them on mount too.
   useEffect(() => {
     loadOptions()
@@ -976,9 +976,9 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
           </SelectContent>
         </Select>
         <Select value={assistantFilter} onValueChange={setAssistantFilter}>
-          <SelectTrigger className="w-[140px]"><SelectValue placeholder="助手" /></SelectTrigger>
+          <SelectTrigger className="w-[140px]"><SelectValue placeholder="智能体" /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">全部助手</SelectItem>
+            <SelectItem value="all">全部智能体</SelectItem>
             {assistants.map((a) => (
               <SelectItem key={a.id} value={a.id}>{a.displayName || a.name}</SelectItem>
             ))}
@@ -1008,7 +1008,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
               {!fixedScope && <TableHead>作用域</TableHead>}
               <TableHead>状态</TableHead>
               <TableHead>可见范围</TableHead>
-              <TableHead>绑定助手</TableHead>
+              <TableHead>绑定智能体</TableHead>
               <TableHead>绑定技能</TableHead>
               <TableHead>凭据来源</TableHead>
               <TableHead>风险等级</TableHead>
@@ -1424,13 +1424,13 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                     )}
 
                     <div className="space-y-2">
-                      <Label>绑定助手</Label>
-                      <p className="text-xs text-muted-foreground">仅勾选的助手可以调用本 MCP；为空表示不限。</p>
+                      <Label>绑定智能体</Label>
+                      <p className="text-xs text-muted-foreground">仅勾选的智能体可以调用本 MCP；为空表示不限。</p>
                       <MultiSelectList
                         options={assistants.map((a) => ({ id: a.id, label: a.displayName || a.name, sub: a.name }))}
                         selected={formData.bound_assistants || []}
                         onChange={(ids) => setFormData({ ...formData, bound_assistants: ids })}
-                        emptyText="没有可绑定的助手"
+                        emptyText="没有可绑定的智能体"
                       />
                     </div>
 

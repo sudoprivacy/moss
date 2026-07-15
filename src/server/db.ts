@@ -531,7 +531,7 @@ export class DirectConnectStore {
 
     // ============================================================
     // Document Center (P0): document tree, documents, wikis, build jobs
-    // Assistant ↔ Wiki association lives in assistant `_moss_meta.json` (enabledWikis: string[]),
+    // Agent ↔ Wiki association lives in agent `_moss_meta.json` (enabledWikis: string[]),
     // not in a join table, to follow the existing enabledSkills pattern.
     // ============================================================
     this.db.exec(`
@@ -2168,7 +2168,7 @@ export class DirectConnectStore {
   }
 
   /**
-   * Update tenant assistant file_path only (used after approval to point to tenant directory)
+   * Update tenant agent file_path only (used after approval to point to tenant directory)
    */
   updateTenantAssistantPath(id: string, filePath: string): void {
     const ts = now()

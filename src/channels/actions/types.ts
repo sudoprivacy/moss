@@ -19,7 +19,7 @@ export interface IActionContext {
   chatId: string;
   displayName?: string;
 
-  // Authorized assistant user (set if user is authorized)
+  // Authorized agent user (set if user is authorized)
   channelUser?: IChannelUser;
 
   // Session information

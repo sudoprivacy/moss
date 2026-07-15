@@ -4314,7 +4314,7 @@ ipcMain.handle('agent:send', async (event, { sessionId, prompt, mode, appName, f
     throw new Error('There is already a pending plan awaiting approval.');
   }
 
-  // Build assistant context prefix (rules + skills list)
+  // Build agent context prefix (rules + skills list)
   let assistantContextPrefix = '';
   let assistantEnabledSkills = [];
   if (assistantName) {

@@ -160,7 +160,7 @@ image: {
 - 发送消息到本地 Agent
 - 文件复制到 workspace 后发送给 Agent
 - 支持百度网盘文件解析后转成本地文件
-- 支持 preset context、skills、assistant resources
+- 支持 preset context、skills、agent resources
 - 支持 MCP 工具配置进入 Agent
 - 支持 Slash 命令
 - 支持 `/image` 图片生成命令
@@ -175,7 +175,7 @@ image: {
 | --- | --- |
 | 首次发送时创建 Moss session | 已实现 |
 | WebSocket 发送消息 | 已实现 |
-| 接收 assistant 消息流 | 已实现 |
+| 接收 agent 消息流 | 已实现 |
 | 权限请求和响应 | 已实现 |
 | 打断会话 | 已实现 |
 | 终止 Moss session | 已实现 |
@@ -289,7 +289,7 @@ Moss AdminHub 目前有服务端系统设置页，主要字段包括：
 - 支持新增、更新、删除、暂停、恢复、立即运行
 - 支持创建新会话或复用会话
 - 支持 workspace
-- 支持 preset assistant
+- 支持 preset agent
 - 支持系统唤醒后检查错过的任务
 - 支持 powerSaveBlocker 防止任务执行时休眠
 

@@ -675,7 +675,7 @@ function HomeLanding({
           Hi，今天有什么安排？
         </h1>
         <p className="mx-auto mt-3 max-w-[560px] text-sm leading-7 text-muted-foreground sm:text-base">
-          让 moss 帮你规划任务、协同执行，或者通过助手直接开始一个新的构建目标。
+          让 moss 帮你规划任务、协同执行，或者通过智能体直接开始一个新的构建目标。
         </p>
       </div>
 

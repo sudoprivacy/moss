@@ -215,14 +215,14 @@ git commit -m "feat(db): extend updateTenantAssistantMeta for full editing suppo
 ## Task 4: 后端 - 新增创建专属智能体 API
 
 **Files:**
-- Modify: `src/server/server.ts` (在 tenant assistant routes 区域)
+- Modify: `src/server/server.ts` (在 tenant agent routes 区域)
 
 **Step 1: 添加 POST /api/v1/agents/tenant/create 端点**
 
 在 `// POST /api/v1/agents/tenant/publish` 之前添加：
 
 ```typescript
-// POST /api/v1/agents/tenant/create - Create tenant assistant directly (admin only)
+// POST /api/v1/agents/tenant/create - Create tenant agent directly (admin only)
 if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
   authService.requireScope(auth, 'admin:settings')
   const body = await readJsonBody(req)
@@ -235,16 +235,16 @@ if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
     throw new HttpError(400, 'name is required')
   }
 
-  // Generate UUID for the assistant
+  // Generate UUID for the agent
   const assistantId = randomUUID()
 
   // Get author info
   const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
   const authorName = authorUser?.name || undefined
 
-  // Create assistant directory in tenant folder
+  // Create agent directory in tenant folder
   const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-  const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
+  const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'agents', 'tenant')
   const assistantDir = join(ASSISTANT_TENANT_DIR, assistantId)
 
   await mkdir(assistantDir, { recursive: true })
@@ -321,7 +321,7 @@ git commit -m "feat(server): add POST /api/v1/agents/tenant/create endpoint"
 修改现有的 PATCH 处理逻辑，支持所有编辑字段：
 
 ```typescript
-// PATCH /api/v1/agents/tenant/:id - Update tenant assistant meta
+// PATCH /api/v1/agents/tenant/:id - Update tenant agent meta
 const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)$/)
 if (req.method === 'PATCH' && agentTenantPatchMatch) {
   authService.requireScope(auth, 'admin:settings')
@@ -373,7 +373,7 @@ if (req.method === 'PATCH' && agentTenantPatchMatch) {
   if (tenantAssistant && tenantAssistant.status === 'approved') {
     const assistantName = tenantAssistant.name as string
     const MOSS_HOME_LOCAL = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-    const ASSISTANT_TENANT_DIR = join(MOSS_HOME_LOCAL, 'assistants', 'tenant')
+    const ASSISTANT_TENANT_DIR = join(MOSS_HOME_LOCAL, 'agents', 'tenant')
     const assistantDir = join(ASSISTANT_TENANT_DIR, assistantName)
     if (existsSync(assistantDir)) {
       const meta = await readAssistantMeta(assistantDir)
@@ -419,7 +419,7 @@ git commit -m "feat(server): extend PATCH /api/v1/agents/tenant/:id for full edi
 在现有状态变量区域添加：
 
 ```typescript
-// Tenant assistant edit states
+// Tenant agent edit states
 const [tenantEditOpen, setTenantEditOpen] = useState(false)
 const [editingTenantAgent, setEditingTenantAgent] = useState<TenantAssistantInfo | null>(null)
 const [tenantEditName, setTenantEditName] = useState('')
@@ -441,8 +441,8 @@ const [savingTenantEdit, setSavingTenantEdit] = useState(false)
 **Step 2: 添加 openTenantEdit 函数**
 
 ```typescript
-const openTenantEdit = useCallback((assistant: TenantAssistantInfo) => {
-  setEditingTenantAgent(assistant)
+const openTenantEdit = useCallback((agent: TenantAssistantInfo) => {
+  setEditingTenantAgent(agent)
   setTenantEditName(assistant.display_name || assistant.name)
   setTenantEditDescription(assistant.description || '')
   setTenantEditAvatar(assistant.avatar || '')
@@ -498,7 +498,7 @@ const openTenantEdit = useCallback((assistant: TenantAssistantInfo) => {
 
 ```bash
 git add admin/src/pages/agent-hub-page.tsx
-git commit -m "feat(ui): add tenant assistant edit states and openTenantEdit function"
+git commit -m "feat(ui): add tenant agent edit states and openTenantEdit function"
 ```
 
 ---
@@ -510,18 +510,18 @@ git commit -m "feat(ui): add tenant assistant edit states and openTenantEdit fun
 
 **Step 1: 修改卡片 onClick**
 
-将 `setTenantAssistantDetail(assistant)` 改为 `openTenantEdit(assistant)`：
+将 `setTenantAssistantDetail(agent)` 改为 `openTenantEdit(agent)`：
 
 ```typescript
 <div
   key={assistant.id}
   role="button"
   tabIndex={0}
-  onClick={() => openTenantEdit(assistant)}
+  onClick={() => openTenantEdit(agent)}
   onKeyDown={event => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
-      openTenantEdit(assistant)
+      openTenantEdit(agent)
     }
   }}
   className="rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent/30"
@@ -532,7 +532,7 @@ git commit -m "feat(ui): add tenant assistant edit states and openTenantEdit fun
 
 ```bash
 git add admin/src/pages/agent-hub-page.tsx
-git commit -m "feat(ui): change tenant assistant card click to open edit dialog"
+git commit -m "feat(ui): change tenant agent card click to open edit dialog"
 ```
 
 ---
@@ -596,7 +596,7 @@ const handleSaveTenantEdit = useCallback(async () => {
 
 ```bash
 git add admin/src/pages/agent-hub-page.tsx
-git commit -m "feat(ui): add tenant assistant edit dialog"
+git commit -m "feat(ui): add tenant agent edit dialog"
 ```
 
 ---

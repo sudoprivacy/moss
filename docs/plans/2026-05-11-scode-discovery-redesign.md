@@ -50,9 +50,9 @@ export function resolveWorkspaceSkillsDir(conversation): string | undefined {
 在 User Message 中注入技能路径提示：
 
 ```
-[Assistant Rules - You MUST follow these instructions]
+[Agent Rules - You MUST follow these instructions]
 ├── [Identity Override] - 身份声明
-├── presetContext - 助手规则
+├── presetContext - 智能体规则
 ├── [Available Skills] - 内置 skills 索引
 ├── [Skills Location] - Builtin skills 路径
 ├── [Skills Directory] - Workspace skills 路径及列表
@@ -261,7 +261,7 @@ export async function prepareFirstMessageForScode(
   }
 
   const systemInstructions = instructions.join('\n\n')
-  return `[Assistant Rules - You MUST follow these instructions]\n${systemInstructions}\n\n[User Request]\n${userContent}`
+  return `[Agent Rules - You MUST follow these instructions]\n${systemInstructions}\n\n[User Request]\n${userContent}`
 }
 
 /**

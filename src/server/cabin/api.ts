@@ -723,7 +723,7 @@ export function createCabinApi(options: {
     }
 
     // Passenger confirmed a hardware suggestion offered on the previous turn (e.g. we asked
-    // "需要我为您把座椅放倒到休息角度吗？" and they replied "好"). Re-route the prior assistant
+    // "需要我为您把座椅放倒到休息角度吗？" and they replied "好"). Re-route the prior agent
     // offer through the deterministic Path A router and execute the resolved action. This sits
     // between Path A and Path B and only fires for a bare affirmation following an offer, so no
     // existing input path changes behavior.

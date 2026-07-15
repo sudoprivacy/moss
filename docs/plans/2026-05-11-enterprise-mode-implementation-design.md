@@ -146,7 +146,7 @@ version: "1.0.0"
 
 **实现位置**: `src/server/skillStore.ts` 新增 `uploadCustomSkill` 函数
 
-#### 3.1.2 上传自定义助手
+#### 3.1.2 上传自定义智能体
 
 **端点**: `POST /api/v1/agents/custom`
 
@@ -160,8 +160,8 @@ Content-Type: multipart/form-data
 ```
 file: <assistant-package.zip>
 name: "my-custom-assistant"
-displayName: "My Custom Assistant"
-description: "助手描述"
+displayName: "My Custom Agent"
+description: "智能体描述"
 version: "1.0.0"
 enabledSkills: ["skill-a", "skill-b"]  // JSON string
 memoryMode: "session"
@@ -172,7 +172,7 @@ memoryMode: "session"
 {
   "id": "custom-agent-001",
   "name": "my-custom-assistant",
-  "displayName": "My Custom Assistant",
+  "displayName": "My Custom Agent",
   "version": "1.0.0",
   "status": "active",
   "visibleTo": {
@@ -184,7 +184,7 @@ memoryMode: "session"
 
 **可见性规则**：
 - 上传成功后，自动设置可见性为当前上传用户（`visible_to: { user_ids: [uploader_id] }`）
-- 只有上传者和管理员可以看到此助手
+- 只有上传者和管理员可以看到此智能体
 
 **实现位置**: `src/server/agentStore.ts` 新增 `uploadCustomAssistant` 函数
 
@@ -234,7 +234,7 @@ Authorization: Bearer <access_token>
 
 **实现位置**: `src/server/tenantStore.ts` 新增 `getTenantSkills` 函数
 
-#### 3.1.4 获取专属助手列表
+#### 3.1.4 获取专属智能体列表
 
 **端点**: `GET /api/v1/agents/tenant`
 
@@ -258,7 +258,7 @@ Authorization: Bearer <access_token>
 
 **实现位置**: `src/server/server.ts` 新增路由处理
 
-#### 3.1.6 下载已安装助手包
+#### 3.1.6 下载已安装智能体包
 
 **端点**: `GET /api/v1/agents/installed/{id}/download`
 
@@ -292,7 +292,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-#### 3.2.2 发布专属助手申请
+#### 3.2.2 发布专属智能体申请
 
 **端点**: `POST /api/v1/agents/tenant/publish`
 
@@ -302,7 +302,7 @@ Authorization: Bearer <access_token>
 
 **端点**: `GET /api/v1/skills/tenant/{id}/download`
 
-#### 3.2.4 下载专属助手包
+#### 3.2.4 下载专属智能体包
 
 **端点**: `GET /api/v1/agents/tenant/{id}/download`
 
@@ -337,7 +337,7 @@ Authorization: Bearer <access_token>
 3. 设置可见性为全员可见（`visible_to: null`）- 所有企业用户都可以看到和使用
 4. 生成 sourceUrl 和 checksum
 
-#### 3.3.2 管理员审批助手
+#### 3.3.2 管理员审批智能体
 
 **端点**: `POST /api/v1/admin/agents/tenant/{id}/approve`
 
@@ -360,7 +360,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-#### 3.4.2 更新专属助手元数据
+#### 3.4.2 更新专属智能体元数据
 
 **端点**: `PATCH /api/v1/agents/tenant/{id}`
 
@@ -380,7 +380,7 @@ Authorization: Bearer <access_token>
 
 **端点**: `DELETE /api/v1/skills/tenant/{id}`
 
-#### 3.4.4 删除专属助手
+#### 3.4.4 删除专属智能体
 
 **端点**: `DELETE /api/v1/agents/tenant/{id}`
 
@@ -459,7 +459,7 @@ getTenantSkills(status?: string): TenantSkillRecord[]
 getTenantSkill(id: string): TenantSkillRecord | null
 createTenantSkill(record: TenantSkillInput): TenantSkillRecord
 updateTenantSkillStatus(id: string, status: string, reviewedBy: string, reviewNote?: string): void
-// 类似的助手方法...
+// 类似的智能体方法...
 ```
 
 #### 4.2.2 `src/server/skillStore.ts`
@@ -489,7 +489,7 @@ export function getSkillDownloadUrl(skillId: string): string
 新增函数：
 
 ```typescript
-// 上传自定义助手
+// 上传自定义智能体
 export async function uploadCustomAssistant(params: {
   file: Buffer
   name: string
@@ -501,10 +501,10 @@ export async function uploadCustomAssistant(params: {
   userId: string
 }): Promise<{ id: string; name: string; version: string }>
 
-// 打包助手为 zip
+// 打包智能体为 zip
 export async function packageAssistantZip(assistantName: string): Promise<Buffer>
 
-// 获取助手下载 URL
+// 获取智能体下载 URL
 export function getAssistantDownloadUrl(assistantId: string): string
 ```
 
@@ -551,7 +551,7 @@ export class TenantStore {
   updateTenantSkillStatus(id: string, status: string, reviewedBy: string, reviewNote?: string): void
   deleteTenantSkill(id: string): void
 
-  // 助手相关
+  // 智能体相关
   listTenantAssistants(status?: string): TenantAssistantRecord[]
   getTenantAssistant(id: string): TenantAssistantRecord | null
   getTenantAssistantByName(name: string): TenantAssistantRecord | null
@@ -568,21 +568,21 @@ export class TenantStore {
 ```typescript
 // P0 接口
 'POST /api/v1/skills/custom'           // 上传自定义技能
-'POST /api/v1/agents/custom'           // 上传自定义助手
+'POST /api/v1/agents/custom'           // 上传自定义智能体
 'GET /api/v1/skills/tenant'            // 获取专属技能列表
-'GET /api/v1/agents/tenant'            // 获取专属助手列表
+'GET /api/v1/agents/tenant'            // 获取专属智能体列表
 'GET /api/v1/skills/installed/:id/download'  // 下载已安装技能
-'GET /api/v1/agents/installed/:id/download'  // 下载已安装助手
+'GET /api/v1/agents/installed/:id/download'  // 下载已安装智能体
 
 // P1 接口
 'POST /api/v1/skills/tenant/publish'   // 发布专属技能申请
-'POST /api/v1/agents/tenant/publish'   // 发布专属助手申请
+'POST /api/v1/agents/tenant/publish'   // 发布专属智能体申请
 'GET /api/v1/skills/tenant/:id/download'     // 下载专属技能
-'GET /api/v1/agents/tenant/:id/download'     // 下载专属助手
+'GET /api/v1/agents/tenant/:id/download'     // 下载专属智能体
 
 // P2 接口
 'POST /api/v1/admin/skills/tenant/:id/approve'   // 审批技能
-'POST /api/v1/admin/agents/tenant/:id/approve'   // 审批助手
+'POST /api/v1/admin/agents/tenant/:id/approve'   // 审批智能体
 ```
 
 ---
@@ -708,17 +708,17 @@ export async function downloadSkill(skillId: string, type: 'installed' | 'tenant
 #### 5.3.2 `admin/lib/api/agent-hub.ts`
 
 ```typescript
-// 获取专属助手列表（包含待审批和已通过）
+// 获取专属智能体列表（包含待审批和已通过）
 export async function getTenantAssistants(): Promise<TenantAssistantInfo[]>
 
-// 审批专属助手
+// 审批专属智能体
 export async function approveTenantAssistant(params: {
   id: string
   approved: boolean
   reviewNote?: string
 }): Promise<{ id: string; status: string }>
 
-// 更新专属助手元数据（启用/禁用、可见性等）
+// 更新专属智能体元数据（启用/禁用、可见性等）
 export async function updateTenantAssistantMeta(params: {
   id: string
   enabled?: boolean
@@ -726,10 +726,10 @@ export async function updateTenantAssistantMeta(params: {
   enabledSkills?: string[]
 }): Promise<void>
 
-// 删除专属助手
+// 删除专属智能体
 export async function deleteTenantAssistant(id: string): Promise<void>
 
-// 下载助手包
+// 下载智能体包
 export async function downloadAssistant(assistantId: string, type: 'installed' | 'tenant'): Promise<Blob>
 ```
 
@@ -769,7 +769,7 @@ type ApprovalDialogProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   item: TenantSkillInfo | TenantAssistantInfo
-  type: 'skill' | 'assistant'
+  type: 'skill' | 'agent'
   onApprove: (approved: boolean, reviewNote?: string) => void
 }
 ```
@@ -781,7 +781,7 @@ type VisibilityDialogProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   itemName: string
-  itemType: 'skill' | 'assistant'
+  itemType: 'skill' | 'agent'
   currentVisibility: VisibleTo
   onSave: (visibility: VisibleTo) => void
 }
@@ -838,11 +838,11 @@ type VisibilityDialogProps = {
 **后端任务**:
 - [ ] 数据库表创建（tenant_skills, tenant_assistants）
 - [ ] `POST /api/v1/skills/custom` 上传自定义技能
-- [ ] `POST /api/v1/agents/custom` 上传自定义助手
+- [ ] `POST /api/v1/agents/custom` 上传自定义智能体
 - [ ] `GET /api/v1/skills/tenant` 获取专属技能列表（含待审批和已通过）
-- [ ] `GET /api/v1/agents/tenant` 获取专属助手列表（含待审批和已通过）
+- [ ] `GET /api/v1/agents/tenant` 获取专属智能体列表（含待审批和已通过）
 - [ ] `GET /api/v1/skills/installed/{id}/download` 下载已安装技能
-- [ ] `GET /api/v1/agents/installed/{id}/download` 下载已安装助手
+- [ ] `GET /api/v1/agents/installed/{id}/download` 下载已安装智能体
 
 **前端任务**:
 - [ ] 技能管理页面页签改造（技能库 | 专属技能 | 自定义技能）
@@ -856,9 +856,9 @@ type VisibilityDialogProps = {
 
 **后端任务**:
 - [ ] `POST /api/v1/skills/tenant/publish` 发布专属技能申请（SudoWork 客户端调用）
-- [ ] `POST /api/v1/agents/tenant/publish` 发布专属助手申请（SudoWork 客户端调用）
+- [ ] `POST /api/v1/agents/tenant/publish` 发布专属智能体申请（SudoWork 客户端调用）
 - [ ] `GET /api/v1/skills/tenant/{id}/download` 下载专属技能
-- [ ] `GET /api/v1/agents/tenant/{id}/download` 下载专属助手
+- [ ] `GET /api/v1/agents/tenant/{id}/download` 下载专属智能体
 
 **前端任务**:
 - [ ] 发布状态展示（在专属页签显示 pending 状态的申请）
@@ -868,11 +868,11 @@ type VisibilityDialogProps = {
 
 **后端任务**:
 - [ ] `POST /api/v1/admin/skills/tenant/{id}/approve` 审批技能（含文件复制到 tenant 目录）
-- [ ] `POST /api/v1/admin/agents/tenant/{id}/approve` 审批助手（含文件复制到 tenant 目录）
+- [ ] `POST /api/v1/admin/agents/tenant/{id}/approve` 审批智能体（含文件复制到 tenant 目录）
 - [ ] `PATCH /api/v1/skills/tenant/{id}` 更新专属技能元数据
-- [ ] `PATCH /api/v1/agents/tenant/{id}` 更新专属助手元数据
+- [ ] `PATCH /api/v1/agents/tenant/{id}` 更新专属智能体元数据
 - [ ] `DELETE /api/v1/skills/tenant/{id}` 删除专属技能
-- [ ] `DELETE /api/v1/agents/tenant/{id}` 删除专属助手
+- [ ] `DELETE /api/v1/agents/tenant/{id}` 删除专属智能体
 
 **前端任务**:
 - [ ] 审批对话框组件
@@ -986,6 +986,6 @@ type VisibleTo = {
 
 ### 9.3 E2E 测试
 
-- 用户上传自定义技能/助手流程
+- 用户上传自定义技能/智能体流程
 - 管理员审批流程
 - 下载安装流程

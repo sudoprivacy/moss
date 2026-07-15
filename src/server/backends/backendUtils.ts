@@ -289,7 +289,7 @@ export function buildSessionScodeHomeDir(
  * 获取所有可用的 skill 名称列表
  *
  * 从所有 skill 目录中收集已启用且有效的 skill 名称
- * 用于非助手会话场景（同步所有可见 skills）
+ * 用于非智能体会话场景（同步所有可见 skills）
  *
  * @returns 所有可用 skill 名称数组
  */
@@ -311,8 +311,8 @@ export async function getAllAvailableSkillNames(): Promise<string[]> {
  * @returns memoryMode 和 enabledSkills
  *
  * enabledSkills 返回值说明:
- * - 指定了 assistantName 且助手有配置 enabledSkills: 返回配置的 skill 列表
- * - 指定了 assistantName 但助手没有配置 enabledSkills: 返回所有可用 skills
+ * - 指定了 assistantName 且智能体有配置 enabledSkills: 返回配置的 skill 列表
+ * - 指定了 assistantName 但智能体没有配置 enabledSkills: 返回所有可用 skills
  * - 未指定 assistantName: 返回所有可用 skills
  */
 export async function getAssistantRuntimeConfig(
@@ -321,7 +321,7 @@ export async function getAssistantRuntimeConfig(
   memoryMode: 'session' | 'user'
   enabledSkills: string[]
 }> {
-  // 未指定助手时，返回所有可用 skills
+  // 未指定智能体时，返回所有可用 skills
   if (!assistantName) {
     const allSkills = await getAllAvailableSkillNames()
     return { memoryMode: 'session', enabledSkills: allSkills }
@@ -330,14 +330,14 @@ export async function getAssistantRuntimeConfig(
   try {
     const result = await findAssistantDir(assistantName)
     if (!result) {
-      // 找不到助手时，返回所有可用 skills
+      // 找不到智能体时，返回所有可用 skills
       const allSkills = await getAllAvailableSkillNames()
       return { memoryMode: 'session', enabledSkills: allSkills }
     }
 
     const meta = await readAssistantMeta(result.dir)
 
-    // 助手没有配置 enabledSkills 时，返回所有可用 skills
+    // 智能体没有配置 enabledSkills 时，返回所有可用 skills
     if (!Array.isArray(meta?.enabledSkills)) {
       const allSkills = await getAllAvailableSkillNames()
       return {
@@ -346,7 +346,7 @@ export async function getAssistantRuntimeConfig(
       }
     }
 
-    // 助手配置了 enabledSkills，返回配置的列表（过滤并 trim）
+    // 智能体配置了 enabledSkills，返回配置的列表（过滤并 trim）
     return {
       memoryMode: meta?.memory_mode === 'user' ? 'user' : 'session',
       enabledSkills: meta.enabledSkills

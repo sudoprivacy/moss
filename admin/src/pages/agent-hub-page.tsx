@@ -363,7 +363,7 @@ function InstalledAgentCard({
     agent.isBuiltin ? '系统内置' : agent.isHubInstalled ? 'Hub' : '本地',
     agent.version ? `v${agent.version}` : '',
     agent.skills.length > 0 ? `${agent.skills.length} 个关联技能` : '',
-    (agent.agentType || agent.meta?.agent_type) === 'workflow' ? '业务流程' : '对话助手',
+    (agent.agentType || agent.meta?.agent_type) === 'workflow' ? '业务流程' : '对话智能体',
   ].filter(Boolean)
 
   return (
@@ -605,7 +605,7 @@ export default function AgentHubPage() {
   // have no 审批 dialog to see the requested visibility in).
   const [viewingVisibility, setViewingVisibility] = useState<TenantAssistantInfo | null>(null)
 
-  // Tenant assistant edit states
+  // Tenant agent edit states
   const [tenantEditOpen, setTenantEditOpen] = useState(false)
   const [editingTenantAgent, setEditingTenantAgent] = useState<TenantAssistantInfo | null>(null)
   const [tenantEditName, setTenantEditName] = useState('')
@@ -1349,7 +1349,7 @@ export default function AgentHubPage() {
           }
         : null
 
-      // Creating on moss authors a TENANT (org-shared) assistant — the org's
+      // Creating on moss authors a TENANT (org-shared) agent — the org's
       // internal library. Custom assistants are client-authored and synced up,
       // so they are not created here (mirrors how tenant vs custom skills work).
       const createRes = await createTenantAssistant({
@@ -1395,7 +1395,7 @@ export default function AgentHubPage() {
       setCreateSelectedSkills([])
       setCreateSelectedWikis([])
       setCreateSelectedCorpApps([])
-      // The new assistant is a tenant (专属) item — land on that tab and refresh
+      // The new agent is a tenant (专属) item — land on that tab and refresh
       // both the tenant list and the installed list (it appears in both).
       setActiveTab('exclusive')
       await Promise.all([fetchTenantAssistants(), fetchInstalledState(false)])
@@ -2038,7 +2038,7 @@ export default function AgentHubPage() {
             ) : (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm text-muted-foreground mr-1">类型</span>
-                {([['all', '全部'], ['chat', '对话助手'], ['workflow', '业务流程']] as const).map(([key, label]) => (
+                {([['all', '全部'], ['chat', '对话智能体'], ['workflow', '业务流程']] as const).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
@@ -2658,7 +2658,7 @@ export default function AgentHubPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="chat">对话助手</SelectItem>
+                  <SelectItem value="chat">对话智能体</SelectItem>
                   <SelectItem value="workflow">业务流程</SelectItem>
                 </SelectContent>
               </Select>
@@ -3040,7 +3040,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{editEnabledWikis.length} / {availableWikis.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                勾选 Wiki 即可让该助手在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
+                勾选 Wiki 即可让该智能体在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
               </p>
               {availableWikis.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -3111,7 +3111,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{editEnabledCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                勾选后,该助手可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                勾选后,该智能体可通过 corpapp CLI 使用这些企业应用收发消息与文件。
               </p>
               {availableCorpApps.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -3343,7 +3343,7 @@ export default function AgentHubPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="chat">对话助手</SelectItem>
+                  <SelectItem value="chat">对话智能体</SelectItem>
                   <SelectItem value="workflow">业务流程</SelectItem>
                 </SelectContent>
               </Select>
@@ -3658,7 +3658,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{createSelectedCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                勾选后,该助手可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                勾选后,该智能体可通过 corpapp CLI 使用这些企业应用收发消息与文件。
               </p>
               {availableCorpApps.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -4364,7 +4364,7 @@ export default function AgentHubPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="chat">对话助手</SelectItem>
+                    <SelectItem value="chat">对话智能体</SelectItem>
                     <SelectItem value="workflow">业务流程</SelectItem>
                   </SelectContent>
                 </Select>
@@ -4694,7 +4694,7 @@ export default function AgentHubPage() {
                   <Badge variant="outline">{tenantEditEnabledWikis.length} / {availableWikis.length} 已关联</Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  勾选 Wiki 即可让该助手在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
+                  勾选 Wiki 即可让该智能体在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
                 </p>
                 {availableWikis.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -4764,7 +4764,7 @@ export default function AgentHubPage() {
                   <Badge variant="outline">{tenantEditEnabledCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  勾选后,该助手可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                  勾选后,该智能体可通过 corpapp CLI 使用这些企业应用收发消息与文件。
                 </p>
                 {availableCorpApps.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">

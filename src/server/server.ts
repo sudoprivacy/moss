@@ -453,7 +453,7 @@ async function copyAssistantToTenantDir(assistantName: string): Promise<void> {
   // Ensure tenant directory exists
   await mkdir(ASSISTANT_TENANT_DIR, { recursive: true })
 
-  // Copy the assistant directory
+  // Copy the agent directory
   cpSync(sourceDir, targetDir, { recursive: true })
 
   // Update metadata to set source_type to 'tenant'
@@ -465,7 +465,7 @@ async function copyAssistantToTenantDir(assistantName: string): Promise<void> {
 }
 
 /**
- * Copy assistant to tenant directory by source path
+ * Copy agent to tenant directory by source path
  * Used when file_path is stored in tenant_assistants table
  */
 async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> {
@@ -484,7 +484,7 @@ async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> 
   // Ensure tenant directory exists
   await mkdir(ASSISTANT_TENANT_DIR, { recursive: true })
 
-  // Copy the assistant directory
+  // Copy the agent directory
   cpSync(sourceDir, targetDir, { recursive: true })
 
   // Update metadata to set source_type to 'tenant'
@@ -601,7 +601,7 @@ async function seedBuiltinSystemAssistants(options: { cabinEnabled?: boolean } =
       )
     } catch (err) {
       console.warn(`[seedBuiltinSystemAssistants] upgrade failed for ${entry.name}:`, err)
-      // Best-effort restore so we never leave the assistant missing.
+      // Best-effort restore so we never leave the agent missing.
       if (!existsSync(targetDir) && existsSync(backupDir)) {
         try {
           renameSync(backupDir, targetDir)
@@ -5420,7 +5420,7 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/custom - Upload custom assistant
+      // POST /api/v1/agents/custom - Upload custom agent
       if (req.method === 'POST' && pathname === '/api/v1/agents/custom') {
         const body = await readJsonBody(req)
         console.log('[Upload Assistant] Received upload request, name:', body.name, 'id:', body.id, 'displayName:', body.displayName)
@@ -5493,7 +5493,7 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/installed/:id/download - Download installed assistant by ID
+      // GET /api/v1/agents/installed/:id/download - Download installed agent by ID
       const agentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/installed\/([^/]+)\/download$/)
       if (req.method === 'GET' && agentDownloadMatch) {
         const assistantId = decodeURIComponent(agentDownloadMatch[1] || '')
@@ -5504,7 +5504,7 @@ export function startServer(
           if (!assistant) {
             throw new HttpError(404, `Assistant not found: ${assistantId}`)
           }
-          // Use assistant name for packaging (directory lookup)
+          // Use agent name for packaging (directory lookup)
           const zipBuffer = await packageAssistantZip(assistant.name)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(assistantId)
@@ -5543,7 +5543,7 @@ export function startServer(
           throw new HttpError(400, `智能体名称 "${name}" 已存在，请使用其他名称`)
         }
 
-        // Generate UUID for the assistant
+        // Generate UUID for the agent
         const assistantId = randomUUID()
 
         // Get author info
@@ -5664,7 +5664,7 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/tenant/publish - Publish tenant assistant request
+      // POST /api/v1/agents/tenant/publish - Publish tenant agent request
       if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/publish') {
         const body = await readJsonBody(req)
         const assistantId = typeof body.assistantId === 'string' ? body.assistantId : ''
@@ -5674,16 +5674,16 @@ export function startServer(
           throw new HttpError(400, `assistantId is required`)
         }
 
-        // Check if assistant exists
+        // Check if agent exists
         const assistantResult = await findAssistantDir(assistantId)
         if (!assistantResult) {
           throw new HttpError(404, `Assistant not found: ${assistantId}`)
         }
 
-        // Read assistant metadata
+        // Read agent metadata
         const meta = await readAssistantMeta(assistantResult.dir)
 
-        // Use actual assistant name from metadata or directory name
+        // Use actual agent name from metadata or directory name
         const actualAssistantName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : assistantId
 
         // Get author name from user info
@@ -5693,7 +5693,7 @@ export function startServer(
         // Stamp the publisher's default visibility (dept_admin → own department,
         // user → self) so it survives approval instead of defaulting to global.
         const publishVisibility = authService.defaultTenantVisibility(auth)
-        // Create tenant assistant record with UUID as id
+        // Create tenant agent record with UUID as id
         runtime.store.createTenantAssistant({
           id: assistantId, // Use UUID as id
           name: actualAssistantName,
@@ -5716,7 +5716,7 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/admin/agents/tenant/:id/approve - Approve tenant assistant
+      // POST /api/v1/admin/agents/tenant/:id/approve - Approve tenant agent
       const agentApproveMatch = pathname.match(/^\/api\/v1\/admin\/agents\/tenant\/([^/]+)\/approve$/)
       if (req.method === 'POST' && agentApproveMatch) {
         authService.requireScope(auth, 'admin:settings')
@@ -5743,7 +5743,7 @@ export function startServer(
           } else if (tenantAssistant.visible_to == null) {
             runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
           }
-          // Copy assistant to tenant directory using stored file_path
+          // Copy agent to tenant directory using stored file_path
           const sourcePath = tenantAssistant.file_path as string | undefined
           if (sourcePath && existsSync(sourcePath)) {
             await copyAssistantToTenantDirByPath(sourcePath)
@@ -5776,7 +5776,7 @@ export function startServer(
         return
       }
 
-      // PATCH /api/v1/agents/tenant/:id - Update tenant assistant meta
+      // PATCH /api/v1/agents/tenant/:id - Update tenant agent meta
       const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
@@ -5888,7 +5888,7 @@ export function startServer(
         return
       }
 
-      // DELETE /api/v1/agents/tenant/:id - Delete tenant assistant
+      // DELETE /api/v1/agents/tenant/:id - Delete tenant agent
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
@@ -5918,7 +5918,7 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/tenant/:id/download - Download tenant assistant
+      // GET /api/v1/agents/tenant/:id/download - Download tenant agent
       const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantAgentDownloadMatch) {
         const tenantAssistantId = decodeURIComponent(tenantAgentDownloadMatch[1] || '')
@@ -6997,7 +6997,7 @@ export function startServer(
             ? body.assistant_name.trim()
             : undefined
 
-        // Resolve assistant display name from UUID or name.
+        // Resolve agent display name from UUID or name.
         // The assistant_name from client may be a UUID; the runtime injects this
         // string verbatim as the agent identity, so we resolve it to the display
         // name (shared with the cron path via resolveAssistantDisplayName).

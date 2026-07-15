@@ -20,7 +20,7 @@
 
 **实现方式**:
 - 移除 `setTenantAssistantDetail` 点击逻辑
-- 改为调用新的 `openTenantEdit(assistant: TenantAssistantInfo)` 函数
+- 改为调用新的 `openTenantEdit(agent: TenantAssistantInfo)` 函数
 - 复用现有编辑对话框结构，适配 TenantAssistantInfo 数据结构
 
 ### 2. 编辑对话框内容

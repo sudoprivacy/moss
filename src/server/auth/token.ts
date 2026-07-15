@@ -85,7 +85,7 @@ export function issueAccessToken(
  *
  * The token claims include an extra `assistant_id` field on top of the
  * standard AccessTokenClaims; the server-side handler will use it to
- * restrict which wikis are visible (see admin scope check + assistant
+ * restrict which wikis are visible (see admin scope check + agent
  * `enabledWikis` filter in `/api/v1/agent/wikis*` handlers).
  *
  * Default TTL: 24h — aligned with typical session length. Caller may

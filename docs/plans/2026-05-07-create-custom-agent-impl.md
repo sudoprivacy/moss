@@ -35,7 +35,7 @@ export async function createCustomAssistant(params: {
 
   // 1. 检查是否已存在
   const existing = await findAssistantDir(assistantName)
-  if (existing) throw new Error(`Assistant already exists: ${assistantName}`)
+  if (existing) throw new Error(`Agent already exists: ${assistantName}`)
 
   // 2. 准备目录
   await mkdir(ASSISTANT_CUSTOM_DIR, { recursive: true })
@@ -161,7 +161,7 @@ curl -X POST http://localhost:PORT/api/v1/agents/create \
 验证 `~/.moss/assistants/custom/test-agent/` 目录及其文件是否存在。
 
 **Step 4: 验证 Scode 发现**
-检查 scode 端是否能看到该助手。
+检查 scode 端是否能看到该智能体。
 
 **Step 5: Commit**
 ```bash

@@ -4,7 +4,7 @@
 
 将当前 `moss/ui` 对话区迁移到 `~/repo/cc-haha` 的展示模型，目标是尽量做到以下部分 1:1：
 
-- 每条用户消息与助手消息的消息壳、布局、间距、交互
+- 每条用户消息与智能体消息的消息壳、布局、间距、交互
 - 每个 tool 的分组、卡片、展开收起、结果内联展示
 - 富文本正文、代码块、表格、引用、长文档模式
 - copy 交互，包括消息 copy、代码 copy、tool input/output copy
@@ -21,7 +21,7 @@
 
 ### 2.1 当前 `moss/ui` 的问题
 
-- 对话区仍然是单一 `MessageBubble` 模型，assistant 正文、thinking、tools 都堆在同一层。
+- 对话区仍然是单一 `MessageBubble` 模型，agent 正文、thinking、tools 都堆在同一层。
 - tool UI 主要依赖 `tool-steps.tsx` 做统一摘要，不是按 tool 类型做差异化展示。
 - markdown 只够“可用”，但没有 `cc-haha` 的文档模式、代码块体系、Mermaid 识别、统一 copy 体系。
 - 消息 copy 交互粗糙，而且当前按钮本身有错误配置。
@@ -79,7 +79,7 @@
 ### 4.1 必须 1:1 对齐的能力
 
 - 用户消息布局与 copy 行为
-- 助手消息布局与 document layout 自动切换
+- 智能体消息布局与 document layout 自动切换
 - thinking block 展开/收起与活动态
 - tool group、tool call、tool result 的布局与层级
 - markdown 富文本样式
@@ -107,7 +107,7 @@
 
 当前 `agent-transcript.ts` 把会话直接压成：
 
-- `ChatMessage.role = user | assistant`
+- `ChatMessage.role = user | agent`
 - `ChatMessage.toolSteps?: ToolStep[]`
 
 这会导致：
@@ -156,7 +156,7 @@
 - 新增或重命名 builder，建议：
   - `buildMainChatRenderMessagesFromHistory`
   - `buildWorkerRenderMessagesFromSubagentEvents`
-- 在解析 `stream_event`、`assistant`、`user`、`result`、`tool_result` 时，不再把 tool 合并成 `toolSteps`。
+- 在解析 `stream_event`、`agent`、`user`、`result`、`tool_result` 时，不再把 tool 合并成 `toolSteps`。
 - 保留 `tool_use_id` 与 `parent_tool_use_id`，让上层能做 `ToolCallGroup`。
 - 保留已有的本地图片路径提取逻辑，继续从 tool result 中抽取图片。
 - 用户消息附件继续从 `event.images` / `event.files` 派生，但渲染层与消息正文解耦。
@@ -220,7 +220,7 @@
 - 继续接入 `FilePreview`
 - 用户附件如果有图片或文件，仍使用 `FilePreview`
 
-### 6.3 助手消息
+### 6.3 智能体消息
 
 #### 新增文件
 
@@ -233,7 +233,7 @@
 #### 负责功能
 
 - bubble/document layout 自动切换
-- 助手正文 copy
+- 智能体正文 copy
 - streaming 光标
 - 与 markdown renderer 对接
 
@@ -498,7 +498,7 @@
 | --- | --- | --- |
 | `src/renderer-react/components/chat/message-list.tsx` | `cc-haha/MessageList.tsx` | 新聊天渲染入口 |
 | `src/renderer-react/components/chat/user-message.tsx` | `cc-haha/UserMessage.tsx` | 用户消息壳 |
-| `src/renderer-react/components/chat/assistant-message.tsx` | `cc-haha/AssistantMessage.tsx` | 助手消息壳 |
+| `src/renderer-react/components/chat/assistant-message.tsx` | `cc-haha/AssistantMessage.tsx` | 智能体消息壳 |
 | `src/renderer-react/components/chat/thinking-block.tsx` | `cc-haha/ThinkingBlock.tsx` | thinking block |
 | `src/renderer-react/components/chat/message-action-bar.tsx` | `cc-haha/MessageActionBar.tsx` | 消息底部操作条 |
 | `src/renderer-react/components/shared/copy-button.tsx` | `cc-haha/CopyButton.tsx` | 通用 copy 按钮 |
@@ -585,8 +585,8 @@
 
 ### 12.1 消息展示
 
-- 用户消息与助手消息视觉结构接近 `cc-haha`
-- 助手长文自动切换 document layout
+- 用户消息与智能体消息视觉结构接近 `cc-haha`
+- 智能体长文自动切换 document layout
 - streaming 态不出现 layout 抖动
 
 ### 12.2 富文本
@@ -626,8 +626,8 @@
 
 - 纯文本对话：
   - 用户消息
-  - 助手短回复
-  - 助手长回复
+  - 智能体短回复
+  - 智能体长回复
 - markdown 富文本：
   - 标题
   - 列表
@@ -661,7 +661,7 @@
 
 - 对同一段对话，在 `cc-haha` 和 `moss/ui` 中截相同区域
 - 重点比对：
-  - assistant 文本宽度
+  - agent 文本宽度
   - 长文 document layout
   - code viewer 头部与底部
   - tool group 与 tool card 层级

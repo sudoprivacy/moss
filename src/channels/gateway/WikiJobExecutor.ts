@@ -3,7 +3,7 @@
  *
  * Picks up queued rows from `wiki_build_jobs` and runs them through
  * RuntimeService (the same pipeline that drives chat sessions). The agent
- * for each build is the system-level `wiki-builder` assistant (currently
+ * for each build is the system-level `wiki-builder` agent (currently
  * hard-coded as a prompt below; will be promoted to $MOSS_HOME/assistants/
  * system/wiki-builder/system.md once tuned).
  *
@@ -190,7 +190,7 @@ export class WikiJobExecutor {
         // Note: assistantName is forwarded by RuntimeService through to the
         // first-message system block. The actual prompt content is provided
         // inline via stdin below since wiki-builder is not yet a real
-        // assistant on disk.
+        // agent on disk.
         assistantName: 'wiki-builder',
       })
 

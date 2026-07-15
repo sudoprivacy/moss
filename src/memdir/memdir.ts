@@ -316,9 +316,9 @@ export function buildMemoryPrompt(params: {
 }
 
 /**
- * Assistant-mode daily-log prompt. Gated behind feature('KAIROS').
+ * Agent-mode daily-log prompt. Gated behind feature('KAIROS').
  *
- * Assistant sessions are effectively perpetual, so the agent writes memories
+ * Agent sessions are effectively perpetual, so the agent writes memories
  * append-only to a date-named log file rather than maintaining MEMORY.md as
  * a live index. A separate nightly /dream skill distills logs into topic
  * files + MEMORY.md. MEMORY.md is still loaded into context (via claudemd.ts)

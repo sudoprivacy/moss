@@ -524,7 +524,7 @@ export type SessionCreateInput = {
   assistantDisplayName?: string
   source?: string
   channelChatId?: string
-  /** Enabled skill names (optional, for non-assistant sessions) */
+  /** Enabled skill names (optional, for non-agent sessions) */
   enabledSkills?: string[]
 }
 
@@ -572,20 +572,20 @@ export type RunnerManifest = {
      */
     sessionToken?: string
     /**
-     * Document Center v2: wikis this assistant is authorized to query.
-     * Resolved by RuntimeService.spawnAttempt from assistant meta +
+     * Document Center v2: wikis this agent is authorized to query.
+     * Resolved by RuntimeService.spawnAttempt from agent meta +
      * DocumentStore; surfaced to agent via acpBridge first-message
      * `[Available Wikis]` block so scode actually knows to use `wiki` CLI.
      */
     availableWikis?: Array<{ id: string; name: string; description?: string | null }>
     /**
-     * Corp app instances this assistant may use via the `corpapp` CLI.
+     * Corp app instances this agent may use via the `corpapp` CLI.
      * acpBridge injects an `[Available Corp Apps]` block so the agent knows
      * the CLI + instance names exist.
      */
     availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
     sharedMemory?: string | null
-    /** Enabled skill names (from client or assistant config) */
+    /** Enabled skill names (from client or agent config) */
     enabledSkills?: string[]
     /**
      * 可见性过滤上下文，用于过滤用户有权访问的技能

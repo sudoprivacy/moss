@@ -281,7 +281,7 @@ export function formatToken(
 
 // Matches owner/repo#NNN style GitHub issue/PR references. The qualified form
 // is unambiguous — bare #NNN was removed because it guessed the current repo
-// and was wrong whenever the assistant discussed a different one.
+// and was wrong whenever the agent discussed a different one.
 // Owner segment disallows dots (GitHub usernames are alphanumerics + hyphens
 // only) so hostnames like docs.github.io/guide#42 don't false-positive. Repo
 // segment allows dots (e.g. cc.kurs.web). Lookbehind is avoided — it defeats

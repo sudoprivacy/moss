@@ -211,7 +211,7 @@ export default function McpPolicyPage() {
             <SettingField label="允许自动任务调用个人 MCP" description="允许自动任务（如定时任务）调用用户的个人 MCP">
               <Switch checked={policy.allow_auto_task_call_personal_mcp} onCheckedChange={() => toggle('allow_auto_task_call_personal_mcp')} />
             </SettingField>
-            <SettingField label="允许企业助手调用个人 MCP" description="允许企业级助手调用用户的个人 MCP">
+            <SettingField label="允许企业智能体调用个人 MCP" description="允许企业级智能体调用用户的个人 MCP">
               <Switch checked={policy.allow_enterprise_assistant_call_personal_mcp} onCheckedChange={() => toggle('allow_enterprise_assistant_call_personal_mcp')} />
             </SettingField>
             <SettingField label="允许携带企业上下文调用" description="允许在调用个人 MCP 时携带企业上下文信息">
@@ -248,7 +248,7 @@ export default function McpPolicyPage() {
             <SettingField label="限制并发和频率" description="限制 MCP 工具调用的并发数和调用频率">
               <Switch checked={policy.limit_concurrency_and_rate} onCheckedChange={() => toggle('limit_concurrency_and_rate')} />
             </SettingField>
-            <SettingField label="限制可调用模型/助手" description="限制哪些模型和助手可以调用 MCP 工具">
+            <SettingField label="限制可调用模型/智能体" description="限制哪些模型和智能体可以调用 MCP 工具">
               <Switch checked={policy.restrict_callable_models} onCheckedChange={() => toggle('restrict_callable_models')} />
             </SettingField>
           </CardContent>

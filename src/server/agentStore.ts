@@ -22,7 +22,7 @@ const ASSISTANT_CUSTOM_DIR = path.join(
   'custom',
 )
 const ASSISTANT_TENANT_DIR = path.join(MOSS_ASSISTANTS_DIR, 'tenant')
-// Staging area for non-admin-published tenant assistants awaiting approval.
+// Staging area for non-admin-published tenant agents awaiting approval.
 // Deliberately excluded from ASSISTANT_SEARCH_DIRS so pending files stay invisible
 // to the runtime scan until approval MOVES them into ASSISTANT_TENANT_DIR.
 export const ASSISTANT_TENANT_PENDING_DIR = path.join(MOSS_ASSISTANTS_DIR, 'tenant-pending')
@@ -101,11 +101,11 @@ export type AssistantStoreMeta = {
   ruleFile?: string
   skills?: string[]
   enabledSkills?: string[]
-  /** Document Center: Wiki IDs this assistant is authorised to query via wikiCli. */
+  /** Document Center: Wiki IDs this agent is authorised to query via wikiCli. */
   enabledWikis?: string[]
-  /** 企业应用管理: Corp App instance IDs this assistant may use via the corpapp CLI. */
+  /** 企业应用管理: Corp App instance IDs this agent may use via the corpapp CLI. */
   enabledCorpApps?: string[]
-  /** 企业鉴权: when true, this assistant may fetch the user's corp OAuth2 provider token via the corpauth CLI. */
+  /** 企业鉴权: when true, this agent may fetch the user's corp OAuth2 provider token via the corpauth CLI. */
   enableCorpAuth?: boolean
   agent_type?: 'chat' | 'workflow'
   memory_mode?: 'session' | 'user'
@@ -562,7 +562,7 @@ export async function findAssistantDir(
   }
 
   // Accept "moss:<assistantId>" form used by SudoWork desktop when the
-  // user picks an assistant from the dropdown — strip the prefix and
+  // user picks an agent from the dropdown — strip the prefix and
   // match against meta.id below.
   const idCandidate = normalizedAssistantName.startsWith('moss:')
     ? normalizedAssistantName.slice('moss:'.length)
@@ -739,7 +739,7 @@ export async function getInstalledAssistants(): Promise<InstalledAssistantInfo[]
 
 /**
  * Resolve an incoming `assistant_name` (which may be a UUID `id`, a directory
- * `name`, or already a display name) to the assistant's display name.
+ * `name`, or already a display name) to the agent's display name.
  *
  * The runtime injects this string verbatim as the agent's identity
  * (buildIdentityBlock / MOSS_ASSISTANT_NAME), so callers must pass the display
@@ -766,7 +766,7 @@ export async function resolveAssistantDisplayName(
 }
 
 /**
- * Get only hub-installed assistants (installed by admin from Hub).
+ * Get only hub-installed agents (installed by admin from Hub).
  * Used by /api/v1/agents/installed endpoint for client sync.
  */
 export async function getHubInstalledAssistants(): Promise<InstalledAssistantInfo[]> {
@@ -1233,8 +1233,8 @@ export async function getAssistantContextSummary(
 }
 
 /**
- * Get assistant system prompt content for MOSS_ASSISTANT_NAME env var handling.
- * Reads the rule file content from the assistant directory.
+ * Get agent system prompt content for MOSS_ASSISTANT_NAME env var handling.
+ * Reads the rule file content from the agent directory.
  */
 export async function getAssistantSystemPrompt(
   assistantName: string,
@@ -1343,12 +1343,12 @@ export async function batchSyncAssistants(params?: {
 }
 
 /**
- * Upload a custom assistant from a zip buffer.
- * The assistant will be installed to the custom directory with visibility set to the uploader only.
+ * Upload a custom agent from a zip buffer.
+ * The agent will be installed to the custom directory with visibility set to the uploader only.
  */
 export async function uploadCustomAssistant(params: {
   file: Buffer
-  name: string // User-visible assistant name (e.g., "微信公众号运营助手")
+  name: string // User-visible agent name (e.g., "微信公众号运营助手")
   id?: string // UUID from client (e.g., "fb11954c-a848-41a2-967f-e1ef5e711fe6")
   displayName: string
   description?: string
@@ -1363,7 +1363,7 @@ export async function uploadCustomAssistant(params: {
     throw new Error('Invalid assistant id')
   }
 
-  // Check if assistant already exists by id (directory name)
+  // Check if agent already exists by id (directory name)
   const existing = await findAssistantDir(assistantId)
   if (existing) {
     throw new Error(`Assistant already exists: ${assistantId}`)
@@ -1379,7 +1379,7 @@ export async function uploadCustomAssistant(params: {
     await mkdir(ASSISTANT_CUSTOM_DIR, { recursive: true })
     await rm(targetDir, { recursive: true, force: true })
 
-    // Find the assistant directory (might be nested)
+    // Find the agent directory (might be nested)
     let assistantDir = tempDir
     const entries = await readdir(tempDir, { withFileTypes: true })
     if (entries.length === 1 && entries[0].isDirectory()) {
@@ -1427,7 +1427,7 @@ export async function uploadCustomAssistant(params: {
 }
 
 /**
- * Package an assistant as a zip buffer for download.
+ * Package an agent as a zip buffer for download.
  */
 export async function packageAssistantZip(assistantName: string): Promise<Buffer> {
   const result = await findAssistantDir(assistantName)
@@ -1444,7 +1444,7 @@ export async function packageAssistantZip(assistantName: string): Promise<Buffer
 }
 
 /**
- * Package an assistant as a zip buffer from a specific directory path.
+ * Package an agent as a zip buffer from a specific directory path.
  */
 export async function packageAssistantZipByDir(assistantDir: string): Promise<Buffer> {
   if (!existsSync(assistantDir)) {
