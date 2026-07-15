@@ -763,12 +763,12 @@ export default function McpTemplatesPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>绑定助手</Label>
+                  <Label>绑定智能体</Label>
                   <MultiSelectList
                     options={assistants.map(a => ({ id: a.id, label: a.displayName || a.name, sub: a.name }))}
                     selected={boundAssistants}
                     onChange={setBoundAssistants}
-                    emptyText="暂无助手数据"
+                    emptyText="暂无智能体数据"
                   />
                 </div>
                 <div className="space-y-2">

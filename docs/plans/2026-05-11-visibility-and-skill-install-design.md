@@ -187,7 +187,7 @@ for (const skillId of selectedSkillIds) {
 
 ```typescript
 for (const skillId of selectedSkillIds) {
-  console.log(`[AgentHub] Installing skill ${skillId} for assistant ${assistantName}`)
+  console.log(`[AgentHub] Installing skill ${skillId} for agent ${assistantName}`)
 
   const detail = await fetchSkillHubSkillDetail(skillId).catch((err) => {
     console.error(`[AgentHub] Failed to fetch skill detail ${skillId}:`, err)

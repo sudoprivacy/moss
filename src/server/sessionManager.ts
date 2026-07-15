@@ -99,14 +99,14 @@ export type BackendSpawnOptions = {
    */
   sessionToken?: string
   /**
-   * Document Center v2: list of wikis the bound assistant is authorized
+   * Document Center v2: list of wikis the bound agent is authorized
    * to query. Resolved by RuntimeService from `_moss_meta.enabledWikis`
    * + DocumentStore lookup. Injected by acpBridge into the first user
    * message as an `[Available Wikis]` block so scode learns it can use
    * the `wiki` CLI.
    */
   availableWikis?: Array<{ id: string; name: string; description?: string | null }>
-  /** 企业应用管理: corp app instances the bound assistant may use via the `corpapp` CLI. */
+  /** 企业应用管理: corp app instances the bound agent may use via the `corpapp` CLI. */
   availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
   sharedMemory?: string | null
   /**

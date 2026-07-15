@@ -32,7 +32,7 @@ type AcpBridgeOptions = {
   assistantDisplayName?: string
   enabledSkillNames?: string[]
   /**
-   * Document Center v2: wikis this assistant is authorized to query.
+   * Document Center v2: wikis this agent is authorized to query.
    * Threaded by RuntimeService.spawnAttempt -> backend -> here, and
    * surfaced in the first user message as an `[Available Wikis]` block
    * so scode learns it can use the `wiki` CLI.

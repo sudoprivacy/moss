@@ -479,7 +479,7 @@ export class RuntimeService {
     let runtimeInput = input.runtime
     const runtimeType = input.runtime?.type || this.options.config.defaultRuntime
 
-    // Let assistant memory_mode decide the initial dockerMode/configDir when the
+    // Let agent memory_mode decide the initial dockerMode/configDir when the
     // caller did not explicitly choose one. Otherwise the global default
     // dockerMode=session gets baked into the session too early and overrides
     // memory_mode=user.
@@ -929,10 +929,10 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
-    // Effective assistant for this attempt. Callers that *create* a session
+    // Effective agent for this attempt. Callers that *create* a session
     // pass `options.assistantName`, but relaunch/reuse paths (e.g. a reused
     // cron session — spawnAttempt is reached via ensureRuntime with only
-    // `resumeTranscriptSessionId`) do not. Fall back to the assistant stored
+    // `resumeTranscriptSessionId`) do not. Fall back to the agent stored
     // on the session record so the pre-signed wiki/corp-app token carries the
     // right `assistant_id`, and the wiki / corp-app / shared-memory resolution
     // below still runs. Without this, a reused session signs a token with
@@ -1041,7 +1041,7 @@ export class RuntimeService {
       )
     }
 
-    // Document Center v2: resolve `enabledWikis` from the bound assistant's
+    // Document Center v2: resolve `enabledWikis` from the bound agent's
     // meta + look up wiki name/description so acpBridge can inject an
     // `[Available Wikis]` block into the first user message. Without this,
     // even though SESSION_TOKEN is set the agent has no idea it can use

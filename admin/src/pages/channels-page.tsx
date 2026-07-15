@@ -75,7 +75,7 @@ const PLATFORM_LOGOS: Record<ChannelPlatform, string> = {
 const SETUP_STEPS = [
   '选择一个渠道完成配置',
   '验证并启用渠道',
-  '在 IM 应用中与 AI 助手开始对话',
+  '在 IM 应用中与 AI 智能体开始对话',
 ]
 
 type PlatformField = {

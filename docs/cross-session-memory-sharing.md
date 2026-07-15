@@ -6,7 +6,7 @@
 
 跨会话记忆只在满足以下条件时共享：
 
-- 当前 Assistant 的 `_moss_meta.json` 配置为 `memory_mode: "user"`。
+- 当前 Agent 的 `_moss_meta.json` 配置为 `memory_mode: "user"`。
 - 当前会话 runtime mode 解析为 `user`，即 host 使用 `hostMode: "user"`，Docker 使用 `dockerMode: "user"`。
 - 共享范围是同一个 `userId` + 同一个 `assistantName`。
 
@@ -16,13 +16,13 @@
 
 当前实现主要涉及以下文件：
 
-- `src/server/runtimeService.ts`：创建 session、解析 assistant `memory_mode`、准备 shared memory、写 manifest。
+- `src/server/runtimeService.ts`：创建 session、解析 agent `memory_mode`、准备 shared memory、写 manifest。
 - `src/server/runtimePaths.ts`：根据 `session/user` mode 生成 runtime `configDir`。
 - `src/server/sharedAgentMemory.ts`：共享记忆文件路径、读写、去重、锁、AGENTS.md override 生成。
 - `src/server/backends/scodeBackend.ts`：host runtime 启动 scode，并设置 HOME/config env。
 - `src/server/backends/dockerBackend.ts`：Docker runtime 启动容器、挂载 configDir，并设置 HOME/config env。
 - `src/server/backends/acpBridge.ts`：首条消息注入 shared memory，并捕获可记忆用户事实写入记忆文件。
-- `src/utils/scodeBridge.ts`：构造首条消息中的 assistant 规则、技能提示、shared memory fallback。
+- `src/utils/scodeBridge.ts`：构造首条消息中的 agent 规则、技能提示、shared memory fallback。
 
 ## 路径模型
 
@@ -56,7 +56,7 @@
 
 ### 共享记忆文件
 
-共享记忆按 Assistant 分目录：
+共享记忆按 Agent 分目录：
 
 ```text
 <configDir>/.moss/memory/<assistantName>/MEMORY.md
@@ -68,7 +68,7 @@
 /Users/yobach/.moss/server/runtime/users/<userId>/config/.moss/memory/微信公众号运营助手/MEMORY.md
 ```
 
-### Assistant override 文件
+### Agent override 文件
 
 运行时会生成：
 
@@ -78,17 +78,17 @@
 
 这个文件包含：
 
-- Assistant 身份覆盖。
+- Agent 身份覆盖。
 - 已读取到的 shared memory。
-- Assistant system prompt。
+- Agent system prompt。
 
 注意：当前实现只写入 runtime `configDir`，不再写入 workspace 下的 `.nexus/sudocode/AGENTS.md`，避免把某个用户的记忆污染到同工作区的其他用户或其他会话。
 
 ## 创建会话时的解析链路
 
 1. API 创建会话，传入 `assistantName`、`runtime`、`userId`。
-2. `RuntimeService.createSession()` 读取 Assistant runtime 配置。
-3. 如果 Assistant 配置为 `memory_mode: "user"`，且调用方没有显式传入 mode：
+2. `RuntimeService.createSession()` 读取 Agent runtime 配置。
+3. 如果 Agent 配置为 `memory_mode: "user"`，且调用方没有显式传入 mode：
    - Docker runtime 设置 `dockerMode: "user"`。
    - Host runtime 设置 `hostMode: "user"`。
 4. `mergeRuntime()` 合并 runtime 默认值和请求值。
@@ -101,7 +101,7 @@
 
 `RuntimeService.spawnAttempt()` 会在启动 runner 前做以下事情：
 
-1. 读取 Assistant meta。
+1. 读取 Agent meta。
 2. 如果 `memory_mode === "user"`：
    - 读取登录用户资料。
    - 构造 profile memory，例如用户名、角色、部门、邮箱。
@@ -132,7 +132,7 @@ Host 模式由 `ScodeBackend` 启动本机 scode 进程。
 configDir = <runtimeDir>/users/<userId>/config
 ```
 
-同一个用户、同一个 Assistant 的后续 host 会话会复用：
+同一个用户、同一个 Agent 的后续 host 会话会复用：
 
 ```text
 <configDir>/.moss/memory/<assistantName>/MEMORY.md
@@ -212,7 +212,7 @@ Docker backend 仍会挂载这个目录进容器，但它是单次会话目录�
 
 1. `AGENTS.md` override：
    - 生成在 `<configDir>/.nexus/sudocode/AGENTS.md`。
-   - 包含 Assistant identity、shared memory、assistant rules。
+   - 包含 Agent identity、shared memory、agent rules。
    - host 和 Docker 都通过 `HOME/CLAUDE_CONFIG_DIR=<configDir>` 让 scode 有机会读取。
 
 2. 首条消息 fallback：
@@ -228,7 +228,7 @@ Docker backend 仍会挂载这个目录进容器，但它是单次会话目录�
 
 ### Profile memory
 
-每次启动 `memory_mode: "user"` 的 Assistant session 时，server 会从当前登录用户资料生成 profile memory，例如：
+每次启动 `memory_mode: "user"` 的 Agent session 时，server 会从当前登录用户资料生成 profile memory，例如：
 
 ```text
 The current logged-in user's name is ...

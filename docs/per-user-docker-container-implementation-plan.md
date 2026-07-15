@@ -73,7 +73,7 @@ src/server/backends/dockerBackend.ts:166
   ```
 - 把现在写到 `<configDir>/.nexus/sudocode/sudocode.json` 的内容改写到 `${SUDO_CODE_CONFIG_HOME}/sudocode.json`。
 - 把现在写到 `<configDir>/.nexus/sudocode/settings.json` 的 MCP 配置改写到 `${SUDO_CODE_CONFIG_HOME}/settings.json`。
-- `HOME=<configDir>` **保留不变**——assistant override、shared memory 路径仍按现状（`CLAUDE_CODE_REMOTE_MEMORY_DIR=<configDir>` 控制），它们与 `SUDO_CODE_CONFIG_HOME` 解耦。
+- `HOME=<configDir>` **保留不变**——agent override、shared memory 路径仍按现状（`CLAUDE_CODE_REMOTE_MEMORY_DIR=<configDir>` 控制），它们与 `SUDO_CODE_CONFIG_HOME` 解耦。
 - `createSkillSymlinks(configDir, enabledSkills)` 在 `dockerMode=user` 下改为写到 `${SUDO_CODE_CONFIG_HOME}/skills/...`（per-session），或者直接删除这条，让 scode 仅通过 `syncWorkspaceSkills(workspace, ...)` 的 workspace 链接发现 skill。后者更简洁，但需要确认 scode 的 plugin 解析能从 workspace 找到 skill。
 - 销毁 session 时连带清理 `<runtimeDir>/sessions/<sid>/scode-home/`。
 
@@ -81,7 +81,7 @@ src/server/backends/dockerBackend.ts:166
 
 - MCP `settings.json` 也可以同时落到 `<workspace>/.nexus/sudocode/settings.json`（Project source），scode 会自动 deep-merge。优点：即使 `SUDO_CODE_CONFIG_HOME` 没改对，workspace 这份也能兜底。但要小心两份同时存在时的合并语义。第一版不推荐叠加，保持单一来源。
 
-**`memory_mode=user` 下的 assistant override 写入**：
+**`memory_mode=user` 下的 agent override 写入**：
 
 - 写入路径仍是 `<users>/<uid>/config/.moss/memory/<assistantName>/AGENTS.md` 这类用户级文件，由 `CLAUDE_CODE_REMOTE_MEMORY_DIR` 控制，与 `SUDO_CODE_CONFIG_HOME` 解耦，不受 A1 主方案影响。
 - 改用：
@@ -100,7 +100,7 @@ src/server/backends/dockerBackend.ts:166
 src/server/backends/dockerBackend.ts        改文件写入路径 + per-exec 加 SUDO_CODE_CONFIG_HOME
 src/server/backends/backendUtils.ts         新增 buildSessionScodeHomeDir() 辅助
 src/server/backends/acpBridge.ts            destroy 时清理 scode-home 目录(若 host 模式)
-src/server/agentStore.ts                    assistant override 写入加锁 + 原子 rename
+src/server/agentStore.ts                    agent override 写入加锁 + 原子 rename
 src/server/__tests__/scode-config-home.test.ts   新增: 验证 SUDO_CODE_CONFIG_HOME 路径生效
                                                        验证 skill 发现路径
 deploy/runtime/Dockerfile                   无需改动
@@ -109,7 +109,7 @@ deploy/runtime/Dockerfile                   无需改动
 **验收**：
 
 - 新增测试：dockerMode=user 下两个 session 并发 spawn，A 写入的 sudocode.json 不被 B 覆盖（断言 A、B 各自读到自己的内容）。
-- 新增测试：assistant override 并发写不出现半写文件（用大量小写入 stress test，校验 JSON 始终可解析）。
+- 新增测试：agent override 并发写不出现半写文件（用大量小写入 stress test，校验 JSON 始终可解析）。
 
 ---
 
@@ -232,7 +232,7 @@ reschedule(record):
 
 - `idleTimer` 只在 (detached && !busy) 同时成立时 arm；任一条件翻转立即取消。
 - `busyCeilingTimer` 只在 (detached && busy) 同时成立时 arm，busy→false 取消后由 idleTimer 接力（不叠计）。
-- AskUserQuestion 期间 busy=true，意味着用户离线且不答时，最终由 `busyCeilingTimer` 兜底回收。`persistInProgressTurn()` 保证 partial assistant text 不丢。
+- AskUserQuestion 期间 busy=true，意味着用户离线且不答时，最终由 `busyCeilingTimer` 兜底回收。`persistInProgressTurn()` 保证 partial agent text 不丢。
 
 #### A2-4. SessionManager / SessionRunnerDaemon 接入
 
@@ -383,7 +383,7 @@ src/server/__tests__/busy-state.test.ts 新增 (见下)
 
 - 长任务（≥ idleTimeoutMs）运行中关掉 web 页面，scode 不被回收。任务完成后用户在 idleTimeoutMs 内回来 reattach，能拿到完整 transcript。
 - 同上但用户不回来，过 idleTimeoutMs 后被回收。
-- AskUserQuestion 出现后用户不答，过 maxDetachedBusyMs 被回收，transcript 包含 partial assistant text + killed_by_idle_busy_timeout 事件。
+- AskUserQuestion 出现后用户不答，过 maxDetachedBusyMs 被回收，transcript 包含 partial agent text + killed_by_idle_busy_timeout 事件。
 
 ---
 
@@ -1189,7 +1189,7 @@ handle.destroy(force=true):
 
 ```text
 Step 1.  if (!force) await handle.persistInProgressTurn()
-         落 partial assistant text + 'killed_by_idle_busy_timeout' 事件到 transcript
+         落 partial agent text + 'killed_by_idle_busy_timeout' 事件到 transcript
          force=true 路径跳过 (用户主动强杀, 不保留 partial)
          任何异常 -> 记 metric 'persist_failed', 继续 step 2
 
@@ -1248,7 +1248,7 @@ src/server/sessionManager.ts                 SessionRuntimeInfo 类型扩字段
 - 集测：reap 后 host 侧 `docker exec` 子进程退出，scode 进程组全部清掉，同容器其他 session 不受影响。
 - 集测：**kill host 侧 `docker exec` 进程**模拟异常，容器内 scode **不应**自动退出（验证信号不转发的事实），后续 destroy 路径调 reaper 才真正清理。
 - 集测：`handle.destroy(force=true)` 路径 graceMs=0，scode 立即 SIGKILL；`force=false` 路径 graceMs=execKillGraceMs，scode 收到 SIGTERM 后 grace 内退出。
-- 集测：detached 长任务被 `maxDetachedBusyMs` kill 时，transcript 包含 partial assistant text + `killed_by_idle_busy_timeout` 事件（验证 persistInProgressTurn 真生效）。
+- 集测：detached 长任务被 `maxDetachedBusyMs` kill 时，transcript 包含 partial agent text + `killed_by_idle_busy_timeout` 事件（验证 persistInProgressTurn 真生效）。
 - 集测：reap exec 失败（mock docker daemon 不通）→ cleanup 仍完成磁盘清理，emit `reap_failed` 指标，**不**升级为 `docker rm -f` 用户容器。
 - 集测：runner 进程正常退出后主进程 `child.once('close')` 触发 `releaseSession`；session 模式下不触发（验证 close handler 仅在 user 模式生效）。
 - 集测：runner 被 `kill -9` 模拟异常退出，主进程 close handler 仍触发 release；activeSessionIds 递减正确。
@@ -1571,7 +1571,7 @@ A 阶段:
                                               A2: busy 状态机 + isBusy/onBusyChange
                                                   + persistInProgressTurn
                                                   + stopReason 路径接 reevaluateBusy)
-  src/server/agentStore.ts                   (A1: assistant override 加锁 + atomic rename)
+  src/server/agentStore.ts                   (A1: agent override 加锁 + atomic rename)
   src/server/sessionManager.ts               (A2: SessionRecord 扩字段含 busy + reschedule;
                                               移除直接 destroy 路径, 改为通知 runner)
   src/server/sessionRunnerDaemon.ts          (A2: reschedule 算法 + onBusyChange 订阅)

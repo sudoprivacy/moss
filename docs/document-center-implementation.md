@@ -10,11 +10,11 @@ Everything needed for the P0 happy path:
 
 - DB schema for document tree, documents, wikis, build jobs
 - DocumentStore high-level API + REST routes (admin + agent surfaces)
-- AdminHub UI: tree with expand/collapse, doc uploads, Wiki list, Assistant ↔ Wiki tab
+- AdminHub UI: tree with expand/collapse, doc uploads, Wiki list, Agent ↔ Wiki tab
 - WikiJobExecutor polling worker that drives builds through RuntimeService
 - `wiki` Go CLI baked into the scode runtime Docker image
 - INDEX injection into first-message system prompt
-- JWT helper + per-assistant ACL on agent-facing wiki endpoints
+- JWT helper + per-agent ACL on agent-facing wiki endpoints
 - SSE-based build progress streaming + UI subscription
 
 Commits on `feat/document-center` (chronological):
@@ -24,7 +24,7 @@ Commits on `feat/document-center` (chronological):
 | ad6a28c | DB + DocumentStore foundation |
 | 906fd08 | REST routes (admin + agent) |
 | 96b170c | AdminHub page + tree component |
-| 8ba6cd3 | Assistant ↔ Wiki association |
+| 8ba6cd3 | Agent ↔ Wiki association |
 | 08448cf | WikiJobExecutor (real build worker) |
 | 4f38cd5 | Go wikiCli + multi-stage Dockerfile |
 | 30739f2 | INDEX injection + JWT + ACL |
@@ -42,9 +42,9 @@ Commits on `feat/document-center` (chronological):
    and `cwd = $MOSS_HOME/wikis/<wikiId>`, feeds it the hardcoded wiki
    build prompt, and waits for `type=result`. SSE pushes
    `wiki_build_status` updates to the AdminHub UI in real time.
-5. Assistant edit dialog (`/settings/agents → 编辑`) shows a "关联 Wiki"
+5. Agent edit dialog (`/settings/agents → 编辑`) shows a "关联 Wiki"
    section right under "关联技能". Selected wiki IDs are persisted to the
-   assistant's `_moss_meta.json` as `enabledWikis: string[]`.
+   agent's `_moss_meta.json` as `enabledWikis: string[]`.
 6. The `wiki` CLI (built into the runtime container at
    `/usr/local/bin/wiki`) talks to `/api/v1/agent/wikis/*` using the
    SESSION_TOKEN env var set by moss-server.
@@ -63,7 +63,7 @@ These are wired in code but not yet "full power":
   currently raw-copies docx/pdf into `<cwd>/input/`. Proper conversion
   pipeline (mammoth for .docx, libreoffice for .pdf) is the next item.
   The agent's own `read_file` tool can handle binary fallback for now.
-- **`wiki-builder` system assistant on disk**:  the build prompt is
+- **`wiki-builder` system agent on disk**:  the build prompt is
   hardcoded in `WikiJobExecutor.WIKI_BUILDER_PROMPT`. Promote it to
   `$MOSS_HOME/assistants/system/wiki-builder/system.md` once tuned.
 - **Wiki INDEX auto-injection in real chat sessions**:  the

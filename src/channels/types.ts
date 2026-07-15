@@ -142,7 +142,7 @@ export interface IChannelPluginStatus {
 // ==================== User Types ====================
 
 /**
- * Authorized user in the assistant system
+ * Authorized user in the agent system
  */
 export interface IChannelUser {
   id: string;
@@ -155,7 +155,7 @@ export interface IChannelUser {
 }
 
 /**
- * Database row for assistant users
+ * Database row for agent users
  */
 export interface IChannelUserRow {
   id: string;
@@ -170,12 +170,12 @@ export interface IChannelUserRow {
 // ==================== Session Types ====================
 
 /**
- * Agent types supported in assistant sessions
+ * Agent types supported in agent sessions
  */
 export type ChannelAgentType = 'acp' | 'openclaw-gateway';
 
 /**
- * User session in the assistant system
+ * User session in the agent system
  */
 export interface IChannelSession {
   id: string;
@@ -189,7 +189,7 @@ export interface IChannelSession {
 }
 
 /**
- * Database row for assistant sessions
+ * Database row for agent sessions
  */
 export interface IChannelSessionRow {
   id: string;

@@ -273,7 +273,7 @@ export async function forkSession(
 }
 
 // ============================================================================
-// Assistant daemon primitives (internal)
+// Agent daemon primitives (internal)
 // ============================================================================
 
 /**

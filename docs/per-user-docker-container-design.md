@@ -45,7 +45,7 @@ docker run --rm -i --name moss-session-<sessionId12>-g<generation> \
 作用分别是：
 
 - `workspace`：当前会话的工作目录。`scode` 在这里读写文件，生成文件会落到宿主机，所以现有文件树和文件预览接口可以直接读取。
-- `config`：当前会话的 HOME 和 scode 配置目录。里面会放生成的 `sudocode.json`、MCP `settings.json`、assistant override 文件，以及其他会话级状态。
+- `config`：当前会话的 HOME 和 scode 配置目录。里面会放生成的 `sudocode.json`、MCP `settings.json`、agent override 文件，以及其他会话级状态。
 - `MOSS_HOME`：MOSS 已安装的智能体、技能和本地资源目录。workspace/config 中创建的技能软链会指向这里，因此容器内必须能访问。
 
 在容器化部署 moss-server 时，moss-server 看到的路径和 Docker daemon 需要的宿主机路径可能不同。当前通过 `MOSS_HOST_PATH_MAP` 把 `/app/data/runtime/...` 这类容器内路径映射回 `/data/moss-server/moss/data/runtime/...` 这类宿主机路径。
@@ -366,9 +366,9 @@ dockerMode = session
 
 - 容器按用户复用。
 - 每个 session 仍然保留自己的 configDir。
-- 并发会话不会互相覆盖 `settings.json`、`sudocode.json`、assistant override 文件或 MCP 配置。
+- 并发会话不会互相覆盖 `settings.json`、`sudocode.json`、agent override 文件或 MCP 配置。
 
-如果某个 assistant 明确需要跨会话记忆，继续使用现有 `memory_mode=user` / `dockerMode=user` 机制。容器复用和记忆共享应当是两个独立概念。
+如果某个 agent 明确需要跨会话记忆，继续使用现有 `memory_mode=user` / `dockerMode=user` 机制。容器复用和记忆共享应当是两个独立概念。
 
 ## 共享 configDir 下的写并发处理
 
@@ -389,7 +389,7 @@ dockerMode = user      users/<uid>/config/.nexus/sudocode/...        共享, 并
    - per-exec 设 `SUDO_CODE_CONFIG_HOME=<runtimeDir>/sessions/<sid>/scode-home/.nexus/sudocode`。
    - `sudocode.json` 写到 `${SUDO_CODE_CONFIG_HOME}/sudocode.json`。
    - `settings.json` 写到 `${SUDO_CODE_CONFIG_HOME}/settings.json`。
-   - `HOME=<configDir>` **保持不变**——assistant override 和 shared memory 仍走 HOME / `CLAUDE_CODE_REMOTE_MEMORY_DIR` 路径，与 scode 配置完全解耦。
+   - `HOME=<configDir>` **保持不变**——agent override 和 shared memory 仍走 HOME / `CLAUDE_CODE_REMOTE_MEMORY_DIR` 路径，与 scode 配置完全解耦。
    - 不需要修改 scode 源码、不需要新增 CLI flag。
 
 2. **skill symlinks 改走 workspace，不走 configDir**。
@@ -397,13 +397,13 @@ dockerMode = user      users/<uid>/config/.nexus/sudocode/...        共享, 并
    - 删除 / 关掉 `createSkillSymlinks(configDir, enabledSkills)` 这一份在 configDir 下的副本，避免双写。
    - 验证 scode 启动时是否优先读 workspace 下的 skill 目录；如果不读，调整 skill 搜索顺序或环境变量。
 
-3. **assistant override 文件**（`memory_mode=user` 下的 `_moss_meta.json` 派生文件）继续允许写 user-mode configDir，但要：
+3. **agent override 文件**（`memory_mode=user` 下的 `_moss_meta.json` 派生文件）继续允许写 user-mode configDir，但要：
    - 写入前先用 advisory lock（`flock` / 文件锁）；
    - 写入用 `tempfile + rename` 原子替换，避免半写文件被并发读到。
 
 4. **shared memory（`MEMORY.md`）的并发追加**沿用现有 lock 即可，文档级 review 但不重做。
 
-落地后 user-mode 共享 configDir 下还剩什么：assistant override、MCP user-level 配置、shared memory。这些都是"按用户语义共享"的内容，不再有 per-session 文件混在里面。
+落地后 user-mode 共享 configDir 下还剩什么：agent override、MCP user-level 配置、shared memory。这些都是"按用户语义共享"的内容，不再有 per-session 文件混在里面。
 
 ## 跨会话共享智能体
 
@@ -419,7 +419,7 @@ dockerMode = user     // configDir 和记忆按用户共享
 现有跨会话共享智能体逻辑依赖的是 `memory_mode=user`：
 
 ```text
-assistant _moss_meta.json: memory_mode = user
+agent _moss_meta.json: memory_mode = user
   -> RuntimeService 将 dockerMode 解析为 user
   -> configDir = <runtimeDir>/users/<userId>/config
   -> shared memory = <runtimeDir>/users/<userId>/config/.moss/memory/<assistantName>/MEMORY.md
@@ -452,7 +452,7 @@ assistant _moss_meta.json: memory_mode = user
 <runtimeDir>/users/<userId>/config/.moss/memory/<assistantName>/MEMORY.md
 ```
 
-所以用户选择 `memory_mode=user` 的智能体时，跨会话共享逻辑不会因为容器复用而失效。会话启动时仍然会读取 shared memory，写入 assistant override，并在首条消息中注入共享记忆。
+所以用户选择 `memory_mode=user` 的智能体时，跨会话共享逻辑不会因为容器复用而失效。会话启动时仍然会读取 shared memory，写入 agent override，并在首条消息中注入共享记忆。
 
 并发安全由"共享 configDir 下的写并发处理"一节负责。`dockerMode=user` 共享 configDir 仅存放真正"用户级语义"的文件，per-session 文件已经搬走。
 
@@ -555,7 +555,7 @@ reschedule(record):
   arm busyCeilingTimer for remaining:
     on fire ->
       emit metric 'idle_busy_timeout_total'
-      await handle.persistInProgressTurn()   // 落 partial assistant text
+      await handle.persistInProgressTurn()   // 落 partial agent text
       handle.destroy(force=true)
 ```
 
@@ -564,7 +564,7 @@ reschedule(record):
 - `idleTimer` 只在 (detached && !busy) **同时**成立时 arm；任一条件翻转立即取消。
 - `busyCeilingTimer` 只在 (detached && busy) 同时成立时 arm；busy→false 时取消并由 `idleTimer` 接管，**不叠计**。
 - `maxDetachedBusyMs` 基于 `detachedBusySince`，busy 来回翻转一次就重置——它度量的是"连续 detached + 连续 busy"的持续时间，不是累积。
-- AskUserQuestion 期间 busy=true：用户离线且不回答时，最终由 `busyCeilingTimer` 兜底回收。`persistInProgressTurn()` 保证 partial assistant text + `killed_by_idle_busy_timeout` 事件落 transcript，不丢。
+- AskUserQuestion 期间 busy=true：用户离线且不回答时，最终由 `busyCeilingTimer` 兜底回收。`persistInProgressTurn()` 保证 partial agent text + `killed_by_idle_busy_timeout` 事件落 transcript，不丢。
 
 ### 参数默认建议
 
@@ -862,7 +862,7 @@ user 模式下 `handle.destroy(force)` 的实际执行序列：
 
 ```text
 Step 1.  if (!force) await handle.persistInProgressTurn()
-         // 落 partial assistant text + 'killed_by_idle_busy_timeout' 事件到 transcript
+         // 落 partial agent text + 'killed_by_idle_busy_timeout' 事件到 transcript
          // force=true 路径跳过 (用户主动强杀, 不保留 partial)
 
 Step 2.  docker exec <userContainer> moss-session-reap <sid> <graceMs>
@@ -1185,12 +1185,12 @@ moss.runtime.config.hash=<configHash>
 | `pendingEnsures` 锁：并发 ensure 同一用户容器只产生一个容器 | 去重锁 |
 | `draining` 状态下 ensure 是等待还是拒绝、行为符合状态机定义 | 销毁/创建互斥 |
 | 容器内 OOM-killed → 所有 attached session 标记 lost 并恢复 | 灾难恢复 |
-| `dockerMode=user` 下两个 scode 同时写 assistant override / shared memory | 共享 configDir 并发 |
+| `dockerMode=user` 下两个 scode 同时写 agent override / shared memory | 共享 configDir 并发 |
 | `sudocode.json` / `settings.json` 改走 per-session 目录后，scode 启动读到正确配置 | 共享 configDir 写并发整改验证 |
 | Reconcile：宿主机有孤儿容器 / 容器内有孤儿 pidfile / DB 有孤儿 session 三种组合 | reconcile 完整性 |
 | 用户容器 idle 超时回收期间新 session 进来取消回收 | 取消语义 |
 | 长任务跨过 `idleTimeoutMs` 才完成，busy→false 时重新 arm 完整 `idleTimeoutMs`，不立即 kill | **核心 idle regression** |
-| detached + 持续 busy → `maxDetachedBusyMs` 兜底前 `persistInProgressTurn` 被调，partial assistant text 落 transcript | 兜底 + 不丢数据 |
+| detached + 持续 busy → `maxDetachedBusyMs` 兜底前 `persistInProgressTurn` 被调，partial agent text 落 transcript | 兜底 + 不丢数据 |
 | AskUserQuestion 期间用户离线 → busy 维持 true，由 `maxDetachedBusyMs` 而非 `idleTimeoutMs` 回收 | AskUserQuestion 兜底 |
 | busy 来回翻转，`idleTimer` / `busyCeilingTimer` 正确取消/重算，时长不叠加 | 状态机正确性 |
 | PID 复用：reaper 在 `start_ticks` 不一致时拒绝 kill | 误杀防御 |

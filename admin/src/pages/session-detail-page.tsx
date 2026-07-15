@@ -145,11 +145,11 @@ function getRoleLabel(message: SessionMessage): string {
 
   // Transcript format: type indicates role
   if (type === 'user') return '用户'
-  if (type === 'assistant') return '助手'
+  if (type === 'assistant') return '智能体'
 
   // Direct role field (fallback)
   if (message.role === 'user') return '用户'
-  if (message.role === 'assistant') return '助手'
+  if (message.role === 'assistant') return '智能体'
 
   return '系统'
 }
@@ -490,7 +490,7 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
                   <span>{usage.cacheCreationInputTokens.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">助手消息</span>
+                  <span className="text-muted-foreground">智能体消息</span>
                   <span>{usage.assistantMessageCount}</span>
                 </div>
                 <div className="flex justify-between text-sm">
