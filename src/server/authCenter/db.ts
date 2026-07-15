@@ -337,7 +337,7 @@ export class AuthCenterDb {
     )
 
     // External-ID columns: stable identifiers from the upstream IdP (e.g.
-    // Ruigu's bizOrgCode / user_id / groupIds[0]). All nullable —
+    // a bizOrgCode / user_id / groupIds[0]). All nullable —
     // locally-authenticated users + the bootstrap default org leave them
     // NULL. Uniqueness is enforced by SQL partial UNIQUE indexes below;
     // NULL values don't compete for uniqueness, so any number of rows can

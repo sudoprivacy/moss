@@ -14,13 +14,13 @@ import { createServerLogger, type ServerLogger } from '../serverLog.js'
  * `name` is rewritten when `extOrgId` / `extDeptId` match but names differ).
  */
 export type OAuth2Identity = {
-  /** IdP's organization id (e.g. Ruigu's bizOrgCode). Required for auto-create. */
+  /** IdP's organization id (e.g. a bizOrgCode). Required for auto-create. */
   extOrgId?: string
   /** IdP's organization display name; used when auto-creating the moss org. */
   extOrgName?: string
-  /** IdP's user id within that org (e.g. Ruigu's user_id). Required. */
+  /** IdP's user id within that org (e.g. a user_id). Required. */
   extUserId: string
-  /** IdP's group id (e.g. Ruigu's groupIds[0]). Optional; when absent falls
+  /** IdP's group id (e.g. a groupIds[0]). Optional; when absent falls
    *  back to by-name dept lookup. */
   extDeptId?: string
   /** Optional — when omitted, moss synthesizes a synthetic internal email. */
@@ -28,7 +28,7 @@ export type OAuth2Identity = {
   expiresIn: number
   /** Provider access token — stored server-side by moss for resource access. */
   accessToken: string
-  /** IdP login username (e.g. Ruigu's user_name) → moss `users.name`. When
+  /** IdP login username (e.g. a user_name) → moss `users.name`. When
    *  omitted, moss falls back to displayName/email for the login name. */
   username?: string
   /** IdP display name / nickname → moss `users.display_name` (shown in UIs and

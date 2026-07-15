@@ -7,7 +7,7 @@
  * document_tree_nodes + documents tables.
  *
  * Two implementations land in P0:
- *   - WecomDriveConnector (sources/wecomDrive.ts) — Ruigu's case
+ *   - WecomDriveConnector (sources/wecomDrive.ts) — WeCom WeDrive source
  *   - FilesystemConnector (sources/filesystem.ts) — works for any
  *     locally mounted directory and is the cleanest validation of the
  *     abstraction.

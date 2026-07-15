@@ -12,7 +12,7 @@ import { resolveUserPinnedOrSuperAdmin } from '../auth/token.js'
 type User = { id: string; orgId: string; role: string; name: string }
 
 const HOME_ORG = 'org-default'
-const FOREIGN_ORG = 'org-ruigu'
+const FOREIGN_ORG = 'org-foreign'
 
 const superAdmin: User = { id: 'u-super', orgId: HOME_ORG, role: 'super_admin', name: 'admin' }
 const regularAdmin: User = { id: 'u-admin', orgId: HOME_ORG, role: 'admin', name: 'org-admin' }

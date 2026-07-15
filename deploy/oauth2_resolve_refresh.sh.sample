@@ -67,7 +67,7 @@ mode="${1:-}"
 #   #   -d "grant_type=authorization_code&code=$code&..." \
 #   #   | jq -r '.access_token')
 #
-# Implicit / token-direct flow (e.g. Ruigu):
+# Implicit / token-direct flow:
 #   access_token=$(echo "$OAUTH2_PARAMS" | jq -r '.access_token // empty')
 #   refresh_token=$(echo "$OAUTH2_PARAMS" | jq -r '.refresh_token // empty')
 #
@@ -177,7 +177,7 @@ resolve_mode() {
   #   refresh_token=$(echo "$token_resp" | jq -r '.refresh_token // empty')
   #   expires_in=$(echo "$token_resp" | jq -r '.expires_in // 3600')
   #
-  # If your IdP returns the token directly in the redirect (implicit/Ruigu-style):
+  # If your IdP returns the token directly in the redirect (implicit-style):
   #   access_token=$(echo "$OAUTH2_PARAMS" | jq -r '.access_token // empty')
   #   refresh_token=$(echo "$OAUTH2_PARAMS" | jq -r '.refresh_token // empty')
   #   expires_in= ...  # may need a separate /check-token or default
@@ -202,7 +202,7 @@ resolve_mode() {
   #
   #   user_id=$(echo "$userinfo" | jq -r '.user_id // empty')
   #   [ -n "$user_id" ] || die "userinfo .user_id is missing or null"
-  #   # Ruigu-style userinfo also carries a login username and a nickname:
+  #   # Some IdPs' userinfo also carries a login username and a nickname:
   #   username=$(echo "$userinfo" | jq -r '.user_name // empty')  # → users.name
   #   nickname=$(echo "$userinfo" | jq -r '.nickname  // empty')  # → users.display_name
   #
@@ -244,7 +244,7 @@ refresh_mode() {
   # the refresh-mode output" as "refresh unavailable" and ends the
   # session, so the user re-logs in when their current access_token
   # expires. This is the right behaviour for any IdP without a refresh
-  # endpoint (Ruigu-style).
+  # endpoint.
   echo '{}'
 
   # ─── If your IdP DOES support refresh, replace the line above with: ─────────
