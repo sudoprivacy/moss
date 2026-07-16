@@ -285,7 +285,9 @@ function SkillCard({
           </div>
         ) : installed && canManage ? (
           <>
-            {onEditVisibility && (
+            {/* Hub/system skills are org-wide installs with no per-user creator;
+                only a store admin may change their visibility. canInstall === isStoreAdmin. */}
+            {onEditVisibility && canInstall && (
               <Button
                 size="sm"
                 variant="ghost"
@@ -358,7 +360,8 @@ type InstalledSkillCardProps = {
   onToggleEnabled: (skill: InstalledSkillInfo, enabled: boolean) => void
   onRequestUninstall: (skill: InstalledSkillInfo) => void
   onUpdate: (skill: InstalledSkillInfo) => void
-  onEditVisibility: (skill: InstalledSkillInfo) => void
+  // Optional: omitted for custom skills, which have no visibility management.
+  onEditVisibility?: (skill: InstalledSkillInfo) => void
   departmentNameMap: Map<string, string>
   users: AuthUser[]
 }
@@ -471,7 +474,7 @@ function InstalledSkillCard({
         className="absolute top-4 right-4 flex items-center gap-2"
         onClick={event => event.stopPropagation()}
       >
-        {canManage ? (
+        {canManage && onEditVisibility ? (
           <Button
             size="sm"
             variant="ghost"
@@ -597,6 +600,10 @@ export default function SkillStorePage() {
   const [editSkillVisibleTo, setEditSkillVisibleTo] = useState<string[]>([])
   const [editSkillVisibleUserIds, setEditSkillVisibleUserIds] = useState<string[]>([])
   const [savingVisibility, setSavingVisibility] = useState(false)
+  // Original stored visible_to for the skill being edited, so we can detect and
+  // warn about admin-set out-of-scope grants a non-admin save would drop.
+  const [editingSkillVisibleTo, setEditingSkillVisibleTo] = useState<VisibleTo | null>(null)
+  const [skillVisibilityWarnOpen, setSkillVisibilityWarnOpen] = useState(false)
   const [tenantSkills, setTenantSkills] = useState<TenantSkillInfo[]>([])
   const [tenantSkillsLoading, setTenantSkillsLoading] = useState(false)
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false)
@@ -1388,6 +1395,7 @@ export default function SkillStorePage() {
   const handleOpenVisibilityEdit = useCallback((skill: InstalledSkillInfo) => {
     setEditingSkillName(skill.name)
     const visibleTo = skill.visibleTo ?? skill.meta?.visible_to
+    setEditingSkillVisibleTo(visibleTo ?? null)
     const deptIds = visibleTo?.department_ids
     const userIds = visibleTo?.user_ids
 
@@ -1409,7 +1417,26 @@ export default function SkillStorePage() {
     setEditVisibilityOpen(true)
   }, [])
 
-  const handleSaveVisibility = useCallback(async () => {
+  const departmentNameMap = useMemo(
+    () => new Map(departments.map(dept => [dept.id, dept.name])),
+    [departments],
+  )
+
+  // Departments/users the stored visible_to references that aren't in the
+  // current (dept_admin/normal) editor's loaded lists — i.e. granted by an admin
+  // outside their scope. A non-admin save drops these, so we count them for the
+  // "+N" note and the overwrite warning.
+  const skillVisibilityOutOfScope = useMemo(() => {
+    const v = editingSkillVisibleTo
+    if (!v) return { deptCount: 0, userCount: 0 }
+    const deptCount = (v.department_ids ?? []).filter(id => !departmentNameMap.has(id)).length
+    const userCount = (v.user_ids ?? []).filter(id =>
+      id !== 'admin' && !users.some(u => u.id === id) && user?.id !== id,
+    ).length
+    return { deptCount, userCount }
+  }, [editingSkillVisibleTo, departmentNameMap, users, user])
+
+  const doSaveVisibility = useCallback(async () => {
     setSavingVisibility(true)
     try {
       await updateSkillVisibility(
@@ -1423,6 +1450,7 @@ export default function SkillStorePage() {
               : null,
       )
       toast.success('可见性已更新')
+      setSkillVisibilityWarnOpen(false)
       setEditVisibilityOpen(false)
       await fetchInstalledList()
     } catch (error) {
@@ -1431,6 +1459,14 @@ export default function SkillStorePage() {
       setSavingVisibility(false)
     }
   }, [editingSkillName, skillVisibilityMode, editSkillVisibleTo, editSkillVisibleUserIds, fetchInstalledList])
+
+  const handleSaveVisibility = useCallback(() => {
+    if (skillVisibilityOutOfScope.deptCount > 0 || skillVisibilityOutOfScope.userCount > 0) {
+      setSkillVisibilityWarnOpen(true)
+      return
+    }
+    void doSaveVisibility()
+  }, [skillVisibilityOutOfScope, doSaveVisibility])
 
   const handleApproveTenantSkill = useCallback(async (approved: boolean) => {
     if (!approvingSkill) return
@@ -1556,11 +1592,6 @@ export default function SkillStorePage() {
     }
   }, [editingTenantSkill, fetchTenantSkills])
 
-  const departmentNameMap = useMemo(
-    () => new Map(departments.map(dept => [dept.id, dept.name])),
-    [departments],
-  )
-
   const renderInstalledCard = useCallback(
     (skill: InstalledSkillInfo) => {
       const latestVersion = skill.meta?.id
@@ -1571,6 +1602,10 @@ export default function SkillStorePage() {
         skill.isHubInstalled &&
         !!latestVersion &&
         (!installedVersion || latestVersion.version !== installedVersion)
+
+      // Custom skills are created from the SudoWork client and are creator-only
+      // by design — no visibility management for any role, so omit onEditVisibility.
+      const isCustom = skill.isUploaded || skill.meta?.source_type === 'custom'
 
       return (
         <InstalledSkillCard
@@ -1589,7 +1624,7 @@ export default function SkillStorePage() {
               void handleUpdate(item.meta.id, item)
             }
           }}
-          onEditVisibility={handleOpenVisibilityEdit}
+          onEditVisibility={isCustom ? undefined : handleOpenVisibilityEdit}
           departmentNameMap={departmentNameMap}
           users={users}
         />
@@ -2190,13 +2225,18 @@ export default function SkillStorePage() {
             <div className="flex flex-wrap items-center gap-2">
               {detailResolvedInstalledSkill && !detailResolvedInstalledSkill.isBuiltin ? (
                 <>
-                  <Button
-                    variant="outline"
-                    onClick={() => handleOpenVisibilityEdit(detailResolvedInstalledSkill)}
-                  >
-                    <Shield className="mr-2 size-4" />
-                    编辑可见性
-                  </Button>
+                  {/* Hub/system skills: only a store admin manages visibility.
+                      Custom skills are creator-only (client-managed) — never here. */}
+                  {isStoreAdmin
+                    && !(detailResolvedInstalledSkill.isUploaded || detailResolvedInstalledSkill.meta?.source_type === 'custom') ? (
+                    <Button
+                      variant="outline"
+                      onClick={() => handleOpenVisibilityEdit(detailResolvedInstalledSkill)}
+                    >
+                      <Shield className="mr-2 size-4" />
+                      编辑可见性
+                    </Button>
+                  ) : null}
                   <Button
                     variant="outline"
                     onClick={() => setPendingUninstallSkill(detailResolvedInstalledSkill)}
@@ -2315,6 +2355,13 @@ export default function SkillStorePage() {
                 )
               ) : null}
             </div>
+          ) : activeTab === 'exclusive' ? (
+            <div className="space-y-2 border-b pb-4">
+              <label className="text-sm font-medium">可见范围</label>
+              <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+                该专属技能将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
+              </p>
+            </div>
           ) : null}
           <div className="grid gap-3">
             <Button
@@ -2385,6 +2432,9 @@ export default function SkillStorePage() {
               设置哪些用户或部门可以看到此技能。
             </DialogDescription>
           </DialogHeader>
+          {(() => {
+          const isNormalUser = !isStoreAdmin && user?.role !== 'dept_admin'
+          return (
           <div className='space-y-3'>
             <RadioGroup
               value={skillVisibilityMode}
@@ -2395,8 +2445,10 @@ export default function SkillStorePage() {
                 <label className='text-sm cursor-pointer'>全员可见</label>
               </div>
               <div className='flex items-center gap-2'>
-                <RadioGroupItem value="departments" />
-                <label className='text-sm cursor-pointer'>指定部门可见</label>
+                <RadioGroupItem value="departments" disabled={isNormalUser} />
+                <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>
+                  指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}
+                </label>
               </div>
               <div className='flex items-center gap-2'>
                 <RadioGroupItem value="users" />
@@ -2407,7 +2459,7 @@ export default function SkillStorePage() {
                 <label className='text-sm cursor-pointer'>仅管理员可见</label>
               </div>
             </RadioGroup>
-            {skillVisibilityMode === 'departments' ? (
+            {skillVisibilityMode === 'departments' && !isNormalUser ? (
               departmentOptions.length === 0 ? (
                 <p className='text-sm text-muted-foreground'>暂无部门数据</p>
               ) : (
@@ -2430,41 +2482,58 @@ export default function SkillStorePage() {
                       <span>{'— '.repeat(dept.depth)}{dept.name}</span>
                     </label>
                   ))}
+                  {skillVisibilityOutOfScope.deptCount > 0 ? (
+                    <span className='text-xs text-muted-foreground sm:col-span-2'>
+                      + {skillVisibilityOutOfScope.deptCount} 个其他部门（由管理员设置，超出你的管理范围，保存将被移除）
+                    </span>
+                  ) : null}
                 </div>
               )
             ) : null}
             {skillVisibilityMode === 'users' ? (
-              users.length === 0 ? (
-                <p className='text-sm text-muted-foreground'>暂无用户数据</p>
-              ) : (
-                <div className='grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-64 overflow-y-auto'>
-                  {users.map(user => (
-                    <label
-                      key={user.id}
-                      className='flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1'
-                    >
-                      <Checkbox
-                        checked={editSkillVisibleUserIds.includes(user.id)}
-                        onCheckedChange={checked => {
-                          setEditSkillVisibleUserIds(
-                            checked === true
-                              ? [...editSkillVisibleUserIds, user.id]
-                              : editSkillVisibleUserIds.filter(id => id !== user.id),
-                          )
-                        }}
-                      />
-                      <span>{user.name}</span>
-                    </label>
-                  ))}
-                </div>
-              )
+              (() => {
+                const pickable = isNormalUser
+                  ? (user ? [{ id: user.id, name: user.displayName || user.name }] : [])
+                  : users.map(u => ({ id: u.id, name: u.name }))
+                return pickable.length === 0 ? (
+                  <p className='text-sm text-muted-foreground'>暂无用户数据</p>
+                ) : (
+                  <div className='grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-64 overflow-y-auto'>
+                    {pickable.map(u => (
+                      <label
+                        key={u.id}
+                        className='flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1'
+                      >
+                        <Checkbox
+                          checked={editSkillVisibleUserIds.includes(u.id)}
+                          onCheckedChange={checked => {
+                            setEditSkillVisibleUserIds(
+                              checked === true
+                                ? [...editSkillVisibleUserIds, u.id]
+                                : editSkillVisibleUserIds.filter(id => id !== u.id),
+                            )
+                          }}
+                        />
+                        <span>{u.name}{isNormalUser ? '（本人）' : ''}</span>
+                      </label>
+                    ))}
+                    {skillVisibilityOutOfScope.userCount > 0 ? (
+                      <span className='text-xs text-muted-foreground sm:col-span-2'>
+                        + {skillVisibilityOutOfScope.userCount} 个其他用户（由管理员设置，超出你的管理范围，保存将被移除）
+                      </span>
+                    ) : null}
+                  </div>
+                )
+              })()
             ) : null}
           </div>
+          )
+          })()}
           <DialogFooter>
             <Button variant='outline' onClick={() => setEditVisibilityOpen(false)}>
               取消
             </Button>
-            <Button disabled={savingVisibility} onClick={() => void handleSaveVisibility()}>
+            <Button disabled={savingVisibility} onClick={() => handleSaveVisibility()}>
               {savingVisibility ? (
                 <>
                   <Loader2 className='mr-2 size-4 animate-spin' />
@@ -2477,6 +2546,25 @@ export default function SkillStorePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={skillVisibilityWarnOpen} onOpenChange={open => { if (!open) setSkillVisibilityWarnOpen(false) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认覆盖可见范围</AlertDialogTitle>
+            <AlertDialogDescription>
+              管理员为该技能设置了
+              {skillVisibilityOutOfScope.deptCount > 0 ? ` ${skillVisibilityOutOfScope.deptCount} 个部门` : ''}
+              {skillVisibilityOutOfScope.deptCount > 0 && skillVisibilityOutOfScope.userCount > 0 ? ' 和' : ''}
+              {skillVisibilityOutOfScope.userCount > 0 ? ` ${skillVisibilityOutOfScope.userCount} 个用户` : ''}
+              的可见范围，这些超出你的管理范围。保存将移除这些设置，仅保留你选择的范围。确认继续？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void doSaveVisibility()}>确认覆盖</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <input
         ref={zipInputRef}
@@ -2718,28 +2806,45 @@ export default function SkillStorePage() {
                     <label className="text-sm">仅管理员可见</label>
                   </div>
                 </RadioGroup>
-                {mode === 'departments' ? (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {deptIds.map(deptId => (
-                      <label key={deptId} className="flex items-center gap-2 text-sm">
-                        <Checkbox checked disabled />
-                        <span>{departmentNameMap.get(deptId) || deptId}</span>
-                      </label>
-                    ))}
-                  </div>
-                ) : mode === 'users' ? (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {userIds.map(userId => {
-                      const u = users.find(x => x.id === userId)
-                      return (
+                {mode === 'departments' ? (() => {
+                  const inScope = deptIds.filter(id => departmentNameMap.has(id))
+                  const outCount = deptIds.length - inScope.length
+                  return (
+                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
+                      {inScope.map(deptId => (
+                        <label key={deptId} className="flex items-center gap-2 text-sm">
+                          <Checkbox checked disabled />
+                          <span>{departmentNameMap.get(deptId)}</span>
+                        </label>
+                      ))}
+                      {outCount > 0 ? (
+                        <span className="text-xs text-muted-foreground">+ {outCount} 个其他部门（由管理员设置）</span>
+                      ) : null}
+                    </div>
+                  )
+                })() : mode === 'users' ? (() => {
+                  const resolve = (id: string) => {
+                    const u = users.find(x => x.id === id)
+                    if (u) return u.displayName || u.name
+                    if (user?.id === id) return user.displayName || user.name
+                    return null
+                  }
+                  const inScope = userIds.filter(id => resolve(id) !== null)
+                  const outCount = userIds.length - inScope.length
+                  return (
+                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
+                      {inScope.map(userId => (
                         <label key={userId} className="flex items-center gap-2 text-sm">
                           <Checkbox checked disabled />
-                          <span>{u ? (u.displayName || u.name) : userId}</span>
+                          <span>{resolve(userId)}</span>
                         </label>
-                      )
-                    })}
-                  </div>
-                ) : null}
+                      ))}
+                      {outCount > 0 ? (
+                        <span className="text-xs text-muted-foreground">+ {outCount} 个其他用户（由管理员设置）</span>
+                      ) : null}
+                    </div>
+                  )
+                })() : null}
               </div>
             )
           })()}
@@ -2844,7 +2949,10 @@ export default function SkillStorePage() {
               {deletingTenantSkillId !== null ? <Loader2 className='mr-2 size-4 animate-spin' /> : null}
               删除
             </Button>
-            <Button disabled={savingTenantVisibility} onClick={() => void handleSaveTenantVisibility()}>
+            <Button
+              disabled={savingTenantVisibility || editingTenantSkill?.can_manage === false}
+              onClick={() => void handleSaveTenantVisibility()}
+            >
               {savingTenantVisibility ? (
                 <>
                   <Loader2 className='mr-2 size-4 animate-spin' />
