@@ -1028,7 +1028,13 @@ export async function setInstalledSkillMeta(
   }
 
   if (updates.visible_to !== undefined) {
-    meta.visible_to = updates.visible_to
+    // Custom skills are created from the SudoWork client and are creator-only by
+    // design (visible_to defaults to the uploader). Never let a visibility update
+    // widen or change that — ignore visible_to for custom items regardless of who
+    // asks, so the creator-only invariant holds even against a crafted request.
+    if (meta.source_type !== 'custom') {
+      meta.visible_to = updates.visible_to
+    }
   }
 
   await writeSkillMeta(sourcePath, meta)
