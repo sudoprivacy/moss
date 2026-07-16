@@ -1186,7 +1186,13 @@ export async function updateInstalledAssistantMeta(params: {
     nextMeta.memory_mode = params.updates.memory_mode
   }
   if (params.updates.visible_to !== undefined) {
-    nextMeta.visible_to = params.updates.visible_to
+    // Custom agents are created from the SudoWork client and are creator-only by
+    // design (visible_to defaults to the uploader). Never let a visibility update
+    // widen or change that — ignore visible_to for custom items regardless of who
+    // asks, so the creator-only invariant holds even against a crafted request.
+    if (existingMeta.source_type !== 'custom') {
+      nextMeta.visible_to = params.updates.visible_to
+    }
   }
   if (params.updates.workflow !== undefined) {
     nextMeta.workflow = params.updates.workflow

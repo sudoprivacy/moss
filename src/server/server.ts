@@ -5321,8 +5321,28 @@ export function startServer(
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/agents/meta') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
+        // Editing installed hub/system agents stays admin-only. CUSTOM agents
+        // (created from the SudoWork client, visible only to their owner) are
+        // strictly creator-only — editable ONLY by the owner, even for an admin
+        // who did not create it. Owner = a user id in the custom agent's
+        // visible_to.user_ids (custom items are per-user, so seeing one implies
+        // owning it). visible_to itself is still ignored for custom items on
+        // write; this only opens up the other meta fields for the owner.
+        {
+          const targetName = typeof body.assistantName === 'string' ? body.assistantName : ''
+          const found = await findAssistantDir(targetName)
+          const targetMeta = found ? await readAssistantMeta(found.dir) : null
+          if (targetMeta?.source_type === 'custom') {
+            const ownsCustom = Array.isArray(targetMeta?.visible_to?.user_ids)
+              && (targetMeta?.visible_to?.user_ids?.includes(auth.userId) ?? false)
+            if (!ownsCustom) {
+              throw new HttpError(403, 'Only the creator can edit this custom agent')
+            }
+          } else {
+            authService.requireScope(auth, 'admin:settings')
+          }
+        }
         const updates = isJsonBody(body.updates) ? body.updates : {}
 
         await updateInstalledAssistantMeta({
@@ -5836,11 +5856,12 @@ export function startServer(
           }
         }
         const body = await readJsonBody(req)
-        // A non-admin cannot widen visibility beyond their own scope: clamp any
-        // visible_to change to their default (own dept / self).
+        // A non-admin cannot widen visibility beyond their own scope: keep only
+        // the in-scope department/user ids they requested (out-of-scope ids an
+        // admin set are dropped — the client warns before this happens). This
+        // no longer overwrites a legitimate in-scope choice with their default.
         if (!agentStoreAdmin && body.visible_to !== undefined) {
-          const clamp = authService.defaultTenantVisibility(auth)
-          body.visible_to = clamp
+          body.visible_to = authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
         }
 
         const updates: Record<string, unknown> = {}
@@ -6523,15 +6544,14 @@ export function startServer(
           updates.enabled = body.enabled ? 1 : 0
         }
         if (body.visible_to !== undefined) {
-          // A non-admin cannot widen visibility beyond their own scope: clamp to
-          // their default (own dept / self). Admins set it verbatim.
-          const requested = skillStoreAdmin
-            ? (body.visible_to ? JSON.stringify(body.visible_to) : null)
-            : (() => {
-                const clamp = authService.defaultTenantVisibility(auth)
-                return clamp ? JSON.stringify(clamp) : null
-              })()
-          updates.visible_to = requested
+          // A non-admin cannot widen visibility beyond their own scope: keep only
+          // the in-scope ids they requested (out-of-scope admin-set ids are
+          // dropped — the client warns first). Admins set it verbatim. This no
+          // longer overwrites a legitimate in-scope choice with their default.
+          const clamped = skillStoreAdmin
+            ? (body.visible_to as VisibleTo)
+            : authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+          updates.visible_to = clamped ? JSON.stringify(clamped) : null
         }
 
         runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
