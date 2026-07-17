@@ -216,6 +216,10 @@ export interface SystemSettings {
   /** Max size (bytes) for a single file uploaded into a session workspace.
    *  Enforced server-side (413 when exceeded). Default 20MB. */
   workspaceUploadLimitBytes: number
+  /** Max cron runs a single reuse-mode session serves before it is retired and a
+   *  fresh one is created, bounding runtime transcript growth. Default 50; 0
+   *  disables rotation. */
+  cronReuseMaxRuns: number
   /** Directory (inside the moss-server container) holding the per-service login
    *  scripts run by the token minter. For a script-type config item with pinyin
    *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Default
@@ -241,6 +245,7 @@ export interface UpdateSystemSettingsRequest {
   clientCronEnabled?: boolean
   clientShowToolCalls?: boolean
   workspaceUploadLimitBytes?: number
+  cronReuseMaxRuns?: number
 }
 
 // Direct Connect Server Types
