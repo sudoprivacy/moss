@@ -545,6 +545,24 @@ export class CronStore {
   }
 
   /**
+   * How many runs of `jobId` have already executed against `sessionId`. Used by
+   * reuse-mode jobs to cap how long a single conversation is reused before it is
+   * retired for a fresh one: the runtime re-compacts its own transcript on every
+   * turn, nesting each prior summary inside a new "Previously compacted context"
+   * wrapper, so an indefinitely-reused session grows monotonically until a single
+   * request exceeds the model's context window. Counting our own run rows is a
+   * cheap moss-side proxy for that depth (the runtime's internal session store is
+   * not visible here). Excludes 'skipped' — those never sent a turn.
+   */
+  countRunsForSession(jobId: string, sessionId: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM cron_job_runs
+      WHERE job_id = ? AND session_id = ? AND status != 'skipped'
+    `).get(jobId, sessionId) as { n: number } | undefined
+    return row?.n ?? 0
+  }
+
+  /**
    * Mark runs that have been 'running'/'queued' since before `startedBefore` as
    * errored. Reaps orphans left behind by a server crash/restart (their socket
    * is long gone but the row never reached a terminal status) and runs that

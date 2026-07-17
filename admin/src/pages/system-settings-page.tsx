@@ -114,6 +114,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     clientCronEnabled: settings.clientCronEnabled,
     clientShowToolCalls: settings.clientShowToolCalls,
     workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
+    cronReuseMaxRuns: settings.cronReuseMaxRuns,
   }
 }
 
@@ -131,6 +132,9 @@ function buildSystemSettingsPatch(
   }
   if (draft.maxTurns !== settings.maxTurns) {
     patch.maxTurns = draft.maxTurns
+  }
+  if (draft.cronReuseMaxRuns !== settings.cronReuseMaxRuns) {
+    patch.cronReuseMaxRuns = draft.cronReuseMaxRuns
   }
   if (draft.thinkingMode !== settings.thinkingMode) {
     patch.thinkingMode = draft.thinkingMode
@@ -944,6 +948,30 @@ export default function SystemSettingsPage() {
                     : current,
                 )
               }
+            />
+          </SettingField>
+
+          <SettingField
+            label="定时任务会话复用上限"
+            description="复用模式的定时任务每复用同一会话满该次数后，自动退役并新建会话，避免运行时上下文不断累积直至超出模型上限。0 表示不限制（一直复用）。默认 50。"
+          >
+            <Input
+              type="number"
+              min={0}
+              max={10000}
+              value={draft.cronReuseMaxRuns}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                const next = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 10000) : 0
+                setDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        cronReuseMaxRuns: next,
+                      }
+                    : current,
+                )
+              }}
             />
           </SettingField>
 

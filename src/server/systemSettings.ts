@@ -59,6 +59,11 @@ export type SystemSettingsPayload = {
    *  POST /api/v1/sessions/:id/workspace/file. Enforced server-side (413 when
    *  exceeded). Admin-editable; default 20MB. */
   workspaceUploadLimitBytes: number
+  /** Max cron runs a single reuse-mode session serves before CronService retires
+   *  it and starts a fresh one. Bounds the runtime's compounding compaction
+   *  transcript, which otherwise overflows the model context. Admin-editable;
+   *  default 50. 0 (or negative) disables rotation (reuse forever). */
+  cronReuseMaxRuns: number
   /** Directory (inside the moss-server container) holding the per-service login
    *  scripts run by the token minter. For a script-type config item with pinyin
    *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Empty/null
@@ -111,6 +116,7 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   clientCronEnabled: true,
   clientShowToolCalls: true,
   workspaceUploadLimitBytes: 20 * 1024 * 1024,
+  cronReuseMaxRuns: 50,
   mintScriptsDir: DEFAULT_MINT_SCRIPTS_DIR,
 })
 
@@ -185,6 +191,17 @@ function normalizeSystemSettings(
     }
   } else if (result.workspaceUploadLimitBytes === undefined) {
     result.workspaceUploadLimitBytes = DEFAULT_SYSTEM_SETTINGS.workspaceUploadLimitBytes
+  }
+
+  if (source.cronReuseMaxRuns !== undefined) {
+    const runs = Number.parseInt(String(source.cronReuseMaxRuns), 10)
+    // 0 (or negative, clamped to 0) disables rotation; otherwise cap at 10000 so
+    // a fat-fingered value can't defeat the guard entirely.
+    if (Number.isFinite(runs)) {
+      result.cronReuseMaxRuns = Math.min(Math.max(runs, 0), 10_000)
+    }
+  } else if (result.cronReuseMaxRuns === undefined) {
+    result.cronReuseMaxRuns = DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns
   }
 
   if (source.thinkingMode !== undefined) {
@@ -370,6 +387,7 @@ function toSystemSettingsPayload(
     clientCronEnabled: state.value.clientCronEnabled ?? DEFAULT_SYSTEM_SETTINGS.clientCronEnabled,
     clientShowToolCalls: state.value.clientShowToolCalls ?? DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls,
     workspaceUploadLimitBytes: state.value.workspaceUploadLimitBytes ?? DEFAULT_SYSTEM_SETTINGS.workspaceUploadLimitBytes,
+    cronReuseMaxRuns: state.value.cronReuseMaxRuns ?? DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns,
     mintScriptsDir: state.value.mintScriptsDir || DEFAULT_SYSTEM_SETTINGS.mintScriptsDir,
     settingsPath: state.path,
     settingsExists: state.exists,
@@ -449,6 +467,7 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
     clientCronEnabled: nextSettings.clientCronEnabled,
     clientShowToolCalls: nextSettings.clientShowToolCalls,
     workspaceUploadLimitBytes: nextSettings.workspaceUploadLimitBytes,
+    cronReuseMaxRuns: nextSettings.cronReuseMaxRuns ?? DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns,
     mintScriptsDir: nextSettings.mintScriptsDir || DEFAULT_SYSTEM_SETTINGS.mintScriptsDir,
     settingsPath: SYSTEM_SETTINGS_PATH,
     settingsExists: true,

@@ -15,6 +15,19 @@ import { isCronAdminCapable } from '../../auth/token.js'
 
 const CRON_RUN_TIMEOUT_MS = Number(process.env.MOSS_CRON_RUN_TIMEOUT_MS) || 30 * 60 * 1000
 
+// Max cron runs a single reuse-mode session serves before it is retired and a
+// fresh one is created. Bounds unbounded transcript growth: the runtime
+// re-compacts its own transcript every turn, nesting each prior summary inside a
+// new "Previously compacted context" wrapper (~+2 layers, ~12KB per run), so an
+// indefinitely-reused session eventually overflows the model's context window
+// with a [single_request_too_large] error. Rotating well before that keeps each
+// conversation small.
+//
+// The effective value is the admin-editable `cronReuseMaxRuns` system setting
+// (settings.json, surfaced in 运行时设置). This env var is only the fallback used
+// when the setting is unset. 0 (or negative) disables the cap (reuse forever).
+const CRON_REUSE_MAX_RUNS_ENV_DEFAULT = Number(process.env.MOSS_CRON_REUSE_MAX_RUNS ?? 50)
+
 // Default timezone for cron expressions when a job has no explicit schedule.tz.
 // Without this, croner falls back to the process timezone — which is UTC in the
 // deployed container, so "9-17" would fire 9-17 UTC (= evening in China). The UI
@@ -501,6 +514,17 @@ export class CronService {
     if (job.boundSessionId) {
       const existingSession = this.config.runtimeService.getSession(job.boundSessionId)
       if (existingSession) {
+        // A bound session is explicitly pinned by the user, so we do not rotate
+        // it out from under the job (that would silently break the binding).
+        // Warn once it crosses the cap so the growth is visible in logs — the
+        // owner can re-bind or switch to auto-chained reuse to get rotation.
+        if (this.reuseCapExceeded(job, job.boundSessionId)) {
+          console.warn(
+            `[CronService] Bound session ${job.boundSessionId} for ${logContext} has served ` +
+            `>= ${this.reuseMaxRuns()} runs; its transcript may overflow the model context. ` +
+            `Consider re-binding to a fresh session.`,
+          )
+        }
         console.log(`[CronService] Reusing bound session ${job.boundSessionId} for ${logContext}`)
         return job.boundSessionId
       }
@@ -511,6 +535,18 @@ export class CronService {
     if (job.lastSessionId) {
       const existingSession = this.config.runtimeService.getSession(job.lastSessionId)
       if (existingSession) {
+        // Auto-chained reuse (lastSessionId): retire and rotate once the session
+        // has served enough runs that its runtime transcript is at risk of
+        // overflowing the model context. The fresh session becomes the new
+        // lastSessionId once this run records its result.
+        if (this.reuseCapExceeded(job, job.lastSessionId)) {
+          console.warn(
+            `[CronService] Session ${job.lastSessionId} for ${logContext} reached the reuse cap ` +
+            `(${this.reuseMaxRuns()} runs); retiring it and starting a fresh session.`,
+          )
+          await this.retireSession(job.lastSessionId)
+          return this.createCronSession(job, run, userAuth)
+        }
         console.log(`[CronService] Reusing last session ${job.lastSessionId} for ${logContext}`)
         return job.lastSessionId
       }
@@ -520,6 +556,39 @@ export class CronService {
 
     console.warn(`[CronService] No reusable session found for ${logContext}, creating new session instead`)
     return this.createCronSession(job, run, userAuth)
+  }
+
+  /**
+   * The effective reuse cap: the admin-editable `cronReuseMaxRuns` system setting
+   * when set, else the env/default fallback. Read fresh each call so a settings
+   * change takes effect on the next fire without a restart.
+   */
+  private reuseMaxRuns(): number {
+    const configured = getSystemSettings().cronReuseMaxRuns
+    return Number.isFinite(configured) ? configured : CRON_REUSE_MAX_RUNS_ENV_DEFAULT
+  }
+
+  /**
+   * Whether a reused session has served enough runs of `job` to hit the rotation
+   * cap. Disabled when the cap is <= 0.
+   */
+  private reuseCapExceeded(job: CronJob, sessionId: string): boolean {
+    const cap = this.reuseMaxRuns()
+    if (cap <= 0) return false
+    return this.store.countRunsForSession(job.id, sessionId) >= cap
+  }
+
+  /**
+   * Best-effort teardown of a rotated-out reuse session. Failures here must not
+   * abort the run — a fresh session is created regardless — so we swallow and log.
+   */
+  private async retireSession(sessionId: string): Promise<void> {
+    try {
+      await this.config.runtimeService.terminateSession(sessionId)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      console.warn(`[CronService] Failed to retire session ${sessionId}: ${msg}`)
+    }
   }
 
   private async sendCronMessage(sessionId: string, message: string): Promise<void> {
