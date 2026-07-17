@@ -18,6 +18,7 @@
  */
 
 import {
+  type ApprovalListParams,
   type CorpAppConfig,
   type CorpAppConnector,
   type CorpAppCredentials,
@@ -37,7 +38,15 @@ import {
 
 export class WeComAppConnector implements CorpAppConnector {
   readonly type = 'wecomapp'
-  readonly capabilities = ['send', 'sendFile', 'receive', 'info', 'downloadMedia']
+  readonly capabilities = [
+    'send',
+    'sendFile',
+    'receive',
+    'info',
+    'downloadMedia',
+    'listApprovals',
+    'getApproval',
+  ]
 
   private corpId = ''
   private agentId = ''
@@ -142,6 +151,44 @@ export class WeComAppConnector implements CorpAppConnector {
     return this.requireClient().getBytes(
       `/cgi-bin/media/get?media_id=${encodeURIComponent(mediaId)}`,
     )
+  }
+
+  /**
+   * List approval instance ids (审批单号) in a time window.
+   *
+   * Requires this app to be authorised under 审批 → 「可调用接口的应用」
+   * in the WeCom admin console, otherwise WeCom returns a permission
+   * errcode. The raw response is passed through: `sp_no_list` (the
+   * matching approval numbers) and `new_next_cursor` (absent when the
+   * result set is exhausted).
+   *
+   * https://developer.work.weixin.qq.com/document/path/91816
+   */
+  async listApprovals(params: ApprovalListParams): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      starttime: params.starttime,
+      endtime: params.endtime,
+      new_cursor: params.cursor ?? '',
+      size: params.size ?? 100,
+    }
+    if (params.filters && params.filters.length > 0) {
+      body.filters = params.filters
+    }
+    return this.requireClient().post('/cgi-bin/oa/getapprovalinfo', body)
+  }
+
+  /**
+   * Fetch the full detail of a single approval instance by its sp_no.
+   *
+   * Raw passthrough of WeCom `getapprovaldetail` — the `info` object with
+   * sp_no, sp_name, sp_status, template_id, apply_time, applyer,
+   * sp_record[] (per-step approver/speech/sptime), comments[] and
+   * apply_data (form controls, including file/attachment media ids).
+   *
+   * https://developer.work.weixin.qq.com/document/path/91983
+   */
+  async getApproval(spNo: string): Promise<Record<string, unknown>> {
+    return this.requireClient().post('/cgi-bin/oa/getapprovaldetail', { sp_no: spNo })
   }
 
   async verifyCallbackUrl(p: {

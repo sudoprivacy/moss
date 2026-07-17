@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,6 +95,20 @@ func FormatInboundJSON(w io.Writer, r *InboundResp) error {
 		return err
 	}
 	fmt.Fprintln(w, string(b))
+	return nil
+}
+
+// FormatRawJSON pretty-prints a raw provider JSON response. Approval
+// responses are passed through undecoded, so we re-indent for readability
+// but never drop or rename fields.
+func FormatRawJSON(w io.Writer, raw json.RawMessage) error {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		// Not valid JSON (shouldn't happen) — print as-is.
+		fmt.Fprintln(w, string(raw))
+		return nil
+	}
+	fmt.Fprintln(w, buf.String())
 	return nil
 }
 

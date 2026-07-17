@@ -3915,6 +3915,105 @@ export function startServer(
         return
       }
 
+      // List approval (审批) instance ids in a time window. Read-only,
+      // same auth model as the other agent-facing corp-app routes. The
+      // raw provider response is passed straight through to the caller.
+      const agentCorpAppApprovalsMatch = pathname.match(
+        /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/approvals$/,
+      )
+      if (req.method === 'GET' && agentCorpAppApprovalsMatch) {
+        const access = await resolveAgentCorpAppAccess()
+        if (access === undefined) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
+          return
+        }
+        const id = agentCorpAppApprovalsMatch[1] || ''
+        if (access !== null && !access.has(id)) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
+          return
+        }
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return
+        }
+        const starttime = Number.parseInt(url.searchParams.get('starttime') ?? '', 10)
+        const endtime = Number.parseInt(url.searchParams.get('endtime') ?? '', 10)
+        if (!Number.isFinite(starttime) || !Number.isFinite(endtime)) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'starttime and endtime (unix seconds) are required' } })
+          return
+        }
+        const cursor = url.searchParams.get('cursor') ?? ''
+        const sizeRaw = Number.parseInt(url.searchParams.get('size') ?? '', 10)
+        const size = Number.isFinite(sizeRaw) && sizeRaw > 0 ? sizeRaw : undefined
+        // Filters are opaque key/value pairs passed through to WeCom.
+        // Accepted as repeatable `filter=key:value` query params.
+        const filters = url.searchParams
+          .getAll('filter')
+          .map((f) => {
+            const idx = f.indexOf(':')
+            return idx > 0 ? { key: f.slice(0, idx), value: f.slice(idx + 1) } : null
+          })
+          .filter((f): f is { key: string; value: string } => f !== null)
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.listApprovals) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot list approvals' } })
+            return
+          }
+          const result = await connector.listApprovals({
+            starttime,
+            endtime,
+            cursor,
+            size,
+            filters: filters.length > 0 ? filters : undefined,
+          })
+          writeJson(res, 200, result)
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'approval_failed', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      // Fetch full detail of a single approval by its provider id (sp_no).
+      const agentCorpAppApprovalMatch = pathname.match(
+        /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/approvals\/([^/]+)$/,
+      )
+      if (req.method === 'GET' && agentCorpAppApprovalMatch) {
+        const access = await resolveAgentCorpAppAccess()
+        if (access === undefined) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
+          return
+        }
+        const id = agentCorpAppApprovalMatch[1] || ''
+        if (access !== null && !access.has(id)) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
+          return
+        }
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return
+        }
+        const spNo = decodeURIComponent(agentCorpAppApprovalMatch[2] || '')
+        if (!spNo) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'sp_no is required' } })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.getApproval) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot fetch approvals' } })
+            return
+          }
+          const result = await connector.getApproval(spNo)
+          writeJson(res, 200, result)
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'approval_failed', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
         writeJson(res, 200, authService.listUsers(auth.orgId, auth))
