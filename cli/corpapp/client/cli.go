@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // RunOptions tunes the CLI presentation. All fields are optional.
@@ -29,7 +30,9 @@ Usage:
   corpapp send --app <name> --to <userid> --text <msg>
   corpapp send-file --app <name> --to <userid> --file <path>
   corpapp receive --app <name> [--since <cursor>] [--limit <n>] [--json]
-  corpapp download --app <name> --media-id <id> [--out <path>]`
+  corpapp download --app <name> --media-id <id> [--out <path>]
+  corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]
+  corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]`
 
 // Run dispatches a corpapp invocation and returns the process exit code:
 //
@@ -70,6 +73,10 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runReceive(rest, c, opts)
 	case "download":
 		err = runDownload(rest, c, opts)
+	case "approvals":
+		err = runApprovals(rest, c, opts)
+	case "approval":
+		err = runApproval(rest, c, opts)
 	case "-h", "--help", "help":
 		printHelp(opts.Stdout, opts)
 		return 0
@@ -289,6 +296,101 @@ func runDownload(args []string, c *Client, opts RunOptions) error {
 	}
 	fmt.Fprintf(opts.Stdout, "saved %d bytes to %s\n", len(bytes), dest)
 	return nil
+}
+
+// ============================================================
+// approvals / approval
+// ============================================================
+
+// stringsFlag collects a repeatable string flag (e.g. --filter key:value).
+type stringsFlag []string
+
+func (s *stringsFlag) String() string { return strings.Join(*s, ",") }
+func (s *stringsFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func runApprovals(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("approvals", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	start := fs.Int64("start", 0, "window start (unix seconds)")
+	end := fs.Int64("end", 0, "window end (unix seconds)")
+	cursor := fs.String("cursor", "", "pagination cursor (empty for first page)")
+	size := fs.Int64("size", 0, "page size (provider default when 0)")
+	status := fs.String("status", "", "filter by approval status (sp_status): "+ApprovalStatusHelp)
+	template := fs.String("template", "", "filter by approval type (template_id)")
+	var filters stringsFlag
+	fs.Var(&filters, "filter", "extra provider filter as key:value (e.g. creator:zhuyx); repeatable")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *start == 0 || *end == 0 {
+		return errors.New("usage: corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]")
+	}
+	// Dedicated --status / --template map to WeCom filter entries. Keep
+	// --filter for the less-common keys (creator, department, record_type).
+	if *status != "" {
+		if !ValidApprovalStatus(*status) {
+			return fmt.Errorf("invalid --status %q; valid: %s", *status, ApprovalStatusHelp)
+		}
+		filters = append(filters, "sp_status:"+*status)
+	}
+	if *template != "" {
+		filters = append(filters, "template_id:"+*template)
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.ListApprovals(resolved.ID, ApprovalListParams{
+		Start:   *start,
+		End:     *end,
+		Cursor:  *cursor,
+		Size:    *size,
+		Filters: filters,
+	})
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runApproval(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("approval", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	spNo := fs.String("sp-no", "", "approval instance id (WeCom sp_no)")
+	attachments := fs.Bool("attachments", false, "list only the downloadable attachments (id/source/label)")
+	jsonOut := fs.Bool("json", false, "output JSON (with --attachments: the attachment list as JSON)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *spNo == "" {
+		return errors.New("usage: corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.GetApproval(resolved.ID, *spNo)
+	if err != nil {
+		return err
+	}
+	// --attachments flattens the three nested WeCom locations (form File
+	// controls, comment media, approver-step media) into one list the
+	// user can feed straight into `corpapp download --media-id`.
+	if *attachments {
+		atts, err := ExtractApprovalAttachments(raw)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return FormatAttachmentsJSON(opts.Stdout, atts)
+		}
+		FormatAttachments(opts.Stdout, atts)
+		return nil
+	}
+	return FormatRawJSON(opts.Stdout, raw)
 }
 
 // baseName returns the last path segment of p (handles both / and \).

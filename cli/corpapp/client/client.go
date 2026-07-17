@@ -246,6 +246,57 @@ func (c *Client) DownloadMedia(id, mediaID string) ([]byte, string, error) {
 	return raw, fileName, nil
 }
 
+// ApprovalListParams are the query parameters for ListApprovals. Start
+// and End are Unix seconds (WeCom caps the window at 31 days). Cursor
+// paginates (empty on the first page). Filters are opaque key/value
+// pairs passed through to the provider (WeCom: template_id, creator,
+// sp_status, record_type, department).
+type ApprovalListParams struct {
+	Start   int64
+	End     int64
+	Cursor  string
+	Size    int64
+	Filters []string // each "key:value"
+}
+
+// ListApprovals returns the raw provider response for the approval-id
+// listing (WeCom getapprovalinfo: sp_no_list + new_next_cursor). The
+// body is passed through undecoded so no provider fields are lost.
+func (c *Client) ListApprovals(id string, p ApprovalListParams) (json.RawMessage, error) {
+	q := url.Values{}
+	q.Set("starttime", fmt.Sprintf("%d", p.Start))
+	q.Set("endtime", fmt.Sprintf("%d", p.End))
+	if p.Cursor != "" {
+		q.Set("cursor", p.Cursor)
+	}
+	if p.Size > 0 {
+		q.Set("size", fmt.Sprintf("%d", p.Size))
+	}
+	for _, f := range p.Filters {
+		if f != "" {
+			q.Add("filter", f)
+		}
+	}
+	var raw json.RawMessage
+	if err := c.get(c.PathPrefix+"/"+url.PathEscape(id)+"/approvals?"+q.Encode(), &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// GetApproval returns the raw provider detail for a single approval by
+// its provider id (WeCom sp_no). Passed through undecoded.
+func (c *Client) GetApproval(id, spNo string) (json.RawMessage, error) {
+	if spNo == "" {
+		return nil, errors.New("sp_no is required")
+	}
+	var raw json.RawMessage
+	if err := c.get(c.PathPrefix+"/"+url.PathEscape(id)+"/approvals/"+url.PathEscape(spNo), &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // Inbound polls buffered inbound messages with seq > since.
 func (c *Client) Inbound(id string, since, limit int64) (*InboundResp, error) {
 	q := url.Values{}

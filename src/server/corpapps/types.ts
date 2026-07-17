@@ -40,6 +40,21 @@ export type CorpAppCredentials = Record<string, string>
 /** Result of `testConnection()` — surfaced in the admin config dialog. */
 export type TestConnectionResult = { ok: boolean; message?: string }
 
+/**
+ * Parameters for `listApprovals()`. `starttime`/`endtime` are Unix
+ * seconds (provider-defined max window applies — WeCom caps at 31 days).
+ * `cursor` paginates (empty on the first page). `filters` are opaque
+ * key/value pairs passed through to the provider (WeCom: template_id,
+ * creator, sp_status, record_type, department).
+ */
+export type ApprovalListParams = {
+  starttime: number
+  endtime: number
+  cursor?: string
+  size?: number
+  filters?: { key: string; value: string }[]
+}
+
 /** Identity/info about the connected app, from `getInfo()`. */
 export type CorpAppInfo = {
   type: string
@@ -114,6 +129,21 @@ export interface CorpAppConnector {
    * Returns the bytes plus a best-effort filename/content-type.
    */
   downloadMedia?(mediaId: string): Promise<{ bytes: Buffer; fileName?: string; contentType?: string }>
+
+  /**
+   * Optional: list approval (审批) instance ids in a time window, with
+   * optional filters (template/creator/status/...). Returns the raw
+   * provider response (e.g. WeCom getapprovalinfo: sp_no_list +
+   * new_next_cursor). The provider schema is passed through unchanged.
+   */
+  listApprovals?(params: ApprovalListParams): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: fetch the full detail of a single approval instance by its
+   * provider id (e.g. WeCom sp_no). Returns the raw provider response
+   * (type, status, applicant, step records, comments, form data).
+   */
+  getApproval?(spNo: string): Promise<Record<string, unknown>>
 
   /**
    * Optional: handle a provider URL-verification handshake. Returns the

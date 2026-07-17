@@ -13,6 +13,10 @@
 //	corpapp send-file --app <name> --to <userid> --file <p>   # send a file
 //	corpapp receive --app <name> [--since <cursor>]           # poll inbound messages
 //	corpapp download --app <name> --media-id <id> [--out <p>] # download received media
+//	corpapp approvals --app <name> --start <ts> --end <ts>    # list approval ids (审批单号)
+//	corpapp approvals ... --status <n> --template <id>       # filter by status / type
+//	corpapp approval --app <name> --sp-no <spNo>              # get one approval's full detail
+//	corpapp approval --app <name> --sp-no <spNo> --attachments # list its downloadable files (id/source/label)
 //
 // The CLI is generic across corp-app types; capabilities are per-type
 // (returned by the server), so a `send`/`receive` against a type that
@@ -46,6 +50,25 @@ Usage:
   corpapp send-file --app <name> --to <userid> --file <path>
   corpapp receive --app <name> [--since <cursor>] [--limit <n>] [--json]
   corpapp download --app <name> --media-id <id> [--out <path>]
+  corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]
+  corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]
+
+Filtering approvals:
+  --status <n>    approval status (sp_status):
+                  1=审批中 2=已通过 3=已驳回 4=已撤销 6=通过后撤销 7=已删除 10=已支付
+  --template <id> approval type (template_id)
+  --filter k:v    any other WeCom filter (creator, department, record_type);
+                  repeatable. Different keys AND together.
+
+Attachments:
+  corpapp approval --app <name> --sp-no <spNo> --attachments
+    lists every downloadable file on the approval (form fields, comments,
+    approver steps) as: KIND  SOURCE  ID  LABEL. Feed an ID straight into:
+  corpapp download --app <name> --media-id <ID> --out ./
+
+Note:
+  approvals/approval require this app to be added under
+  审批 → 「可调用接口的应用」 in the WeCom admin console.
 
 Environment:
   MOSS_SERVER_URL  base URL of moss-server (set by moss-server when it

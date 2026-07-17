@@ -256,8 +256,9 @@ export default function CorpAppsPage() {
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="pt-0">
+              <CardContent className="pt-0 space-y-1">
                 <CallbackUrlHint app={a} />
+                <ApprovalSetupHint app={a} />
               </CardContent>
             </Card>
           ))}
@@ -318,6 +319,21 @@ function CallbackUrlHint({ app }: { app: CorpApp }) {
     <div className="text-xs text-muted-foreground">
       接收消息回调 URL(配置到企业微信后台,需指向公网回调端口):
       <code className="ml-1 bg-muted px-1.5 py-0.5 rounded">{`https://<公网域名:回调端口>${path}`}</code>
+    </div>
+  )
+}
+
+// Reminds the admin that approval (审批流) reads require the app to be
+// authorised in the WeCom console — a step that can't be done from moss.
+// Only shown for instances that declare the approval capabilities.
+function ApprovalSetupHint({ app }: { app: CorpApp }) {
+  if (!app.capabilities?.includes('getApproval') && !app.capabilities?.includes('listApprovals'))
+    return null
+  return (
+    <div className="text-xs text-muted-foreground">
+      读取审批流(审批单),需在企业微信后台将本应用添加到
+      <code className="mx-1 bg-muted px-1.5 py-0.5 rounded">审批 → 「可调用接口的应用」</code>
+      ,否则接口返回无权限错误。
     </div>
   )
 }
