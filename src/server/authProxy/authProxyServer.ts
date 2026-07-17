@@ -237,6 +237,16 @@ const CONTROL_HEADERS = new Set([
   'x-auth-scheme', 'x-remote-url', 'x-remote-method', 'host', 'connection',
 ])
 
+/** Collect a request's body into a single Buffer (empty when there is none). */
+function readRequestBody(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
 const UPSTREAM_TIMEOUT_MS = 30_000
 const AUTH_PROXY_PORT = 12013
 // Token TTL: tokens older than this are considered expired and will be cleaned up
@@ -438,6 +448,23 @@ export class AuthProxyServer {
     // 3. Resolve credentials and inject
     let injectResult: InjectAuthResult = { headers: {} }
     let matchedConfigItemId: number | null = null
+    // When the injected credential was a minted (login-type) token, capture what
+    // we'd need to re-mint it. If the upstream rejects the cached token with 401
+    // (e.g. the provider enforces a single active session and a login elsewhere
+    // invalidated ours), we force a fresh mint and retry the request once — so a
+    // single fetchurl call self-heals instead of surfacing a spurious 401.
+    let mintRetry: {
+      cfg: {
+        configItemId: number
+        authType: string
+        tokenUrl: string | null | undefined
+        tokenRequestJson: string | null | undefined
+        pinyin: string | null | undefined
+        mintScriptsDir: string | null | undefined
+      }
+      creds: Record<string, string>
+      userId: string
+    } | null = null
 
     // Priority 1: Explicit headers
     const explicitNs = req.headers['x-secret-namespace'] as string
@@ -556,24 +583,23 @@ export class AuthProxyServer {
         }
         const creds: Record<string, string> = {}
         for (const s of secrets) creds[s.configKey] = s.value
-        const minted = await this.tokenMinter.getOrMint(
-          tokenEntry.userId,
-          {
-            configItemId: match.configItemId,
-            authType: match.authType!,
-            tokenUrl: match.tokenUrl,
-            tokenRequestJson: match.tokenRequestJson,
-            pinyin: match.pinyin,
-            mintScriptsDir: getSystemSettings().mintScriptsDir,
-          },
-          creds,
-        )
+        const mintCfg = {
+          configItemId: match.configItemId,
+          authType: match.authType!,
+          tokenUrl: match.tokenUrl,
+          tokenRequestJson: match.tokenRequestJson,
+          pinyin: match.pinyin,
+          mintScriptsDir: getSystemSettings().mintScriptsDir,
+        }
+        const minted = await this.tokenMinter.getOrMint(tokenEntry.userId, mintCfg, creds)
         if (!minted) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'mint_failed', message: 'Could not obtain an access token; the user may need to set or refresh their credential' }))
           return
         }
         injectResult = injectAuth({ scheme: 'bearer', secret: minted.token })
+        // Enable the on-401 re-mint-and-retry path for this request.
+        mintRetry = { cfg: mintCfg, creds, userId: tokenEntry.userId }
       } else if (['bearer', 'basic'].includes(match.scheme)) {
         injectResult = injectAuth({
           scheme: match.scheme,
@@ -605,43 +631,113 @@ export class AuthProxyServer {
 
     // 7. Forward request
     const targetFinal = new URL(finalUrl)
-    const requestOptions = {
+    const method = (req.headers['x-remote-method'] as string | undefined)?.toUpperCase() || req.method
+    const baseRequestOptions = {
       hostname: targetFinal.hostname,
       port: targetFinal.port || (targetFinal.protocol === 'https:' ? '443' : '80'),
       path: targetFinal.pathname + targetFinal.search,
       // Upstream method comes from X-Remote-Method (fetchurl sets it); fall back
       // to the incoming method for direct callers.
-      method: (req.headers['x-remote-method'] as string | undefined)?.toUpperCase() || req.method,
-      headers: upstreamHeaders,
+      method,
       timeout: UPSTREAM_TIMEOUT_MS,
     }
+    const doRequest = targetFinal.protocol === 'https:' ? httpsRequest : httpRequest
 
-    const upstreamReq = targetFinal.protocol === 'https:'
-      ? httpsRequest(requestOptions)
-      : httpRequest(requestOptions)
+    // Fast path: no minted credential, so no re-mint/retry is possible. Keep the
+    // original zero-copy streaming pipe (request body and upstream response both
+    // streamed) — unchanged behavior for every non-login-type credential.
+    if (!mintRetry) {
+      const upstreamReq = doRequest({ ...baseRequestOptions, headers: upstreamHeaders })
+      upstreamReq.on('response', (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers)
+        upstreamRes.pipe(res)
+      })
+      upstreamReq.on('error', (err) => {
+        console.error('[AuthProxy] Upstream error:', err.message)
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'upstream_error', message: err.message }))
+        }
+      })
+      upstreamReq.on('timeout', () => {
+        upstreamReq.destroy()
+        if (!res.headersSent) {
+          res.writeHead(504, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'upstream_timeout', message: 'Upstream request timed out' }))
+        }
+      })
+      req.pipe(upstreamReq)
+      return
+    }
 
-    upstreamReq.on('response', (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers)
-      upstreamRes.pipe(res)
-    })
+    // Retry path (login-type credential): buffer the request body so it can be
+    // replayed, and buffer the upstream response so its status can be inspected
+    // before we commit to the client. On a 401 (stale/invalidated minted token)
+    // we force a fresh mint, swap the Bearer header, and forward once more.
+    const reqBody = await readRequestBody(req)
 
-    upstreamReq.on('error', (err) => {
-      console.error('[AuthProxy] Upstream error:', err.message)
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'upstream_error', message: err.message }))
+    type UpstreamResult = { status: number; headers: IncomingMessage['headers']; body: Buffer }
+    const sendUpstream = (headers: Record<string, string>): Promise<UpstreamResult> =>
+      new Promise<UpstreamResult>((resolve, reject) => {
+        const upstreamReq = doRequest({ ...baseRequestOptions, headers })
+        upstreamReq.on('response', (upstreamRes) => {
+          const chunks: Buffer[] = []
+          upstreamRes.on('data', (c: Buffer) => chunks.push(c))
+          upstreamRes.on('end', () =>
+            resolve({
+              status: upstreamRes.statusCode || 502,
+              headers: upstreamRes.headers,
+              body: Buffer.concat(chunks),
+            }),
+          )
+          upstreamRes.on('error', reject)
+        })
+        upstreamReq.on('error', reject)
+        upstreamReq.on('timeout', () => {
+          upstreamReq.destroy(new Error('upstream_timeout'))
+        })
+        if (reqBody.length > 0) upstreamReq.write(reqBody)
+        upstreamReq.end()
+      })
+
+    try {
+      let result = await sendUpstream(upstreamHeaders)
+
+      if (result.status === 401 && this.tokenMinter) {
+        // The cached minted token was rejected — force a fresh mint and retry once.
+        const reminted = await this.tokenMinter.forceMint(mintRetry.userId, mintRetry.cfg, mintRetry.creds)
+        if (reminted) {
+          console.warn(
+            `[AuthProxy] Upstream 401 for config item #${mintRetry.cfg.configItemId}; ` +
+              're-minted token and retrying once.',
+          )
+          const retryInject = injectAuth({ scheme: 'bearer', secret: reminted.token })
+          const retryHeaders = { ...upstreamHeaders, ...retryInject.headers }
+          result = await sendUpstream(retryHeaders)
+        }
       }
-    })
 
-    upstreamReq.on('timeout', () => {
-      upstreamReq.destroy()
-      if (!res.headersSent) {
-        res.writeHead(504, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'upstream_timeout', message: 'Upstream request timed out' }))
+      // Strip hop-by-hop / length headers Node will recompute for the buffered body.
+      const outHeaders: Record<string, string | string[]> = {}
+      for (const [k, v] of Object.entries(result.headers)) {
+        const lk = k.toLowerCase()
+        if (lk === 'transfer-encoding' || lk === 'connection' || lk === 'content-length') continue
+        if (v !== undefined) outHeaders[k] = v
       }
-    })
-
-    req.pipe(upstreamReq)
+      res.writeHead(result.status, outHeaders)
+      res.end(result.body)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error('[AuthProxy] Upstream error:', message)
+      if (!res.headersSent) {
+        const timedOut = message === 'upstream_timeout'
+        res.writeHead(timedOut ? 504 : 502, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          error: timedOut ? 'upstream_timeout' : 'upstream_error',
+          message: timedOut ? 'Upstream request timed out' : message,
+        }))
+      }
+    }
   }
 
   /**
