@@ -84,6 +84,31 @@ export class TokenMinter {
     if (cached && cached.expiresAt - nowSec >= MINT_SKEW_SEC) {
       return cached
     }
+    return this.mintAndStore(userId, cfg, creds)
+  }
+
+  /**
+   * Mint a fresh token unconditionally (ignoring any cached one) and overwrite
+   * the cache. Used when a cached token was accepted by getOrMint's expiry check
+   * but the upstream still rejected it with 401 — e.g. the provider enforces a
+   * single active session per account, so a login elsewhere silently invalidated
+   * our token well before its nominal expiry. getOrMint alone can't recover from
+   * that (no time has passed), so the proxy calls this to re-mint and retry once.
+   */
+  async forceMint(
+    userId: string,
+    cfg: MintConfig,
+    creds: Record<string, string>,
+  ): Promise<{ token: string; expiresAt: number } | null> {
+    return this.mintAndStore(userId, cfg, creds)
+  }
+
+  /** Run the mint recipe, store the result in the cache, and return it. */
+  private async mintAndStore(
+    userId: string,
+    cfg: MintConfig,
+    creds: Record<string, string>,
+  ): Promise<{ token: string; expiresAt: number } | null> {
     let minted: { token: string; expiresIn: number } | null
     try {
       minted = cfg.authType === 'script'
