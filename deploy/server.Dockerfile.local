@@ -122,7 +122,10 @@ RUN cd native/nexus-napi \
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
 FROM debian:bookworm-slim AS dl
-ARG NEXUS_VFS_VERSION=v0.1.0
+# Real nexus-vfs release tag (GitHub releases/download/<tag>/...). Keep in
+# step with src/server/nexus/runtime-versions.json (the Electron-side pin);
+# v0.1.0 was fictional (never released), so the server download 404'd.
+ARG NEXUS_VFS_VERSION=v0.6.0
 ARG SCODE_VERSION=latest
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar \
