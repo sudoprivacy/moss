@@ -81,17 +81,17 @@ export class NexusManager {
     const dataDir = join(this.nexusDir, 'data')
 
     const args = [
-      '--bind-addr', `127.0.0.1:${this.grpcPort}`,
+      // `serve-local --port <p>` (nexus-vfs >=v0.6.0) is the shorthand for
+      // `--bind-addr 127.0.0.1:<p> --no-tls`: it binds loopback + plaintext,
+      // the trusted-local-backend posture nexus-vfs's boot invariant permits
+      // without --insecure-no-auth (it only refuses no-auth on a *reachable*
+      // bind, which this is not). Moving that invariant into the binary
+      // removes the hand-written triplet here; it also subsumes the old
+      // --bootstrap-mode drop (removed upstream in Phase G — the daemon infers
+      // its boot action from on-disk state). Requires the v0.6.0 pin below.
+      'serve-local',
+      '--port', String(this.grpcPort),
       '--data-dir', dataDir,
-      '--no-tls',
-      // --bootstrap-mode was removed in nexus-vfs (Phase G): the daemon now
-      // infers its boot action from on-disk state instead of an operator flag.
-      // It is REQUIRED on v0.4.0 and REJECTED on >=v0.5.0, so dropping it is
-      // atomic with the pin bump to v0.5.0 — either alone fails to boot.
-      //
-      // --no-tls stays. On the container's loopback, a plaintext tokenless
-      // daemon is a trusted local backend; nexus-vfs's boot invariant only
-      // refuses no-auth on a *reachable* bind, which this is not.
     ]
 
     console.log(`[NexusManager] Starting nexus (Rust version) on gRPC port ${this.grpcPort}...`)
