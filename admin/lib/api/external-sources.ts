@@ -68,8 +68,14 @@ export function updateExternalSource(
   return authClient.patch<ExternalSource>(`/api/v1/external-sources/${id}`, input)
 }
 
-export function deleteExternalSource(id: string): Promise<{ ok: boolean }> {
-  return authClient.delete(`/api/v1/external-sources/${id}`)
+export function deleteExternalSource(
+  id: string,
+  opts?: { cascadeTree?: boolean },
+): Promise<{ ok: boolean }> {
+  // cascadeTree also removes the auto-managed knowledge tree this source created;
+  // omitting it keeps the tree (orphaned, but manually deletable).
+  const qs = opts?.cascadeTree ? '?cascade_tree=true' : ''
+  return authClient.delete(`/api/v1/external-sources/${id}${qs}`)
 }
 
 export function testExternalSource(id: string): Promise<TestConnectionResult> {

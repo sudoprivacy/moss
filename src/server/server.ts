@@ -2529,18 +2529,25 @@ export function startServer(
       if (req.method === 'DELETE' && documentNodeMatch) {
         authService.requireScope(auth, 'admin:documents')
         const nodeId = documentNodeMatch[1] || ''
-        // v2: auto_managed nodes can only be removed by deleting the
-        // source or by sync's reverse-sweep. Admins delete the SOURCE,
-        // not individual mirrored nodes.
+        // v2: while its source still exists, an auto_managed node is mirror state —
+        // it can only be removed by deleting the source or by sync's reverse-sweep,
+        // so admins delete the SOURCE, not individual mirrored nodes. But once the
+        // source is gone (deleted), the node is an orphaned tree with no owner and
+        // no future sync to sweep it; allow deleting it directly so admins can clean
+        // up stale trees left behind by pre-cascade source deletions.
         const existing = documentStore.getNode(nodeId, auth.orgId)
         if (existing?.autoManaged) {
-          writeJson(res, 400, {
-            error: {
-              code: 'auto_managed',
-              message: '该节点由外部数据源管理,无法直接删除。请在「外部数据源」中删除整个源,或在源系统中删除原文件后等待同步。',
-            },
-          })
-          return
+          const sourceStillExists =
+            !!existing.sourceId && !!runtime.store.getExternalSource(existing.sourceId, auth.orgId)
+          if (sourceStillExists) {
+            writeJson(res, 400, {
+              error: {
+                code: 'auto_managed',
+                message: '该节点由外部数据源管理,无法直接删除。请在「外部数据源」中删除整个源,或在源系统中删除原文件后等待同步。',
+              },
+            })
+            return
+          }
         }
         await documentStore.deleteNode(nodeId, auth.orgId)
         writeJson(res, 200, { ok: true })
@@ -3121,13 +3128,17 @@ export function startServer(
       if (req.method === 'DELETE' && externalSourceItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const id = externalSourceItemMatch[1] || ''
+        // cascade_tree=true also deletes the auto-managed knowledge tree this source
+        // created; otherwise the tree is kept (orphaned, but manually deletable).
+        // Default is keep — the non-destructive choice for callers that omit it.
+        const cascadeTree = url.searchParams.get('cascade_tree') === 'true'
         const existing = runtime.store.getExternalSource(id, auth.orgId)
         if (existing) {
           const oldKey = (existing as Record<string, unknown>).credentials_secret_key
           if (typeof oldKey === 'string' && oldKey) {
             await deleteSecret(oldKey).catch(() => {})
           }
-          runtime.store.deleteExternalSource(id, auth.orgId)
+          runtime.store.deleteExternalSource(id, auth.orgId, { cascadeTree })
         }
         writeJson(res, 200, { ok: true })
         return

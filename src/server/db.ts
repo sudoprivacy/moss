@@ -2695,9 +2695,18 @@ export class DirectConnectStore {
     )
   }
 
-  deleteExternalSource(id: string, orgId: string): void {
-    // Note: documents and tree nodes with this source_id are NOT cascade-deleted;
-    // the next sync sweep will soft-delete them. Keep DB referential integrity loose.
+  deleteExternalSource(id: string, orgId: string, opts?: { cascadeTree?: boolean }): void {
+    // The auto-managed knowledge tree this source created (document_tree_nodes with
+    // source_id = <id>) is handled per the caller's choice:
+    //   - cascadeTree: remove those nodes too. documents under them cascade
+    //     (documents.node_id ON DELETE CASCADE); any built wiki survives with
+    //     node_id nulled (wikis.node_id ON DELETE SET NULL).
+    //   - otherwise: keep the tree, just orphaned. There is no FK to external_sources
+    //     and no future sync will ever sweep it, so it stays until an admin deletes
+    //     the orphaned node manually (allowed once its source is gone).
+    if (opts?.cascadeTree) {
+      this.db.prepare(`DELETE FROM document_tree_nodes WHERE source_id = ? AND org_id = ?`).run(id, orgId)
+    }
     this.db.prepare(`DELETE FROM external_sources WHERE id = ? AND org_id = ?`).run(id, orgId)
   }
 

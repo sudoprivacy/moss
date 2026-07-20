@@ -122,9 +122,12 @@ RUN cd native/nexus-napi \
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
 FROM debian:bookworm-slim AS dl
-# Real nexus-vfs release tag (GitHub releases/download/<tag>/...). Keep in
-# step with src/server/nexus/runtime-versions.json (the Electron-side pin);
-# v0.1.0 was fictional (never released), so the server download 404'd.
+# Real nexus-vfs release tag (GitHub releases/download/<tag>/...). Keep in step
+# with src/server/nexus/runtime-versions.json (the Electron-side pin). moss
+# spawns the daemon as `nexusd serve-local --port <p>` (nexusManager.ts), a
+# subcommand introduced in nexus-vfs v0.6.0 — older binaries (e.g. the fictional
+# v0.1.0, which also 404'd) fail with "unrecognized subcommand 'serve-local'"
+# and nexus never boots.
 ARG NEXUS_VFS_VERSION=v0.6.0
 ARG SCODE_VERSION=latest
 ARG TARGETARCH
@@ -167,16 +170,23 @@ FROM node:22-trixie-slim
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
-# Mirror fallback: try the default deb.debian.org first; only if it fails (e.g.
-# the upstream mirror is unreachable from this network) rewrite the trixie
-# sources to mirrors.aliyun.com and retry. node:22-trixie-slim uses the deb822
-# format at /etc/apt/sources.list.d/debian.sources, so rewrite the URIs there.
-RUN if ! apt-get update; then \
-      echo "deb.debian.org apt-get update failed; switching to mirrors.aliyun.com"; \
-      sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g; s|https://deb.debian.org|https://mirrors.aliyun.com|g' \
-        /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
-      sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g; s|https://deb.debian.org|https://mirrors.aliyun.com|g' \
-        /etc/apt/sources.list 2>/dev/null || true; \
+# Mirror: deb.debian.org is intermittently 502/unreachable through some proxies
+# (a single probe can pass, then a later apt call in the same build 502s), so
+# rewrite the trixie sources to mirrors.aliyun.com UNCONDITIONALLY. Use http://
+# (not https://): some egress proxies mangle the TLS handshake to the mirror,
+# which surfaces as apt "Ign:" on the InRelease files and a failed update; plain
+# http avoids that path and the deb822 Signed-By keyring still authenticates the
+# release. If aliyun can't refresh the index, fall back to the original
+# deb.debian.org. node:22-trixie-slim uses the deb822 format at
+# /etc/apt/sources.list.d/debian.sources.
+RUN cp -a /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.orig 2>/dev/null || true; \
+    sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
+      /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
+      /etc/apt/sources.list 2>/dev/null || true; \
+    if ! apt-get update; then \
+      echo "mirrors.aliyun.com apt-get update failed; reverting to deb.debian.org"; \
+      cp -a /etc/apt/sources.list.d/debian.sources.orig /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
       apt-get update; \
     fi
 # Docker CLI + LibreOffice deps. Retry loop converges past transient mirror 502s
@@ -214,6 +224,12 @@ RUN apt-get update \
          && break || { echo "apt install attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && command -v jq >/dev/null || (echo "jq not installed after retries" && exit 1) \
+    # node:22-trixie-slim ships WITHOUT /etc/ssl/certs/ca-certificates.crt, and
+    # installing ca-certificates with --no-install-recommends does not always run
+    # its postinst trigger, so curl in the later docker-cli stage fails with
+    # "curl: (77) error setting certificate file". Materialize the bundle now.
+    && update-ca-certificates \
+    && test -s /etc/ssl/certs/ca-certificates.crt \
     && LIBDIR="$(dirname "$(ldconfig -p | awk '/libssl.so.3/{print $NF; exit}')")" \
     && ln -sf "$LIBDIR/libssl.so.3" "$LIBDIR/libssl3.so" \
     && ln -sf "$LIBDIR/libcrypto.so.3" "$LIBDIR/libcrypto3.so" \
