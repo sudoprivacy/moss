@@ -255,7 +255,18 @@ flowchart LR
 <tr><td>验证</td><td>CI 里有一条真 E2E:铸 key → 带 key 调 gRPC 通过 → <strong>空 token 被拒</strong> → 吊销 → 同一把 key 被拒</td></tr>
 </table>
 
-<h2>5. Tier 1 / Tier 2 — 映射到我们的机制 <span class="tag" style="color:#9a6700;border-color:#d4a72c">Tier 1 已就绪 · Tier 2 未实现</span></h2>
+<h3>4.1 每个平面产出什么身份</h3>
+
+<p>一次判定落在 <code>OperationContext.agent_id</code> 上的东西,取决于走哪个平面 —— 这三条路各产出一层不同的身份:</p>
+
+<table>
+<tr><th>平面 / 凭证</th><th>产出的身份</th><th><code>agent_id</code></th></tr>
+<tr><td>token 平面 · <strong>Agent key</strong>(<code>mint --subject-type agent --subject-id &lt;name&gt;</code>)</td><td>agent 身份 —— agent 的稳定名字</td><td><code>= subject_id</code></td></tr>
+<tr><td>token 平面 · User / Service key</td><td>对应的 user / service subject</td><td>无</td></tr>
+<tr><td>peer 平面 · mTLS 客户端证书</td><td>集群<strong>节点</strong>成员身份(URI SAN 里的 <code>zone/node</code>)</td><td>无</td></tr>
+</table>
+
+<p>只有 <strong>Agent key</strong> 这一条产出 <code>agent_id</code>,它就是消息署名(A2A 里被内核 stamp 成不可伪造 <code>from</code>)的发送方身份 —— A2A 侧怎么用见 <a href="https://s.shareone.vip/s/nexus-integration-architecture">nexus-integration-architecture §3.3</a>。peer 平面认证的是「哪个节点」,与「哪个 agent」是正交的两层:节点身份让联邦成员复制状态,agent 身份让消息有可信来源,一层管传输成员、一层管内容署名。</p>
 
 <p>moss 侧提的两层方案,我们的机制都能直接承接:</p>
 
