@@ -67,6 +67,7 @@ import {
   updateWiki,
   uploadDocument,
 } from '@/lib/api/document-center'
+import { listExternalSources } from '@/lib/api/external-sources'
 
 const MAX_DOC_SIZE = 50 * 1024 * 1024 // 50 MB; aligns with server-side limit
 
@@ -107,6 +108,10 @@ export default function DocumentCenterPage() {
   const [nodes, setNodes] = useState<DocumentTreeNode[]>([])
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [wikis, setWikis] = useState<WikiRecord[]>([])
+  // IDs of external data sources that still exist. An auto-managed tree node whose
+  // sourceId is NOT in this set is orphaned (its source was deleted) and should be
+  // manually deletable, unlike a live-source node which stays locked.
+  const [liveSourceIds, setLiveSourceIds] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -159,9 +164,15 @@ export default function DocumentCenterPage() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [t, w] = await Promise.all([getDocumentTree(), listWikis()])
+      const [t, w, sources] = await Promise.all([
+        getDocumentTree(),
+        listWikis(),
+        // Best-effort: if this fails we simply treat all auto nodes as locked.
+        listExternalSources().catch(() => []),
+      ])
       setNodes(t)
       setWikis(w)
+      setLiveSourceIds(new Set(sources.map(s => s.id)))
       // Auto-expand all on first load so user sees the structure
       setExpanded(prev => {
         if (prev.size === 0 && t.length > 0) {
@@ -704,6 +715,7 @@ export default function DocumentCenterPage() {
                     onRename={handleOpenRename}
                     onDelete={handleOpenDelete}
                     onSetAlias={handleOpenSetAlias}
+                    liveSourceIds={liveSourceIds}
                   />
                 ))}
               </ul>
@@ -1203,6 +1215,7 @@ function TreeRow({
   onRename,
   onDelete,
   onSetAlias,
+  liveSourceIds,
 }: {
   branch: DocTreeBranch
   depth: number
@@ -1214,11 +1227,16 @@ function TreeRow({
   onRename: (n: DocumentTreeNode) => void
   onDelete: (n: DocumentTreeNode) => void
   onSetAlias: (n: DocumentTreeNode) => void
+  liveSourceIds: Set<string>
 }) {
   const hasChildren = branch.children.length > 0
   const isExpanded = expanded.has(branch.id)
   const isSelected = selectedId === branch.id
   const isAuto = branch.autoManaged === true
+  // An auto-managed node whose external source no longer exists is orphaned:
+  // no future sync will ever sweep it, so let admins delete it manually (like a
+  // normal tree). Live-source auto nodes stay locked (delete the source instead).
+  const isOrphanedAuto = isAuto && (!branch.sourceId || !liveSourceIds.has(branch.sourceId))
   const displayName = isAuto && branch.alias ? `${branch.alias} (${branch.name})` : branch.name
 
   return (
@@ -1247,7 +1265,7 @@ function TreeRow({
             <span className="inline-block size-4" />
           )}
         </button>
-        {isAuto && (
+        {isAuto && !isOrphanedAuto && (
           <Lock
             className="size-3 text-muted-foreground shrink-0"
             aria-label="自动同步节点(不可改名/删除)"
@@ -1301,7 +1319,7 @@ function TreeRow({
               <Pencil className="size-3.5" />
             </Button>
           )}
-          {!isAuto && (
+          {(!isAuto || isOrphanedAuto) && (
             <Button
               variant="ghost"
               size="icon"
@@ -1310,7 +1328,7 @@ function TreeRow({
                 e.stopPropagation()
                 onDelete(branch)
               }}
-              title="删除"
+              title={isOrphanedAuto ? '删除(数据源已删除,可清理)' : '删除'}
             >
               <Trash2 className="size-3.5" />
             </Button>
@@ -1332,6 +1350,7 @@ function TreeRow({
               onRename={onRename}
               onDelete={onDelete}
               onSetAlias={onSetAlias}
+              liveSourceIds={liveSourceIds}
             />
           ))}
         </ul>

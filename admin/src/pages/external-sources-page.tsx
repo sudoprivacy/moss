@@ -31,7 +31,6 @@ import {
 } from '@/components/ui/dialog'
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -203,11 +202,11 @@ export default function ExternalSourcesPage() {
     }
   }
 
-  const handleDelete = async () => {
+  const handleDelete = async (cascadeTree: boolean) => {
     if (!deletingId) return
     try {
-      await deleteExternalSource(deletingId)
-      toast.success('已删除')
+      await deleteExternalSource(deletingId, { cascadeTree })
+      toast.success(cascadeTree ? '已删除数据源及其知识树' : '已删除数据源(保留知识树)')
       setDeletingId(null)
       await refresh()
     } catch (err) {
@@ -376,18 +375,27 @@ export default function ExternalSourcesPage() {
         }}
       />
 
-      {/* Delete confirm */}
+      {/* Delete confirm — choose whether to also remove the auto-synced knowledge tree */}
       <AlertDialog open={!!deletingId} onOpenChange={(o) => !o && setDeletingId(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>确认删除数据源?</AlertDialogTitle>
             <AlertDialogDescription>
-              删除后将不再同步,已同步进文档中心的内容将在下个同步周期被软删(保留 30 天)。
+              删除后将不再同步。该数据源在文档中心自动创建的知识树,你可以选择:
+              <br />
+              <strong>保留知识树</strong>:仅删除数据源,已同步的内容保留在文档中心(之后可手动删除)。
+              <br />
+              <strong>同时删除知识树</strong>:一并删除该知识树及其下同步的文档(基于其构建的 wiki 会保留,但不再挂在该树下)。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>删除</AlertDialogAction>
+            <Button variant="outline" onClick={() => void handleDelete(false)}>
+              保留知识树
+            </Button>
+            <Button variant="destructive" onClick={() => void handleDelete(true)}>
+              同时删除知识树
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
