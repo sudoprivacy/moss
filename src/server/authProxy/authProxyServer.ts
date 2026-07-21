@@ -9,6 +9,11 @@ import { secretSubject, orgScopedNamespace, deptSecretNamespace } from '../secre
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { TokenMinter } from './tokenMinter.js'
 import { getSystemSettings } from '../systemSettings.js'
+import {
+  parseBodyAuthCheck,
+  bodyIndicatesUnauthorized,
+  type BodyAuthCheckRecipe,
+} from './bodyAuthCheck.js'
 
 export interface AuthProxyRule {
   configItemId: number
@@ -35,6 +40,9 @@ export interface AuthProxyRule {
   // For auth_type 'script' the login script path is composed as
   // `<mintScriptsDir>/<pinyin>_mint.sh`; carry the pinyin for the minter.
   pinyin?: string | null
+  // Opt-in recipe (JSON) for detecting a body-level "unauthorized" reply
+  // (HTTP 200 + {"code":401,...}) so re-mint fires on it too. See bodyAuthCheck.
+  bodyAuthCheck?: string | null
 }
 
 /**
@@ -76,6 +84,7 @@ export function configItemToRule(
     tokenUrl: (item.token_url as string | null) ?? null,
     tokenRequestJson: (item.token_request_json as string | null) ?? null,
     pinyin: (item.pinyin as string | null) ?? null,
+    bodyAuthCheck: (item.body_auth_check as string | null) ?? null,
   }
 }
 
@@ -464,6 +473,8 @@ export class AuthProxyServer {
       }
       creds: Record<string, string>
       userId: string
+      // Parsed per-item body-level 401 recipe (null = HTTP-status-only).
+      bodyAuthCheck: BodyAuthCheckRecipe | null
     } | null = null
 
     // Priority 1: Explicit headers
@@ -598,8 +609,14 @@ export class AuthProxyServer {
           return
         }
         injectResult = injectAuth({ scheme: 'bearer', secret: minted.token })
-        // Enable the on-401 re-mint-and-retry path for this request.
-        mintRetry = { cfg: mintCfg, creds, userId: tokenEntry.userId }
+        // Enable the on-401 re-mint-and-retry path for this request. The body
+        // check is opt-in per config item; null keeps HTTP-status-only behavior.
+        mintRetry = {
+          cfg: mintCfg,
+          creds,
+          userId: tokenEntry.userId,
+          bodyAuthCheck: parseBodyAuthCheck(match.bodyAuthCheck),
+        }
       } else if (['bearer', 'basic'].includes(match.scheme)) {
         injectResult = injectAuth({
           scheme: match.scheme,
@@ -703,12 +720,18 @@ export class AuthProxyServer {
     try {
       let result = await sendUpstream(upstreamHeaders)
 
-      if (result.status === 401 && this.tokenMinter) {
-        // The cached minted token was rejected — force a fresh mint and retry once.
+      // The cached minted token can be rejected two ways: a real HTTP 401, or —
+      // for providers that always answer 200 — a body-level envelope such as
+      // {"code":401,...} (opt-in per config item via body_auth_check). Either
+      // triggers a single force-mint + retry so a lone fetchurl call self-heals.
+      const httpUnauthorized = result.status === 401
+      const bodyUnauthorized = bodyIndicatesUnauthorized(mintRetry.bodyAuthCheck, result.body)
+      if ((httpUnauthorized || bodyUnauthorized) && this.tokenMinter) {
         const reminted = await this.tokenMinter.forceMint(mintRetry.userId, mintRetry.cfg, mintRetry.creds)
         if (reminted) {
+          const reason = httpUnauthorized ? 'HTTP 401' : 'body-level 401'
           console.warn(
-            `[AuthProxy] Upstream 401 for config item #${mintRetry.cfg.configItemId}; ` +
+            `[AuthProxy] Upstream ${reason} for config item #${mintRetry.cfg.configItemId}; ` +
               're-minted token and retrying once.',
           )
           const retryInject = injectAuth({ scheme: 'bearer', secret: reminted.token })
