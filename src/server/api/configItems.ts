@@ -3,11 +3,56 @@ import { randomUUID } from 'crypto'
 import { textToPinyin } from '../utils/pinyin.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 import { hasScope } from '../auth/token.js'
+import { parseBodyAuthCheck } from '../authProxy/bodyAuthCheck.js'
 
 type SqlRow = Record<string, unknown>
 
 function now(): number {
   return Date.now()
+}
+
+/**
+ * Validate an admin-supplied `body_auth_check` recipe. Returns an error message
+ * for a malformed value, or null when it's empty (feature off) or valid.
+ * A recipe must be a JSON object; `field` (if present) a non-empty string and
+ * `unauthorizedValues` (if present) a non-empty array of strings/numbers.
+ */
+function validateBodyAuthCheck(raw: string | null | undefined): string | null {
+  if (raw == null || !raw.trim()) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return 'body_auth_check 必须是合法的 JSON'
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return 'body_auth_check 必须是 JSON 对象，例如 {"field":"code","unauthorizedValues":[401]}'
+  }
+  const r = parsed as Record<string, unknown>
+  if ('field' in r && (typeof r.field !== 'string' || !r.field.trim())) {
+    return 'body_auth_check.field 必须是非空字符串'
+  }
+  if ('unauthorizedValues' in r) {
+    if (!Array.isArray(r.unauthorizedValues) || r.unauthorizedValues.length === 0) {
+      return 'body_auth_check.unauthorizedValues 必须是非空数组'
+    }
+    if (!r.unauthorizedValues.every(v => typeof v === 'string' || typeof v === 'number')) {
+      return 'body_auth_check.unauthorizedValues 只能包含字符串或数字'
+    }
+  }
+  return null
+}
+
+/**
+ * Normalize a `body_auth_check` value for storage: empty → null (feature off);
+ * a valid recipe is re-serialized via the shared parser so what's stored is
+ * exactly what the auth proxy will honor (unknown keys dropped, whitespace
+ * trimmed). Assumes validateBodyAuthCheck already passed.
+ */
+function normalizeBodyAuthCheck(raw: string | null | undefined): string | undefined {
+  if (raw == null || !raw.trim()) return undefined
+  const recipe = parseBodyAuthCheck(raw)
+  return recipe ? JSON.stringify(recipe) : undefined
 }
 
 // URL pattern validation (ported from sudowork-server)
@@ -68,6 +113,7 @@ function mapConfigItem(row: SqlRow) {
     token_url: (row.token_url as string | null) ?? null,
     token_request_json: (row.token_request_json as string | null) ?? null,
     mint_script: (row.mint_script as string | null) ?? null,
+    body_auth_check: (row.body_auth_check as string | null) ?? null,
     status: row.status as number,
     created_at: row.created_at as number,
     updated_at: row.updated_at as number,
@@ -91,7 +137,7 @@ export function createConfigItemsApi(db: {
   listConfigItems: (opts: { name?: string; scope?: string; status?: string; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
   getConfigItem: (id: number, orgId?: string) => SqlRow | null
   getConfigItemByPinyin: (pinyin: string, orgId?: string) => SqlRow | null
-  createConfigItem: (row: { name: string; description?: string; icon?: string; pinyin: string; scope: string; url_pattern?: string; scheme?: string; bearer_prefix?: string; status?: number; org_id?: string | null; auth_type?: string; token_url?: string; token_request_json?: string; mint_script?: string }) => number
+  createConfigItem: (row: { name: string; description?: string; icon?: string; pinyin: string; scope: string; url_pattern?: string; scheme?: string; bearer_prefix?: string; status?: number; org_id?: string | null; auth_type?: string; token_url?: string; token_request_json?: string; mint_script?: string; body_auth_check?: string }) => number
   updateConfigItem: (id: number, updates: Record<string, unknown>, orgId?: string) => void
   deleteConfigItem: (id: number, orgId?: string) => void
   getConfigEntries: (configItemId: number) => SqlRow[]
@@ -147,10 +193,15 @@ export function createConfigItemsApi(db: {
       auth_type?: string
       token_url?: string
       token_request_json?: string
+      body_auth_check?: string
       entries: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
       if (!body.name?.trim()) {
         return { success: false, error: { code: 'validation_error', message: '名称不能为空' } }
+      }
+      const bodyAuthErr = validateBodyAuthCheck(body.body_auth_check)
+      if (bodyAuthErr) {
+        return { success: false, error: { code: 'validation_error', message: bodyAuthErr } }
       }
       // A URL-matched 凭据 needs an auth method: either a static injection
       // scheme (bearer/basic/header/query) OR a login-type auth_type that mints
@@ -204,6 +255,7 @@ export function createConfigItemsApi(db: {
           auth_type: body.auth_type,
           token_url: body.token_url,
           token_request_json: body.token_request_json,
+          body_auth_check: normalizeBodyAuthCheck(body.body_auth_check),
         })
 
         if (body.entries?.length > 0) {
@@ -232,6 +284,7 @@ export function createConfigItemsApi(db: {
       auth_type?: string
       token_url?: string
       token_request_json?: string
+      body_auth_check?: string | null
       entries?: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
       const existing = db.getConfigItem(id, orgId)
@@ -239,6 +292,12 @@ export function createConfigItemsApi(db: {
 
       if (body.url_pattern?.trim() && !isValidUrlPattern(body.url_pattern.trim())) {
         return { success: false, error: { code: 'validation_error', message: 'URL 模式格式不正确，需以 http:// 或 https:// 开头，路径中可使用 * 和 ? 通配符' } }
+      }
+      if (body.body_auth_check !== undefined && body.body_auth_check !== null) {
+        const bodyAuthErr = validateBodyAuthCheck(body.body_auth_check)
+        if (bodyAuthErr) {
+          return { success: false, error: { code: 'validation_error', message: bodyAuthErr } }
+        }
       }
 
       if (body.pinyin && body.pinyin !== existing.pinyin) {
@@ -267,6 +326,10 @@ export function createConfigItemsApi(db: {
       if (body.auth_type !== undefined) updates.auth_type = body.auth_type
       if (body.token_url !== undefined) updates.token_url = body.token_url
       if (body.token_request_json !== undefined) updates.token_request_json = body.token_request_json
+      // Empty string clears the recipe (null); a non-empty value is normalized.
+      if (body.body_auth_check !== undefined) {
+        updates.body_auth_check = normalizeBodyAuthCheck(body.body_auth_check)
+      }
       updates.updated_at = now()
 
       try {

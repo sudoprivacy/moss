@@ -92,6 +92,8 @@ interface ConfigItemForm {
   loginAuthType: LoginAuthType
   token_url: string
   token_request_json: string
+  // Opt-in body-level 401 detection recipe (JSON). Empty = HTTP-status-only.
+  body_auth_check: string
   entries: EntryForm[]
 }
 
@@ -101,6 +103,7 @@ const emptyForm: ConfigItemForm = {
   name: '', pinyin: '', description: '', icon: '', scope: 'system',
   url_pattern: '', authMode: 'static', scheme: '', bearer_prefix: '',
   loginAuthType: 'oauth2_password', token_url: '', token_request_json: '',
+  body_auth_check: '',
   entries: [{ ...emptyEntry }],
 }
 
@@ -199,6 +202,7 @@ export default function ConfigItemsPage() {
       loginAuthType,
       token_url: item.token_url || '',
       token_request_json: item.token_request_json || '',
+      body_auth_check: item.body_auth_check || '',
       entries: item.entries.length > 0
         ? item.entries.map(e => ({ config_key: e.config_key, name: e.name, config_desc: e.config_desc || '', required: !!e.required }))
         : [{ ...emptyEntry }],
@@ -240,6 +244,14 @@ export default function ConfigItemsPage() {
       if (form.token_request_json.trim()) {
         try { JSON.parse(form.token_request_json) } catch { toast.error('请求配方 (token_request_json) 不是合法 JSON'); return }
       }
+      if (form.body_auth_check.trim()) {
+        try {
+          const parsed = JSON.parse(form.body_auth_check)
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            toast.error('响应体 401 检测 (body_auth_check) 必须是 JSON 对象'); return
+          }
+        } catch { toast.error('响应体 401 检测 (body_auth_check) 不是合法 JSON'); return }
+      }
     }
     // login-type 与 static 二选一：互斥地清空对侧字段
     const authPayload = isLogin
@@ -247,6 +259,8 @@ export default function ConfigItemsPage() {
           auth_type: form.loginAuthType,
           token_url: form.loginAuthType === 'oauth2_password' ? (form.token_url.trim() || undefined) : undefined,
           token_request_json: form.token_request_json.trim() || undefined,
+          // Empty string clears the recipe server-side; a value opts in.
+          body_auth_check: form.body_auth_check.trim() || '',
           scheme: undefined,
           bearer_prefix: undefined,
         }
@@ -254,6 +268,7 @@ export default function ConfigItemsPage() {
           auth_type: 'static',
           token_url: undefined,
           token_request_json: undefined,
+          body_auth_check: '',
           scheme: form.scheme || undefined,
           bearer_prefix: form.bearer_prefix.trim() || undefined,
         }
@@ -624,6 +639,20 @@ export default function ConfigItemsPage() {
                     </p>
                   </div>
                 )}
+
+                <div className="space-y-2">
+                  <Label>响应体 401 检测（body_auth_check，可选）</Label>
+                  <Textarea
+                    value={form.body_auth_check}
+                    onChange={e => setForm(f => ({ ...f, body_auth_check: e.target.value }))}
+                    placeholder={'{\n  "field": "code",\n  "unauthorizedValues": [401, "401"]\n}'}
+                    rows={4}
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    某些接口在会话失效时仍返回 HTTP 200，但响应体里带有 <code>{'{"code":401,...}'}</code>。填写此项后，代理会在响应体命中该值时也自动重新登录并重试一次（与 HTTP 401 一样）。<code>field</code> 支持点号路径（如 <code>data.code</code>），默认 <code>code</code>；<code>unauthorizedValues</code> 默认 <code>[401, "401"]</code>。留空则仅按 HTTP 状态码判断。
+                  </p>
+                </div>
 
                 <p className="text-xs text-muted-foreground">
                   下方“字段定义”是用户需要在「我的凭据」中填写的登录凭据字段（如 username、password），脚本/请求配方会用到它们。
