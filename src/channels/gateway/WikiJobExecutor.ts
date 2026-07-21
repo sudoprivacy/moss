@@ -261,7 +261,24 @@ export class WikiJobExecutor {
       }
 
       if (!result.ok) {
-        throw new Error(result.error ?? 'build session failed')
+        // Best-effort enrichment: the runner records the concrete failure
+        // (e.g. a `FOREIGN KEY constraint failed` from a corrupted WAL) on the
+        // attempt row via #fail before dying, which may be more specific than
+        // whatever reached us over the (already-closed) attach socket.
+        let reason = result.error ?? 'build session failed'
+        try {
+          const attemptId = created.sessionId
+            ? this.db.getSession(created.sessionId)?.currentAttemptId ?? null
+            : null
+          const errorText = attemptId
+            ? this.db.getAttempt(attemptId)?.errorText ?? null
+            : null
+          if (errorText) reason = `${reason}: ${errorText}`
+        } catch {
+          // DB read failed (e.g. the same corruption that killed the runner) —
+          // fall back to the socket-derived reason.
+        }
+        throw new Error(reason)
       }
 
       // Stage 4: verify output presence (in the staging dir — the live
@@ -735,6 +752,17 @@ export class WikiJobExecutor {
       let lastProgress = 40
       let settled = false
 
+      // Failure-surfacing state. A wiki build only "succeeds" if the agent
+      // actually produced output; a runner that dies at startup (e.g. the
+      // session runner crashing before the backend spawns) closes the attach
+      // socket with no agent lines and no `exit` frame. Treating that as
+      // success is what historically masked real runner crashes as the
+      // downstream "WIKI.md was not produced" error. Track whether we ever
+      // saw meaningful agent activity, and the last stderr the runner
+      // forwarded, so a silent death is reported as a failure with a reason.
+      let sawAgentActivity = false
+      let lastStderr = ''
+
       // Idle-nudge watchdog state.
       //   lastActivityAt      — bumped on any meaningful agent output; drives
       //                         the "is it silent?" check.
@@ -766,6 +794,7 @@ export class WikiJobExecutor {
       // so a slowly-advancing build never trips the cap.
       const markProgress = () => {
         lastActivityAt = Date.now()
+        sawAgentActivity = true
         if (awaitingNudgeProof) {
           awaitingNudgeProof = false
           unproductiveNudges = 0
@@ -822,8 +851,34 @@ export class WikiJobExecutor {
                   currentStep: step,
                 })
               }, settle)
+            } else if (parsed.type === 'stderr' && typeof parsed.line === 'string') {
+              // Keep the most recent runner stderr so a crash reported via
+              // `exit` (or a silent close) carries a concrete reason.
+              lastStderr = parsed.line.trim() || lastStderr
             } else if (parsed.type === 'exit') {
-              settle({ ok: true })
+              // The runner forwards the backend's exit code. A clean exit
+              // (code 0 / null with output already seen) is success; a
+              // non-zero code, or any exit before the agent produced a single
+              // line, is a runner failure that must not masquerade as success.
+              const code = typeof parsed.code === 'number' ? parsed.code : null
+              if (code !== null && code !== 0) {
+                settle({
+                  ok: false,
+                  error:
+                    lastStderr ||
+                    `build runner exited with code ${code}` +
+                      (parsed.signal ? ` (signal ${parsed.signal})` : ''),
+                })
+              } else if (!sawAgentActivity) {
+                settle({
+                  ok: false,
+                  error:
+                    lastStderr ||
+                    'build runner exited before producing any output',
+                })
+              } else {
+                settle({ ok: true })
+              }
               return
             }
           } catch {
@@ -837,6 +892,21 @@ export class WikiJobExecutor {
       })
 
       socket.on('close', () => {
+        // The attach socket closed without an explicit `exit` frame. If the
+        // agent never produced output, the runner died early (e.g. it crashed
+        // in start() before spawning the backend — the classic symptom of a
+        // corrupted/split SQLite WAL, where the runner's session_events insert
+        // fails the sessions FK). Report it as a failure so runJob surfaces the
+        // real reason instead of the misleading "WIKI.md was not produced".
+        if (!sawAgentActivity) {
+          settle({
+            ok: false,
+            error:
+              lastStderr ||
+              'build runner connection closed before producing any output',
+          })
+          return
+        }
         settle({ ok: true })
       })
 

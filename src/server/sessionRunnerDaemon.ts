@@ -644,22 +644,41 @@ export class SessionRunnerDaemon {
     const message = error instanceof Error ? error.stack || error.message : String(error)
     this.#rememberStderr(message)
     await appendFile(this.manifest.attempt.stderrLogPath, `${message}\n`, 'utf8').catch(() => {})
-    this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
-      runtimeState: 'failed',
-      stopReason,
-      errorText: message,
-    })
-    this.#store.markSessionEnded(
-      this.manifest.session.sessionId,
-      'failed',
-      'active',
-    )
-    this.#store.addEvent(
-      this.manifest.session.sessionId,
-      this.manifest.attempt.attemptId,
-      'attempt_failed',
-      { stopReason, error: message },
-    )
+    // Tell any attached client (e.g. the wiki build driver) the concrete
+    // reason and that we're going down, BEFORE touching the DB. The DB writes
+    // below can themselves throw — the canonical case is a corrupted/split
+    // SQLite WAL, where these very inserts fail the sessions foreign key and
+    // this method would otherwise re-throw and die silently, leaving the
+    // client to see only a bare socket close. Broadcasting first guarantees the
+    // failure is observable regardless of DB health.
+    this.#broadcast({ type: 'stderr', line: message })
+    this.#broadcast({ type: 'exit', code: 1, signal: null })
+    // Each DB write is best-effort: if the store is unwritable, we still want
+    // to finish shutting the runner down cleanly rather than crash mid-#fail.
+    try {
+      this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
+        runtimeState: 'failed',
+        stopReason,
+        errorText: message,
+      })
+    } catch (dbErr) {
+      process.stderr.write(`[SessionRunnerDaemon] #fail markAttemptStopped failed: ${dbErr}\n`)
+    }
+    try {
+      this.#store.markSessionEnded(this.manifest.session.sessionId, 'failed', 'active')
+    } catch (dbErr) {
+      process.stderr.write(`[SessionRunnerDaemon] #fail markSessionEnded failed: ${dbErr}\n`)
+    }
+    try {
+      this.#store.addEvent(
+        this.manifest.session.sessionId,
+        this.manifest.attempt.attemptId,
+        'attempt_failed',
+        { stopReason, error: message },
+      )
+    } catch (dbErr) {
+      process.stderr.write(`[SessionRunnerDaemon] #fail addEvent failed: ${dbErr}\n`)
+    }
     await writeStatus(this.manifest.attempt.statusPath, {
       state: 'failed',
       pid: process.pid,
