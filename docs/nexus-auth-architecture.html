@@ -268,6 +268,12 @@ flowchart LR
 
 <p>只有 <strong>Agent key</strong> 这一条产出 <code>agent_id</code>,它就是消息署名(A2A 里被内核 stamp 成不可伪造 <code>from</code>)的发送方身份 —— A2A 侧怎么用见 <a href="https://s.shareone.vip/s/nexus-integration-architecture">nexus-integration-architecture §3.3</a>。peer 平面认证的是「哪个节点」,与「哪个 agent」是正交的两层:节点身份让联邦成员复制状态,agent 身份让消息有可信来源,一层管传输成员、一层管内容署名。</p>
 
+<p><strong>agent_id 唯一性 = 节点内强制 + 跨节点靠命名(auth store 每节点独立)。</strong>凭证存储在 root zone,而 <strong>root zone 每节点独立、从不联邦</strong>(SOLO):每个节点铸造并校验<strong>自己的</strong> agent,agent 只在<strong>本机</strong>认证(Option X,从不跨网直连远端)。所以唯一性分两半:<code>auth mint</code> 在<strong>本节点存储内</strong>强制唯一(同一 <code>(subject_type, subject_id)</code> 已有活跃 key 则拒;<code>--allow-existing</code> 留给<strong>轮转</strong>,吊销即释放);<strong>跨节点</strong>唯一性由<strong>命名</strong>保证 —— 默认名 <code>{机器}.{worktree}</code>,机器段锚 <code>node_id</code>(SSOT、已在证书里,不用可伪造的 hostname),使不同节点的名字天然不撞。zone 是<strong>访问范围</strong>(key 的 <code>zone_perms</code>),不是身份 namespace;一个 agent 跨它所属的多个 zone(<code>ZoneManager</code> 多 zone)保持<strong>同一</strong>身份(它是同一个 actor)。唯一性检查是<strong>铸造层</strong>策略(存储按 key-hash 索引、record 保持 opaque bytes,不把凭证 schema 耦合进状态机)。canonical 形式 <code>nexus://agent/{name}</code>(与节点 SAN <code>nexus://zone/{z}/node/{n}</code> 平行)。</p>
+
+<div class="box ok">
+<p><strong>部署落地(Option X):两个平面按受众经不同 bind 到达。</strong>在一个既服务联邦 peer、又服务本机 agent 的节点上:可达的联邦 bind(<code>--bind-addr</code>,如 Tailscale IP)承载 <strong>peer 平面</strong>(节点证书,强制 mTLS);本机 agent 经一个 <strong>loopback bind</strong>(<code>--agent-bind-addr</code>)承载 <strong>token 平面</strong>(agent 的 <code>sk-</code> key)。<code>resolve()</code> 仍是两者的唯一判定。于是 §3.1 的「<code>--no-tls</code> ⊥ <code>sk-</code> token」不只是逻辑正交,而是<strong>物理分面</strong>:联邦面握手层强制 mTLS、纵深防御一点不减(agent 从不跨网直连远端节点),本机 agent 用 loopback + Tier-1 拿到 <code>agent_id</code>,其 mailbox 写由 stamp hook 盖成不可伪造 <code>from</code> 后经 raft 复制到对端。</p>
+</div>
+
 <p>moss 侧提的两层方案,我们的机制都能直接承接:</p>
 
 <table>
