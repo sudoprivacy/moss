@@ -296,6 +296,51 @@ flowchart LR
 <p><strong>有了第 3 节那条不变量之后,Tier 1 对 moss 就变成了<em>可选</em>的纵深防御</strong>(因为 loopback + 无 auth 已经合法且安全)。所以这里需要 moss 侧拍一下:<strong>是现在就上 Tier 1,还是先只要 loopback 守卫?</strong></p>
 </div>
 
+<h2>5. 不可伪造的 authorship — 跨信任域可验的 agent 署名</h2>
+
+<p>§4.1 里,<strong>Agent key</strong> 是唯一产出 <code>agent_id</code> 的凭证,内核把它 stamp 成 mailbox <code>from</code>。本节把这个 <code>from</code> 从「本集群内因内核盖章而可信」提升为一个<strong>可携带、任意消费方(本机 / 跨节点 / 跨组织)都能独立密码学验证</strong>的属性 —— 每个 agent 的署名各自成立,不依赖 ingress 节点的姿态。</p>
+
+<pre class="mermaid">
+flowchart LR
+  CA["cluster CA<br/>(enrollment 分发到每个节点)"]
+  CA --> NC["node cert<br/>SAN nexus://zone/{z}/node/{n}"]
+  CA --> AC["agent cert<br/>SAN nexus://agent/{name}"]
+  AC -->|"agent 私钥签 envelope"| ENV["mailbox 写<br/>payload = { from, sig, cert }"]
+  ENV --> RAFT["raft log<br/>AppendStreamEntry @ apply<br/>定序 · 复制 · 防篡改"]
+  RAFT --> V["消费方<br/>本机 / 跨节点 / 跨组织"]
+  CA -. "以 CA 验 cert" .-> V
+  V -->|"① cert 在 CA 下有效<br/>② sig 在 cert 公钥下有效<br/>③ SAN 名 == from"| OK["authorship 已验<br/>无需信任 ingress 节点"]
+
+  style OK fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+</pre>
+
+<h3>5.1 Agent 身份 = 一张 CA 签发的证书</h3>
+
+<p>agent 身份与<strong>节点身份同构</strong>:同一套 <code>certgen</code>(EC P-256 + URI SAN)、同一个 <strong>cluster CA</strong> 签发,SAN 用 §4.1 已预留的 canonical 形式 <code>nexus://agent/{name}</code>(与节点的 <code>nexus://zone/{z}/node/{n}</code> 平行)。CA 私钥留在 founder,agent cert 走<strong>与 node enrollment 同一条签发路径</strong>。使用姿势不变 —— <code>auth mint --subject-type agent --subject-id &lt;name&gt;</code> 仍是<strong>一条命令、一个产物</strong>(一份 cert 包),和铸一把 <code>sk-</code> 一样开箱即用;agent 用这一张 cert 同时完成<strong>认证</strong>(<code>peer_identity</code> 解析 <code>nexus://agent/</code> → <code>agent_id</code>)与<strong>署名</strong>,身份只有一个来源。</p>
+
+<h3>5.2 署名如何被任意消费方验证</h3>
+
+<p>agent 用私钥对 envelope 签名,签名与其 cert 随 payload 一起进 mailbox。任意消费方的验证是三步:<strong>①</strong> cert 在 cluster CA 信任链下有效;<strong>②</strong> 签名在 cert 公钥下有效;<strong>③</strong> cert 的 SAN 名 == envelope 的 <code>from</code>。三者皆真,则 <code>from</code> 为该 agent 亲笔。</p>
+
+<div class="box ok">
+<p><strong>验证挂在 CA 上,不挂在凭证存储上 —— 这让三件事同时成立。(a)</strong> auth store 保持<strong>每节点独立</strong>(§4.1 的 root-SOLO 不变量原样保留):跨节点验签靠每个节点都持有的 CA,而非复制存储。<strong>(b) 跨节点:</strong>签名的 envelope 经 raft 原样复制到对端,对端以 CA + 公钥重验。<strong>(c) 跨组织:</strong>换成跨 CA 的信任锚即可,沿用 X.509 —— 这是 nexus A2A 面向跨组织协作的自然延伸。</p>
+</div>
+
+<h3>5.3 承重的都是既有原语</h3>
+
+<table>
+<tr><th>层</th><th>承担者</th></tr>
+<tr><td>身份</td><td>CA 签发的 cert(<code>certgen</code> / <code>peer_identity</code> / x509,与 node 同一套)</td></tr>
+<tr><td>账本</td><td><strong>raft log</strong> —— <code>AppendStreamEntry</code> 在 apply 定序,有序、复制、防篡改、强一致;签名 envelope 原样承载</td></tr>
+<tr><td>访问控制</td><td>内核权限门 + <code>OperationContext.zone_perms</code> + ReBAC(§1.7)</td></tr>
+<tr><td>凭证记录 / 吊销</td><td><code>TREE_AUTH_KEYS</code> + <code>/__sys__/auth/keys/</code> 视图(§3.B.3 / §4)</td></tr>
+<tr><td>签名密钥值</td><td>agent 私钥留在 agent 侧;raft log 只承载公钥/cert(公开数据),与「日志只放非密」的既有不变量一致</td></tr>
+</table>
+
+<div class="box ok">
+<p><strong>Prior art.</strong>本节的署名-验签模型借鉴 <a href="https://arxiv.org/pdf/2508.01332">BlockA2A</a>(Zhenhua Zou、Zhuotao Liu 等,清华大学;arXiv 2508.01332)对 agent-to-agent 的 DID 消息验证(其 Protocol 2:发送方以私钥签、接收方按可解析公钥验)。nexus 把这一模型落在<strong>自身已有的原语</strong>上 —— CA 签发的证书作可解析身份、raft log 作有序防篡改的强一致账本、内核权限门作访问控制 —— 在集群内获得零额外信任基座,并保留向跨组织(跨 CA)扩展的路径。</p>
+</div>
+
 <h2>6. 对 moss 的具体影响 <span class="tag ask">要你们确认</span></h2>
 
 <h3>6.1 必须改:<code>--bootstrap-mode</code> 已经被删了</h3>
