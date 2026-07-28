@@ -37,14 +37,17 @@ export async function startStandaloneDirectConnectServer(
   })
   await ensureServerDirectories(config)
 
-  // Start Nexus subprocess for secrets storage (required, no fallback)
-  const nexusManager = new NexusManager()
-  let nexusClient: NexusClientType
+  const nexusDisabled = process.env.MOSS_NEXUS_DISABLED === '1' || process.env.MOSS_NEXUS_DISABLED === 'true'
+  const nexusManager = nexusDisabled ? null : new NexusManager()
+  let nexusClient: NexusClientType | undefined
 
-  // Start nexus - must succeed, no in-memory fallback
-  await nexusManager.start()
-  nexusClient = new NexusClient(nexusManager.grpcUrl)
-  console.log('[Startup] Nexus started successfully for secrets management (gRPC mode)')
+  if (nexusManager) {
+    await nexusManager.start()
+    nexusClient = new NexusClient(nexusManager.grpcUrl)
+    console.log('[Startup] Nexus started successfully for secrets management (gRPC mode)')
+  } else {
+    console.warn('[Startup] Nexus disabled by MOSS_NEXUS_DISABLED; secrets-backed features are unavailable')
+  }
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
   const store = openDirectConnectStore(config)
@@ -59,7 +62,7 @@ export async function startStandaloneDirectConnectServer(
     await authProxy.start()
   } catch (error) {
     console.error('[Startup] Failed to start Auth Proxy:', error instanceof Error ? error.message : error)
-    await nexusManager.stop().catch(() => {})
+    await nexusManager?.stop().catch(() => {})
     process.exit(1)
   }
 
@@ -101,12 +104,14 @@ export async function startStandaloneDirectConnectServer(
   authProxy.setDeptAncestorProvider((orgId, departmentId) =>
     authService.getDepartmentAncestorChain(orgId, departmentId),
   )
-  setSecretsApiDependencies(
-    nexusClient,
-    policyProvider,
-    () => store.getAllActiveConfigItems() as unknown as Array<{ id: number; scope: string; pinyin: string }>,
-    (orgId, departmentId) => authService.getDepartmentAncestorChain(orgId, departmentId),
-  )
+  if (nexusClient) {
+    setSecretsApiDependencies(
+      nexusClient,
+      policyProvider,
+      () => store.getAllActiveConfigItems() as unknown as Array<{ id: number; scope: string; pinyin: string }>,
+      (orgId, departmentId) => authService.getDepartmentAncestorChain(orgId, departmentId),
+    )
+  }
   const runtime = new RuntimeService({
     config,
     store,

@@ -25,7 +25,12 @@ async function mintToken() {
   const res = await fetch(`${SERVER}/v1/auth/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...tabletHeaders },
-    body: JSON.stringify({ seatNo: 'A', columnNo: 'A', flightSeatId: 'CA1234-A' }),
+    body: JSON.stringify({
+      seatNo: 'A',
+      columnNo: 'A',
+      flightSeatId: 'CA1234-A',
+      aircraftNo: 'B-WITHFLIGHT-01',
+    }),
   })
   const body = await res.json()
   if (!res.ok || !body.access_token) {
@@ -83,6 +88,32 @@ async function getControlLog() {
 
 async function resetControlLog() {
   await fetch(`${MOCK}/_mock/control-log/reset`, { method: 'POST' })
+}
+
+async function getStatusLog() {
+  const res = await fetch(`${MOCK}/_mock/status-log`)
+  return res.json()
+}
+
+async function resetStatusLog() {
+  await fetch(`${MOCK}/_mock/status-log/reset`, { method: 'POST' })
+}
+
+async function getBroadcastLog() {
+  const res = await fetch(`${MOCK}/_mock/broadcast-log`)
+  return res.json()
+}
+
+async function resetBroadcastLog() {
+  await fetch(`${MOCK}/_mock/broadcast-log/reset`, { method: 'POST' })
+}
+
+async function setSeatState(input) {
+  await fetch(`${MOCK}/_mock/seat-state`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  })
 }
 
 const results = { pass: 0, fail: 0, notes: [] }
@@ -211,6 +242,62 @@ async function main() {
   log(`  乘客: 不用了`)
   log(`  乘务员: ${decline.reply || '(空)'}  | dispatch: ${afterDecline.count}`)
   check('decline does not dispatch', afterDecline.count === 0, `count=${afterDecline.count}`)
+
+  // ---------------------------------------------------------------- Phase 4
+  log('\n== Phase 4: hardware status query via tool-call ==')
+  await resetControlLog()
+  await resetStatusLog()
+  await setSeatState({ seatNo: 'A', posture: { position: '35' } })
+  const statusTurn = await sendMessage(token, '当前座椅角度是多少')
+  const statusLog = await getStatusLog()
+  const statusEntry = statusLog.entries[statusLog.entries.length - 1]
+  const controlAfterStatus = await getControlLog()
+  log(`  乘客: 当前座椅角度是多少`)
+  log(`  乘务员: ${statusTurn.reply || '(空)'}  | status: ${statusEntry ? statusEntry.target + '/' + statusEntry.key : 'NONE'}`)
+  check('status query emits status tool_call', statusTurn.toolCalls.some(call => call?.name === 'cabin.hardware.status'), `tool_calls=${statusTurn.toolCalls.map(call => call?.name).join(',')}`)
+  check('status query hits posture endpoint', statusEntry?.target === 'A' && statusEntry?.key === 'posture', `got=${statusEntry?.target}/${statusEntry?.key}`)
+  check('status query does not dispatch control', controlAfterStatus.count === 0, `count=${controlAfterStatus.count}`)
+  check('status query reply references real angle', /35/.test(statusTurn.reply), `reply=${statusTurn.reply}`)
+
+  // ---------------------------------------------------------------- Phase 5
+  log('\n== Phase 5: tray close guard when tray is unfolded ==')
+  await resetControlLog()
+  await resetStatusLog()
+  await resetBroadcastLog()
+  await setSeatState({ seatNo: 'A', tray: { tray_state: 'opened', tray_flipped: 'true' } })
+  const trayClose = await sendMessage(token, '关闭小桌板')
+  const trayControlLog = await getControlLog()
+  const trayStatusLog = await getStatusLog()
+  const trayBroadcastLog = await getBroadcastLog()
+  const trayBroadcast = trayBroadcastLog.entries.find(entry => entry.type === 'error-seat')
+  log(`  乘客: 关闭小桌板`)
+  log(`  乘务员: ${trayClose.reply || '(空)'}  | control=${trayControlLog.count} status=${trayStatusLog.count} broadcast=${trayBroadcastLog.count}`)
+  check('tray guard checks status first', trayStatusLog.entries.some(entry => entry.target === 'A' && entry.key === 'tray'), `status=${trayStatusLog.count}`)
+  check('tray guard blocks close dispatch', trayControlLog.count === 0, `count=${trayControlLog.count}`)
+  check('tray guard sends error-seat broadcast', !!trayBroadcast, `broadcast=${trayBroadcastLog.count}`)
+  check('tray guard tells passenger to fold first', /折叠|展开|不能关闭/.test(trayClose.reply), `reply=${trayClose.reply}`)
+
+  await resetControlLog()
+  await setSeatState({ seatNo: 'A', tray: { tray_state: 'opened', tray_flipped: 'false' } })
+  const trayCloseAllowed = await sendMessage(token, '关闭小桌板')
+  const trayAllowedLog = await getControlLog()
+  log(`  乘客: 关闭小桌板 (已折叠)`)
+  log(`  乘务员: ${trayCloseAllowed.reply || '(空)'}  | dispatch=${trayAllowedLog.count}`)
+  check('tray close dispatches after folded', trayAllowedLog.entries.some(entry => entry.path === '/admin-api/tcp-client/cmd/seat/tray/close'), `count=${trayAllowedLog.count}`)
+
+  // ---------------------------------------------------------------- Phase 6
+  log('\n== Phase 6: cabin business mode switch via tool-call ==')
+  await resetControlLog()
+  await resetBroadcastLog()
+  const modeTurn = await sendMessage(token, '切换到睡眠模式')
+  const modeControlLog = await getControlLog()
+  const modeBroadcastLog = await getBroadcastLog()
+  const modeEntry = modeBroadcastLog.entries.find(entry => entry.type === 'mode-seat')
+  log(`  乘客: 切换到睡眠模式`)
+  log(`  乘务员: ${modeTurn.reply || '(空)'}  | mode: ${modeEntry ? JSON.stringify(modeEntry.payload) : 'NONE'}`)
+  check('mode switch emits mode tool_call', modeTurn.toolCalls.some(call => call?.name === 'cabin.mode.switch'), `tool_calls=${modeTurn.toolCalls.map(call => call?.name).join(',')}`)
+  check('mode switch hits mode-seat endpoint', modeEntry?.payload?.mode === 'sleep' && modeEntry?.payload?.seatNo === 'A', `payload=${JSON.stringify(modeEntry?.payload)}`)
+  check('mode switch does not dispatch hardware control', modeControlLog.count === 0, `count=${modeControlLog.count}`)
 
   // ---------------------------------------------------------------- Summary
   log('\n== SUMMARY ==')

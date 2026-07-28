@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test'
-import { CabinServices, isAffirmationReply, looksLikeHardwareOffer } from '../service.js'
+import {
+  CabinServices,
+  buildCabinComfortOffer,
+  isAffirmationReply,
+  looksLikeHardwareOffer,
+  normalizeCabinHardwareReply,
+} from '../service.js'
 import type { CabinConfig, CabinPassengerContext } from '../types.js'
 
 const context: CabinPassengerContext = {
@@ -53,6 +59,20 @@ describe('looksLikeHardwareOffer', () => {
   })
 })
 
+describe('buildCabinComfortOffer', () => {
+  it('offers one hardware adjustment for comfort-state-only messages', () => {
+    expect(buildCabinComfortOffer({ context, text: '我困了' })).toContain('座椅放倒')
+    expect(buildCabinComfortOffer({ context, text: '有点冷' })).toContain('座椅加热')
+    expect(buildCabinComfortOffer({ context, text: '这里好闷啊' })).toContain('座椅通风')
+    expect(buildCabinComfortOffer({ context, text: '坐久了腰有点酸' })).toContain('座椅按摩')
+  })
+
+  it('does not offer when the message is explicit control or ordinary chat', () => {
+    expect(buildCabinComfortOffer({ context, text: '打开座椅加热' })).toBeNull()
+    expect(buildCabinComfortOffer({ context, text: '我有点无聊，能聊聊天吗？' })).toBeNull()
+  })
+})
+
 describe('confirmed suggestion resolves through the deterministic router', () => {
   const resolve = (offer: string) => makeServices().routeHardwareControl({ context, text: offer })
 
@@ -75,5 +95,13 @@ describe('confirmed suggestion resolves through the deterministic router', () =>
   it('maps a seat-massage offer to seat.massage', () => {
     const route = resolve('需要我为您开启座椅按摩吗？')
     expect(route?.command).toBe('seat.massage')
+  })
+
+  it('keeps seat-rest confirmations labeled as seat control, not cabin scene control', () => {
+    expect(normalizeCabinHardwareReply({
+      userText: '需要我为您把座椅放倒到休息角度吗？',
+      reply: '已为您下发座椅位置调整到 60%的指令，请稍候。',
+      context,
+    })).toContain('座椅')
   })
 })

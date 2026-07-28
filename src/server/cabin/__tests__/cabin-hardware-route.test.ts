@@ -66,6 +66,18 @@ describe('routeHardwareControl seat recline defaults', () => {
   it('honors an explicit percentage', () => {
     expect(route('座椅调到 45%')?.params.position).toBe(45)
   })
+
+  it('does not route seat state questions as seat control', () => {
+    expect(route('当前座椅角度是多少')).toBeNull()
+    expect(route('座椅是不是放倒了')).toBeNull()
+  })
+})
+
+describe('routeHardwareControl status query guard', () => {
+  it('does not route tray state questions as tray control', () => {
+    expect(route('小桌板收好了吗')).toBeNull()
+    expect(route('现在小桌板是展开的吗')).toBeNull()
+  })
 })
 
 describe('routeHardwareControl newly covered endpoints', () => {
@@ -85,6 +97,10 @@ describe('routeHardwareControl newly covered endpoints', () => {
 
   it('routes 清除场景 to scene clear', () => {
     expect(route('清除客舱场景')?.command).toBe('cabin.scene.clear')
+  })
+
+  it('routes common tray-table typo 小桌版 as tray control', () => {
+    expect(route('打开小桌版')?.command).toBe('seat.tray.open')
   })
 
   it('falls through to the LLM path for an unknown scene word', () => {

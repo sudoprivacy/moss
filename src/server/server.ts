@@ -661,7 +661,7 @@ async function seedBundledHubSkills(options: { cabinEnabled?: boolean } = {}): P
   let skipped = 0
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    if (entry.name === 'cabin-hardware-control' && options.cabinEnabled !== true) {
+    if (entry.name.startsWith('cabin-') && options.cabinEnabled !== true) {
       skipped++
       continue
     }

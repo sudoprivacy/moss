@@ -5,6 +5,7 @@ import type { CabinConfig, CabinPassengerContext } from '../types.js'
 const context: CabinPassengerContext = {
   flightId: 'F1',
   flightDate: '2026-07-01',
+  aircraftNo: 'B-WITHFLIGHT-01',
   seatId: 'A',
   columnNo: 'A',
   tabletId: 'T1',
@@ -94,5 +95,76 @@ describe('executeHardwareControl', () => {
     const route = buildRouteFromCommand(context, 'seat.tray.open')!
     const result = await services.executeHardwareControl({ route })
     expect(result.reply).toBe('当前暂时无法连接客舱设备控制服务，请稍后再试。')
+  })
+
+  it('blocks tray close and raises an alert when the tray is unfolded', async () => {
+    const calls: Array<{ url: string; method?: string }> = []
+    const alerts: unknown[] = []
+    const services = new CabinServices({
+      config: {
+        controlBaseUrl: 'http://control.local',
+        broadcastApiBaseUrl: 'http://broadcast.local',
+        broadcastApiKey: 'test-key',
+        controlAuth: 'test-auth',
+        controlTimeoutMs: 50,
+      } as unknown as CabinConfig,
+      store: {
+        createAlert: input => {
+          alerts.push(input)
+          return input
+        },
+      } as never,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), method: init?.method })
+        if (String(url).includes('/admin-api/tcp/hardware/status')) {
+          return new Response(JSON.stringify({
+            code: 0,
+            data: {
+              target: 'A',
+              key: 'tray',
+              data: { tray_state: 'opened', tray_flipped: 'true' },
+            },
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ code: 0 }), { status: 200 })
+      },
+    })
+
+    const route = buildRouteFromCommand(context, 'seat.tray.close')!
+    const result = await services.executeHardwareControl({ route })
+
+    expect(result.reply).toContain('先将桌板折叠')
+    expect(result.slots.execution_status).toBe('blocked')
+    expect(alerts).toHaveLength(1)
+    expect(calls.some(call => call.url.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toBe(false)
+    expect(calls.some(call => call.url.includes('/admin-api/cabin/broadcast/error-seat'))).toBe(true)
+  })
+
+  it('allows tray close when the tray is already folded', async () => {
+    const calls: Array<{ url: string; method?: string }> = []
+    const services = new CabinServices({
+      config: { controlBaseUrl: 'http://control.local', controlTimeoutMs: 50 } as unknown as CabinConfig,
+      store: {} as never,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), method: init?.method })
+        if (String(url).includes('/admin-api/tcp/hardware/status')) {
+          return new Response(JSON.stringify({
+            code: 0,
+            data: {
+              target: 'A',
+              key: 'tray',
+              data: { tray_state: 'opened', tray_flipped: 'false' },
+            },
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ code: 0 }), { status: 200 })
+      },
+    })
+
+    const route = buildRouteFromCommand(context, 'seat.tray.close')!
+    const result = await services.executeHardwareControl({ route })
+
+    expect(result.slots.execution_status).toBe('dispatched')
+    expect(calls.some(call => call.url.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toBe(true)
   })
 })

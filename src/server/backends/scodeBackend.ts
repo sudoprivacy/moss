@@ -201,7 +201,7 @@ function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknow
   if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
     Object.assign(settings, options.mcpSettings)
   }
-  if (options.enabledSkillNames?.includes('cabin-hardware-control')) {
+  if (options.enabledSkillNames?.some(name => name.startsWith('cabin-'))) {
     settings.sandbox = {
       ...(typeof settings.sandbox === 'object' && settings.sandbox !== null ? settings.sandbox : {}),
       enabled: false,

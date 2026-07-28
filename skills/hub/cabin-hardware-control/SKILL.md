@@ -10,6 +10,8 @@ emoji: "🛫"
 # Cabin Hardware Control
 
 Use this skill for passenger requests that require real cabin hardware control.
+Do not use this skill for hardware status questions such as 当前座椅角度是多少 or 小桌板收好了吗; use `cabin-hardware-status-query`.
+Do not use this skill for business mode switching such as 办公模式、放松模式、睡眠模式、个人模式; use `cabin-mode-switch`.
 
 Only use the command names listed below. Do not invent command names such as
 `seat.recline`, `seat.light.off`, `seat.health`, or `cabin.scene.boarding`.

@@ -3,6 +3,10 @@ import {
   extractHardwareToolResult,
   extractHardwareCommandSpec,
   extractHardwareCommandFromToolUse,
+  extractHardwareStatusQuerySpec,
+  extractHardwareStatusQueryFromToolUse,
+  extractModeSwitchSpec,
+  extractModeSwitchFromToolUse,
   lineHasToolUse,
 } from '../service.js'
 
@@ -204,6 +208,62 @@ describe('extractHardwareCommandFromToolUse', () => {
   it('returns null for non-JSON and non-tool_use lines', () => {
     expect(extractHardwareCommandFromToolUse('not json')).toBeNull()
     expect(extractHardwareCommandFromToolUse(JSON.stringify({ type: 'assistant', message: { content: 'hi' } }))).toBeNull()
+  })
+})
+
+describe('status query and mode switch tool extraction', () => {
+  it('parses a hardware status query from a tool_result', () => {
+    const emit = JSON.stringify({
+      ok: true,
+      mode: 'status_query',
+      target_type: 'seat',
+      status_key: 'tray',
+    })
+    expect(extractHardwareStatusQuerySpec(userEnvelope(emit))).toEqual({
+      targetType: 'seat',
+      statusKey: 'tray',
+    })
+  })
+
+  it('parses a hardware status query from bash tool_use', () => {
+    const line = JSON.stringify({
+      type: 'tool_use',
+      name: 'Bash',
+      input: {
+        command: 'node cabin-status.mjs --target-type seat --status-key posture --seat-no 01A',
+      },
+    })
+    expect(extractHardwareStatusQueryFromToolUse(line)).toEqual({
+      targetType: 'seat',
+      statusKey: 'posture',
+    })
+  })
+
+  it('parses a cabin mode switch from a tool_result', () => {
+    const emit = JSON.stringify({
+      ok: true,
+      mode: 'mode_switch',
+      cabin_mode: 'sleep',
+      title: '睡眠模式',
+    })
+    expect(extractModeSwitchSpec(userEnvelope(emit))).toEqual({
+      cabinMode: 'sleep',
+      title: '睡眠模式',
+    })
+  })
+
+  it('parses a cabin mode switch from bash tool_use', () => {
+    const line = JSON.stringify({
+      type: 'tool_use',
+      name: 'Bash',
+      input: {
+        command: 'node cabin-mode.mjs --mode office --title 办公模式 --seat-no A --aircraft-no B-WITHFLIGHT-01',
+      },
+    })
+    expect(extractModeSwitchFromToolUse(line)).toEqual({
+      cabinMode: 'office',
+      title: '办公模式',
+    })
   })
 })
 
