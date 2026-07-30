@@ -117,8 +117,21 @@ export interface CorpAppConnector {
   /** Optional: identity/info about the connected app. */
   getInfo?(): Promise<CorpAppInfo>
 
-  /** Optional: send a text message to a platform user. */
-  sendMessage?(to: string, text: string): Promise<{ ok: boolean; msgId?: string }>
+  /**
+   * Optional: send a message to a platform user. `format` selects the
+   * message representation:
+   *   - 'text' (default): plain text, no styling.
+   *   - 'markdown': provider-flavoured markdown, e.g. WeCom's
+   *     `<font color="info|comment|warning">` colour spans. Callers
+   *     should check `capabilities` for 'sendMarkdown' before relying on
+   *     colour — connectors without markdown support should treat this
+   *     as plain text.
+   */
+  sendMessage?(
+    to: string,
+    text: string,
+    format?: 'text' | 'markdown',
+  ): Promise<{ ok: boolean; msgId?: string }>
 
   /** Optional: upload + send a file to a platform user. */
   sendFile?(to: string, fileName: string, bytes: Buffer): Promise<{ ok: boolean; msgId?: string }>
