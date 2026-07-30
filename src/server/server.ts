@@ -97,6 +97,8 @@ import { configItemToRule } from './authProxy/authProxyServer.js'
 import { createSecretsApi } from './api/secrets.js'
 import { createCronApi } from './api/cron.js'
 import { CronService } from './services/cron/CronService.js'
+import { createEventTriggerApi, createEventTriggerIngest } from './api/eventTriggers.js'
+import { EventTriggerService } from './services/eventTrigger/EventTriggerService.js'
 import { createMcpAdminApi } from './api/mcpAdmin.js'
 import { createMcpUserApi } from './api/mcpUser.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
@@ -1423,6 +1425,31 @@ export function startServer(
     isOrgUser: (userId: string, orgId: string) => authService.getUserOrNull(userId, orgId) != null,
   })
 
+  // Event Triggers - external systems POST an event to start an agent run.
+  // Shares cron's runtime/workspace configuration; differs in being
+  // push-driven and queue-drained rather than schedule-driven.
+  const eventTriggerService = new EventTriggerService(runtime.store.db, {
+    runtimeService: runtime,
+    runtimeDir: config.runtimeDir,
+    defaultRuntime: config.defaultRuntime,
+    dockerContainerMode: config.docker?.containerMode ?? 'session',
+    workspace: config.workspace,
+    getUserAuth: async (userId: string, orgId: string) => {
+      try {
+        const user = authService.getUserOrNull(userId, orgId)
+        if (!user) return null
+        return { role: user.role, scopes: user.scopes || [] }
+      } catch {
+        return null
+      }
+    },
+  })
+  const eventTriggerIngest = createEventTriggerIngest(eventTriggerService)
+  const eventTriggerApi = createEventTriggerApi({
+    store: eventTriggerService.getStore(),
+    getUserName: resolveUserName,
+  })
+
   const mcpStore = new McpStore(runtime.store.db)
   const mcpUserConfigApi = nexusClient ? createMcpUserConfigApi({
     nexusClient,
@@ -1539,6 +1566,9 @@ export function startServer(
     console.error('[server] Failed to start cron service:', err)
   })
 
+  // Start the event trigger executor (drains externally-POSTed events)
+  eventTriggerService.start()
+
   // Startup integrity check: approved tenant skills must have their files on
   // disk. The DB row is the source of truth for "this skill exists", but the
   // runtime loads the actual skill from file_path; if the on-disk dir was wiped
@@ -1633,6 +1663,14 @@ export function startServer(
       }
 
       if (cabinApi && await cabinApi.handle(req, res, pathname)) {
+        return
+      }
+
+      // Event trigger ingest. Mounted above the bearer-JWT auth wall because
+      // it authenticates with a per-trigger secret instead; it owns only
+      // POST /api/v1/triggers/:id/events and falls through for everything
+      // else, so the management routes below still require a normal token.
+      if (await eventTriggerIngest.handle(req, res, pathname)) {
         return
       }
 
@@ -5229,6 +5267,82 @@ export function startServer(
         const result = await cronApi.adminListJobs(auth)
         writeJson(res, 200, result)
         return
+      }
+
+      // ==================== Event Triggers ====================
+      // Management surface. The ingest endpoint (POST .../events) is handled
+      // far above, before the auth wall, since it uses a trigger secret.
+      // A null result from any api method means "missing or not in this org"
+      // and is answered 404 so trigger existence never leaks across orgs.
+      if (pathname === '/api/v1/triggers') {
+        if (req.method === 'GET') {
+          authService.requireScope(auth, 'admin:triggers')
+          writeJson(res, 200, eventTriggerApi.listTriggers(auth))
+          return
+        }
+        if (req.method === 'POST') {
+          authService.requireScope(auth, 'admin:triggers')
+          const body = await readJsonBody(req)
+          const result = eventTriggerApi.createTrigger(auth, body)
+          writeJson(res, result.success ? 201 : 400, result)
+          return
+        }
+      }
+
+      const triggerRunMatch = pathname.match(/^\/api\/v1\/triggers\/([^/]+)\/runs\/([^/]+)$/)
+      if (req.method === 'GET' && triggerRunMatch) {
+        authService.requireScope(auth, 'admin:triggers')
+        const result = eventTriggerApi.getRun(auth, triggerRunMatch[1], triggerRunMatch[2])
+        if (!result) throw new HttpError(404, 'Run not found')
+        writeJson(res, 200, result)
+        return
+      }
+
+      const triggerRunsMatch = pathname.match(/^\/api\/v1\/triggers\/([^/]+)\/runs$/)
+      if (req.method === 'GET' && triggerRunsMatch) {
+        authService.requireScope(auth, 'admin:triggers')
+        const limitRaw = url.searchParams.get('limit')
+        const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
+        const result = eventTriggerApi.listRuns(auth, triggerRunsMatch[1], Number.isFinite(limit) ? limit : 50)
+        if (!result) throw new HttpError(404, 'Trigger not found')
+        writeJson(res, 200, result)
+        return
+      }
+
+      const triggerRotateMatch = pathname.match(/^\/api\/v1\/triggers\/([^/]+)\/rotate-secret$/)
+      if (req.method === 'POST' && triggerRotateMatch) {
+        authService.requireScope(auth, 'admin:triggers')
+        const result = eventTriggerApi.rotateSecret(auth, triggerRotateMatch[1])
+        if (!result) throw new HttpError(404, 'Trigger not found')
+        writeJson(res, 200, result)
+        return
+      }
+
+      const triggerMatch = pathname.match(/^\/api\/v1\/triggers\/([^/]+)$/)
+      if (triggerMatch) {
+        const triggerId = triggerMatch[1]
+        if (req.method === 'GET') {
+          authService.requireScope(auth, 'admin:triggers')
+          const result = eventTriggerApi.getTrigger(auth, triggerId)
+          if (!result) throw new HttpError(404, 'Trigger not found')
+          writeJson(res, 200, result)
+          return
+        }
+        if (req.method === 'PATCH' || req.method === 'PUT') {
+          authService.requireScope(auth, 'admin:triggers')
+          const body = await readJsonBody(req)
+          const result = eventTriggerApi.updateTrigger(auth, triggerId, body)
+          if (!result) throw new HttpError(404, 'Trigger not found')
+          writeJson(res, 200, result)
+          return
+        }
+        if (req.method === 'DELETE') {
+          authService.requireScope(auth, 'admin:triggers')
+          const result = eventTriggerApi.deleteTrigger(auth, triggerId)
+          if (!result) throw new HttpError(404, 'Trigger not found')
+          writeJson(res, 200, result)
+          return
+        }
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/upload/logo') {

@@ -127,6 +127,9 @@ function defaultScopesForRole(role: string): string[] {
       'cron:self',
       'cron:list:subtree',
       'cron:manage:subtree',
+      // Event triggers: a dept_admin may register and manage inbound event
+      // triggers for its org. Admins get this via '*'.
+      'admin:triggers',
       'admin:mcp',
       'admin:mcp:write',
       'admin:mcp:audit',
