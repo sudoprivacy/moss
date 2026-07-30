@@ -525,6 +525,133 @@ API key 登录：
 
 需要 `Authorization: Bearer <token>` header。
 
+## Event Triggers API
+
+外部系统通过 HTTP POST 通知 moss，触发 agent 近实时执行分析任务。
+
+典型场景：客户系统提交了数据 → POST 事件到 moss → agent 拉取数据、分析 → agent 自行回报
+（调用客户 API 或通过 corpapp 发送）。**报告的投递由 agent 的 prompt/skills 决定，moss
+本身不负责回调投递。**
+
+与 cron 的区别：cron 由时间驱动（最快 60s 轮询），event trigger 由外部推送驱动
+（2s 排空间隔），并携带每次事件独有的 payload。
+
+### 认证模型
+
+- **管理接口**（创建/查询/修改/删除）：普通 `Authorization: Bearer <access_token>`，需要 `admin:triggers` scope。
+- **事件投递接口**：使用每个 trigger 独立的 secret，不需要 JWT。
+  secret 仅在创建/轮换时返回一次，服务端只保存 sha256，不可恢复。
+
+### POST `/api/v1/triggers`
+
+创建 trigger。需要 scope `admin:triggers`。
+
+请求：
+
+```json
+{
+  "name": "订单风险审核",
+  "prompt_template": "有新订单提交。请分析该订单并判断是否需要人工复核。",
+  "assistant_name": "risk-analyst",
+  "conversation_mode": "new",
+  "workspace": null,
+  "timeout_ms": 900000,
+  "rate_limit_per_min": 120
+}
+```
+
+响应 `201`：
+
+```json
+{
+  "success": true,
+  "trigger": { "id": "...", "events_url": "/api/v1/triggers/<id>/events", "secret_prefix": "moss_evt_xYHU5xt", "...": "..." },
+  "secret": "moss_evt_xYHU5xtRPAggvXR8AN-vtLLUqDyLNmMT"
+}
+```
+
+`secret` **只返回这一次**，请立即保存。丢失后只能通过 rotate-secret 重新生成。
+
+字段说明：
+
+- `prompt_template`：agent 指令，保存在服务端。事件 payload 会以 ```json 代码块追加在其后。
+  指令留在服务端，意味着调用方只能提供数据，不能注入 agent 指令。
+- `conversation_mode`：`new`（默认，每次事件独立 session，结束后自动回收）或 `reuse`（复用上次 session）。
+- `timeout_ms`：单次运行上限，默认 15 分钟。
+- `rate_limit_per_min`：该 trigger 的每分钟投递上限，默认 120。
+
+### POST `/api/v1/triggers/:id/events`
+
+**事件投递接口**（供客户系统调用）。不需要 JWT。
+
+```bash
+curl -X POST https://<moss>/api/v1/triggers/<id>/events \
+  -H "Authorization: Bearer moss_evt_xxxxx" \
+  -H "Content-Type: application/json" \
+  -H "X-Moss-Idempotency-Key: order-SO-8812" \
+  -d '{"order_id":"SO-8812","amount":240000,"customer":"ACME"}'
+```
+
+- secret 也可通过 `X-Moss-Trigger-Secret` 头传递。
+- body 必须是 JSON 对象，上限 **1 MiB**（超出返回 `413`）。
+- `X-Moss-Idempotency-Key` 可选；同一 trigger 下重复的 key 不会产生第二次运行。
+
+响应 `202`（立即返回，不等待 agent 执行完）：
+
+```json
+{
+  "run_id": "...",
+  "status": "queued",
+  "trigger_id": "...",
+  "status_url": "/api/v1/triggers/<id>/runs/<run_id>"
+}
+```
+
+重复的 idempotency key 返回 `200` 且带 `"duplicate": true`，`run_id` 为首次的运行。
+
+错误码：
+
+| 状态码 | 含义 |
+| --- | --- |
+| `401` | secret 缺失或错误（trigger 不存在时同样返回 401，避免探测 id 是否存在） |
+| `403` | trigger 已停用 |
+| `400` | body 不是合法 JSON |
+| `413` | body 超过 1 MiB |
+| `429` | 超过该 trigger 的每分钟上限 |
+
+### GET `/api/v1/triggers/:id/runs/:runId`
+
+查询单次运行状态。需要 scope `admin:triggers`。
+
+状态流转：`queued` → `running` → `ok` / `error` / `skipped`。
+
+响应包含 `session_id`（可据此查看完整 transcript）、原始 `payload`、`error`、`summary`
+及时间戳。
+
+### 其他管理接口
+
+- `GET /api/v1/triggers` — 列出本 org 的 trigger
+- `GET /api/v1/triggers/:id` — 查询单个
+- `PATCH /api/v1/triggers/:id` — 修改（含 `enabled` 启停）
+- `DELETE /api/v1/triggers/:id` — 软删除
+- `POST /api/v1/triggers/:id/rotate-secret` — 轮换 secret（旧 secret 立即失效）
+- `GET /api/v1/triggers/:id/runs?limit=50` — 运行历史
+
+所有接口均按 org 隔离：跨 org 访问一律返回 `404`（而非 `403`），避免泄露资源是否存在。
+
+### 并发与容量
+
+- 全局并发上限默认 **3**（`MOSS_EVENT_MAX_CONCURRENT`）。突发事件排队，不丢弃。
+- 排空间隔默认 **2s**（`MOSS_EVENT_TICK_MS`）。
+- `new` 模式的 session 在运行结束后自动回收，避免耗尽 runtime 的 `maxSessionsPerUser` 配额。
+- 服务重启时，处于 `running` 的孤儿运行会被标记为 `error`，不会永久占用并发槽位。
+
+### 安全提示
+
+事件 payload 是**不可信输入**，最终会进入 agent 的上下文。请为 trigger 绑定权限收敛的
+agent，并在 `prompt_template` 中明确要求 agent 将 payload 视为数据而非指令。
+另外该接口应始终经由 HTTPS 暴露——bearer secret 模式不提供载荷完整性校验。
+
 ## Notes
 
 - `AuthService.verifyAccessToken()` 已经是进程内调用，server 不再反向 fetch 外部 auth-center。

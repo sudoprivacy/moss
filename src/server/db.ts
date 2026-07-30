@@ -967,6 +967,81 @@ export class DirectConnectStore {
         ON cron_job_runs (job_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_cron_job_runs_session
         ON cron_job_runs (session_id);
+
+      -- ============================================================
+      -- Event Triggers: external systems POST an event to start an
+      -- agent run in near-real-time. The cron analogue for pushes
+      -- rather than schedules — see services/eventTrigger/.
+      -- ============================================================
+      CREATE TABLE IF NOT EXISTS event_triggers (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        deleted_at INTEGER,
+
+        -- Bearer secret, stored as sha256 of the random secret (never
+        -- recoverable) exactly like api_keys. secret_prefix is a display
+        -- fragment so operators can identify a key without revealing it.
+        secret_hash TEXT NOT NULL,
+        secret_prefix TEXT NOT NULL,
+
+        -- Instructions prepended to the POSTed payload. Kept server-side so
+        -- the calling system supplies data, not agent instructions.
+        prompt_template TEXT NOT NULL,
+
+        assistant_name TEXT,
+        conversation_mode TEXT NOT NULL DEFAULT 'new',
+        bound_session_id TEXT,
+        last_session_id TEXT,
+        workspace TEXT,
+
+        timeout_ms INTEGER,
+        rate_limit_per_min INTEGER,
+
+        last_used_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_event_triggers_org
+        ON event_triggers (org_id, deleted_at);
+
+      CREATE TABLE IF NOT EXISTS event_trigger_runs (
+        id TEXT PRIMARY KEY,
+        trigger_id TEXT NOT NULL,
+        org_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+
+        session_id TEXT,
+        status TEXT NOT NULL,
+
+        -- Raw JSON event body as POSTed, appended to the prompt at run time.
+        payload_json TEXT,
+        -- Optional client-supplied dedupe key; unique per trigger (see index).
+        idempotency_key TEXT,
+
+        started_at INTEGER,
+        finished_at INTEGER,
+        error TEXT,
+        summary TEXT,
+
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_event_trigger_runs_trigger
+        ON event_trigger_runs (trigger_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_event_trigger_runs_status
+        ON event_trigger_runs (status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_event_trigger_runs_session
+        ON event_trigger_runs (session_id);
+      -- Enforces idempotency: a repeated key for the same trigger cannot
+      -- create a second run. Partial so NULL keys (the common case) are exempt.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_event_trigger_runs_idem
+        ON event_trigger_runs (trigger_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
     `)
 
     // Migration: add lease_until to cron_jobs
