@@ -3784,6 +3784,7 @@ export function startServer(
         const body = await readJsonBody(req)
         const to = typeof body.to === 'string' ? body.to : ''
         const text = typeof body.text === 'string' ? body.text : ''
+        const format = body.format === 'markdown' ? 'markdown' : 'text'
         if (!to || !text) {
           writeJson(res, 400, { error: { code: 'invalid_payload', message: 'to and text are required' } })
           return
@@ -3794,7 +3795,7 @@ export function startServer(
             writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot send messages' } })
             return
           }
-          const result = await connector.sendMessage(to, text)
+          const result = await connector.sendMessage(to, text, format)
           writeJson(res, 200, result)
         } catch (err) {
           writeJson(res, 502, { error: { code: 'send_failed', message: err instanceof Error ? err.message : String(err) } })

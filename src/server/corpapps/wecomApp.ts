@@ -14,7 +14,9 @@
  *   - callbackToken   接收消息 Token        (optional; needed for receive)
  *   - encodingAesKey  接收消息 EncodingAESKey (optional; needed for receive)
  *
- * Capabilities: send (text), sendFile, receive (callback), info.
+ * Capabilities: send (text or markdown, incl. WeCom's
+ * `<font color="info|comment|warning">` colour spans), sendFile,
+ * receive (callback), info.
  */
 
 import {
@@ -40,6 +42,7 @@ export class WeComAppConnector implements CorpAppConnector {
   readonly type = 'wecomapp'
   readonly capabilities = [
     'send',
+    'sendMarkdown',
     'sendFile',
     'receive',
     'info',
@@ -108,13 +111,16 @@ export class WeComAppConnector implements CorpAppConnector {
     return { type: this.type, key: `${this.corpId}:${this.agentId}`, identity }
   }
 
-  async sendMessage(to: string, text: string): Promise<{ ok: boolean; msgId?: string }> {
-    const json = await this.requireClient().post('/cgi-bin/message/send', {
-      touser: to,
-      msgtype: 'text',
-      agentid: Number(this.agentId),
-      text: { content: text },
-    })
+  async sendMessage(
+    to: string,
+    text: string,
+    format: 'text' | 'markdown' = 'text',
+  ): Promise<{ ok: boolean; msgId?: string }> {
+    const body =
+      format === 'markdown'
+        ? { touser: to, msgtype: 'markdown', agentid: Number(this.agentId), markdown: { content: text } }
+        : { touser: to, msgtype: 'text', agentid: Number(this.agentId), text: { content: text } }
+    const json = await this.requireClient().post('/cgi-bin/message/send', body)
     return { ok: Number(json.errcode ?? 0) === 0, msgId: json.msgid ? String(json.msgid) : undefined }
   }
 
