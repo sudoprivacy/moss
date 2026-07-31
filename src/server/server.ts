@@ -172,8 +172,8 @@ type MossSessionAvailableSkill = {
 
 const WORKSPACE_TREE_MAX_DEPTH = 10
 const WORKSPACE_TREE_MAX_ENTRIES_PER_DIR = 500
-const WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES = 2 * 1024 * 1024
-const WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES = 20 * 1024 * 1024
+const WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES = 10 * 1024 * 1024
+const WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES = 100 * 1024 * 1024
 const WORKSPACE_TREE_SKIP_DIRS = new Set(['.git', 'node_modules'])
 
 // Cap concurrent wiki vector queries per process. onnxruntime-node is
