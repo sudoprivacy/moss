@@ -24,6 +24,7 @@ import {
   ScrollText,
   ShieldCheck,
   Plane,
+  Webhook,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -97,6 +98,12 @@ const menuItems: NavItem[] = [
     url: '/cron',
     icon: Clock,
     requiredAnyScopes: ['admin:cron', 'cron:self'],
+  },
+  {
+    title: '事件触发器',
+    url: '/event-triggers',
+    icon: Webhook,
+    requiredScope: 'admin:triggers',
   },
   {
     title: 'IM管理',

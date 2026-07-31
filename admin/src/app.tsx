@@ -26,6 +26,7 @@ const UserCredentialsPage = lazy(() => import('./pages/secrets/user-credentials-
 const AuditLogPage = lazy(() => import('./pages/secrets/audit-log-page'))
 const RotationAlertsPage = lazy(() => import('./pages/secrets/rotation-alerts-page'))
 const CronJobsPage = lazy(() => import('./pages/cron-jobs-page'))
+const EventTriggersPage = lazy(() => import('./pages/event-triggers-page'))
 const McpServersPage = lazy(() => import('./pages/mcp/mcp-servers-page'))
 const McpEnterpriseServersPage = lazy(() => import('./pages/mcp/mcp-enterprise-servers-page'))
 const McpDepartmentServersPage = lazy(() => import('./pages/mcp/mcp-department-servers-page'))
@@ -257,6 +258,15 @@ export default function App() {
           element={
             <SuspendedRoute>
               <CronJobsPage />
+            </SuspendedRoute>
+          }
+        />
+        {/* Event Triggers: external systems POST events to run an agent */}
+        <Route
+          path="/event-triggers"
+          element={
+            <SuspendedRoute>
+              <EventTriggersPage />
             </SuspendedRoute>
           }
         />
