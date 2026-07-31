@@ -191,10 +191,18 @@ func (c *Client) ResolveByKey(typ, key string) (*CorpApp, error) {
 	return &app, nil
 }
 
-// SendMessage sends a text message via the app with the given id.
-func (c *Client) SendMessage(id, to, text string) (*SendResp, error) {
+// SendMessage sends a message via the app with the given id.
+//
+// format selects the message representation: "text" (plain, no styling) or
+// "markdown" (provider-flavoured markdown — on WeCom this is what enables
+// <font color="..."> colour spans). An empty format is omitted from the
+// request body, letting the server apply its own default ("text").
+func (c *Client) SendMessage(id, to, text, format string) (*SendResp, error) {
 	var resp SendResp
 	body := map[string]string{"to": to, "text": text}
+	if format != "" {
+		body["format"] = format
+	}
 	if err := c.post(c.PathPrefix+"/"+url.PathEscape(id)+"/messages", body, &resp); err != nil {
 		return nil, err
 	}

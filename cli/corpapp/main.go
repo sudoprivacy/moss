@@ -46,12 +46,27 @@ const mossHelpText = `corpapp — Corp App (企业应用) CLI for use inside the
 Usage:
   corpapp list [--json]
   corpapp get --name <name> | --key <key> [--type <type>] [--json]
-  corpapp send --app <name> --to <userid> --text <msg>
+  corpapp send --app <name> --to <userid> --text <msg> [--format text|markdown]
   corpapp send-file --app <name> --to <userid> --file <path>
   corpapp receive --app <name> [--since <cursor>] [--limit <n>] [--json]
   corpapp download --app <name> --media-id <id> [--out <path>]
   corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]
   corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]
+
+Colored / styled messages:
+  --format markdown enables styling. --format text (the default) has no
+  styling at all.
+
+  WeCom supports exactly three colors, via <font color="...">:
+    info     green
+    comment  gray
+    warning  orange
+
+  WeCom has NO red — use warning (orange) for anything urgent.
+
+  Example:
+    corpapp send --app myapp --to zhangsan --format markdown \
+      --text '<font color="info">通过</font> <font color="warning">2 项告警</font>'
 
 Filtering approvals:
   --status <n>    approval status (sp_status):

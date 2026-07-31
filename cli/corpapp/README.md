@@ -16,12 +16,33 @@ in its `_moss_meta.json` (enforced server-side on every call).
 corpapp list [--json]                                       # apps this assistant can use
 corpapp get --name <name> [--json]                          # resolve an app by name
 corpapp get --key <corpId:agentId> [--type wecomapp] [--json]
-corpapp send --app <name> --to <userid> --text <msg>        # send a text message
+corpapp send --app <name> --to <userid> --text <msg> [--format text|markdown]  # send a message
 corpapp send-file --app <name> --to <userid> --file <path>  # upload + send a file
 corpapp receive --app <name> [--since <cursor>] [--limit <n>] [--json]   # poll inbound
 corpapp download --app <name> --media-id <id> [--out <path>]             # fetch media bytes
 corpapp approvals --app <name> --start <ts> --end <ts> [filters]         # list 审批单号
 corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]    # one approval's detail
+```
+
+### Colored / styled messages
+
+`--format text` (the default) sends plain text with no styling. Pass
+`--format markdown` to enable styling.
+
+WeCom supports exactly **three** colors, via `<font color="...">`:
+
+| tag | renders |
+| --- | --- |
+| `<font color="info">` | green |
+| `<font color="comment">` | gray |
+| `<font color="warning">` | orange |
+
+**WeCom has no red.** Map any "red"/urgent request to `warning` (orange) —
+an unsupported color name is rendered as plain unstyled text.
+
+```
+corpapp send --app myapp --to zhangsan --format markdown \
+  --text '<font color="info">通过</font> <font color="warning">2 项告警</font>'
 ```
 
 `receive` returns a `nextCursor`; pass it back as `--since` on the next
