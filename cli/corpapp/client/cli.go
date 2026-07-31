@@ -27,12 +27,27 @@ const defaultHelpText = `corpapp — Corp App CLI.
 Usage:
   corpapp list [--json]
   corpapp get --name <name> | --key <key> [--type <type>] [--json]
-  corpapp send --app <name> --to <userid> --text <msg>
+  corpapp send --app <name> --to <userid> --text <msg> [--format text|markdown]
   corpapp send-file --app <name> --to <userid> --file <path>
   corpapp receive --app <name> [--since <cursor>] [--limit <n>] [--json]
   corpapp download --app <name> --media-id <id> [--out <path>]
   corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]
-  corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]`
+  corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]
+
+Colored / styled messages:
+  Pass --format markdown to enable styling. Plain --format text (the
+  default) has no styling at all.
+
+  WeCom supports exactly three colors, via <font color="...">:
+    info     green
+    comment  gray
+    warning  orange
+
+  WeCom has NO red. Use warning (orange) for anything urgent.
+
+  Example:
+    corpapp send --app <name> --to <userid> --format markdown \
+      --text '<font color="info">OK</font> <font color="warning">2 warnings</font>'`
 
 // Run dispatches a corpapp invocation and returns the process exit code:
 //
@@ -173,17 +188,24 @@ func runSend(args []string, c *Client, opts RunOptions) error {
 	app := fs.String("app", "", "corp app name")
 	to := fs.String("to", "", "recipient user id")
 	text := fs.String("text", "", "message text")
+	format := fs.String("format", "text", "message format: text | markdown")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *app == "" || *to == "" || *text == "" {
-		return errors.New("usage: corpapp send --app <name> --to <userid> --text <msg>")
+		return errors.New("usage: corpapp send --app <name> --to <userid> --text <msg> [--format text|markdown]")
+	}
+	// Reject unknown formats rather than silently falling back to plain text:
+	// a typo like --format markdwon would otherwise send an unstyled message
+	// that looks like the colour spans simply did not work.
+	if *format != "text" && *format != "markdown" {
+		return fmt.Errorf("invalid --format %q: must be \"text\" or \"markdown\"", *format)
 	}
 	resolved, err := resolveApp(c, *app)
 	if err != nil {
 		return err
 	}
-	resp, err := c.SendMessage(resolved.ID, *to, *text)
+	resp, err := c.SendMessage(resolved.ID, *to, *text, *format)
 	if err != nil {
 		return err
 	}
