@@ -341,6 +341,101 @@ flowchart LR
 <p><strong>Prior art.</strong>本节的署名-验签模型借鉴 <a href="https://arxiv.org/pdf/2508.01332">BlockA2A</a>(Zhenhua Zou、Zhuotao Liu 等,清华大学;arXiv 2508.01332)对 agent-to-agent 的 DID 消息验证(其 Protocol 2:发送方以私钥签、接收方按可解析公钥验)。nexus 把这一模型落在<strong>自身已有的原语</strong>上 —— CA 签发的证书作可解析身份、raft log 作有序防篡改的强一致账本、内核权限门作访问控制 —— 在集群内获得零额外信任基座,并保留向跨组织(跨 CA)扩展的路径。</p>
 </div>
 
+<h3>5.4 跨组织:一个问题裂成两个锚 <span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></h3>
+
+<p>§5.2 那句「跨组织 —— 换成跨 CA 的信任锚即可」,这一节把它展开(§5.1–5.3 是<strong>集群内已合并</strong>的域内模型,5.4 起是它的<strong>跨域扩展</strong>)。先钉定义:<strong>cross-org ≡ cross-CA ≡ cross-trust-root</strong>。信任边界是 <strong>CA</strong>,不是机器、不是 org 标签、不是在不在同一个 LAN —— 两台在两家公司的盒子共用一个 CA = 一个信任域(是 federation,<strong>不是</strong> cross-org);一台盒子自签自己的 CA = 另一个信任域(<strong>才是</strong> cross-org)。典型载体:一台<strong>交付到客户侧、自带 CA 的 DGX</strong>,它<strong>永不加入我们的 raft cluster</strong>,只把署名后的消息经隔离中介(平台 broker)过界。</p>
+
+<p>关键动作:今天(§4)<strong>成员资格</strong>和<strong>署名</strong>都压在同一个 <code>client_ca_root</code> 上;cross-org 把这两件事掰开 —— 这是整个扩展的地基。</p>
+
+<pre class="mermaid">
+flowchart TB
+  subgraph NOW["今天 · 单信任根（§4）"]
+    C0["client_ca_root<br/>我们唯一的 CA"]
+    C0 --> M0["成员资格 ✓"]
+    C0 --> A0["署名 ✓"]
+  end
+  subgraph XORG["cross-org · 两个锚"]
+    CAA["我们的 CA<br/>成员资格锚"]
+    REG["外域 authorship 锚点注册表<br/>外域 CA → 信任域 id"]
+    CAA --> MEM["成员资格<br/>外部盒子永不是成员"]
+    REG --> AUT["署名验证<br/>外域 agent 的 from 可验"]
+  end
+  style M0 fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+  style A0 fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+  style MEM fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+  style AUT fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+</pre>
+
+<div class="box ok">
+<p><strong>两个锚,各管一件事。(1) 成员资格锚</strong> = 我们的 CA(<code>client_ca_root</code>),只答「它是不是我 raft cluster 里的节点」—— 外部盒子<strong>永远</strong>不是成员。<strong>(2) 署名锚</strong> = 一张<strong>外域 authorship 锚点注册表</strong>(<code>外域 CA 指纹 → 信任域 id</code>),只答「这个 <code>from</code> 是不是某个我登记过的 org 的真 agent 签的」。两者<strong>分开存、分开判</strong>。</p>
+</div>
+
+<p><strong>命名 —— 域内扁平,过界时限定。</strong>每个信任域内部照旧扁平(<code>nexus://agent/{name}</code>,外域用它自己的 mint 保证域内唯一),<strong>cert 格式一字节不改</strong>。全局唯一由验证方在过界时合成 <code>{信任域}/agent/{name}</code>(如 <code>hospital-a/agent/cardio-expert</code>);<strong>canonical org = f(验证用的 CA),不是 SAN 里的自由文本</strong> —— 信任域串是我们注册那张外域 CA 时钉的,外域无法自称 <code>hospital-a</code>,除非我们把它的 CA 登记成 <code>hospital-a</code>。</p>
+
+<table>
+<tr><th></th><th>域内(§5.1–5.3)</th><th>过界(cross-org)</th></tr>
+<tr><td>cert SAN</td><td><code>nexus://agent/{name}</code></td><td><strong>不变</strong></td></tr>
+<tr><td>验证锚</td><td>cluster CA</td><td>已注册的<strong>外域 CA</strong></td></tr>
+<tr><td>全局 id</td><td><code>agent/{name}</code></td><td><code>{信任域}/agent/{name}</code>(broker 合成)</td></tr>
+<tr><td>授权结论</td><td colspan="2">同 §5:<strong>agent = mailbox 参与者,句号</strong>;外域链<strong>永不</strong>解析成 node / 成员 / zone 权限</td></tr>
+</table>
+
+<p>验证仍是 §5.2 的三步,只有第 ① 步的信任锚从「cluster CA」扩成「<code>client_ca_root</code> ∪ 外域锚集」,命中外域锚时给身份<strong>打上信任域标签</strong>:</p>
+
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant F as 外域 agent（DGX · CA_B）
+  participant BR as broker（域 A）
+  participant REG as 外域锚点注册表
+  participant MB as stamp hook
+  F->>BR: mTLS，出示 client cert（CA_B 签，SAN nexus://agent/cardio-expert）
+  BR->>REG: 这条链验哪个锚?（先 client_ca_root，再外域锚集）
+  REG-->>BR: 命中 CA_B → 信任域 = hospital-a
+  Note over BR,REG: 授权 = agent（mailbox 参与者，句号）· 绝不给成员 / zone
+  BR->>MB: 盖 from = hospital-a/agent/cardio-expert
+  MB-->>BR: 不可伪造的跨 org 署名落 raft
+</pre>
+
+<p><strong>最小面。加(小):</strong><code>PeerIdentity</code> 增一个 <code>trust_domain: Option&lt;String&gt;</code>(<code>None</code>=本域;<code>Some(td)</code>=外域,来自注册表);一张<strong>外域-CA authorship 注册表</strong>,与 <code>client_ca_root</code> 分开存、分开判。<strong>不动:</strong><code>generate_agent_cert</code> / cert 格式 / §5.2 的验签三步 / raft 成员(外域盒子永不入 cluster)/ 数据面(不复制,只有 mailbox 消息过界)。<strong>范围外:</strong>通用 PKI 联邦 / bridge-CA / 交叉签名 —— 只要一张扁平注册表;人类法律签字(shareone)骑在本 DID 之上,不在此层。</p>
+
+<div class="box ok">
+<p><strong>注册表倾向 replicated(raft)</strong> —— 任何 broker 节点都要一致地验外域 agent,属于 distributed SSOT,不宜 node-local。语义上是「平台侧配置」而非「节点身份」,但仍需集群内一致。</p>
+</div>
+
+<h3>5.5 交付 / provisioning —— 归 <code>sudoedge</code></h3>
+
+<p>DGX 是要<strong>交付出去</strong>的盒子,所以从第一天当外部;交付时配好它自己的信任域 —— 这件事在 <strong>sudoedge</strong> repo,由那条线做。</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph DEL["交付流程（sudoedge）"]
+    G["① 生成盒子信任域<br/>CA_B + 信任域 id<br/>自主 · 客户/盒子持 key"]
+    MINT["② 域内 mint agent<br/>nexus://agent/name（CA_B 签）"]
+    EXP["③ 导出 CA_B 公钥 + 信任域 id"]
+    G --> MINT --> EXP
+  end
+  EXP -->|"交平台登记"| REG["broker：注册为<br/>authorship 锚点<br/>CA_B → 信任域"]
+  style REG fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
+</pre>
+
+<div class="box warn">
+<p><strong>硬约束(给 sudoedge):</strong>盒子<strong>自签自己的 CA</strong>(交付后我们不持 key);<strong>不拿 enroll-token、不接收我们的 CA 作成员锚</strong> —— 它不是也永不是 cluster 成员;在自己域内 mint agent;集成握手 = <strong>导出 CA 公钥 + 信任域 id</strong> 交平台登记为 authorship 锚点。反向(盒子验平台)是后续步骤。</p>
+</div>
+
+<h3>5.6 bring-up 次序与开放点</h3>
+
+<p><strong>去掉「先同-CA 入 cluster」那步</strong>(那会先建一个错的信任姿态、交付时再拆):</p>
+
+<table>
+<tr><th>步</th><th>做什么</th></tr>
+<tr><td>①</td><td>各自独立绿:DGX 起自己单节点 cluster(<code>CA_B</code>)+ agent + 本地 mailbox;我们 Win↔Mac 早通</td></tr>
+<tr><td>②</td><td>纯连通性 smoke:DGX ↔ 我们 plain gRPC dial 通(隔离网络变量)</td></tr>
+<tr><td>③</td><td>最小 cross-CA 锚:唯一新变量 = 跨 CA 验证;一条跨 org 署名端到端验通 = 契约 pin 住</td></tr>
+</table>
+
+<p><strong>开放点:</strong>① 注册表存哪(倾向 raft-replicated);② 反向信任(盒子验平台)要不要现在做(倾向:先只做 broker 验外域 authorship 单向);③ 外域 agent 吊销 v1(注册表删 CA / 列外域 serial vs 消费外域 CRL);④ <code>trust_domain</code> 是否进 <code>display_id()</code> / 审计格式(防 id 泄漏,单元测 <code>Display</code>)。<strong>触发场景:</strong>LAN 上一台 DGX Spark(由 sudowork-6 那条线持有),终局交付客户 —— 拿真外部信任域来 pin 这份契约。</p>
+
 <h2>6. 对 moss 的具体影响 <span class="tag ask">要你们确认</span></h2>
 
 <h3>6.1 必须改:<code>--bootstrap-mode</code> 已经被删了</h3>
