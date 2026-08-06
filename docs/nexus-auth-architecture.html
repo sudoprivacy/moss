@@ -397,44 +397,49 @@ sequenceDiagram
   MB-->>BR: 不可伪造的跨 org 署名落 raft
 </pre>
 
+<p><strong>反向同一次握手:</strong>mTLS 本就双向 —— 第 ① 步握手里 broker 也出示自己的 <strong>CA_A node cert</strong>,客户端按注入的 <strong>CA_A 锚</strong>验我们平台的身份。所以反向信任不需要第二条链路,骑在同一次 mTLS 上(§5.5 步 ④ 灌的就是这个锚)。</p>
+
 <p><strong>最小面。加(小):</strong><code>PeerIdentity</code> 增一个 <code>trust_domain: Option&lt;String&gt;</code>(<code>None</code>=本域;<code>Some(td)</code>=外域,来自注册表);一张<strong>外域-CA authorship 注册表</strong>,与 <code>client_ca_root</code> 分开存、分开判。<strong>不动:</strong><code>generate_agent_cert</code> / cert 格式 / §5.2 的验签三步 / raft 成员(外域盒子永不入 cluster)/ 数据面(不复制,只有 mailbox 消息过界)。<strong>范围外:</strong>通用 PKI 联邦 / bridge-CA / 交叉签名 —— 只要一张扁平注册表;人类法律签字(shareone)骑在本 DID 之上,不在此层。</p>
 
 <div class="box ok">
-<p><strong>注册表倾向 replicated(raft)</strong> —— 任何 broker 节点都要一致地验外域 agent,属于 distributed SSOT,不宜 node-local。语义上是「平台侧配置」而非「节点身份」,但仍需集群内一致。</p>
+<p><strong>注册表 = replicated(raft,已定)</strong> —— 任何 broker 节点都要一致地验外域 agent,属于 distributed SSOT,不宜 node-local。语义上是「平台侧配置」而非「节点身份」,但仍需集群内一致(客户侧同理,存其 DGX 域)。</p>
 </div>
 
 <h3>5.5 交付 / provisioning —— 归 <code>sudoedge</code></h3>
 
-<p>DGX 是要<strong>交付出去</strong>的盒子,所以从第一天当外部;交付时配好它自己的信任域 —— 这件事在 <strong>sudoedge</strong> repo,由那条线做。</p>
+<p>DGX 是要<strong>交付出去</strong>的盒子,所以从第一天当外部;交付时配好它自己的信任域 —— 这件事在 <strong>sudoedge</strong> repo,由那条线做。盒子上<strong>跑 nexusd-cluster</strong>(~15MB、零显存的协调 daemon,不碰 GPU),所以走 nexus 原生原语、不手搓 X.509;<strong>一个客户的多台 DGX = 客户自己的域</strong>(≥1 节点,共 <code>CA_B</code>,域内 raft)。</p>
 
 <pre class="mermaid">
 flowchart LR
   subgraph DEL["交付流程（sudoedge）"]
-    G["① 生成盒子信任域<br/>CA_B + 信任域 id<br/>自主 · 客户/盒子持 key"]
-    MINT["② 域内 mint agent<br/>nexus://agent/name（CA_B 签）"]
-    EXP["③ 导出 CA_B 公钥 + 信任域 id"]
+    G["① nexus generate_zone_ca<br/>CA_B（集群 init · 客户持 key<br/>TPM-seal 或盘加密 · 生成一次）"]
+    MINT["② auth mint 问责落点<br/>nexus://agent/{role}<br/>（CA_B 签 · 持久角色名,非 pid）"]
+    EXP["③ 导出 {ca_cert_pem,<br/>trust_domain_id, fingerprint=SHA-256(DER)}"]
+    INJ["④ 灌入平台 CA_A(pem+指纹)<br/>作反向锚"]
     G --> MINT --> EXP
+    G --> INJ
   end
-  EXP -->|"交平台登记"| REG["broker：注册为<br/>authorship 锚点<br/>CA_B → 信任域"]
+  EXP -->|"交平台登记（正向锚）"| REG["broker：CA_B → 信任域"]
+  REG -.->|"回交 CA_A pem+指纹（反向锚）"| INJ
   style REG fill:#dafbe1,stroke:#4ac26b,color:#1a7f37
 </pre>
 
 <div class="box warn">
-<p><strong>硬约束(给 sudoedge):</strong>盒子<strong>自签自己的 CA</strong>(交付后我们不持 key);<strong>不拿 enroll-token、不接收我们的 CA 作成员锚</strong> —— 它不是也永不是 cluster 成员;在自己域内 mint agent;集成握手 = <strong>导出 CA 公钥 + 信任域 id</strong> 交平台登记为 authorship 锚点。反向(盒子验平台)是后续步骤。</p>
+<p><strong>硬约束(给 sudoedge):</strong>CA_B 由 <strong>nexus <code>generate_zone_ca</code></strong> 在集群 init 时生成(<strong>客户持 key、我们不持</strong>,TPM-seal 或盘加密、<strong>只生成一次</strong> —— 重生成 = 换信任根 = 注册锚失效);盒子<strong>不拿 enroll-token、不接收我们的 CA 作成员锚</strong> —— 它<strong>永不入我们的 cluster</strong>(只入客户自己的域);只给<strong>署名过界的问责落点</strong>(worker / sudocode)<code>auth mint</code>,nova-gateway 纯路由不 mint;集成握手 = <strong>导出上面那个三元组</strong>交平台登记正向锚,并把平台回交的 <strong>CA_A</strong> 灌成<strong>反向锚</strong>(双向)。</p>
 </div>
 
-<h3>5.6 bring-up 次序与开放点</h3>
+<h3>5.6 bring-up 次序 · 设计点已定</h3>
 
 <p><strong>去掉「先同-CA 入 cluster」那步</strong>(那会先建一个错的信任姿态、交付时再拆):</p>
 
 <table>
 <tr><th>步</th><th>做什么</th></tr>
-<tr><td>①</td><td>各自独立绿:DGX 起自己单节点 cluster(<code>CA_B</code>)+ agent + 本地 mailbox;我们 Win↔Mac 早通</td></tr>
+<tr><td>①</td><td>各自独立绿:DGX 起<strong>客户域</strong>(≥1 节点,共 <code>CA_B</code>)+ agent + 本地 mailbox;我们 Win↔Mac 早通</td></tr>
 <tr><td>②</td><td>纯连通性 smoke:DGX ↔ 我们 plain gRPC dial 通(隔离网络变量)</td></tr>
 <tr><td>③</td><td>最小 cross-CA 锚:唯一新变量 = 跨 CA 验证;一条跨 org 署名端到端验通 = 契约 pin 住</td></tr>
 </table>
 
-<p><strong>开放点:</strong>① 注册表存哪(倾向 raft-replicated);② 反向信任(盒子验平台)要不要现在做(倾向:先只做 broker 验外域 authorship 单向);③ 外域 agent 吊销 v1(注册表删 CA / 列外域 serial vs 消费外域 CRL);④ <code>trust_domain</code> 是否进 <code>display_id()</code> / 审计格式(防 id 泄漏,单元测 <code>Display</code>)。<strong>触发场景:</strong>LAN 上一台 DGX Spark(由 sudowork-6 那条线持有),终局交付客户 —— 拿真外部信任域来 pin 这份契约。</p>
+<p><strong>设计点已定(kernel lead):</strong>① <strong>注册表</strong> —— 每个集群内 <strong>raft 复制</strong>(我们 broker 侧存我们节点、客户侧存 DGX 域;非 node-local);② <strong>反向信任</strong> —— <strong>双向</strong>(mTLS 本就双向,不再「先单向」),各持对方 CA 作锚;③ <strong>吊销</strong> —— broker 侧 <strong>CRL:逐 serial + 整域撤 CA</strong>,存 raft、全节点即时一致,复用现有 CRL 机制,反向走客户侧表;④ <strong><code>trust_domain</code> 进 <code>display_id()</code> / 审计</strong> —— 外域 agent 一律<strong>限定渲染</strong> <code>{信任域}/agent/{name}</code>、绝不裸名,单元测 <code>Display</code> 防冒充。<strong>触发场景 · gate 现状:</strong>LAN 上一台 DGX Spark(sudowork-6 那条线持有),终局交付客户;nexus-vfs <code>v0.6.0</code> 已发 <code>linux-aarch64</code> 二进制,gate 从「port」降为「在 DGX 上 dry-run 验加载」。</p>
 
 <h2>6. 对 moss 的具体影响 <span class="tag ask">要你们确认</span></h2>
 
