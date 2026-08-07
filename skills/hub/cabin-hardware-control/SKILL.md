@@ -2,7 +2,7 @@
 name: cabin-hardware-control
 displayName: 客舱硬件控制
 description: Use this skill when a cabin passenger asks to control real cabin hardware, especially opening or closing the tray table, seat-side devices, lights, seat posture, or other equipment through customer cabin control APIs. The skill must use server-provided cabin_context for seat identity.
-version: 1.3.0
+version: 1.3.1
 category: 客舱服务
 emoji: "🛫"
 ---
@@ -12,6 +12,8 @@ emoji: "🛫"
 Use this skill for passenger requests that require real cabin hardware control.
 Do not use this skill for hardware status questions such as 当前座椅角度是多少 or 小桌板收好了吗; use `cabin-hardware-status-query`.
 Do not use this skill for business mode switching such as 办公模式、放松模式、睡眠模式、个人模式; use `cabin-mode-switch`.
+This exclusion is mandatory: if a passenger says 打开/开启/切换/调整/调至/进入/启动 + 办公模式、放松模式、睡眠模式、个人模式, stop using this skill and use `cabin-mode-switch` instead.
+Never map those four business modes to `cabin.scene` presets such as `cruise` or `night`.
 
 Only use the command names listed below. Do not invent command names such as
 `seat.recline`, `seat.light.off`, `seat.health`, or `cabin.scene.boarding`.
@@ -140,6 +142,7 @@ The script reads:
   - `night` — 睡眠 / 休息 / 夜间。例如：睡眠场景、休息模式、夜间模式、助眠灯光、准备睡觉、调暗休息。
   - `landing` — 下机 / 降落。例如：下机场景、降落模式、落地灯光。
   Map the passenger's words onto the closest preset (e.g. 睡眠/休息 → `night`). Never invent presets like `sleep`, `rest`, `dining`, `reading`, or `none`. 若乘客说的场景（如用餐/阅读/欢迎场景）没有对应的合法值，不要硬映射，改为追问澄清。
+  Business modes are forbidden here: 办公模式、工作模式、放松模式、休闲模式、睡眠模式、睡觉模式、个人模式、私人模式 are not hardware scene presets. For example, "帮我调整至办公模式" must use `cabin-mode-switch --mode office`, not `cabin.scene --preset cruise`; "帮我打开睡眠模式" must use `cabin-mode-switch --mode sleep`, not `cabin.scene --preset night`.
 - 清除客舱场景: `--command cabin.scene.clear`; never approximate this as `cabin.scene --preset none`。例如：清除场景、取消场景、退出场景模式、恢复默认灯光。
 
 ## Reply Rules
