@@ -79,7 +79,7 @@
 <tr><th>标记</th><th>含义</th><th>哪几节</th></tr>
 <tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></td><td><strong>今天线上就是这样</strong>,代码可查</td><td>§1 §2 §6</td></tr>
 <tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">已合并 · 已发版</span></td><td>auth 折进 <code>nexusd-cluster</code>(<code>collaboration</code> profile 已删),<strong>已随 <code>v0.5.0+</code> 发版</strong> —— 从 sudowork 冷装的用户拿到的 nexusd 已带 auth + loopback 守卫</td><td>§3 §4</td></tr>
-<tr><td><span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 在 main</span></td><td>签名 authorship(<a href="https://github.com/nexi-lab/nexus-vfs/pull/194">#194</a>)+ 跨组织信任面(<a href="https://github.com/nexi-lab/nexus-vfs/pull/209">#209</a>/<a href="https://github.com/nexi-lab/nexus-vfs/pull/211">#211</a>)<strong>都已合并到 main</strong>,进后续 release</td><td>§5</td></tr>
+<tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">已合并 · 已发版</span></td><td>签名 authorship(<a href="https://github.com/nexi-lab/nexus-vfs/pull/194">#194</a>)+ 跨组织信任面(准入 <a href="https://github.com/nexi-lab/nexus-vfs/pull/209">#209</a>/<a href="https://github.com/nexi-lab/nexus-vfs/pull/211">#211</a> + classify 接线 <a href="https://github.com/nexi-lab/nexus-vfs/pull/212">#212</a>/<a href="https://github.com/nexi-lab/nexus-vfs/pull/213">#213</a> + 归属 live <a href="https://github.com/nexi-lab/nexus-vfs/pull/215">#215</a>)<strong>已合并、已随 <code>v0.7.x</code> 发版</strong></td><td>§5</td></tr>
 </table>
 </div>
 
@@ -344,7 +344,7 @@ flowchart LR
 <h3>5.4 跨组织:一个问题裂成两个锚 <span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 在 main</span></h3>
 
 <div class="box ok">
-<p><strong>实现状态(下文按设计叙述,此处对齐代码):已合并到 main。</strong>热换客户端证书验证器 + 外域-CA 注册表(raft)+ <code>classify_peer_cert</code> + <code>PeerIdentity.trust_domain</code>(<a href="https://github.com/nexi-lab/nexus-vfs/pull/209">#209</a>);<code>RegisterForeignCa/Unregister/List</code> 走活 daemon(<a href="https://github.com/nexi-lab/nexus-vfs/pull/211">#211</a>,live E2E 证到握手层)。<strong>剩余 follow-up:</strong>① <code>classify</code> 接进请求路径(<a href="https://github.com/nexi-lab/nexus-vfs/pull/212">#212</a> verifier 半 + grpc 一行 —— 否则外域 agent 被准入但仍认成本地裸名);② 外域 agent 逐-serial 撤销(现只整域撤 CA);③ 外域 mailbox scope(#41);④ cross-CA 跨机 e2e(需真 CA_B)。</p>
+<p><strong>实现状态(下文按设计叙述,此处对齐代码):已合并到 main、已随 <code>v0.7.x</code> 发版。</strong>热换客户端证书验证器 + 外域-CA 注册表(raft)+ <code>classify_peer_cert</code> + <code>PeerIdentity.trust_domain</code>(<a href="https://github.com/nexi-lab/nexus-vfs/pull/209">#209</a>);<code>RegisterForeignCa/Unregister/List</code> 走活 daemon,<strong>准入</strong>有 live gate(<a href="https://github.com/nexi-lab/nexus-vfs/pull/211">#211</a> —— 注册前 <code>CA_B</code>-签名 cert 被握手拒、注册后接受、注销后再拒)。<code>classify</code> 已接进 VFS 请求路径 —— verifier 访问器(<a href="https://github.com/nexi-lab/nexus-vfs/pull/212">#212</a>)+ 请求路径接线(<a href="https://github.com/nexi-lab/nexus-vfs/pull/213">#213</a>),外域 agent 现被解析成<strong>合格跨域身份 <code>{trust_domain}/agent/{name}</code></strong>,不再是本地裸名;<strong>归属</strong>亦有 live 覆盖(<a href="https://github.com/nexi-lab/nexus-vfs/pull/215">#215</a> —— 外域 agent 写 mailbox 的 <code>from</code> 被 stamp 成合格跨域 id,CI-native 实跑绿)。<strong>剩余 follow-up(按 YAGNI 延后,待真实 pilot 触发):</strong>① 外域 agent 逐-serial 撤销(现只整域撤 CA);② 外域 mailbox scope(#41);③ cross-CA <strong>跨机</strong>实跑 —— 机制已在 CI 证毕,用真 DGX <code>CA_B</code> 的真机 e2e 进行中(客户端工具 <code>mailbox_cli send-raw/collect-raw</code> 已就绪)。</p>
 </div>
 
 <p>§5.2 那句「跨组织 —— 换成跨 CA 的信任锚即可」,这一节把它展开(§5.1–5.3 是<strong>集群内已合并</strong>的域内模型,5.4 起是它的<strong>跨域扩展</strong>)。先钉定义:<strong>cross-org ≡ cross-CA ≡ cross-trust-root</strong>。信任边界是 <strong>CA</strong>,不是机器、不是 org 标签、不是在不在同一个 LAN —— 两台在两家公司的盒子共用一个 CA = 一个信任域(是 federation,<strong>不是</strong> cross-org);一台盒子自签自己的 CA = 另一个信任域(<strong>才是</strong> cross-org)。典型载体:一台<strong>交付到客户侧、自带 CA 的 DGX</strong>,它<strong>永不加入我们的 raft cluster</strong>,只把署名后的消息经隔离中介(平台 broker)过界。</p>
@@ -562,7 +562,7 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 <h3>8.2 发布 + bump — 完成 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">已全部合并</span></h3>
 
 <div class="box ok">
-<p><strong>当前 release 已到 <code>v0.6.0</code></strong>(加 <code>linux-aarch64</code> 二进制 + 后续 auth/enrollment 工作)。下方 <code>v0.5.0</code> 是 <strong>auth 首次随 release 发版</strong>的里程碑记录 —— §5 的签名 authorship / 跨组织信任面已合并 main、进 <code>v0.6.0</code> 之后的 release。</p>
+<p><strong>当前 release 已到 <code>v0.7.1</code></strong>(<code>linux-aarch64</code> 二进制 + auth/enrollment + §5 跨组织信任面 classify 接线与归属 live 验证)。下方 <code>v0.5.0</code> 是 <strong>auth 首次随 release 发版</strong>的里程碑记录 —— §5 的签名 authorship / 跨组织信任面自 <code>v0.7.0</code>/<code>v0.7.1</code> 起随 release 发版。</p>
 </div>
 
 <table>
