@@ -78,8 +78,8 @@
 <table style="margin:10px 0 0">
 <tr><th>标记</th><th>含义</th><th>哪几节</th></tr>
 <tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">现状</span></td><td><strong>今天线上就是这样</strong>,代码可查</td><td>§1 §2 §6</td></tr>
-<tr><td><span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 未发版</span></td><td>代码在 <code>nexus-vfs</code> <code>main</code> 上,但<strong>只在 <code>nexusd-collaboration</code> profile 里</strong>,而且<strong>没有任何 release 包含它</strong>。moss 今天拿到的 <code>nexusd-cluster</code> 里<strong>一行 auth 都没有</strong></td><td>§3 §4</td></tr>
-<tr><td><span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></td><td><strong>还没写。</strong>这是我准备做的,拿出来先对齐</td><td>§5</td></tr>
+<tr><td><span class="tag" style="color:#1a7f37;border-color:#4ac26b">已合并 · 已发版</span></td><td>auth 折进 <code>nexusd-cluster</code>(<code>collaboration</code> profile 已删),<strong>已随 <code>v0.5.0+</code> 发版</strong> —— 从 sudowork 冷装的用户拿到的 nexusd 已带 auth + loopback 守卫</td><td>§3 §4</td></tr>
+<tr><td><span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 在 main</span></td><td>签名 authorship(<a href="https://github.com/nexi-lab/nexus-vfs/pull/194">#194</a>)+ 跨组织信任面(<a href="https://github.com/nexi-lab/nexus-vfs/pull/209">#209</a>/<a href="https://github.com/nexi-lab/nexus-vfs/pull/211">#211</a>)<strong>都已合并到 main</strong>,进后续 release</td><td>§5</td></tr>
 </table>
 </div>
 
@@ -251,7 +251,7 @@ flowchart LR
 <tr><td>凭证格式</td><td><code>sk-</code> + 128-bit 随机,HMAC-SHA256 存储(和 Python 侧字节兼容)</td></tr>
 <tr><td>记录存哪</td><td><strong>raft 专用树 <code>TREE_AUTH_KEYS</code></strong> —— 不在文件元数据路径上,<code>sys_write</code> 伪造不了;复制到每个副本,所以<strong>吊销会传播</strong></td></tr>
 <tr><td>自带能力</td><td>吊销、过期、per-key 的 zone 授权、审计视图(<code>/__sys__/auth/keys/</code>,admin-only 只读)</td></tr>
-<tr><td>管理接口</td><td><code>nexusd auth mint | revoke | list</code>(离线子命令,<code>useradd</code> 语义)</td></tr>
+<tr><td>管理接口</td><td><code>nexusd auth mint | revoke | list</code> —— <strong>活 daemon 客户端</strong>(<code>MintKey/RevokeKey/ListKeys</code> RPC,node-cert gated,写转发 leader;<a href="https://github.com/nexi-lab/nexus-vfs/pull/206">#206</a>-<a href="https://github.com/nexi-lab/nexus-vfs/pull/208">208</a>),离线仅用于冷启动。<code>useradd</code> 语义不变</td></tr>
 <tr><td>验证</td><td>CI 里有一条真 E2E:铸 key → 带 key 调 gRPC 通过 → <strong>空 token 被拒</strong> → 吊销 → 同一把 key 被拒</td></tr>
 </table>
 
@@ -341,7 +341,11 @@ flowchart LR
 <p><strong>Prior art.</strong>本节的署名-验签模型借鉴 <a href="https://arxiv.org/pdf/2508.01332">BlockA2A</a>(Zhenhua Zou、Zhuotao Liu 等,清华大学;arXiv 2508.01332)对 agent-to-agent 的 DID 消息验证(其 Protocol 2:发送方以私钥签、接收方按可解析公钥验)。nexus 把这一模型落在<strong>自身已有的原语</strong>上 —— CA 签发的证书作可解析身份、raft log 作有序防篡改的强一致账本、内核权限门作访问控制 —— 在集群内获得零额外信任基座,并保留向跨组织(跨 CA)扩展的路径。</p>
 </div>
 
-<h3>5.4 跨组织:一个问题裂成两个锚 <span class="tag" style="color:#9a6700;border-color:#d4a72c">提议 · 未实现</span></h3>
+<h3>5.4 跨组织:一个问题裂成两个锚 <span class="tag" style="color:#0969da;border-color:#0969da">已合并 · 在 main</span></h3>
+
+<div class="box ok">
+<p><strong>实现状态(下文按设计叙述,此处对齐代码):已合并到 main。</strong>热换客户端证书验证器 + 外域-CA 注册表(raft)+ <code>classify_peer_cert</code> + <code>PeerIdentity.trust_domain</code>(<a href="https://github.com/nexi-lab/nexus-vfs/pull/209">#209</a>);<code>RegisterForeignCa/Unregister/List</code> 走活 daemon(<a href="https://github.com/nexi-lab/nexus-vfs/pull/211">#211</a>,live E2E 证到握手层)。<strong>剩余 follow-up:</strong>① <code>classify</code> 接进请求路径(<a href="https://github.com/nexi-lab/nexus-vfs/pull/212">#212</a> verifier 半 + grpc 一行 —— 否则外域 agent 被准入但仍认成本地裸名);② 外域 agent 逐-serial 撤销(现只整域撤 CA);③ 外域 mailbox scope(#41);④ cross-CA 跨机 e2e(需真 CA_B)。</p>
+</div>
 
 <p>§5.2 那句「跨组织 —— 换成跨 CA 的信任锚即可」,这一节把它展开(§5.1–5.3 是<strong>集群内已合并</strong>的域内模型,5.4 起是它的<strong>跨域扩展</strong>)。先钉定义:<strong>cross-org ≡ cross-CA ≡ cross-trust-root</strong>。信任边界是 <strong>CA</strong>,不是机器、不是 org 标签、不是在不在同一个 LAN —— 两台在两家公司的盒子共用一个 CA = 一个信任域(是 federation,<strong>不是</strong> cross-org);一台盒子自签自己的 CA = 另一个信任域(<strong>才是</strong> cross-org)。典型载体:一台<strong>交付到客户侧、自带 CA 的 DGX</strong>,它<strong>永不加入我们的 raft cluster</strong>,只把署名后的消息经隔离中介(平台 broker)过界。</p>
 
@@ -556,6 +560,10 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 </table>
 
 <h3>8.2 发布 + bump — 完成 <span class="tag" style="color:#1a7f37;border-color:#4ac26b">已全部合并</span></h3>
+
+<div class="box ok">
+<p><strong>当前 release 已到 <code>v0.6.0</code></strong>(加 <code>linux-aarch64</code> 二进制 + 后续 auth/enrollment 工作)。下方 <code>v0.5.0</code> 是 <strong>auth 首次随 release 发版</strong>的里程碑记录 —— §5 的签名 authorship / 跨组织信任面已合并 main、进 <code>v0.6.0</code> 之后的 release。</p>
+</div>
 
 <table>
 <tr><th></th><th>状态</th></tr>
