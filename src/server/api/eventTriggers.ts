@@ -18,6 +18,23 @@ const DEFAULT_RATE_LIMIT_PER_MIN = Number(process.env.MOSS_EVENT_RATE_LIMIT_PER_
 type AuthLike = { orgId: string; userId: string; role?: string; scopes?: string[] }
 
 /**
+ * Parse an optional positive-integer setting (timeout_ms, rate_limit_per_min).
+ *
+ * Returns null for "unset — use the default". Note that `Number(null)` and
+ * `Number('')` are both 0, so a bare `Number.isFinite(Number(v))` check would
+ * silently turn an explicit null (which is what the UI sends when the field is
+ * left empty) into 0 — a 0ms timeout kills the run on the next tick, and a
+ * 0/min rate limit rejects every request. Non-positive and unparseable values
+ * are treated as unset for the same reason.
+ */
+function optionalPositiveInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.floor(n)
+}
+
+/**
  * Public (client-visible) trigger shape. Deliberately omits secret_hash —
  * the secret is returned exactly once, at create/rotate time.
  */
@@ -188,7 +205,12 @@ export function createEventTriggerIngest(service: EventTriggerService) {
           throw new IngestError(403, 'TRIGGER_DISABLED', 'This trigger is disabled')
         }
 
-        const limit = trigger.rateLimitPerMin ?? DEFAULT_RATE_LIMIT_PER_MIN
+        // Non-positive means "unset" — a stored 0 (written before the API
+        // stopped coercing null → 0) would otherwise reject every request.
+        const limit =
+          trigger.rateLimitPerMin && trigger.rateLimitPerMin > 0
+            ? trigger.rateLimitPerMin
+            : DEFAULT_RATE_LIMIT_PER_MIN
         if (!limiter.check(trigger.id, limit)) {
           res.setHeader('Retry-After', '60')
           throw new IngestError(429, 'RATE_LIMITED', `Rate limit of ${limit}/min exceeded for this trigger`)
@@ -323,10 +345,8 @@ export function createEventTriggerApi(options: {
         assistantName: typeof input.assistant_name === 'string' ? input.assistant_name : null,
         conversationMode: input.conversation_mode === 'reuse' ? 'reuse' : 'new',
         workspace: typeof input.workspace === 'string' ? input.workspace : null,
-        timeoutMs: Number.isFinite(Number(input.timeout_ms)) ? Number(input.timeout_ms) : null,
-        rateLimitPerMin: Number.isFinite(Number(input.rate_limit_per_min))
-          ? Number(input.rate_limit_per_min)
-          : null,
+        timeoutMs: optionalPositiveInt(input.timeout_ms),
+        rateLimitPerMin: optionalPositiveInt(input.rate_limit_per_min),
       })
 
       return {
@@ -365,17 +385,11 @@ export function createEventTriggerApi(options: {
               ? updates.workspace
               : null,
         timeoutMs:
-          updates.timeout_ms === undefined
-            ? undefined
-            : Number.isFinite(Number(updates.timeout_ms))
-              ? Number(updates.timeout_ms)
-              : null,
+          updates.timeout_ms === undefined ? undefined : optionalPositiveInt(updates.timeout_ms),
         rateLimitPerMin:
           updates.rate_limit_per_min === undefined
             ? undefined
-            : Number.isFinite(Number(updates.rate_limit_per_min))
-              ? Number(updates.rate_limit_per_min)
-              : null,
+            : optionalPositiveInt(updates.rate_limit_per_min),
       })
 
       return updated ? { success: true as const, trigger: mapTrigger(updated) } : null

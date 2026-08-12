@@ -210,7 +210,12 @@ export class EventTriggerService {
       this.store.updateLastSession(trigger.id, sessionId)
 
       const prompt = buildPrompt(trigger.promptTemplate, run.payloadJson)
-      await this.driveSession(sessionId, prompt, trigger.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS)
+      // `??` alone would let a stored 0 through (rows written before the API
+      // stopped coercing null → 0), and a 0ms timeout aborts the run on the
+      // next tick. Treat any non-positive value as "unset".
+      const timeoutMs =
+        trigger.timeoutMs && trigger.timeoutMs > 0 ? trigger.timeoutMs : DEFAULT_RUN_TIMEOUT_MS
+      await this.driveSession(sessionId, prompt, timeoutMs)
 
       this.store.updateRunStatus(run.id, {
         status: 'ok',
