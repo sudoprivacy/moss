@@ -378,3 +378,118 @@ describe('event trigger management API — org isolation', () => {
     expect(api.getRun(org1, b.id, run.id)!.run.id).toBe(run.id)
   })
 })
+
+describe('event trigger management API — optional numeric settings', () => {
+  let store: EventTriggerStore
+  let api: ReturnType<typeof createEventTriggerApi>
+
+  beforeEach(() => {
+    store = new EventTriggerStore(makeDb())
+    api = createEventTriggerApi({ store })
+  })
+
+  const org1 = { orgId: 'org-1', userId: 'user-1' }
+
+  // Regression: the admin UI sends an explicit null when the field is left
+  // blank ("use the default"). `Number(null)` is 0 and `Number.isFinite(0)` is
+  // true, so the old coercion stored 0 — a 0ms run timeout aborted the session
+  // on the next tick and a 0/min rate limit rejected every event.
+  it('keeps an explicit null as null on create', () => {
+    const created = api.createTrigger(org1, {
+      name: 'T', prompt_template: 'x',
+      timeout_ms: null, rate_limit_per_min: null,
+    })
+    expect(created.trigger!.timeout_ms).toBeNull()
+    expect(created.trigger!.rate_limit_per_min).toBeNull()
+  })
+
+  it('keeps an explicit null as null on update', () => {
+    const id = api.createTrigger(org1, {
+      name: 'T', prompt_template: 'x',
+      timeout_ms: 60_000, rate_limit_per_min: 30,
+    }).trigger!.id
+
+    const updated = api.updateTrigger(org1, id, { timeout_ms: null, rate_limit_per_min: null })
+    expect(updated!.trigger.timeout_ms).toBeNull()
+    expect(updated!.trigger.rate_limit_per_min).toBeNull()
+  })
+
+  it('treats empty strings and non-positive values as unset', () => {
+    for (const bad of ['', 0, -1, 'abc', NaN]) {
+      const created = api.createTrigger(org1, {
+        name: 'T', prompt_template: 'x',
+        timeout_ms: bad, rate_limit_per_min: bad,
+      })
+      expect(created.trigger!.timeout_ms).toBeNull()
+      expect(created.trigger!.rate_limit_per_min).toBeNull()
+    }
+  })
+
+  it('still stores genuine positive values', () => {
+    const created = api.createTrigger(org1, {
+      name: 'T', prompt_template: 'x',
+      timeout_ms: 900_000, rate_limit_per_min: 120,
+    })
+    expect(created.trigger!.timeout_ms).toBe(900_000)
+    expect(created.trigger!.rate_limit_per_min).toBe(120)
+  })
+
+  it('leaves an omitted field untouched on update', () => {
+    const id = api.createTrigger(org1, {
+      name: 'T', prompt_template: 'x',
+      timeout_ms: 60_000, rate_limit_per_min: 30,
+    }).trigger!.id
+
+    const updated = api.updateTrigger(org1, id, { name: 'renamed' })
+    expect(updated!.trigger.timeout_ms).toBe(60_000)
+    expect(updated!.trigger.rate_limit_per_min).toBe(30)
+  })
+})
+
+describe('event trigger ingest — legacy zero rate limit', () => {
+  // Rows written before the fix can hold 0; those triggers must not be bricked.
+  it('falls back to the default instead of rejecting every event', async () => {
+    const store = new EventTriggerStore(makeDb())
+    const { trigger, secret } = seed(store, { rateLimitPerMin: 0 })
+    await withServer(store, async base => {
+      const res = await fetch(`${base}/api/v1/triggers/${trigger.id}/events`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      expect(res.status).toBe(202)
+    })
+  })
+})
+
+describe('event trigger management API — edit round-trip', () => {
+  const org = { orgId: 'org-1', userId: 'user-1' }
+
+  // The exact path that bricked the SQL审计 trigger in production: create with
+  // the numeric fields left blank, reopen the edit modal, save without touching
+  // them. openEdit() loads null into the form, the input renders `?? ''`, and
+  // the client forwards every non-undefined field — so an explicit null is
+  // PATCHed back and must survive as null, not become 0.
+  it('keeps blank fields blank when an untouched trigger is re-saved', () => {
+    const store = new EventTriggerStore(makeDb())
+    const api = createEventTriggerApi({ store })
+
+    const id = api.createTrigger(org, {
+      name: 'SQL审计', prompt_template: 'x',
+      timeout_ms: null, rate_limit_per_min: null,
+    }).trigger!.id
+
+    // Re-save three times, each time echoing back what the form loaded.
+    for (let i = 0; i < 3; i++) {
+      const loaded = api.getTrigger(org, id)!.trigger
+      api.updateTrigger(org, id, {
+        timeout_ms: loaded.timeout_ms,
+        rate_limit_per_min: loaded.rate_limit_per_min,
+      })
+    }
+
+    const final = api.getTrigger(org, id)!.trigger
+    expect(final.timeout_ms).toBeNull()
+    expect(final.rate_limit_per_min).toBeNull()
+  })
+})
