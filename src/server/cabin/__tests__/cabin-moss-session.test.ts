@@ -37,6 +37,10 @@ function skillToolUse(): string {
   return stdout({ type: 'tool_use', name: 'Skill', input: '{"skill":"cabin-hardware-control"}' })
 }
 
+function shellToolUse(command: string): string {
+  return stdout({ type: 'tool_use', name: 'Bash', input: { command } })
+}
+
 const servers: net.Server[] = []
 
 // Stand up a loopback TCP server that replays the given scode stdout lines to any client,
@@ -54,12 +58,18 @@ async function fakeRunnerSocket(lines: string[]): Promise<net.Socket> {
 
 function makeServices(opts: {
   fetchImpl?: typeof fetch
-  lines: string[]
+  lines: string[] | string[][]
 }): CabinServices {
   const config = { controlBaseUrl: 'http://control.local', controlTimeoutMs: 200, llmModel: 'test' } as unknown as CabinConfig
+  let connectionIndex = 0
   const runtime = {
     ensureSessionReady: async () => ({ attempt: {} }),
-    connectToAttempt: async () => fakeRunnerSocket(opts.lines),
+    connectToAttempt: async () => {
+      const allLines = Array.isArray(opts.lines[0]) ? opts.lines as string[][] : [opts.lines as string[]]
+      const lines = allLines[Math.min(connectionIndex, allLines.length - 1)]
+      connectionIndex += 1
+      return fakeRunnerSocket(lines)
+    },
   } as never
   return new CabinServices({
     config,
@@ -160,6 +170,80 @@ describe('generateReplyWithMossSession · intent-first', () => {
     expect(result.toolCall).toBeUndefined()
     expect(result.reply).toContain('不客气')
     expect(result.reply).toContain('祝您旅途愉快')
+  })
+
+  it('executes emitted hardware status query and asks the model to phrase the real result', async () => {
+    const fetched: string[] = []
+    const services = makeServices({
+      lines: [
+        [
+          emitToolResult({ ok: true, mode: 'status_query', target_type: 'seat', status_key: 'posture' }),
+        ],
+        [
+          assistantText('您当前座椅角度约为 35%。'),
+        ],
+      ],
+      fetchImpl: async url => {
+        fetched.push(String(url))
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            target: '01A',
+            key: 'posture',
+            data: { position: '35' },
+            lastUpdateTime: 1783062445053,
+          },
+        }), { status: 200 })
+      },
+    })
+
+    const result = await services.generateReplyWithMossSession({
+      mossSessionId: 's-status',
+      context,
+      text: '当前座椅角度是多少',
+    })
+
+    expect(fetched).toHaveLength(1)
+    expect(fetched[0]).toContain('/admin-api/tcp/hardware/status')
+    expect(fetched[0]).toContain('target=01A')
+    expect(fetched[0]).toContain('key=posture')
+    expect(result.reply).toContain('35')
+    expect(result.toolCall?.name).toBe('cabin.hardware.status')
+    expect(result.intent).toBe('hardware_status_query')
+  })
+
+  it('executes emitted mode switch through the cabin business API', async () => {
+    const requests: Array<{ url: string; body: unknown }> = []
+    const services = makeServices({
+      lines: [
+        shellToolUse('node .nexus/sudocode/skills/cabin-mode-switch/scripts/cabin-mode.mjs --mode sleep --seat-no "01A" --aircraft-no B-WITHFLIGHT-01 --title 睡眠模式'),
+      ],
+      fetchImpl: async (_url, init) => {
+        requests.push({
+          url: String(_url),
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+        })
+        return new Response(JSON.stringify({ code: 0, data: { requestId: 'BC-1', matchedCount: 1, sentCount: 1 } }), { status: 200 })
+      },
+    })
+
+    const result = await services.generateReplyWithMossSession({
+      mossSessionId: 's-mode',
+      context: { ...context, aircraftNo: 'B-WITHFLIGHT-01' },
+      text: '切换到睡眠模式',
+    })
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0].url).toContain('/admin-api/cabin/broadcast/mode-seat')
+    expect(requests[0].body).toMatchObject({
+      aircraftNo: 'B-WITHFLIGHT-01',
+      seatNo: '01A',
+      mode: 'sleep',
+      title: '睡眠模式',
+    })
+    expect(result.reply).toBe('已为您切换到睡眠模式，请稍候。')
+    expect(result.toolCall?.name).toBe('cabin.mode.switch')
+    expect(result.intent).toBe('cabin_mode_switch')
   })
 })
 

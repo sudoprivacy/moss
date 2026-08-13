@@ -26,6 +26,7 @@ const PHASE_INTERVAL_MS = Number(process.env.MOCK_PHASE_INTERVAL_MS || 1000)
 
 const controlLog = []
 const broadcastLog = []
+const statusLog = []
 const wsClients = new Set()
 
 const seatState = new Map([
@@ -146,6 +147,7 @@ const server = http.createServer(async (req, res) => {
         flightId: 'AUTO',
         flightDate: new Date().toISOString().slice(0, 10),
         flightNo: 'CA1234',
+        aircraftNo: 'B-WITHFLIGHT-01',
         seatNo: 'A',
         passenger: { displayName: '张先生', gender: 'male', seatNo: 'A', language: 'zh' },
       },
@@ -174,6 +176,11 @@ const server = http.createServer(async (req, res) => {
     const data = target === 'cabin'
       ? cabinState[key] || {}
       : ensureSeat(target)[key] || {}
+    statusLog.push({
+      at: new Date().toISOString(),
+      target,
+      key,
+    })
     return json(res, 200, {
       code: 0,
       msg: '',
@@ -193,6 +200,10 @@ const server = http.createServer(async (req, res) => {
     const state = ensureSeat(seatNo)
     if (url.pathname === '/admin-api/tcp-client/cmd/seat/cushion') {
       state.posture.position = url.searchParams.get('position') || '0'
+    }
+    if (url.pathname === '/admin-api/tcp-client/cmd/seat/tray/open') {
+      state.tray.tray_state = 'opened'
+      state.tray.tray_flipped = 'false'
     }
     if (url.pathname === '/admin-api/tcp-client/cmd/seat/tray/close') {
       state.tray.tray_state = 'closed'
@@ -260,6 +271,38 @@ const server = http.createServer(async (req, res) => {
     })
   }
 
+  if (req.method === 'POST' && url.pathname === '/admin-api/cabin/broadcast/mode-seat') {
+    const body = await readBody(req)
+    let payload = {}
+    try {
+      payload = JSON.parse(body)
+    } catch {}
+    const validModes = new Set(['office', 'relax', 'sleep', 'personal'])
+    if (!validModes.has(String(payload.mode || ''))) {
+      return json(res, 400, { code: 400, msg: `无效的客舱模式: ${payload.mode}`, data: {} })
+    }
+    const entry = {
+      at: new Date().toISOString(),
+      type: 'mode-seat',
+      payload,
+      apiKey: req.headers['x-hardware-api-key'] || '',
+      authorization: req.headers.authorization || '',
+    }
+    broadcastLog.push(entry)
+    process.stderr.write(`[mock-broadcast] mode-seat ${JSON.stringify(payload)}\n`)
+    return json(res, 200, {
+      code: 0,
+      msg: '',
+      data: {
+        requestId: `BC-${Date.now()}`,
+        matchedCount: 1,
+        sentCount: 1,
+        audioUrl: null,
+        fileName: null,
+      },
+    })
+  }
+
   if (req.method === 'POST' && url.pathname === '/_mock/phase') {
     const body = await readBody(req)
     let phase = Number.parseInt(url.searchParams.get('phase') || '', 10)
@@ -303,6 +346,37 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/_mock/broadcast-log/reset') {
     broadcastLog.length = 0
     return json(res, 200, { ok: true })
+  }
+  if (req.method === 'GET' && url.pathname === '/_mock/status-log') {
+    return json(res, 200, { count: statusLog.length, entries: statusLog })
+  }
+  if (req.method === 'POST' && url.pathname === '/_mock/status-log/reset') {
+    statusLog.length = 0
+    return json(res, 200, { ok: true })
+  }
+  if (req.method === 'POST' && url.pathname === '/_mock/seat-state') {
+    const body = await readBody(req)
+    let payload = {}
+    try {
+      payload = JSON.parse(body)
+    } catch {
+      return json(res, 400, { ok: false, msg: 'invalid JSON body' })
+    }
+    const seatNo = String(payload.seatNo || payload.seat_no || 'A')
+    const state = ensureSeat(seatNo)
+    if (payload.tray && typeof payload.tray === 'object') {
+      state.tray = { ...state.tray, ...payload.tray }
+    }
+    if (payload.posture && typeof payload.posture === 'object') {
+      state.posture = { ...state.posture, ...payload.posture }
+    }
+    if (payload.comfort && typeof payload.comfort === 'object') {
+      state.comfort = { ...state.comfort, ...payload.comfort }
+    }
+    if (payload.reading_light && typeof payload.reading_light === 'object') {
+      state.reading_light = { ...state.reading_light, ...payload.reading_light }
+    }
+    return json(res, 200, { ok: true, seatNo, state })
   }
   if (req.method === 'GET' && url.pathname === '/_mock/state') {
     return json(res, 200, {

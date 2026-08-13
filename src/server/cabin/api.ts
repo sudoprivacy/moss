@@ -12,6 +12,7 @@ import {
   shouldBufferCabinReply,
   isAffirmationReply,
   looksLikeHardwareOffer,
+  buildCabinComfortOffer,
 } from './service.js'
 import { CabinHealthReportService } from './healthReports.js'
 import { CabinStore } from './store.js'
@@ -771,6 +772,39 @@ export function createCabinApi(options: {
           return
         }
       }
+    }
+
+    const comfortOffer = buildCabinComfortOffer({ context, text })
+    if (comfortOffer) {
+      const assistantMessage = store.appendMessage({
+        conversationId: conversation.id,
+        role: 'assistant',
+        source: 'agent',
+        content: comfortOffer,
+      })
+      cabinLogger.log({
+        type: 'outbound',
+        ...logContext,
+        upstream: 'agent-reply',
+        method: 'GENERATE',
+        ok: true,
+        elapsedMs: 0,
+        details: {
+          source,
+          input_chars: text.length,
+          reply_chars: comfortOffer.length,
+          intent: assistantMessage.intent || '',
+          routed: 'comfort-offer',
+        },
+      })
+      writeSse(res, 'delta', { content: comfortOffer })
+      writeSse(res, 'done', {
+        intent: '',
+        slots: {},
+        reply_text: comfortOffer,
+      })
+      res.end()
+      return
     }
 
     const inferredTool = cabinConfig.createMossSession

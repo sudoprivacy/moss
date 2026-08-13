@@ -20,6 +20,48 @@ type CabinHardwareRoute = {
   params: Record<string, string | number | boolean>
 }
 
+type CabinHardwareStatusTarget = 'seat' | 'cabin'
+type CabinHardwareStatusKey =
+  | 'posture'
+  | 'tray'
+  | 'safety'
+  | 'comfort'
+  | 'reading_light'
+  | 'glass_state'
+  | 'ceiling_state'
+
+type CabinHardwareStatusSpec = {
+  targetType: CabinHardwareStatusTarget
+  statusKey: CabinHardwareStatusKey
+}
+
+type CabinHardwareStatusResult = {
+  intent: string
+  slots: Record<string, unknown>
+  toolCall: CabinToolCall
+  reply: string
+  ok: boolean
+  payload: unknown
+  status?: number
+}
+
+type CabinMode = 'office' | 'relax' | 'sleep' | 'personal'
+
+type CabinModeSwitchSpec = {
+  cabinMode: CabinMode
+  title?: string
+}
+
+type CabinModeSwitchResult = {
+  intent: string
+  slots: Record<string, unknown>
+  toolCall: CabinToolCall
+  reply: string
+  ok: boolean
+  payload: unknown
+  status?: number
+}
+
 export type CabinServicesOptions = {
   config: CabinConfig
   store: CabinStore
@@ -123,6 +165,150 @@ export class CabinServices {
     return buildHardwareRoute(input.context, input.text)
   }
 
+  async executeHardwareStatusQuery(input: {
+    context: CabinPassengerContext
+    spec: CabinHardwareStatusSpec
+    logContext?: CabinLogContext
+  }): Promise<CabinHardwareStatusResult> {
+    const baseUrl = this.options.config.controlBaseUrl?.replace(/\/+$/, '')
+    const target = input.spec.targetType === 'cabin' ? 'cabin' : input.context.seatId || ''
+    const toolCall = buildHardwareStatusToolCall(input.context, input.spec)
+    if (!baseUrl || !target) {
+      return {
+        intent: 'hardware_status_query',
+        slots: {
+          ...toolCall.arguments,
+          execution_status: 'failed',
+        },
+        toolCall,
+        reply: '当前暂时无法获取客舱设备状态，请稍后再试。',
+        ok: false,
+        payload: null,
+      }
+    }
+
+    return this.fetchHardwareStatus({
+      target,
+      key: input.spec.statusKey,
+      toolCall,
+      logContext: input.logContext,
+    })
+  }
+
+  async executeModeSwitch(input: {
+    context: CabinPassengerContext
+    spec: CabinModeSwitchSpec
+    logContext?: CabinLogContext
+  }): Promise<CabinModeSwitchResult> {
+    const baseUrl = (this.options.config.broadcastApiBaseUrl || this.options.config.controlBaseUrl)?.replace(/\/+$/, '')
+    const seatNo = input.context.seatId || ''
+    const aircraftNo = input.context.aircraftNo || this.options.config.aircraftNo || input.context.aircraftId || ''
+    const title = input.spec.title || CABIN_MODE_LABELS[input.spec.cabinMode]
+    const toolCall = buildModeSwitchToolCall(input.context, input.spec)
+    if (!baseUrl || !seatNo || !aircraftNo) {
+      return {
+        intent: 'cabin_mode_switch',
+        slots: {
+          ...toolCall.arguments,
+          execution_status: 'failed',
+        },
+        toolCall,
+        reply: '当前暂时无法切换客舱模式，请稍后再试。',
+        ok: false,
+        payload: null,
+      }
+    }
+
+    const url = `${baseUrl}/admin-api/cabin/broadcast/mode-seat`
+    const start = Date.now()
+    let response: Response
+    let bodyText = ''
+    try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), this.options.config.controlTimeoutMs ?? 10_000)
+      try {
+        response = await this.fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(this.options.config.broadcastApiKey
+              ? { 'x-hardware-api-key': this.options.config.broadcastApiKey }
+              : {}),
+            ...(this.options.config.broadcastAuth || this.options.config.controlAuth
+              ? { authorization: this.options.config.broadcastAuth || this.options.config.controlAuth! }
+              : {}),
+          },
+          body: JSON.stringify({
+            mode: input.spec.cabinMode,
+            title,
+            aircraftNo,
+            seatNo,
+          }),
+          signal: controller.signal,
+        })
+        bodyText = await response.text()
+      } finally {
+        clearTimeout(timeout)
+      }
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'cabin-mode-switch',
+        method: 'POST',
+        url,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: { mode: input.spec.cabinMode },
+      })
+      return {
+        intent: 'cabin_mode_switch',
+        slots: { ...toolCall.arguments, execution_status: 'failed' },
+        toolCall,
+        reply: '当前暂时无法切换客舱模式，请稍后再试。',
+        ok: false,
+        payload: null,
+      }
+    }
+
+    const payload = parseJsonPayload(bodyText)
+    const businessCode = payload && typeof payload === 'object' && 'code' in payload
+      ? (payload as { code?: unknown }).code
+      : undefined
+    const ok = response.ok && (businessCode === 0 || businessCode === '0')
+    const executionStatus = ok ? 'dispatched' : 'failed'
+    this.logOutbound({
+      ...input.logContext,
+      upstream: 'cabin-mode-switch',
+      method: 'POST',
+      url,
+      status: response.status,
+      ok,
+      elapsedMs: Date.now() - start,
+      details: {
+        mode: input.spec.cabinMode,
+        execution_status: executionStatus,
+        response_code: businessCode,
+      },
+    })
+
+    return {
+      intent: 'cabin_mode_switch',
+      slots: {
+        ...toolCall.arguments,
+        title,
+        execution_status: executionStatus,
+      },
+      toolCall,
+      reply: ok
+        ? `已为您切换到${title}，请稍候。`
+        : `${title}切换失败，请稍后再试。`,
+      ok,
+      payload,
+      status: response.status,
+    }
+  }
+
   async executeHardwareControl(input: {
     route: CabinHardwareRoute
     logContext?: CabinLogContext
@@ -135,6 +321,11 @@ export class CabinServices {
         toolCall: input.route.toolCall,
         reply: '当前暂时无法连接客舱设备控制服务，请稍后再试。',
       }
+    }
+
+    if (input.route.command === 'seat.tray.close') {
+      const guard = await this.guardTrayClose({ route: input.route, logContext: input.logContext })
+      if (guard) return guard
     }
 
     const url = new URL(`${baseUrl}${input.route.path}`)
@@ -527,7 +718,7 @@ export class CabinServices {
       try {
         // The Path B LLM is a pure NLU: it emits a structured command and never authors
         // hardware confirmations, so its pre-tool text is always suppressed.
-        const { reply, hardwareResult, commandSpec } = await sendPromptToRunnerSocket(
+        const { reply, hardwareResult, commandSpec, statusQuerySpec, modeSwitchSpec } = await sendPromptToRunnerSocket(
           socket,
           prompt,
           replyTimeoutMs,
@@ -546,6 +737,8 @@ export class CabinServices {
             input_chars: input.text.length,
             reply_chars: reply.length,
             command: commandSpec?.command,
+            status_key: statusQuerySpec?.statusKey,
+            mode: modeSwitchSpec?.cabinMode,
             recovered,
           },
         })
@@ -566,6 +759,45 @@ export class CabinServices {
           const clarify = '好的，请您再说得具体一些，我来为您操作。'
           input.onDelta?.(clarify)
           return { reply: clarify }
+        }
+
+        if (statusQuerySpec) {
+          const statusResult = await this.executeHardwareStatusQuery({
+            context: input.context,
+            spec: statusQuerySpec,
+            logContext: input.logContext,
+          })
+          const phrasedReply = statusResult.ok
+            ? await this.phraseHardwareStatusResult({
+              sessionId,
+              context: input.context,
+              userText: input.text,
+              statusResult,
+              timeoutMs: replyTimeoutMs,
+              onDelta: input.onDelta,
+              logContext: input.logContext,
+            })
+            : statusResult.reply
+          return {
+            reply: phrasedReply || statusResult.reply,
+            toolCall: statusResult.toolCall,
+            intent: statusResult.intent,
+            slots: statusResult.slots,
+          }
+        }
+
+        if (modeSwitchSpec) {
+          const result = await this.executeModeSwitch({
+            context: input.context,
+            spec: modeSwitchSpec,
+            logContext: input.logContext,
+          })
+          return {
+            reply: result.reply,
+            toolCall: result.toolCall,
+            intent: result.intent,
+            slots: result.slots,
+          }
         }
 
         if (hardwareResult) {
@@ -653,6 +885,290 @@ export class CabinServices {
       .join('\n')
   }
 
+  private async phraseHardwareStatusResult(input: {
+    sessionId: string
+    context: CabinPassengerContext
+    userText: string
+    statusResult: CabinHardwareStatusResult
+    timeoutMs: number
+    onDelta?: (text: string) => void
+    logContext?: CabinLogContext
+  }): Promise<string> {
+    const runtime = this.options.runtime
+    if (!runtime) return input.statusResult.reply
+    const ready = await runtime.ensureSessionReady(input.sessionId)
+    const socket = await runtime.connectToAttempt(ready.attempt)
+    const start = Date.now()
+    const prompt = formatCabinStatusResultPrompt({
+      context: input.context,
+      userText: input.userText,
+      statusResult: input.statusResult,
+    })
+    const { reply } = await sendPromptToRunnerSocket(
+      socket,
+      prompt,
+      input.timeoutMs,
+      input.onDelta,
+      false,
+    )
+    this.logOutbound({
+      ...input.logContext,
+      upstream: 'moss-session-status-reply',
+      method: 'SOCKET',
+      endpoint: input.sessionId,
+      ok: true,
+      elapsedMs: Date.now() - start,
+      model: this.options.config.llmModel,
+      details: {
+        input_chars: input.userText.length,
+        reply_chars: reply.length,
+        status_key: input.statusResult.toolCall.arguments.status_key,
+      },
+    })
+    return reply.trim() || input.statusResult.reply
+  }
+
+  private async fetchHardwareStatus(input: {
+    target: string
+    key: CabinHardwareStatusKey
+    toolCall?: CabinToolCall
+    logContext?: CabinLogContext
+  }): Promise<CabinHardwareStatusResult> {
+    const baseUrl = this.options.config.controlBaseUrl?.replace(/\/+$/, '')
+    const toolCall = input.toolCall || buildHardwareStatusToolCallFromTarget(input.target, input.key)
+    if (!baseUrl) {
+      return {
+        intent: 'hardware_status_query',
+        slots: { ...toolCall.arguments, execution_status: 'failed' },
+        toolCall,
+        reply: '当前暂时无法获取客舱设备状态，请稍后再试。',
+        ok: false,
+        payload: null,
+      }
+    }
+    const url = new URL(`${baseUrl}/admin-api/tcp/hardware/status`)
+    url.searchParams.set('target', input.target)
+    url.searchParams.set('key', input.key)
+
+    const start = Date.now()
+    let response: Response
+    let bodyText = ''
+    try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), this.options.config.controlTimeoutMs ?? 10_000)
+      try {
+        response = await this.fetchImpl(url, {
+          method: 'GET',
+          headers: this.options.config.controlAuth
+            ? { authorization: this.options.config.controlAuth }
+            : undefined,
+          signal: controller.signal,
+        })
+        bodyText = await response.text()
+      } finally {
+        clearTimeout(timeout)
+      }
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'hardware-status',
+        method: 'GET',
+        url: url.toString(),
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: { key: input.key, target: input.target },
+      })
+      return {
+        intent: 'hardware_status_query',
+        slots: { ...toolCall.arguments, execution_status: 'failed' },
+        toolCall,
+        reply: '当前暂时无法获取客舱设备状态，请稍后再试。',
+        ok: false,
+        payload: null,
+      }
+    }
+
+    const payload = parseJsonPayload(bodyText)
+    const businessCode = payload && typeof payload === 'object' && 'code' in payload
+      ? (payload as { code?: unknown }).code
+      : undefined
+    const ok = response.ok && (businessCode === 0 || businessCode === '0')
+    const data = extractHardwareStatusData(payload)
+    this.logOutbound({
+      ...input.logContext,
+      upstream: 'hardware-status',
+      method: 'GET',
+      url: url.toString(),
+      status: response.status,
+      ok,
+      elapsedMs: Date.now() - start,
+      details: {
+        key: input.key,
+        target: input.target,
+        response_code: businessCode,
+      },
+    })
+    return {
+      intent: 'hardware_status_query',
+      slots: {
+        ...toolCall.arguments,
+        execution_status: ok ? 'succeeded' : 'failed',
+        status_data: data,
+        last_update_time: extractHardwareStatusLastUpdateTime(payload),
+      },
+      toolCall,
+      reply: ok ? formatHardwareStatusReply(input.key, data) : '当前暂时无法获取客舱设备状态，请稍后再试。',
+      ok,
+      payload,
+      status: response.status,
+    }
+  }
+
+  private async guardTrayClose(input: {
+    route: CabinHardwareRoute
+    logContext?: CabinLogContext
+  }): Promise<{ intent: string; slots: Record<string, unknown>; toolCall: CabinToolCall; reply: string } | null> {
+    const seatNo = String(input.route.params.seatNo || '')
+    if (!seatNo) return null
+    const status = await this.fetchHardwareStatus({
+      target: seatNo,
+      key: 'tray',
+      logContext: input.logContext,
+    })
+    if (!status.ok) {
+      return {
+        intent: input.route.intent,
+        slots: {
+          ...input.route.slots,
+          execution_status: 'blocked',
+          blocked_reason: 'tray_status_unavailable',
+        },
+        toolCall: input.route.toolCall,
+        reply: '当前暂时无法确认小桌板状态，不能关闭，请稍后再试或联系乘务员。',
+      }
+    }
+    const data = extractHardwareStatusData(status.payload)
+    if (!isTrayUnfolded(data)) return null
+
+    const message = `${seatNo} 小桌板未折叠，无法关闭`
+    const store = this.options.store as unknown as {
+      createAlert?: (input: {
+        aircraftNo?: string | null
+        flightId: string
+        flightDate?: string | null
+        phaseName: string
+        seatNo?: string | null
+        alertType: string
+        severity?: 'info' | 'warning' | 'critical'
+        message: string
+        details?: Record<string, unknown> | null
+      }) => unknown
+    }
+    if (typeof store.createAlert === 'function') {
+      try {
+        store.createAlert({
+          aircraftNo: null,
+          flightId: input.logContext?.flightId || 'unknown',
+          flightDate: null,
+          phaseName: 'passenger_chat',
+          seatNo,
+          alertType: 'TRAY_NOT_FOLDED',
+          severity: 'warning',
+          message,
+          details: {
+            reason: 'tray_flipped_true',
+            tray: data,
+          },
+        })
+      } catch (error) {
+        this.logOutbound({
+          ...input.logContext,
+          upstream: 'cabin-alert',
+          method: 'CREATE',
+          ok: false,
+          elapsedMs: 0,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          details: { alert_type: 'TRAY_NOT_FOLDED' },
+        })
+      }
+    }
+    await this.sendTrayNotFoldedBroadcast({
+      aircraftNo: String(input.route.slots.aircraft_no || input.route.slots.aircraft_id || ''),
+      seatNo,
+      logContext: input.logContext,
+      tray: data,
+    })
+
+    return {
+      intent: input.route.intent,
+      slots: {
+        ...input.route.slots,
+        execution_status: 'blocked',
+        blocked_reason: 'tray_not_folded',
+        status_data: data,
+      },
+      toolCall: input.route.toolCall,
+      reply: '当前小桌板仍处于展开状态，请先将桌板折叠后再关闭。',
+    }
+  }
+
+  private async sendTrayNotFoldedBroadcast(input: {
+    aircraftNo: string
+    seatNo: string
+    logContext?: CabinLogContext
+    tray: Record<string, unknown>
+  }): Promise<void> {
+    const baseUrl = (this.options.config.broadcastApiBaseUrl || this.options.config.controlBaseUrl)?.replace(/\/+$/, '')
+    const aircraftNo = input.aircraftNo || this.options.config.aircraftNo || ''
+    if (!baseUrl || !aircraftNo || this.options.config.broadcastEnabled === false) return
+    const url = `${baseUrl}/admin-api/cabin/broadcast/error-seat`
+    const start = Date.now()
+    try {
+      const response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.options.config.broadcastApiKey
+            ? { 'x-hardware-api-key': this.options.config.broadcastApiKey }
+            : {}),
+          ...(this.options.config.broadcastAuth || this.options.config.controlAuth
+            ? { authorization: this.options.config.broadcastAuth || this.options.config.controlAuth! }
+            : {}),
+        },
+        body: JSON.stringify({
+          aircraftNo,
+          seatNo: input.seatNo,
+          title: '小桌板未折叠',
+          content: '小桌板仍处于展开状态，请先折叠后再关闭。',
+          contentEN: 'The tray table is still unfolded. Please fold it before closing.',
+        }),
+      })
+      const payload = parseJsonPayload(await response.text())
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'cabin-alert-broadcast',
+        method: 'POST',
+        url,
+        status: response.status,
+        ok: response.ok,
+        elapsedMs: Date.now() - start,
+        details: { alert_type: 'TRAY_NOT_FOLDED', tray: input.tray, response: payload },
+      })
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'cabin-alert-broadcast',
+        method: 'POST',
+        url,
+        ok: false,
+        elapsedMs: Date.now() - start,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        details: { alert_type: 'TRAY_NOT_FOLDED', tray: input.tray },
+      })
+    }
+  }
+
   private logOutbound(event: CabinLogContext & {
     upstream: string
     method: string
@@ -715,8 +1231,70 @@ function buildSeatToolArguments(context: CabinPassengerContext): Record<string, 
     seat_side: context.columnNo || '',
     flight_seat_id: context.flightSeatId || '',
     aircraft_seat_id: context.aircraftSeatId || '',
+    aircraft_id: context.aircraftId || '',
+    aircraft_no: context.aircraftNo || '',
   }
 }
+
+function buildHardwareStatusToolCall(context: CabinPassengerContext, spec: CabinHardwareStatusSpec): CabinToolCall {
+  const seatContext = buildSeatToolArguments(context)
+  return {
+    id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+    name: 'cabin.hardware.status',
+    arguments: {
+      ...seatContext,
+      target_type: spec.targetType,
+      status_key: spec.statusKey,
+      target: spec.targetType === 'cabin' ? 'cabin' : context.seatId || '',
+    },
+  }
+}
+
+function buildHardwareStatusToolCallFromTarget(target: string, key: CabinHardwareStatusKey): CabinToolCall {
+  return {
+    id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+    name: 'cabin.hardware.status',
+    arguments: {
+      target,
+      status_key: key,
+    },
+  }
+}
+
+function buildModeSwitchToolCall(context: CabinPassengerContext, spec: CabinModeSwitchSpec): CabinToolCall {
+  const seatContext = buildSeatToolArguments(context)
+  const title = spec.title || CABIN_MODE_LABELS[spec.cabinMode]
+  return {
+    id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+    name: 'cabin.mode.switch',
+    arguments: {
+      ...seatContext,
+      mode: spec.cabinMode,
+      title,
+      aircraftNo: context.aircraftNo || context.aircraftId || '',
+      seatNo: context.seatId || '',
+    },
+  }
+}
+
+const CABIN_STATUS_KEYS = new Set<CabinHardwareStatusKey>([
+  'posture',
+  'tray',
+  'safety',
+  'comfort',
+  'reading_light',
+  'glass_state',
+  'ceiling_state',
+])
+
+const CABIN_MODE_LABELS: Record<CabinMode, string> = {
+  office: '办公模式',
+  relax: '放松模式',
+  sleep: '睡眠模式',
+  personal: '个人模式',
+}
+
+const CABIN_MODES = new Set<CabinMode>(['office', 'relax', 'sleep', 'personal'])
 
 type HardwareRouteInput = {
   intent: string
@@ -973,10 +1551,11 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
   const text = userText.toLowerCase()
   const seatNo = context.seatId || ''
   if (!seatNo) return null
+  if (isHardwareStatusQuestion(text)) return null
 
   const route = (input: HardwareRouteInput): CabinHardwareRoute => makeHardwareRoute(context, input)
 
-  if (hasAnyText(text, ['小桌板', '桌板', '餐桌板', 'tray'])) {
+  if (hasAnyText(text, ['小桌板', '桌板', '餐桌板', '小桌版', '桌版', 'tray'])) {
     if (hasAnyText(text, ['关闭', '关上', '合上', '收起', '收好', 'close'])) {
       return route({
         intent: 'tray_close',
@@ -1181,6 +1760,32 @@ function hasAnyText(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word.toLowerCase()))
 }
 
+function isHardwareStatusQuestion(text: string): boolean {
+  const mentionsHardware = hasAnyText(text, [
+    '小桌板',
+    '桌板',
+    '小桌版',
+    '桌版',
+    'tray',
+    '座椅',
+    '靠背',
+    '坐垫',
+    'seat',
+    '阅读灯',
+    '读书灯',
+    '顶灯',
+    '客舱灯',
+    '通风',
+    '加热',
+    '按摩',
+  ])
+  if (!mentionsHardware) return false
+  const isQuestion = /(?:当前|现在|目前|状态|多少|几档|几度|是不是|是否|有没有|开着吗|关着吗|开了吗|关了吗|打开了吗|关闭了吗|收好了吗|归位了吗|展开了吗|折叠了吗|了吗|吗|？|\?)/u.test(text)
+  if (!isQuestion) return false
+  const explicitRequest = /(?:帮我|给我|替我|麻烦|需要我|是否需要|请(?:帮|给|把)?).*(?:打开|开启|关闭|关掉|合上|收起|展开|放倒|后仰|调直|归位|调|启动|停止)|(?:打开|开启|关闭|关掉|合上|收起|展开|放倒|后仰|调直|归位|启动|停止).*(?:一下|吧|可以吗|好吗)$/u.test(text)
+  return !explicitRequest
+}
+
 function extractPercentValue(text: string): number | null {
   const percentMatch = text.match(/(\d{1,3})\s*(?:%|％|百分之)/)
   if (percentMatch) return clampInt(Number.parseInt(percentMatch[1], 10), 0, 100)
@@ -1324,6 +1929,52 @@ function parseJsonPayload(text: string): unknown {
   }
 }
 
+function extractHardwareStatusData(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {}
+  const data = (payload as { data?: unknown }).data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+  const nested = (data as { data?: unknown }).data
+  return nested && typeof nested === 'object' && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : {}
+}
+
+function extractHardwareStatusLastUpdateTime(payload: unknown): number | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const data = (payload as { data?: unknown }).data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  const value = (data as { lastUpdateTime?: unknown }).lastUpdateTime
+  return typeof value === 'number' ? value : null
+}
+
+function isTruthyStatusFlag(value: unknown): boolean {
+  if (value === true) return true
+  if (typeof value === 'number') return value !== 0
+  if (typeof value !== 'string') return false
+  return /^(true|1|yes|on|open|opened|展开)$/i.test(value.trim())
+}
+
+function isTrayUnfolded(data: Record<string, unknown>): boolean {
+  return isTruthyStatusFlag(data.tray_flipped)
+}
+
+function formatHardwareStatusReply(key: CabinHardwareStatusKey, data: Record<string, unknown>): string {
+  if (key === 'posture' && data.position !== undefined) {
+    return `当前座椅角度约为 ${data.position}%。`
+  }
+  if (key === 'tray') {
+    const flipped = isTrayUnfolded(data) ? '展开' : '折叠'
+    const state = data.tray_state === 'closed' ? '关闭' : data.tray_state === 'opened' ? '打开' : '未知'
+    return `当前小桌板处于${state}状态，桌板为${flipped}状态。`
+  }
+  if (key === 'reading_light' && data.on !== undefined) {
+    return `当前阅读灯为${isTruthyStatusFlag(data.on) ? '开启' : '关闭'}状态。`
+  }
+  return Object.keys(data).length
+    ? `当前设备状态为：${JSON.stringify(data)}。`
+    : '当前暂未获取到该设备的详细状态。'
+}
+
 // Thrown when the runner socket produces no `result` within the reply window — the
 // primary detector for a "fake-dead" session (TCP up, scode stalled). A dedicated type
 // lets recovery classification key off `instanceof` instead of fragile message matching.
@@ -1405,8 +2056,10 @@ function isHardwareTemplateReply(message: CabinMessage): boolean {
 
 function formatCabinSessionPrompt(context: CabinPassengerContext, text: string, historyBlock = ''): string {
   const lines = [
-    '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧；硬件控制的 seat-no 必须原样使用 cabin_context.seat_no 或 seat_id。',
-    '硬件控制规则：任何涉及座椅/靠背/坐垫/桌板/阅读灯/顶灯/通风/加热/按摩/场景/生理检测的控制请求，你只负责调用 cabin-hardware-control 技能来"发出指令"，由服务端真正执行硬件并撰写回复。',
+    '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧；seat-no 必须原样使用 cabin_context.seat_no 或 seat_id。',
+    '硬件控制规则：乘客要求控制座椅/靠背/坐垫/桌板/阅读灯/顶灯/通风/加热/按摩/场景/生理检测时，你只负责调用 cabin-hardware-control 技能来"发出指令"，由服务端真正执行硬件并撰写回复。',
+    '硬件状态查询规则：乘客询问设备当前状态、角度、档位、是否打开/关闭/收好/展开时，调用 cabin-hardware-status-query 技能发射查询，不要改成控制命令。',
+    '客舱模式切换规则：乘客要求切换办公/放松/睡眠/个人模式时，调用 cabin-mode-switch 技能发射业务模式，不要走 cabin.scene 硬件场景命令。',
     '严禁你自己撰写任何面向乘客的执行结果或确认话术（如"已打开/已关闭/已完成/已调好/已下发…指令/正在为您调节"等）——这些一律由服务端根据真实下发结果生成，你不要输出。',
     '若判断无需控制硬件（闲聊、咨询），可正常回答，但绝不能声称对任何设备做了操作。',
   ]
@@ -1418,6 +2071,21 @@ function formatCabinSessionPrompt(context: CabinPassengerContext, text: string, 
   lines.push('用户消息：')
   lines.push(text)
   return lines.join('\n')
+}
+
+function formatCabinStatusResultPrompt(input: {
+  context: CabinPassengerContext
+  userText: string
+  statusResult: CabinHardwareStatusResult
+}): string {
+  return [
+    '系统上下文：以下是服务端刚刚从真实硬件状态接口获取的结果。',
+    '请基于 hardware_status_result 中的真实字段，用客舱乘务员口吻简短回复乘客。',
+    '不得编造未提供字段，不得调用任何技能或工具，不得输出接口名、JSON 或内部链路。',
+    `cabin_context=${JSON.stringify(buildPromptContext(input.context))}`,
+    `用户原始问题=${JSON.stringify(input.userText)}`,
+    `hardware_status_result=${JSON.stringify(input.statusResult.payload)}`,
+  ].join('\n')
 }
 
 function formatUserMessage(text: string): string {
@@ -1516,6 +2184,14 @@ type HardwareCommandSpec = {
   seatNo?: string
 }
 
+type RunnerSocketResult = {
+  reply: string
+  hardwareResult: HardwareToolResult | null
+  commandSpec: HardwareCommandSpec | null
+  statusQuerySpec: CabinHardwareStatusSpec | null
+  modeSwitchSpec: CabinModeSwitchSpec | null
+}
+
 // cabin-control.mjs (emit mode) prints `{ ok, mode:'emit', command, seat_no, params }`
 // WITHOUT calling hardware. The server parses this structured command and performs the
 // dispatch itself, so the LLM only ever selects a command — it never executes or authors
@@ -1523,6 +2199,22 @@ type HardwareCommandSpec = {
 export function extractHardwareCommandSpec(line: string): HardwareCommandSpec | null {
   for (const text of collectToolResultTexts(line)) {
     const spec = parseHardwareCommandPayload(text)
+    if (spec) return spec
+  }
+  return null
+}
+
+export function extractHardwareStatusQuerySpec(line: string): CabinHardwareStatusSpec | null {
+  for (const text of collectToolResultTexts(line)) {
+    const spec = parseHardwareStatusQueryPayload(text)
+    if (spec) return spec
+  }
+  return null
+}
+
+export function extractModeSwitchSpec(line: string): CabinModeSwitchSpec | null {
+  for (const text of collectToolResultTexts(line)) {
+    const spec = parseModeSwitchPayload(text)
     if (spec) return spec
   }
   return null
@@ -1556,6 +2248,46 @@ function parseHardwareCommandPayload(text: string): HardwareCommandSpec | null {
   return null
 }
 
+function parseHardwareStatusQueryPayload(text: string): CabinHardwareStatusSpec | null {
+  for (const candidate of text.split(/\r?\n/)) {
+    const trimmed = candidate.trim()
+    if (!trimmed.startsWith('{')) continue
+    let obj: { mode?: unknown; target_type?: unknown; targetType?: unknown; status_key?: unknown; key?: unknown }
+    try {
+      obj = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (obj.mode !== 'status_query') continue
+    const targetType = normalizeStatusTarget(obj.target_type ?? obj.targetType)
+    const statusKey = normalizeStatusKey(obj.status_key ?? obj.key)
+    if (!targetType || !statusKey) continue
+    return { targetType, statusKey }
+  }
+  return null
+}
+
+function parseModeSwitchPayload(text: string): CabinModeSwitchSpec | null {
+  for (const candidate of text.split(/\r?\n/)) {
+    const trimmed = candidate.trim()
+    if (!trimmed.startsWith('{')) continue
+    let obj: { mode?: unknown; cabin_mode?: unknown; cabinMode?: unknown; title?: unknown }
+    try {
+      obj = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (obj.mode !== 'mode_switch') continue
+    const cabinMode = normalizeCabinMode(obj.cabin_mode ?? obj.cabinMode)
+    if (!cabinMode) continue
+    return {
+      cabinMode,
+      title: typeof obj.title === 'string' && obj.title.trim() ? obj.title.trim() : undefined,
+    }
+  }
+  return null
+}
+
 // The Path B model emits the skill call, the bash tool_use, and its narration in a
 // single assistant turn without waiting for the tool to run, so cabin-control.mjs's
 // emit-JSON stdout is never surfaced as a tool_result. The command line itself, however,
@@ -1563,13 +2295,37 @@ function parseHardwareCommandPayload(text: string): HardwareCommandSpec | null {
 // structured command straight from there so the emit hop never depends on the model
 // yielding control for tool execution.
 export function extractHardwareCommandFromToolUse(line: string): HardwareCommandSpec | null {
+  for (const shellCommand of collectShellToolUseCommands(line)) {
+    const spec = parseHardwareCommandFromShell(shellCommand)
+    if (spec) return spec
+  }
+  return null
+}
+
+export function extractHardwareStatusQueryFromToolUse(line: string): CabinHardwareStatusSpec | null {
+  for (const shellCommand of collectShellToolUseCommands(line)) {
+    const spec = parseHardwareStatusQueryFromShell(shellCommand)
+    if (spec) return spec
+  }
+  return null
+}
+
+export function extractModeSwitchFromToolUse(line: string): CabinModeSwitchSpec | null {
+  for (const shellCommand of collectShellToolUseCommands(line)) {
+    const spec = parseModeSwitchFromShell(shellCommand)
+    if (spec) return spec
+  }
+  return null
+}
+
+function collectShellToolUseCommands(line: string): string[] {
   let parsed: unknown
   try {
     parsed = JSON.parse(line)
   } catch {
-    return null
+    return []
   }
-  if (!parsed || typeof parsed !== 'object') return null
+  if (!parsed || typeof parsed !== 'object') return []
   const event = parsed as {
     type?: string
     name?: string
@@ -1587,15 +2343,65 @@ export function extractHardwareCommandFromToolUse(line: string): HardwareCommand
       }
     }
   }
+  const shellCommands: string[] = []
   for (const candidate of candidates) {
     const name = String(candidate.name ?? '').toLowerCase()
     if (name !== 'bash' && name !== 'shell') continue
     const shellCommand = extractShellCommand(candidate.input)
     if (!shellCommand) continue
-    const spec = parseHardwareCommandFromShell(shellCommand)
-    if (spec) return spec
+    shellCommands.push(shellCommand)
   }
+  return shellCommands
+}
+
+function normalizeStatusTarget(raw: unknown): CabinHardwareStatusTarget | null {
+  const value = String(raw || '').trim().toLowerCase().replace(/-/g, '_')
+  if (value === 'seat' || value === 'passenger_seat') return 'seat'
+  if (value === 'cabin') return 'cabin'
   return null
+}
+
+function normalizeStatusKey(raw: unknown): CabinHardwareStatusKey | null {
+  const value = String(raw || '').trim().toLowerCase().replace(/-/g, '_')
+  if (CABIN_STATUS_KEYS.has(value as CabinHardwareStatusKey)) return value as CabinHardwareStatusKey
+  const aliases: Record<string, CabinHardwareStatusKey> = {
+    seat: 'posture',
+    seat_angle: 'posture',
+    angle: 'posture',
+    cushion: 'posture',
+    tray_table: 'tray',
+    table: 'tray',
+    light: 'reading_light',
+    reading_light_state: 'reading_light',
+    ceiling: 'ceiling_state',
+    ceiling_light: 'ceiling_state',
+    glass: 'glass_state',
+  }
+  return aliases[value] || null
+}
+
+function normalizeCabinMode(raw: unknown): CabinMode | null {
+  const value = String(raw || '').trim().toLowerCase().replace(/-/g, '_')
+  if (CABIN_MODES.has(value as CabinMode)) return value as CabinMode
+  const aliases: Record<string, CabinMode> = {
+    work: 'office',
+    working: 'office',
+    办公: 'office',
+    工作: 'office',
+    relax_mode: 'relax',
+    rest: 'relax',
+    放松: 'relax',
+    休闲: 'relax',
+    sleep_mode: 'sleep',
+    night: 'sleep',
+    睡眠: 'sleep',
+    睡觉: 'sleep',
+    personal_mode: 'personal',
+    individual: 'personal',
+    个人: 'personal',
+    私人: 'personal',
+  }
+  return aliases[value] || null
 }
 
 function extractShellCommand(input: unknown): string | null {
@@ -1660,6 +2466,44 @@ function parseHardwareCommandFromShell(command: string): HardwareCommandSpec | n
   return { command: command_, params, seatNo }
 }
 
+function parseHardwareStatusQueryFromShell(command: string): CabinHardwareStatusSpec | null {
+  if (!command.includes('cabin-status')) return null
+  const flags = parseShellFlagRecord(command)
+  const targetType = normalizeStatusTarget(flags['target-type'] ?? flags.target)
+  const statusKey = normalizeStatusKey(flags['status-key'] ?? flags.key)
+  if (!targetType || !statusKey) return null
+  return { targetType, statusKey }
+}
+
+function parseModeSwitchFromShell(command: string): CabinModeSwitchSpec | null {
+  if (!command.includes('cabin-mode')) return null
+  const flags = parseShellFlagRecord(command)
+  const cabinMode = normalizeCabinMode(flags.mode ?? flags['cabin-mode'])
+  if (!cabinMode) return null
+  return {
+    cabinMode,
+    title: typeof flags.title === 'string' && flags.title.trim() ? flags.title.trim() : undefined,
+  }
+}
+
+function parseShellFlagRecord(command: string): Record<string, string | boolean> {
+  const tokens = tokenizeShellFlags(command)
+  const flags: Record<string, string | boolean> = {}
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    if (!token.startsWith('--')) continue
+    const key = token.slice(2)
+    const next = tokens[i + 1]
+    if (next === undefined || next.startsWith('--')) {
+      flags[key] = true
+    } else {
+      flags[key] = next
+      i += 1
+    }
+  }
+  return flags
+}
+
 function parseHardwareResultPayload(text: string): HardwareToolResult | null {
   for (const candidate of text.split(/\r?\n/)) {
     const trimmed = candidate.trim()
@@ -1690,7 +2534,33 @@ function parseHardwareResultPayload(text: string): HardwareToolResult | null {
 }
 
 export function isCabinHardwareRequest(text: string): boolean {
-  return /小桌板|桌板|tray|灯|light|顶灯|座椅|靠背|坐垫|通风|加热|按摩|seat|温度|temperature|空调|air\s*condition|场景|scene|生理|健康|采集/i.test(text)
+  return /小桌板|桌板|小桌版|桌版|tray|灯|light|顶灯|座椅|靠背|坐垫|通风|加热|按摩|seat|温度|temperature|空调|air\s*condition|场景|scene|生理|健康|采集/i.test(text)
+}
+
+export function buildCabinComfortOffer(input: {
+  context?: CabinPassengerContext
+  text: string
+}): string | null {
+  const text = input.text.trim().toLowerCase()
+  if (!text) return null
+  if (/聊天|聊聊|讲|故事|笑话|wifi|航班|座位号|谢谢|你好|hello|hi/i.test(text)) return null
+  if (/(?:打开|开启|关闭|关掉|合上|收起|展开|放倒|后仰|调直|归位|调到|调成|开到|启动|停止|切换|清除|帮我|给我|替我|麻烦|请)/u.test(text)) {
+    return null
+  }
+
+  let reply = ''
+  if (/困|累|想睡|睡会|睡觉|眯一会|疲惫|休息/u.test(text)) {
+    reply = '您辛苦了，需要我为您把座椅放倒到休息角度吗？'
+  } else if (/冷|凉|冻/u.test(text)) {
+    reply = '好的，需要我为您开启座椅加热吗？'
+  } else if (/热|闷|气闷|不透气/u.test(text)) {
+    reply = '好的，需要我为您开启座椅通风吗？'
+  } else if (/腰酸|背疼|腰疼|背酸|肩颈|酸痛|坐久/u.test(text)) {
+    reply = '久坐辛苦了，需要我为您开启座椅按摩吗？'
+  } else {
+    return null
+  }
+  return addPassengerSalutation(reply, input.context)
 }
 
 // A bare passenger confirmation ("好/可以/行/嗯") that carries no concrete action or
@@ -1730,7 +2600,7 @@ function buildDispatchedHardwareReply(text: string): string {
     if (/打开|开启|open|on/i.test(text)) return `已为您下发打开${lightLabel}的指令，请稍候。`
     return `已为您下发${lightLabel}控制指令，请稍候。`
   }
-  if (/小桌板|桌板|tray/i.test(text)) {
+  if (/小桌板|桌板|小桌版|桌版|tray/i.test(text)) {
     if (/关闭|关上|合上|收起|close/i.test(text)) {
       return '已为您下发关闭小桌板的指令，请稍候。'
     }
@@ -1742,11 +2612,11 @@ function buildDispatchedHardwareReply(text: string): string {
   if (/顶灯|客舱灯|ceiling|cabin light/i.test(text)) {
     return '已为您下发客舱灯光控制指令，请稍候。'
   }
-  if (/场景|scene|登机|巡航|休息|睡眠/i.test(text)) {
-    return '已为您下发客舱场景控制指令，请稍候。'
-  }
   if (/座椅|靠背|坐垫|通风|加热|按摩|seat|ventilation|heating|massage/i.test(text)) {
     return '已为您下发座椅控制指令，请稍候。'
+  }
+  if (/场景|scene|登机|巡航|休息|睡眠/i.test(text)) {
+    return '已为您下发客舱场景控制指令，请稍候。'
   }
   if (/生理|健康|采集|health/i.test(text)) {
     return '已为您下发生理检测控制指令，请稍候。'
@@ -1877,7 +2747,7 @@ function sanitizeInternalCapabilityText(text: string): string {
     .split(/\n{2,}/)
     .map(part => part.trim())
     .filter(Boolean)
-    .filter(part => !/(?:技能|工具|接口|功能范围|硬件控制|内部|配置|token|cabin-hardware-control)/i.test(part))
+    .filter(part => !/(?:技能|工具|接口|功能范围|硬件控制|内部|配置|token|cabin-hardware-control|cabin-hardware-status-query|cabin-mode-switch)/i.test(part))
     .join('\n\n')
     .trim()
 }
@@ -1929,13 +2799,15 @@ function sendPromptToRunnerSocket(
   timeoutMs: number,
   onDelta?: (text: string) => void,
   suppressPreToolText = false,
-): Promise<{ reply: string; hardwareResult: HardwareToolResult | null; commandSpec: HardwareCommandSpec | null }> {
+): Promise<RunnerSocketResult> {
   return new Promise((resolve, reject) => {
     let settled = false
     let assistantText = ''
     let pendingText = ''
     let hardwareResult: HardwareToolResult | null = null
     let commandSpec: HardwareCommandSpec | null = null
+    let statusQuerySpec: CabinHardwareStatusSpec | null = null
+    let modeSwitchSpec: CabinModeSwitchSpec | null = null
     let releasedDeltas = !suppressPreToolText
     const rl = createInterface({ input: socket })
 
@@ -1991,6 +2863,14 @@ function sendPromptToRunnerSocket(
       if (emittedSpec) commandSpec = emittedSpec
       const spec = extractHardwareCommandSpec(message.line)
       if (spec) commandSpec = spec
+      const emittedStatusSpec = extractHardwareStatusQueryFromToolUse(message.line)
+      if (emittedStatusSpec) statusQuerySpec = emittedStatusSpec
+      const statusSpec = extractHardwareStatusQuerySpec(message.line)
+      if (statusSpec) statusQuerySpec = statusSpec
+      const emittedModeSpec = extractModeSwitchFromToolUse(message.line)
+      if (emittedModeSpec) modeSwitchSpec = emittedModeSpec
+      const modeSpec = extractModeSwitchSpec(message.line)
+      if (modeSpec) modeSwitchSpec = modeSpec
 
       try {
         const inner = JSON.parse(message.line) as { type?: string; status?: string; input?: unknown }
@@ -2000,17 +2880,16 @@ function sendPromptToRunnerSocket(
           // A chat turn where the model merely pokes the Skill without emitting a command
           // must keep its reply text intact; resetting on any string-input tool_use here
           // truncated legitimate chat replies.
-          if (suppressPreToolText && commandSpec) {
+          if (suppressPreToolText && (commandSpec || statusQuerySpec || modeSwitchSpec)) {
             pendingText = ''
           }
         }
         if (inner.type === 'result') {
           if (inner.status === 'success') {
             if (suppressPreToolText) {
-              if (commandSpec) {
-                // A structured command was emitted. The server executes the hardware
-                // dispatch and authors the confirmation from the real outcome, so no
-                // model-authored text is surfaced here. The caller owns the reply.
+              if (commandSpec || statusQuerySpec || modeSwitchSpec) {
+                // A structured tool was emitted. The server performs the business call
+                // and owns the passenger-facing reply.
                 assistantText = ''
               } else if (hardwareResult) {
                 // Execute-mode subprocess performed the HTTP call itself; ground the reply
@@ -2031,7 +2910,13 @@ function sendPromptToRunnerSocket(
               assistantText += pendingText
               onDelta?.(pendingText)
             }
-            finish(() => resolve({ reply: assistantText.trim(), hardwareResult, commandSpec }))
+            finish(() => resolve({
+              reply: assistantText.trim(),
+              hardwareResult,
+              commandSpec,
+              statusQuerySpec,
+              modeSwitchSpec,
+            }))
           } else {
             finish(() => reject(new Error(`Moss session result status: ${inner.status || 'unknown'}`)))
           }
