@@ -34,8 +34,8 @@ const enabledFeatures = Object.entries({ ...RECOMMENDED, ...EXPERIMENTAL, ...NAT
 
 const defines = [
   `--define=MACRO.VERSION="2.1.88"`,
-  `--define=MACRO.PACKAGE_URL="@anthropic-ai/claude-code"`,
-  `--define=MACRO.NATIVE_PACKAGE_URL="@anthropic-ai/claude-code"`,
+  `--define=MACRO.PACKAGE_URL="moss"`,
+  `--define=MACRO.NATIVE_PACKAGE_URL="moss"`,
   `--define=MACRO.BUILD_TIME="${new Date().toISOString()}"`,
   `--define=MACRO.FEEDBACK_CHANNEL=""`,
   `--define=MACRO.ISSUES_EXPLAINER=""`,

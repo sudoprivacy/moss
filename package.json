@@ -1,5 +1,5 @@
 {
-  "name": "@anthropic-ai/claude-code",
+  "name": "moss",
   "version": "2.1.88",
   "type": "module",
   "bin": {

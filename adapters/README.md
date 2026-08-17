@@ -1,4 +1,4 @@
-# Claude Code IM Adapters
+# Moss IM Adapters
 
 当前目录只放 IM Adapter 运行时代码。
 
@@ -18,7 +18,7 @@ Desktop Webapp Settings
   -> ~/.claude/adapters.json
   -> adapters/<platform>/index.ts
   -> /api/sessions + /ws/:sessionId
-  -> Claude Code session
+  -> Moss session
 ```
 
 注意两点：

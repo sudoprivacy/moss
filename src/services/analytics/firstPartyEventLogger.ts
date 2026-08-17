@@ -341,7 +341,7 @@ export function initialize1PEventLogging(): void {
   // Build our own resource for 1P event logging with minimal attributes
   const platform = getPlatform()
   const attributes: Record<string, string> = {
-    [ATTR_SERVICE_NAME]: 'claude-code',
+    [ATTR_SERVICE_NAME]: 'moss',
     [ATTR_SERVICE_VERSION]: MACRO.VERSION,
   }
 
