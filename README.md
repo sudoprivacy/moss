@@ -1,6 +1,6 @@
-# Moss - Claude Code Electron UI
+# Moss — AgentHub
 
-Moss 是一个基于 Electron 的桌面客户端，它直接嵌入了 Anthropic 的 Claude Code Agent 逻辑，提供了可视化的聊天界面、工作区文件管理以及生成式 Mini App 的运行环境。
+Moss 是一个多用户 AI coding agent 平台：一个 HTTP/WebSocket 服务端（`moss-server`，端口 43127）加一个 Electron 桌面客户端。每个会话运行 sudocode（`scode`）作为 agent 引擎，并提供可视化的聊天界面、工作区文件管理以及生成式 Mini App 的运行环境。
 
 ## 文档
 
@@ -8,16 +8,14 @@ Moss 是一个基于 Electron 的桌面客户端，它直接嵌入了 Anthropic 
 
 ## 快速启动
 
-### 1. 编译依赖 (重要)
+### 1. 构建服务端
 
-由于程序采用了嵌入式架构，启动前需要先编译 Agent 的核心逻辑：
+启动前先在仓库根目录构建服务端：
 
 ```bash
-# 在仓库根目录执行，生成 electron-direct.mjs 和相关依赖
+# 生成 bin/moss-server.mjs + bin/direct-connect-session-runner.mjs
 bun run build:node
 ```
-
-该命令会将 Agent 的核心逻辑打包成 Electron 可直接加载的模块。
 
 ### 2. 启动 UI
 
@@ -34,10 +32,10 @@ bun run start
 
 ## 开发与部署
 
-### 1. 构建核心 Agent 逻辑
+### 1. 构建服务端
 
 ```bash
-# 生成 electron-direct.mjs 和相关依赖
+# 生成 bin/moss-server.mjs + bin/direct-connect-session-runner.mjs
 bun run build:node
 ```
 

@@ -1,5 +1,5 @@
 /**
- * Claude Code Feature Flags
+ * Moss Feature Flags
  *
  * 用法：在 package.json 的 build 脚本里，把想开启的 feature 加入 --define 参数：
  *   --define 'feature("FEATURE_NAME")=true'
@@ -152,7 +152,7 @@ export const INTERNAL_ONLY = {
   KAIROS_GITHUB_WEBHOOKS: false, // Kairos GitHub Webhook
   KAIROS_PUSH_NOTIFICATION: false, // Kairos 推送
 
-  CCR_AUTO_CONNECT: false,   // Claude Code Remote 自动连接
+  CCR_AUTO_CONNECT: false,   // Moss Remote 自动连接
   CCR_MIRROR: false,         // CCR 镜像模式
   CCR_REMOTE_SETUP: false,   // CCR 远程初始化
 

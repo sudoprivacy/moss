@@ -538,7 +538,7 @@ export class FirstPartyEventLoggingExporter implements LogRecordExporter {
     const baseHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': getClaudeCodeUserAgent(),
-      'x-service-name': 'claude-code',
+      'x-service-name': 'moss',
     }
 
     // Skip auth if trust hasn't been established yet
