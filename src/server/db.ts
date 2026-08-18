@@ -19,6 +19,7 @@ import type {
   SessionSummary,
 } from './types.js'
 import type { SessionRuntimeInfo } from './sessionManager.js'
+import { channelCredentialIdentity } from '../channels/types.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -1755,6 +1756,53 @@ export class DirectConnectStore {
       return this.db.prepare(`SELECT * FROM channel_plugins WHERE user_id = ? ORDER BY created_at DESC`).all(userId) as SqlRow[]
     }
     return this.db.prepare(`SELECT * FROM channel_plugins ORDER BY created_at DESC`).all() as SqlRow[]
+  }
+
+  /**
+   * Find another user in the same org who already configured this channel with the
+   * same bot identity. Used to reject duplicate configurations: two users sharing one
+   * bot credential means the IM platform pushes each message to both connections,
+   * and the chat sees a duplicate reply for every message.
+   *
+   * Only enabled rows reserve an identity: a disabled connection holds no subscription and
+   * therefore causes no duplicates, so it must not block another user (or the same bot being
+   * re-saved after its previous owner turned it off).
+   *
+   * Returns the conflicting owner (id + display name) or null when the identity is free.
+   */
+  findChannelPluginCredentialOwner(params: {
+    type: string
+    identity: string
+    orgId: string | null
+    excludeUserId: string
+  }): { userId: string; name: string } | null {
+    const { type, identity, orgId, excludeUserId } = params
+    if (!identity) return null
+    const rows = this.db.prepare(
+      `SELECT p.user_id AS user_id, p.org_id AS org_id, p.credentials_json AS credentials_json,
+              u.display_name AS display_name, u.name AS name, u.email AS email
+         FROM channel_plugins p
+         LEFT JOIN users u ON u.id = p.user_id
+        WHERE p.type = ? AND p.user_id != ? AND p.enabled = 1`,
+    ).all(type, excludeUserId) as SqlRow[]
+
+    for (const row of rows) {
+      // Only conflict within the same org; rows with no org are treated as global.
+      if (orgId && row.org_id && String(row.org_id) !== orgId) continue
+      const owner = row.user_id ? String(row.user_id) : ''
+      if (!owner) continue
+      if (!row.credentials_json) continue
+      let creds: Record<string, unknown>
+      try {
+        creds = JSON.parse(String(row.credentials_json)) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (channelCredentialIdentity(type, creds) !== identity) continue
+      const name = String(row.display_name || row.name || row.email || owner)
+      return { userId: owner, name }
+    }
+    return null
   }
 
   getChannelPlugin(id: string, userId?: string): SqlRow | null {

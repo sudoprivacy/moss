@@ -10,7 +10,17 @@ import { PluginManager } from '../gateway/PluginManager.js';
 import type { IChannelProvider } from './IChannelProvider.js';
 import type { DirectConnectStore } from '../../server/db.js';
 import type { IChannelPluginConfig, IChannelPluginStatus, PluginType } from '../types.js';
+import { channelCredentialIdentity } from '../types.js';
 import type { PluginMessageHandler } from '../plugins/BasePlugin.js';
+
+/** Human-readable channel names for user-facing errors. */
+const PLUGIN_TYPE_LABELS: Record<string, string> = {
+  telegram: 'Telegram Bot',
+  lark: '飞书 Bot',
+  dingtalk: '钉钉 Bot',
+  wechat: '个人微信 Bot',
+  wecom: '企业微信 Bot',
+};
 
 /**
  * ChannelManager - Full orchestrator for Moss Server
@@ -160,6 +170,27 @@ class ChannelManager {
       if (!effectiveUserId) {
         return { success: false, error: 'userId is required for enterprise mode' };
       }
+
+      // Reject a bot identity another user already connected. Two connections to one bot
+      // make the IM platform deliver every message twice, so the chat sees duplicate replies.
+      const identity = channelCredentialIdentity(pluginType as PluginType, finalCredentials);
+      if (identity) {
+        const effectiveOrgId = orgId || (existing?.org_id ? String(existing.org_id) : null);
+        const conflict = this.db.findChannelPluginCredentialOwner({
+          type: pluginType,
+          identity,
+          orgId: effectiveOrgId,
+          excludeUserId: effectiveUserId,
+        });
+        if (conflict) {
+          const label = PLUGIN_TYPE_LABELS[pluginType] || pluginType;
+          return {
+            success: false,
+            error: `该${label}已被用户「${conflict.name}」配置，无法重复配置。同一个机器人被多个账号连接会导致消息重复回复。请改用其他机器人，或联系「${conflict.name}」取消其配置。`,
+          };
+        }
+      }
+
       this.db.upsertChannelPlugin({
         id: pluginConfig.id,
         type: pluginConfig.type,

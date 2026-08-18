@@ -65,6 +65,34 @@ export function hasPluginCredentials(type: PluginType, credentials?: IPluginCred
 }
 
 /**
+ * Stable identity of the bot/app a credential set points at, ignoring the secret half.
+ *
+ * Two users configuring the same identity means the IM platform pushes every message to
+ * both connections, so the chat sees a duplicate reply per message. Callers use this to
+ * reject the second configuration. Kept beside hasPluginCredentials so both stay in sync
+ * when a platform is added.
+ *
+ * Returns null when the credentials carry no usable identity (nothing to compare).
+ */
+export function channelCredentialIdentity(type: PluginType, credentials?: IPluginCredentials): string | null {
+  if (!credentials) return null;
+  const pick = (value: unknown): string | null => {
+    const str = typeof value === 'string' ? value.trim() : '';
+    return str ? str : null;
+  };
+  // Identify by the bot/app handle, never the secret: rotating a secret must not free
+  // the identity for another user to claim.
+  if (type === 'lark') return pick(credentials.appId);
+  if (type === 'dingtalk') return pick(credentials.clientId);
+  if (type === 'wechat') return pick(credentials.accountId);
+  if (type === 'wecom') return pick(credentials.botId);
+  // Telegram has no separate id; the bot token itself is the identity.
+  if (type === 'telegram') return pick(credentials.token);
+  // Extension plugins: no known identity field, so nothing to compare on.
+  return null;
+}
+
+/**
  * Plugin configuration options
  */
 export interface IPluginConfigOptions {

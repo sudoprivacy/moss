@@ -128,7 +128,7 @@ export class MossActionExecutor {
         await existingLock;
       }
 
-      const lockPromise = this.processMessage(platform, chatId, user, content.text, sendFn, editFn);
+      const lockPromise = this.processMessage(platform, chatId, user, content.text, sendFn, editFn, mossUserId);
       this.conversationLocks.set(lockKey, lockPromise);
 
       try {
@@ -158,6 +158,7 @@ export class MossActionExecutor {
     text: string,
     sendFn: (msg: any) => Promise<string | null>,
     editFn: (msgId: string, msg: any) => Promise<boolean>,
+    mossUserId: string | undefined,
   ): Promise<void> {
     const channelUserKey = `${platform}:${user.id}:${chatId}`;
 
@@ -189,7 +190,7 @@ export class MossActionExecutor {
     if (!channelState || !channelState.socket || channelState.socket.destroyed) {
       // Create new Moss runtime session
       try {
-        channelState = await this.createRuntimeSession(channelUserKey, channelUser, platform, chatId);
+        channelState = await this.createRuntimeSession(channelUserKey, channelUser, platform, chatId, mossUserId);
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to create runtime session:`, error);
         await sendFn({ type: 'text', text: '❌ Failed to create AI session. Please try again.', parseMode: 'HTML' });
@@ -271,7 +272,7 @@ export class MossActionExecutor {
     //   edit the "thinking" message in-place to show the final answer.
     // For platforms that don't (WeChat): send a new message instead.
     if (finalText) {
-      if (platform === 'wechat' || platform === 'wecom') {
+      if (platform === 'wechat') {
         await sendFn({
           type: 'text',
           text: finalText,
@@ -282,8 +283,9 @@ export class MossActionExecutor {
           type: 'text',
           text: finalText,
           parseMode: 'HTML',
-          // replyMarkup signals DingTalk AI card finalization; omit for other platforms
-          ...(platform === 'dingtalk' ? { replyMarkup: {} } : {}),
+          // replyMarkup signals stream/card finalization for DingTalk AI cards and for the
+          // WeCom stream that carried the "thinking" placeholder; omit for other platforms.
+          ...(platform === 'dingtalk' || platform === 'wecom' ? { replyMarkup: {} } : {}),
         }).catch(() => {
           // Edit failed, send as new message
           void sendFn({ type: 'text', text: finalText, parseMode: 'HTML' });
@@ -308,6 +310,7 @@ export class MossActionExecutor {
     channelUser: IChannelUser,
     platform: string,
     chatId: string,
+    ownerUserId: string | undefined,
   ): Promise<ChannelSessionState> {
     console.log(`[MossActionExecutor] Creating runtime session for ${channelUserKey}`);
 
@@ -317,10 +320,14 @@ export class MossActionExecutor {
       existing.socket.destroy();
     }
 
-    // Resolve the Moss platform user (channel plugin owner) so sessions are visible in the management UI
+    // Resolve the Moss platform user (channel plugin owner) so sessions are visible in the
+    // management UI. The owner comes from the receiving plugin instance: channel_plugins is
+    // keyed (id, user_id), so looking up `${platform}_default` without a user_id returns an
+    // arbitrary row and would attribute the session to the wrong user whenever more than one
+    // user has connected this platform.
     const pluginId = `${platform}_default`;
-    const plugin = this.db.getChannelPlugin(pluginId);
-    const mossUserId = plugin ? String(plugin.user_id) : 'channel';
+    const plugin = ownerUserId ? this.db.getChannelPlugin(pluginId, ownerUserId) : null;
+    const mossUserId = ownerUserId || (plugin ? String(plugin.user_id) : 'channel');
     // org_id from plugin, fall back to users table lookup
     let mossOrgId: string | null = plugin?.org_id ? String(plugin.org_id) : null;
     if (!mossOrgId && mossUserId !== 'channel') {
