@@ -766,6 +766,10 @@ export class WeComPlugin extends BasePlugin {
       const chatId = encodeChatId(body);
       if (headers?.req_id) {
         this.reqIdCache.set(chatId, headers.req_id);
+        // Drop the previous turn's stream. Each incoming message opens a new stream, and a
+        // finished (or stale-reqId) session left here would make editMessage bail out and
+        // silently swallow this turn's answer.
+        this.streamSessions.delete(chatId);
       }
 
       // Download and decrypt media files before converting to unified message
