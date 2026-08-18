@@ -1867,7 +1867,10 @@ export function startServer(
         if (req.method === 'POST' && enableMatch) {
           const pluginId = enableMatch[1] || ''
           const body = await readJsonBody(req)
-          writeJson(res, 200, await channelsApi.enablePlugin(auth.orgId, auth.userId, pluginId, body))
+          const enableResult = await channelsApi.enablePlugin(auth.orgId, auth.userId, pluginId, body)
+          // 409 on a duplicate/failed enable so the admin UI surfaces the reason instead of
+          // reporting success; the client only throws on a non-2xx status.
+          writeJson(res, enableResult.ok ? 200 : 409, enableResult)
           return
         }
 

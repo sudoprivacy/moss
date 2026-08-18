@@ -11,13 +11,16 @@ import type { IChannelPluginConfig, PluginStatus, IChannelUser, PluginType, ICha
  * IChannelProvider - Interface for channel data operations
  */
 export interface IChannelProvider {
-  // Plugin management
-  getPlugins(): Promise<IChannelPluginConfig[]>;
-  getPlugin(pluginId: string): Promise<IChannelPluginConfig | null>;
-  upsertPlugin(plugin: IChannelPluginConfig): Promise<boolean>;
+  // Plugin management.
+  // channel_plugins is keyed (id, user_id): one row per user per platform. Pass userId to
+  // address a specific user's connection; omitting it on a multi-user server resolves to an
+  // arbitrary row.
+  getPlugins(userId?: string): Promise<IChannelPluginConfig[]>;
+  getPlugin(pluginId: string, userId?: string): Promise<IChannelPluginConfig | null>;
+  upsertPlugin(plugin: IChannelPluginConfig, userId: string, orgId?: string | null): Promise<boolean>;
   updatePluginStatus(pluginId: string, status: PluginStatus, lastConnected?: number): Promise<boolean>;
-  updatePluginEnabled(pluginId: string, enabled: boolean, status: PluginStatus): Promise<boolean>;
-  deletePlugin(pluginId: string): Promise<boolean>;
+  updatePluginEnabled(pluginId: string, enabled: boolean, status: PluginStatus, userId?: string): Promise<boolean>;
+  deletePlugin(pluginId: string, userId?: string): Promise<boolean>;
 
   // User management
   getUsers(): Promise<IChannelUser[]>;
@@ -40,17 +43,17 @@ export interface IChannelProvider {
 export class LocalChannelProvider implements IChannelProvider {
   constructor(private db: DirectConnectStore) {}
 
-  async getPlugins(): Promise<IChannelPluginConfig[]> {
-    const rows = this.db.listChannelPlugins();
+  async getPlugins(userId?: string): Promise<IChannelPluginConfig[]> {
+    const rows = this.db.listChannelPlugins(userId);
     return rows.map((row) => this.mapPluginRow(row));
   }
 
-  async getPlugin(pluginId: string): Promise<IChannelPluginConfig | null> {
-    const row = this.db.getChannelPlugin(pluginId);
+  async getPlugin(pluginId: string, userId?: string): Promise<IChannelPluginConfig | null> {
+    const row = this.db.getChannelPlugin(pluginId, userId);
     return row ? this.mapPluginRow(row) : null;
   }
 
-  async upsertPlugin(plugin: IChannelPluginConfig): Promise<boolean> {
+  async upsertPlugin(plugin: IChannelPluginConfig, userId: string, orgId?: string | null): Promise<boolean> {
     try {
       this.db.upsertChannelPlugin({
         id: plugin.id,
@@ -61,6 +64,9 @@ export class LocalChannelProvider implements IChannelProvider {
         credentials_json: plugin.credentials ? JSON.stringify(plugin.credentials) : null,
         config_json: plugin.config ? JSON.stringify(plugin.config) : null,
         last_connected: plugin.lastConnected ?? null,
+        // Required: channel_plugins is keyed (id, user_id).
+        user_id: userId,
+        org_id: orgId ?? null,
       });
       return true;
     } catch {
@@ -77,11 +83,11 @@ export class LocalChannelProvider implements IChannelProvider {
     }
   }
 
-  async updatePluginEnabled(pluginId: string, enabled: boolean, status: PluginStatus): Promise<boolean> {
+  async updatePluginEnabled(pluginId: string, enabled: boolean, status: PluginStatus, userId?: string): Promise<boolean> {
     try {
       // Update the plugin with enabled status
-      const existing = this.db.getChannelPlugin(pluginId);
-      if (existing) {
+      const existing = this.db.getChannelPlugin(pluginId, userId);
+      if (existing?.user_id) {
         this.db.upsertChannelPlugin({
           id: pluginId,
           type: String(existing.type),
@@ -91,6 +97,10 @@ export class LocalChannelProvider implements IChannelProvider {
           credentials_json: typeof existing.credentials_json === 'string' ? existing.credentials_json : null,
           config_json: typeof existing.config_json === 'string' ? existing.config_json : null,
           last_connected: typeof existing.last_connected === 'number' ? existing.last_connected : null,
+          // Carry ownership through: the upsert is keyed (id, user_id), so dropping these
+          // would write to a different row than the one just read.
+          user_id: String(existing.user_id),
+          org_id: existing.org_id ? String(existing.org_id) : null,
         });
       }
       return true;
@@ -99,11 +109,11 @@ export class LocalChannelProvider implements IChannelProvider {
     }
   }
 
-  async deletePlugin(pluginId: string): Promise<boolean> {
+  async deletePlugin(pluginId: string, userId?: string): Promise<boolean> {
     try {
       // Disable the plugin first (mark as disabled)
-      const existing = this.db.getChannelPlugin(pluginId);
-      if (existing) {
+      const existing = this.db.getChannelPlugin(pluginId, userId);
+      if (existing?.user_id) {
         this.db.upsertChannelPlugin({
           id: pluginId,
           type: String(existing.type),
@@ -112,6 +122,9 @@ export class LocalChannelProvider implements IChannelProvider {
           status: 'stopped',
           credentials_json: null,
           config_json: null,
+          // Keep ownership so this disables the row that was read, not an arbitrary one.
+          user_id: String(existing.user_id),
+          org_id: existing.org_id ? String(existing.org_id) : null,
         });
       }
       return true;
