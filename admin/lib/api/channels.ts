@@ -26,6 +26,28 @@ export async function enablePlugin(
   return authClient.post<IChannelPluginConfig>(`/api/v1/channels/plugins/${pluginId}/enable`, config)
 }
 
+/** An agent (智能体) an IM channel can be bound to. */
+export interface IChannelAgentOption {
+  name: string
+  displayName: string
+  description?: string
+}
+
+/** Agents this channel may use, plus the connection-level default (null when unset). */
+export async function getPluginAgents(
+  pluginId: string,
+): Promise<{ agents: IChannelAgentOption[]; defaultAgent: string | null }> {
+  return authClient.get(`/api/v1/channels/plugins/${pluginId}/agents`)
+}
+
+/** Set the agent new chats start with, or pass null to clear it. */
+export async function setPluginDefaultAgent(
+  pluginId: string,
+  agentName: string | null,
+): Promise<{ ok: boolean; message?: string }> {
+  return authClient.put(`/api/v1/channels/plugins/${pluginId}/agents/default`, { agentName })
+}
+
 export async function disablePlugin(pluginId: string): Promise<IChannelPluginConfig> {
   return authClient.post<IChannelPluginConfig>(`/api/v1/channels/plugins/${pluginId}/disable`)
 }
