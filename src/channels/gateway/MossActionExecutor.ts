@@ -7,6 +7,7 @@
 import net from 'net';
 import type { RuntimeService } from '../../server/runtimeService.js';
 import type { DirectConnectStore } from '../../server/db.js';
+import type { ChannelAgentResolver, IChannelAgentOption } from './ChannelAgentResolver.js';
 import type { PluginManager } from './PluginManager.js';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { PairingService } from '../pairing/PairingService.js';
@@ -52,18 +53,23 @@ export class MossActionExecutor {
   /** Throttle interval for editMessage (ms) */
   private static readonly EDIT_THROTTLE_MS = 500;
 
+  /** Resolves which agent (智能体) each chat runs as; undefined disables agent switching. */
+  private agentResolver?: ChannelAgentResolver;
+
   constructor(
     pluginManager: PluginManager,
     sessionManager: SessionManager,
     pairingService: PairingService,
     runtime: RuntimeService,
     db: DirectConnectStore,
+    agentResolver?: ChannelAgentResolver,
   ) {
     this.pluginManager = pluginManager;
     this.sessionManager = sessionManager;
     this.pairingService = pairingService;
     this.runtime = runtime;
     this.db = db;
+    this.agentResolver = agentResolver;
   }
 
   /**
@@ -114,7 +120,18 @@ export class MossActionExecutor {
         }
       }
 
-      // 2. Only process text messages for now
+      // 2. Agent (智能体) switching. Handled before the text gate because some platforms
+      //    deliver "/agent ..." as type 'command' rather than 'text'.
+      const commandText = (content.text || '').trim();
+      if (
+        (content.type === 'text' || content.type === 'command') &&
+        /^\/agents?(\s|$)/i.test(commandText)
+      ) {
+        await this.handleAgentCommand(platform, chatId, commandText, sendFn, mossUserId);
+        return;
+      }
+
+      // 3. Only process text messages for now
       if (content.type !== 'text' || !content.text) {
         console.log(`[MossActionExecutor] Skipping non-text message type: ${content.type}`);
         return;
@@ -381,6 +398,26 @@ export class MossActionExecutor {
       }
     }
 
+    // Bind the agent (智能体) this chat is set to. `assistantName` is what RuntimeService
+    // resolves memory_mode / enabledSkills from and signs into the session token, so it must
+    // be the agent's name — not the chat user's display name, which never matches an agent
+    // and silently degrades to a generic session with every skill enabled.
+    let activeAgent: IChannelAgentOption | null = null;
+    if (this.agentResolver) {
+      try {
+        activeAgent = await this.agentResolver.resolveActiveAgent({
+          platform,
+          chatId,
+          ownerUserId: ownerUserId,
+        });
+      } catch (error) {
+        console.warn('[MossActionExecutor] failed to resolve active agent:', error);
+      }
+    }
+    if (activeAgent) {
+      console.log(`[MossActionExecutor] Session for ${channelUserKey} bound to agent ${activeAgent.name}`);
+    }
+
     // Create new Moss runtime session
     const created = await this.runtime.createSession({
       cwd: process.cwd(),
@@ -391,7 +428,9 @@ export class MossActionExecutor {
       scopes: ['sessions:create', 'sessions:attach:any'],
       source: platform,
       channelChatId: chatId,
-      assistantName: displayName,
+      ...(activeAgent
+        ? { assistantName: activeAgent.name, assistantDisplayName: activeAgent.displayName }
+        : { assistantName: displayName }),
     });
 
     const sessionId = created.sessionId;
@@ -610,6 +649,123 @@ export class MossActionExecutor {
   /**
    * Handle pairing flow for unauthorized users
    */
+  /**
+   * Handle "/agents" (list) and "/agent <name>" (switch).
+   *
+   * Switching cannot be applied to a live session: RuntimeService binds the agent at spawn
+   * time (it is baked into the pre-signed session token as `assistant_id`). So a switch
+   * terminates the current session and lets the next message spawn a fresh one bound to the
+   * chosen agent — which means conversation context is lost, and we say so explicitly.
+   */
+  private async handleAgentCommand(
+    platform: string,
+    chatId: string,
+    commandText: string,
+    sendFn: (msg: any) => Promise<string | null>,
+    mossUserId: string | undefined,
+  ): Promise<void> {
+    const send = (text: string) => sendFn({ type: 'text', text, parseMode: 'HTML' });
+
+    if (!this.agentResolver) {
+      await send('当前部署未启用智能体切换。');
+      return;
+    }
+    if (!mossUserId) {
+      await send('无法确定该渠道的归属用户，暂时无法切换智能体。');
+      return;
+    }
+
+    const agents = await this.agentResolver.listAgents(mossUserId);
+    const active = await this.agentResolver.resolveActiveAgent({ platform, chatId, ownerUserId: mossUserId });
+
+    // Everything after the command word is the requested agent name (may contain spaces).
+    const argument = commandText.replace(/^\/agents?/i, '').trim();
+
+    if (!argument) {
+      if (agents.length === 0) {
+        await send('当前没有可用的智能体。');
+        return;
+      }
+      const lines = agents.map((a, i) => {
+        const marker = active && a.name === active.name ? ' ✅' : '';
+        return `${i + 1}. ${a.displayName}${marker}`;
+      });
+      await send(
+        `当前智能体：${active ? active.displayName : '默认（未指定）'}\n\n可用智能体：\n${lines.join('\n')}\n\n发送 /agent <名称> 切换。`,
+      );
+      return;
+    }
+
+    if (argument === 'default' || argument === '默认') {
+      await this.agentResolver.setChatAgent({ platform, chatId, ownerUserId: mossUserId, agentName: null });
+      await this.resetChatSession(platform, chatId, mossUserId);
+      await send('已恢复为默认智能体。⚠️ 新会话已开始，之前的对话上下文不会保留。');
+      return;
+    }
+
+    const matched = this.agentResolver.matchAgent(argument, agents);
+    if (!matched) {
+      const names = agents.map((a) => a.displayName).join('、') || '（无）';
+      await send(`未找到智能体「${argument}」。\n可用：${names}`);
+      return;
+    }
+    if (active && matched.name === active.name) {
+      await send(`当前已经是「${matched.displayName}」，无需切换。`);
+      return;
+    }
+
+    const result = await this.agentResolver.setChatAgent({
+      platform,
+      chatId,
+      ownerUserId: mossUserId,
+      agentName: matched.name,
+    });
+    if (!result.ok) {
+      await send(`切换失败：${result.error}`);
+      return;
+    }
+
+    await this.resetChatSession(platform, chatId, mossUserId);
+    await send(`已切换到「${matched.displayName}」。⚠️ 新会话已开始，之前的对话上下文不会保留。`);
+  }
+
+  /**
+   * Tear down this chat's runtime session so the next message spawns a fresh one bound to
+   * the newly selected agent. Only this chat is affected — other chats on the same
+   * connection keep their own sessions.
+   */
+  private async resetChatSession(
+    platform: string,
+    chatId: string,
+    mossUserId: string,
+  ): Promise<void> {
+    // The in-memory key is built from the IM user, which we do not have here, so drop every
+    // cached entry pointing at this chat on this platform.
+    for (const [key, state] of [...this.channelSessions.entries()]) {
+      if (!key.startsWith(`${platform}:`) || !key.endsWith(`:${chatId}`)) continue;
+      try {
+        state.socket?.destroy();
+      } catch { /* already gone */ }
+      this.channelSessions.delete(key);
+      try {
+        await this.runtime.terminateSession(state.sessionId);
+      } catch (error) {
+        console.warn(`[MossActionExecutor] failed to terminate session ${state.sessionId}:`, error);
+      }
+    }
+
+    // Also end any DB session recorded for this chat, so createRuntimeSession does not
+    // resume it instead of creating one under the new agent.
+    try {
+      const existing = this.db.findChannelSession(platform, chatId, mossUserId);
+      if (existing && ['creating', 'active', 'detached'].includes(existing.status)) {
+        await this.runtime.terminateSession(existing.sessionId);
+      }
+    } catch (error) {
+      console.warn('[MossActionExecutor] failed to end stored channel session:', error);
+    }
+  }
+
   private async handlePairingFlow(
     platform: string,
     user: { id: string; displayName?: string },

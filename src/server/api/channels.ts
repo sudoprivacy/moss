@@ -314,6 +314,81 @@ export function createChannelsApi(db: DirectConnectStore) {
     },
 
     /**
+     * GET /api/v1/channels/plugins/:id/agents
+     *
+     * Agents this connection can use, plus the connection-level default. The roster is
+     * whatever is visible to the requesting user, so it matches what they see elsewhere.
+     */
+    getPluginAgents: async (
+      orgId: string,
+      userId: string,
+      pluginId: string,
+      listAgents: (ownerUserId: string) => Promise<Array<{ name: string; displayName: string; description?: string }>>,
+    ) => {
+      const row = db.getChannelPlugin(pluginId, userId)
+      let defaultAgent: string | null = null
+      if (row?.config_json) {
+        try {
+          const cfg = JSON.parse(String(row.config_json))
+          const name = cfg?.agent?.name
+          if (typeof name === 'string' && name) defaultAgent = name
+        } catch { /* treat as unset */ }
+      }
+      const agents = await listAgents(userId)
+      // A default pointing at an agent the user can no longer see is reported as unset.
+      if (defaultAgent && !agents.some(a => a.name === defaultAgent)) defaultAgent = null
+      return { agents, defaultAgent }
+    },
+
+    /**
+     * PUT /api/v1/channels/plugins/:id/agents/default
+     *
+     * Set (or clear, with null) the agent new chats on this connection start with. Existing
+     * chats keep whatever they were switched to.
+     */
+    setPluginDefaultAgent: async (
+      orgId: string,
+      userId: string,
+      pluginId: string,
+      agentName: string | null,
+      listAgents: (ownerUserId: string) => Promise<Array<{ name: string; displayName: string }>>,
+    ) => {
+      const row = db.getChannelPlugin(pluginId, userId)
+      if (!row) return { ok: false, message: 'Channel not configured' }
+
+      if (agentName) {
+        const agents = await listAgents(userId)
+        if (!agents.some(a => a.name === agentName)) {
+          return { ok: false, message: `智能体不存在或无权访问：${agentName}` }
+        }
+      }
+
+      let cfg: Record<string, unknown> = {}
+      if (row.config_json) {
+        try {
+          const parsed = JSON.parse(String(row.config_json))
+          if (parsed && typeof parsed === 'object') cfg = parsed as Record<string, unknown>
+        } catch { /* start from empty */ }
+      }
+      if (agentName) cfg.agent = { name: agentName }
+      else delete cfg.agent
+
+      db.upsertChannelPlugin({
+        id: pluginId,
+        type: String(row.type),
+        name: String(row.name),
+        enabled: Number(row.enabled) ? 1 : 0,
+        status: String(row.status),
+        credentials_json: typeof row.credentials_json === 'string' ? row.credentials_json : null,
+        config_json: JSON.stringify(cfg),
+        last_connected: typeof row.last_connected === 'number' ? row.last_connected : null,
+        user_id: userId,
+        org_id: row.org_id ? String(row.org_id) : orgId,
+      })
+      return { ok: true }
+    },
+
+    /**
      * POST /api/v1/channels/settings/sync
      */
     syncChannelSettings: async (

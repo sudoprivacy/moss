@@ -78,6 +78,7 @@ import { createChannelsApi } from './api/channels.js'
 import { getChannelManager } from '../channels/core/ChannelManager.js'
 import { getPairingService } from '../channels/pairing/PairingService.js'
 import { MossActionExecutor } from '../channels/gateway/MossActionExecutor.js'
+import { ChannelAgentResolver } from '../channels/gateway/ChannelAgentResolver.js'
 import { WikiJobExecutor } from '../channels/gateway/WikiJobExecutor.js'
 import { loadIndex, vectorSearch, rrfFuse, createQuerySemaphore, runWikiGrep } from './wikiIndex/query.js'
 import { ensureEmbedder } from './wikiIndex/embedder.js'
@@ -1611,16 +1612,54 @@ export function startServer(
   channelManager.initialize(runtime.store)
   getPairingService().initialize(runtime.store)
 
+  // Agents an IM chat may switch to = those visible to the moss user who owns the
+  // channel connection, using the same visibility rules as the rest of the product
+  // (global / tenant / custom, with user + department whitelists). Declared here (not
+  // inside the plugin-wiring block) because the channel agent HTTP routes use it too.
+  const listAgentsVisibleToUserImpl = async (ownerUserId: string) => {
+      const owner = authService.getUserById(ownerUserId)
+      const ownerOrgId = runtime.store.getUserOrgId(ownerUserId)
+      if (!owner || !ownerOrgId) return []
+      const filter = authService.buildVisibilityFilter({
+        rawToken: '',
+        userId: ownerUserId,
+        orgId: ownerOrgId,
+        role: owner.role,
+        scopes: [],
+        keyId: '',
+        jti: '',
+        exp: 0,
+      })
+      const installed = await getInstalledAssistants()
+      return installed
+        .filter((a) => {
+          if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
+          if (a.agentType === 'workflow') return false
+          return isVisibleTo(a.visibleTo, filter)
+        })
+        .map((a) => ({
+          name: a.name,
+          displayName: a.displayName || a.name,
+          description: a.description,
+        }))
+    }
+
   // Wire up message routing: incoming channel messages -> AI processing -> response
   const pluginManager = channelManager.getPluginManager()
   const sessionManager = channelManager.getSessionManager()
   if (pluginManager && sessionManager) {
+    const listAgentsVisibleToUser = listAgentsVisibleToUserImpl
+    const channelAgentResolver = new ChannelAgentResolver(
+      runtime.store,
+      listAgentsVisibleToUser,
+    )
     const mossActionExecutor = new MossActionExecutor(
       pluginManager,
       sessionManager,
       getPairingService(),
       runtime,
       runtime.store,
+      channelAgentResolver,
     )
     channelManager.setMessageHandler(mossActionExecutor.getMessageHandler())
     console.log('[Server] MossActionExecutor wired up for channel message routing')
@@ -1942,6 +1981,28 @@ export function startServer(
             throw new HttpError(404, 'Plugin not found')
           }
           writeJson(res, 200, result)
+          return
+        }
+
+        // GET /api/v1/channels/plugins/:id/agents
+        const agentsListMatch = pathname.match(/^\/api\/v1\/channels\/plugins\/([^/]+)\/agents$/)
+        if (req.method === 'GET' && agentsListMatch) {
+          writeJson(res, 200, await channelsApi.getPluginAgents(
+            auth.orgId, auth.userId, agentsListMatch[1] || '', listAgentsVisibleToUserImpl,
+          ))
+          return
+        }
+
+        // PUT /api/v1/channels/plugins/:id/agents/default
+        const agentsDefaultMatch = pathname.match(/^\/api\/v1\/channels\/plugins\/([^/]+)\/agents\/default$/)
+        if (req.method === 'PUT' && agentsDefaultMatch) {
+          const body = await readJsonBody(req)
+          const raw = (body as { agentName?: unknown })?.agentName
+          const agentName = typeof raw === 'string' && raw.trim() ? raw.trim() : null
+          const result = await channelsApi.setPluginDefaultAgent(
+            auth.orgId, auth.userId, agentsDefaultMatch[1] || '', agentName, listAgentsVisibleToUserImpl,
+          )
+          writeJson(res, result.ok ? 200 : 400, result)
           return
         }
 
