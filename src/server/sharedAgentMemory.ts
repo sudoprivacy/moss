@@ -38,8 +38,26 @@ export function getSharedAgentMemoryFilePath(
   return path.join(getSharedAgentMemoryDir(configDir, assistantName), 'MEMORY.md')
 }
 
+/**
+ * First line of every moss-generated AGENTS.md. Used to tell our own file apart from a
+ * workspace's hand-written one so we never overwrite the latter.
+ */
+const AGENTS_MD_HEADER = '# Moss Assistant Override'
+
 export function getAssistantOverrideAgentsMdPath(configDir: string): string {
   return path.join(configDir, '.nexus', 'sudocode', 'AGENTS.md')
+}
+
+/**
+ * The path scode actually loads assistant instructions from: AGENTS.md in the WORKSPACE.
+ *
+ * Verified against the runtime image — `scode system-prompt` includes a workspace AGENTS.md
+ * and ignores both `$SUDO_CODE_CONFIG_HOME/AGENTS.md` and `$HOME/.nexus/sudocode/AGENTS.md`.
+ * The configDir copy above is kept for backwards compatibility, but nothing reads it, so the
+ * workspace copy is what actually gives the agent its identity.
+ */
+export function getWorkspaceAgentsMdPath(workspace: string): string {
+  return path.join(workspace, 'AGENTS.md')
 }
 
 export async function readSharedAgentMemory(
@@ -195,6 +213,8 @@ export function buildUserProfileMemory(params: {
 
 export async function writeAssistantOverrideAgentsMd(params: {
   configDir?: string | null
+  /** Session workspace (cwd). This is the copy scode actually reads. */
+  workspace?: string | null
   assistantName: string
   assistantDisplayName?: string | null
   assistantRules?: string | null
@@ -202,7 +222,7 @@ export async function writeAssistantOverrideAgentsMd(params: {
 }): Promise<void> {
   const identityName = params.assistantDisplayName?.trim() || params.assistantName
   const lines = [
-    '# Moss Assistant Override',
+    AGENTS_MD_HEADER,
     '',
     'These instructions override any default runtime identity or generic assistant framing.',
     '',
@@ -229,13 +249,44 @@ export async function writeAssistantOverrideAgentsMd(params: {
     lines.push('')
   }
 
-  const targets = [
-    params.configDir ? getAssistantOverrideAgentsMdPath(params.configDir) : null,
-  ].filter((value): value is string => Boolean(value))
+  const body = `${lines.join('\n').trimEnd()}\n`
 
-  for (const filePath of targets) {
-    await mkdir(path.dirname(filePath), { recursive: true })
-    await writeFileAtomic(filePath, `${lines.join('\n').trimEnd()}\n`)
+  // Legacy location. Nothing reads it today, but keep writing it so existing tooling
+  // that inspects configDir keeps working.
+  if (params.configDir) {
+    const legacyPath = getAssistantOverrideAgentsMdPath(params.configDir)
+    await mkdir(path.dirname(legacyPath), { recursive: true })
+    await writeFileAtomic(legacyPath, body)
+  }
+
+  // The copy scode actually loads. Sessions can run in a REAL user directory (a repo
+  // checkout, or even $HOME), and some projects track their own AGENTS.md — sudowork
+  // does. Overwriting that would destroy a real source file, so only ever create this
+  // copy, never clobber an existing one, and mark it so it is recognisable as generated.
+  if (params.workspace) {
+    const workspacePath = getWorkspaceAgentsMdPath(params.workspace)
+    if (await isMossGeneratedAgentsMd(workspacePath)) {
+      await writeFileAtomic(workspacePath, body)
+    } else {
+      console.warn(
+        `[sharedAgentMemory] ${workspacePath} exists and was not written by moss; ` +
+          `leaving it untouched. Assistant "${params.assistantName}" will not override this workspace's own instructions.`,
+      )
+    }
+  }
+}
+
+/**
+ * True when the path is free, or holds a file moss generated (so it is safe to replace).
+ * A workspace's own AGENTS.md must never be overwritten.
+ */
+async function isMossGeneratedAgentsMd(filePath: string): Promise<boolean> {
+  try {
+    const existing = await readFile(filePath, 'utf8')
+    return existing.startsWith(AGENTS_MD_HEADER)
+  } catch {
+    // Missing file: free to create.
+    return true
   }
 }
 

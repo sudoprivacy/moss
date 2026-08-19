@@ -1134,6 +1134,9 @@ export class RuntimeService {
           if (session.runtime.configDir) {
             await writeAssistantOverrideAgentsMd({
               configDir: session.runtime.configDir,
+              // scode reads AGENTS.md from the workspace it runs in, not from configDir —
+              // without this the assistant identity never reaches the agent.
+              workspace: session.cwd,
               assistantName: effectiveAssistantName,
               assistantDisplayName,
               assistantRules: await import('./agentStore.js').then(m =>
