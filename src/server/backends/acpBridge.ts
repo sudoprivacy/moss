@@ -4,7 +4,7 @@ import { dirname } from 'path'
 import { randomUUID } from 'crypto'
 import type { ChildProcess } from 'child_process'
 import type { BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
-import { prepareFirstMessageForScode, buildIdentityBlock } from '../../utils/scodeBridge.js'
+import { prepareFirstMessageForScode } from '../../utils/scodeBridge.js'
 import {
   appendSharedAgentMemory,
   extractRememberableUserFact,
@@ -430,13 +430,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         process.stderr.write(`[AcpBridge] Failed to prepare first message: ${err}\n`)
       }
       isFirstMessage = false
-    } else if (options.assistantName) {
-      // 后续消息：只注入身份声明
-      const identityBlock = buildIdentityBlock(
-        options.assistantDisplayName || options.assistantName,
-      )
-      finalText = `${identityBlock}[User Request]\n${trimmedText}`
     }
+    // 后续消息不再注入身份声明。身份由 configDir/.nexus/sudocode/AGENTS.md 承载
+    // （可信的 runtime 配置），在用户消息里重复一份 "[Identity Override - 最高优先级]"
+    // 反而会被模型判定为提示注入攻击并拒绝，连带否定合法的身份声明。
 
     // 写入 transcript 时只保存原始用户消息（trimmedText），不包含系统提示词
     // 系统提示词是给 agent 的，不应该出现在用户可见的历史记录中
