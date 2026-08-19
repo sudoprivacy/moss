@@ -10,6 +10,13 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
@@ -35,7 +42,10 @@ import {
   deleteUser,
   startWechatQrLogin,
   pollWechatQrStatus,
+  getPluginAgents,
+  setPluginDefaultAgent,
 } from '@/lib/api/channels'
+import type { IChannelAgentOption } from '@/lib/api/channels'
 import type {
   IChannelPluginConfig,
   IChannelUser,
@@ -144,6 +154,12 @@ export default function ChannelsPage() {
   const [platformSaving, setPlatformSaving] = useState<Record<string, boolean>>({})
 
   // WeChat QR login state
+  // Agent (智能体) selection per channel: roster + current default, loaded lazily when a
+  // plugin card is expanded so the page does not fetch for every platform up front.
+  const [agentOptions, setAgentOptions] = useState<Record<string, IChannelAgentOption[]>>({})
+  const [defaultAgents, setDefaultAgents] = useState<Record<string, string | null>>({})
+  const [agentSaving, setAgentSaving] = useState<Record<string, boolean>>({})
+
   const [wechatQrPhase, setWechatQrPhase] = useState<'idle' | 'loading' | 'qrcode' | 'scanned' | 'success' | 'error'>('idle')
   const [wechatQrUrl, setWechatQrUrl] = useState('')
   const [wechatQrError, setWechatQrError] = useState('')
@@ -195,6 +211,41 @@ export default function ChannelsPage() {
     // Load credentials when expanding
     if (isExpanding) {
       void loadCredentials(platform)
+      void loadAgents(platform)
+    }
+  }
+
+  /** Load the agent roster + current default for a platform's channel. */
+  const loadAgents = async (platform: string) => {
+    const pluginId = `${platform}_default`
+    try {
+      const res = await getPluginAgents(pluginId)
+      setAgentOptions(prev => ({ ...prev, [pluginId]: res.agents }))
+      setDefaultAgents(prev => ({ ...prev, [pluginId]: res.defaultAgent }))
+    } catch {
+      // Non-fatal: the card still works without the selector.
+      setAgentOptions(prev => ({ ...prev, [pluginId]: [] }))
+    }
+  }
+
+  /**
+   * Change the agent new chats on this channel start with. Existing chats keep whatever
+   * they were switched to in-chat, so this never rewrites live conversations.
+   */
+  const handleDefaultAgentChange = async (pluginId: string, value: string) => {
+    const agentName = value === '__none__' ? null : value
+    const previous = defaultAgents[pluginId] ?? null
+    setDefaultAgents(prev => ({ ...prev, [pluginId]: agentName }))
+    setAgentSaving(prev => ({ ...prev, [pluginId]: true }))
+    try {
+      const res = await setPluginDefaultAgent(pluginId, agentName)
+      if (!res.ok) throw new Error(res.message || '保存失败')
+      toast.success(agentName ? '默认智能体已更新' : '已清除默认智能体')
+    } catch (err) {
+      setDefaultAgents(prev => ({ ...prev, [pluginId]: previous }))
+      toast.error('保存失败', { description: err instanceof Error ? err.message : 'Unknown error' })
+    } finally {
+      setAgentSaving(prev => ({ ...prev, [pluginId]: false }))
     }
   }
 
@@ -655,6 +706,34 @@ export default function ChannelsPage() {
                                 <p>3. 配对成功后即可开始对话</p>
                               </div>
                             )}
+                          </div>
+
+                          {/* Default agent (智能体) for new chats on this channel */}
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">默认智能体</span>
+                              {agentSaving[plugin.id] && <Loader2 className="h-3 w-3 animate-spin" />}
+                            </div>
+                            <Select
+                              value={defaultAgents[plugin.id] ?? '__none__'}
+                              onValueChange={(v) => void handleDefaultAgentChange(plugin.id, v)}
+                              disabled={agentSaving[plugin.id]}
+                            >
+                              <SelectTrigger className="max-w-xs h-8 text-sm">
+                                <SelectValue placeholder="未指定" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__none__">未指定（通用会话）</SelectItem>
+                                {(agentOptions[plugin.id] || []).map((a) => (
+                                  <SelectItem key={a.name} value={a.name}>
+                                    {a.displayName}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <p className="text-xs text-muted-foreground">
+                              新会话将使用该智能体；已有会话保持各自在聊天中切换的结果。用户可在聊天中发送 <code className="font-mono">/agents</code> 查看、<code className="font-mono">/agent &lt;名称&gt;</code> 切换。
+                            </p>
                           </div>
 
                           {/* Credentials summary (masked) */}
