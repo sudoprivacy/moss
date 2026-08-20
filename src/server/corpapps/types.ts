@@ -55,6 +55,109 @@ export type ApprovalListParams = {
   filters?: { key: string; value: string }[]
 }
 
+/**
+ * Parameters for `listCustomerGroups()` (WeCom 客户群列表, doc 92120).
+ *
+ * `ownerUserIds` filters by 群主 — and note that WeCom's visibility rule is
+ * keyed on the OWNER alone: a group whose owner is outside the app's visible
+ * range is not returned at all, even when other members are in range. With no
+ * filter WeCom returns every owner in the visible range, but errors with
+ * `81017` once that range exceeds 1000 people, so callers at scale must page
+ * by owner (WeCom caps `ownerUserIds` at 100 per call).
+ */
+export type CustomerGroupListParams = {
+  ownerUserIds?: string[]
+  statusFilter?: number
+  cursor?: string
+  limit?: number
+}
+
+/**
+ * Parameters for `createGroupMsgTask()` (WeCom 企业群发, doc 92135).
+ *
+ * IMPORTANT — this does NOT send. It creates a *pending task* that a human
+ * must confirm in 企微 群发助手 before anything reaches the group. Tasks
+ * created through the API are recorded by WeCom as `create_type=0` (企业发表)
+ * with an empty `creator`, which additionally requires an administrator to
+ * approve them before the sender is even notified. Only tasks composed by a
+ * person inside the WeCom client are `create_type=1` (个人发表) and skip that
+ * admin step — there is no API parameter that changes this.
+ *
+ * `sender` must be an internal 企业成员 userid who is already a member of the
+ * target group; an `external_userid` is rejected with `60111 userid not found`.
+ */
+export type GroupMsgTaskParams = {
+  chatIdList: string[]
+  sender: string
+  text?: string
+  attachments?: GroupMsgAttachment[]
+  allowSelect?: boolean
+}
+
+/**
+ * One attachment on a 群发 task. WeCom accepts at most 9 per task. Media must
+ * already be uploaded (see `uploadMedia`) — attachments carry a `mediaId`,
+ * never raw bytes.
+ */
+export type GroupMsgAttachment = {
+  msgtype: 'image' | 'link' | 'video' | 'file' | 'miniprogram'
+  mediaId?: string
+  [key: string]: unknown
+}
+
+/**
+ * Parameters for `listGroupMsgs()` (WeCom 群发记录, doc 93338). The provider
+ * caps the window at one month. `filterType`: 0=企业发表 1=个人发表 2=全部.
+ */
+export type GroupMsgListParams = {
+  startTime: number
+  endTime: number
+  creator?: string
+  filterType?: number
+  cursor?: string
+  limit?: number
+}
+
+/**
+ * One target's outcome in `GroupMsgSendSummary`. `status` mirrors WeCom's
+ * send-result codes: 0=未发送 1=已发送 2=非好友失败 3=已收到其他群发失败.
+ */
+export type GroupMsgSendEntry = {
+  chatId: string
+  status: number
+  statusLabel: string
+  delivered: boolean
+  /** True for status 3 — the target's daily broadcast quota was already used. */
+  blockedByDailyCap: boolean
+  sendTime?: number
+}
+
+/**
+ * Reconciled view of what a 群发 task actually delivered.
+ *
+ * This exists because the obvious signal lies: a task whose members show
+ * `已发送` may still have delivered to nobody. WeCom accepts only one 群发 per
+ * customer group per day, and a same-day second task is confirmed by the human
+ * as normal, then silently discarded with send-result status 3. Callers must
+ * reconcile here rather than trusting task status.
+ */
+export type GroupMsgSendSummary = {
+  msgId: string
+  delivered: number
+  pending: number
+  failed: number
+  /** Targets dropped because the group already received a broadcast today. */
+  blockedByDailyCap: number
+  entries: GroupMsgSendEntry[]
+}
+
+/** Result of `createGroupMsgTask()`. `failList` holds chat ids WeCom rejected. */
+export type GroupMsgTaskResult = {
+  ok: boolean
+  msgId?: string
+  failList?: string[]
+}
+
 /** Identity/info about the connected app, from `getInfo()`. */
 export type CorpAppInfo = {
   type: string
@@ -157,6 +260,80 @@ export interface CorpAppConnector {
    * (type, status, applicant, step records, comments, form data).
    */
   getApproval?(spNo: string): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: list customer groups (WeCom 客户群, doc 92120). Returns the raw
+   * provider response (`group_chat_list` + `next_cursor`) so no fields are
+   * lost. See `CustomerGroupListParams` for the owner-visibility caveat.
+   */
+  listCustomerGroups?(params: CustomerGroupListParams): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: fetch one customer group's detail (doc 92122) — name, owner,
+   * notice, admin list and the full `member_list`, where `type` is 1 for
+   * internal staff and 2 for external contacts. Pass `needName` to have WeCom
+   * include member display names (it omits them by default).
+   */
+  getCustomerGroup?(chatId: string, needName?: boolean): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: create a 群发 task targeting customer groups (doc 92135).
+   * Creates a task pending human confirmation — see `GroupMsgTaskParams`.
+   */
+  createGroupMsgTask?(params: GroupMsgTaskParams): Promise<GroupMsgTaskResult>
+
+  /**
+   * Optional: per-target delivery status for a 群发 task (doc 93338).
+   * WeCom `status`: 0=未发送 1=已发送 2=因客户不是好友失败
+   * 3=因客户已收到其他群发失败. A group accepts only ONE 群发 per day, so a
+   * same-day second task settles as status 3 while the task itself still
+   * reports as sent — always reconcile here, not on the task status alone.
+   */
+  getGroupMsgSendResult?(
+    msgId: string,
+    userId: string,
+    cursor?: string,
+  ): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: list past 群发 tasks in a time window (doc 93338). Raw
+   * passthrough of `group_msg_list` + `next_cursor`. Used to reconstruct
+   * which groups already received a broadcast — the provider enforces one
+   * per group per day but never reports the remaining quota.
+   */
+  listGroupMsgs?(params: GroupMsgListParams): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: reconcile a 群发 task into a per-target delivery summary,
+   * paging through the provider's cursor. Prefer this over
+   * `getGroupMsgSendResult` when you want to know what actually landed —
+   * it classifies the daily-cap rejection (status 3) explicitly.
+   */
+  summariseGroupMsgDelivery?(msgId: string, userId: string): Promise<GroupMsgSendSummary>
+
+  /**
+   * Optional: per-member task status for a 群发 (doc 93338).
+   * WeCom `status`: 0=未发送 2=已发送.
+   */
+  getGroupMsgTask?(msgId: string, cursor?: string): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: re-trigger the confirmation prompt for a pending 群发 task
+   * (doc 97610). WeCom allows at most 3 reminders per task per 24h.
+   */
+  remindGroupMsgSend?(msgId: string): Promise<{ ok: boolean }>
+
+  /**
+   * Optional: upload media and return its provider media id, without sending
+   * anything. Group-message attachments reference media by id, so upload and
+   * send are separate steps here (unlike `sendFile`, which does both).
+   * WeCom media ids expire after 3 days.
+   */
+  uploadMedia?(
+    type: 'file' | 'image' | 'video' | 'voice',
+    fileName: string,
+    bytes: Buffer,
+  ): Promise<{ mediaId: string }>
 
   /**
    * Optional: handle a provider URL-verification handshake. Returns the

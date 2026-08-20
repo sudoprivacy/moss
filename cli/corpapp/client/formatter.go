@@ -66,6 +66,51 @@ func FormatSend(w io.Writer, r *SendResp) {
 
 // FormatInbound writes inbound messages (or "(no new messages)") plus the
 // next cursor to use on the following poll.
+// FormatGroupMsg renders the result of creating a 群发 task. The task is
+// pending human confirmation, so this reports "task created", never "sent".
+func FormatGroupMsg(w io.Writer, r *GroupMsgResp) {
+	status := "created"
+	if !r.OK {
+		status = "failed"
+	}
+	fmt.Fprintf(w, "group message task %s", status)
+	if r.MsgID != "" {
+		fmt.Fprintf(w, "  msgid=%s", r.MsgID)
+	}
+	fmt.Fprintln(w)
+	if len(r.FailList) > 0 {
+		fmt.Fprintf(w, "rejected chat ids: %s\n", strings.Join(r.FailList, ", "))
+	}
+	fmt.Fprintln(w, "NOTE: awaiting confirmation in the provider client before delivery.")
+}
+
+// FormatGroupSummary renders reconciled delivery counts, calling out targets
+// dropped by the one-broadcast-per-group-per-day cap since that failure is
+// otherwise invisible — the sender sees a normal "sent".
+func FormatGroupSummary(w io.Writer, s *GroupMsgSummary) {
+	fmt.Fprintf(w, "msgid %s\n", s.MsgID)
+	fmt.Fprintf(w, "delivered=%d  pending=%d  failed=%d\n", s.Delivered, s.Pending, s.Failed)
+	if s.BlockedByDailyCap > 0 {
+		fmt.Fprintf(w, "\nWARNING: %d target(s) received nothing — already got a broadcast today.\n", s.BlockedByDailyCap)
+		fmt.Fprintln(w, "Each group accepts one broadcast per day; retry tomorrow.")
+	}
+	if len(s.Entries) > 0 {
+		fmt.Fprintln(w, "\nCHAT ID                              STATUS")
+		for _, e := range s.Entries {
+			fmt.Fprintf(w, "%-36s %s\n", truncate(e.ChatID, 36), e.StatusLabel)
+		}
+	}
+}
+
+func FormatGroupSummaryJSON(w io.Writer, s *GroupMsgSummary) error {
+	b, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(b, '\n'))
+	return err
+}
+
 func FormatInbound(w io.Writer, r *InboundResp) {
 	if len(r.Messages) == 0 {
 		fmt.Fprintln(w, "(no new messages)")

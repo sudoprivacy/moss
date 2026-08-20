@@ -3947,6 +3947,266 @@ export function startServer(
         return
       }
 
+      // ---- Customer groups (客户群) + group broadcast (群发) ----
+      // Shared guard: resolve access, verify the assistant may use this app,
+      // and load the row. Returns null when it has already answered.
+      const resolveAgentCorpAppRow = async (
+        id: string,
+      ): Promise<Record<string, unknown> | null> => {
+        const access = await resolveAgentCorpAppAccess()
+        if (access === undefined) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
+          return null
+        }
+        if (access !== null && !access.has(id)) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
+          return null
+        }
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return null
+        }
+        return row
+      }
+
+      const agentCorpAppGroupsMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/customer-groups$/)
+      if (req.method === 'GET' && agentCorpAppGroupsMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupsMatch[1] || '')
+        if (!row) return
+        const ownerParam = url.searchParams.get('owner') ?? ''
+        const ownerUserIds = ownerParam
+          ? ownerParam.split(',').map((v) => v.trim()).filter(Boolean)
+          : undefined
+        if (ownerUserIds && ownerUserIds.length > 100) {
+          writeJson(res, 400, {
+            error: { code: 'invalid_payload', message: 'owner accepts at most 100 userids per call' },
+          })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.listCustomerGroups) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot list customer groups' } })
+            return
+          }
+          const result = await connector.listCustomerGroups({
+            ownerUserIds,
+            statusFilter: Number.parseInt(url.searchParams.get('status') ?? '0', 10) || 0,
+            cursor: url.searchParams.get('cursor') ?? undefined,
+            limit: Number.parseInt(url.searchParams.get('limit') ?? '1000', 10) || 1000,
+          })
+          writeJson(res, 200, result)
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppGroupMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/customer-groups\/([^/]+)$/)
+      if (req.method === 'GET' && agentCorpAppGroupMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupMatch[1] || '')
+        if (!row) return
+        const chatId = decodeURIComponent(agentCorpAppGroupMatch[2] || '')
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.getCustomerGroup) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot read customer groups' } })
+            return
+          }
+          const needName = url.searchParams.get('needName') !== '0'
+          writeJson(res, 200, await connector.getCustomerGroup(chatId, needName))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppGroupMsgMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages$/)
+      if (req.method === 'POST' && agentCorpAppGroupMsgMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupMsgMatch[1] || '')
+        if (!row) return
+        const body = await readJsonBody(req)
+        const chatIdList = Array.isArray(body.chatIdList)
+          ? body.chatIdList.filter((v): v is string => typeof v === 'string')
+          : []
+        const sender = typeof body.sender === 'string' ? body.sender : ''
+        const text = typeof body.text === 'string' ? body.text : undefined
+        const attachments = Array.isArray(body.attachments)
+          ? (body.attachments as import('./corpapps/types.js').GroupMsgAttachment[])
+          : undefined
+        if (chatIdList.length === 0 || !sender) {
+          writeJson(res, 400, {
+            error: { code: 'invalid_payload', message: 'chatIdList and sender are required' },
+          })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.createGroupMsgTask) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot send group messages' } })
+            return
+          }
+          const result = await connector.createGroupMsgTask({
+            chatIdList,
+            sender,
+            text,
+            attachments,
+            allowSelect: typeof body.allowSelect === 'boolean' ? body.allowSelect : undefined,
+          })
+          writeJson(res, 200, result)
+        } catch (err) {
+          // Local validation (attachment count, text size, empty sender) throws
+          // before any network call — surface those as 400, not 502.
+          const msg = err instanceof Error ? err.message : String(err)
+          const isValidation = msg.startsWith('createGroupMsgTask:')
+          writeJson(res, isValidation ? 400 : 502, {
+            error: { code: isValidation ? 'invalid_payload' : 'send_failed', message: msg },
+          })
+        }
+        return
+      }
+
+      const agentCorpAppGroupMsgResultMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages\/([^/]+)\/result$/)
+      if (req.method === 'GET' && agentCorpAppGroupMsgResultMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupMsgResultMatch[1] || '')
+        if (!row) return
+        const msgId = decodeURIComponent(agentCorpAppGroupMsgResultMatch[2] || '')
+        const userId = url.searchParams.get('userid') ?? ''
+        if (!userId) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'userid query param is required' } })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.getGroupMsgSendResult) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot read group message results' } })
+            return
+          }
+          writeJson(res, 200, await connector.getGroupMsgSendResult(msgId, userId, url.searchParams.get('cursor') ?? undefined))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppGroupMsgListMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages$/)
+      if (req.method === 'GET' && agentCorpAppGroupMsgListMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupMsgListMatch[1] || '')
+        if (!row) return
+        const startTime = Number.parseInt(url.searchParams.get('start') ?? '0', 10)
+        const endTime = Number.parseInt(url.searchParams.get('end') ?? '0', 10)
+        if (!startTime || !endTime) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'start and end (unix seconds) are required' } })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.listGroupMsgs) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot list group messages' } })
+            return
+          }
+          writeJson(res, 200, await connector.listGroupMsgs({
+            startTime,
+            endTime,
+            creator: url.searchParams.get('creator') ?? undefined,
+            filterType: Number.parseInt(url.searchParams.get('filterType') ?? '2', 10),
+            cursor: url.searchParams.get('cursor') ?? undefined,
+            limit: Number.parseInt(url.searchParams.get('limit') ?? '100', 10) || 100,
+          }))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppGroupMsgSummaryMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages\/([^/]+)\/summary$/)
+      if (req.method === 'GET' && agentCorpAppGroupMsgSummaryMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupMsgSummaryMatch[1] || '')
+        if (!row) return
+        const msgId = decodeURIComponent(agentCorpAppGroupMsgSummaryMatch[2] || '')
+        const userId = url.searchParams.get('userid') ?? ''
+        if (!userId) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'userid query param is required' } })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.summariseGroupMsgDelivery) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot summarise group deliveries' } })
+            return
+          }
+          writeJson(res, 200, await connector.summariseGroupMsgDelivery(msgId, userId))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppGroupMsgTaskMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages\/([^/]+)\/task$/)
+      if (req.method === 'GET' && agentCorpAppGroupMsgTaskMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppGroupMsgTaskMatch[1] || '')
+        if (!row) return
+        const msgId = decodeURIComponent(agentCorpAppGroupMsgTaskMatch[2] || '')
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.getGroupMsgTask) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot read group message tasks' } })
+            return
+          }
+          writeJson(res, 200, await connector.getGroupMsgTask(msgId, url.searchParams.get('cursor') ?? undefined))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppRemindMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages\/([^/]+)\/remind$/)
+      if (req.method === 'POST' && agentCorpAppRemindMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppRemindMatch[1] || '')
+        if (!row) return
+        const msgId = decodeURIComponent(agentCorpAppRemindMatch[2] || '')
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.remindGroupMsgSend) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot remind senders' } })
+            return
+          }
+          writeJson(res, 200, await connector.remindGroupMsgSend(msgId))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
+      const agentCorpAppUploadMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/media$/)
+      if (req.method === 'POST' && agentCorpAppUploadMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppUploadMatch[1] || '')
+        if (!row) return
+        const rawType = url.searchParams.get('type') ?? 'file'
+        if (rawType !== 'file' && rawType !== 'image' && rawType !== 'video' && rawType !== 'voice') {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'type must be file|image|video|voice' } })
+          return
+        }
+        const fileName = url.searchParams.get('fileName') ?? 'file'
+        const bytes = await readRawBody(req)
+        if (bytes.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'empty file body' } })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.uploadMedia) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot upload media' } })
+            return
+          }
+          writeJson(res, 200, await connector.uploadMedia(rawType, fileName, bytes))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
       const agentCorpAppInboundMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/inbound$/)
       if (req.method === 'GET' && agentCorpAppInboundMatch) {
         const access = await resolveAgentCorpAppAccess()

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 // RunOptions tunes the CLI presentation. All fields are optional.
@@ -92,6 +93,20 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runApprovals(rest, c, opts)
 	case "approval":
 		err = runApproval(rest, c, opts)
+	case "groups":
+		err = runGroups(rest, c, opts)
+	case "group":
+		err = runGroup(rest, c, opts)
+	case "send-group":
+		err = runSendGroup(rest, c, opts)
+	case "group-msg-result":
+		err = runGroupMsgResult(rest, c, opts)
+	case "group-msg-task":
+		err = runGroupMsgTask(rest, c, opts)
+	case "group-msg-summary":
+		err = runGroupMsgSummary(rest, c, opts)
+	case "group-msg-remind":
+		err = runGroupMsgRemind(rest, c, opts)
 	case "-h", "--help", "help":
 		printHelp(opts.Stdout, opts)
 		return 0
@@ -416,6 +431,251 @@ func runApproval(args []string, c *Client, opts RunOptions) error {
 }
 
 // baseName returns the last path segment of p (handles both / and \).
+// ============================================================
+// customer groups (客户群) + group broadcast (群发)
+// ============================================================
+
+func runGroups(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("groups", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	owner := fs.String("owner", "", "filter by group owner userid(s), comma-separated (max 100)")
+	cursor := fs.String("cursor", "", "pagination cursor")
+	limit := fs.Int64("limit", 0, "page size (provider max 1000)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" {
+		return errors.New("usage: corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]")
+	}
+	var owners []string
+	if *owner != "" {
+		for _, v := range strings.Split(*owner, ",") {
+			if t := strings.TrimSpace(v); t != "" {
+				owners = append(owners, t)
+			}
+		}
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.ListCustomerGroups(resolved.ID, owners, *cursor, *limit)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runGroup(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	chatID := fs.String("chat-id", "", "customer group chat id")
+	noName := fs.Bool("no-name", false, "omit member display names")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *chatID == "" {
+		return errors.New("usage: corpapp group --app <name> --chat-id <id> [--no-name]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.GetCustomerGroup(resolved.ID, *chatID, !*noName)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runSendGroup(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("send-group", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	sender := fs.String("sender", "", "internal staff userid who will confirm and send")
+	text := fs.String("text", "", "message text")
+	var chatIDs stringsFlag
+	fs.Var(&chatIDs, "chat-id", "target customer group chat id; repeatable")
+	var files stringsFlag
+	fs.Var(&files, "file", "attach a file (uploaded first); repeatable, max 9")
+	var mediaIDs stringsFlag
+	fs.Var(&mediaIDs, "media-id", "attach an already-uploaded media id; repeatable")
+	capWindow := fs.String("cap-window", string(CapWindowCalendar),
+		"daily-cap boundary: calendar (resets at provider midnight) | rolling24h (stricter)")
+	noCapCheck := fs.Bool("no-cap-check", false, "skip the daily-cap pre-check (the provider will still drop over-quota targets)")
+	skipCapped := fs.Bool("skip-capped", false, "drop targets that already received a broadcast, send to the rest")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *sender == "" || len(chatIDs) == 0 {
+		return errors.New("usage: corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...]")
+	}
+	if *text == "" && len(files) == 0 && len(mediaIDs) == 0 {
+		return errors.New("send-group: --text, --file or --media-id is required")
+	}
+	if len(files)+len(mediaIDs) > 9 {
+		return fmt.Errorf("send-group: %d attachments exceeds the provider limit of 9", len(files)+len(mediaIDs))
+	}
+	window, err := ParseCapWindow(*capWindow)
+	if err != nil {
+		return err
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+
+	// Guard BEFORE uploading or creating anything: an over-quota task is
+	// accepted by the provider and only fails after a human has approved and
+	// confirmed it, so catching it here is the only way to avoid wasting that.
+	targets := []string(chatIDs)
+	if !*noCapCheck {
+		capErr := c.CheckDailyCap(resolved.ID, *sender, targets, window, time.Now())
+		var violation *DailyCapViolation
+		if errors.As(capErr, &violation) {
+			if !*skipCapped {
+				return violation
+			}
+			blocked := map[string]bool{}
+			for _, id := range violation.BlockedIDs() {
+				blocked[id] = true
+			}
+			var kept []string
+			for _, id := range targets {
+				if !blocked[id] {
+					kept = append(kept, id)
+				}
+			}
+			fmt.Fprintf(opts.Stderr, "skipping %d target(s) that already received a broadcast in this window\n", len(blocked))
+			if len(kept) == 0 {
+				return errors.New("every target is over quota; nothing to send")
+			}
+			targets = kept
+		} else if capErr != nil {
+			// The check itself failed (network, permissions). Do not silently
+			// proceed: the caller asked for a guard, so surface it and let them
+			// opt out explicitly with --no-cap-check.
+			return fmt.Errorf("daily-cap check failed: %w (pass --no-cap-check to send without it)", capErr)
+		}
+	}
+
+	var attachments []GroupMsgAttachment
+	for _, f := range files {
+		body, rerr := os.ReadFile(f)
+		if rerr != nil {
+			return fmt.Errorf("read file %s: %w", f, rerr)
+		}
+		up, uerr := c.UploadMedia(resolved.ID, "file", baseName(f), body)
+		if uerr != nil {
+			return fmt.Errorf("upload %s: %w", f, uerr)
+		}
+		attachments = append(attachments, GroupMsgAttachment{MsgType: "file", MediaID: up.MediaID})
+	}
+	for _, m := range mediaIDs {
+		attachments = append(attachments, GroupMsgAttachment{MsgType: "file", MediaID: m})
+	}
+
+	resp, err := c.SendGroupMessage(resolved.ID, targets, *sender, *text, attachments)
+	if err != nil {
+		return err
+	}
+	FormatGroupMsg(opts.Stdout, resp)
+	return nil
+}
+
+func runGroupMsgResult(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msg-result", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	msgID := fs.String("msgid", "", "group message id")
+	userID := fs.String("userid", "", "sender userid the task was assigned to")
+	cursor := fs.String("cursor", "", "pagination cursor")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *msgID == "" || *userID == "" {
+		return errors.New("usage: corpapp group-msg-result --app <name> --msgid <id> --userid <userid> [--cursor <c>]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.GroupMessageResult(resolved.ID, *msgID, *userID, *cursor)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runGroupMsgTask(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msg-task", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	msgID := fs.String("msgid", "", "group message id")
+	cursor := fs.String("cursor", "", "pagination cursor")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *msgID == "" {
+		return errors.New("usage: corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.GroupMessageTask(resolved.ID, *msgID, *cursor)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runGroupMsgSummary(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msg-summary", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	msgID := fs.String("msgid", "", "group message id")
+	userID := fs.String("userid", "", "sender userid the task was assigned to")
+	asJSON := fs.Bool("json", false, "emit raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *msgID == "" || *userID == "" {
+		return errors.New("usage: corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	sum, err := c.GroupMessageSummary(resolved.ID, *msgID, *userID)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return FormatGroupSummaryJSON(opts.Stdout, sum)
+	}
+	FormatGroupSummary(opts.Stdout, sum)
+	return nil
+}
+
+func runGroupMsgRemind(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msg-remind", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	msgID := fs.String("msgid", "", "group message id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *msgID == "" {
+		return errors.New("usage: corpapp group-msg-remind --app <name> --msgid <id>")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	resp, err := c.RemindGroupMessage(resolved.ID, *msgID)
+	if err != nil {
+		return err
+	}
+	FormatSend(opts.Stdout, resp)
+	return nil
+}
+
 func baseName(p string) string {
 	for i := len(p) - 1; i >= 0; i-- {
 		if p[i] == '/' || p[i] == '\\' {
