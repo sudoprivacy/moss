@@ -97,6 +97,8 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runGroups(rest, c, opts)
 	case "group":
 		err = runGroup(rest, c, opts)
+	case "group-msgs":
+		err = runGroupMsgs(rest, c, opts)
 	case "send-group":
 		err = runSendGroup(rest, c, opts)
 	case "group-msg-result":
@@ -580,6 +582,36 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 	}
 	FormatGroupMsg(opts.Stdout, resp)
 	return nil
+}
+
+func runGroupMsgs(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msgs", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	start := fs.Int64("start", 0, "window start (unix seconds)")
+	end := fs.Int64("end", 0, "window end (unix seconds)")
+	creator := fs.String("creator", "", "filter by the userid that created the task")
+	cursor := fs.String("cursor", "", "pagination cursor")
+	limit := fs.Int64("limit", 0, "page size (provider max 100)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *start == 0 || *end == 0 {
+		return errors.New("usage: corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>] [--cursor <c>] [--limit <n>]")
+	}
+	// WeCom caps the window at one month and silently returns nothing beyond
+	// it, which reads as "no history" rather than "window too wide".
+	if *end-*start > 31*24*3600 {
+		return errors.New("group-msgs: the provider caps the window at one month; narrow --start/--end")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.ListGroupMsgs(resolved.ID, *start, *end, *creator, *cursor, *limit)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
 }
 
 func runGroupMsgResult(args []string, c *Client, opts RunOptions) error {

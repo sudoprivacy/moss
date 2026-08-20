@@ -173,3 +173,28 @@ func itoa(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+func TestListGroupMsgsRequiresWindow(t *testing.T) {
+	c := New("http://unused", "t")
+	if _, err := c.ListGroupMsgs("app1", 0, 0, "", "", 0); err == nil {
+		t.Error("want error when start/end are missing")
+	}
+}
+
+func TestListGroupMsgsSendsParams(t *testing.T) {
+	var gotPath string
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.String()
+		_, _ = io.WriteString(w, `{"group_msg_list":[]}`)
+	}))
+	defer srv.Close()
+
+	if _, err := c.ListGroupMsgs("app1", 1000, 2000, "linqinhui", "CUR", 50); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"start=1000", "end=2000", "creator=linqinhui", "cursor=CUR", "limit=50"} {
+		if !strings.Contains(gotPath, want) {
+			t.Errorf("want %q in %q", want, gotPath)
+		}
+	}
+}
