@@ -305,6 +305,212 @@ func (c *Client) GetApproval(id, spNo string) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// ============================================================
+// Customer groups (客户群) + group broadcast (群发)
+// ============================================================
+
+// GroupMsgAttachment is one attachment on a 群发 task. Media must already be
+// uploaded (see UploadMedia) — attachments reference a media id, not bytes.
+type GroupMsgAttachment struct {
+	MsgType string `json:"msgtype"`
+	MediaID string `json:"mediaId,omitempty"`
+}
+
+// GroupMsgResp is the result of creating a 群发 task. FailList holds chat ids
+// the provider rejected.
+type GroupMsgResp struct {
+	OK       bool     `json:"ok"`
+	MsgID    string   `json:"msgId"`
+	FailList []string `json:"failList"`
+}
+
+// UploadMediaResp is the result of an upload — a provider media id, valid for
+// 3 days on WeCom.
+type UploadMediaResp struct {
+	MediaID string `json:"mediaId"`
+}
+
+// ListCustomerGroups returns the raw provider response for the customer-group
+// listing (WeCom: group_chat_list + next_cursor), passed through undecoded.
+//
+// owner filters by GROUP OWNER, which is also how the provider scopes
+// visibility: a group whose owner is outside the app's visible range is
+// silently absent. Max 100 owner ids per call.
+func (c *Client) ListCustomerGroups(id string, owner []string, cursor string, limit int64) (json.RawMessage, error) {
+	q := url.Values{}
+	if len(owner) > 0 {
+		q.Set("owner", strings.Join(owner, ","))
+	}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	var raw json.RawMessage
+	path := c.PathPrefix + "/" + url.PathEscape(id) + "/customer-groups"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	if err := c.get(path, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// GetCustomerGroup returns one customer group's raw detail, including the
+// member list (type 1 = internal staff, 2 = external contact).
+func (c *Client) GetCustomerGroup(id, chatID string, needName bool) (json.RawMessage, error) {
+	if chatID == "" {
+		return nil, errors.New("chat-id is required")
+	}
+	q := url.Values{}
+	if !needName {
+		q.Set("needName", "0")
+	}
+	path := c.PathPrefix + "/" + url.PathEscape(id) + "/customer-groups/" + url.PathEscape(chatID)
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var raw json.RawMessage
+	if err := c.get(path, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// SendGroupMessage creates a 群发 task targeting customer groups.
+//
+// This does NOT deliver the message: it creates a task that a human must
+// confirm in the provider client, and API-created tasks additionally require
+// administrator approval before the sender is notified. sender must be an
+// internal staff userid who is already a member of the target group.
+func (c *Client) SendGroupMessage(id string, chatIDs []string, sender, text string, attachments []GroupMsgAttachment) (*GroupMsgResp, error) {
+	if len(chatIDs) == 0 {
+		return nil, errors.New("at least one chat-id is required")
+	}
+	if sender == "" {
+		return nil, errors.New("sender is required")
+	}
+	body := map[string]any{"chatIdList": chatIDs, "sender": sender}
+	if text != "" {
+		body["text"] = text
+	}
+	if len(attachments) > 0 {
+		body["attachments"] = attachments
+	}
+	var resp GroupMsgResp
+	if err := c.post(c.PathPrefix+"/"+url.PathEscape(id)+"/group-messages", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GroupMsgSendEntry is one target's outcome within a GroupMsgSummary.
+type GroupMsgSendEntry struct {
+	ChatID            string `json:"chatId"`
+	Status            int    `json:"status"`
+	StatusLabel       string `json:"statusLabel"`
+	Delivered         bool   `json:"delivered"`
+	BlockedByDailyCap bool   `json:"blockedByDailyCap"`
+	SendTime          int64  `json:"sendTime,omitempty"`
+}
+
+// GroupMsgSummary is the reconciled view of what a 群发 actually delivered.
+// Use this rather than task status: a task whose members show "sent" may have
+// delivered to nobody, because a group accepts only one broadcast per day and
+// same-day repeats are dropped after the human confirms them.
+type GroupMsgSummary struct {
+	MsgID             string              `json:"msgId"`
+	Delivered         int                 `json:"delivered"`
+	Pending           int                 `json:"pending"`
+	Failed            int                 `json:"failed"`
+	BlockedByDailyCap int                 `json:"blockedByDailyCap"`
+	Entries           []GroupMsgSendEntry `json:"entries"`
+}
+
+// GroupMessageSummary reconciles a 群发 task into per-target delivery counts,
+// classifying the daily-cap rejection explicitly.
+func (c *Client) GroupMessageSummary(id, msgID, userID string) (*GroupMsgSummary, error) {
+	if msgID == "" || userID == "" {
+		return nil, errors.New("msgid and userid are required")
+	}
+	q := url.Values{}
+	q.Set("userid", userID)
+	var resp GroupMsgSummary
+	if err := c.get(c.PathPrefix+"/"+url.PathEscape(id)+"/group-messages/"+url.PathEscape(msgID)+"/summary?"+q.Encode(), &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GroupMessageResult returns per-target delivery status for a 群发 task.
+// Provider status: 0=not sent 1=sent 2=failed (not a contact) 3=failed
+// (target already received another broadcast — the daily per-group cap).
+func (c *Client) GroupMessageResult(id, msgID, userID, cursor string) (json.RawMessage, error) {
+	if msgID == "" || userID == "" {
+		return nil, errors.New("msgid and userid are required")
+	}
+	q := url.Values{}
+	q.Set("userid", userID)
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	var raw json.RawMessage
+	if err := c.get(c.PathPrefix+"/"+url.PathEscape(id)+"/group-messages/"+url.PathEscape(msgID)+"/result?"+q.Encode(), &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// GroupMessageTask returns per-member task status for a 群发.
+// Provider status: 0=not sent 2=sent. A member showing "sent" only means they
+// confirmed — use GroupMessageResult to learn whether the group received it.
+func (c *Client) GroupMessageTask(id, msgID, cursor string) (json.RawMessage, error) {
+	if msgID == "" {
+		return nil, errors.New("msgid is required")
+	}
+	q := url.Values{}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	path := c.PathPrefix + "/" + url.PathEscape(id) + "/group-messages/" + url.PathEscape(msgID) + "/task"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var raw json.RawMessage
+	if err := c.get(path, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// RemindGroupMessage re-triggers the confirmation prompt for a pending 群发.
+// The provider allows at most 3 reminders per task per 24h.
+func (c *Client) RemindGroupMessage(id, msgID string) (*SendResp, error) {
+	if msgID == "" {
+		return nil, errors.New("msgid is required")
+	}
+	var resp SendResp
+	if err := c.post(c.PathPrefix+"/"+url.PathEscape(id)+"/group-messages/"+url.PathEscape(msgID)+"/remind", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// UploadMedia uploads bytes and returns a provider media id for use as a
+// group-message attachment. Unlike SendFile this does not send anything.
+func (c *Client) UploadMedia(id, mediaType, fileName string, body []byte) (*UploadMediaResp, error) {
+	q := url.Values{}
+	q.Set("type", mediaType)
+	q.Set("fileName", fileName)
+	var resp UploadMediaResp
+	if err := c.postRaw(c.PathPrefix+"/"+url.PathEscape(id)+"/media?"+q.Encode(), body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // Inbound polls buffered inbound messages with seq > since.
 func (c *Client) Inbound(id string, since, limit int64) (*InboundResp, error) {
 	q := url.Values{}

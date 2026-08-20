@@ -17,6 +17,13 @@
 //	corpapp approvals ... --status <n> --template <id>       # filter by status / type
 //	corpapp approval --app <name> --sp-no <spNo>              # get one approval's full detail
 //	corpapp approval --app <name> --sp-no <spNo> --attachments # list its downloadable files (id/source/label)
+//	corpapp groups --app <name> [--owner <userid,...>]        # list customer groups (客户群)
+//	corpapp group --app <name> --chat-id <id>                 # one group's detail + members
+//	corpapp send-group --app <name> --sender <userid> --chat-id <id> --text <msg>
+//	                                                          # create a 群发 task (needs human confirmation)
+//	corpapp group-msg-result --app <name> --msgid <id> --userid <userid>
+//	                                                          # per-group delivery status
+//	corpapp group-msg-remind --app <name> --msgid <id>        # nudge the sender to confirm
 //
 // The CLI is generic across corp-app types; capabilities are per-type
 // (returned by the server), so a `send`/`receive` against a type that
@@ -52,6 +59,15 @@ Usage:
   corpapp download --app <name> --media-id <id> [--out <path>]
   corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]
   corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]
+  corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]
+  corpapp group --app <name> --chat-id <id> [--no-name]
+  corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...]
+                     [--cap-window calendar|rolling24h] [--skip-capped] [--no-cap-check]
+  corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>]
+  corpapp group-msg-result --app <name> --msgid <id> --userid <userid> [--cursor <c>]
+  corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]
+  corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
+  corpapp group-msg-remind --app <name> --msgid <id>
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -67,6 +83,62 @@ Colored / styled messages:
   Example:
     corpapp send --app myapp --to zhangsan --format markdown \
       --text '<font color="info">通过</font> <font color="warning">2 项告警</font>'
+
+Customer groups and 群发 (WeCom):
+  groups/group read 客户群. Visibility is decided by the GROUP OWNER: a group
+  whose 群主 is outside the app's visible range is silently missing from
+  the groups output — no error, just a short list. Without --owner the provider walks
+  every owner in range and fails with 81017 past 1000 people, so large tenants
+  should page with --owner (max 100 userids per call).
+
+  group prints the member list, where type 1 is internal staff (real userid)
+  and type 2 is an external contact (opaque external_userid).
+
+  send-group does NOT send. It creates a task that a human must confirm in
+  企微 群发助手, and tasks created through the API are recorded as 企业发表,
+  which an administrator must approve before the sender is even notified.
+  --sender must be an internal staff userid who is already in the target group.
+
+  THE DAILY CAP — the sharpest edge here. A customer group accepts only ONE
+  群发 per day. A second same-day task is NOT rejected at creation: it returns
+  errcode 0 with a valid msgid, an admin approves it, the sender taps send,
+  and group-msg-task then reports 已发送 — yet the group receives nothing.
+  Only the send result exposes it, as status 3.
+
+  send-group therefore GUARDS against this before doing anything: it
+  reconstructs which of your targets already received a broadcast in the
+  window and refuses with a non-zero exit rather than queueing a doomed task.
+
+    --cap-window calendar    (default) quota resets at provider midnight,
+                             evaluated in Asia/Shanghai — the provider's clock,
+                             not yours
+    --cap-window rolling24h  stricter: looks back a rolling 24h, so a 23:50
+                             send still blocks 00:10 the next morning
+    --skip-capped            drop over-quota targets, send to the rest
+    --no-cap-check           skip the check entirely (the provider will still
+                             silently drop over-quota targets)
+
+  Which boundary the provider actually uses is NOT documented. calendar
+  matches its wording; rolling24h is the safe choice if you schedule near
+  midnight. A group that was only queued or dropped does not consume quota,
+  so the guard counts confirmed deliveries only.
+
+  So a human spends a confirmation click on a message that goes nowhere.
+  Always reconcile with:
+
+    corpapp group-msg-summary --app myapp --msgid <id> --userid <sender>
+
+  which counts delivered/pending/failed and flags targets dropped by the cap.
+  Never treat group-msg-task (per member: "the human clicked send") as proof
+  of delivery — use group-msg-result / group-msg-summary (per group).
+
+  The reset is enforced by the provider on China time (Asia/Shanghai), not by
+  this CLI, and whether it is a calendar-day or rolling-24h boundary is not
+  documented — schedule campaigns well clear of midnight rather than
+  assuming either.
+
+    corpapp send-group --app myapp --sender zhangsan \
+      --chat-id wr_xxx --text '本周报表' --file ./report.pdf
 
 Filtering approvals:
   --status <n>    approval status (sp_status):
