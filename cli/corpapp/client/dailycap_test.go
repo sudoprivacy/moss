@@ -54,17 +54,30 @@ func TestCapWindowStartDiffersAcrossMidnight(t *testing.T) {
 	}
 }
 
-// capStub serves a broadcast list plus a per-msgid summary.
-func capStub(t *testing.T, msgs []map[string]any, summaries map[string]string) http.Handler {
+// capStub serves a broadcast list, a per-msgid summary, and a per-msgid task
+// list. tasks maps msgid -> raw get_groupmsg_task body; a msgid absent from it
+// is reported as fully confirmed (status 2), i.e. not pending.
+func capStub(t *testing.T, msgs []map[string]any, summaries map[string]string, tasks map[string]string) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		msgIDFrom := func(off int) string {
+			parts := strings.Split(r.URL.Path, "/")
+			if len(parts) < off {
+				return ""
+			}
+			return parts[len(parts)-off]
+		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/resolve"):
 			_, _ = io.WriteString(w, `{"id":"app1","name":"x","type":"wecomapp"}`)
+		case strings.HasSuffix(r.URL.Path, "/task"):
+			if body, ok := tasks[msgIDFrom(2)]; ok {
+				_, _ = io.WriteString(w, body)
+				return
+			}
+			_, _ = io.WriteString(w, `{"task_list":[{"userid":"linqinhui","status":2}]}`)
 		case strings.Contains(r.URL.Path, "/summary"):
-			parts := strings.Split(r.URL.Path, "/")
-			msgID := parts[len(parts)-2]
-			if body, ok := summaries[msgID]; ok {
+			if body, ok := summaries[msgIDFrom(2)]; ok {
 				_, _ = io.WriteString(w, body)
 				return
 			}
@@ -84,7 +97,7 @@ func TestCheckDailyCapBlocksDeliveredTarget(t *testing.T) {
 	c, srv := newTestClient(capStub(t,
 		[]map[string]any{{"msgid": "msg_a", "create_time": sent}},
 		map[string]string{"msg_a": `{"msgId":"msg_a","entries":[
-			{"chatId":"wr_blocked","status":1,"delivered":true,"sendTime":` + itoa(sent) + `}]}`},
+			{"chatId":"wr_blocked","status":1,"delivered":true,"sendTime":` + itoa(sent) + `}]}`}, nil,
 	))
 	defer srv.Close()
 
@@ -110,7 +123,7 @@ func TestCheckDailyCapIgnoresUndeliveredTasks(t *testing.T) {
 		[]map[string]any{{"msgid": "msg_a", "create_time": sent}},
 		map[string]string{"msg_a": `{"msgId":"msg_a","entries":[
 			{"chatId":"wr_x","status":3,"delivered":false,"blockedByDailyCap":true},
-			{"chatId":"wr_y","status":0,"delivered":false}]}`},
+			{"chatId":"wr_y","status":0,"delivered":false}]}`}, nil,
 	))
 	defer srv.Close()
 
@@ -120,7 +133,7 @@ func TestCheckDailyCapIgnoresUndeliveredTasks(t *testing.T) {
 }
 
 func TestCheckDailyCapPassesWhenNoHistory(t *testing.T) {
-	c, srv := newTestClient(capStub(t, nil, nil))
+	c, srv := newTestClient(capStub(t, nil, nil, nil))
 	defer srv.Close()
 	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, time.Now()); err != nil {
 		t.Errorf("want clear, got %v", err)
@@ -129,7 +142,7 @@ func TestCheckDailyCapPassesWhenNoHistory(t *testing.T) {
 
 func TestCheckDailyCapRequiresSender(t *testing.T) {
 	c := New("http://unused", "t")
-	if _, err := c.RecentlyBroadcastGroups("app1", "", CapWindowCalendar, time.Now()); err == nil {
+	if _, err := c.InspectQuota("app1", "", CapWindowCalendar, time.Now()); err == nil {
 		t.Error("want error when sender is empty")
 	}
 }
@@ -141,7 +154,7 @@ func TestCheckDailyCapIgnoresOutsideWindow(t *testing.T) {
 	c, srv := newTestClient(capStub(t,
 		[]map[string]any{{"msgid": "msg_old", "create_time": old}},
 		map[string]string{"msg_old": `{"msgId":"msg_old","entries":[
-			{"chatId":"wr_a","status":1,"delivered":true,"sendTime":` + itoa(old) + `}]}`},
+			{"chatId":"wr_a","status":1,"delivered":true,"sendTime":` + itoa(old) + `}]}`}, nil,
 	))
 	defer srv.Close()
 
@@ -155,14 +168,14 @@ func TestDailyCapViolationMessageNamesWindow(t *testing.T) {
 	now := time.Date(2026, 8, 20, 10, 0, 0, 0, loc)
 	v := &DailyCapViolation{
 		Window: CapWindowRolling, WindowFrom: capWindowStart(now, CapWindowRolling),
-		Blocked: map[string]time.Time{"wr_a": now.Add(-time.Hour)},
+		Delivered: map[string]time.Time{"wr_a": now.Add(-time.Hour)},
 	}
 	if !strings.Contains(v.Error(), "last 24h") {
 		t.Errorf("rolling window should be named:\n%s", v.Error())
 	}
 	cal := &DailyCapViolation{
 		Window: CapWindowCalendar, WindowFrom: capWindowStart(now, CapWindowCalendar),
-		Blocked: map[string]time.Time{"wr_a": now.Add(-time.Hour)},
+		Delivered: map[string]time.Time{"wr_a": now.Add(-time.Hour)},
 	}
 	if !strings.Contains(cal.Error(), "Asia/Shanghai") {
 		t.Errorf("calendar window should name the provider timezone:\n%s", cal.Error())
@@ -195,6 +208,119 @@ func TestListGroupMsgsSendsParams(t *testing.T) {
 	for _, want := range []string{"start=1000", "end=2000", "creator=linqinhui", "cursor=CUR", "limit=50"} {
 		if !strings.Contains(gotPath, want) {
 			t.Errorf("want %q in %q", want, gotPath)
+		}
+	}
+}
+
+// The regression the guard previously missed. On 2026-08-18, 测试1 was created
+// at 07:57 and confirmed at 10:18; 测试2 was created at 08:10 while 测试1 was
+// still pending. At that moment the group had zero deliveries, so a
+// delivered-only check passed — and 测试2 later settled as status 3, wasting a
+// human confirmation. A pending task must block.
+func TestCheckDailyCapBlocksOnPendingTask(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-2 * time.Hour).Unix()
+	c, srv := newTestClient(capStub(t,
+		[]map[string]any{{"msgid": "msg_pending", "create_time": created}},
+		map[string]string{"msg_pending": `{"msgId":"msg_pending","entries":[
+			{"chatId":"wr_target","status":0,"delivered":false}]}`},
+		map[string]string{"msg_pending": `{"task_list":[{"userid":"linqinhui","status":0}]}`},
+	))
+	defer srv.Close()
+
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_target"}, CapWindowCalendar, now)
+	var v *DailyCapViolation
+	if !errors.As(err, &v) {
+		t.Fatalf("a pending task must block; got %v", err)
+	}
+	if v.Pending["wr_target"] != "msg_pending" {
+		t.Errorf("want the blocking msgid reported, got %+v", v.Pending)
+	}
+	if len(v.Delivered) != 0 {
+		t.Errorf("nothing was delivered; got %+v", v.Delivered)
+	}
+	if !strings.Contains(v.Error(), "awaiting confirmation") {
+		t.Errorf("error should name the pending reason:\n%s", v.Error())
+	}
+}
+
+// A pending task created before the window still blocks: it carries no send
+// time, and confirming it tomorrow consumes tomorrow's quota.
+func TestCheckDailyCapPendingIgnoresWindow(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-72 * time.Hour).Unix()
+	c, srv := newTestClient(capStub(t,
+		[]map[string]any{{"msgid": "msg_old", "create_time": old}},
+		map[string]string{"msg_old": `{"msgId":"msg_old","entries":[
+			{"chatId":"wr_a","status":0,"delivered":false}]}`},
+		map[string]string{"msg_old": `{"task_list":[{"userid":"linqinhui","status":0}]}`},
+	))
+	defer srv.Close()
+
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now); err == nil {
+		t.Error("a stale pending task still claims the next confirmed day's quota")
+	}
+}
+
+// A fully confirmed task is not pending, so it must not block on that basis.
+func TestCheckDailyCapConfirmedTaskIsNotPending(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-time.Hour).Unix()
+	c, srv := newTestClient(capStub(t,
+		[]map[string]any{{"msgid": "msg_done", "create_time": created}},
+		// status 3: confirmed but dropped, so it consumed nothing.
+		map[string]string{"msg_done": `{"msgId":"msg_done","entries":[
+			{"chatId":"wr_a","status":3,"delivered":false}]}`},
+		map[string]string{"msg_done": `{"task_list":[{"userid":"linqinhui","status":2}]}`},
+	))
+	defer srv.Close()
+
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now); err != nil {
+		t.Errorf("confirmed-but-dropped consumes nothing and is not pending: %v", err)
+	}
+}
+
+// Delivered wins over pending for the same group — reporting both would be
+// redundant and the operator response differs.
+func TestCheckDailyCapDeliveredTakesPrecedence(t *testing.T) {
+	now := time.Now()
+	sent := now.Add(-time.Hour).Unix()
+	c, srv := newTestClient(capStub(t,
+		[]map[string]any{
+			{"msgid": "msg_done", "create_time": sent},
+			{"msgid": "msg_pending", "create_time": sent},
+		},
+		map[string]string{
+			"msg_done":    `{"entries":[{"chatId":"wr_a","status":1,"delivered":true,"sendTime":` + itoa(sent) + `}]}`,
+			"msg_pending": `{"entries":[{"chatId":"wr_a","status":0,"delivered":false}]}`,
+		},
+		map[string]string{"msg_pending": `{"task_list":[{"userid":"linqinhui","status":0}]}`},
+	))
+	defer srv.Close()
+
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now)
+	var v *DailyCapViolation
+	if !errors.As(err, &v) {
+		t.Fatalf("want violation, got %v", err)
+	}
+	if len(v.Delivered) != 1 || len(v.Pending) != 0 {
+		t.Errorf("delivered should win: delivered=%+v pending=%+v", v.Delivered, v.Pending)
+	}
+}
+
+// --skip-capped drops both kinds, deduplicated.
+func TestBlockedIDsUnionsBothReasons(t *testing.T) {
+	v := &DailyCapViolation{
+		Delivered: map[string]time.Time{"wr_a": time.Now(), "wr_shared": time.Now()},
+		Pending:   map[string]string{"wr_b": "msg_x", "wr_shared": "msg_y"},
+	}
+	ids := v.BlockedIDs()
+	if len(ids) != 3 {
+		t.Fatalf("want 3 deduped ids, got %v", ids)
+	}
+	for i, want := range []string{"wr_a", "wr_b", "wr_shared"} {
+		if ids[i] != want {
+			t.Errorf("ids[%d]=%s want %s", i, ids[i], want)
 		}
 	}
 }

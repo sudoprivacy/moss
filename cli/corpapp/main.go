@@ -114,14 +114,21 @@ Customer groups and 群发 (WeCom):
                              not yours
     --cap-window rolling24h  stricter: looks back a rolling 24h, so a 23:50
                              send still blocks 00:10 the next morning
-    --skip-capped            drop over-quota targets, send to the rest
+    --skip-capped            drop blocked targets, send to the rest
     --no-cap-check           skip the check entirely (the provider will still
                              silently drop over-quota targets)
 
   Which boundary the provider actually uses is NOT documented. calendar
   matches its wording; rolling24h is the safe choice if you schedule near
-  midnight. A group that was only queued or dropped does not consume quota,
-  so the guard counts confirmed deliveries only.
+  midnight.
+
+  A group is blocked if it ALREADY RECEIVED a broadcast in the window, or if an
+  unconfirmed task targets it. The second case matters because quota is spent at
+  confirmation, not creation: a task created at 08:10 once passed a
+  delivered-only check because the task ahead of it was not confirmed until
+  10:18 — then it settled as status 3, wasting a confirmation. Pending tasks
+  block regardless of age, since one confirmed after midnight spends the new
+  day's quota. Cancelling the outstanding task frees the slot.
 
   So a human spends a confirmation click on a message that goes nowhere.
   Always reconcile with:

@@ -504,7 +504,7 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 	capWindow := fs.String("cap-window", string(CapWindowCalendar),
 		"daily-cap boundary: calendar (resets at provider midnight) | rolling24h (stricter)")
 	noCapCheck := fs.Bool("no-cap-check", false, "skip the daily-cap pre-check (the provider will still drop over-quota targets)")
-	skipCapped := fs.Bool("skip-capped", false, "drop targets that already received a broadcast, send to the rest")
+	skipCapped := fs.Bool("skip-capped", false, "drop targets blocked by the cap (delivered or awaiting confirmation), send to the rest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -547,7 +547,8 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 					kept = append(kept, id)
 				}
 			}
-			fmt.Fprintf(opts.Stderr, "skipping %d target(s) that already received a broadcast in this window\n", len(blocked))
+			fmt.Fprintf(opts.Stderr, "skipping %d target(s): %d already received a broadcast, %d awaiting confirmation of an earlier task\n",
+				len(blocked), len(violation.Delivered), len(violation.Pending))
 			if len(kept) == 0 {
 				return errors.New("every target is over quota; nothing to send")
 			}

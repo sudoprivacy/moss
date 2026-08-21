@@ -67,45 +67,89 @@ func capWindowStart(now time.Time, w CapWindow) time.Time {
 	}
 }
 
-// DailyCapViolation reports groups that already used today's quota. It
+// DailyCapViolation reports groups whose daily quota is already spoken for. It
 // implements error so callers can return it directly, and carries structure so
 // automation can react without parsing the message.
+//
+// Two distinct reasons, because they need different operator responses:
+//   - Delivered: the group already RECEIVED a broadcast in this window. Nothing
+//     to do but wait for the reset.
+//   - Pending: a task for this group is awaiting confirmation. It has not spent
+//     the quota yet, but confirming it will — so submitting another now queues a
+//     second task that is guaranteed to settle as status 3. The operator can
+//     cancel the stale task instead of waiting.
 type DailyCapViolation struct {
 	Window     CapWindow
 	WindowFrom time.Time
-	// Blocked maps chat id -> when it last received a broadcast.
-	Blocked map[string]time.Time
+	// Delivered maps chat id -> when it received a broadcast in this window.
+	Delivered map[string]time.Time
+	// Pending maps chat id -> the msgid of an unconfirmed task targeting it.
+	Pending map[string]string
 }
 
 func (e *DailyCapViolation) Error() string {
-	ids := make([]string, 0, len(e.Blocked))
-	for id := range e.Blocked {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
 	var b strings.Builder
-	fmt.Fprintf(&b, "daily cap: %d of the target group(s) already received a broadcast", len(ids))
+	window := "today (" + e.WindowFrom.Format("2006-01-02") + ", " + ProviderTZ + ")"
 	if e.Window == CapWindowRolling {
-		fmt.Fprintf(&b, " in the last 24h")
-	} else {
-		fmt.Fprintf(&b, " today (%s, %s)", e.WindowFrom.Format("2006-01-02"), ProviderTZ)
+		window = "in the last 24h"
 	}
-	b.WriteString("\n")
-	for _, id := range ids {
-		fmt.Fprintf(&b, "  %s  last sent %s\n", id, e.Blocked[id].In(providerLocation()).Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(&b, "daily cap: %d target group(s) cannot receive a broadcast %s\n", len(e.BlockedIDs()), window)
+
+	if len(e.Delivered) > 0 {
+		b.WriteString("\nalready received a broadcast:\n")
+		for _, id := range sortedKeys(e.Delivered) {
+			fmt.Fprintf(&b, "  %s  last sent %s\n", id,
+				e.Delivered[id].In(providerLocation()).Format("2006-01-02 15:04:05"))
+		}
 	}
+	if len(e.Pending) > 0 {
+		b.WriteString("\nawaiting confirmation (will consume the quota once confirmed):\n")
+		for _, id := range sortedKeysStr(e.Pending) {
+			fmt.Fprintf(&b, "  %s  msgid %s\n", id, e.Pending[id])
+		}
+	}
+
 	b.WriteString("\nSending anyway would not fail loudly: the provider accepts the task, an\n")
 	b.WriteString("admin approves it, the sender taps confirm — and the group still receives\n")
-	b.WriteString("nothing (send result status 3). Retry after the quota resets, or pass\n")
-	b.WriteString("--skip-capped to drop these targets and send to the rest.")
+	b.WriteString("nothing (send result status 3).\n")
+	if len(e.Pending) > 0 {
+		b.WriteString("For the pending ones, cancel the outstanding task to free the slot, or\n")
+		b.WriteString("wait for it to be confirmed.\n")
+	}
+	b.WriteString("Pass --skip-capped to drop these targets and send to the rest.")
 	return b.String()
 }
 
-// BlockedIDs returns the offending chat ids, sorted.
+func sortedKeys(m map[string]time.Time) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedKeysStr(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// BlockedIDs returns every blocked chat id, from either reason, sorted and
+// deduplicated. This is what --skip-capped drops.
 func (e *DailyCapViolation) BlockedIDs() []string {
-	ids := make([]string, 0, len(e.Blocked))
-	for id := range e.Blocked {
+	set := make(map[string]struct{}, len(e.Delivered)+len(e.Pending))
+	for id := range e.Delivered {
+		set[id] = struct{}{}
+	}
+	for id := range e.Pending {
+		set[id] = struct{}{}
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -142,16 +186,37 @@ func (c *Client) ListGroupMsgs(id string, start, end int64, creator, cursor stri
 	return raw, nil
 }
 
-// RecentlyBroadcastGroups returns chat ids that already received a broadcast
-// inside the quota window, mapped to when.
+// QuotaState is what the provider currently says about each group's daily slot.
+type QuotaState struct {
+	// Delivered: group -> when it received a broadcast inside the window. The
+	// quota is already spent.
+	Delivered map[string]time.Time
+	// Pending: group -> msgid of an unconfirmed task targeting it. The quota is
+	// not spent yet, but is claimed: confirming that task consumes it.
+	Pending map[string]string
+}
+
+// InspectQuota reconstructs each target group's quota state from the provider.
 //
-// It walks recent 群发 tasks and follows each into its send result, counting a
-// group only when the provider confirms delivery (status 1). Tasks that were
-// themselves dropped, or are still awaiting confirmation, do not consume the
-// target's quota and so must not block a new send.
+// Two things block a group, and they are found differently:
 //
-// sender scopes the send-result lookup; the provider requires a userid there.
-func (c *Client) RecentlyBroadcastGroups(appID, sender string, w CapWindow, now time.Time) (map[string]time.Time, error) {
+//   - DELIVERED (status 1): walk recent tasks into their send results. Only
+//     counted when the delivery timestamp falls inside the window; anything
+//     older is stale. Statuses 2 and 3 never delivered, so they consume nothing
+//     and are ignored. Cancelled tasks surface as an error on the summary call
+//     and are skipped.
+//
+//   - PENDING (task status 0): an unconfirmed task. Deliberately NOT filtered by
+//     the window — a pending task carries no send time, and whenever it is
+//     eventually confirmed it consumes the quota of THAT day. A task created
+//     just before midnight would otherwise slip through and silently eat the
+//     new day's slot.
+//
+// Pending detection is also broader than delivered detection: get_groupmsg_task
+// takes only a msgid, so it reveals every assignee, while send results require a
+// userid and therefore only cover `sender`. A colleague's pending task is
+// visible; their delivered one is not.
+func (c *Client) InspectQuota(appID, sender string, w CapWindow, now time.Time) (*QuotaState, error) {
 	if sender == "" {
 		return nil, errors.New("sender is required to check the daily cap")
 	}
@@ -167,15 +232,27 @@ func (c *Client) RecentlyBroadcastGroups(appID, sender string, w CapWindow, now 
 		return nil, fmt.Errorf("decode broadcast list: %w", err)
 	}
 
-	seen := map[string]time.Time{}
+	state := &QuotaState{Delivered: map[string]time.Time{}, Pending: map[string]string{}}
 	for _, m := range listResp.GroupMsgList {
 		if m.MsgID == "" {
 			continue
 		}
+
+		// Is anyone still sitting on this task? get_groupmsg_task needs no
+		// userid, so this sees every assignee regardless of `sender`.
+		unconfirmed, terr := c.hasUnconfirmedTask(appID, m.MsgID)
+		if terr == nil && unconfirmed {
+			for _, id := range c.targetsOf(appID, m.MsgID, sender) {
+				if _, already := state.Pending[id]; !already {
+					state.Pending[id] = m.MsgID
+				}
+			}
+		}
+
 		sum, err := c.GroupMessageSummary(appID, m.MsgID, sender)
 		if err != nil {
-			// A task belonging to another sender is not visible to us; that is
-			// expected, not fatal. Skip it rather than failing the whole check.
+			// Not visible to this sender, or cancelled (41093). Either way the
+			// delivered set gains nothing; skip rather than fail the check.
 			continue
 		}
 		for _, e := range sum.Entries {
@@ -189,29 +266,79 @@ func (c *Client) RecentlyBroadcastGroups(appID, sender string, w CapWindow, now 
 			if at.Before(from) {
 				continue
 			}
-			if prev, ok := seen[e.ChatID]; !ok || at.After(prev) {
-				seen[e.ChatID] = at
+			if prev, ok := state.Delivered[e.ChatID]; !ok || at.After(prev) {
+				state.Delivered[e.ChatID] = at
 			}
 		}
 	}
-	return seen, nil
+	return state, nil
+}
+
+// hasUnconfirmedTask reports whether any assignee still has this task at
+// status 0 (未发送).
+func (c *Client) hasUnconfirmedTask(appID, msgID string) (bool, error) {
+	raw, err := c.GroupMessageTask(appID, msgID, "")
+	if err != nil {
+		return false, err
+	}
+	var resp struct {
+		TaskList []struct {
+			Status int `json:"status"`
+		} `json:"task_list"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false, err
+	}
+	for _, t := range resp.TaskList {
+		if t.Status == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// targetsOf lists the chat ids a task addresses. The send result enumerates
+// every target regardless of its status, which is what we need for a task that
+// has not been confirmed yet.
+func (c *Client) targetsOf(appID, msgID, sender string) []string {
+	sum, err := c.GroupMessageSummary(appID, msgID, sender)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(sum.Entries))
+	for _, e := range sum.Entries {
+		if e.ChatID != "" {
+			out = append(out, e.ChatID)
+		}
+	}
+	return out
 }
 
 // CheckDailyCap returns a *DailyCapViolation when any target already used its
 // quota. A nil error means every target is clear.
 func (c *Client) CheckDailyCap(appID, sender string, chatIDs []string, w CapWindow, now time.Time) error {
-	seen, err := c.RecentlyBroadcastGroups(appID, sender, w, now)
+	state, err := c.InspectQuota(appID, sender, w, now)
 	if err != nil {
 		return err
 	}
-	blocked := map[string]time.Time{}
+	delivered := map[string]time.Time{}
+	pending := map[string]string{}
 	for _, id := range chatIDs {
-		if at, ok := seen[id]; ok {
-			blocked[id] = at
+		if at, ok := state.Delivered[id]; ok {
+			delivered[id] = at
+			continue // already spent; the pending reason would be redundant
+		}
+		if msgID, ok := state.Pending[id]; ok {
+			pending[id] = msgID
 		}
 	}
-	if len(blocked) == 0 {
+	if len(delivered) == 0 && len(pending) == 0 {
 		return nil
 	}
-	return &DailyCapViolation{Window: w, WindowFrom: capWindowStart(now, w), Blocked: blocked}
+	return &DailyCapViolation{
+		Window:     w,
+		WindowFrom: capWindowStart(now, w),
+		Delivered:  delivered,
+		Pending:    pending,
+	}
 }
