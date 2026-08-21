@@ -93,6 +93,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Eye,
   Shield,
   Sparkles,
   Trash2,
@@ -643,6 +644,13 @@ export default function AgentHubPage() {
   const [tenantEditEnabledWikis, setTenantEditEnabledWikis] = useState<string[]>([])
   const [tenantEditEnabledCorpApps, setTenantEditEnabledCorpApps] = useState<string[]>([])
   const [tenantEditRules, setTenantEditRules] = useState('')
+  // The system prompt is fetched separately from the row. Anyone the agent is
+  // visible to may read it, but only the creator (or a dept_admin over them /
+  // a store admin) may save it back. `false` renders the box read-only;
+  // `tenantEditRulesLoadFailed` means we never got the text at all, so the
+  // save must omit `rules` rather than persist an empty string over it.
+  const [tenantEditRulesEditable, setTenantEditRulesEditable] = useState(true)
+  const [tenantEditRulesLoadFailed, setTenantEditRulesLoadFailed] = useState(false)
   const [tenantEditWorkflow, setTenantEditWorkflow] = useState<TenantAssistantInfo['workflow']>(null)
   const [savingTenantEdit, setSavingTenantEdit] = useState(false)
   const [tenantEditSkillsDetails, setTenantEditSkillsDetails] = useState<SkillHubSkill[]>([])
@@ -1555,12 +1563,20 @@ export default function AgentHubPage() {
     void loadAvailableWikis()
     void loadAvailableCorpApps()
 
+    setTenantEditRulesEditable(assistant.can_manage !== false)
+    setTenantEditRulesLoadFailed(false)
     void (async () => {
       try {
-        const { rules } = await getTenantAssistantRules(assistant.id)
+        const { rules, can_edit } = await getTenantAssistantRules(assistant.id)
         setTenantEditRules(rules)
+        // The server is the authority on editability; older builds omit the
+        // flag, so fall back to the row's can_manage.
+        setTenantEditRulesEditable(can_edit ?? assistant.can_manage !== false)
       } catch {
-        setTenantEditRules('')
+        // Never fall back to '' as if the prompt were empty — that would let a
+        // save wipe the real system.md.
+        setTenantEditRulesLoadFailed(true)
+        setTenantEditRulesEditable(false)
       }
     })()
 
@@ -1641,7 +1657,9 @@ export default function AgentHubPage() {
         description: tenantEditDescription,
         avatar: tenantEditAvatar,
         emoji: tenantEditEmoji,
-        rules: tenantEditRules,
+        ...(tenantEditRulesEditable && !tenantEditRulesLoadFailed
+          ? { rules: tenantEditRules }
+          : {}),
         agent_type: tenantEditAgentType,
         memory_mode: tenantEditMemoryMode,
         visible_to,
@@ -1662,6 +1680,7 @@ export default function AgentHubPage() {
       setSavingTenantEdit(false)
     }
   }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditEmoji, tenantEditRules,
+      tenantEditRulesEditable, tenantEditRulesLoadFailed,
       tenantEditAgentType, tenantEditMemoryMode, tenantEditVisibilityMode, tenantEditVisibleTo,
       tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
       tenantEditWorkflow, fetchTenantAssistants])
@@ -2356,7 +2375,20 @@ export default function AgentHubPage() {
                                     )}
                                   </Button>
                                 </>
-                              ) : null
+                              ) : (
+                                // Not the creator (nor a dept_admin over them):
+                                // no manage actions, but the agent is visible to
+                                // them, so offer the read-only detail view —
+                                // the dialog renders the prompt uneditable.
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  title="查看详情"
+                                  onClick={() => openTenantEdit(assistant)}
+                                >
+                                  <Eye className="size-4" />
+                                </Button>
+                              )
                             ) : (
                               assistant.can_manage !== false ? (
                                 <Button
@@ -4499,14 +4531,23 @@ export default function AgentHubPage() {
               <div className="space-y-2">
                 <label className="text-sm font-medium">Markdown 规则</label>
                 <Textarea
-                  value={tenantEditRules}
+                  value={tenantEditRulesLoadFailed ? '' : tenantEditRules}
                   onChange={event => setTenantEditRules(event.target.value)}
                   rows={10}
-                  placeholder="# 角色\n\n在这里输入智能体规则"
-                  className="font-mono text-xs"
+                  readOnly={!tenantEditRulesEditable}
+                  placeholder={
+                    tenantEditRulesLoadFailed
+                      ? '无法加载规则内容'
+                      : '# 角色\n\n在这里输入智能体规则'
+                  }
+                  className={`font-mono text-xs${tenantEditRulesEditable ? '' : ' bg-muted'}`}
                 />
                 <p className="text-xs text-muted-foreground">
-                  这里的 Markdown 内容会同步到专属智能体的规则文件。
+                  {tenantEditRulesLoadFailed
+                    ? '规则内容加载失败，保存时将保留原有规则不变。'
+                    : tenantEditRulesEditable
+                      ? '这里的 Markdown 内容会同步到专属智能体的规则文件。'
+                      : '仅创建者可编辑规则内容，此处为只读。'}
                 </p>
               </div>
 

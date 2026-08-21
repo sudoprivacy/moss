@@ -374,8 +374,16 @@ export function getInstalledAgentRules(assistantName: string): Promise<{ rules: 
   )
 }
 
-export function getTenantAssistantRules(id: string): Promise<{ rules: string }> {
-  return authClient.get<{ rules: string }>(
+/**
+ * The system prompt is readable by anyone the agent is visible to; `can_edit`
+ * reports whether this caller may also save changes back (creator/subtree or
+ * store admin). Older servers omit it — treat a missing value as editable and
+ * let the PATCH be the authority.
+ */
+export function getTenantAssistantRules(
+  id: string,
+): Promise<{ rules: string; can_edit?: boolean }> {
+  return authClient.get<{ rules: string; can_edit?: boolean }>(
     `/api/v1/agents/tenant/${encodeURIComponent(id)}/rules`,
   )
 }
