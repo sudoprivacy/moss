@@ -264,11 +264,24 @@ export class SessionRunnerDaemon {
         }
         this.#finalized = true
         const runtimeState = code === 0 ? 'stopped' : 'failed'
+        // A context-window overflow kills the runtime with SIGKILL, and the
+        // generic "exited before attach became stable" text told the user
+        // nothing about why. scode emits the overflow marker on stdout just
+        // before dying, so surface that as the error instead — the session
+        // stays desired=active and is resumable, but the user needs to know a
+        // fresh session (or a smaller prompt) is what unblocks them.
+        const overflowText = this.#recentContextOverflowText()
         const errorText =
           code === 0
             ? null
-            : this.#recentStderrText() ||
+            : overflowText ||
+              this.#recentStderrText() ||
               `Runtime exited before attach became stable (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+        if (overflowText) {
+          process.stderr.write(
+            `[SessionRunnerDaemon] session ${this.manifest.session.sessionId} died from context-window overflow\n`,
+          )
+        }
         this.#state = code === 0 ? 'stopped' : 'failed'
         this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
           runtimeState,
@@ -571,6 +584,23 @@ export class SessionRunnerDaemon {
       })
     }, remaining)
     this.#busyCeilingTimer.unref?.()
+  }
+
+  /**
+   * scode prints a `[context_window_exceeded]` assistant message just before
+   * the runtime is SIGKILLed. Recovering it lets the exit be reported as what
+   * it actually was instead of a generic crash. Returns null when the recent
+   * output holds no overflow marker.
+   */
+  #recentContextOverflowText(): string | null {
+    for (let i = this.#recentStderr.length - 1; i >= 0; i--) {
+      const line = this.#recentStderr[i]
+      if (line && line.includes('context_window_exceeded')) {
+        return '对话上下文超出模型限制，会话已中断。请开始新会话，或缩短本次输入后重试。'
+          + ' (context_window_exceeded)'
+      }
+    }
+    return null
   }
 
   #rememberStderr(line: string): void {

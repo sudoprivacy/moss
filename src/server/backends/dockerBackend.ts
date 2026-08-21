@@ -1,5 +1,5 @@
 import { spawn } from 'child_process'
-import { writeFileSync } from 'fs'
+import { existsSync, writeFileSync } from 'fs'
 import { mkdir, readFile, rm } from 'fs/promises'
 import os from 'os'
 import { dirname, join } from 'path'
@@ -228,6 +228,26 @@ export class DockerBackend implements SessionBackend {
       ...(scodeHomeDir ? [scodeHomeDir] : []),
     ]).filter(p => p !== '/')
 
+    // When the session cwd is moss-server's own app dir, the mount above also
+    // exposes `data/runtime/sessions/**` — every session's transcript and
+    // attempt logs, including this session's own. An agent that reads those
+    // pulls the whole conversation (plus every tool payload) back into its
+    // context, which compounds recursively and overflows the model context
+    // window: one observed session went 19k -> 960k tokens in ~3 minutes and
+    // was SIGKILLed.
+    //
+    // Shadow the `sessions/` tree with a single empty read-only tmpfs. The
+    // per-session dirs the runtime actually needs (configDir, scodeHomeDir)
+    // are bind-mounted individually and are emitted AFTER this shadow, so
+    // Docker layers them back on top and they stay readable. One tmpfs no
+    // matter how many sessions are on disk — shadowing each transcript dir
+    // separately would mean hundreds of mounts on a busy box.
+    const sessionTranscriptRoots = uniqueMounts(
+      mounts
+        .map(m => join(m, 'data', 'runtime', 'sessions'))
+        .filter(p => existsSync(p)),
+    )
+
     // Use model from env (which includes user preference), or fallback
     let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
     if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
@@ -291,6 +311,11 @@ export class DockerBackend implements SessionBackend {
       }
       for (const [key, value] of Object.entries(this.defaults.labels || {})) {
         args.push('--label', `${key}=${value}`)
+      }
+      // Shadow first, real per-session mounts second: Docker applies mounts in
+      // order, so configDir/scodeHomeDir land on top of the tmpfs.
+      for (const shadow of sessionTranscriptRoots) {
+        args.push('--tmpfs', `${shadow}:ro,size=4k`)
       }
       for (const mount of mounts) {
         const hostPath = toHostPath(mount)
