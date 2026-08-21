@@ -6245,11 +6245,40 @@ export function startServer(
 
       const tenantAgentRulesMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/rules$/)
       if (req.method === 'GET' && tenantAgentRulesMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        // Reading the system prompt follows the same rule the tenant list uses:
+        // anyone the agent is visible to may READ it (the /download endpoint
+        // already ships system.md to exactly those callers, so gating this on
+        // admin:settings protected nothing and only desynced the UI). Editing
+        // stays owner/subtree-only — enforced by PATCH, and signalled here via
+        // `can_edit` so the client can render read-only instead of guessing.
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(tenantAgentRulesMatch[1] || '')
         const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+        }
+
+        const rulesStoreAdmin = isStoreAdmin(auth)
+        if (!rulesStoreAdmin && tenantAssistant.org_id != null && tenantAssistant.org_id !== auth.orgId) {
+          throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+        }
+        const canEditRules =
+          rulesStoreAdmin ||
+          authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth)
+        if (!canEditRules) {
+          // Not the owner: only an approved agent that is visible to this
+          // caller may be read. Pending/rejected items stay private to their
+          // author and the admins.
+          const rulesVisibleTo =
+            typeof tenantAssistant.visible_to === 'string'
+              ? (JSON.parse(tenantAssistant.visible_to) as VisibleTo)
+              : null
+          const visible =
+            tenantAssistant.status === 'approved' &&
+            isVisibleTo(rulesVisibleTo, authService.buildVisibilityFilter(auth))
+          if (!visible) {
+            throw new HttpError(403, 'You cannot view this tenant assistant')
+          }
         }
 
         const filePath = typeof tenantAssistant.file_path === 'string' ? tenantAssistant.file_path : ''
@@ -6263,12 +6292,12 @@ export function startServer(
         }
 
         if (rules !== null) {
-          writeJson(res, 200, { rules })
+          writeJson(res, 200, { rules, can_edit: canEditRules })
           return
         }
 
         const fallback = await readFile(join(assistantDir, 'system.md'), 'utf8').catch(() => '')
-        writeJson(res, 200, { rules: fallback })
+        writeJson(res, 200, { rules: fallback, can_edit: canEditRules })
         return
       }
 
