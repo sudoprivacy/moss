@@ -198,6 +198,23 @@ So `send-group` checks before creating anything:
 Which boundary WeCom actually uses is **not documented**; `calendar`
 matches its wording, `rolling24h` is safer if you schedule near midnight.
 
+The check blocks a group for either of two reasons:
+
+| reason | meaning |
+| --- | --- |
+| **already received** | a broadcast reached it inside the window (send result status 1) — the quota is spent |
+| **awaiting confirmation** | an unconfirmed task targets it — the quota is not spent *yet*, but confirming that task will spend it |
+
+The second reason matters because **quota is consumed at confirmation, not at
+creation**, and a human may confirm hours later. Observed in production: a task
+created at 08:10 passed a delivered-only check, because the task that beat it
+was not confirmed until 10:18 — then settled as status 3, wasting a
+confirmation. Pending tasks are therefore blocked regardless of age: one created
+just before midnight consumes the *next* day's slot when confirmed.
+
+`--skip-capped` drops targets blocked for either reason. For a pending block,
+cancelling the outstanding task frees the slot immediately.
+
 Two limits worth knowing before relying on the guard:
 
 - **Quota is shared across senders.** A colleague broadcasting to the same
