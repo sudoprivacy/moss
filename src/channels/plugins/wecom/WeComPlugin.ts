@@ -10,7 +10,7 @@ import WebSocket from 'ws';
 
 import type { BotInfo, IChannelPluginConfig, IUnifiedOutgoingMessage, PluginType } from '../../types.js';
 import { BasePlugin } from '../BasePlugin.js';
-import { WECOM_MESSAGE_LIMIT, encodeChatId, getDefaultExtension, parseChatId, toUnifiedIncomingMessage, toWeComSendParams } from './WeComAdapter.js';
+import { WECOM_MESSAGE_LIMIT, encodeChatId, getDefaultExtension, parseChatId, splitMessage, toUnifiedIncomingMessage, toWeComSendParams } from './WeComAdapter.js';
 import type { WeComMsgCallback, WeComEventCallback, WeComUploadType } from './WeComAdapter.js';
 import { downloadAndDecryptMedia } from './WeComCrypto.js';
 import { WeComUploader } from './WeComUploader.js';
@@ -263,7 +263,8 @@ export class WeComPlugin extends BasePlugin {
 
     console.log(`[WeComPlugin] sendMessage: reqId=${reqId || 'none'}, content length=${content.length}`);
 
-    // Truncate if too long
+    // Stream mode renders progressively, so it takes the content as-is (the
+    // limit applies per stream update, and updates carry the full text).
     const truncatedContent = content.length > WECOM_MESSAGE_LIMIT ? content.slice(0, WECOM_MESSAGE_LIMIT - 3) + '...' : content;
 
     // If we have a reqId (responding to an incoming message), use stream mode
@@ -296,23 +297,35 @@ export class WeComPlugin extends BasePlugin {
       return messageId;
     }
 
-    // Otherwise, use proactive push (aibot_send_msg)
+    // Otherwise, use proactive push (aibot_send_msg). A push is a discrete
+    // message, so an over-limit answer must be SPLIT across several pushes —
+    // truncating with '...' silently destroyed the tail. splitMessage prefers
+    // newline/space boundaries so markdown survives the cut.
     const { type: chatType, id: pureId } = parseChatId(chatId);
-    const sendReqId = this.generateReqId();
-    console.log(`[WeComPlugin] sendMessage: using proactive push, chatType=${chatType}, pureId=${pureId}, sendReqId=${sendReqId}`);
+    const chunks = splitMessage(content, WECOM_MESSAGE_LIMIT);
+    if (chunks.length > 1) {
+      console.log(`[WeComPlugin] sendMessage: splitting ${content.length} chars into ${chunks.length} pushes`);
+    }
 
-    this.send({
-      cmd: 'aibot_send_msg',
-      headers: { req_id: sendReqId },
-      body: {
-        chatid: pureId,
-        chat_type: chatType === 'group' ? 2 : 1,
-        msgtype: 'markdown',
-        markdown: { content: truncatedContent },
-      },
-    });
+    let lastReqId = '';
+    for (const chunk of chunks) {
+      const sendReqId = this.generateReqId();
+      lastReqId = sendReqId;
+      console.log(`[WeComPlugin] sendMessage: using proactive push, chatType=${chatType}, pureId=${pureId}, sendReqId=${sendReqId}`);
 
-    return `push_${sendReqId}`;
+      this.send({
+        cmd: 'aibot_send_msg',
+        headers: { req_id: sendReqId },
+        body: {
+          chatid: pureId,
+          chat_type: chatType === 'group' ? 2 : 1,
+          msgtype: 'markdown',
+          markdown: { content: chunk },
+        },
+      });
+    }
+
+    return `push_${lastReqId}`;
   }
 
   /**
@@ -322,8 +335,28 @@ export class WeComPlugin extends BasePlugin {
     const session = this.streamSessions.get(chatId);
     const isFinal = !!message.replyMarkup;
 
-    // No stream session or already finished
-    if (!session || session.isFinished) {
+    // A finished stream used to make this a silent no-op, which dropped any
+    // further message the agent produced in the SAME turn (WeCom marks a
+    // stream final on the first reply carrying replyMarkup, so a second
+    // assistant message — e.g. a long answer split into "part 1" / "part 2" —
+    // was swallowed with no log and no error). Open a fresh stream for it
+    // instead; the reqId is still valid for the current turn.
+    if (session?.isFinished) {
+      console.warn(
+        `[WeComPlugin] editMessage: stream already finished for ${chatId}, opening a new stream for the follow-up message`,
+      );
+      await this.sendMessage(chatId, message);
+      return;
+    }
+
+    if (!session) {
+      // Never opened a stream for this chat (or it was dropped by a new
+      // incoming message). Fall back to a normal send so the content still
+      // reaches the user rather than vanishing.
+      console.warn(
+        `[WeComPlugin] editMessage: no stream session for ${chatId}, falling back to sendMessage`,
+      );
+      await this.sendMessage(chatId, message);
       return;
     }
 
