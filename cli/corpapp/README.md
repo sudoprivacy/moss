@@ -259,6 +259,89 @@ To actually notify someone, send them a 1:1 message with `corpapp send
 --to <userid>` — that does push. A common shape is: broadcast the content
 to the group, then ping the responsible internal colleague directly.
 
+## 消息队列（group-msg-queue）
+
+发送配额是**在人工确认时**扣掉的，不是创建任务时 —— 而确认可能发生在数小时之后。
+因此「这个群今天发过了吗」无法只靠「已送达记录」回答：一条还在等确认的任务同样
+占着当天名额。队列就是用来记住这个「意图」的，**按 corp app 分目录、按群分文件、
+跨会话持久**。
+
+### 标准循环（顺序有意义）
+
+```bash
+APP=数牍
+
+# 1. 超时回收 —— 按每条自己的 --expires-at
+corpapp group-msg-queue --app $APP --action reap --cancel-wecom
+
+# 2. 业务撤销 —— 调用方查业务数据后自行决定
+corpapp group-msg-queue --app $APP --action list --state pending --json
+corpapp group-msg-queue --app $APP --action cancel --chat-id wr_xxx \
+  --entry-id q_... --reason "排期已取消" --cancel-wecom
+
+# 3. 结算已发送的
+corpapp group-msg-queue --app $APP --action reconcile
+
+# 4. 入队（只存元数据，不存内容）
+corpapp group-msg-queue --app $APP --action enqueue --chat-id wr_xxx \
+  --meta '{"type":"日常追货提醒","customer_id":"C1024"}' \
+  --idempotency-key '日常追货提醒:C1024:2026-08-27' \
+  --expires-at 2026-08-26T10:00:00+08:00
+
+# 5. 问「现在哪些群能发」
+corpapp group-msg-queue --app $APP --action next
+
+# 6. 逐条：占位 → 组装 → 发送 → 标记
+corpapp group-msg-queue --app $APP --action claim --chat-id wr_xxx --entry-id q_...
+corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx
+corpapp group-msg-queue --app $APP --action mark-sent --chat-id wr_xxx \
+  --entry-id q_... --msgid msg_... --sender linqinhui
+# 发送失败则归还名额，否则名额空烧一天：
+corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
+  --entry-id q_... --reason "send-group 失败"
+```
+
+**前三步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
+释放，那个群就白白锁死一天。
+
+### 两种撤销，刻意分开
+
+| | 依据 | 谁判断 |
+|---|---|---|
+| `reap` | 只看每条自己的 `--expires-at` 是否已过 | moss，**从不读 `--meta`** |
+| `cancel` | 「排期已取消」「客户已回复」等业务条件 | 调用方，需查业务数据 |
+
+过期时刻在入队时按业务算好，**按小时或按天都能表达**（`--expires-at` 是绝对时间戳），
+不同消息类型、不同客户都可以不同。moss 侧不增加任何业务规则参数。
+
+### 为什么 claim 要独立于 mark-sent
+
+组装内容可能耗时数十秒（查数、生成 xlsx）。不先占住名额，另一个 agent 可能在这段
+时间里也通过 `next` 拿到同一个群 —— 两边都发，输的那条在人工确认之后才以 status 3
+死掉，白白浪费一次确认。
+
+### 三条约定
+
+- **`next` 绝不静默截断**：`totalEligible` / `hasMore` 恒返回，被挡下的群都在
+  `skipped` 里带原因。`--limit` 是**主动限流**（每条都要一次管理员审批 + 一次发送人
+  确认），不是安全阀。
+- **`skipped` 必须如实回报**：客户今天没收到消息，运维要知道是「已发过」还是
+  「上一条还在等确认」。
+- **status 3 不自动重排**：置 `failed` + 释放名额，是否还值得发是业务判断
+  （排期已过的提醒不该重发）。用 `list --state failed` 自行决定。
+
+### 状态机
+
+```
+pending ──claim──> claimed ──mark-sent──> sent ──reconcile──> delivered  (status 1)
+   │                  │                     │              └─> failed   (status 2/3)
+   │                  └──release──> pending └─ (status 0 保持 sent)
+   └──cancel / reap──> cancelled
+```
+
+存储位置：`$MOSS_HOME/wecom-queue/<corpAppId>/<chat_id>.json`，原子写入
+（tmp + rename），按 corp app 串行化。
+
 ## Capabilities
 
 Capabilities are per-type and reported by the server (`list`/`get` show

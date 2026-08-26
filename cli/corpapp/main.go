@@ -68,6 +68,8 @@ Usage:
   corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]
   corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
   corpapp group-msg-remind --app <name> --msgid <id>
+  corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
+                     verbs: enqueue|next|claim|release|mark-sent|cancel|reap|reconcile|list
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -146,6 +148,50 @@ Customer groups and 群发 (WeCom):
 
     corpapp send-group --app myapp --sender zhangsan \
       --chat-id wr_xxx --text '本周报表' --file ./report.pdf
+
+The message queue (group-msg-queue):
+  The daily cap is spent when a human CONFIRMS a task, not when the API creates
+  one — and confirmation can land hours later. So "has this group been sent to
+  today?" cannot be answered by looking at delivered broadcasts alone. The queue
+  remembers intent across runs, per corp app, per group.
+
+  Standard loop (the order matters — the first three all RELEASE slots, so
+  running them after next would leave groups needlessly locked for the day):
+
+    1. reap                  withdraw entries past their own --expires-at
+    2. list --state pending  caller applies business rules -> cancel
+    3. reconcile             settle sent entries against what WeCom delivered
+    4. enqueue               queue new intents (idempotency-key makes re-runs safe)
+    5. next                  ask which groups may be sent to now
+    6. per entry: claim -> compose -> send-group -> mark-sent
+                  (on failure: release, so the slot is not burned)
+    7. list --state failed   caller decides whether to re-queue
+
+  TWO KINDS OF CANCELLATION, deliberately separate:
+    reap    knows only HOW LONG — it compares each entry's --expires-at to now
+            and never reads --meta. Set the deadline per entry at enqueue time;
+            hours and days are equally expressible.
+    cancel  knows WHY — "the schedule moved", "the customer already replied".
+            That needs fresh business data, so the caller drives it via
+            list --state pending, then cancel --reason.
+
+  claim before composing: building a report can take a minute, and without the
+  slot held a second agent could pass next for the same group. Both would
+  send; the loser dies as status 3 after a human confirmed it.
+
+  next never truncates silently: totalEligible and hasMore are always reported,
+  and every held-back group appears in skipped with its reason. Use --limit as
+  deliberate pacing — each send costs an admin approval plus a confirmation.
+
+  status 3 is NOT auto-requeued. The entry becomes failed and the slot is
+  freed, but whether it is still worth sending tomorrow is a business call.
+
+  Example:
+
+    corpapp group-msg-queue --app myapp --action enqueue --chat-id wr_xxx \
+      --meta '{"type":"daily_chase","customer_id":"C1024"}' \
+      --idempotency-key 'daily_chase:C1024:2026-08-27' \
+      --expires-at 2026-08-26T10:00:00+08:00
 
 Filtering approvals:
   --status <n>    approval status (sp_status):

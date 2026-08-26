@@ -166,3 +166,127 @@ func truncate(s string, n int) string {
 	}
 	return s[:n-1] + "…"
 }
+
+// FormatAnyJSON pretty-prints any queue response for --json.
+func FormatAnyJSON(w io.Writer, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(b, '\n'))
+	return err
+}
+
+// FormatQueueNext prints sendable entries AND the groups held back. The skipped
+// list is not noise: it is the only way an operator learns why a customer got
+// nothing today, so it is always printed.
+func FormatQueueNext(w io.Writer, r *QueueNextResp) {
+	fmt.Fprintf(w, "sendable=%d  eligible=%d", len(r.Entries), r.TotalEligible)
+	if r.HasMore {
+		fmt.Fprintf(w, "  (truncated by --limit; %d more)", r.TotalEligible-len(r.Entries))
+	}
+	fmt.Fprintln(w)
+	for _, e := range r.Entries {
+		fmt.Fprintf(w, "  %s  %s  %s\n", e.EntryID, truncate(e.ChatID, 34), metaSummary(e.Meta))
+	}
+	if len(r.Skipped) > 0 {
+		fmt.Fprintln(w, "\nskipped:")
+		for _, s := range r.Skipped {
+			switch s.Reason {
+			case "already_sent_today":
+				fmt.Fprintf(w, "  %s  already received a broadcast today (%s)\n", truncate(s.ChatID, 34), s.LastSentDate)
+			default:
+				fmt.Fprintf(w, "  %s  an earlier entry is still awaiting confirmation (%s)\n",
+					truncate(s.ChatID, 34), s.BlockingEntryID)
+			}
+		}
+	}
+}
+
+func FormatQueueAction(w io.Writer, r *QueueActionResp) {
+	if !r.OK {
+		fmt.Fprintf(w, "refused: %s\n", r.Reason)
+		return
+	}
+	fmt.Fprint(w, "ok")
+	if r.State != "" {
+		fmt.Fprintf(w, "  state=%s", r.State)
+	}
+	if r.WecomCancelled {
+		fmt.Fprint(w, "  (withdrawn at WeCom)")
+	}
+	fmt.Fprintln(w)
+}
+
+func FormatQueueReap(w io.Writer, r *QueueReapResp) {
+	if len(r.Reaped) == 0 {
+		fmt.Fprintln(w, "nothing expired")
+		return
+	}
+	fmt.Fprintf(w, "reaped %d expired entr%s\n", len(r.Reaped), plural(len(r.Reaped), "y", "ies"))
+	for _, e := range r.Reaped {
+		fmt.Fprintf(w, "  %s  %s  expired %s", e.EntryID, truncate(e.ChatID, 34), e.ExpiresAt)
+		if e.MsgID != "" && !e.WecomCancelled {
+			fmt.Fprint(w, "  WARNING: still pending at WeCom (pass --cancel-wecom)")
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+// FormatQueueReconcile calls out status 3 explicitly: the task WAS confirmed by
+// a human, yet the group received nothing, and that is invisible everywhere else.
+func FormatQueueReconcile(w io.Writer, r *QueueReconcileResp) {
+	if len(r.Reconciled) == 0 {
+		fmt.Fprintln(w, "nothing to settle")
+		return
+	}
+	var delivered, failed int
+	for _, o := range r.Reconciled {
+		if o.State == "delivered" {
+			delivered++
+		} else {
+			failed++
+		}
+	}
+	fmt.Fprintf(w, "settled %d: delivered=%d failed=%d\n", len(r.Reconciled), delivered, failed)
+	for _, o := range r.Reconciled {
+		fmt.Fprintf(w, "  %s  %s  status=%d  %s", o.EntryID, truncate(o.ChatID, 34), o.SendStatus, o.State)
+		if o.Reason == "daily_cap" {
+			fmt.Fprint(w, "  (confirmed, but the group had already received another broadcast — nothing delivered)")
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+func FormatQueueList(w io.Writer, r *QueueListResp) {
+	if len(r.Entries) == 0 {
+		fmt.Fprintln(w, "(empty)")
+		return
+	}
+	fmt.Fprintln(w, "ENTRY                                 STATE      CHAT                                META")
+	for _, e := range r.Entries {
+		fmt.Fprintf(w, "%-36s  %-9s  %-34s  %s\n",
+			truncate(e.EntryID, 36), e.State, truncate(e.ChatID, 34), metaSummary(e.Meta))
+	}
+}
+
+func metaSummary(m map[string]any) string {
+	if m == nil {
+		return ""
+	}
+	if t, ok := m["type"].(string); ok {
+		return t
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return truncate(string(b), 40)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
