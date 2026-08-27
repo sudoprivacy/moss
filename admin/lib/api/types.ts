@@ -220,6 +220,11 @@ export interface SystemSettings {
    *  fresh one is created, bounding runtime transcript growth. Default 50; 0
    *  disables rotation. */
   cronReuseMaxRuns: number
+  /** Max user turns a single IM chat accumulates before its runtime session is
+   *  retired and a fresh one is started, seeded with a summary of recent turns.
+   *  Bounds the same transcript growth as cronReuseMaxRuns, measured in chat
+   *  turns. Default 200; 0 disables rotation. */
+  imReuseMaxTurns: number
   /** Directory (inside the moss-server container) holding the per-service login
    *  scripts run by the token minter. For a script-type config item with pinyin
    *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Default
@@ -246,6 +251,7 @@ export interface UpdateSystemSettingsRequest {
   clientShowToolCalls?: boolean
   workspaceUploadLimitBytes?: number
   cronReuseMaxRuns?: number
+  imReuseMaxTurns?: number
 }
 
 // Direct Connect Server Types

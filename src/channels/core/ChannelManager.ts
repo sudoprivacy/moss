@@ -37,6 +37,10 @@ class ChannelManager {
   private pluginManager: PluginManager | null = null;
   private db: DirectConnectStore | null = null;
   private initialized: boolean = false;
+  private staleSweepTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** How often to sweep stale channel_sessions rows. */
+  private static readonly STALE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
   private constructor() {}
 
@@ -115,15 +119,40 @@ class ChannelManager {
 
     console.log('[ChannelManager] Starting enabled plugins...');
     await this.pluginManager.startEnabledPlugins();
+    this.startStaleSessionSweep();
   }
 
   /**
    * Stop all plugins
    */
   async stopAllPlugins(): Promise<void> {
+    if (this.staleSweepTimer) {
+      clearInterval(this.staleSweepTimer);
+      this.staleSweepTimer = null;
+    }
     if (this.pluginManager) {
       await this.pluginManager.stopAll();
     }
+  }
+
+  /**
+   * Periodically drop channel_sessions rows that have gone untouched past the TTL.
+   * cleanupStaleSessions() has existed since the SessionManager was written but was
+   * never scheduled, so these rows accumulated indefinitely. Routing bookkeeping
+   * only — dropping a row does not terminate a runtime session, it just means the
+   * next message from that chat starts fresh.
+   */
+  private startStaleSessionSweep(): void {
+    if (this.staleSweepTimer) return;
+    this.staleSweepTimer = setInterval(() => {
+      try {
+        this.cleanupStaleSessions();
+      } catch (error) {
+        console.warn('[ChannelManager] stale session sweep failed:', error);
+      }
+    }, ChannelManager.STALE_SWEEP_INTERVAL_MS);
+    // Never hold the process open just for the sweep.
+    this.staleSweepTimer.unref?.();
   }
 
   /**

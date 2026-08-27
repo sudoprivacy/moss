@@ -115,6 +115,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     clientShowToolCalls: settings.clientShowToolCalls,
     workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
     cronReuseMaxRuns: settings.cronReuseMaxRuns,
+    imReuseMaxTurns: settings.imReuseMaxTurns,
   }
 }
 
@@ -135,6 +136,9 @@ function buildSystemSettingsPatch(
   }
   if (draft.cronReuseMaxRuns !== settings.cronReuseMaxRuns) {
     patch.cronReuseMaxRuns = draft.cronReuseMaxRuns
+  }
+  if (draft.imReuseMaxTurns !== settings.imReuseMaxTurns) {
+    patch.imReuseMaxTurns = draft.imReuseMaxTurns
   }
   if (draft.thinkingMode !== settings.thinkingMode) {
     patch.thinkingMode = draft.thinkingMode
@@ -968,6 +972,30 @@ export default function SystemSettingsPage() {
                     ? {
                         ...current,
                         cronReuseMaxRuns: next,
+                      }
+                    : current,
+                )
+              }}
+            />
+          </SettingField>
+
+          <SettingField
+            label="IM 会话轮次上限"
+            description="同一个 IM 聊天累计对话满该轮数后，自动重建会话并注入最近对话摘要，避免运行时上下文不断累积直至超出模型上限。重建会保留对话主线，但工具调用等中间状态会丢失。0 表示不限制（一直复用）。默认 200。"
+          >
+            <Input
+              type="number"
+              min={0}
+              max={10000}
+              value={draft.imReuseMaxTurns}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                const next = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 10000) : 0
+                setDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        imReuseMaxTurns: next,
                       }
                     : current,
                 )

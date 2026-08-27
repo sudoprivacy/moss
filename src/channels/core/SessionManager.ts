@@ -92,9 +92,14 @@ export class SessionManager {
   createSessionWithConversation(user: IChannelUser, conversationId: string, agentType: IChannelSession['agentType'] = 'acp', workspace?: string, chatId?: string): IChannelSession {
     const key = this.buildKey(user.id, chatId);
 
-    // Clear existing session if any
+    // Clear existing session if any. Carry the chat's conversation depth across
+    // the rebuild: the row is deleted and re-inserted under a new uuid, and the
+    // IM turn cap measures cumulative depth per CHAT, not per row. Losing it here
+    // would silently disarm the cap.
     const existingSession = this.activeSessions.get(key);
+    let carriedTurnCount = 0;
     if (existingSession) {
+      carriedTurnCount = this.db.getChannelSessionTurnCount(user.id, chatId);
       this.db.deleteChannelSession(existingSession.id);
     }
 
@@ -125,6 +130,10 @@ export class SessionManager {
 
     // Update in-memory cache
     this.activeSessions.set(key, session);
+
+    if (carriedTurnCount > 0) {
+      this.db.setChannelSessionTurnCount(session.id, carriedTurnCount);
+    }
 
     return session;
   }

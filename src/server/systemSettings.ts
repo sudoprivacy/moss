@@ -64,6 +64,13 @@ export type SystemSettingsPayload = {
    *  transcript, which otherwise overflows the model context. Admin-editable;
    *  default 50. 0 (or negative) disables rotation (reuse forever). */
   cronReuseMaxRuns: number
+  /** Max user turns a single IM chat accumulates before MossActionExecutor
+   *  retires its runtime session and starts a fresh one seeded with a summary
+   *  of recent turns. Bounds the same compounding-compaction growth that
+   *  cronReuseMaxRuns bounds for cron, but measured in chat turns. IM turns are
+   *  far smaller than a cron run, hence the higher default. Admin-editable;
+   *  default 200. 0 (or negative) disables rotation (reuse forever). */
+  imReuseMaxTurns: number
   /** Directory (inside the moss-server container) holding the per-service login
    *  scripts run by the token minter. For a script-type config item with pinyin
    *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Empty/null
@@ -117,6 +124,7 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   clientShowToolCalls: true,
   workspaceUploadLimitBytes: 20 * 1024 * 1024,
   cronReuseMaxRuns: 50,
+  imReuseMaxTurns: 200,
   mintScriptsDir: DEFAULT_MINT_SCRIPTS_DIR,
 })
 
@@ -202,6 +210,17 @@ function normalizeSystemSettings(
     }
   } else if (result.cronReuseMaxRuns === undefined) {
     result.cronReuseMaxRuns = DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns
+  }
+
+  if (source.imReuseMaxTurns !== undefined) {
+    const turns = Number.parseInt(String(source.imReuseMaxTurns), 10)
+    // Same shape as cronReuseMaxRuns: 0 disables rotation, upper bound stops a
+    // fat-fingered value from defeating the guard.
+    if (Number.isFinite(turns)) {
+      result.imReuseMaxTurns = Math.min(Math.max(turns, 0), 10_000)
+    }
+  } else if (result.imReuseMaxTurns === undefined) {
+    result.imReuseMaxTurns = DEFAULT_SYSTEM_SETTINGS.imReuseMaxTurns
   }
 
   if (source.thinkingMode !== undefined) {
@@ -388,6 +407,7 @@ function toSystemSettingsPayload(
     clientShowToolCalls: state.value.clientShowToolCalls ?? DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls,
     workspaceUploadLimitBytes: state.value.workspaceUploadLimitBytes ?? DEFAULT_SYSTEM_SETTINGS.workspaceUploadLimitBytes,
     cronReuseMaxRuns: state.value.cronReuseMaxRuns ?? DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns,
+    imReuseMaxTurns: state.value.imReuseMaxTurns ?? DEFAULT_SYSTEM_SETTINGS.imReuseMaxTurns,
     mintScriptsDir: state.value.mintScriptsDir || DEFAULT_SYSTEM_SETTINGS.mintScriptsDir,
     settingsPath: state.path,
     settingsExists: state.exists,
@@ -468,6 +488,7 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
     clientShowToolCalls: nextSettings.clientShowToolCalls,
     workspaceUploadLimitBytes: nextSettings.workspaceUploadLimitBytes,
     cronReuseMaxRuns: nextSettings.cronReuseMaxRuns ?? DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns,
+    imReuseMaxTurns: nextSettings.imReuseMaxTurns ?? DEFAULT_SYSTEM_SETTINGS.imReuseMaxTurns,
     mintScriptsDir: nextSettings.mintScriptsDir || DEFAULT_SYSTEM_SETTINGS.mintScriptsDir,
     settingsPath: SYSTEM_SETTINGS_PATH,
     settingsExists: true,

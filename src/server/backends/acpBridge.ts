@@ -534,7 +534,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         if (parsed.id === 'm-session-load') {
           process.stderr.write(`[AcpBridge] session/load response: ${JSON.stringify(parsed)}\n`)
           if (parsed.error) {
-            process.stderr.write(`[AcpBridge] session/load failed, falling back to session/new: ${JSON.stringify(parsed.error)}\n`)
+            // Loud on purpose. This is the silent-amnesia path: the session is
+            // revived and looks healthy, but starts with an EMPTY context. The
+            // usual cause is the workspace losing `.moss/scode-session-id`
+            // (which is where resumeSessionId is read from) while the session
+            // row still points at a transcript — so nothing else in the stack
+            // reports a problem, and the only symptom is a user saying the bot
+            // forgot everything.
+            process.stderr.write(
+              `[AcpBridge] session/load FAILED for ${options.resumeSessionId} — falling back to session/new. ` +
+              `CONVERSATION HISTORY WILL NOT BE RESTORED for this session. ` +
+              `error=${JSON.stringify(parsed.error)}\n`,
+            )
             sendNewSession()
             continue
           }

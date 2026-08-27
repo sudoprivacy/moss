@@ -369,6 +369,22 @@ export class DirectConnectStore {
       // Index creation failed, ignore
     }
 
+    // Incremental migration: per-chat conversation depth for IM turn-cap
+    // rotation. Counted on channel_sessions (not the runtime `sessions` row)
+    // so it SURVIVES a rotation — the whole point of the cap is to measure
+    // cumulative depth across the chat, not the life of one runtime session.
+    // ALTER TABLE ADD COLUMN is safe here (no constraint change, unlike the
+    // channel_users rebuild above); existing rows read NULL and coalesce to 0.
+    try {
+      const channelSessionColumns = this.db.prepare(`PRAGMA table_info(channel_sessions)`).all() as SqlRow[]
+      if (!channelSessionColumns.some(c => String(c.name) === 'turn_count')) {
+        this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`)
+        console.log('[DB] Added channel_sessions.turn_count for IM turn-cap rotation')
+      }
+    } catch (error) {
+      console.error('[DB] Failed to add channel_sessions.turn_count:', error)
+    }
+
     // Create tenant_skills table for enterprise exclusive skills
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tenant_skills (
@@ -1970,6 +1986,52 @@ export class DirectConnectStore {
       row.created_at,
       row.last_activity,
     )
+  }
+
+  /**
+   * Conversation depth for a chat, in user turns. Drives IM turn-cap rotation.
+   *
+   * Keyed by (user_id, chat_id) rather than the channel_sessions PRIMARY KEY:
+   * SessionManager.createSessionWithConversation DELETEs the old row and
+   * INSERTs one with a fresh uuid whenever a chat's session record is rebuilt,
+   * so a depth counted against `id` would silently reset to 0 there. Since
+   * rebuilding the row is routine, the cap would then never fire and the
+   * compaction growth it exists to bound would go unchecked — the failure
+   * would only surface months later as [single_request_too_large].
+   */
+  getChannelSessionTurnCount(userId: string, chatId?: string): number {
+    const row = this.db.prepare(
+      `SELECT MAX(COALESCE(turn_count, 0)) AS tc FROM channel_sessions
+       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
+    ).get(userId, chatId ?? null) as SqlRow | undefined
+    return row ? Number(row.tc ?? 0) : 0
+  }
+
+  /** Increment a chat's conversation depth by one turn; returns the new value. */
+  incrementChannelSessionTurnCount(userId: string, chatId?: string): number {
+    this.db.prepare(
+      `UPDATE channel_sessions SET turn_count = COALESCE(turn_count, 0) + 1
+       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
+    ).run(userId, chatId ?? null)
+    return this.getChannelSessionTurnCount(userId, chatId)
+  }
+
+  /** Seed a freshly-inserted row's depth, used by SessionManager to carry the
+   *  count across a channel_sessions row rebuild. Keyed by row id because the
+   *  new row is the only one for that chat at call time. */
+  setChannelSessionTurnCount(id: string, turnCount: number): void {
+    this.db.prepare(
+      `UPDATE channel_sessions SET turn_count = ? WHERE id = ?`,
+    ).run(Math.max(0, Math.trunc(turnCount)), id)
+  }
+
+  /** Reset depth to zero. Called ONLY after a rotation actually replaced the
+   *  runtime session — never on an idle revive. */
+  resetChannelSessionTurnCount(userId: string, chatId?: string): void {
+    this.db.prepare(
+      `UPDATE channel_sessions SET turn_count = 0
+       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
+    ).run(userId, chatId ?? null)
   }
 
   deleteChannelSession(id: string): void {

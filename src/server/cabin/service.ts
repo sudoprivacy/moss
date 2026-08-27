@@ -4,7 +4,8 @@ import type net from 'net'
 import type { CabinConfig, CabinMessage, CabinPassengerContext, CabinToolCall } from './types.js'
 import { buildConversationKey } from './auth.js'
 import { CabinStore } from './store.js'
-import type { RuntimeService, SessionSnapshot } from '../runtimeService.js'
+import type { RuntimeService } from '../runtimeService.js'
+import { classifyMossSession } from '../sessionRecovery.js'
 import type { CabinLogger, CabinLogContext } from './logger.js'
 import { summarizeContext } from './logger.js'
 
@@ -1365,35 +1366,6 @@ function recoveryReason(error: unknown): string {
   return 'recoverable-error'
 }
 
-function isTerminalAttemptRuntime(state: string): boolean {
-  return state === 'stopped' || state === 'failed' || state === 'lost'
-}
-
-// Map a read-only session snapshot to a recovery action. Null (session id unknown) is
-// always 'replace' — never 'reuse'. ended splits on desired_state: an idle-recycled
-// session (desired=active) can be respawned; a naturally-retired one (desired=ended)
-// is replaced outright.
-function classifyMossSession(snapshot: SessionSnapshot | null): 'reuse' | 'recover' | 'replace' {
-  if (!snapshot) return 'replace'
-  switch (snapshot.status) {
-    case 'lost':
-    case 'failed':
-    case 'terminated':
-      return 'replace'
-    case 'active':
-      if (snapshot.attempt && isTerminalAttemptRuntime(snapshot.attempt.runtimeState)) return 'recover'
-      return 'reuse'
-    case 'detached':
-      if (snapshot.attempt?.attachPath && !isTerminalAttemptRuntime(snapshot.attempt.runtimeState)) return 'reuse'
-      return 'recover'
-    case 'ended':
-      return snapshot.desiredState === 'active' ? 'recover' : 'replace'
-    case 'creating':
-      return 'recover'
-    default:
-      return 'recover'
-  }
-}
 
 // Server-authored hardware confirmations are templated ("已为您下发…请稍候。") and carry
 // an intent; replaying them into a recovered session only adds "已下发" echo noise.
