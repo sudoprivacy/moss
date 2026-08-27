@@ -318,6 +318,13 @@ export interface CorpAppConnector {
   getGroupMsgTask?(msgId: string, cursor?: string): Promise<Record<string, unknown>>
 
   /**
+   * Optional: cancel a pending 群发 task (`cancel_groupmsg_send`). Removes it
+   * from the approver's and sender's queues so a stale task cannot be
+   * confirmed days later and consume that day's quota.
+   */
+  cancelGroupMsgSend?(msgId: string): Promise<{ ok: boolean }>
+
+  /**
    * Optional: re-trigger the confirmation prompt for a pending 群发 task
    * (doc 97610). WeCom allows at most 3 reminders per task per 24h.
    */

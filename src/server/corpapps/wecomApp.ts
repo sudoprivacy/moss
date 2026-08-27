@@ -73,6 +73,8 @@ export class WeComAppConnector implements CorpAppConnector {
     'uploadMedia',
     'groupMsgSummary',
     'listGroupMsgs',
+    'cancelGroupMsg',
+    'groupMsgQueue',
   ]
 
   private corpId = ''
@@ -412,6 +414,22 @@ export class WeComAppConnector implements CorpAppConnector {
     const body: Record<string, unknown> = { msgid: msgId, limit: 1000 }
     if (cursor) body.cursor = cursor
     return this.requireClient().post('/cgi-bin/externalcontact/get_groupmsg_task', body)
+  }
+
+  /**
+   * Cancel a pending 群发 task.
+   *
+   * Verified against a live tenant: the endpoint is `cancel_groupmsg_send`
+   * (not `stop_groupmsg_send`, which 404s). Afterwards `get_groupmsg_task`
+   * reports `41093 group message canceled`, which callers should treat as
+   * "gone", not as an error.
+   */
+  async cancelGroupMsgSend(msgId: string): Promise<{ ok: boolean }> {
+    const json = await this.requireClient().post(
+      '/cgi-bin/externalcontact/cancel_groupmsg_send',
+      { msgid: msgId },
+    )
+    return { ok: Number(json.errcode ?? 0) === 0 }
   }
 
   /**

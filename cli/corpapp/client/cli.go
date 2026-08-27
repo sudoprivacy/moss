@@ -105,6 +105,8 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runGroupMsgResult(rest, c, opts)
 	case "group-msg-task":
 		err = runGroupMsgTask(rest, c, opts)
+	case "group-msg-queue":
+		err = runGroupMsgQueue(rest, c, opts)
 	case "group-msg-summary":
 		err = runGroupMsgSummary(rest, c, opts)
 	case "group-msg-remind":
@@ -658,6 +660,126 @@ func runGroupMsgTask(args []string, c *Client, opts RunOptions) error {
 		return err
 	}
 	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runGroupMsgQueue(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msg-queue", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	action := fs.String("action", "", "enqueue|next|claim|release|mark-sent|cancel|reap|reconcile|list")
+	chatID := fs.String("chat-id", "", "customer group chat id")
+	entryID := fs.String("entry-id", "", "queue entry id")
+	meta := fs.String("meta", "", "message metadata as JSON (enqueue); put `type` in here")
+	idemKey := fs.String("idempotency-key", "", "dedupe key; a re-run with the same key will not queue twice")
+	expiresAt := fs.String("expires-at", "", "RFC3339 instant after which a still-pending entry is reaped")
+	msgid := fs.String("msgid", "", "WeCom group message id (mark-sent)")
+	sender := fs.String("sender", "", "userid the task was assigned to (mark-sent)")
+	reason := fs.String("reason", "", "why (release/cancel)")
+	state := fs.String("state", "", "filter by state (list)")
+	limit := fs.Int64("limit", 0, "deliberate throttle (next); totalEligible/hasMore always reported")
+	cancelWecom := fs.Bool("cancel-wecom", false, "also withdraw the task at WeCom (cancel/reap)")
+	asJSON := fs.Bool("json", false, "emit raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *action == "" {
+		return errors.New("usage: corpapp group-msg-queue --app <name> --action <verb> [...]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+
+	switch *action {
+	case "enqueue":
+		m, merr := ParseMetaJSON(*meta)
+		if merr != nil {
+			return merr
+		}
+		r, err := c.QueueEnqueue(resolved.ID, *chatID, m, *idemKey, *expiresAt)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return FormatAnyJSON(opts.Stdout, r)
+		}
+		if r.Duplicate {
+			fmt.Fprintf(opts.Stdout, "already queued (idempotency key matched)  entry=%s\n", r.Entry.EntryID)
+			return nil
+		}
+		fmt.Fprintf(opts.Stdout, "queued  entry=%s  chat=%s\n", r.Entry.EntryID, *chatID)
+		return nil
+
+	case "next":
+		r, err := c.QueueNext(resolved.ID, *chatID, *limit)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return FormatAnyJSON(opts.Stdout, r)
+		}
+		FormatQueueNext(opts.Stdout, r)
+		return nil
+
+	case "claim":
+		r, err := c.QueueClaim(resolved.ID, *chatID, *entryID)
+		return queueActionOut(opts, asJSON, r, err)
+	case "release":
+		r, err := c.QueueRelease(resolved.ID, *chatID, *entryID, *reason)
+		return queueActionOut(opts, asJSON, r, err)
+	case "mark-sent":
+		r, err := c.QueueMarkSent(resolved.ID, *chatID, *entryID, *msgid, *sender)
+		return queueActionOut(opts, asJSON, r, err)
+	case "cancel":
+		r, err := c.QueueCancel(resolved.ID, *chatID, *entryID, *reason, *cancelWecom)
+		return queueActionOut(opts, asJSON, r, err)
+
+	case "reap":
+		r, err := c.QueueReap(resolved.ID, *chatID, *cancelWecom)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return FormatAnyJSON(opts.Stdout, r)
+		}
+		FormatQueueReap(opts.Stdout, r)
+		return nil
+
+	case "reconcile":
+		r, err := c.QueueReconcile(resolved.ID, *chatID)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return FormatAnyJSON(opts.Stdout, r)
+		}
+		FormatQueueReconcile(opts.Stdout, r)
+		return nil
+
+	case "list":
+		r, err := c.QueueList(resolved.ID, *chatID, *state)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return FormatAnyJSON(opts.Stdout, r)
+		}
+		FormatQueueList(opts.Stdout, r)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown --action %q", *action)
+	}
+}
+
+func queueActionOut(opts RunOptions, asJSON *bool, r *QueueActionResp, err error) error {
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return FormatAnyJSON(opts.Stdout, r)
+	}
+	FormatQueueAction(opts.Stdout, r)
+	return nil
 }
 
 func runGroupMsgSummary(args []string, c *Client, opts RunOptions) error {
