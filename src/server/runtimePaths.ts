@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { join } from 'path'
+import { dirname, join, resolve } from 'path'
 import type { ServerConfig } from './types.js'
 
 export function isNamedPipePath(path: string): boolean {
@@ -132,4 +132,41 @@ export function getInContainerPidFile(
   sessionId: string,
 ): string {
   return join(runtimeDir, 'sessions', sessionId, 'runtime', 'scode.pid')
+}
+
+/**
+ * Decide whether a caller-supplied session cwd may be used as-is.
+ *
+ * A session's cwd is bind-mounted into the runtime container, so pointing it at
+ * moss-server's own working directory hands the agent the whole server tree:
+ * `data/runtime/sessions/**` (every session's transcript and manifest, including
+ * the JWTs in them), `data/moss.db`, and any scratch files other assistants left
+ * in that directory. It also makes the cwd shared across sessions, which defeats
+ * per-session workspace isolation — scode keys its own session store on the
+ * workspace path, so two assistants sharing a cwd share one scode session bucket
+ * and can read each other's history.
+ *
+ * Reject anything at or above the runtime/storage roots, plus the server's own
+ * process cwd. Callers fall back to the per-session workspace dir.
+ */
+export function isSafeSessionCwd(config: ServerConfig, cwd: string): boolean {
+  const normalize = (p: string) => resolve(p).replace(/\/+$/, '') || '/'
+  const target = normalize(cwd)
+  if (target === '/') return false
+
+  // `target` is unsafe if it IS, or CONTAINS, a protected root. Being *inside*
+  // one is fine: the per-session workspace lives under runtimeDir.
+  const protectedRoots = [
+    config.runtimeDir,
+    config.rootDir,
+    dirname(config.dbPath),
+    process.cwd(),
+  ].filter(Boolean)
+
+  for (const root of protectedRoots) {
+    const normalizedRoot = normalize(root)
+    if (target === normalizedRoot) return false
+    if (normalizedRoot.startsWith(`${target}/`)) return false
+  }
+  return true
 }

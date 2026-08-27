@@ -31,6 +31,7 @@ import {
   getRuntimeStdoutLogPath,
   getSessionConfigDir,
   getSessionWorkspaceDir,
+  isSafeSessionCwd,
   getSessionScodeHomeDir,
   getSessionTmpDir,
   getInContainerPidFile,
@@ -517,7 +518,23 @@ export class RuntimeService {
       }
     }
 
-    const workspaceDir = input.cwd || getSessionWorkspaceDir(this.options.config, sessionId)
+    // A caller-supplied cwd is bind-mounted into the runtime container, so a
+    // path like moss-server's own /app would expose every session's transcript,
+    // manifest (JWTs included) and moss.db to the agent — and make the workspace
+    // shared, which collapses scode's per-workspace session store into one
+    // bucket that assistants read each other's history out of. Fall back to the
+    // isolated per-session workspace when the request asks for such a path.
+    const sessionWorkspaceDir = getSessionWorkspaceDir(this.options.config, sessionId)
+    let workspaceDir = sessionWorkspaceDir
+    if (input.cwd) {
+      if (isSafeSessionCwd(this.options.config, input.cwd)) {
+        workspaceDir = input.cwd
+      } else {
+        console.warn(
+          `[RuntimeService] refusing unsafe session cwd ${input.cwd} for ${sessionId}; using ${sessionWorkspaceDir}`,
+        )
+      }
+    }
     await mkdir(workspaceDir, { recursive: true })
     await ensureDraftsDirectory(workspaceDir)
 
