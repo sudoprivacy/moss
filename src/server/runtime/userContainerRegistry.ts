@@ -21,6 +21,8 @@
 
 import { createHash } from 'crypto'
 import { spawn } from 'child_process'
+import { readdirSync } from 'fs'
+import { join } from 'path'
 import { MOSS_HOME } from '../../utils/skills/localSkillDirectories.js'
 import type { ServerConfig } from '../types.js'
 import { PerKeyMutex } from './perKeyMutex.js'
@@ -154,6 +156,34 @@ const CONTAINER_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
 ]
 
+/**
+ * Container-internal paths of every session's transcript dir, for tmpfs
+ * shadowing. Returns container paths (not host paths): --tmpfs targets a path
+ * inside the container, unlike -v which needs the host side translated.
+ */
+function listSessionTranscriptDirs(runtimeDir: string): string[] {
+  const sessionsRoot = join(runtimeDir, 'sessions')
+  let entries: string[]
+  try {
+    entries = readdirSync(sessionsRoot, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+  } catch {
+    return []
+  }
+  const dirs: string[] = []
+  for (const sid of entries) {
+    const transcriptDir = join(sessionsRoot, sid, 'transcript')
+    try {
+      readdirSync(transcriptDir)
+      dirs.push(transcriptDir)
+    } catch {
+      // No transcript dir yet — nothing to hide.
+    }
+  }
+  return dirs
+}
+
 async function doCreate(
   config: ServerConfig,
   ctx: EnsureContext,
@@ -190,6 +220,9 @@ async function doCreate(
     '--label', `moss.user=${ctx.userId}`,
     '--label', `moss.image=${image}`,
     '--label', `moss.runtime.config.hash=${rec.configHash}`,
+    // Mounts ALL of runtimeDir so the launcher and reaper can reach any
+    // session's pid files. That breadth also exposes every session's
+    // transcript/ — see the tmpfs shadowing below.
     '-v', `${runtimeDirHost}:${config.runtimeDir}`,
     '-v', `${mossHomeHost}:${MOSS_HOME}`,
     '-e', `MOSS_HOME=${MOSS_HOME}`,
@@ -199,6 +232,24 @@ async function doCreate(
     '-e', `MOSS_SESSION_ROLE=${ctx.role}`,
     '-e', `MOSS_SESSION_SCOPES=${ctx.scopes.join(',')}`,
   ]
+
+  // Shadow every existing session's transcript/ dir with an empty read-only
+  // tmpfs, hiding other assistants' full conversations from an agent that goes
+  // looking. Docker applies mounts in path order, so these land on top of the
+  // runtimeDir bind above and hide the .jsonl transcripts without touching the
+  // sibling dirs (runtime/, workspace/, config/) the launcher and reaper write.
+  //
+  // Session mode does the same shadowing at `docker run` time in DockerBackend;
+  // user mode attaches via `docker exec`, which takes no mounts, so for this
+  // mode it has to happen here at container creation.
+  //
+  // Sessions created after this container starts are not covered — the mount
+  // set is fixed at `docker run`. That is an accepted narrowing: it shrinks the
+  // window to sessions created during one container's lifetime, and the cwd
+  // guard in RuntimeService keeps those out of a shared workspace anyway.
+  for (const shadow of listSessionTranscriptDirs(config.runtimeDir)) {
+    args.push('--tmpfs', `${shadow}:ro,size=4k`)
+  }
 
   if (config.dockerNetwork) {
     args.push('--network', config.dockerNetwork)

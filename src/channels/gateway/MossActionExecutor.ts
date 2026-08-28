@@ -14,6 +14,9 @@ import type { PairingService } from '../pairing/PairingService.js';
 import type { PluginMessageHandler, BasePlugin } from '../plugins/BasePlugin.js';
 import type { IUnifiedIncomingMessage, IChannelUser, PluginType } from '../types.js';
 import { getChannelEventEmitter } from '../core/ChannelEventEmitter.js';
+import { classifyMossSession } from '../../server/sessionRecovery.js';
+import { buildTranscriptSeed } from './transcriptSeed.js';
+import { getSystemSettings } from '../../server/systemSettings.js';
 
 type Platform = 'telegram' | 'lark' | 'dingtalk' | 'wechat' | 'wecom';
 
@@ -49,6 +52,13 @@ export class MossActionExecutor {
 
   /** Per-conversation mutex to serialize message processing */
   private conversationLocks: Map<string, Promise<void>> = new Map();
+
+  /** `platform:chatId` -> context seed awaiting the next session spawn. Written by a
+   *  history-preserving reset (a wedged session the user asked to rescue), consumed by
+   *  the next createRuntimeSession for that chat. In-memory only: a seed that does not
+   *  survive a server restart is an acceptable loss, and persisting it would mean
+   *  another table. */
+  private pendingSeeds: Map<string, string> = new Map();
 
   /** Throttle interval for editMessage (ms) */
   private static readonly EDIT_THROTTLE_MS = 500;
@@ -131,6 +141,30 @@ export class MossActionExecutor {
         return;
       }
 
+      // 2b. "/restart" — rebuild a wedged session WITHOUT losing the thread.
+      //     Distinct from the agent-switch reset, which intentionally discards
+      //     context: here the user wants the same conversation, just unstuck, so
+      //     we summarize the transcript before terminating and seed the successor.
+      if (
+        (content.type === 'text' || content.type === 'command') &&
+        /^\/(restart|重启|恢复)(\s|$)/i.test(commandText)
+      ) {
+        if (!mossUserId) {
+          await sendFn({ type: 'text', text: '无法确定该渠道的归属用户，暂时无法重启会话。', parseMode: 'HTML' });
+          return;
+        }
+        await this.resetChatSession(platform, chatId, mossUserId, { preserveHistory: true });
+        const rescued = this.pendingSeeds.has(`${platform}:${chatId}`);
+        await sendFn({
+          type: 'text',
+          text: rescued
+            ? '🔄 会话已重启，并保留了最近的对话摘要。工具调用等中间状态无法恢复。'
+            : '🔄 会话已重启。未找到可保留的历史记录，将从空白开始。',
+          parseMode: 'HTML',
+        });
+        return;
+      }
+
       // 3. Only process text messages for now
       if (content.type !== 'text' || !content.text) {
         console.log(`[MossActionExecutor] Skipping non-text message type: ${content.type}`);
@@ -202,12 +236,37 @@ export class MossActionExecutor {
       );
     }
 
+    // Conversation depth drives turn-cap rotation. Counted per CHAT (on the
+    // channel_sessions row), so it accumulates across idle revives and survives
+    // rotation — counting per runtime session would reset on every idle recycle,
+    // which is the most common IM path, and the cap would never fire.
+    const turnCount = this.db.incrementChannelSessionTurnCount(channelUser.id, chatId);
+    const rotation = await this.planRotation(turnCount, mossUserId, platform, chatId);
+
     // Get or create Moss runtime session
     let channelState = this.channelSessions.get(channelUserKey);
-    if (!channelState || !channelState.socket || channelState.socket.destroyed) {
-      // Create new Moss runtime session
+    if (rotation.rotate || !channelState || !channelState.socket || channelState.socket.destroyed) {
+      // A cold start here is a full `docker run`; before this change only brand-new
+      // chats paid it, now every post-idle message does. Tell the user something is
+      // happening rather than leaving "⏳ Thinking..." to sit silently.
+      if (rotation.notice) {
+        try {
+          await sendFn({ type: 'text', text: rotation.notice, parseMode: 'HTML' });
+        } catch { /* notice is best-effort */ }
+      }
       try {
-        channelState = await this.createRuntimeSession(channelUserKey, channelUser, platform, chatId, mossUserId);
+        channelState = await this.createRuntimeSession(
+          channelUserKey,
+          channelUser,
+          platform,
+          chatId,
+          mossUserId,
+          { forceReplace: rotation.rotate, seedText: rotation.seedText },
+        );
+        if (rotation.rotate) {
+          // Only after a rotation actually produced a new runtime session.
+          this.db.resetChannelSessionTurnCount(channelUser.id, chatId);
+        }
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to create runtime session:`, error);
         await sendFn({ type: 'text', text: '❌ Failed to create AI session. Please try again.', parseMode: 'HTML' });
@@ -320,6 +379,82 @@ export class MossActionExecutor {
   }
 
   /**
+   * Decide whether this chat has accumulated enough turns to warrant retiring its
+   * runtime session, and build the seed that carries context into the successor.
+   *
+   * Why a cap at all: the runtime re-compacts its own transcript every turn,
+   * nesting each prior summary inside a new "Previously compacted context"
+   * wrapper (~+12KB/cycle), so a session reused forever eventually overflows the
+   * model context with [single_request_too_large] — the same growth cron bounds
+   * with cronReuseMaxRuns. Before the revive fix above, IM never hit this because
+   * idle recycling reset the depth every 10 minutes; now that sessions genuinely
+   * persist, the ceiling is real and rotation is what keeps it bounded.
+   */
+  private async planRotation(
+    turnCount: number,
+    mossUserId: string | undefined,
+    platform: string,
+    chatId: string,
+  ): Promise<{ rotate: boolean; seedText?: string; notice?: string }> {
+    let cap = 0;
+    try {
+      cap = Number(getSystemSettings().imReuseMaxTurns ?? 0);
+    } catch {
+      return { rotate: false };
+    }
+    // 0 or negative disables rotation (reuse forever), same as cronReuseMaxRuns.
+    if (!Number.isFinite(cap) || cap <= 0 || turnCount <= cap) return { rotate: false };
+
+    const previous = mossUserId ? this.db.findChannelSession(platform, chatId, mossUserId) : null;
+    const seedText = await this.buildSeedForSession(previous?.sessionId);
+
+    console.log(
+      `[MossActionExecutor] [session-rotate] chat ${platform}:${chatId} hit turn cap ` +
+      `(${turnCount} > ${cap}); retiring ${previous?.sessionId ?? 'n/a'}` +
+      `${seedText ? ` with ${seedText.length} chars of seed` : ' without seed'}`,
+    );
+
+    // Retire the old runtime session so the fresh one does not inherit its depth.
+    // Best-effort: a failed terminate must not block the user's message.
+    if (previous?.sessionId) {
+      try {
+        await this.runtime.terminateSession(previous.sessionId);
+      } catch (error) {
+        console.warn(`[MossActionExecutor] failed to retire session ${previous.sessionId}:`, error);
+      }
+    }
+
+    return {
+      rotate: true,
+      seedText,
+      // Be honest that this is lossy: the seed keeps the thread of the
+      // conversation, not tool state or file context.
+      notice: seedText
+        ? '♻️ 对话较长，已重建会话并保留最近对话摘要。'
+        : '♻️ 对话较长，已重建会话。',
+    };
+  }
+
+  /**
+   * Summarize a session's transcript for seeding its successor. Returns '' when
+   * there is nothing to carry over. Never throws — a failed seed degrades to a
+   * plain fresh session rather than breaking the user's message.
+   */
+  private async buildSeedForSession(sessionId?: string): Promise<string | undefined> {
+    if (!sessionId) return undefined;
+    try {
+      const snapshot = this.runtime.getSession(sessionId);
+      const transcriptPath = snapshot?.transcriptPath;
+      if (!transcriptPath) return undefined;
+      const seed = await buildTranscriptSeed(transcriptPath);
+      return seed || undefined;
+    } catch (error) {
+      console.warn(`[MossActionExecutor] failed to build seed from ${sessionId}:`, error);
+      return undefined;
+    }
+  }
+
+  /**
    * Create a new Moss runtime session and connect to its runner
    */
   private async createRuntimeSession(
@@ -328,8 +463,17 @@ export class MossActionExecutor {
     platform: string,
     chatId: string,
     ownerUserId: string | undefined,
+    options: { forceReplace?: boolean; seedText?: string } = {},
   ): Promise<ChannelSessionState> {
     console.log(`[MossActionExecutor] Creating runtime session for ${channelUserKey}`);
+
+    // A rescue reset may have stashed context for this chat; it applies to whichever
+    // session spawns next. Consume it either way so a stale seed cannot leak into a
+    // later, unrelated session.
+    const seedKey = `${platform}:${chatId}`;
+    const stashedSeed = this.pendingSeeds.get(seedKey);
+    if (stashedSeed) this.pendingSeeds.delete(seedKey);
+    const seedText = options.seedText ?? stashedSeed;
 
     // Clean up any existing in-memory session
     const existing = this.channelSessions.get(channelUserKey);
@@ -359,9 +503,26 @@ export class MossActionExecutor {
     const existingSession = this.db.findChannelSession(platform, chatId, mossUserId);
     const displayName = channelUser.displayName || chatId;
 
-    if (existingSession && ['creating', 'active', 'detached'].includes(existingSession.status)) {
-      // Reuse existing session — try to reconnect
-      console.log(`[MossActionExecutor] Reusing existing session ${existingSession.sessionId} for ${channelUserKey}`);
+    // Recovery classification is shared with cabin/cron (see sessionRecovery.ts).
+    // The status allowlist this used to hard-code excluded 'ended', which is what
+    // the runner daemon writes when it recycles an idle session while leaving
+    // desired_state='active' ("user still wants this, respawn it"). Dropping that
+    // signal is why IM chats silently lost their history after idleTimeoutMs:
+    // ensureSessionReady() would have respawned the runtime and replayed the
+    // transcript via ACP session/load, but we never called it.
+    //
+    // 'reuse' and 'recover' both proceed to ensureSessionReady — it reconnects a
+    // live attach socket or respawns a dead one. 'replace' falls through to a
+    // fresh session below, seeded from the old transcript when possible.
+    const recovery = existingSession && !options.forceReplace
+      ? classifyMossSession(this.runtime.getSessionSnapshot(existingSession.sessionId))
+      : 'replace';
+
+    if (existingSession && recovery !== 'replace') {
+      console.log(
+        `[MossActionExecutor] [session-revive] ${recovery} session ${existingSession.sessionId} ` +
+        `(status=${existingSession.status}) for ${channelUserKey}`,
+      );
       try {
         const ready = await this.runtime.ensureSessionReady(existingSession.sessionId);
         const socket = await this.runtime.connectToAttempt(ready.attempt);
@@ -466,6 +627,23 @@ export class MossActionExecutor {
     });
 
     this.channelSessions.set(channelUserKey, state);
+
+    // Seed the fresh session with a summary of the conversation it replaces, so a
+    // rotation (turn cap) or a stuck-session reset does not read to the user as
+    // total amnesia. Sent as a plain turn before the user's message; the runtime
+    // answers it, but processMessage is not waiting on this write, so the reply is
+    // absorbed as context rather than delivered to the chat.
+    if (seedText) {
+      try {
+        socket.write(`${JSON.stringify({ type: 'stdin', data: `${seedText}\n` })}\n`);
+        console.log(
+          `[MossActionExecutor] [session-rotate] seeded ${sessionId} with ${seedText.length} chars of prior context`,
+        );
+      } catch (error) {
+        // A failed seed costs continuity, not correctness — the session still works.
+        console.warn(`[MossActionExecutor] failed to seed session ${sessionId}:`, error);
+      }
+    }
 
     // Update channel session with Moss session ID as conversationId
     this.sessionManager.updateSessionConversation(
@@ -738,7 +916,22 @@ export class MossActionExecutor {
     platform: string,
     chatId: string,
     mossUserId: string,
+    options: { preserveHistory?: boolean } = {},
   ): Promise<void> {
+    // When the user is recovering a WEDGED session (rather than deliberately
+    // starting over), capture a seed before tearing anything down — terminate
+    // makes the session unrecoverable, and the transcript is the only record.
+    // Stashed for the next createRuntimeSession call on this chat.
+    if (options.preserveHistory) {
+      const existing = this.db.findChannelSession(platform, chatId, mossUserId);
+      const seed = await this.buildSeedForSession(existing?.sessionId);
+      if (seed) {
+        this.pendingSeeds.set(`${platform}:${chatId}`, seed);
+        console.log(
+          `[MossActionExecutor] [session-rescue] stashed ${seed.length} chars of context for ${platform}:${chatId}`,
+        );
+      }
+    }
     // The in-memory key is built from the IM user, which we do not have here, so drop every
     // cached entry pointing at this chat on this platform.
     for (const [key, state] of [...this.channelSessions.entries()]) {
@@ -758,7 +951,11 @@ export class MossActionExecutor {
     // resume it instead of creating one under the new agent.
     try {
       const existing = this.db.findChannelSession(platform, chatId, mossUserId);
-      if (existing && ['creating', 'active', 'detached'].includes(existing.status)) {
+      // Terminate anything not already terminated. The old allowlist stopped at
+      // 'detached', which was harmless while 'ended' sessions were never revived
+      // — now that they are, leaving one alive would let the next message resume
+      // the very session the user just asked to reset.
+      if (existing && existing.status !== 'terminated') {
         await this.runtime.terminateSession(existing.sessionId);
       }
     } catch (error) {
