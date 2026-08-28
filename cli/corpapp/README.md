@@ -261,37 +261,41 @@ to the group, then ping the responsible internal colleague directly.
 
 ## 消息队列（group-msg-queue）
 
-发送配额是**在人工确认时**扣掉的，不是创建任务时 —— 而确认可能发生在数小时之后。
-因此「这个群今天发过了吗」无法只靠「已送达记录」回答：一条还在等确认的任务同样
-占着当天名额。队列就是用来记住这个「意图」的，**按 corp app 分目录、按群分文件、
-跨会话持久**。
+发送配额是**在人工确认时**扣掉的，不是创建任务时 —— 而确认时间**完全不可预测**：
+可能几分钟，可能跨天，也可能一直不来。因此「这个群今天发过了吗」无法只靠
+「已送达记录」回答：一条还在等确认的任务同样占着当天名额。队列就是用来记住这个
+「意图」的，**按 corp app 分目录、按群分文件、跨会话持久**。
+
+也正因为配额在确认时才扣，**名额算在哪一天，取决于企微实际发出的那天**
+（取自 `send_result` 的 `send_time`），而不是我们占位的那天 —— 当天晚些创建、
+次日才被确认的任务，扣的是**次日**的配额。
 
 ### 标准循环（顺序有意义）
 
 ```bash
 APP=数牍
 
-# 1. 超时回收 —— 按每条自己的 --expires-at
+# 1. 超时回收 —— 先结算，再回收「到 --expires-at 仍未送达」的条目
+#    已送达（delivered）的不会被回收；结算结果一并返回在 reconciled 里
 corpapp group-msg-queue --app $APP --action reap --cancel-wecom
 
 # 2. 业务撤销 —— 调用方查业务数据后自行决定
-corpapp group-msg-queue --app $APP --action list --state pending --json
+#    不要加 --state pending：claimed / sent 同样可撤，而 sent 恰恰最该撤
+#    （已在等人确认，--cancel-wecom 可赶在确认前撤掉企微侧任务）
+corpapp group-msg-queue --app $APP --action list --json
 corpapp group-msg-queue --app $APP --action cancel --chat-id wr_xxx \
   --entry-id q_... --reason "排期已取消" --cancel-wecom
 
-# 3. 结算已发送的
-corpapp group-msg-queue --app $APP --action reconcile
-
-# 4. 入队（只存元数据，不存内容）
+# 3. 入队（只存元数据，不存内容）
 corpapp group-msg-queue --app $APP --action enqueue --chat-id wr_xxx \
   --meta '{"type":"日常追货提醒","customer_id":"C1024"}' \
   --idempotency-key '日常追货提醒:C1024:2026-08-27' \
   --expires-at 2026-08-26T10:00:00+08:00
 
-# 5. 问「现在哪些群能发」
+# 4. 问「现在哪些群能发」（内部会先结算再判定，结算结果见 reconciled）
 corpapp group-msg-queue --app $APP --action next
 
-# 6. 逐条：占位 → 组装 → 发送 → 标记
+# 5. 逐条：占位 → 组装 → 发送 → 标记
 corpapp group-msg-queue --app $APP --action claim --chat-id wr_xxx --entry-id q_...
 corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx
 corpapp group-msg-queue --app $APP --action mark-sent --chat-id wr_xxx \
@@ -301,17 +305,36 @@ corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
   --entry-id q_... --reason "send-group 失败"
 ```
 
-**前三步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
+**前两步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
 释放，那个群就白白锁死一天。
+
+### `reconcile`：只用于排查，标准循环不需要它
+
+`reap` 和 `next` 都会自己先结算，所以正常流程里**不必**单独调用 `reconcile`。
+但这两个命令都还会做别的事（`reap` 会取消到期条目；`next` 之后通常紧接着 `claim`）。
+`reconcile` 是唯一「只刷新投递事实、不改动其他任何状态」的入口 —— 当你要排查
+「这个客户到底收到没有」而又不想扰动队列时用它。
+
+它的输出也是唯一会把 **status 3** 单独讲清楚的：人确认了，但因为当天名额已被另一条
+群发占掉，群里什么都没收到。`reap` / `next` 返回的 `reconciled` 只是简要汇总。
+
+```bash
+corpapp group-msg-queue --app $APP --action reconcile --chat-id wr_xxx
+```
 
 ### 两种撤销，刻意分开
 
 | | 依据 | 谁判断 |
 |---|---|---|
-| `reap` | 只看每条自己的 `--expires-at` 是否已过 | moss，**从不读 `--meta`** |
+| `reap` | 先结算，再看「到 `--expires-at` 仍未送达」 | moss，**从不读 `--meta`** |
 | `cancel` | 「排期已取消」「客户已回复」等业务条件 | 调用方，需查业务数据 |
 
-过期时刻在入队时按业务算好，**按小时或按天都能表达**（`--expires-at` 是绝对时间戳），
+过期时刻在入队时按业务算好，**按小时或按天都能表达**（`--expires-at` 是绝对时间戳）。
+不传则回退到**该 corp app 配置的队列有效期**（管理后台「企业应用」中按应用设置，
+默认 72 小时，范围 1~720）—— 这只是兜底，防止漏传的条目永久占住该群名额
+（`next` 会一直以 `pending_exists` 跳过它且不报错）；对时效有要求就显式传。
+审批快的租户可以调短，让客户更早收到下一条。
+
 不同消息类型、不同客户都可以不同。moss 侧不增加任何业务规则参数。
 
 ### 为什么 claim 要独立于 mark-sent

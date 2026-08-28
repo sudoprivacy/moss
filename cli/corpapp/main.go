@@ -69,7 +69,8 @@ Usage:
   corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
   corpapp group-msg-remind --app <name> --msgid <id>
   corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
-                     verbs: enqueue|next|claim|release|mark-sent|cancel|reap|reconcile|list
+                     verbs: enqueue|next|claim|release|mark-sent|cancel|reap|list
+                            reconcile (diagnostic only — the loop never needs it)
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -151,29 +152,61 @@ Customer groups and 群发 (WeCom):
 
 The message queue (group-msg-queue):
   The daily cap is spent when a human CONFIRMS a task, not when the API creates
-  one — and confirmation can land hours later. So "has this group been sent to
-  today?" cannot be answered by looking at delivered broadcasts alone. The queue
-  remembers intent across runs, per corp app, per group.
+  one — and confirmation is unbounded: minutes, the next day, or never. So "has
+  this group been sent to today?" cannot be answered by looking at delivered
+  broadcasts alone. The queue remembers intent across runs, per corp app, per
+  group.
 
-  Standard loop (the order matters — the first three all RELEASE slots, so
-  running them after next would leave groups needlessly locked for the day):
+  Because the quota is spent at confirmation, the day it lands on is the day
+  WeCom actually sent — read from send_result's send_time, not from the day the
+  slot was claimed. A task created late one day and confirmed the next spends
+  the NEXT day's quota.
 
-    1. reap                  withdraw entries past their own --expires-at
-    2. list --state pending  caller applies business rules -> cancel
-    3. reconcile             settle sent entries against what WeCom delivered
-    4. enqueue               queue new intents (idempotency-key makes re-runs safe)
-    5. next                  ask which groups may be sent to now
-    6. per entry: claim -> compose -> send-group -> mark-sent
+  Standard loop (the order matters — the first two RELEASE slots, so running
+  them after next would leave groups needlessly locked for the day):
+
+    1. reap                  settle, then withdraw anything NOT DELIVERED by its
+                             own --expires-at (a delivered entry is left alone)
+    2. list                  caller applies business rules -> cancel
+                             (no --state: pending, claimed and sent are all
+                             still cancellable, and sent is the batch most worth
+                             cancelling before a human confirms it)
+    3. enqueue               queue new intents (idempotency-key makes re-runs safe)
+    4. next                  settles sent entries against WeCom, THEN reports
+                             which groups may be sent to; the settlements appear
+                             as "reconciled"
+    5. per entry: claim -> compose -> send-group -> mark-sent
                   (on failure: release, so the slot is not burned)
-    7. list --state failed   caller decides whether to re-queue
+    6. list --state failed   caller decides whether to re-queue
+
+  next reconciles first because an entry stays "sent" until someone asks the
+  provider: local state alone would report a group as blocked long after its
+  message landed. This makes next a MUTATING call — two consecutive runs can
+  legitimately differ.
+
+  reconcile is a DIAGNOSTIC verb — the standard loop never needs it. reap and
+  next both settle on their own, but both also do something else (reap cancels
+  expired entries; next is normally followed by claim). reconcile is the only
+  way to refresh delivery facts and change nothing else, which is what you want
+  when investigating "did this customer actually get it?" without disturbing
+  the queue. Its output is also the one that spells out status 3 — the human
+  confirmed, yet the group received nothing because another broadcast had
+  already spent the day's quota — which the settlement lines inside reap/next
+  only summarise.
 
   TWO KINDS OF CANCELLATION, deliberately separate:
     reap    knows only HOW LONG — it compares each entry's --expires-at to now
             and never reads --meta. Set the deadline per entry at enqueue time;
-            hours and days are equally expressible.
+            hours and days are equally expressible. Omitting it falls back to
+            the corp app's configured queue TTL (admin page, default 72h), so a
+            forgotten deadline cannot leave an entry holding a group's slot
+            forever — set it explicitly when timeliness matters.
     cancel  knows WHY — "the schedule moved", "the customer already replied".
             That needs fresh business data, so the caller drives it via
-            list --state pending, then cancel --reason.
+            list (no --state), then cancel --reason. Do not filter to pending:
+            claimed and sent are equally cancellable, and sent is the batch
+            most worth cancelling — it is already waiting on a human, and
+            --cancel-wecom withdraws the task before that confirmation is spent.
 
   claim before composing: building a report can take a minute, and without the
   slot held a second agent could pass next for the same group. Both would

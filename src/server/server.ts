@@ -4090,6 +4090,182 @@ export function startServer(
         return
       }
 
+      // ---- Group broadcast queue (per corp app, per customer group) ----
+      // The daily quota is spent when a human CONFIRMS a task, not when the API
+      // creates it, so intent has to be remembered between runs. All verbs go
+      // through one endpoint keyed by `action` to keep the CLI surface small.
+      const agentCorpAppQueueMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/queue$/)
+      if (req.method === 'POST' && agentCorpAppQueueMatch) {
+        const corpAppId = agentCorpAppQueueMatch[1] || ''
+        const row = await resolveAgentCorpAppRow(corpAppId)
+        if (!row) return
+        const body = await readJsonBody(req)
+        const action = typeof body.action === 'string' ? body.action : ''
+        const chatId = typeof body.chatId === 'string' ? body.chatId : undefined
+        const entryId = typeof body.entryId === 'string' ? body.entryId : ''
+        const q = await import('./corpapps/groupMsgQueue.js')
+
+        // Cancelling at WeCom is best-effort and must never change the queue
+        // outcome: the entry is already cancelled locally, and a task that
+        // cannot be withdrawn is strictly less harmful than a stuck queue.
+        const cancelAtWeCom = async (msgid: string | null | undefined): Promise<boolean> => {
+          if (!msgid) return false
+          try {
+            const connector = await initCorpAppConnector(row)
+            if (!connector.cancelGroupMsgSend) return false
+            const r = await connector.cancelGroupMsgSend(msgid)
+            return r.ok
+          } catch (err) {
+            console.warn(`[queue] cancel_groupmsg_send failed for ${msgid}: ${String(err)}`)
+            return false
+          }
+        }
+
+        // Settle every `sent` entry against what WeCom actually did. Shared by
+        // the explicit `reconcile` verb and by `next`, which cannot answer
+        // "may this group be sent to" from local state alone: an entry sits in
+        // `sent` until someone asks the provider, so an unsettled queue reports
+        // a group as blocked long after its message landed (or failed).
+        // Failures are logged and skipped, never fatal — a provider outage must
+        // degrade `next` to its local answer, not break the caller's run.
+        const runReconcilePass = async (): Promise<unknown[]> => {
+          const pending = await q.pendingReconcile(corpAppId, chatId)
+          if (pending.length === 0) return []
+          const connector = await initCorpAppConnector(row)
+          const reconciled: unknown[] = []
+          for (const p of pending) {
+            if (!connector?.summariseGroupMsgDelivery) break
+            try {
+              // Each entry records the sender it was assigned to, because
+              // WeCom scopes send results per sender and a shared queue may
+              // hold entries from several.
+              const sum = await connector.summariseGroupMsgDelivery(p.msgid, p.sender)
+              const hit = sum.entries.find((e) => e.chatId === p.chatId)
+              if (!hit) continue
+              const outcome = await q.applyReconcile(corpAppId, p.chatId, p.entryId, hit.status, hit.sendTime)
+              if (outcome) reconciled.push(outcome)
+            } catch (err) {
+              // A cancelled task answers 41093; that is information, not a
+              // failure, and must not abort the whole reconcile pass.
+              console.warn(`[queue] reconcile ${p.msgid}: ${String(err)}`)
+            }
+          }
+          return reconciled
+        }
+
+        try {
+          switch (action) {
+            case 'enqueue': {
+              if (!chatId || typeof body.meta !== 'object' || body.meta === null) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId and meta are required' } })
+                return
+              }
+              // Per-app entry lifetime, so a tenant that confirms broadcasts
+              // quickly can reap sooner than one whose approvals take days.
+              // Only used when the caller does not pass its own --expires-at.
+              let appConfig: Record<string, unknown> = {}
+              try {
+                appConfig = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+              } catch {
+                // Malformed config must not stop the queue accepting work.
+              }
+              const r = await q.enqueue(corpAppId, {
+                chatId,
+                meta: body.meta as Record<string, unknown>,
+                idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
+                expiresAt: typeof body.expiresAt === 'string' ? body.expiresAt : undefined,
+                ttlMs: q.resolveEntryTtlMs(appConfig.queueEntryTtlHours),
+              })
+              writeJson(res, 200, { ok: true, duplicate: r.duplicate, entry: { ...r.entry, chatId } })
+              return
+            }
+            case 'next': {
+              const limit = Number.parseInt(String(body.limit ?? '0'), 10) || 0
+              // Settle before deciding, so eligibility reflects the provider's
+              // truth rather than whatever was last written locally. Reported
+              // back as `reconciled` so a caller can see what changed under it —
+              // this makes `next` a mutating call, unlike the pure read it was.
+              const reconciled = await runReconcilePass()
+              const result = await q.next(corpAppId, { chatId, limit })
+              writeJson(res, 200, { ...result, reconciled })
+              return
+            }
+            case 'claim': {
+              if (!chatId || !entryId) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId and entryId are required' } })
+                return
+              }
+              writeJson(res, 200, await q.claim(corpAppId, chatId, entryId))
+              return
+            }
+            case 'release': {
+              if (!chatId || !entryId) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId and entryId are required' } })
+                return
+              }
+              writeJson(res, 200, await q.release(corpAppId, chatId, entryId, String(body.reason ?? '')))
+              return
+            }
+            case 'mark-sent': {
+              const msgid = typeof body.msgid === 'string' ? body.msgid : ''
+              const sender = typeof body.sender === 'string' ? body.sender : ''
+              if (!chatId || !entryId || !msgid || !sender) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId, entryId, msgid and sender are required' } })
+                return
+              }
+              writeJson(res, 200, await q.markSent(corpAppId, chatId, entryId, msgid, sender))
+              return
+            }
+            case 'cancel': {
+              if (!chatId || !entryId) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId and entryId are required' } })
+                return
+              }
+              const r = await q.cancelEntry(corpAppId, chatId, entryId, String(body.reason ?? ''))
+              const wecomCancelled = r.ok && body.cancelWecom === true ? await cancelAtWeCom(r.msgid) : false
+              writeJson(res, 200, { ...r, wecomCancelled })
+              return
+            }
+            case 'reap': {
+              // Settle first. reap's rule is "not delivered by its deadline",
+              // and an entry stays `sent` until someone asks the provider — so
+              // reaping before settling can cancel a message a human already
+              // confirmed, losing the delivery (and its lastSentDate) for good:
+              // once cancelled it leaves `sent` and pendingReconcile never
+              // offers it again. Settling first lets a delivered entry become
+              // `delivered` — no longer blocking, so reap correctly leaves it
+              // alone — while one still awaiting confirmation is reaped as
+              // before. Matters most with a short per-app TTL, where the
+              // confirm-then-expire window is easiest to hit.
+              const reconciled = await runReconcilePass()
+              const reaped = await q.reap(corpAppId, { chatId })
+              const out = []
+              for (const r of reaped) {
+                const wecomCancelled = body.cancelWecom === true ? await cancelAtWeCom(r.msgid) : false
+                out.push({ ...r, wecomCancelled })
+              }
+              writeJson(res, 200, { reaped: out, reconciled })
+              return
+            }
+            case 'reconcile': {
+              writeJson(res, 200, { reconciled: await runReconcilePass() })
+              return
+            }
+            case 'list': {
+              const state = typeof body.state === 'string' ? (body.state as never) : undefined
+              writeJson(res, 200, { entries: await q.listEntries(corpAppId, { chatId, state }) })
+              return
+            }
+            default:
+              writeJson(res, 400, { error: { code: 'invalid_payload', message: `unknown action: ${action}` } })
+              return
+          }
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'queue_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
       const agentCorpAppGroupMsgListMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages$/)
       if (req.method === 'GET' && agentCorpAppGroupMsgListMatch) {
         const row = await resolveAgentCorpAppRow(agentCorpAppGroupMsgListMatch[1] || '')

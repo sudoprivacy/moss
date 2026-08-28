@@ -68,6 +68,9 @@ type FieldSpec = {
   type?: 'text' | 'password'
   bucket: 'config' | 'credentials'
   optional?: boolean
+  /** Longer explanation rendered under the input, for settings whose effect is
+   *  not obvious from the label alone. */
+  hint?: string
 }
 
 const TYPE_FIELDS: Record<string, FieldSpec[]> = {
@@ -87,6 +90,18 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       type: 'password',
       bucket: 'credentials',
       optional: true,
+    },
+    {
+      key: 'queueEntryTtlHours',
+      label: '群发队列条目有效期/小时(可选,默认 72)',
+      placeholder: '72',
+      bucket: 'config',
+      optional: true,
+      hint:
+        '入队时未指定 --expires-at 的条目多久后自动回收。企微的每群每日名额是在' +
+        '「人工点确认」时才扣除,审批可能几分钟、也可能跨天甚至一直不来 —— 这个值' +
+        '是兜底,防止一条迟迟未确认的消息长期占住该群名额。审批快的租户可以调短,' +
+        '让客户更早收到下一条。范围 1~720 小时。',
     },
   ],
 }
@@ -478,6 +493,9 @@ function CorpAppDialog({
                 }
                 placeholder={f.placeholder}
               />
+              {f.hint && (
+                <p className="text-xs text-muted-foreground leading-relaxed">{f.hint}</p>
+              )}
             </div>
           ))}
         </div>

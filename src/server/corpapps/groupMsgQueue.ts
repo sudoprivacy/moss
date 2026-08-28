@@ -40,6 +40,38 @@ export const MOSS_WECOM_QUEUE_DIR = path.join(MOSS_HOME, 'wecom-queue')
 /** Timezone the WeCom daily quota resets in — the provider's clock, not ours. */
 const QUOTA_TZ = 'Asia/Shanghai'
 
+/**
+ * Fallback lifetime for an entry enqueued without an explicit `--expires-at`.
+ *
+ * reap() only ever acted on entries that carried their own expiry, and expiry
+ * is optional — so one omitted flag left a claimed/sent entry holding the
+ * group's slot forever: `next` skipped the group with `pending_exists` every
+ * day thereafter, silently and with no error to notice. 72h is deliberately
+ * generous: the daily cap is settled when a human confirms, which was measured
+ * hours after creation, so this is a backstop against a stuck entry, not a
+ * business deadline. Callers that care about timeliness still pass
+ * `--expires-at`; this only bounds the ones that do not.
+ */
+const DEFAULT_ENTRY_TTL_HOURS = 72
+const DEFAULT_ENTRY_TTL_MS = DEFAULT_ENTRY_TTL_HOURS * 60 * 60 * 1000
+
+/** Bounds for the admin-editable per-app TTL. 0 is not allowed: an entry with
+ *  no grace at all would be reaped before anyone could confirm it. */
+export const MIN_ENTRY_TTL_HOURS = 1
+export const MAX_ENTRY_TTL_HOURS = 720 // 30 days
+
+/**
+ * Resolve a corp app's configured entry TTL, in milliseconds. Invalid or absent
+ * values fall back to the default rather than throwing — a malformed config
+ * must not stop a queue from accepting work.
+ */
+export function resolveEntryTtlMs(ttlHours?: unknown): number {
+  const n = typeof ttlHours === 'number' ? ttlHours : Number(ttlHours)
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_ENTRY_TTL_MS
+  const clamped = Math.min(Math.max(n, MIN_ENTRY_TTL_HOURS), MAX_ENTRY_TTL_HOURS)
+  return clamped * 60 * 60 * 1000
+}
+
 export type QueueEntryState =
   | 'pending'   // queued, nothing sent
   | 'claimed'   // holds today's slot while content is composed
@@ -200,6 +232,9 @@ async function mutate<T>(
 // ============================================================
 
 export type EnqueueInput = {
+  /** Entry lifetime override, in ms. Comes from the corp app's configured
+   *  queueEntryTtlHours; omitted falls back to DEFAULT_ENTRY_TTL_MS. */
+  ttlMs?: number
   chatId: string
   meta: Record<string, unknown>
   idempotencyKey?: string
@@ -218,6 +253,7 @@ export type EnqueueInput = {
 export async function enqueue(
   corpAppId: string,
   input: EnqueueInput,
+  now: Date = new Date(),
 ): Promise<{ entry: QueueEntry; duplicate: boolean }> {
   return mutate(corpAppId, input.chatId, (q) => {
     if (input.idempotencyKey) {
@@ -231,8 +267,11 @@ export async function enqueue(
       state: 'pending',
       meta: input.meta ?? {},
       idempotencyKey: input.idempotencyKey,
-      expiresAt: input.expiresAt,
-      enqueuedAt: new Date().toISOString(),
+      // Always carry an expiry so reap() can eventually free the slot.
+      expiresAt:
+        input.expiresAt ??
+        new Date(now.getTime() + (input.ttlMs ?? DEFAULT_ENTRY_TTL_MS)).toISOString(),
+      enqueuedAt: now.toISOString(),
       claimedAt: null,
       sender: null,
       msgid: null,
@@ -269,6 +308,15 @@ export function evaluateGroup(
 
   // An entry already claimed or sent is holding the slot: nothing else may go
   // out today, and the holder itself is not offered again.
+  //
+  // This is NOT redundant with the lastSentDate check above, and the two cover
+  // different phases. lastSentDate is written only by reconcile on status 1 —
+  // i.e. after a human confirms, measured hours after the task was created. In
+  // the window between claim and that confirmation the group has spent nothing
+  // yet by that measure, so lastSentDate is still unset and would happily offer
+  // a second entry: precisely the double-send this queue exists to prevent.
+  // A holder is bounded by its expiry (defaulted at enqueue), so it cannot
+  // block the group indefinitely.
   const holder = live.find((e) => e.state === 'claimed' || e.state === 'sent')
   if (holder) {
     return {
@@ -524,8 +572,18 @@ export async function applyReconcile(
     }
     if (sendStatus === 1) {
       entry.state = 'delivered'
-      entry.settledAt = sendTime ? new Date(sendTime * 1000).toISOString() : new Date().toISOString()
-      q.lastSentDate = entry.quotaDate ?? quotaToday()
+      const settledAt = sendTime ? new Date(sendTime * 1000) : new Date()
+      entry.settledAt = settledAt.toISOString()
+      // The quota is spent on the day WeCom actually sent, which is the day the
+      // human confirmed — not the day we claimed the slot. Approval can land in
+      // minutes, the next day, or never, so the two dates diverge routinely.
+      // Recording the claim day here made the queue believe a group was still
+      // free on the day its message actually went out, and it would then offer a
+      // second entry that was certain to come back as status 3 — after a human
+      // had spent a confirmation on it. send_time is the provider's own account
+      // of when the quota went; fall back to the claim day only when it is
+      // absent.
+      q.lastSentDate = sendTime ? quotaToday(settledAt) : entry.quotaDate ?? quotaToday()
       q.lastDeliveredMsgid = entry.msgid ?? null
       return { ...base, state: 'delivered' as QueueEntryState }
     }

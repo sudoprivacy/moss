@@ -342,6 +342,28 @@ export async function prepareFirstMessageForScode(
     lines.push('  corpapp send --app <name> --to <userid> --text <msg>    # send a text message')
     lines.push('  corpapp send-file --app <name> --to <userid> --file <p> # send a file')
     lines.push('  corpapp receive --app <name> [--since <cursor>]         # poll inbound messages')
+    lines.push('')
+    lines.push('Customer-group broadcast (客户群群发) — WeCom apps:')
+    lines.push('  corpapp groups --app <name>                             # list 客户群')
+    lines.push('  corpapp send-group --app <name> --sender <userid> --chat-id <id> --text <msg>')
+    lines.push('  corpapp group-msg-summary --app <name> --msgid <id> --userid <sender>')
+    lines.push('  corpapp group-msg-queue --app <name> --action <verb>    # cross-run intent queue')
+    lines.push('')
+    // These two rules are the ones that cost a real broadcast when missed, so they
+    // are stated inline rather than left to --help: a group accepts ONE 群发 per
+    // day and an over-quota task still returns success, and send-group only
+    // creates a task a human must confirm. Everything else (the nine queue verbs,
+    // the cap windows, the claim/mark-sent loop) stays in --help so the prompt
+    // does not carry 150 lines into every session.
+    lines.push('IMPORTANT — read `corpapp --help` before your first 群发 or queue call.')
+    lines.push('  - A customer group accepts only ONE broadcast per day. An over-quota')
+    lines.push('    task still returns success and is only revealed as status 3 in the')
+    lines.push('    send result, after a human has spent a confirmation on it.')
+    lines.push('  - send-group does NOT send: it creates a task an admin approves and a')
+    lines.push('    human confirms in 企微 群发助手. Never treat creation as delivery —')
+    lines.push('    verify with group-msg-summary.')
+    lines.push('  - Use group-msg-queue to remember intent across runs; quota is spent at')
+    lines.push('    confirmation, not creation, so delivered-only checks are not enough.')
     instructions.push(lines.join('\n'))
   }
 
