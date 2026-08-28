@@ -279,7 +279,8 @@ corpapp group-msg-queue --app $APP --action list --state pending --json
 corpapp group-msg-queue --app $APP --action cancel --chat-id wr_xxx \
   --entry-id q_... --reason "排期已取消" --cancel-wecom
 
-# 3. 结算已发送的
+# 3.（已并入 next）结算已发送的 —— next 会先结算再判定；
+#    本命令保留用于「只结算、不取件」的排查场景
 corpapp group-msg-queue --app $APP --action reconcile
 
 # 4. 入队（只存元数据，不存内容）

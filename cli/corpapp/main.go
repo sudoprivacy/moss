@@ -155,17 +155,27 @@ The message queue (group-msg-queue):
   today?" cannot be answered by looking at delivered broadcasts alone. The queue
   remembers intent across runs, per corp app, per group.
 
-  Standard loop (the order matters — the first three all RELEASE slots, so
-  running them after next would leave groups needlessly locked for the day):
+  Standard loop (the order matters — the first two RELEASE slots, so running
+  them after next would leave groups needlessly locked for the day):
 
     1. reap                  withdraw entries past their own --expires-at
-    2. list --state pending  caller applies business rules -> cancel
-    3. reconcile             settle sent entries against what WeCom delivered
-    4. enqueue               queue new intents (idempotency-key makes re-runs safe)
-    5. next                  ask which groups may be sent to now
-    6. per entry: claim -> compose -> send-group -> mark-sent
+    2. list                  caller applies business rules -> cancel
+                             (no --state: pending, claimed and sent are all
+                             still cancellable, and sent is the batch most worth
+                             cancelling before a human confirms it)
+    3. enqueue               queue new intents (idempotency-key makes re-runs safe)
+    4. next                  settles sent entries against WeCom, THEN reports
+                             which groups may be sent to; the settlements appear
+                             as "reconciled"
+    5. per entry: claim -> compose -> send-group -> mark-sent
                   (on failure: release, so the slot is not burned)
-    7. list --state failed   caller decides whether to re-queue
+    6. list --state failed   caller decides whether to re-queue
+
+  next reconciles first because an entry stays "sent" until someone asks the
+  provider: local state alone would report a group as blocked long after its
+  message landed. This makes next a MUTATING call — two consecutive runs can
+  legitimately differ. The reconcile verb remains available to settle without
+  asking for eligibility.
 
   TWO KINDS OF CANCELLATION, deliberately separate:
     reap    knows only HOW LONG — it compares each entry's --expires-at to now

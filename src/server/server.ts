@@ -4121,6 +4121,38 @@ export function startServer(
           }
         }
 
+        // Settle every `sent` entry against what WeCom actually did. Shared by
+        // the explicit `reconcile` verb and by `next`, which cannot answer
+        // "may this group be sent to" from local state alone: an entry sits in
+        // `sent` until someone asks the provider, so an unsettled queue reports
+        // a group as blocked long after its message landed (or failed).
+        // Failures are logged and skipped, never fatal — a provider outage must
+        // degrade `next` to its local answer, not break the caller's run.
+        const runReconcilePass = async (): Promise<unknown[]> => {
+          const pending = await q.pendingReconcile(corpAppId, chatId)
+          if (pending.length === 0) return []
+          const connector = await initCorpAppConnector(row)
+          const reconciled: unknown[] = []
+          for (const p of pending) {
+            if (!connector?.summariseGroupMsgDelivery) break
+            try {
+              // Each entry records the sender it was assigned to, because
+              // WeCom scopes send results per sender and a shared queue may
+              // hold entries from several.
+              const sum = await connector.summariseGroupMsgDelivery(p.msgid, p.sender)
+              const hit = sum.entries.find((e) => e.chatId === p.chatId)
+              if (!hit) continue
+              const outcome = await q.applyReconcile(corpAppId, p.chatId, p.entryId, hit.status, hit.sendTime)
+              if (outcome) reconciled.push(outcome)
+            } catch (err) {
+              // A cancelled task answers 41093; that is information, not a
+              // failure, and must not abort the whole reconcile pass.
+              console.warn(`[queue] reconcile ${p.msgid}: ${String(err)}`)
+            }
+          }
+          return reconciled
+        }
+
         try {
           switch (action) {
             case 'enqueue': {
@@ -4139,7 +4171,13 @@ export function startServer(
             }
             case 'next': {
               const limit = Number.parseInt(String(body.limit ?? '0'), 10) || 0
-              writeJson(res, 200, await q.next(corpAppId, { chatId, limit }))
+              // Settle before deciding, so eligibility reflects the provider's
+              // truth rather than whatever was last written locally. Reported
+              // back as `reconciled` so a caller can see what changed under it —
+              // this makes `next` a mutating call, unlike the pure read it was.
+              const reconciled = await runReconcilePass()
+              const result = await q.next(corpAppId, { chatId, limit })
+              writeJson(res, 200, { ...result, reconciled })
               return
             }
             case 'claim': {
@@ -4189,27 +4227,7 @@ export function startServer(
               return
             }
             case 'reconcile': {
-              const pending = await q.pendingReconcile(corpAppId, chatId)
-              const connector = pending.length > 0 ? await initCorpAppConnector(row) : null
-              const reconciled = []
-              for (const p of pending) {
-                if (!connector?.summariseGroupMsgDelivery) break
-                try {
-                  // Each entry records the sender it was assigned to, because
-                  // WeCom scopes send results per sender and a shared queue may
-                  // hold entries from several.
-                  const sum = await connector.summariseGroupMsgDelivery(p.msgid, p.sender)
-                  const hit = sum.entries.find((e) => e.chatId === p.chatId)
-                  if (!hit) continue
-                  const outcome = await q.applyReconcile(corpAppId, p.chatId, p.entryId, hit.status, hit.sendTime)
-                  if (outcome) reconciled.push(outcome)
-                } catch (err) {
-                  // A cancelled task answers 41093; that is information, not a
-                  // failure, and must not abort the whole reconcile pass.
-                  console.warn(`[queue] reconcile ${p.msgid}: ${String(err)}`)
-                }
-              }
-              writeJson(res, 200, { reconciled })
+              writeJson(res, 200, { reconciled: await runReconcilePass() })
               return
             }
             case 'list': {

@@ -550,8 +550,18 @@ export async function applyReconcile(
     }
     if (sendStatus === 1) {
       entry.state = 'delivered'
-      entry.settledAt = sendTime ? new Date(sendTime * 1000).toISOString() : new Date().toISOString()
-      q.lastSentDate = entry.quotaDate ?? quotaToday()
+      const settledAt = sendTime ? new Date(sendTime * 1000) : new Date()
+      entry.settledAt = settledAt.toISOString()
+      // The quota is spent on the day WeCom actually sent, which is the day the
+      // human confirmed — not the day we claimed the slot. Approval can land in
+      // minutes, the next day, or never, so the two dates diverge routinely.
+      // Recording the claim day here made the queue believe a group was still
+      // free on the day its message actually went out, and it would then offer a
+      // second entry that was certain to come back as status 3 — after a human
+      // had spent a confirmation on it. send_time is the provider's own account
+      // of when the quota went; fall back to the claim day only when it is
+      // absent.
+      q.lastSentDate = sendTime ? quotaToday(settledAt) : entry.quotaDate ?? quotaToday()
       q.lastDeliveredMsgid = entry.msgid ?? null
       return { ...base, state: 'delivered' as QueueEntryState }
     }

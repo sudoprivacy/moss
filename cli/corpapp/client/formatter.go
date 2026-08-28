@@ -181,6 +181,17 @@ func FormatAnyJSON(w io.Writer, v any) error {
 // list is not noise: it is the only way an operator learns why a customer got
 // nothing today, so it is always printed.
 func FormatQueueNext(w io.Writer, r *QueueNextResp) {
+	// next settles pending entries first, so say what moved — otherwise a group
+	// silently changing eligibility between two runs looks arbitrary.
+	if len(r.Reconciled) > 0 {
+		fmt.Fprintf(w, "reconciled %d entr%s first:\n", len(r.Reconciled),
+			map[bool]string{true: "y", false: "ies"}[len(r.Reconciled) == 1])
+		for _, o := range r.Reconciled {
+			fmt.Fprintf(w, "  %s  %s  status=%d %s\n",
+				truncate(o.ChatID, 34), o.State, o.SendStatus, o.Reason)
+		}
+		fmt.Fprintln(w)
+	}
 	fmt.Fprintf(w, "sendable=%d  eligible=%d", len(r.Entries), r.TotalEligible)
 	if r.HasMore {
 		fmt.Fprintf(w, "  (truncated by --limit; %d more)", r.TotalEligible-len(r.Entries))

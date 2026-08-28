@@ -42,6 +42,11 @@ type QueueNextResp struct {
 	Skipped       []SkippedGroup `json:"skipped"`
 	TotalEligible int            `json:"totalEligible"`
 	HasMore       bool           `json:"hasMore"`
+	// Entries next settled against WeCom before deciding eligibility. next
+	// reconciles first because a `sent` entry stays `sent` until someone asks
+	// the provider, so an unsettled queue reports a group as blocked long after
+	// its message landed.
+	Reconciled []ReconcileOutcome `json:"reconciled,omitempty"`
 }
 
 type QueueEnqueueResp struct {
