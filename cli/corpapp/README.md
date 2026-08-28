@@ -311,7 +311,10 @@ corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
 | `reap` | 只看每条自己的 `--expires-at` 是否已过 | moss，**从不读 `--meta`** |
 | `cancel` | 「排期已取消」「客户已回复」等业务条件 | 调用方，需查业务数据 |
 
-过期时刻在入队时按业务算好，**按小时或按天都能表达**（`--expires-at` 是绝对时间戳），
+过期时刻在入队时按业务算好，**按小时或按天都能表达**（`--expires-at` 是绝对时间戳）。
+不传则默认 **入队时间 +72 小时** —— 这只是兜底，防止漏传的条目永久占住该群名额
+（`next` 会一直以 `pending_exists` 跳过它且不报错）；对时效有要求就显式传。
+
 不同消息类型、不同客户都可以不同。moss 侧不增加任何业务规则参数。
 
 ### 为什么 claim 要独立于 mark-sent

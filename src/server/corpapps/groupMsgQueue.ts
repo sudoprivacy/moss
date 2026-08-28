@@ -40,6 +40,20 @@ export const MOSS_WECOM_QUEUE_DIR = path.join(MOSS_HOME, 'wecom-queue')
 /** Timezone the WeCom daily quota resets in — the provider's clock, not ours. */
 const QUOTA_TZ = 'Asia/Shanghai'
 
+/**
+ * Fallback lifetime for an entry enqueued without an explicit `--expires-at`.
+ *
+ * reap() only ever acted on entries that carried their own expiry, and expiry
+ * is optional — so one omitted flag left a claimed/sent entry holding the
+ * group's slot forever: `next` skipped the group with `pending_exists` every
+ * day thereafter, silently and with no error to notice. 72h is deliberately
+ * generous: the daily cap is settled when a human confirms, which was measured
+ * hours after creation, so this is a backstop against a stuck entry, not a
+ * business deadline. Callers that care about timeliness still pass
+ * `--expires-at`; this only bounds the ones that do not.
+ */
+const DEFAULT_ENTRY_TTL_MS = 72 * 60 * 60 * 1000
+
 export type QueueEntryState =
   | 'pending'   // queued, nothing sent
   | 'claimed'   // holds today's slot while content is composed
@@ -218,6 +232,7 @@ export type EnqueueInput = {
 export async function enqueue(
   corpAppId: string,
   input: EnqueueInput,
+  now: Date = new Date(),
 ): Promise<{ entry: QueueEntry; duplicate: boolean }> {
   return mutate(corpAppId, input.chatId, (q) => {
     if (input.idempotencyKey) {
@@ -231,8 +246,10 @@ export async function enqueue(
       state: 'pending',
       meta: input.meta ?? {},
       idempotencyKey: input.idempotencyKey,
-      expiresAt: input.expiresAt,
-      enqueuedAt: new Date().toISOString(),
+      // Always carry an expiry so reap() can eventually free the slot.
+      expiresAt:
+        input.expiresAt ?? new Date(now.getTime() + DEFAULT_ENTRY_TTL_MS).toISOString(),
+      enqueuedAt: now.toISOString(),
       claimedAt: null,
       sender: null,
       msgid: null,
@@ -269,6 +286,15 @@ export function evaluateGroup(
 
   // An entry already claimed or sent is holding the slot: nothing else may go
   // out today, and the holder itself is not offered again.
+  //
+  // This is NOT redundant with the lastSentDate check above, and the two cover
+  // different phases. lastSentDate is written only by reconcile on status 1 —
+  // i.e. after a human confirms, measured hours after the task was created. In
+  // the window between claim and that confirmation the group has spent nothing
+  // yet by that measure, so lastSentDate is still unset and would happily offer
+  // a second entry: precisely the double-send this queue exists to prevent.
+  // A holder is bounded by its expiry (defaulted at enqueue), so it cannot
+  // block the group indefinitely.
   const holder = live.find((e) => e.state === 'claimed' || e.state === 'sent')
   if (holder) {
     return {

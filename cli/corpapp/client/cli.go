@@ -670,7 +670,7 @@ func runGroupMsgQueue(args []string, c *Client, opts RunOptions) error {
 	entryID := fs.String("entry-id", "", "queue entry id")
 	meta := fs.String("meta", "", "message metadata as JSON (enqueue); put `type` in here")
 	idemKey := fs.String("idempotency-key", "", "dedupe key; a re-run with the same key will not queue twice")
-	expiresAt := fs.String("expires-at", "", "RFC3339 instant after which a still-pending entry is reaped")
+	expiresAt := fs.String("expires-at", "", "RFC3339 instant after which a still-pending entry is reaped (default: enqueue time + 72h)")
 	msgid := fs.String("msgid", "", "WeCom group message id (mark-sent)")
 	sender := fs.String("sender", "", "userid the task was assigned to (mark-sent)")
 	reason := fs.String("reason", "", "why (release/cancel)")
