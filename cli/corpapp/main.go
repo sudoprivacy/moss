@@ -69,7 +69,8 @@ Usage:
   corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
   corpapp group-msg-remind --app <name> --msgid <id>
   corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
-                     verbs: enqueue|next|claim|release|mark-sent|cancel|reap|reconcile|list
+                     verbs: enqueue|next|claim|release|mark-sent|cancel|reap|list
+                            reconcile (diagnostic only — the loop never needs it)
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -181,8 +182,17 @@ The message queue (group-msg-queue):
   next reconciles first because an entry stays "sent" until someone asks the
   provider: local state alone would report a group as blocked long after its
   message landed. This makes next a MUTATING call — two consecutive runs can
-  legitimately differ. The reconcile verb remains available to settle without
-  asking for eligibility.
+  legitimately differ.
+
+  reconcile is a DIAGNOSTIC verb — the standard loop never needs it. reap and
+  next both settle on their own, but both also do something else (reap cancels
+  expired entries; next is normally followed by claim). reconcile is the only
+  way to refresh delivery facts and change nothing else, which is what you want
+  when investigating "did this customer actually get it?" without disturbing
+  the queue. Its output is also the one that spells out status 3 — the human
+  confirmed, yet the group received nothing because another broadcast had
+  already spent the day's quota — which the settlement lines inside reap/next
+  only summarise.
 
   TWO KINDS OF CANCELLATION, deliberately separate:
     reap    knows only HOW LONG — it compares each entry's --expires-at to now

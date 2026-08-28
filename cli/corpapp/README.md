@@ -286,20 +286,16 @@ corpapp group-msg-queue --app $APP --action list --json
 corpapp group-msg-queue --app $APP --action cancel --chat-id wr_xxx \
   --entry-id q_... --reason "排期已取消" --cancel-wecom
 
-# 3.（已并入 next）结算已发送的 —— next 会先结算再判定；
-#    本命令保留用于「只结算、不取件」的排查场景
-corpapp group-msg-queue --app $APP --action reconcile
-
-# 4. 入队（只存元数据，不存内容）
+# 3. 入队（只存元数据，不存内容）
 corpapp group-msg-queue --app $APP --action enqueue --chat-id wr_xxx \
   --meta '{"type":"日常追货提醒","customer_id":"C1024"}' \
   --idempotency-key '日常追货提醒:C1024:2026-08-27' \
   --expires-at 2026-08-26T10:00:00+08:00
 
-# 5. 问「现在哪些群能发」（内部会先结算再判定，结算结果见 reconciled）
+# 4. 问「现在哪些群能发」（内部会先结算再判定，结算结果见 reconciled）
 corpapp group-msg-queue --app $APP --action next
 
-# 6. 逐条：占位 → 组装 → 发送 → 标记
+# 5. 逐条：占位 → 组装 → 发送 → 标记
 corpapp group-msg-queue --app $APP --action claim --chat-id wr_xxx --entry-id q_...
 corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx
 corpapp group-msg-queue --app $APP --action mark-sent --chat-id wr_xxx \
@@ -310,7 +306,21 @@ corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
 ```
 
 **前两步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
-释放，那个群就白白锁死一天。（原来的第 3 步 `reconcile` 已并入 `next`。）
+释放，那个群就白白锁死一天。
+
+### `reconcile`：只用于排查，标准循环不需要它
+
+`reap` 和 `next` 都会自己先结算，所以正常流程里**不必**单独调用 `reconcile`。
+但这两个命令都还会做别的事（`reap` 会取消到期条目；`next` 之后通常紧接着 `claim`）。
+`reconcile` 是唯一「只刷新投递事实、不改动其他任何状态」的入口 —— 当你要排查
+「这个客户到底收到没有」而又不想扰动队列时用它。
+
+它的输出也是唯一会把 **status 3** 单独讲清楚的：人确认了，但因为当天名额已被另一条
+群发占掉，群里什么都没收到。`reap` / `next` 返回的 `reconciled` 只是简要汇总。
+
+```bash
+corpapp group-msg-queue --app $APP --action reconcile --chat-id wr_xxx
+```
 
 ### 两种撤销，刻意分开
 

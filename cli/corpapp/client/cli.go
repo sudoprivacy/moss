@@ -665,7 +665,7 @@ func runGroupMsgTask(args []string, c *Client, opts RunOptions) error {
 func runGroupMsgQueue(args []string, c *Client, opts RunOptions) error {
 	fs := flag.NewFlagSet("group-msg-queue", flag.ContinueOnError)
 	app := fs.String("app", "", "corp app name")
-	action := fs.String("action", "", "enqueue|next|claim|release|mark-sent|cancel|reap|reconcile|list")
+	action := fs.String("action", "", "enqueue|next|claim|release|mark-sent|cancel|reap|list; reconcile is diagnostic-only")
 	chatID := fs.String("chat-id", "", "customer group chat id")
 	entryID := fs.String("entry-id", "", "queue entry id")
 	meta := fs.String("meta", "", "message metadata as JSON (enqueue); put `type` in here")
