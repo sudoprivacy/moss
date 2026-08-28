@@ -4227,13 +4227,24 @@ export function startServer(
               return
             }
             case 'reap': {
+              // Settle first. reap's rule is "not delivered by its deadline",
+              // and an entry stays `sent` until someone asks the provider — so
+              // reaping before settling can cancel a message a human already
+              // confirmed, losing the delivery (and its lastSentDate) for good:
+              // once cancelled it leaves `sent` and pendingReconcile never
+              // offers it again. Settling first lets a delivered entry become
+              // `delivered` — no longer blocking, so reap correctly leaves it
+              // alone — while one still awaiting confirmation is reaped as
+              // before. Matters most with a short per-app TTL, where the
+              // confirm-then-expire window is easiest to hit.
+              const reconciled = await runReconcilePass()
               const reaped = await q.reap(corpAppId, { chatId })
               const out = []
               for (const r of reaped) {
                 const wecomCancelled = body.cancelWecom === true ? await cancelAtWeCom(r.msgid) : false
                 out.push({ ...r, wecomCancelled })
               }
-              writeJson(res, 200, { reaped: out })
+              writeJson(res, 200, { reaped: out, reconciled })
               return
             }
             case 'reconcile': {

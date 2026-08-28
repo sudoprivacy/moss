@@ -72,6 +72,10 @@ type ReapedEntry struct {
 
 type QueueReapResp struct {
 	Reaped []ReapedEntry `json:"reaped"`
+	// Entries settled against WeCom before the expiry sweep. reap settles first
+	// so an entry a human already confirmed becomes `delivered` — and is
+	// therefore left alone — instead of being cancelled as if it never landed.
+	Reconciled []ReconcileOutcome `json:"reconciled,omitempty"`
 }
 
 type ReconcileOutcome struct {

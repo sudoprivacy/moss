@@ -261,21 +261,28 @@ to the group, then ping the responsible internal colleague directly.
 
 ## 消息队列（group-msg-queue）
 
-发送配额是**在人工确认时**扣掉的，不是创建任务时 —— 而确认可能发生在数小时之后。
-因此「这个群今天发过了吗」无法只靠「已送达记录」回答：一条还在等确认的任务同样
-占着当天名额。队列就是用来记住这个「意图」的，**按 corp app 分目录、按群分文件、
-跨会话持久**。
+发送配额是**在人工确认时**扣掉的，不是创建任务时 —— 而确认时间**完全不可预测**：
+可能几分钟，可能跨天，也可能一直不来。因此「这个群今天发过了吗」无法只靠
+「已送达记录」回答：一条还在等确认的任务同样占着当天名额。队列就是用来记住这个
+「意图」的，**按 corp app 分目录、按群分文件、跨会话持久**。
+
+也正因为配额在确认时才扣，**名额算在哪一天，取决于企微实际发出的那天**
+（取自 `send_result` 的 `send_time`），而不是我们占位的那天 —— 当天晚些创建、
+次日才被确认的任务，扣的是**次日**的配额。
 
 ### 标准循环（顺序有意义）
 
 ```bash
 APP=数牍
 
-# 1. 超时回收 —— 按每条自己的 --expires-at
+# 1. 超时回收 —— 先结算，再回收「到 --expires-at 仍未送达」的条目
+#    已送达（delivered）的不会被回收；结算结果一并返回在 reconciled 里
 corpapp group-msg-queue --app $APP --action reap --cancel-wecom
 
 # 2. 业务撤销 —— 调用方查业务数据后自行决定
-corpapp group-msg-queue --app $APP --action list --state pending --json
+#    不要加 --state pending：claimed / sent 同样可撤，而 sent 恰恰最该撤
+#    （已在等人确认，--cancel-wecom 可赶在确认前撤掉企微侧任务）
+corpapp group-msg-queue --app $APP --action list --json
 corpapp group-msg-queue --app $APP --action cancel --chat-id wr_xxx \
   --entry-id q_... --reason "排期已取消" --cancel-wecom
 
@@ -289,7 +296,7 @@ corpapp group-msg-queue --app $APP --action enqueue --chat-id wr_xxx \
   --idempotency-key '日常追货提醒:C1024:2026-08-27' \
   --expires-at 2026-08-26T10:00:00+08:00
 
-# 5. 问「现在哪些群能发」
+# 5. 问「现在哪些群能发」（内部会先结算再判定，结算结果见 reconciled）
 corpapp group-msg-queue --app $APP --action next
 
 # 6. 逐条：占位 → 组装 → 发送 → 标记
@@ -302,14 +309,14 @@ corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
   --entry-id q_... --reason "send-group 失败"
 ```
 
-**前三步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
-释放，那个群就白白锁死一天。
+**前两步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
+释放，那个群就白白锁死一天。（原来的第 3 步 `reconcile` 已并入 `next`。）
 
 ### 两种撤销，刻意分开
 
 | | 依据 | 谁判断 |
 |---|---|---|
-| `reap` | 只看每条自己的 `--expires-at` 是否已过 | moss，**从不读 `--meta`** |
+| `reap` | 先结算，再看「到 `--expires-at` 仍未送达」 | moss，**从不读 `--meta`** |
 | `cancel` | 「排期已取消」「客户已回复」等业务条件 | 调用方，需查业务数据 |
 
 过期时刻在入队时按业务算好，**按小时或按天都能表达**（`--expires-at` 是绝对时间戳）。

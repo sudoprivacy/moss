@@ -151,14 +151,21 @@ Customer groups and 群发 (WeCom):
 
 The message queue (group-msg-queue):
   The daily cap is spent when a human CONFIRMS a task, not when the API creates
-  one — and confirmation can land hours later. So "has this group been sent to
-  today?" cannot be answered by looking at delivered broadcasts alone. The queue
-  remembers intent across runs, per corp app, per group.
+  one — and confirmation is unbounded: minutes, the next day, or never. So "has
+  this group been sent to today?" cannot be answered by looking at delivered
+  broadcasts alone. The queue remembers intent across runs, per corp app, per
+  group.
+
+  Because the quota is spent at confirmation, the day it lands on is the day
+  WeCom actually sent — read from send_result's send_time, not from the day the
+  slot was claimed. A task created late one day and confirmed the next spends
+  the NEXT day's quota.
 
   Standard loop (the order matters — the first two RELEASE slots, so running
   them after next would leave groups needlessly locked for the day):
 
-    1. reap                  withdraw entries past their own --expires-at
+    1. reap                  settle, then withdraw anything NOT DELIVERED by its
+                             own --expires-at (a delivered entry is left alone)
     2. list                  caller applies business rules -> cancel
                              (no --state: pending, claimed and sent are all
                              still cancellable, and sent is the batch most worth
@@ -186,7 +193,10 @@ The message queue (group-msg-queue):
             forever — set it explicitly when timeliness matters.
     cancel  knows WHY — "the schedule moved", "the customer already replied".
             That needs fresh business data, so the caller drives it via
-            list --state pending, then cancel --reason.
+            list (no --state), then cancel --reason. Do not filter to pending:
+            claimed and sent are equally cancellable, and sent is the batch
+            most worth cancelling — it is already waiting on a human, and
+            --cancel-wecom withdraws the task before that confirmation is spent.
 
   claim before composing: building a report can take a minute, and without the
   slot held a second agent could pass next for the same group. Both would
