@@ -4160,11 +4160,21 @@ export function startServer(
                 writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId and meta are required' } })
                 return
               }
+              // Per-app entry lifetime, so a tenant that confirms broadcasts
+              // quickly can reap sooner than one whose approvals take days.
+              // Only used when the caller does not pass its own --expires-at.
+              let appConfig: Record<string, unknown> = {}
+              try {
+                appConfig = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+              } catch {
+                // Malformed config must not stop the queue accepting work.
+              }
               const r = await q.enqueue(corpAppId, {
                 chatId,
                 meta: body.meta as Record<string, unknown>,
                 idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
                 expiresAt: typeof body.expiresAt === 'string' ? body.expiresAt : undefined,
+                ttlMs: q.resolveEntryTtlMs(appConfig.queueEntryTtlHours),
               })
               writeJson(res, 200, { ok: true, duplicate: r.duplicate, entry: { ...r.entry, chatId } })
               return

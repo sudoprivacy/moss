@@ -180,9 +180,10 @@ The message queue (group-msg-queue):
   TWO KINDS OF CANCELLATION, deliberately separate:
     reap    knows only HOW LONG — it compares each entry's --expires-at to now
             and never reads --meta. Set the deadline per entry at enqueue time;
-            hours and days are equally expressible. Omitting it defaults to
-            enqueue + 72h, so a forgotten deadline cannot leave an entry holding
-            a group's slot forever — set it explicitly when timeliness matters.
+            hours and days are equally expressible. Omitting it falls back to
+            the corp app's configured queue TTL (admin page, default 72h), so a
+            forgotten deadline cannot leave an entry holding a group's slot
+            forever — set it explicitly when timeliness matters.
     cancel  knows WHY — "the schedule moved", "the customer already replied".
             That needs fresh business data, so the caller drives it via
             list --state pending, then cancel --reason.

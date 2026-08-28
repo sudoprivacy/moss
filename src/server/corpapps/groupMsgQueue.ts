@@ -52,7 +52,25 @@ const QUOTA_TZ = 'Asia/Shanghai'
  * business deadline. Callers that care about timeliness still pass
  * `--expires-at`; this only bounds the ones that do not.
  */
-const DEFAULT_ENTRY_TTL_MS = 72 * 60 * 60 * 1000
+const DEFAULT_ENTRY_TTL_HOURS = 72
+const DEFAULT_ENTRY_TTL_MS = DEFAULT_ENTRY_TTL_HOURS * 60 * 60 * 1000
+
+/** Bounds for the admin-editable per-app TTL. 0 is not allowed: an entry with
+ *  no grace at all would be reaped before anyone could confirm it. */
+export const MIN_ENTRY_TTL_HOURS = 1
+export const MAX_ENTRY_TTL_HOURS = 720 // 30 days
+
+/**
+ * Resolve a corp app's configured entry TTL, in milliseconds. Invalid or absent
+ * values fall back to the default rather than throwing — a malformed config
+ * must not stop a queue from accepting work.
+ */
+export function resolveEntryTtlMs(ttlHours?: unknown): number {
+  const n = typeof ttlHours === 'number' ? ttlHours : Number(ttlHours)
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_ENTRY_TTL_MS
+  const clamped = Math.min(Math.max(n, MIN_ENTRY_TTL_HOURS), MAX_ENTRY_TTL_HOURS)
+  return clamped * 60 * 60 * 1000
+}
 
 export type QueueEntryState =
   | 'pending'   // queued, nothing sent
@@ -214,6 +232,9 @@ async function mutate<T>(
 // ============================================================
 
 export type EnqueueInput = {
+  /** Entry lifetime override, in ms. Comes from the corp app's configured
+   *  queueEntryTtlHours; omitted falls back to DEFAULT_ENTRY_TTL_MS. */
+  ttlMs?: number
   chatId: string
   meta: Record<string, unknown>
   idempotencyKey?: string
@@ -248,7 +269,8 @@ export async function enqueue(
       idempotencyKey: input.idempotencyKey,
       // Always carry an expiry so reap() can eventually free the slot.
       expiresAt:
-        input.expiresAt ?? new Date(now.getTime() + DEFAULT_ENTRY_TTL_MS).toISOString(),
+        input.expiresAt ??
+        new Date(now.getTime() + (input.ttlMs ?? DEFAULT_ENTRY_TTL_MS)).toISOString(),
       enqueuedAt: now.toISOString(),
       claimedAt: null,
       sender: null,
