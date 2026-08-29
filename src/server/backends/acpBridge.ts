@@ -943,11 +943,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             return
           }
 
-          // Build scode model name with proxy/ prefix if needed
-          let scodeModelName = modelId
-          if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
-            scodeModelName = `proxy/${scodeModelName}`
-          }
+          // Pass the bare model id: the session already runs under `--auth
+          // proxy`, so scode's proxy passthrough forwards it to sudorouter as
+          // is. A `proxy/` prefix would 400 ("No available channel").
+          const scodeModelName = modelId
 
           process.stderr.write(`[AcpBridge] Model switch requested: ${scodeModelName}, acpSessionId: ${acpSessionId}\n`)
 

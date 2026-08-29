@@ -19,7 +19,6 @@ import {
   buildAvailableSkillSnapshot,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
-import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
 import { reapInUserContainer } from '../runtime/reaper.js'
 import { toHostPath } from '../runtime/dockerPathMap.js'
 import { logRuntimeEvent, logRuntimeMetric } from '../runtime/runtimeMetrics.js'
@@ -178,18 +177,12 @@ export class DockerBackend implements SessionBackend {
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      // Use model from env (which includes user preference), or fallback
-      // env.MOSS_DEFAULT_MODEL has priority: user preference > system settings > default
-      const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-      let scodeModelName = model
-      if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
-        scodeModelName = `proxy/${scodeModelName}`
-      }
 
-      // Preload all available models from sudorouter API
-      // This allows dynamic model switching without modifying sudocode.json
-      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
-
+      // Only supply the proxy connection. Models are resolved dynamically by
+      // scode: unknown aliases fall through to proxy passthrough, and the
+      // wire format is picked from the model-capabilities SSOT (populated from
+      // sudorouter /v1/models). A static model list here would pin every model
+      // to one hard-coded wire format and drift from sudorouter's catalog.
       const scodeConfig = {
         auth_modes: {
           proxy: {
@@ -198,13 +191,12 @@ export class DockerBackend implements SessionBackend {
               apiKey
             }
           }
-        },
-        models: allModels  // Preload all available models
+        }
       }
       writeFileSync(dummySudocodePath, JSON.stringify(scodeConfig, null, 2), 'utf8')
-      process.stderr.write(`[DockerBackend] Preloaded ${Object.keys(allModels).length} models into sudocode.json\n`)
+      process.stderr.write(`[DockerBackend] Wrote sudocode.json (proxy connection only; models resolved dynamically via sudorouter)\n`)
     } catch (e) {
-      process.stderr.write(`[DockerBackend] Failed to create dynamic sudocode.json: ${e}\n`)
+      process.stderr.write(`[DockerBackend] Failed to create sudocode.json: ${e}\n`)
     }
 
     const scodeSettings = buildScodeSettings(options)
@@ -228,11 +220,11 @@ export class DockerBackend implements SessionBackend {
       ...(scodeHomeDir ? [scodeHomeDir] : []),
     ]).filter(p => p !== '/')
 
-    // Use model from env (which includes user preference), or fallback
-    let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-    if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
-      model = `proxy/${model}`
-    }
+    // Use model from env (which includes user preference), or fallback.
+    // Bare model id only: `--auth proxy` selects the proxy auth mode and
+    // scode's passthrough forwards the id verbatim to sudorouter. A `proxy/`
+    // prefix would 400 ("No available channel for model proxy/...").
+    const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
     console.log(`[DockerBackend] Model for session ${options.sessionId}: ${model} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})`)
 
     let args: string[]
