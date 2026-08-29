@@ -81,17 +81,16 @@ export class NexusManager {
     const dataDir = join(this.nexusDir, 'data')
 
     const args = [
-      // `serve-local --port <p>` (nexus-vfs >=v0.6.0) is the shorthand for
-      // `--bind-addr 127.0.0.1:<p> --no-tls`: it binds loopback + plaintext,
-      // the trusted-local-backend posture nexus-vfs's boot invariant permits
-      // without --insecure-no-auth (it only refuses no-auth on a *reachable*
-      // bind, which this is not). Moving that invariant into the binary
-      // removes the hand-written triplet here; it also subsumes the old
-      // --bootstrap-mode drop (removed upstream in Phase G — the daemon infers
-      // its boot action from on-disk state). Requires the v0.6.0 pin below.
+      // Ported to current nexusd-cluster (0.1.x) CLI: `serve-local` subcommand
+      // + --port + --data-dir + --no-tls. The old code's `--bootstrap-mode`
+      // was removed upstream (the daemon infers boot action from on-disk
+      // state); nexusd-cluster rejects it. Loopback + plaintext = trusted
+      // local backend. Binary + version pinned to nexusd-cluster, same as
+      // sudocode/sudowork.
       'serve-local',
       '--port', String(this.grpcPort),
       '--data-dir', dataDir,
+      '--no-tls',
     ]
 
     console.log(`[NexusManager] Starting nexus (Rust version) on gRPC port ${this.grpcPort}...`)
@@ -223,13 +222,17 @@ export class NexusManager {
       // gRPC server starts very fast in Rust
       await new Promise(r => setTimeout(r, 500))
       if (this.child?.exitCode === null) {
-        // Try a simple gRPC write/read to verify it's ready
+        // Probe the gRPC port with a plain TCP connect — nexusd-cluster binds
+        // 127.0.0.1:<grpcPort> once its Raft gRPC server is up. Avoids the
+        // nexus-napi NexusGrpcClient (unported / native binding not needed
+        // just to confirm liveness).
         try {
-          const { NexusGrpcClient } = require('../../../native/nexus-napi')
-          const testClient = new NexusGrpcClient(`http://127.0.0.1:${this.grpcPort}`)
-          // Rust version doesn't have ping, use write/read instead
-          testClient.write('/health/check.json', Buffer.from('{}'), '')
-          testClient.read('/health/check.json', '')
+          await new Promise((resolve, reject) => {
+            const sock = require('net').connect(this.grpcPort, '127.0.0.1')
+            sock.once('connect', () => { sock.destroy(); resolve(undefined) })
+            sock.once('error', (e: unknown) => { sock.destroy(); reject(e) })
+            sock.setTimeout(1000, () => { sock.destroy(); reject(new Error('connect timeout')) })
+          })
           return
         } catch (error) {
           lastError = error
