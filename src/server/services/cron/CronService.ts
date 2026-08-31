@@ -453,6 +453,22 @@ export class CronService {
   /**
    * Create a new session for cron execution
    */
+  /**
+   * The directory this job's runs execute in. Exposed so the upload API can put
+   * files exactly where the runs will look for them — resolving it twice with
+   * drifting logic is how "I uploaded it but the job cannot see it" happens.
+   */
+  resolveWorkspaceFor(job: CronJob): string {
+    return resolveCronWorkspace({
+      jobId: job.id,
+      jobWorkspace: job.workspace,
+      serviceWorkspace: this.config.workspace,
+      runtimeDir: this.config.runtimeDir,
+      defaultRuntime: this.config.defaultRuntime,
+      dockerContainerMode: this.config.dockerContainerMode,
+    })
+  }
+
   private async createCronSession(
     job: CronJob,
     run: CronJobRun,
@@ -476,14 +492,7 @@ export class CronService {
       : undefined
 
     // Create session via RuntimeService
-    const cwd = resolveCronWorkspace({
-      jobId: job.id,
-      jobWorkspace: job.workspace,
-      serviceWorkspace: this.config.workspace,
-      runtimeDir: this.config.runtimeDir,
-      defaultRuntime: this.config.defaultRuntime,
-      dockerContainerMode: this.config.dockerContainerMode,
-    })
+    const cwd = this.resolveWorkspaceFor(job)
     const session = await this.config.runtimeService.createSession({
       cwd,
       dangerouslySkipPermissions: false,

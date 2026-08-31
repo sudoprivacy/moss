@@ -2,7 +2,7 @@ import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
-import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir } from 'fs/promises'
+import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
 import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
@@ -1110,15 +1110,16 @@ async function buildWorkspaceNode(
   return matches || children.length > 0 ? node : null
 }
 
-async function readWorkspaceTree(
-  session: SessionRecord,
+/** Dir-based core; cron jobs have a workspace but no session. */
+async function readWorkspaceTreeIn(
+  workspaceRoot: string,
   params: { path?: string | null; search?: string | null },
 ): Promise<MossWorkspaceNode> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
   if (relativePath === '' || relativePath === DRAFTS_DIR_NAME) {
-    await ensureDraftsDirectory(session.cwd)
+    await ensureDraftsDirectory(workspaceRoot)
   }
-  const { rootRealPath, fullPath } = await resolveWorkspaceEntry(session.cwd, relativePath)
+  const { rootRealPath, fullPath } = await resolveWorkspaceEntry(workspaceRoot, relativePath)
   const info = await lstat(fullPath)
   if (!info.isDirectory()) throw new HttpError(400, 'Path is not a directory')
   const search = (params.search ?? '').trim().toLowerCase()
@@ -1175,8 +1176,22 @@ async function readWorkspaceFilePreview(
   }
 }
 
-async function writeWorkspaceFile(
+function readWorkspaceTree(
   session: SessionRecord,
+  params: { path?: string | null; search?: string | null },
+): Promise<MossWorkspaceNode> {
+  return readWorkspaceTreeIn(session.cwd, params)
+}
+
+/**
+ * Write an uploaded file into a workspace directory.
+ *
+ * Takes the directory rather than a SessionRecord: cron jobs upload into their
+ * workspace *before* any session exists (and, in reuse mode, outlive several),
+ * so the file cannot be addressed through a session.
+ */
+async function writeWorkspaceFileTo(
+  workspaceRoot: string,
   params: { path: string | null; contentBase64: string | null },
 ): Promise<{ relativePath: string; size: number }> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
@@ -1207,8 +1222,8 @@ async function writeWorkspaceFile(
   // Ensure the workspace root exists; for remote sessions it may not be
   // materialized until the runtime spawns, and we want upload-before-first-
   // message to work.
-  await mkdir(session.cwd, { recursive: true })
-  const rootRealPath = await realpathOrHttpNotFound(session.cwd, 'Workspace root not found')
+  await mkdir(workspaceRoot, { recursive: true })
+  const rootRealPath = await realpathOrHttpNotFound(workspaceRoot, 'Workspace root not found')
 
   // resolveWorkspaceEntry realpaths the target and 404s if it does not exist
   // yet, so for a not-yet-existing destination we mirror its guard logic
@@ -1224,6 +1239,13 @@ async function writeWorkspaceFile(
     relativePath: toWorkspaceRelativePath(rootRealPath, candidate),
     size: buffer.length,
   }
+}
+
+function writeWorkspaceFile(
+  session: SessionRecord,
+  params: { path: string | null; contentBase64: string | null },
+): Promise<{ relativePath: string; size: number }> {
+  return writeWorkspaceFileTo(session.cwd, params)
 }
 
 function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
@@ -5694,6 +5716,61 @@ export function startServer(
           maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined,
         })
         writeJson(res, 200, result)
+        return
+      }
+
+      // Files a cron job's runs will see. Uploaded against the JOB, not a
+      // session: 'new' mode gives every run a fresh session and 'reuse' mode
+      // keeps one across many runs, so a session-scoped file would either
+      // disappear next run or be unreachable before the first. The job's
+      // workspace is what every run shares.
+      const cronJobFileMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/workspace\/file$/)
+      if (cronJobFileMatch && (req.method === 'POST' || req.method === 'DELETE')) {
+        const jobId = cronJobFileMatch[1] || ''
+        const resolved = cronApi.resolveJobWorkspace(auth, jobId, cronSubtreeUserIds)
+        if (!resolved.success || !resolved.workspace) {
+          const msg = resolved.message ?? 'Job not found'
+          throw new HttpError(msg === 'Access denied' ? 403 : msg === 'Job not found' ? 404 : 400, msg)
+        }
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req)
+          // Same name overwrites: re-uploading a corrected spreadsheet is the
+          // common case, and leaving the stale one in place would let the job
+          // keep running against it.
+          const result = await writeWorkspaceFileTo(resolved.workspace, {
+            path: typeof body.path === 'string' ? body.path : null,
+            contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
+          })
+          writeJson(res, 200, { success: true, ...result })
+          return
+        }
+        const rel = normalizeWorkspaceRelativePath(url.searchParams.get('path') ?? '')
+        if (!rel) throw new HttpError(400, 'Missing path')
+        const rootReal = await realpathOrHttpNotFound(resolved.workspace, 'Workspace root not found')
+        const target = resolve(rootReal, rel)
+        if (!isInsideDir(rootReal, target)) throw new HttpError(403, 'Path escapes workspace root')
+        await rm(target, { force: true })
+        writeJson(res, 200, { success: true, relativePath: rel })
+        return
+      }
+
+      const cronJobTreeMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/workspace\/tree$/)
+      if (req.method === 'GET' && cronJobTreeMatch) {
+        const jobId = cronJobTreeMatch[1] || ''
+        const resolved = cronApi.resolveJobWorkspace(auth, jobId, cronSubtreeUserIds)
+        if (!resolved.success || !resolved.workspace) {
+          const msg = resolved.message ?? 'Job not found'
+          throw new HttpError(msg === 'Access denied' ? 403 : msg === 'Job not found' ? 404 : 400, msg)
+        }
+        // Listing before the first run is normal (upload, then wait for the
+        // schedule), and the directory may not exist yet — report empty rather
+        // than 404 so the caller cannot mistake "not created yet" for "gone".
+        await mkdir(resolved.workspace, { recursive: true })
+        writeJson(res, 200, {
+          success: true,
+          workspace: resolved.workspace,
+          tree: await readWorkspaceTreeIn(resolved.workspace, { path: url.searchParams.get('path') }),
+        })
         return
       }
 
