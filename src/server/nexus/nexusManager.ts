@@ -3,7 +3,6 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  unlinkSync,
   writeFileSync,
 } from 'fs'
 import { connect, createServer } from 'net'
@@ -67,7 +66,6 @@ export function formatNexusStartupFailure(input: {
 export async function assertTcpPortAvailable(port: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const server = createServer()
-    server.unref()
     server.once('error', reject)
     server.listen(port, '127.0.0.1', () => {
       server.close(error => error ? reject(error) : resolve())
@@ -161,7 +159,6 @@ export class NexusManager {
     }
 
     mkdirSync(this.nexusDir, { recursive: true })
-    this.cleanStalePidFiles()
 
     const dataDir = join(this.nexusDir, 'data')
     const args = buildNexusArgs(this.grpcPort, dataDir)
@@ -195,13 +192,12 @@ export class NexusManager {
 
     try {
       await this.waitForGrpcReady(child, () => exitInfo, () => spawnError, () => lastStderr)
+      this.writeReadyFile()
     } catch (error) {
       await this.terminateChild(child)
       if (this.child === child) this.child = null
       throw error
     }
-
-    this.writeReadyFile()
     console.log(
       `[NexusManager] Nexus started (version=${NEXUS_VERSION}, pid=${child.pid ?? 'unknown'}, gRPC=127.0.0.1:${this.grpcPort})`,
     )
@@ -213,22 +209,6 @@ export class NexusManager {
     console.log(`[NexusManager] Stopping nexusd-cluster pid=${child.pid ?? 'unknown'}...`)
     await this.terminateChild(child)
     if (this.child === child) this.child = null
-  }
-
-  private cleanStalePidFiles(): void {
-    const pidLocations = [
-      join(this.nexusDir, 'nexusd.pid'),
-      join(homedir(), '.nexus', 'nexusd.pid'),
-    ]
-    for (const pidFile of pidLocations) {
-      if (!existsSync(pidFile)) continue
-      try {
-        unlinkSync(pidFile)
-        console.log(`[NexusManager] Cleaned stale PID: ${pidFile}`)
-      } catch (error) {
-        console.warn(`[NexusManager] Failed to clean stale PID ${pidFile}: ${String(error)}`)
-      }
-    }
   }
 
   private resolveCompatibleBinary(): string {
@@ -351,27 +331,39 @@ export class NexusManager {
 
   private async terminateChild(child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null) return
-    try {
-      child.kill('SIGTERM')
-    } catch {
-      return
-    }
+    if (child.pid === undefined) return
     await new Promise<void>(resolve => {
       let settled = false
+      let killTimeout: NodeJS.Timeout | undefined
+      let giveUpTimeout: NodeJS.Timeout | undefined
       const finish = () => {
         if (settled) return
         settled = true
-        clearTimeout(killTimeout)
-        clearTimeout(giveUpTimeout)
+        if (killTimeout) clearTimeout(killTimeout)
+        if (giveUpTimeout) clearTimeout(giveUpTimeout)
+        child.off('exit', finish)
         resolve()
       }
-      const killTimeout = setTimeout(() => {
+      child.once('exit', finish)
+      try {
+        if (!child.kill('SIGTERM')) {
+          finish()
+          return
+        }
+      } catch {
+        finish()
+        return
+      }
+      killTimeout = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
-          try { child.kill('SIGKILL') } catch { finish() }
+          try {
+            if (!child.kill('SIGKILL')) finish()
+          } catch {
+            finish()
+          }
         }
       }, NEXUS_STOP_TIMEOUT_MS)
-      const giveUpTimeout = setTimeout(finish, NEXUS_STOP_TIMEOUT_MS + 1_000)
-      child.once('exit', finish)
+      giveUpTimeout = setTimeout(finish, NEXUS_STOP_TIMEOUT_MS + 1_000)
     })
   }
 

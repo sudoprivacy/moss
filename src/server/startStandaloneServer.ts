@@ -39,11 +39,26 @@ export async function startStandaloneDirectConnectServer(
 
   // Start Nexus subprocess for secrets storage (required, no fallback)
   const nexusManager = new NexusManager()
-  let nexusClient: NexusClientType
 
   // Start nexus - must succeed, no in-memory fallback
   await nexusManager.start()
-  nexusClient = new NexusClient(nexusManager.grpcUrl)
+  try {
+    return await finishStandaloneServerStartup(config, nexusManager)
+  } catch (error) {
+    await nexusManager.stop().catch(stopError => {
+      process.stderr.write(
+        `[Startup] failed to stop Nexus after startup error: ${stopError instanceof Error ? stopError.message : String(stopError)}\n`,
+      )
+    })
+    throw error
+  }
+}
+
+async function finishStandaloneServerStartup(
+  config: ServerConfig,
+  nexusManager: NexusManager,
+) {
+  const nexusClient: NexusClientType = new NexusClient(nexusManager.grpcUrl)
   console.log('[Startup] Nexus started successfully for secrets management (gRPC mode)')
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
@@ -59,8 +74,7 @@ export async function startStandaloneDirectConnectServer(
     await authProxy.start()
   } catch (error) {
     console.error('[Startup] Failed to start Auth Proxy:', error instanceof Error ? error.message : error)
-    await nexusManager.stop().catch(() => {})
-    process.exit(1)
+    throw error
   }
 
   const { service: authService, bootstrap } = await createAuthService({
@@ -155,10 +169,7 @@ export async function startStandaloneDirectConnectServer(
     }
     await server.stop()
     await authProxy.stop()
-    // Only stop nexusManager if it was started (not in fallback mode)
-    if (nexusManager && nexusManager['child'] !== null) {
-      await nexusManager.stop()
-    }
+    await nexusManager.stop()
     store.stopServerInstance(instance.instanceId)
     store.close()
   }
