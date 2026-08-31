@@ -122,13 +122,9 @@ RUN cd native/nexus-napi \
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
 FROM debian:bookworm-slim AS dl
-# Real nexus-vfs release tag (GitHub releases/download/<tag>/...). Keep in step
-# with src/server/nexus/runtime-versions.json (the Electron-side pin). moss
-# spawns the daemon as `nexusd serve-local --port <p>` (nexusManager.ts), a
-# subcommand introduced in nexus-vfs v0.6.0 — older binaries (e.g. the fictional
-# v0.1.0, which also 404'd) fail with "unrecognized subcommand 'serve-local'"
-# and nexus never boots.
-ARG NEXUS_VFS_VERSION=v0.6.0
+# nexusd-cluster assembly release. Keep this in step with
+# src/server/nexus/runtime-versions.json and the current sudowork demo runtime.
+ARG NEXUSD_CLUSTER_VERSION=0.1.1
 ARG SCODE_VERSION=latest
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar \
@@ -140,7 +136,12 @@ RUN case "$TARGETARCH" in \
       arm64) NEXUS_ARCH="aarch64" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac \
-    && curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/${NEXUS_VFS_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
+    && case "$TARGETARCH" in \
+      amd64) NEXUS_SHA256="d5c9887ebcde3d7f75cfca31fb6fa4cfc5a54d0f1bb3e77dbdc48aaab06391ed" ;; \
+      arm64) NEXUS_SHA256="7896bf2baabd62fd2e2cb4b35eed46a65ab2b68cc881ab3794d3a7f00fdafb32" ;; \
+    esac \
+    && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/nexusd-cluster-v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
+    && echo "${NEXUS_SHA256}  nexus.tar.gz" | sha256sum -c - \
     && tar -xzf nexus.tar.gz \
     && mkdir -p /out/bin/nexus \
     && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
