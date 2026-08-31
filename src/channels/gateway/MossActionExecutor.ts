@@ -518,6 +518,34 @@ export class MossActionExecutor {
       ? classifyMossSession(this.runtime.getSessionSnapshot(existingSession.sessionId))
       : 'replace';
 
+    // A session that died on its own (crashed runtime, lost container) still has its
+    // transcript on disk — terminateSession only kills the process and flips status, and
+    // nothing ever deletes transcripts. Rotation and /restart already carry that history
+    // into the successor; a crash used to be the one replace path that silently dropped it,
+    // which reads to the user as "the bot forgot everything because it fell over".
+    //
+    // Deliberate terminations are excluded on purpose: 'terminated' is what /agent writes
+    // when the user switches agent, and that flow means to start clean. Seeding it would
+    // undo the reset the user just asked for.
+    let recoveredSeed: string | undefined;
+    if (
+      existingSession &&
+      recovery === 'replace' &&
+      !options.forceReplace &&
+      !seedText
+    ) {
+      const status = this.runtime.getSessionSnapshot(existingSession.sessionId)?.status;
+      if (status === 'lost' || status === 'failed') {
+        recoveredSeed = await this.buildSeedForSession(existingSession.sessionId);
+        console.log(
+          `[MossActionExecutor] [session-rescue] ${status} session ${existingSession.sessionId} ` +
+          `for ${channelUserKey}` +
+          `${recoveredSeed ? ` — carrying ${recoveredSeed.length} chars of history` : ' — no history to carry'}`,
+        );
+      }
+    }
+    const effectiveSeed = seedText ?? recoveredSeed;
+
     if (existingSession && recovery !== 'replace') {
       console.log(
         `[MossActionExecutor] [session-revive] ${recovery} session ${existingSession.sessionId} ` +
@@ -629,15 +657,15 @@ export class MossActionExecutor {
     this.channelSessions.set(channelUserKey, state);
 
     // Seed the fresh session with a summary of the conversation it replaces, so a
-    // rotation (turn cap) or a stuck-session reset does not read to the user as
-    // total amnesia. Sent as a plain turn before the user's message; the runtime
+    // rotation (turn cap), a stuck-session reset, or a crashed runtime does not read
+    // to the user as total amnesia. Sent as a plain turn before the user's message; the runtime
     // answers it, but processMessage is not waiting on this write, so the reply is
     // absorbed as context rather than delivered to the chat.
-    if (seedText) {
+    if (effectiveSeed) {
       try {
-        socket.write(`${JSON.stringify({ type: 'stdin', data: `${seedText}\n` })}\n`);
+        socket.write(`${JSON.stringify({ type: 'stdin', data: `${effectiveSeed}\n` })}\n`);
         console.log(
-          `[MossActionExecutor] [session-rotate] seeded ${sessionId} with ${seedText.length} chars of prior context`,
+          `[MossActionExecutor] [session-seed] seeded ${sessionId} with ${effectiveSeed.length} chars of prior context`,
         );
       } catch (error) {
         // A failed seed costs continuity, not correctness — the session still works.
