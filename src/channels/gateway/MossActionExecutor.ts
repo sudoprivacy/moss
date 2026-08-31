@@ -13,6 +13,7 @@ import type { SessionManager } from '../core/SessionManager.js';
 import type { PairingService } from '../pairing/PairingService.js';
 import type { PluginMessageHandler, BasePlugin } from '../plugins/BasePlugin.js';
 import type { IUnifiedIncomingMessage, IChannelUser, PluginType } from '../types.js';
+import { pluginScope, scopedChatId, defaultPluginId, pluginTypeFromId } from '../types.js';
 import { getChannelEventEmitter } from '../core/ChannelEventEmitter.js';
 import { classifyMossSession } from '../../server/sessionRecovery.js';
 import { buildTranscriptSeed } from './transcriptSeed.js';
@@ -99,6 +100,10 @@ export class MossActionExecutor {
     // Resolve the moss admin userId from the running plugin instance key (format: "pluginId:userId")
     const instanceKey = this.pluginManager.getInstanceKey(sourcePlugin);
     const mossUserId = instanceKey?.includes(':') ? instanceKey.split(':').pop() : undefined;
+    // Which CONNECTION received this. A user may have several bots of one type connected;
+    // everything keyed below (session, authorization, agent binding) must stay per-bot, or
+    // one bot answers with another's conversation.
+    const pluginId = instanceKey ? instanceKey.split(':')[0] : defaultPluginId(platform);
 
     // Use the source plugin directly for sending responses (no lookup needed)
     const sendFn = async (msg: any) => sourcePlugin.sendMessage(chatId, msg);
@@ -106,14 +111,14 @@ export class MossActionExecutor {
 
     try {
       // 1. Check authorization
-      const isAuthorized = this.pairingService.isUserAuthorized(user.id, platform);
+      const isAuthorized = this.pairingService.isUserAuthorized(user.id, pluginScope(pluginId, platform), mossUserId);
 
       // Handle /start command
       if (content.type === 'command' && content.text === '/start') {
         if (platform === 'wechat' || platform === 'wecom') {
           // Auto-authorize and continue
         } else {
-          await this.handlePairingFlow(platform, user, sendFn, mossUserId);
+          await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId);
           return;
         }
       }
@@ -122,10 +127,10 @@ export class MossActionExecutor {
       if (!isAuthorized) {
         if (platform === 'wechat' || platform === 'wecom') {
           // Auto-authorize WeChat/WeCom users
-          this.autoAuthorizeUser(user, platform, mossUserId);
+          this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
         } else {
           // Show pairing flow for other platforms
-          await this.handlePairingFlow(platform, user, sendFn, mossUserId);
+          await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId);
           return;
         }
       }
@@ -137,7 +142,7 @@ export class MossActionExecutor {
         (content.type === 'text' || content.type === 'command') &&
         /^\/agents?(\s|$)/i.test(commandText)
       ) {
-        await this.handleAgentCommand(platform, chatId, commandText, sendFn, mossUserId);
+        await this.handleAgentCommand(platform, pluginId, chatId, commandText, sendFn, mossUserId);
         return;
       }
 
@@ -153,8 +158,8 @@ export class MossActionExecutor {
           await sendFn({ type: 'text', text: '无法确定该渠道的归属用户，暂时无法重启会话。', parseMode: 'HTML' });
           return;
         }
-        await this.resetChatSession(platform, chatId, mossUserId, { preserveHistory: true });
-        const rescued = this.pendingSeeds.has(`${platform}:${chatId}`);
+        await this.resetChatSession(platform, pluginId, chatId, mossUserId, { preserveHistory: true });
+        const rescued = this.pendingSeeds.has(`${platform}:${scopedChatId(pluginId, platform, chatId)}`);
         await sendFn({
           type: 'text',
           text: rescued
@@ -172,14 +177,14 @@ export class MossActionExecutor {
       }
 
       // 3. Per-conversation mutex
-      const lockKey = `${platform}:${user.id}:${chatId}`;
+      const lockKey = `${pluginScope(pluginId, platform)}:${user.id}:${chatId}`;
       const existingLock = this.conversationLocks.get(lockKey);
       if (existingLock) {
         console.log(`[MossActionExecutor] Message already being processed for ${lockKey}, queuing`);
         await existingLock;
       }
 
-      const lockPromise = this.processMessage(platform, chatId, user, content.text, sendFn, editFn, mossUserId);
+      const lockPromise = this.processMessage(platform, pluginId, chatId, user, content.text, sendFn, editFn, mossUserId);
       this.conversationLocks.set(lockKey, lockPromise);
 
       try {
@@ -204,6 +209,7 @@ export class MossActionExecutor {
    */
   private async processMessage(
     platform: string,
+    pluginId: string,
     chatId: string,
     user: { id: string; displayName?: string },
     text: string,
@@ -211,13 +217,17 @@ export class MossActionExecutor {
     editFn: (msgId: string, msg: any) => Promise<boolean>,
     mossUserId: string | undefined,
   ): Promise<void> {
-    const channelUserKey = `${platform}:${user.id}:${chatId}`;
+    // Scope every key below to the receiving connection: two bots of one type must not
+    // share a session, a turn counter or an agent binding.
+    const scope = pluginScope(pluginId, platform);
+    const sChatId = scopedChatId(pluginId, platform, chatId);
+    const channelUserKey = `${scope}:${user.id}:${chatId}`;
 
     // Get/create channel user
-    let channelUser = this.getChannelUser(user.id, platform);
+    let channelUser = this.getChannelUser(user.id, scope, mossUserId);
     if (!channelUser) {
       // Should have been created by auto-authorize or pairing, but create as fallback
-      channelUser = this.autoAuthorizeUser(user, platform, mossUserId);
+      channelUser = this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
       if (!channelUser) {
         await sendFn({ type: 'text', text: '❌ Authorization failed. Please try again.', parseMode: 'HTML' });
         return;
@@ -225,14 +235,14 @@ export class MossActionExecutor {
     }
 
     // Get/create channel session
-    let session = this.sessionManager.getSession(channelUser.id, chatId);
+    let session = this.sessionManager.getSession(channelUser.id, sChatId);
     if (!session || !session.conversationId) {
       // Create a new channel session with conversationId = channelUserKey (used as Moss session ID)
       session = this.sessionManager.createSession(
         channelUser,
         'acp',
         undefined,
-        chatId,
+        sChatId,
       );
     }
 
@@ -240,8 +250,8 @@ export class MossActionExecutor {
     // channel_sessions row), so it accumulates across idle revives and survives
     // rotation — counting per runtime session would reset on every idle recycle,
     // which is the most common IM path, and the cap would never fire.
-    const turnCount = this.db.incrementChannelSessionTurnCount(channelUser.id, chatId);
-    const rotation = await this.planRotation(turnCount, mossUserId, platform, chatId);
+    const turnCount = this.db.incrementChannelSessionTurnCount(channelUser.id, sChatId);
+    const rotation = await this.planRotation(turnCount, mossUserId, platform, pluginId, chatId);
 
     // Get or create Moss runtime session
     let channelState = this.channelSessions.get(channelUserKey);
@@ -259,13 +269,14 @@ export class MossActionExecutor {
           channelUserKey,
           channelUser,
           platform,
+          pluginId,
           chatId,
           mossUserId,
           { forceReplace: rotation.rotate, seedText: rotation.seedText },
         );
         if (rotation.rotate) {
           // Only after a rotation actually produced a new runtime session.
-          this.db.resetChannelSessionTurnCount(channelUser.id, chatId);
+          this.db.resetChannelSessionTurnCount(channelUser.id, sChatId);
         }
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to create runtime session:`, error);
@@ -394,8 +405,10 @@ export class MossActionExecutor {
     turnCount: number,
     mossUserId: string | undefined,
     platform: string,
+    pluginId: string,
     chatId: string,
   ): Promise<{ rotate: boolean; seedText?: string; notice?: string }> {
+    const sChatId = scopedChatId(pluginId, platform, chatId);
     let cap = 0;
     try {
       cap = Number(getSystemSettings().imReuseMaxTurns ?? 0);
@@ -405,11 +418,11 @@ export class MossActionExecutor {
     // 0 or negative disables rotation (reuse forever), same as cronReuseMaxRuns.
     if (!Number.isFinite(cap) || cap <= 0 || turnCount <= cap) return { rotate: false };
 
-    const previous = mossUserId ? this.db.findChannelSession(platform, chatId, mossUserId) : null;
+    const previous = mossUserId ? this.db.findChannelSession(platform, sChatId, mossUserId) : null;
     const seedText = await this.buildSeedForSession(previous?.sessionId);
 
     console.log(
-      `[MossActionExecutor] [session-rotate] chat ${platform}:${chatId} hit turn cap ` +
+      `[MossActionExecutor] [session-rotate] chat ${platform}:${sChatId} hit turn cap ` +
       `(${turnCount} > ${cap}); retiring ${previous?.sessionId ?? 'n/a'}` +
       `${seedText ? ` with ${seedText.length} chars of seed` : ' without seed'}`,
     );
@@ -461,16 +474,18 @@ export class MossActionExecutor {
     channelUserKey: string,
     channelUser: IChannelUser,
     platform: string,
+    pluginId: string,
     chatId: string,
     ownerUserId: string | undefined,
     options: { forceReplace?: boolean; seedText?: string } = {},
   ): Promise<ChannelSessionState> {
+    const sChatId = scopedChatId(pluginId, platform, chatId);
     console.log(`[MossActionExecutor] Creating runtime session for ${channelUserKey}`);
 
     // A rescue reset may have stashed context for this chat; it applies to whichever
     // session spawns next. Consume it either way so a stale seed cannot leak into a
     // later, unrelated session.
-    const seedKey = `${platform}:${chatId}`;
+    const seedKey = `${platform}:${sChatId}`;
     const stashedSeed = this.pendingSeeds.get(seedKey);
     if (stashedSeed) this.pendingSeeds.delete(seedKey);
     const seedText = options.seedText ?? stashedSeed;
@@ -483,10 +498,9 @@ export class MossActionExecutor {
 
     // Resolve the Moss platform user (channel plugin owner) so sessions are visible in the
     // management UI. The owner comes from the receiving plugin instance: channel_plugins is
-    // keyed (id, user_id), so looking up `${platform}_default` without a user_id returns an
-    // arbitrary row and would attribute the session to the wrong user whenever more than one
-    // user has connected this platform.
-    const pluginId = `${platform}_default`;
+    // keyed (id, user_id), so looking up an id without a user_id returns an arbitrary row
+    // and would attribute the session to the wrong user whenever more than one user has
+    // connected this platform.
     const plugin = ownerUserId ? this.db.getChannelPlugin(pluginId, ownerUserId) : null;
     const mossUserId = ownerUserId || (plugin ? String(plugin.user_id) : 'channel');
     // org_id from plugin, fall back to users table lookup
@@ -500,7 +514,7 @@ export class MossActionExecutor {
     }
 
     // Try to reuse an existing DB session for this channel user
-    const existingSession = this.db.findChannelSession(platform, chatId, mossUserId);
+    const existingSession = this.db.findChannelSession(platform, sChatId, mossUserId);
     const displayName = channelUser.displayName || chatId;
 
     // Recovery classification is shared with cabin/cron (see sessionRecovery.ts).
@@ -568,6 +582,7 @@ export class MossActionExecutor {
       try {
         activeAgent = await this.agentResolver.resolveActiveAgent({
           platform,
+          pluginId,
           chatId,
           ownerUserId: ownerUserId,
         });
@@ -588,7 +603,7 @@ export class MossActionExecutor {
       role: 'user',
       scopes: ['sessions:create', 'sessions:attach:any'],
       source: platform,
-      channelChatId: chatId,
+      channelChatId: sChatId,
       ...(activeAgent
         ? { assistantName: activeAgent.name, assistantDisplayName: activeAgent.displayName }
         : { assistantName: displayName }),
@@ -771,8 +786,8 @@ export class MossActionExecutor {
   /**
    * Get channel user from database
    */
-  private getChannelUser(platformUserId: string, platformType: string): IChannelUser | null {
-    const row = this.db.getChannelUserByPlatform(platformUserId, platformType);
+  private getChannelUser(platformUserId: string, scope: string, mossUserId?: string): IChannelUser | null {
+    const row = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
     if (!row) return null;
     return {
       id: String(row.id),
@@ -791,13 +806,15 @@ export class MossActionExecutor {
   private autoAuthorizeUser(
     user: { id: string; displayName?: string },
     platform: string,
+    pluginId: string,
     mossUserId?: string,
   ): IChannelUser | null {
-    const existing = this.getChannelUser(user.id, platform);
+    const scope = pluginScope(pluginId, platform);
+    const existing = this.getChannelUser(user.id, scope, mossUserId);
     if (existing) return existing;
 
     const now = Date.now();
-    const newUserId = `${platform}_${user.id}_${now}`;
+    const newUserId = `${scope}_${user.id}_${now}`;
     const channelUser: IChannelUser = {
       id: newUserId,
       platformUserId: user.id,
@@ -810,6 +827,7 @@ export class MossActionExecutor {
       id: channelUser.id,
       platform_user_id: channelUser.platformUserId,
       platform_type: channelUser.platformType,
+      plugin_scope: scope,
       display_name: channelUser.displayName ?? null,
       authorized_at: channelUser.authorizedAt,
       last_active: null,
@@ -837,6 +855,7 @@ export class MossActionExecutor {
    */
   private async handleAgentCommand(
     platform: string,
+    pluginId: string,
     chatId: string,
     commandText: string,
     sendFn: (msg: any) => Promise<string | null>,
@@ -854,7 +873,7 @@ export class MossActionExecutor {
     }
 
     const agents = await this.agentResolver.listAgents(mossUserId);
-    const active = await this.agentResolver.resolveActiveAgent({ platform, chatId, ownerUserId: mossUserId });
+    const active = await this.agentResolver.resolveActiveAgent({ platform, pluginId, chatId, ownerUserId: mossUserId });
 
     // Everything after the command word is the requested agent name (may contain spaces).
     const argument = commandText.replace(/^\/agents?/i, '').trim();
@@ -875,8 +894,8 @@ export class MossActionExecutor {
     }
 
     if (argument === 'default' || argument === '默认') {
-      await this.agentResolver.setChatAgent({ platform, chatId, ownerUserId: mossUserId, agentName: null });
-      await this.resetChatSession(platform, chatId, mossUserId);
+      await this.agentResolver.setChatAgent({ platform, pluginId, chatId, ownerUserId: mossUserId, agentName: null });
+      await this.resetChatSession(platform, pluginId, chatId, mossUserId);
       await send('已恢复为默认智能体。⚠️ 新会话已开始，之前的对话上下文不会保留。');
       return;
     }
@@ -894,6 +913,7 @@ export class MossActionExecutor {
 
     const result = await this.agentResolver.setChatAgent({
       platform,
+      pluginId,
       chatId,
       ownerUserId: mossUserId,
       agentName: matched.name,
@@ -903,7 +923,7 @@ export class MossActionExecutor {
       return;
     }
 
-    await this.resetChatSession(platform, chatId, mossUserId);
+    await this.resetChatSession(platform, pluginId, chatId, mossUserId);
     await send(`已切换到「${matched.displayName}」。⚠️ 新会话已开始，之前的对话上下文不会保留。`);
   }
 
@@ -914,28 +934,32 @@ export class MossActionExecutor {
    */
   private async resetChatSession(
     platform: string,
+    pluginId: string,
     chatId: string,
     mossUserId: string,
     options: { preserveHistory?: boolean } = {},
   ): Promise<void> {
+    const scope = pluginScope(pluginId, platform);
+    const sChatId = scopedChatId(pluginId, platform, chatId);
     // When the user is recovering a WEDGED session (rather than deliberately
     // starting over), capture a seed before tearing anything down — terminate
     // makes the session unrecoverable, and the transcript is the only record.
     // Stashed for the next createRuntimeSession call on this chat.
     if (options.preserveHistory) {
-      const existing = this.db.findChannelSession(platform, chatId, mossUserId);
+      const existing = this.db.findChannelSession(platform, sChatId, mossUserId);
       const seed = await this.buildSeedForSession(existing?.sessionId);
       if (seed) {
-        this.pendingSeeds.set(`${platform}:${chatId}`, seed);
+        this.pendingSeeds.set(`${platform}:${sChatId}`, seed);
         console.log(
-          `[MossActionExecutor] [session-rescue] stashed ${seed.length} chars of context for ${platform}:${chatId}`,
+          `[MossActionExecutor] [session-rescue] stashed ${seed.length} chars of context for ${platform}:${sChatId}`,
         );
       }
     }
     // The in-memory key is built from the IM user, which we do not have here, so drop every
-    // cached entry pointing at this chat on this platform.
+    // cached entry pointing at this chat on this CONNECTION (scope, not platform — a
+    // sibling bot's chat with the same raw chatId must keep its session).
     for (const [key, state] of [...this.channelSessions.entries()]) {
-      if (!key.startsWith(`${platform}:`) || !key.endsWith(`:${chatId}`)) continue;
+      if (!key.startsWith(`${scope}:`) || !key.endsWith(`:${chatId}`)) continue;
       try {
         state.socket?.destroy();
       } catch { /* already gone */ }
@@ -950,7 +974,7 @@ export class MossActionExecutor {
     // Also end any DB session recorded for this chat, so createRuntimeSession does not
     // resume it instead of creating one under the new agent.
     try {
-      const existing = this.db.findChannelSession(platform, chatId, mossUserId);
+      const existing = this.db.findChannelSession(platform, sChatId, mossUserId);
       // Terminate anything not already terminated. The old allowlist stopped at
       // 'detached', which was harmless while 'ended' sessions were never revived
       // — now that they are, leaving one alive would let the next message resume
@@ -965,6 +989,7 @@ export class MossActionExecutor {
 
   private async handlePairingFlow(
     platform: string,
+    pluginId: string,
     user: { id: string; displayName?: string },
     sendFn: (msg: any) => Promise<string | null>,
     mossUserId?: string,
@@ -975,6 +1000,7 @@ export class MossActionExecutor {
         platform,
         user.displayName,
         mossUserId,
+        pluginScope(pluginId, platform),
       );
 
       const ttlMin = Math.max(1, Math.ceil((expiresAt - Date.now()) / 60000));

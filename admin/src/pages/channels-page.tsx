@@ -44,6 +44,8 @@ import {
   pollWechatQrStatus,
   getPluginAgents,
   setPluginDefaultAgent,
+  createPlugin,
+  removePlugin,
 } from '@/lib/api/channels'
 import type { IChannelAgentOption } from '@/lib/api/channels'
 import type {
@@ -62,6 +64,7 @@ import {
   Check,
   X,
   ChevronDown,
+  Plus,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { toast } from 'sonner'
@@ -81,6 +84,9 @@ const PLATFORM_LOGOS: Record<ChannelPlatform, string> = {
   wechat: `${import.meta.env.BASE_URL}channel-logos/wechat.svg`,
   wecom: `${import.meta.env.BASE_URL}channel-logos/wecom.svg`,
 }
+
+/** Render order for channel groups; also the set of types that can be added. */
+const CHANNEL_TYPES: ChannelPlatform[] = ['telegram', 'lark', 'dingtalk', 'wechat', 'wecom']
 
 const SETUP_STEPS = [
   '选择一个渠道完成配置',
@@ -145,13 +151,17 @@ export default function ChannelsPage() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [togglingPlugins, setTogglingPlugins] = useState<Set<string>>(new Set())
 
-  // Per-platform expand state
+  // Per-CONNECTION state, keyed by plugin id rather than channel type: a type may now
+  // have several connections (e.g. two WeCom bots), and each needs its own form,
+  // test status and expand state.
   const [expandedPlatforms, setExpandedPlatforms] = useState<Set<string>>(new Set())
-
-  // Per-platform form values and test status
   const [platformFormValues, setPlatformFormValues] = useState<Record<string, Record<string, string>>>({})
   const [platformTestStatus, setPlatformTestStatus] = useState<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({})
   const [platformSaving, setPlatformSaving] = useState<Record<string, boolean>>({})
+  /** Which type is mid "add connection", so the button can show a spinner. */
+  const [addingType, setAddingType] = useState<string | null>(null)
+  /** Connection whose WeChat QR flow is active; WeChat allows several accounts too. */
+  const [wechatQrPluginId, setWechatQrPluginId] = useState<string | null>(null)
 
   // WeChat QR login state
   // Agent (智能体) selection per channel: roster + current default, loaded lazily when a
@@ -196,28 +206,27 @@ export default function ChannelsPage() {
     return () => clearInterval(interval)
   }, [loadData])
 
-  const toggleExpand = (platform: string) => {
-    const isExpanding = !expandedPlatforms.has(platform)
+  const toggleExpand = (pluginId: string) => {
+    const isExpanding = !expandedPlatforms.has(pluginId)
     setExpandedPlatforms(prev => {
       const next = new Set(prev)
-      if (next.has(platform)) {
-        next.delete(platform)
+      if (next.has(pluginId)) {
+        next.delete(pluginId)
       } else {
-        next.add(platform)
+        next.add(pluginId)
       }
       return next
     })
 
     // Load credentials when expanding
     if (isExpanding) {
-      void loadCredentials(platform)
-      void loadAgents(platform)
+      void loadCredentials(pluginId)
+      void loadAgents(pluginId)
     }
   }
 
-  /** Load the agent roster + current default for a platform's channel. */
-  const loadAgents = async (platform: string) => {
-    const pluginId = `${platform}_default`
+  /** Load the agent roster + current default for ONE connection. */
+  const loadAgents = async (pluginId: string) => {
     try {
       const res = await getPluginAgents(pluginId)
       setAgentOptions(prev => ({ ...prev, [pluginId]: res.agents }))
@@ -249,22 +258,22 @@ export default function ChannelsPage() {
     }
   }
 
-  const loadCredentials = async (platform: string) => {
-    const plugin = plugins.find(p => p.type === platform)
+  const loadCredentials = async (pluginId: string) => {
+    const plugin = plugins.find(p => p.id === pluginId)
     if (plugin?.credentials && Object.keys(plugin.credentials).length > 0) {
       setPlatformFormValues(prev => ({
         ...prev,
-        [platform]: Object.fromEntries(
+        [pluginId]: Object.fromEntries(
           Object.entries(plugin.credentials).map(([k, v]) => [k, String(v || '')])
         ),
       }))
     } else {
       try {
-        const creds = await getPluginCredentials(plugin?.id || `${platform}_default`)
+        const creds = await getPluginCredentials(pluginId)
         if (creds && Object.keys(creds).length > 0) {
           setPlatformFormValues(prev => ({
             ...prev,
-            [platform]: Object.fromEntries(
+            [pluginId]: Object.fromEntries(
               Object.entries(creds).map(([k, v]) => [k, String(v || '')])
             ),
           }))
@@ -275,67 +284,92 @@ export default function ChannelsPage() {
     }
   }
 
-  const updateFormValue = (platform: string, key: string, value: string) => {
+  const updateFormValue = (pluginId: string, key: string, value: string) => {
     setPlatformFormValues(prev => ({
       ...prev,
-      [platform]: { ...(prev[platform] || {}), [key]: value },
+      [pluginId]: { ...(prev[pluginId] || {}), [key]: value },
     }))
     // Reset test status when form changes
-    setPlatformTestStatus(prev => ({ ...prev, [platform]: 'idle' }))
+    setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'idle' }))
   }
 
-  const handleTest = async (platform: string) => {
-    const plugin = plugins.find(p => p.type === platform)
-    if (!plugin) return
-    const values = platformFormValues[platform] || {}
+  const handleTest = async (pluginId: string) => {
+    const values = platformFormValues[pluginId] || {}
 
-    setPlatformTestStatus(prev => ({ ...prev, [platform]: 'testing' }))
+    setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'testing' }))
     try {
-      const res = await testPlugin(plugin.id, values)
+      const res = await testPlugin(pluginId, values)
       if (res.ok) {
-        setPlatformTestStatus(prev => ({ ...prev, [platform]: 'success' }))
+        setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'success' }))
         toast.success('测试成功', { description: res.message })
       } else {
-        setPlatformTestStatus(prev => ({ ...prev, [platform]: 'error' }))
+        setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'error' }))
         toast.error('测试失败', { description: res.message })
       }
     } catch (err) {
-      setPlatformTestStatus(prev => ({ ...prev, [platform]: 'error' }))
+      setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'error' }))
       toast.error('测试出错', { description: err instanceof Error ? err.message : 'Unknown error' })
     }
   }
 
-  const handleTestAndEnable = async (platform: string) => {
-    const plugin = plugins.find(p => p.type === platform)
-    if (!plugin) return
-    const values = platformFormValues[platform] || {}
+  const handleTestAndEnable = async (pluginId: string) => {
+    const values = platformFormValues[pluginId] || {}
 
-    setPlatformTestStatus(prev => ({ ...prev, [platform]: 'testing' }))
+    setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'testing' }))
     try {
-      const res = await testPlugin(plugin.id, values)
+      const res = await testPlugin(pluginId, values)
       if (res.ok) {
         toast.success('测试成功，正在启用...', { description: res.message })
-        setPlatformSaving(prev => ({ ...prev, [platform]: true }))
+        setPlatformSaving(prev => ({ ...prev, [pluginId]: true }))
         try {
-          await enablePlugin(plugin.id, values)
+          await enablePlugin(pluginId, values)
           toast.success('渠道已启用')
           void loadData(true)
         } catch (enableErr) {
           toast.error('启用失败', { description: enableErr instanceof Error ? enableErr.message : 'Unknown error' })
         } finally {
-          setPlatformSaving(prev => ({ ...prev, [platform]: false }))
+          setPlatformSaving(prev => ({ ...prev, [pluginId]: false }))
         }
       } else {
-        setPlatformTestStatus(prev => ({ ...prev, [platform]: 'error' }))
+        setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'error' }))
         toast.error('测试失败', { description: res.message })
       }
     } catch (err) {
-      setPlatformTestStatus(prev => ({ ...prev, [platform]: 'error' }))
+      setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'error' }))
       toast.error('测试出错', { description: err instanceof Error ? err.message : 'Unknown error' })
     } finally {
-      if (platformTestStatus[platform] !== 'success' && platformTestStatus[platform] !== 'error') {
-        setPlatformTestStatus(prev => ({ ...prev, [platform]: 'idle' }))
+      if (platformTestStatus[pluginId] !== 'success' && platformTestStatus[pluginId] !== 'error') {
+        setPlatformTestStatus(prev => ({ ...prev, [pluginId]: 'idle' }))
       }
+    }
+  }
+
+  /** Add another connection of a type, then expand its (empty) card to configure it. */
+  const handleAddConnection = async (type: ChannelPlatform) => {
+    setAddingType(type)
+    try {
+      const res = await createPlugin(type)
+      if (!res.ok || !res.id) throw new Error(res.message || '创建失败')
+      await loadData(true)
+      setExpandedPlatforms(prev => new Set(prev).add(res.id!))
+      toast.success('已添加连接', { description: '请填写凭据并启用' })
+    } catch (err) {
+      toast.error('添加失败', { description: err instanceof Error ? err.message : 'Unknown error' })
+    } finally {
+      setAddingType(null)
+    }
+  }
+
+  /** Delete one connection. Its sessions/authorizations go with it; siblings are untouched. */
+  const handleRemoveConnection = async (plugin: IChannelPluginConfig) => {
+    if (!confirm(`确定要删除连接「${plugin.name}」吗？该连接的授权用户与会话将一并移除，同类型的其他连接不受影响。`)) return
+    try {
+      const res = await removePlugin(plugin.id)
+      if (!res.ok) throw new Error(res.message || '删除失败')
+      toast.success('连接已删除')
+      void loadData(true)
+    } catch (err) {
+      toast.error('删除失败', { description: err instanceof Error ? err.message : 'Unknown error' })
     }
   }
 
@@ -345,8 +379,8 @@ export default function ChannelsPage() {
       if (enabled) {
         // WeChat uses QR login flow, not credentials form
         if (plugin.type === 'wechat') {
-          if (!expandedPlatforms.has(plugin.type)) {
-            toggleExpand(plugin.type)
+          if (!expandedPlatforms.has(plugin.id)) {
+            toggleExpand(plugin.id)
           }
           setTogglingPlugins(prev => {
             const next = new Set(prev)
@@ -357,8 +391,8 @@ export default function ChannelsPage() {
         }
         if (!plugin.credentials || Object.keys(plugin.credentials).length === 0) {
           // No credentials, expand to show form
-          if (!expandedPlatforms.has(plugin.type)) {
-            toggleExpand(plugin.type)
+          if (!expandedPlatforms.has(plugin.id)) {
+            toggleExpand(plugin.id)
           }
           setTogglingPlugins(prev => {
             const next = new Set(prev)
@@ -423,7 +457,8 @@ export default function ChannelsPage() {
   }
 
   // WeChat QR login flow
-  const handleWechatConnect = async () => {
+  const handleWechatConnect = async (pluginId: string) => {
+    setWechatQrPluginId(pluginId)
     setWechatQrPhase('loading')
     setWechatQrError('')
     setWechatQrUrl('')
@@ -449,7 +484,7 @@ export default function ChannelsPage() {
             setWechatQrPhase('scanned')
           } else if (pollRes.status === 'confirmed' && pollRes.botToken && pollRes.accountId) {
             try {
-              await enablePlugin('wechat_default', { token: pollRes.botToken, accountId: pollRes.accountId })
+              await enablePlugin(pluginId, { token: pollRes.botToken, accountId: pollRes.accountId })
               setWechatQrPhase('success')
               toast.success('微信连接成功')
               void loadData(true)
@@ -525,23 +560,54 @@ export default function ChannelsPage() {
           </CardContent>
         </Card>
 
-        {/* Channel Items */}
-        <div className="space-y-3">
-          {plugins.map((plugin) => {
-            const isExpanded = expandedPlatforms.has(plugin.type)
+        {/* Channel Items, grouped by type so a type's connections sit together and each
+            type carries its own "add connection" action. */}
+        <div className="space-y-6">
+          {CHANNEL_TYPES.filter(type => plugins.some(p => p.type === type)).map((type) => {
+          const typePlugins = plugins.filter(p => p.type === type)
+          return (
+          <div key={type} className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {PLATFORM_LOGOS[type] && (
+                  <img src={PLATFORM_LOGOS[type]} alt={PLATFORM_LABELS[type]} className="w-4 h-4 object-contain" />
+                )}
+                <span className="text-sm font-semibold">{PLATFORM_LABELS[type]}</span>
+                {typePlugins.length > 1 && (
+                  <Badge variant="outline" className="text-xs">{typePlugins.length} 个连接</Badge>
+                )}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleAddConnection(type)}
+                disabled={addingType === type}
+              >
+                {addingType === type
+                  ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  : <Plus className="mr-1 h-3.5 w-3.5" />}
+                添加连接
+              </Button>
+            </div>
+          {typePlugins.map((plugin) => {
+            const isExpanded = expandedPlatforms.has(plugin.id)
             const fields = getFieldsForPlatform(plugin.type as ChannelPlatform)
-            const formValues = platformFormValues[plugin.type] || {}
-            const testStatus = platformTestStatus[plugin.type] || 'idle'
-            const isSaving = platformSaving[plugin.type] || false
+            const formValues = platformFormValues[plugin.id] || {}
+            const testStatus = platformTestStatus[plugin.id] || 'idle'
+            const isSaving = platformSaving[plugin.id] || false
             const isToggling = togglingPlugins.has(plugin.id)
-            const platformPairings = pairings.filter(p => p.platformType === plugin.type)
-            const platformUsers = users.filter(u => u.platformType === plugin.type)
+            // Pairings and users belong to ONE connection: the backend scopes them by
+            // plugin id for every connection after a type's first, which keeps the bare
+            // platform. Match either form so both resolve to the right card.
+            const scope = plugin.id.endsWith('_default') ? plugin.type : plugin.id
+            const platformPairings = pairings.filter(p => (p.pluginScope || p.platformType) === scope)
+            const platformUsers = users.filter(u => (u.pluginScope || u.platformType) === scope)
 
             return (
               <Collapsible
                 key={plugin.id}
                 open={isExpanded}
-                onOpenChange={() => void toggleExpand(plugin.type)}
+                onOpenChange={() => void toggleExpand(plugin.id)}
               >
                 <div className="border rounded-lg">
                   {/* Header */}
@@ -554,7 +620,7 @@ export default function ChannelsPage() {
                           className="w-5 h-5 object-contain"
                         />
                       )}
-                      <span className="text-sm font-medium">{PLATFORM_LABELS[plugin.type as ChannelPlatform] || plugin.name}</span>
+                      <span className="text-sm font-medium">{plugin.name || PLATFORM_LABELS[plugin.type as ChannelPlatform]}</span>
                       <StatusBadge status={!plugin.enabled && plugin.status === 'stopped' ? 'unconfigured' : plugin.status} />
                       {platformUsers.length > 0 && (
                         <Badge variant="outline" className="text-xs">{platformUsers.length} 用户</Badge>
@@ -567,6 +633,15 @@ export default function ChannelsPage() {
                         disabled={isToggling}
                       />
                       {isToggling && <Loader2 className="h-4 w-4 animate-spin" />}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                        title="删除该连接"
+                        onClick={() => void handleRemoveConnection(plugin)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                       <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                     </div>
                   </CollapsibleTrigger>
@@ -579,15 +654,15 @@ export default function ChannelsPage() {
                         <div className="space-y-3">
                           {fields.map((field) => (
                             <div key={field.key} className="grid grid-cols-[14rem_1fr] items-center gap-4">
-                              <Label htmlFor={`${plugin.type}-${field.key}`} className="text-right text-sm">
+                              <Label htmlFor={`${plugin.id}-${field.key}`} className="text-right text-sm">
                                 {field.label}
                                 {field.required && <span className="text-destructive ml-0.5">*</span>}
                               </Label>
                               <Input
-                                id={`${plugin.type}-${field.key}`}
+                                id={`${plugin.id}-${field.key}`}
                                 type={field.type}
                                 value={formValues[field.key] || ''}
-                                onChange={(e) => updateFormValue(plugin.type, field.key, e.target.value)}
+                                onChange={(e) => updateFormValue(plugin.id, field.key, e.target.value)}
                                 placeholder={field.placeholder}
                                 className="max-w-xs"
                               />
@@ -597,7 +672,7 @@ export default function ChannelsPage() {
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => void handleTest(plugin.type)}
+                              onClick={() => void handleTest(plugin.id)}
                               disabled={testStatus === 'testing' || isSaving}
                             >
                               {testStatus === 'testing' && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
@@ -605,7 +680,7 @@ export default function ChannelsPage() {
                             </Button>
                             <Button
                               size="sm"
-                              onClick={() => void handleTestAndEnable(plugin.type)}
+                              onClick={() => void handleTestAndEnable(plugin.id)}
                               disabled={testStatus === 'testing' || isSaving}
                             >
                               {isSaving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
@@ -622,25 +697,29 @@ export default function ChannelsPage() {
                       )}
 
                       {/* WeChat QR Login (replaces credential form) */}
-                      {plugin.type === 'wechat' && !plugin.enabled && (
+                      {plugin.type === 'wechat' && !plugin.enabled && (() => {
+                        // The QR phase belongs to whichever connection started it; other
+                        // WeChat connections stay in their idle state.
+                        const qrPhase = wechatQrPluginId === plugin.id ? wechatQrPhase : 'idle'
+                        return (
                         <div className="space-y-3">
-                          {wechatQrPhase === 'idle' && (
+                          {qrPhase === 'idle' && (
                             <div className="space-y-2">
                               <p className="text-sm text-muted-foreground">
                                 扫描二维码连接个人微信账号
                               </p>
-                              <Button size="sm" onClick={handleWechatConnect}>
+                              <Button size="sm" onClick={() => void handleWechatConnect(plugin.id)}>
                                 连接微信
                               </Button>
                             </div>
                           )}
-                          {wechatQrPhase === 'loading' && (
+                          {qrPhase === 'loading' && (
                             <div className="flex items-center gap-2 text-sm text-muted-foreground">
                               <Loader2 className="h-4 w-4 animate-spin" />
                               正在获取二维码...
                             </div>
                           )}
-                          {wechatQrPhase === 'qrcode' && (
+                          {qrPhase === 'qrcode' && (
                             <div className="flex flex-col items-center gap-3 p-4 rounded-lg border bg-muted/50">
                               <span className="text-sm font-medium">请使用微信扫描二维码</span>
                               <div className="bg-white rounded-lg p-3">
@@ -649,31 +728,32 @@ export default function ChannelsPage() {
                               <span className="text-xs text-muted-foreground">打开手机微信，扫描上方二维码</span>
                             </div>
                           )}
-                          {wechatQrPhase === 'scanned' && (
+                          {qrPhase === 'scanned' && (
                             <div className="flex items-center gap-2 p-3 rounded-lg border bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800">
                               <CheckCircle2 className="h-4 w-4 text-yellow-600" />
                               <span className="text-sm">已扫描，请在手机上确认...</span>
                             </div>
                           )}
-                          {wechatQrPhase === 'success' && (
+                          {qrPhase === 'success' && (
                             <div className="flex items-center gap-2 p-3 rounded-lg border bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800">
                               <CheckCircle2 className="h-4 w-4 text-green-600" />
                               <span className="text-sm">微信已连接</span>
                             </div>
                           )}
-                          {wechatQrPhase === 'error' && (
+                          {qrPhase === 'error' && (
                             <div className="space-y-2">
                               <div className="flex items-center gap-2 p-3 rounded-lg border bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800">
                                 <AlertCircle className="h-4 w-4 text-destructive" />
                                 <span className="text-sm text-destructive">{wechatQrError}</span>
                               </div>
-                              <Button size="sm" variant="outline" onClick={handleWechatConnect}>
+                              <Button size="sm" variant="outline" onClick={() => void handleWechatConnect(plugin.id)}>
                                 重试
                               </Button>
                             </div>
                           )}
                         </div>
-                      )}
+                        )
+                      })()}
 
                       {/* When enabled, show config info + reconfigure option */}
                       {plugin.enabled && (
@@ -839,6 +919,9 @@ export default function ChannelsPage() {
                 </div>
               </Collapsible>
             )
+          })}
+          </div>
+          )
           })}
         </div>
       </div>

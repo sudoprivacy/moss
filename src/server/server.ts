@@ -1930,6 +1930,19 @@ export function startServer(
           return
         }
 
+        // POST /api/v1/channels/plugins/create
+        if (req.method === 'POST' && pathname === '/api/v1/channels/plugins/create') {
+          writeJson(res, 200, await channelsApi.createPlugin(auth.orgId, auth.userId, await readJsonBody(req)))
+          return
+        }
+
+        // POST /api/v1/channels/plugins/:id/remove
+        const removeMatch = pathname.match(/^\/api\/v1\/channels\/plugins\/([^/]+)\/remove$/)
+        if (req.method === 'POST' && removeMatch) {
+          writeJson(res, 200, await channelsApi.removePlugin(auth.orgId, auth.userId, removeMatch[1] || ''))
+          return
+        }
+
         // POST /api/v1/channels/plugins/:id/delete
         const deleteMatch = pathname.match(/^\/api\/v1\/channels\/plugins\/([^/]+)\/delete$/)
         if (req.method === 'POST' && deleteMatch) {

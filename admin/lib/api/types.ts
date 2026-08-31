@@ -539,6 +539,11 @@ export interface IChannelUser {
   id: string
   platformUserId: string
   platformType: ChannelPlatform
+  /**
+   * Which connection this authorization belongs to: the bare platform for a type's first
+   * connection, the plugin id for any additional one. Absent on older servers.
+   */
+  pluginScope?: string
   displayName?: string
   authorizedAt: number
   lastActive?: number
@@ -549,6 +554,8 @@ export interface IChannelPendingPairing {
   code: string
   platformUserId: string
   platformType: ChannelPlatform
+  /** Connection the code was issued for; see IChannelUser.pluginScope. */
+  pluginScope?: string
   displayName?: string
   requestedAt: number
   expiresAt: number

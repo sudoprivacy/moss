@@ -51,26 +51,34 @@ class PairingService {
   /**
    * Check if user is already authorized
    */
-  isUserAuthorized(platformUserId: string, platformType: string): boolean {
+  /**
+   * Whether this IM user is authorized on ONE connection.
+   *
+   * `scope` is the connection scope, not the platform: with several bots of a type
+   * connected, checking the platform would let anyone paired with one bot use them all.
+   */
+  isUserAuthorized(platformUserId: string, scope: string, mossUserId?: string): boolean {
     if (!this.db) return false;
-    const user = this.db.getChannelUserByPlatform(platformUserId, platformType);
+    const user = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
     return !!user;
   }
 
   /**
    * Get pending request for user
    */
-  getPendingRequestForUser(platformUserId: string, platformType: string): any {
+  getPendingRequestForUser(platformUserId: string, scope: string): any {
     if (!this.db) return null;
     const requests = this.db.listPendingPairingRequests();
     const request = requests.find(
-      (r) => String(r.platform_user_id) === platformUserId && String(r.platform_type) === platformType
+      (r) => String(r.platform_user_id) === platformUserId &&
+        String(r.plugin_scope || r.platform_type) === scope
     );
     if (!request) return null;
     return {
       code: String(request.code),
       platformUserId: String(request.platform_user_id),
       platformType: String(request.platform_type),
+      pluginScope: String(request.plugin_scope || request.platform_type),
       displayName: request.display_name ? String(request.display_name) : undefined,
       requestedAt: Number(request.requested_at),
       expiresAt: Number(request.expires_at),
@@ -85,20 +93,23 @@ class PairingService {
     platformUserId: string,
     platformType: string,
     displayName?: string,
-    userId?: string
+    userId?: string,
+    scope?: string,
   ): Promise<{ code: string; expiresAt: number }> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
-    // Invalidate existing pending requests for this user
-    const existing = this.getPendingRequestForUser(platformUserId, platformType);
+    const effectiveScope = scope || platformType;
+
+    // Invalidate existing pending requests for this user on this connection
+    const existing = this.getPendingRequestForUser(platformUserId, effectiveScope);
     if (existing) {
       this.db.updatePairingRequestStatus(existing.code, 'expired');
     }
 
     const ttlMs = 10 * 60 * 1000;
-    const code = this.generatePairingCode(platformUserId, platformType, displayName, ttlMs, userId);
+    const code = this.generatePairingCode(platformUserId, platformType, displayName, ttlMs, userId, effectiveScope);
     return { code, expiresAt: Date.now() + ttlMs };
   }
 
@@ -129,6 +140,8 @@ class PairingService {
       id: userId,
       platformUserId: String(row.platform_user_id),
       platformType: String(row.platform_type),
+      // Authorization belongs to the connection the code was issued for, not the platform.
+      pluginScope: String(row.plugin_scope || row.platform_type),
       displayName: row.display_name ? String(row.display_name) : undefined,
       authorizedAt: Date.now(),
     };
@@ -171,7 +184,8 @@ class PairingService {
     platformType: string,
     displayName?: string,
     ttlMs: number = 10 * 60 * 1000, // 10 minutes default
-    userId?: string
+    userId?: string,
+    scope?: string,
   ): string {
     if (!this.db) {
       throw new Error('Database not initialized');
@@ -184,6 +198,7 @@ class PairingService {
       code,
       platform_user_id: platformUserId,
       platform_type: platformType,
+      plugin_scope: scope || platformType,
       display_name: displayName ?? null,
       requested_at: now,
       expires_at: now + ttlMs,

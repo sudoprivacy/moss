@@ -10,7 +10,7 @@ import { PluginManager } from '../gateway/PluginManager.js';
 import type { IChannelProvider } from './IChannelProvider.js';
 import type { DirectConnectStore } from '../../server/db.js';
 import type { IChannelPluginConfig, IChannelPluginStatus, PluginType } from '../types.js';
-import { channelCredentialIdentity } from '../types.js';
+import { channelCredentialIdentity, pluginTypeFromId } from '../types.js';
 import type { PluginMessageHandler } from '../plugins/BasePlugin.js';
 
 /** Human-readable channel names for user-facing errors. */
@@ -204,6 +204,22 @@ class ChannelManager {
       // make the IM platform deliver every message twice, so the chat sees duplicate replies.
       const identity = channelCredentialIdentity(pluginType as PluginType, finalCredentials);
       if (identity) {
+        // Same user, two connections, one bot: also a duplicate-delivery source now that a
+        // user can hold several connections of a type.
+        const ownDuplicate = this.db.findOwnChannelPluginWithIdentity({
+          type: pluginType,
+          identity,
+          userId: effectiveUserId,
+          excludePluginId: pluginId,
+        });
+        if (ownDuplicate) {
+          const label = PLUGIN_TYPE_LABELS[pluginType] || pluginType;
+          return {
+            success: false,
+            error: `该${label}已在您的连接「${ownDuplicate}」中配置。同一个机器人连接两次会导致消息重复回复，请改用其他机器人。`,
+          };
+        }
+
         const effectiveOrgId = orgId || (existing?.org_id ? String(existing.org_id) : null);
         const conflict = this.db.findChannelPluginCredentialOwner({
           type: pluginType,
@@ -321,13 +337,7 @@ class ChannelManager {
    * e.g., "lark_default" -> "lark", "telegram_main" -> "telegram"
    */
   private extractPluginType(pluginId: string): string {
-    const knownTypes = ['telegram', 'lark', 'dingtalk', 'wechat', 'wecom'];
-    for (const type of knownTypes) {
-      if (pluginId.startsWith(type)) {
-        return type;
-      }
-    }
-    return pluginId;
+    return pluginTypeFromId(pluginId);
   }
 }
 
