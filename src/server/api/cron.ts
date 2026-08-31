@@ -261,6 +261,39 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
     /**
      * Get a single cron job by ID
      */
+    /**
+     * Resolve the directory a job's runs will see, for file upload/listing.
+     *
+     * Uploads target the JOB, not a session: in 'new' mode every run gets a
+     * fresh session, and in 'reuse' mode the session outlives many runs — so a
+     * file addressed through a session would either vanish next run or be
+     * unreachable before the first one. The job's workspace is the one thing
+     * every run shares, and resolveCronWorkspace is the same function
+     * createCronSession uses, so what is uploaded is exactly what runs see.
+     *
+     * Gated on canManageJob rather than canReadJob: writing into the workspace
+     * changes what the job does on its next run, which is an edit, not a read.
+     */
+    resolveJobWorkspace: (
+      auth: { orgId: string; userId: string; scopes?: string[] },
+      jobId: string,
+      subtreeUserIds?: Set<string> | null,
+    ): { success: boolean; message?: string; workspace?: string } => {
+      const job = store.getById(jobId)
+      if (!job) return { success: false, message: 'Job not found' }
+      if (!canManageJob(auth, job, subtreeUserIds)) {
+        return { success: false, message: 'Access denied' }
+      }
+      try {
+        return { success: true, workspace: config.cronService.resolveWorkspaceFor(job) }
+      } catch (err) {
+        // resolveCronWorkspace throws when a configured workspace is not
+        // mounted in docker user-container mode; surface that verbatim so the
+        // caller learns which paths are allowed.
+        return { success: false, message: err instanceof Error ? err.message : String(err) }
+      }
+    },
+
     getJob: async (
       auth: { orgId: string; userId: string; scopes?: string[] },
       jobId: string,
