@@ -138,6 +138,11 @@ export class LocalChannelProvider implements IChannelProvider {
     return rows.map((row) => this.mapUserRow(row));
   }
 
+  /**
+   * `platformType` doubles as the connection scope (see pluginScope): identical for a
+   * type's first connection, the plugin id for additional ones. Callers holding a specific
+   * connection should pass its scope so siblings stay isolated.
+   */
   async getUserByPlatform(platformUserId: string, platformType: PluginType): Promise<IChannelUser | null> {
     const row = this.db.getChannelUserByPlatform(platformUserId, platformType);
     return row ? this.mapUserRow(row) : null;

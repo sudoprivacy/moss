@@ -74,13 +74,15 @@ export class ChannelAgentResolver {
    */
   async resolveActiveAgent(params: {
     platform: string;
+    /** Which connection's config to read. Each bot carries its own default + chat bindings. */
+    pluginId?: string;
     chatId: string;
     ownerUserId: string | undefined;
   }): Promise<IChannelAgentOption | null> {
-    const { platform, chatId, ownerUserId } = params;
+    const { platform, pluginId, chatId, ownerUserId } = params;
     if (!ownerUserId) return null;
 
-    const config = this.readConfig(platform, ownerUserId);
+    const config = this.readConfig(platform, pluginId, ownerUserId);
     const chatAgents = this.readChatAgents(config);
     const candidate =
       chatAgents[chatId] ||
@@ -100,11 +102,13 @@ export class ChannelAgentResolver {
    */
   async setChatAgent(params: {
     platform: string;
+    /** Which connection's config to write. Each bot carries its own chat bindings. */
+    pluginId?: string;
     chatId: string;
     ownerUserId: string | undefined;
     agentName: string | null;
   }): Promise<{ ok: true; agent: IChannelAgentOption | null } | { ok: false; error: string }> {
-    const { platform, chatId, ownerUserId, agentName } = params;
+    const { platform, pluginId, chatId, ownerUserId, agentName } = params;
     if (!ownerUserId) return { ok: false, error: 'no plugin owner for this channel' };
 
     let resolved: IChannelAgentOption | null = null;
@@ -114,12 +118,12 @@ export class ChannelAgentResolver {
       if (!resolved) return { ok: false, error: `agent not found: ${agentName}` };
     }
 
-    const config = this.readConfig(platform, ownerUserId);
+    const config = this.readConfig(platform, pluginId, ownerUserId);
     const chatAgents = { ...this.readChatAgents(config) };
     if (resolved) chatAgents[chatId] = resolved.name;
     else delete chatAgents[chatId];
 
-    this.writeConfig(platform, ownerUserId, { ...config, chatAgents });
+    this.writeConfig(platform, pluginId, ownerUserId, { ...config, chatAgents });
     return { ok: true, agent: resolved };
   }
 
@@ -141,8 +145,8 @@ export class ChannelAgentResolver {
     );
   }
 
-  private readConfig(platform: string, ownerUserId: string): Record<string, unknown> {
-    const row = this.db.getChannelPlugin(`${platform}_default`, ownerUserId);
+  private readConfig(platform: string, pluginId: string | undefined, ownerUserId: string): Record<string, unknown> {
+    const row = this.db.getChannelPlugin(pluginId || `${platform}_default`, ownerUserId);
     if (!row?.config_json) return {};
     try {
       const parsed = JSON.parse(String(row.config_json));
@@ -164,10 +168,11 @@ export class ChannelAgentResolver {
 
   private writeConfig(
     platform: string,
+    pluginIdIn: string | undefined,
     ownerUserId: string,
     config: Record<string, unknown>,
   ): void {
-    const pluginId = `${platform}_default`;
+    const pluginId = pluginIdIn || `${platform}_default`;
     const row = this.db.getChannelPlugin(pluginId, ownerUserId);
     if (!row) return;
     this.db.upsertChannelPlugin({

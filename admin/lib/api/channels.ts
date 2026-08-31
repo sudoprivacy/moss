@@ -52,6 +52,19 @@ export async function disablePlugin(pluginId: string): Promise<IChannelPluginCon
   return authClient.post<IChannelPluginConfig>(`/api/v1/channels/plugins/${pluginId}/disable`)
 }
 
+/** Allocate an additional connection of a channel type. Returns the new plugin id. */
+export async function createPlugin(
+  type: ChannelPlatform,
+  name?: string,
+): Promise<{ ok: boolean; id?: string; name?: string; message?: string }> {
+  return authClient.post(`/api/v1/channels/plugins/create`, { type, name })
+}
+
+/** Delete one connection outright, along with its authorizations and pending pairings. */
+export async function removePlugin(pluginId: string): Promise<{ ok: boolean; message?: string }> {
+  return authClient.post(`/api/v1/channels/plugins/${pluginId}/remove`)
+}
+
 export async function testPlugin(
   pluginId: string,
   config: Record<string, any>,
@@ -83,12 +96,18 @@ export async function deleteUser(userId: string): Promise<{ ok: boolean }> {
   return authClient.delete<{ ok: boolean }>(`/api/v1/channels/users/${userId}`)
 }
 
+/**
+ * Sync agent/model settings for one connection. `pluginId` targets a specific connection;
+ * omitting it falls back to the type's first connection, which is what a type had before
+ * multiple connections were supported.
+ */
 export async function syncChannelSettings(
   platform: string,
   agent?: { backend: string; customAgentId?: string; name?: string },
   model?: { id: string; useModel: string },
+  pluginId?: string,
 ): Promise<{ ok: boolean }> {
-  return authClient.post<{ ok: boolean }>('/api/v1/channels/settings/sync', { platform, agent, model })
+  return authClient.post<{ ok: boolean }>('/api/v1/channels/settings/sync', { platform, pluginId, agent, model })
 }
 
 export async function startWechatQrLogin(): Promise<{ ok: boolean; qrcode?: string; qrcodeImgContent?: string; error?: string }> {

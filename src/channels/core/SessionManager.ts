@@ -69,6 +69,10 @@ export class SessionManager {
   /**
    * Get session by platform user
    */
+  /**
+   * `platformType` is the connection scope (see pluginScope) — the bare platform for a
+   * type's first connection, the plugin id for additional ones.
+   */
   getSessionByPlatformUser(platformUserId: string, platformType: PluginType, chatId?: string): IChannelSession | null {
     const row = this.db.getChannelUserByPlatform(platformUserId, platformType);
 

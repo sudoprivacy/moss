@@ -231,13 +231,14 @@ export class DirectConnectStore {
         id TEXT PRIMARY KEY,
         platform_user_id TEXT NOT NULL,
         platform_type TEXT NOT NULL,
+        plugin_scope TEXT NOT NULL DEFAULT '',
         display_name TEXT,
         authorized_at INTEGER NOT NULL,
         last_active INTEGER,
         session_id TEXT,
         org_id TEXT,
         user_id TEXT,
-        UNIQUE(platform_user_id, platform_type, user_id)
+        UNIQUE(platform_user_id, plugin_scope, user_id)
       );
 
       CREATE TABLE IF NOT EXISTS channel_sessions (
@@ -255,6 +256,7 @@ export class DirectConnectStore {
         code TEXT PRIMARY KEY,
         platform_user_id TEXT NOT NULL,
         platform_type TEXT NOT NULL,
+        plugin_scope TEXT,
         display_name TEXT,
         requested_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
@@ -360,6 +362,53 @@ export class DirectConnectStore {
       }
     } catch (error) {
       console.error('[DB] Failed to migrate channel_users constraint:', error)
+    }
+
+    // Migration: scope channel_users to ONE connection rather than the whole platform.
+    // With multiple connections of a type, `platform_type` alone let a user paired with
+    // bot A talk to bot B: isUserAuthorized() matched on the platform, not the bot.
+    // plugin_scope holds the owning connection (the bare platform for a type's first
+    // connection, so existing rows keep resolving) and joins the UNIQUE key.
+    try {
+      const channelUsersSql = String((this.db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='channel_users'`).get() as SqlRow | undefined)?.sql || '')
+      if (channelUsersSql && !channelUsersSql.includes('plugin_scope')) {
+        this.db.exec(`
+          CREATE TABLE channel_users_new (
+            id TEXT PRIMARY KEY,
+            platform_user_id TEXT NOT NULL,
+            platform_type TEXT NOT NULL,
+            plugin_scope TEXT NOT NULL DEFAULT '',
+            display_name TEXT,
+            authorized_at INTEGER NOT NULL,
+            last_active INTEGER,
+            session_id TEXT,
+            org_id TEXT,
+            user_id TEXT,
+            UNIQUE(platform_user_id, plugin_scope, user_id)
+          );
+          INSERT OR IGNORE INTO channel_users_new
+            (id, platform_user_id, platform_type, plugin_scope, display_name, authorized_at, last_active, session_id, org_id, user_id)
+            SELECT id, platform_user_id, platform_type, platform_type, display_name, authorized_at, last_active, session_id, org_id, user_id
+              FROM channel_users;
+          DROP TABLE channel_users;
+          ALTER TABLE channel_users_new RENAME TO channel_users;
+        `)
+        console.log('[DB] Migrated channel_users to per-connection plugin_scope')
+      }
+    } catch (error) {
+      console.error('[DB] Failed to migrate channel_users plugin_scope:', error)
+    }
+
+    // Migration: scope pairing codes to one connection, for the same reason.
+    try {
+      const pairingCols = this.db.prepare(`PRAGMA table_info(channel_pairing_requests)`).all() as { name: string }[]
+      if (!pairingCols.some(col => col.name === 'plugin_scope')) {
+        this.db.exec(`ALTER TABLE channel_pairing_requests ADD COLUMN plugin_scope TEXT`)
+        this.db.exec(`UPDATE channel_pairing_requests SET plugin_scope = platform_type WHERE plugin_scope IS NULL`)
+        console.log('[DB] Added channel_pairing_requests.plugin_scope')
+      }
+    } catch (error) {
+      console.error('[DB] Failed to add channel_pairing_requests.plugin_scope:', error)
     }
 
     // Create index for channel session lookup if it doesn't exist
@@ -1426,6 +1475,15 @@ export class DirectConnectStore {
     `).run(now(), sessionId)
   }
 
+  /**
+   * Find the runtime session backing one IM chat.
+   *
+   * `chatId` must be the connection-scoped chat key (see scopedChatId): with multiple
+   * connections of a type, the platform's own chat id repeats across bots — a DM is keyed
+   * by the platform user — so an unscoped lookup would hand bot B the session belonging to
+   * bot A, mixing two conversations into one. `source` stays the bare platform because the
+   * sessions UI renders it as the platform label.
+   */
   findChannelSession(source: string, chatId: string, userId: string): SessionRecord | null {
     const row = this.db.prepare(`
       SELECT *
@@ -1821,6 +1879,41 @@ export class DirectConnectStore {
     return null
   }
 
+  /**
+   * Whether this user already connected the same bot identity under a DIFFERENT plugin id.
+   *
+   * Now that a user may hold several connections of one type, they can point two of them at
+   * the same bot by mistake. The IM platform would then push every message to both
+   * connections and the chat would see a duplicate reply, so the second one is rejected —
+   * the same rule findChannelPluginCredentialOwner enforces across users.
+   */
+  findOwnChannelPluginWithIdentity(params: {
+    type: string
+    identity: string
+    userId: string
+    excludePluginId: string
+  }): string | null {
+    const { type, identity, userId, excludePluginId } = params
+    if (!identity) return null
+    const rows = this.db.prepare(
+      `SELECT id, name, credentials_json FROM channel_plugins
+        WHERE type = ? AND user_id = ? AND id != ? AND enabled = 1`,
+    ).all(type, userId, excludePluginId) as SqlRow[]
+
+    for (const row of rows) {
+      if (!row.credentials_json) continue
+      let creds: Record<string, unknown>
+      try {
+        creds = JSON.parse(String(row.credentials_json)) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (channelCredentialIdentity(type, creds) !== identity) continue
+      return String(row.name || row.id)
+    }
+    return null
+  }
+
   getChannelPlugin(id: string, userId?: string): SqlRow | null {
     if (userId) {
       return (this.db.prepare(`SELECT * FROM channel_plugins WHERE id = ? AND user_id = ?`).get(id, userId) as SqlRow) ?? null
@@ -1887,6 +1980,11 @@ export class DirectConnectStore {
     }
   }
 
+  /** Remove one connection row. Used when a user deletes a channel connection. */
+  deleteChannelPlugin(id: string, userId: string): void {
+    this.db.prepare(`DELETE FROM channel_plugins WHERE id = ? AND user_id = ?`).run(id, userId)
+  }
+
   // ==================== Channel Users ====================
 
   listChannelUsers(userId?: string): SqlRow[] {
@@ -1896,14 +1994,29 @@ export class DirectConnectStore {
     return this.db.prepare(`SELECT * FROM channel_users ORDER BY authorized_at DESC`).all() as SqlRow[]
   }
 
-  getChannelUserByPlatform(platformUserId: string, platformType: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM channel_users WHERE platform_user_id = ? AND platform_type = ?`).get(platformUserId, platformType) as SqlRow) ?? null
+  /**
+   * Look up an authorized channel user within ONE connection.
+   *
+   * `scope` is the connection scope (pluginScope): the bare platform for a type's first
+   * connection, the plugin id for any additional one. Matching on the platform instead
+   * would let a user paired with one bot talk to every other bot of that type.
+   */
+  getChannelUserByPlatform(platformUserId: string, scope: string, userId?: string): SqlRow | null {
+    if (userId) {
+      return (this.db.prepare(
+        `SELECT * FROM channel_users WHERE platform_user_id = ? AND plugin_scope = ? AND user_id = ?`,
+      ).get(platformUserId, scope, userId) as SqlRow) ?? null
+    }
+    return (this.db.prepare(
+      `SELECT * FROM channel_users WHERE platform_user_id = ? AND plugin_scope = ?`,
+    ).get(platformUserId, scope) as SqlRow) ?? null
   }
 
   upsertChannelUser(row: {
     id: string
     platform_user_id: string
     platform_type: string
+    plugin_scope?: string | null
     display_name?: string | null
     authorized_at: number
     last_active?: number | null
@@ -1913,9 +2026,9 @@ export class DirectConnectStore {
   }): void {
     this.db.prepare(`
       INSERT INTO channel_users (
-        id, platform_user_id, platform_type, display_name, authorized_at, last_active, session_id, org_id, user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(platform_user_id, platform_type, user_id) DO UPDATE SET
+        id, platform_user_id, platform_type, plugin_scope, display_name, authorized_at, last_active, session_id, org_id, user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(platform_user_id, plugin_scope, user_id) DO UPDATE SET
         display_name = excluded.display_name,
         last_active = excluded.last_active,
         session_id = excluded.session_id,
@@ -1925,6 +2038,7 @@ export class DirectConnectStore {
       row.id,
       row.platform_user_id,
       row.platform_type,
+      row.plugin_scope ?? row.platform_type,
       row.display_name ?? null,
       row.authorized_at,
       row.last_active ?? null,
@@ -1942,12 +2056,16 @@ export class DirectConnectStore {
     this.db.prepare(`DELETE FROM channel_users WHERE id = ?`).run(id)
   }
 
-  deleteChannelUsersByPlatform(platformType: string, userId?: string): number {
+  /**
+   * Drop authorized users for ONE connection (scope), not the whole platform:
+   * disabling one bot must not deauthorize everyone paired with its siblings.
+   */
+  deleteChannelUsersByPlatform(scope: string, userId?: string): number {
     if (userId) {
-      const result = this.db.prepare(`DELETE FROM channel_users WHERE platform_type = ? AND user_id = ?`).run(platformType, userId)
+      const result = this.db.prepare(`DELETE FROM channel_users WHERE plugin_scope = ? AND user_id = ?`).run(scope, userId)
       return result.changes
     }
-    const result = this.db.prepare(`DELETE FROM channel_users WHERE platform_type = ?`).run(platformType)
+    const result = this.db.prepare(`DELETE FROM channel_users WHERE plugin_scope = ?`).run(scope)
     return result.changes
   }
 
@@ -2055,6 +2173,7 @@ export class DirectConnectStore {
     code: string
     platform_user_id: string
     platform_type: string
+    plugin_scope?: string | null
     display_name?: string | null
     requested_at: number
     expires_at: number
@@ -2063,12 +2182,13 @@ export class DirectConnectStore {
   }): void {
     this.db.prepare(`
       INSERT INTO channel_pairing_requests (
-        code, platform_user_id, platform_type, display_name, requested_at, expires_at, status, user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        code, platform_user_id, platform_type, plugin_scope, display_name, requested_at, expires_at, status, user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(code) DO UPDATE SET
         status = excluded.status,
         user_id = excluded.user_id,
         platform_type = excluded.platform_type,
+        plugin_scope = excluded.plugin_scope,
         display_name = excluded.display_name,
         requested_at = excluded.requested_at,
         expires_at = excluded.expires_at
@@ -2076,6 +2196,7 @@ export class DirectConnectStore {
       row.code,
       row.platform_user_id,
       row.platform_type,
+      row.plugin_scope ?? row.platform_type,
       row.display_name ?? null,
       row.requested_at,
       row.expires_at,
@@ -2088,8 +2209,9 @@ export class DirectConnectStore {
     this.db.prepare(`UPDATE channel_pairing_requests SET status = ? WHERE code = ?`).run(status, code)
   }
 
-  deletePairingRequestsByUserAndPlatform(userId: string, platformType: string): void {
-    this.db.prepare(`DELETE FROM channel_pairing_requests WHERE user_id = ? AND platform_type = ?`).run(userId, platformType)
+  /** Drop pending pairing codes for ONE connection (scope), not the whole platform. */
+  deletePairingRequestsByUserAndPlatform(userId: string, scope: string): void {
+    this.db.prepare(`DELETE FROM channel_pairing_requests WHERE user_id = ? AND plugin_scope = ?`).run(userId, scope)
   }
 
   // ==================== Tenant Skills ====================
