@@ -3415,7 +3415,6 @@ export default function AgentHubPage() {
                   value={createEmoji}
                   onChange={event => setCreateEmoji(event.target.value)}
                   placeholder="🚀"
-                  className="w-32"
                 />
               </div>
 
