@@ -20,6 +20,7 @@ import type {
 } from './types.js'
 import type { SessionRuntimeInfo } from './sessionManager.js'
 import { channelCredentialIdentity } from '../channels/types.js'
+import { resolveRuntimeScodePath } from './runtimeScodePath.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -3936,7 +3937,7 @@ export function mergeRuntime(
     dockerImage: runtime?.dockerImage || config.dockerImage,
     dockerMode,
     configDir: runtime?.configDir,
-    scodePath: runtime?.scodePath || config.scodePath,
+    scodePath: resolveRuntimeScodePath(config, type, runtime?.scodePath),
     hostMode,
   }
 }

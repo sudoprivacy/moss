@@ -7,7 +7,12 @@ import { delimiter, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
 import { loadBudgetStats } from './budgetStats.js'
-import { DirectConnectStore, mergeRuntime, openDirectConnectStore, toSessionSummary } from './db.js'
+import {
+  DirectConnectStore,
+  mergeRuntime,
+  openDirectConnectStore,
+  toSessionSummary,
+} from './db.js'
 import { AuthService } from './auth/service.js'
 import { hasScope } from './auth/token.js'
 import type {
@@ -49,6 +54,7 @@ import {
 } from './sharedAgentMemory.js'
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
+import { resolveRuntimeScodePath } from './runtimeScodePath.js'
 import { McpStore } from './mcp/db.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
 import { resolveScodeMcpSettings } from './mcp/scodeMcpInjector.js'
@@ -1013,7 +1019,10 @@ export class RuntimeService {
 
     // Force sync global engine config into session runtime for manifest
     session.runtime.engine = this.options.config.engine
-    session.runtime.scodePath = this.options.config.scodePath
+    session.runtime.scodePath = resolveRuntimeScodePath(
+      this.options.config,
+      session.runtime.type,
+    )
     if (
       session.runtime.type === 'docker'
       && this.options.config.dockerImage

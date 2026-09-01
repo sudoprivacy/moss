@@ -7,17 +7,9 @@ on:
     tags:
       - 'server-v*'
   workflow_dispatch:
-    inputs:
-      scode_version:
-        description: 'scode release version'
-        required: false
-        default: 'v0.1.10'
 
 permissions:
   contents: write
-
-env:
-  SCODE_VERSION: ${{ inputs.scode_version || 'v0.1.10' }}
 
 jobs:
   build:
@@ -43,9 +35,12 @@ jobs:
             RELEASE_TAG="server-v$VERSION"
           fi
           [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
+          SCODE_VERSION="$(node -p "require('./src/server/nexus/runtime-versions.json').scode")"
+          [[ "$SCODE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "image_tag=$VERSION-amd64" >> "$GITHUB_OUTPUT"
+          echo "scode_version=$SCODE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -94,15 +89,16 @@ jobs:
       - name: Build and smoke-test session runtime image
         env:
           IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+          SCODE_VERSION: ${{ steps.release.outputs.scode_version }}
         run: |
           set -euo pipefail
           docker buildx build \
             --platform linux/amd64 \
             --load \
-            --build-arg "SCODE_VERSION=$SCODE_VERSION" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
-          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt
+          grep -Fq "${SCODE_VERSION#v}" dist/scode-version.txt
           docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz"
 
       - name: Assemble installer and checksums
@@ -130,6 +126,12 @@ jobs:
           tar -tzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" > dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/moss-server.mjs' dist/server-contents.txt
           grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/nexus/nexusd' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/scode' dist/server-contents.txt
+          package_check_dir="$(mktemp -d)"
+          tar -xzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" -C "$package_check_dir"
+          test -x "$package_check_dir/moss-server/app/bin/scode"
+          rm -rf "$package_check_dir"
           ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
           EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "server-v$VERSION")"
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh

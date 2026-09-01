@@ -84,6 +84,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       type: z.enum(['host', 'docker']).default('host'),
       engine: z.enum(['scode']).default('scode'),
       scodePath: z.string().optional(),
+      hostScodePath: z.string().optional(),
+      dockerScodePath: z.string().optional(),
       dockerImage: z.string().optional(),
       dockerMode: z.enum(['session', 'user']).default('session'),
       workspace: z.string().optional(),
@@ -289,6 +291,8 @@ export type ServerConfig = {
   defaultRuntime: SessionRuntimeType
   engine: 'scode'
   scodePath?: string
+  hostScodePath?: string
+  dockerScodePath?: string
   dockerImage?: string
   dockerMode?: 'session' | 'user'
   idleTimeoutMs: number

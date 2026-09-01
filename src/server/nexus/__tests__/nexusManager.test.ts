@@ -19,7 +19,7 @@ afterEach(async () => {
 })
 
 describe('NexusManager', () => {
-  it('keeps the runtime and Docker assembly pins aligned at 0.1.1', () => {
+  it('uses the repository runtime version config for the Docker assembly', () => {
     const runtimeVersions = JSON.parse(
       readFileSync(join(import.meta.dir, '..', 'runtime-versions.json'), 'utf8'),
     ) as Record<string, string>
@@ -29,7 +29,8 @@ describe('NexusManager', () => {
     )
 
     expect(runtimeVersions['nexusd-cluster']).toBe('0.1.1')
-    expect(dockerfile).toContain('ARG NEXUSD_CLUSTER_VERSION=0.1.1')
+    expect(dockerfile).toContain('COPY src/server/nexus/runtime-versions.json /runtime-versions.json')
+    expect(dockerfile).toContain("NEXUSD_CLUSTER_VERSION=\"$(jq -er '.\"nexusd-cluster\"' /runtime-versions.json)\"")
     expect(dockerfile).toContain('github.com/nexi-lab/nexus/releases/download/nexusd-cluster-v${NEXUSD_CLUSTER_VERSION}')
   })
 

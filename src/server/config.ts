@@ -138,6 +138,11 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     scodePath: raw.runtimeDefaults.scodePath
       ? normalizePath(raw.runtimeDefaults.scodePath)
       : undefined,
+    hostScodePath: raw.runtimeDefaults.hostScodePath
+      ? normalizePath(raw.runtimeDefaults.hostScodePath)
+      : undefined,
+    // This path is resolved inside the Runtime container, not on the host.
+    dockerScodePath: raw.runtimeDefaults.dockerScodePath,
     dockerImage: raw.runtimeDefaults.dockerImage,
     dockerMode: raw.runtimeDefaults.dockerMode,
     idleTimeoutMs: raw.runtimeDefaults.idleTimeoutMs,
