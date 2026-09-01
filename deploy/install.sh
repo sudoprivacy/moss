@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPOSITORY="sudoprivacy/moss"
 RELEASE_TAG="${MOSS_RELEASE_TAG:-@@MOSS_RELEASE_TAG@@}"
-DEFAULT_INSTALL_DIR="/opt/moss"
+DEFAULT_INSTALL_DIR=""
 NETWORK_NAME="moss-network"
 SERVICE_NAME="moss-server"
 OFFLINE=0
@@ -19,13 +19,13 @@ Usage: install.sh [options]
 
 Options:
   --offline                 Read release archives next to this script.
-  --install-dir PATH        Installation root (default: /opt/moss).
+  --install-dir PATH        Installation root (default: <install-user-home>/.moss/server).
   --non-interactive         Read configuration from MOSS_* environment variables.
   -h, --help                Show this help.
 
 Configuration environment variables:
-  MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST, MOSS_ADMIN_USERNAME,
-  MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, ANTHROPIC_BASE_URL,
+  MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
+  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, ANTHROPIC_BASE_URL,
   ANTHROPIC_API_KEY.
 EOF
 }
@@ -47,6 +47,23 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "run as root (for example: curl ... | sudo bash)"
 [ "$(uname -s)" = Linux ] || die "only Linux is supported"
+
+command -v getent >/dev/null 2>&1 || die "getent is required"
+resolve_install_account() {
+  PASSWD_ENTRY="$(getent passwd "$INSTALL_USER" || true)"
+  [ -n "$PASSWD_ENTRY" ] || die "install user does not exist: $INSTALL_USER"
+  INSTALL_USER_HOME="$(printf '%s\n' "$PASSWD_ENTRY" | awk -F: 'NR == 1 { print $6 }')"
+  INSTALL_USER_GROUP="$(id -gn "$INSTALL_USER")"
+  case "$INSTALL_USER_HOME" in
+    /*) ;;
+    *) die "install user has no absolute home directory: $INSTALL_USER" ;;
+  esac
+  [ -d "$INSTALL_USER_HOME" ] || die "install user home does not exist: $INSTALL_USER_HOME"
+}
+
+INSTALL_USER="${MOSS_INSTALL_USER:-${SUDO_USER:-$(id -un)}}"
+resolve_install_account
+DEFAULT_INSTALL_DIR="${INSTALL_USER_HOME%/}/.moss/server"
 
 case "$(uname -m)" in
   x86_64|amd64) ARCH=amd64 ;;
@@ -84,6 +101,19 @@ prompt_value() {
   printf -v "$variable" '%s' "${answer:-$default_value}"
 }
 
+USING_DEFAULT_INSTALL_DIR=0
+if [ -z "$INSTALL_DIR" ] && [ -f "/etc/systemd/system/$SERVICE_NAME.service" ]; then
+  EXISTING_ENV_PATH="$(awk -F= '$1 == "EnvironmentFile" { print substr($0, index($0, "=") + 1); exit }' \
+    "/etc/systemd/system/$SERVICE_NAME.service")"
+  if [ -n "$EXISTING_ENV_PATH" ] && [ -f "$EXISTING_ENV_PATH" ]; then
+    EXISTING_INSTALL_DIR="$(dirname "$EXISTING_ENV_PATH")"
+    if [ -f "$EXISTING_INSTALL_DIR/server.json" ]; then
+      INSTALL_DIR="$EXISTING_INSTALL_DIR"
+      log "Existing service found; using install directory: $INSTALL_DIR"
+    fi
+  fi
+fi
+[ -n "$INSTALL_DIR" ] || USING_DEFAULT_INSTALL_DIR=1
 prompt_value INSTALL_DIR 'Install directory' "$DEFAULT_INSTALL_DIR"
 case "$INSTALL_DIR" in
   /*) ;;
@@ -93,6 +123,20 @@ case "$INSTALL_DIR" in
   *[[:space:]]*) die "install directory must not contain whitespace" ;;
 esac
 [ "$INSTALL_DIR" != / ] || die "refusing to install into /"
+
+if [ -f "$INSTALL_DIR/server.json" ]; then
+  EXISTING_INSTALL_USER="$(stat -c %U "$INSTALL_DIR")"
+  if [ -n "${MOSS_INSTALL_USER:-}" ] && [ "$EXISTING_INSTALL_USER" != "$INSTALL_USER" ]; then
+    die "existing installation belongs to $EXISTING_INSTALL_USER; service-user migration is not supported"
+  fi
+  if [ -z "${MOSS_INSTALL_USER:-}" ] && [ -n "$EXISTING_INSTALL_USER" ] \
+    && [ "$EXISTING_INSTALL_USER" != "$INSTALL_USER" ]; then
+    INSTALL_USER="$EXISTING_INSTALL_USER"
+    resolve_install_account
+  fi
+fi
+log "Service user: $INSTALL_USER"
+log "Install directory: $INSTALL_DIR"
 
 command -v ldd >/dev/null 2>&1 || die "ldd is required"
 GLIBC_VERSION="$(ldd --version 2>&1 | awk '
@@ -114,10 +158,17 @@ if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -l
   die "glibc 2.35 or newer is required (Ubuntu 22.04+); found $GLIBC_VERSION"
 fi
 
-for command_name in tar gzip sha256sum systemctl docker curl; do
+for command_name in tar gzip sha256sum systemctl docker curl install stat; do
   command -v "$command_name" >/dev/null 2>&1 || die "$command_name is required"
 done
 docker info >/dev/null 2>&1 || die "Docker daemon is not available"
+
+DOCKER_SOCKET="/var/run/docker.sock"
+[ -S "$DOCKER_SOCKET" ] || die "Docker socket is not available: $DOCKER_SOCKET"
+DOCKER_GROUP_ID="$(stat -c %g "$DOCKER_SOCKET")"
+DOCKER_GROUP_ENTRY="$(getent group "$DOCKER_GROUP_ID" || true)"
+[ -n "$DOCKER_GROUP_ENTRY" ] || die "Docker socket group does not exist: $DOCKER_GROUP_ID"
+DOCKER_GROUP="${DOCKER_GROUP_ENTRY%%:*}"
 
 DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
 DOCKER_MAJOR="${DOCKER_VERSION%%.*}"
@@ -234,8 +285,11 @@ fi
 NETWORK_GATEWAY="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK_NAME")"
 [ -n "$NETWORK_GATEWAY" ] || die "could not determine $NETWORK_NAME gateway"
 
-mkdir -p "$INSTALL_DIR/releases" "$INSTALL_DIR/data" "$INSTALL_DIR/.moss"
-chmod 700 "$INSTALL_DIR/data" "$INSTALL_DIR/.moss"
+if [ "$USING_DEFAULT_INSTALL_DIR" = 1 ]; then
+  install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$INSTALL_USER_HOME/.moss"
+fi
+install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
+  "$INSTALL_DIR" "$INSTALL_DIR/releases" "$INSTALL_DIR/data" "$INSTALL_DIR/.moss"
 RELEASE_DIR="$INSTALL_DIR/releases/$RELEASE_TAG"
 NEW_RELEASE_DIR="$INSTALL_DIR/releases/.$RELEASE_TAG.new.$$"
 PREVIOUS_TARGET="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
@@ -260,6 +314,7 @@ if systemctl cat "$SERVICE_NAME.service" >/dev/null 2>&1; then
 fi
 rm -rf "$NEW_RELEASE_DIR"
 cp -a "$PACKAGE_DIR" "$NEW_RELEASE_DIR"
+chown -R "$INSTALL_USER:$INSTALL_USER_GROUP" "$NEW_RELEASE_DIR"
 rm -rf "$RELEASE_DIR"
 mv "$NEW_RELEASE_DIR" "$RELEASE_DIR"
 
@@ -350,7 +405,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=$INSTALL_USER
+Group=$INSTALL_USER_GROUP
+SupplementaryGroups=$DOCKER_GROUP
 WorkingDirectory=$INSTALL_DIR/current/app
 EnvironmentFile=$ENV_PATH
 ExecStart=$INSTALL_DIR/current/node/bin/node $INSTALL_DIR/current/app/bin/moss-server.mjs start
@@ -397,6 +454,10 @@ else
 fi
 EOF
 chmod +x "$INSTALL_DIR/start.sh" "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh" "$INSTALL_DIR/uninstall.sh"
+for owned_path in "$CONFIG_PATH" "$ENV_PATH" "$SETTINGS_PATH" \
+  "$INSTALL_DIR/start.sh" "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh" "$INSTALL_DIR/uninstall.sh"; do
+  [ ! -e "$owned_path" ] || chown "$INSTALL_USER:$INSTALL_USER_GROUP" "$owned_path"
+done
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME.service" >/dev/null

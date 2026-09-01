@@ -22,16 +22,23 @@ Ubuntu 22.04 为最低验证基线；Ubuntu 20.04 和 CentOS 7 会在安装器�
 每个服务端版本使用独立的 `server-v*` Release。版本固定的安装命令为：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.1/install.sh | sudo bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh | sudo bash
 ```
 
 安装器会提示安装目录、端口、对外地址、管理员账号密码及可选 API 配置。默认
-目录是 `/opt/moss`，默认端口是 `43127`。
+目录是发起安装用户的 `$HOME/.moss/server`，默认端口是 `43127`。通过 `sudo`
+执行时根据 `SUDO_USER` 查询该用户的真实 home；直接以 root 执行时默认目录才是
+`/root/.moss/server`。systemd 中始终写入解析后的绝对路径，不使用 `~`。
+服务进程也以该用户运行；systemd 仅为服务补充 Docker socket 所属组。安装器和
+systemd 单元的写入仍需要 root 权限。
+升级已有服务且未显式指定目录时，安装器优先从现有 systemd 单元读取原目录，
+不会因默认目录规则变化而迁移或新建数据。升级时保留原服务用户；安装器不自动
+迁移已有目录的所有权。
 
 也可以使用环境变量进行非交互安装：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.1/install.sh \
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh \
   | sudo MOSS_NON_INTERACTIVE=1 \
       MOSS_INSTALL_DIR=/data/moss \
       MOSS_ADVERTISED_HOST=10.0.1.133 \
@@ -39,15 +46,15 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.1/i
       bash
 ```
 
-支持的变量包括 `MOSS_INSTALL_DIR`、`MOSS_PORT`、`MOSS_ADVERTISED_HOST`、
-`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`MOSS_DOWNLOAD_BASE`、
+支持的变量包括 `MOSS_INSTALL_USER`、`MOSS_INSTALL_DIR`、`MOSS_PORT`、
+`MOSS_ADVERTISED_HOST`、`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`MOSS_DOWNLOAD_BASE`、
 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY`。如果服务器不能访问 GitHub
 Release 大文件域名，可将
 Release 资产同步到同一个 HTTP 目录，并通过 `MOSS_DOWNLOAD_BASE` 指定镜像：
 
 ```bash
-curl -fsSL https://mirror.example.com/moss/server-v0.1.1/install.sh \
-  | sudo MOSS_DOWNLOAD_BASE=https://mirror.example.com/moss/server-v0.1.1 \
+curl -fsSL https://mirror.example.com/moss/server-v0.1.2/install.sh \
+  | sudo MOSS_DOWNLOAD_BASE=https://mirror.example.com/moss/server-v0.1.2 \
       bash
 ```
 
@@ -58,7 +65,7 @@ curl -fsSL https://mirror.example.com/moss/server-v0.1.1/install.sh \
 在有网络的机器下载与目标架构对应的离线包并传到服务器：
 
 ```bash
-tar -xzf moss-offline-0.1.1-linux-amd64.tar.gz
+tar -xzf moss-offline-0.1.2-linux-amd64.tar.gz
 cd moss-offline
 sudo ./install.sh --offline
 ```
@@ -71,9 +78,9 @@ sudo ./install.sh --offline
 默认目录结构：
 
 ```text
-/opt/moss/
-  current -> releases/server-v0.1.1
-  releases/server-v0.1.1/   # Node 22、moss-server.mjs 和运行依赖
+~/.moss/server/
+  current -> releases/server-v0.1.2
+  releases/server-v0.1.2/   # Node 22、moss-server.mjs 和运行依赖
   data/                      # SQLite、transcript 和 session runtime 数据
   .moss/                     # 设置、技能、assistant 和 Nexus 数据
   server.json
@@ -87,9 +94,9 @@ sudo ./install.sh --offline
 常用操作：
 
 ```bash
-sudo /opt/moss/status.sh
-sudo /opt/moss/stop.sh
-sudo /opt/moss/start.sh
+sudo ~/.moss/server/status.sh
+sudo ~/.moss/server/stop.sh
+sudo ~/.moss/server/start.sh
 journalctl -u moss-server.service -f
 curl http://127.0.0.1:43127/healthz
 ```
@@ -104,13 +111,13 @@ curl http://127.0.0.1:43127/healthz
 普通卸载保留数据和配置：
 
 ```bash
-sudo /opt/moss/uninstall.sh
+sudo ~/.moss/server/uninstall.sh
 ```
 
 明确删除全部 Moss 数据：
 
 ```bash
-sudo /opt/moss/uninstall.sh --purge
+sudo ~/.moss/server/uninstall.sh --purge
 ```
 
 `--purge` 不会删除不属于 Moss 的目录、容器或 Docker 镜像。
@@ -124,4 +131,4 @@ sudo /opt/moss/uninstall.sh --purge
 - `moss-offline-X.Y.Z-linux-ARCH.tar.gz`：上述两项和安装器的离线组合包。
 - `install.sh` 与 `SHA256SUMS`。
 
-应用内部版本与部署通道版本相互独立；当前已验收的部署版本是 `server-v0.1.1`。
+应用内部版本与部署通道版本相互独立；当前部署版本是 `server-v0.1.2`。
