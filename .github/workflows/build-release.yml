@@ -180,7 +180,7 @@ jobs:
         with:
           name: Moss Server ${{ github.ref_name }}
           generate_release_notes: true
-          make_latest: false
+          make_latest: true
           files: |
             release-assets/*.tar.gz
             release-assets/install.sh
