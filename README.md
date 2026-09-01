@@ -24,10 +24,10 @@ Docker Runtime 中运行 `scode`。
 
 ## 一键安装
 
-默认使用腾讯云 COS 固定入口，URL 不随版本变化：
+默认使用腾讯云 COS 全球加速固定入口，URL 不随版本变化：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/latest/install.sh | sudo bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh | sudo bash
 ```
 
 安装器会提示安装目录、对外地址、管理员账号、密码及可选模型 API 配置。通过
@@ -38,7 +38,7 @@ curl -fL --progress-bar https://sudowork-release-1309794936.cos.ap-beijing.myqcl
 非交互安装：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/latest/install.sh \
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
   | sudo env MOSS_NON_INTERACTIVE=1 \
       MOSS_ADVERTISED_HOST=10.0.1.206 \
       MOSS_ADMIN_USERNAME=admin \
@@ -72,7 +72,7 @@ curl -fL --progress-bar "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE"
 需要锁定版本或回滚时使用版本 URL：
 
 ```bash
-BASE=https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/server-v0.1.5
+BASE=https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/server-v0.1.5
 curl -fL --progress-bar "$BASE/install.sh" \
   | sudo env MOSS_DOWNLOAD_BASE="$BASE" MOSS_ALLOW_OLD_VERSION=1 bash
 ```
@@ -82,7 +82,7 @@ curl -fL --progress-bar "$BASE/install.sh" \
 下载与目标机器架构一致的离线包：
 
 ```bash
-curl -fLO https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/server-v0.1.5/moss-offline-0.1.5-linux-amd64.tar.gz
+curl -fLO https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/server-v0.1.5/moss-offline-0.1.5-linux-amd64.tar.gz
 tar -xzf moss-offline-0.1.5-linux-amd64.tar.gz
 cd moss-offline
 sudo ./install.sh --offline

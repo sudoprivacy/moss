@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPOSITORY="sudoprivacy/moss"
 RELEASE_TAG="${MOSS_RELEASE_TAG:-@@MOSS_RELEASE_TAG@@}"
-DEFAULT_DOWNLOAD_BASE="https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/$RELEASE_TAG"
+DEFAULT_DOWNLOAD_BASE="https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG"
 DEFAULT_INSTALL_DIR=""
 NETWORK_NAME="moss-network"
 SERVICE_NAME="moss-server"

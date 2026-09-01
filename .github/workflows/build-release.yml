@@ -148,7 +148,7 @@ jobs:
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh
           grep -Fq 'Checking GitHub Latest release' dist/install.sh
           grep -Fq -- '--progress-bar' dist/install.sh
-          grep -Fq 'sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
+          grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5
@@ -193,7 +193,6 @@ jobs:
           TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
           TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
           COS_BUCKET: sudowork-release-1309794936
-          COS_REGION: ap-beijing
           COS_ROOT_PATH: moss/server
           COS_PUBLIC_BASE_URL: https://sudowork-release-1309794936.cos.accelerate.myqcloud.com
         run: |
@@ -219,7 +218,6 @@ jobs:
       - name: Publish Tencent COS Latest entrypoint
         env:
           COS_BUCKET: sudowork-release-1309794936
-          COS_REGION: ap-beijing
           COS_ROOT_PATH: moss/server
           COS_PUBLIC_BASE_URL: https://sudowork-release-1309794936.cos.accelerate.myqcloud.com
         run: bash scripts/publish-server-to-cos.sh release-assets "$GITHUB_REF_NAME" --latest-only
