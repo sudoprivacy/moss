@@ -39,6 +39,20 @@ function parseJsonArray(value: unknown): string[] {
   }
 }
 
+function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function mapRuntime(row: SqlRow): SessionRuntimeInfo {
   const rawType = String(row.runtime_type)
   const type: SessionRuntimeInfo['type'] =
@@ -85,6 +99,7 @@ function mapSession(row: SqlRow): SessionRecord {
     assistantName: typeof row.assistant_name === 'string' ? row.assistant_name : null,
     source: typeof row.source === 'string' ? row.source : undefined,
     channelChatId: typeof row.channel_chat_id === 'string' ? row.channel_chat_id : undefined,
+    clientMetadata: parseJsonObject(row.client_metadata),
     createdAt: Number(row.created_at),
     lastActiveAt: Number(row.last_active_at),
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
@@ -151,6 +166,7 @@ export class DirectConnectStore {
         assistant_name TEXT,
         source TEXT,
         channel_chat_id TEXT,
+        client_metadata TEXT,
         created_at INTEGER NOT NULL,
         last_active_at INTEGER NOT NULL,
         ended_at INTEGER,
@@ -293,6 +309,12 @@ export class DirectConnectStore {
     if (!sessionsColumns.some(col => col.name === 'channel_chat_id')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN channel_chat_id TEXT`)
       console.log('[DB] Added channel_chat_id column to sessions')
+    }
+
+    // Migration: add client_metadata (opaque per-session client JSON) if absent
+    if (!sessionsColumns.some(col => col.name === 'client_metadata')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN client_metadata TEXT`)
+      console.log('[DB] Added client_metadata column to sessions')
     }
 
     // Migration: add org_id to channel_plugins
@@ -1536,6 +1558,36 @@ export class DirectConnectStore {
       patch.summary === undefined ? null : patch.summary,
       sessionId,
     )
+  }
+
+  /**
+   * Shallow-merge `patch` into the session's opaque client_metadata JSON blob.
+   * A key set to `undefined` in `patch` deletes that key; any other value
+   * (including `null`) overwrites it. Read-merge-write, so callers only send the
+   * keys they want to change. Missing session or empty result collapses to NULL.
+   */
+  updateSessionClientMetadata(
+    sessionId: string,
+    patch: Record<string, unknown>,
+  ): void {
+    const row = this.db.prepare(
+      `SELECT client_metadata FROM sessions WHERE session_id = ?`,
+    ).get(sessionId) as SqlRow | undefined
+    if (!row) return
+    const current = parseJsonObject(row.client_metadata) ?? {}
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) {
+        delete current[key]
+      } else {
+        current[key] = value
+      }
+    }
+    const serialized = Object.keys(current).length > 0 ? JSON.stringify(current) : null
+    this.db.prepare(`
+      UPDATE sessions
+      SET client_metadata = ?
+      WHERE session_id = ?
+    `).run(serialized, sessionId)
   }
 
   updateSessionRuntimeImage(sessionId: string, dockerImage: string): void {

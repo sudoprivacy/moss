@@ -263,6 +263,7 @@ function serializeSession(session: {
   title?: string | null
   source?: string
   channelChatId?: string
+  clientMetadata?: Record<string, unknown>
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
@@ -282,6 +283,7 @@ function serializeSession(session: {
     title: session.title,
     source: session.source,
     channelChatId: session.channelChatId,
+    clientMetadata: session.clientMetadata,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,
@@ -7803,6 +7805,34 @@ export function startServer(
           session: serializeSession(ready.session),
           ws_url: buildWsUrl(server, config, ready.session.sessionId),
         })
+        return
+      }
+
+      if (req.method === 'PATCH' && sessionIdMatch) {
+        const sessionId = sessionIdMatch[1] || ''
+        const session = runtime.getSession(sessionId)
+        if (!session) {
+          throw new HttpError(404, 'Session not found')
+        }
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const body = await readJsonBody(req)
+        if (typeof body.title === 'string') {
+          runtime.store.updateSessionMetadata(sessionId, { title: body.title })
+        }
+        // Shallow-merge opaque per-session client metadata. A key set to null
+        // (JSON has no undefined) deletes it; the store treats undefined as
+        // delete, so map nulls through.
+        if (body.client_metadata && typeof body.client_metadata === 'object' && !Array.isArray(body.client_metadata)) {
+          const patch: Record<string, unknown> = {}
+          for (const [key, value] of Object.entries(body.client_metadata as Record<string, unknown>)) {
+            patch[key] = value === null ? undefined : value
+          }
+          runtime.store.updateSessionClientMetadata(sessionId, patch)
+        }
+        const updated = runtime.getSession(sessionId) ?? session
+        writeJson(res, 200, { session: serializeSession(updated) })
         return
       }
 

@@ -483,6 +483,7 @@ export type SessionRecord = {
   assistantName: string | null
   source?: string
   channelChatId?: string
+  clientMetadata?: Record<string, unknown>
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
@@ -549,6 +550,7 @@ export type SessionSummary = {
   assistantName: string | null
   source?: string
   channelChatId?: string
+  clientMetadata?: Record<string, unknown>
   createdAt: number
   lastActiveAt: number
   endedAt: number | null

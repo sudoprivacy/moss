@@ -92,6 +92,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const pendingStdin: string[] = []
   const pendingStdout: string[] = []
   let currentAssistantText = ''
+  // Accumulates AgentThoughtChunk text for the current turn (mirrors
+  // currentAssistantText). Flushed as a `thinking` transcript record on
+  // stopReason, then reset. Without this, scode's reasoning is dropped.
+  let currentThoughtText = ''
   let lastPersistedUuid: string | null = null
   let isHandshakeComplete = false
   let currentTurnAssistantUuid: string | null = null
@@ -100,6 +104,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const toolResultIdByToolCallId = new Map<string, string>()
   // Track tool calls in current turn for completion status
   const currentTurnToolCalls = new Map<string, { toolCallId: string; name: string }>()
+  // Latest ACP tool_call_update content per toolCallId, captured so a
+  // `tool_result` record (with the tool's actual output) can be persisted on
+  // stopReason. Without this the transcript records the call but never its
+  // output.
+  const currentTurnToolOutput = new Map<string, { content: unknown; isError: boolean }>()
 
   // Pending RPC requests waiting for response
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
@@ -166,6 +175,40 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       blocks.push({ type: 'image', data, mimeType })
     }
     return blocks
+  }
+
+  // Flatten an ACP ToolCallUpdate `content` array into the text output a
+  // Claude-Code-style `tool_result` record expects. ACP wraps each block as
+  // `{ type: 'content', content: { type: 'text', text } }`, but tolerate bare
+  // `{ type: 'text', text }` too. Returns undefined when there is nothing to
+  // record (so callers can avoid clobbering earlier output with an empty
+  // in-progress update).
+  const extractToolResultContent = (content: unknown): string | undefined => {
+    if (typeof content === 'string') return content
+    if (!Array.isArray(content)) return undefined
+    const parts: string[] = []
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as Record<string, any>
+      const inner = b.type === 'content' && b.content && typeof b.content === 'object' ? b.content : b
+      const text = typeof inner.text === 'string' ? inner.text : ''
+      if (text) parts.push(text)
+    }
+    return parts.length > 0 ? parts.join('\n') : undefined
+  }
+
+  // The text moss receives from the Sudowork client still carries the
+  // client-injected preambles: an `[Assistant Rules …]` block and/or a cron
+  // skill instruction, each terminated by a `[User Request]\n` header (see the
+  // Sudowork client's RemoteAgent/agentUtils). Everything the human actually
+  // typed is the last `[User Request]` segment. This mirrors the client's own
+  // `extractDisplayUserContent` so a transcript rendered here reads the same as
+  // in the desktop app. The raw text is still stored in `content` for resume
+  // fidelity; this only feeds the additive `displayText` field.
+  const extractDisplayUserText = (text: string): string => {
+    if (typeof text !== 'string' || !text.includes('[User Request]')) return text
+    const parts = text.split('[User Request]')
+    return parts[parts.length - 1]?.trim() || text
   }
 
   const writeTranscript = async (event: any) => {
@@ -437,7 +480,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
     // 写入 transcript 时只保存原始用户消息（trimmedText），不包含系统提示词
     // 系统提示词是给 agent 的，不应该出现在用户可见的历史记录中
-    const userEvent = {
+    // displayText 只在剥离掉客户端注入的 [User Request]/cron 前言后与原文不同时写入，
+    // 供渲染层展示；raw content 仍保留完整文本以保证 resume 保真度。
+    const displayText = extractDisplayUserText(trimmedText)
+    const userEvent: Record<string, unknown> = {
       type: 'user',
       sessionId,
       uuid: userUuid,
@@ -451,6 +497,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         role: 'user',
         content: trimmedText, // 保存原始用户消息，不包含注入的系统提示词
       },
+    }
+    if (displayText !== trimmedText) {
+      userEvent.displayText = displayText
     }
     void writeTranscript(userEvent)
     lastPersistedUuid = userUuid
@@ -599,9 +648,32 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             }
             process.stderr.write(`[AcpBridge] EMITTING TOOL_COMPLETE EVENT for ${toolCallId}\n`)
             emitStdout(JSON.stringify(toolCompleteEvent) + '\n')
+
+            // Persist a durable tool_result record carrying the captured output
+            // so a rendered transcript shows what each tool returned. Chained via
+            // lastPersistedUuid so it parents onto the tool_use event.
+            const output = currentTurnToolOutput.get(toolCallId)
+            const toolResultUuid = randomUUID()
+            const toolResultEvent = {
+              type: 'tool_result',
+              sessionId,
+              uuid: toolResultUuid,
+              parentUuid: lastPersistedUuid,
+              isSidechain: false,
+              tool_use_id: toolCallId,
+              content: output?.content ?? '',
+              is_error: output?.isError ?? false,
+              timestamp: new Date().toISOString(),
+              cwd,
+              userType: 'external',
+              version: 'unknown',
+            }
+            void writeTranscript(toolResultEvent)
+            lastPersistedUuid = toolResultUuid
           }
-          // Clear tracked tool calls for next turn
+          // Clear tracked tool calls / captured output for next turn
           currentTurnToolCalls.clear()
+          currentTurnToolOutput.clear()
 
           const rawUsage = parsed.result.usage || {}
           const usage = {
@@ -615,6 +687,31 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             usage.output_tokens > 0 ||
             usage.cache_read_input_tokens > 0 ||
             usage.cache_creation_input_tokens > 0
+          // Persist the accumulated reasoning as a durable `thinking` record
+          // BEFORE the assistant text event, so the transcript reads
+          // thinking -> answer. Chained via lastPersistedUuid so the assistant
+          // event that follows parents onto it.
+          if (currentThoughtText && !currentTurnUsedSendUserMessage) {
+            const thinkingUuid = randomUUID()
+            const thinkingEvent = {
+              type: 'thinking',
+              sessionId,
+              uuid: thinkingUuid,
+              parentUuid: lastPersistedUuid,
+              isSidechain: false,
+              timestamp: new Date().toISOString(),
+              cwd,
+              userType: 'external',
+              version: 'unknown',
+              message: {
+                role: 'assistant',
+                content: [{ type: 'thinking', thinking: currentThoughtText }],
+              },
+            }
+            void writeTranscript(thinkingEvent)
+            lastPersistedUuid = thinkingUuid
+          }
+
           const assistantUuid = randomUUID()
 
           if (currentAssistantText && !currentTurnUsedSendUserMessage) {
@@ -681,6 +778,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             })
 
           currentAssistantText = ''
+          currentThoughtText = ''
           currentTurnUsedSendUserMessage = false
           // A2: stopReason is the authoritative "turn done" signal from scode.
           // Re-evaluate busy here; setBusy(false) only if no question / stdin
@@ -724,6 +822,41 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               process.stderr.write(`[AcpBridge] EMITTING ASSISTANT EVENT: ${mossEvent}\n`)
               emitStdout(mossEvent + '\n')
               // Removed raw text emission to prevent duplicate display in UI
+            }
+          }
+
+          // scode streams its reasoning as AgentThoughtChunk over ACP. Accumulate
+          // it for the current turn and stream a live `thinking` block so the UI
+          // can render the model's reasoning; the durable transcript record is
+          // written on stopReason (before the assistant text event).
+          if (sessionUpdate === 'agent_thought_chunk' && update) {
+            const content = update.content || update.message?.content
+            let text = ''
+            if (typeof content === 'string') {
+              text = content
+            } else if (content && typeof content === 'object') {
+              text = content.text || (Array.isArray(content) ? content[0]?.text : content?.text) || ''
+            }
+
+            if (text && !currentTurnUsedSendUserMessage) {
+              currentThoughtText += text
+
+              if (!currentTurnAssistantUuid) {
+                currentTurnAssistantUuid = randomUUID()
+              }
+
+              const mossEvent = JSON.stringify({
+                type: 'assistant',
+                session_id: sessionId,
+                message: {
+                  role: 'assistant',
+                  content: [{ type: 'thinking', thinking: text }], // current delta only
+                },
+                uuid: currentTurnAssistantUuid,
+                timestamp: new Date().toISOString(),
+                delta: true,
+              })
+              emitStdout(mossEvent + '\n')
             }
           }
 
@@ -798,6 +931,26 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               // Store the uuid temporarily - when _scode/ask_user_question arrives,
               // we'll create a mapping: uuid -> requestId
               askUserQuestionUuidToRequestId.set(toolUuid, '')
+            }
+          }
+
+          // scode reports a tool's output via ToolCallUpdate. Capture the latest
+          // content/status per toolCallId so the durable `tool_result` record
+          // written on stopReason carries the actual output (and error flag).
+          if (sessionUpdate === 'tool_call_update' && update) {
+            const toolCallId = update.toolCallId
+            if (toolCallId) {
+              const status = typeof update.status === 'string' ? update.status : undefined
+              const isError = status === 'failed' || status === 'error'
+              const captured = extractToolResultContent(update.content)
+              // Only overwrite once we actually have content (or a terminal
+              // status), so an early in_progress update does not clobber output.
+              if (captured !== undefined || isError) {
+                currentTurnToolOutput.set(toolCallId, {
+                  content: captured ?? '',
+                  isError,
+                })
+              }
             }
           }
         }
@@ -937,6 +1090,44 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         process.stderr.write(`[AcpBridge] writeStdin: stdin destroyed, ignoring\n`)
         return
       }
+
+      // Interrupt: cancel the current turn via ACP session/cancel (scode replies
+      // to the pending prompt with stopReason:'cancelled', which flows through
+      // the normal turn-end path). Record a durable cancelled marker so a
+      // resumed transcript shows the turn was interrupted. Handled before
+      // setBusy(true) so an idle interrupt does not falsely mark the session
+      // busy.
+      try {
+        const parsed = JSON.parse(data)
+        if (parsed?.type === 'control_request' && parsed.request?.subtype === 'interrupt') {
+          process.stderr.write(`[AcpBridge] Received interrupt control_request\n`)
+          if (acpSessionId && child.stdin && !child.stdin.writableEnded) {
+            const cancelMsg = JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'session/cancel',
+              params: { sessionId: acpSessionId },
+            }) + '\n'
+            child.stdin.write(cancelMsg)
+          }
+          // Durable marker (result_type:'user'): a `result` row is ignored by the
+          // /context reader (no blank bubble) yet stays in the JSONL for resume.
+          void writeTranscript({
+            type: 'result',
+            result_type: 'user',
+            subtype: 'cancelled',
+            sessionId,
+            session_id: sessionId,
+            uuid: randomUUID(),
+            parentUuid: lastPersistedUuid,
+            isSidechain: false,
+            timestamp: new Date().toISOString(),
+          })
+          return
+        }
+      } catch {
+        // Not JSON or not an interrupt — fall through to normal handling.
+      }
+
       // A2: user kicked off a turn. Stays busy until stopReason or destroy.
       setBusy(true)
 
