@@ -89,6 +89,8 @@ export type AssistantStoreMeta = {
   description?: string
   avatar?: string
   emoji?: string | null
+  defaultInitPrompt?: string
+  promptsI18n?: Record<string, string[]>
   category?: string
   categories?: string[]
   source_type?: 'hub' | 'upload' | 'custom' | 'tenant'
@@ -128,6 +130,8 @@ export type InstalledAssistantInfo = {
   description: string
   avatar: string
   emoji: string
+  defaultInitPrompt: string
+  promptsI18n: Record<string, string[]>
   category: string
   categories: string[]
   version: string
@@ -592,6 +596,11 @@ export async function findAssistantDir(
   return null
 }
 
+function normalizePromptsI18n(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { 'zh-CN': [] }
+  return { 'zh-CN': parseStringArray((value as Record<string, unknown>)['zh-CN']) }
+}
+
 function toInstalledAssistantInfo(params: {
   assistantDir: string
   dirName: string
@@ -602,6 +611,7 @@ function toInstalledAssistantInfo(params: {
   // Trim directory name to avoid leading/trailing spaces
   const trimmedDirName = dirName.trim()
   const categories = parseStringArray(meta?.categories)
+  const promptsI18n = normalizePromptsI18n(meta?.promptsI18n)
   const normalizedCategory =
     typeof meta?.category === 'string' ? meta.category : categories[0] || ''
 
@@ -620,6 +630,8 @@ function toInstalledAssistantInfo(params: {
     description: typeof meta?.description === 'string' ? meta.description : '',
     avatar: typeof meta?.avatar === 'string' ? meta.avatar : '',
     emoji: typeof meta?.emoji === 'string' ? meta.emoji : '',
+    defaultInitPrompt: typeof meta?.defaultInitPrompt === 'string' ? meta.defaultInitPrompt : '',
+    promptsI18n,
     category: normalizedCategory,
     categories,
     version: normalizeVersion(meta?.installed_version),

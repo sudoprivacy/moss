@@ -4,11 +4,13 @@ import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
 import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
 import os from 'os'
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
+import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
+import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
+import { readTenantAssistantMultipart, type TenantAssistantMultipartFile } from './utils/tenantAssistantMultipart.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
 import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
 import { deptSecretNamespace } from './secrets/secretSubject.js'
@@ -411,6 +413,94 @@ async function readJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
     throw new HttpError(400, 'JSON body must be an object')
   }
   return parsed
+}
+
+type TenantAssistantRequest = {
+  body: JsonBody
+  fields: Record<string, string> | null
+  avatar: TenantAssistantMultipartFile | null
+}
+
+async function readTenantAssistantRequest(req: http.IncomingMessage): Promise<TenantAssistantRequest> {
+  const contentType = req.headers['content-type'] || ''
+  if (/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    return { body: await readJsonBody(req), fields: null, avatar: null }
+  }
+  if (/^multipart\/form-data(?:\s*;|$)/i.test(contentType)) {
+    try {
+      const form = await readTenantAssistantMultipart(req)
+      return { body: { ...form.fields }, fields: form.fields, avatar: form.avatar }
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : String(error))
+    }
+  }
+  throw new HttpError(415, 'Content-Type must be application/json or multipart/form-data')
+}
+
+function parseTenantStringArray(value: unknown, fieldName: string): string[] {
+  if (value === undefined) return []
+  let parsed: unknown = value
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      throw new HttpError(400, `${fieldName} 必须是 JSON 数组`)
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.some(item => typeof item !== 'string')) {
+    throw new HttpError(400, `${fieldName} 必须是字符串数组`)
+  }
+  return parsed.map(item => item.trim()).filter(Boolean)
+}
+
+function parseTenantPrompts(value: unknown): Record<string, string[]> {
+  if (value === undefined) return { 'zh-CN': [] }
+  let parsed: unknown = value
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      throw new HttpError(400, 'promptsI18n 必须是 JSON 对象')
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new HttpError(400, 'promptsI18n 必须是 JSON 对象')
+  }
+  const prompts = (parsed as Record<string, unknown>)['zh-CN']
+  if (!Array.isArray(prompts) || prompts.some(item => typeof item !== 'string')) {
+    throw new HttpError(400, 'promptsI18n.zh-CN 必须是字符串数组')
+  }
+  return { 'zh-CN': prompts.map(item => item.trim()).filter(Boolean) }
+}
+
+function parseTenantObject(value: unknown, fieldName: string): JsonBody | null {
+  if (value === null) return null
+  let parsed: unknown = value
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      throw new HttpError(400, `${fieldName} 必须是 JSON 对象`)
+    }
+  }
+  if (parsed === null) return null
+  if (!isJsonBody(parsed)) {
+    throw new HttpError(400, `${fieldName} 必须是 JSON 对象`)
+  }
+  return parsed
+}
+
+function parseTenantBoolean(value: unknown, fieldName: string): boolean | undefined {
+  if (value === undefined) return undefined
+  if (typeof value === 'boolean') return value
+  if (value === 'true') return true
+  if (value === 'false') return false
+  throw new HttpError(400, `${fieldName} 必须是布尔值`)
+}
+
+function formatTenantAssistantAvatarUrl(avatar: unknown, publicBaseUrl: string): unknown {
+  if (typeof avatar !== 'string' || !publicBaseUrl) return avatar
+  return getTenantAssistantAvatarFilename(avatar) ? `${publicBaseUrl}${avatar}` : avatar
 }
 
 async function copySkillToTenantDir(skillName: string, sourcePathOverride?: string): Promise<void> {
@@ -1050,6 +1140,71 @@ async function resolveWorkspaceEntry(rootDir: string, relativePath: string): Pro
     throw new HttpError(403, 'Path escapes workspace root')
   }
   return { rootRealPath, fullPath: resolvedTarget }
+}
+
+async function resolveTenantAssistantRulePath(
+  assistantDir: string,
+  ruleFile: unknown,
+  forWrite: boolean,
+): Promise<string> {
+  if (typeof ruleFile !== 'string' || !ruleFile.trim() || ruleFile.includes('\0')) {
+    throw new HttpError(400, 'Invalid tenant assistant rule file')
+  }
+  const normalized = ruleFile.replace(/\\/g, '/').replace(/^\.\/+/, '')
+  if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith('/')) {
+    throw new HttpError(400, 'Tenant assistant rule file must be relative')
+  }
+  const relativeRuleFile = posix.normalize(normalized)
+  if (relativeRuleFile === '.' || relativeRuleFile === '..' || relativeRuleFile.startsWith('../')) {
+    throw new HttpError(400, 'Tenant assistant rule file escapes assistant directory')
+  }
+
+  let rootRealPath: string
+  try {
+    rootRealPath = await realpath(assistantDir)
+  } catch (error) {
+    const code = typeof error === 'object' && error && 'code' in error ? error.code : undefined
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new HttpError(404, 'Tenant assistant directory not found')
+    }
+    throw error
+  }
+  const candidate = resolve(rootRealPath, relativeRuleFile)
+  if (!isInsideDir(rootRealPath, candidate)) {
+    throw new HttpError(400, 'Tenant assistant rule file escapes assistant directory')
+  }
+
+  try {
+    const resolvedTarget = await realpath(candidate)
+    if (!isInsideDir(rootRealPath, resolvedTarget)) {
+      throw new HttpError(400, 'Tenant assistant rule file escapes assistant directory')
+    }
+    const info = await stat(resolvedTarget)
+    if (!info.isFile()) {
+      throw new HttpError(400, 'Tenant assistant rule file must be a file')
+    }
+    return resolvedTarget
+  } catch (error) {
+    if (error instanceof HttpError) throw error
+    const code = typeof error === 'object' && error && 'code' in error ? error.code : undefined
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
+    if (!forWrite) return candidate
+
+    try {
+      const parent = await realpath(dirname(candidate))
+      if (!isInsideDir(rootRealPath, parent)) {
+        throw new HttpError(400, 'Tenant assistant rule file escapes assistant directory')
+      }
+    } catch (parentError) {
+      if (parentError instanceof HttpError) throw parentError
+      const parentCode = typeof parentError === 'object' && parentError && 'code' in parentError ? parentError.code : undefined
+      if (parentCode === 'ENOENT' || parentCode === 'ENOTDIR') {
+        throw new HttpError(400, 'Tenant assistant rule file parent directory not found')
+      }
+      throw parentError
+    }
+    return candidate
+  }
 }
 
 function toWorkspaceRelativePath(rootDir: string, fullPath: string): string {
@@ -2319,6 +2474,34 @@ export function startServer(
           res.writeHead(200, {
             'content-type': contentType,
             'cache-control': 'public, max-age=31536000',
+          })
+          res.end(fileContent)
+          return
+        } catch {
+          throw new HttpError(404, 'File not found')
+        }
+      }
+
+      // ---- Static file serving: /uploads/tenant-assistant-avatars/* (no auth) ----
+      const tenantAvatarMatch = pathname.match(/^\/uploads\/tenant-assistant-avatars\/(.+)$/)
+      if (tenantAvatarMatch && req.method === 'GET') {
+        const filename = basename(tenantAvatarMatch[1])
+        if (!getTenantAssistantAvatarFilename(`/uploads/tenant-assistant-avatars/${filename}`)) {
+          throw new HttpError(404, 'File not found')
+        }
+        try {
+          const fileContent = await readFile(join(config.runtimeDir, 'uploads', 'tenant-assistant-avatars', filename))
+          const ext = extname(filename).toLowerCase()
+          const contentType = ext === '.png'
+            ? 'image/png'
+            : ext === '.jpg'
+              ? 'image/jpeg'
+              : 'image/svg+xml'
+          res.writeHead(200, {
+            'content-type': contentType,
+            'cache-control': 'public, max-age=31536000',
+            'x-content-type-options': 'nosniff',
+            ...(ext === '.svg' ? { 'content-security-policy': 'sandbox' } : {}),
           })
           res.end(fileContent)
           return
@@ -6351,14 +6534,35 @@ export function startServer(
           return canManage || isAdmin
         }).map((row: Record<string, unknown>) => {
           // Parse JSON fields for frontend consumption
+          const parseArray = (value: unknown): string[] => {
+            if (typeof value !== 'string') return Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
+            try {
+              const parsed = JSON.parse(value)
+              return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : []
+            } catch {
+              return []
+            }
+          }
+          const parseObject = (value: unknown, fallback: unknown): unknown => {
+            if (typeof value !== 'string') return value ?? fallback
+            try {
+              return JSON.parse(value)
+            } catch {
+              return fallback
+            }
+          }
           return {
             ...row,
-            skills: typeof row.skills === 'string' ? JSON.parse(row.skills) : row.skills ?? [],
-            enabled_skills: typeof row.enabled_skills === 'string' ? JSON.parse(row.enabled_skills) : row.enabled_skills ?? [],
-            enabled_wikis: typeof row.enabled_wikis === 'string' ? JSON.parse(row.enabled_wikis) : row.enabled_wikis ?? [],
-            enabled_corp_apps: typeof row.enabled_corp_apps === 'string' ? JSON.parse(row.enabled_corp_apps) : row.enabled_corp_apps ?? [],
-            workflow: typeof row.workflow === 'string' ? JSON.parse(row.workflow) : row.workflow ?? null,
-            visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
+            avatar: formatTenantAssistantAvatarUrl(row.avatar, config.publicBaseUrl),
+            default_init_prompt: typeof row.default_init_prompt === 'string' ? row.default_init_prompt : '',
+            prompts_i18n: parseObject(row.prompts_i18n, { 'zh-CN': [] }),
+            categories: parseArray(row.categories),
+            skills: parseArray(row.skills),
+            enabled_skills: parseArray(row.enabled_skills),
+            enabled_wikis: parseArray(row.enabled_wikis),
+            enabled_corp_apps: parseArray(row.enabled_corp_apps),
+            workflow: parseObject(row.workflow, null),
+            visible_to: parseObject(row.visible_to, null),
             // Lets the frontend show edit/delete without re-deriving subtree math.
             can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
           }
@@ -6401,7 +6605,27 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const storeAdmin = isStoreAdmin(auth)
-        const body = await readJsonBody(req)
+        const request = await readTenantAssistantRequest(req)
+        const body = request.body
+        const avatarFile = request.avatar
+        for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps']) {
+          if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
+        }
+        for (const fieldName of ['visible_to', 'workflow']) {
+          if (body[fieldName] !== undefined) body[fieldName] = parseTenantObject(body[fieldName], fieldName)
+        }
+        const enableCorpAuth = parseTenantBoolean(body.enable_corp_auth, 'enable_corp_auth')
+        if (enableCorpAuth !== undefined) body.enable_corp_auth = enableCorpAuth
+        if (body.promptsI18n !== undefined && body.prompts_i18n !== undefined) {
+          const current = parseTenantPrompts(body.promptsI18n)
+          const legacy = parseTenantPrompts(body.prompts_i18n)
+          if (JSON.stringify(current) !== JSON.stringify(legacy)) {
+            throw new HttpError(400, 'promptsI18n 与 prompts_i18n 不能同时传递不同内容')
+          }
+        }
+        const promptsI18n = parseTenantPrompts(body.promptsI18n ?? body.prompts_i18n)
+        const categories = parseTenantStringArray(body.categories, 'categories')
+        const defaultInitPrompt = typeof body.default_init_prompt === 'string' ? body.default_init_prompt : ''
 
         // Validate required fields
         const name = typeof body.name === 'string' ? body.name.trim() : ''
@@ -6410,7 +6634,6 @@ export function startServer(
         if (!name) {
           throw new HttpError(400, 'name is required')
         }
-
         // Check if name already exists (within this org)
         const existingAssistant = runtime.store.getTenantAssistantByName(name, auth.orgId)
         if (existingAssistant) {
@@ -6431,7 +6654,13 @@ export function startServer(
         const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
         const assistantDir = join(storeAdmin ? ASSISTANT_TENANT_DIR : ASSISTANT_TENANT_PENDING_DIR, name)
 
+        if (avatarFile) validateTenantAssistantAvatar(avatarFile)
         await mkdir(assistantDir, { recursive: true })
+        const avatar = avatarFile
+          ? await saveTenantAssistantAvatar(config.runtimeDir, avatarFile)
+          : typeof body.avatar === 'string'
+            ? body.avatar
+            : undefined
 
         // Visibility policy for the pending request:
         //  - admin: as submitted (they create live).
@@ -6454,8 +6683,12 @@ export function startServer(
           name,
           display_name: displayName,
           description: typeof body.description === 'string' ? body.description : undefined,
-          avatar: typeof body.avatar === 'string' ? body.avatar : undefined,
+          avatar,
           emoji: typeof body.emoji === 'string' ? body.emoji : undefined,
+          defaultInitPrompt,
+          promptsI18n,
+          categories,
+          category: categories[0] ?? '',
           source_type: 'tenant',
           enabled: true,
           ruleFile: 'system.md',
@@ -6470,20 +6703,31 @@ export function startServer(
           workflow: body.workflow || null,
         }
 
-        await writeAssistantMeta(assistantDir, meta)
-
         // Create rules file
         const rulesContent = rules.trim()
           ? rules
           : `# ${displayName}\n\n${typeof body.description === 'string' ? body.description : '这是一个专属智能体。'}\n`
-        await writeFile(join(assistantDir, 'system.md'), rulesContent)
+        try {
+          await writeAssistantMeta(assistantDir, meta)
+          await writeFile(join(assistantDir, 'system.md'), rulesContent)
+        } catch (error) {
+          if (avatar) await removeTenantAssistantAvatar(config.runtimeDir, avatar)
+          rmSync(assistantDir, { recursive: true, force: true })
+          throw error
+        }
 
         // Admin → approved (live). Non-admin → pending (awaits approval).
-        runtime.store.createTenantAssistant({
+        try {
+          runtime.store.createTenantAssistant({
           id: assistantId,
           name,
           display_name: displayName,
           description: meta.description,
+          default_init_prompt: meta.defaultInitPrompt,
+          prompts_i18n: JSON.stringify(meta.promptsI18n),
+          categories: JSON.stringify(meta.categories),
+          avatar: meta.avatar,
+          emoji: meta.emoji,
           author_id: auth.userId,
           author_name: authorName,
           status: storeAdmin ? 'approved' : 'pending',
@@ -6495,14 +6739,27 @@ export function startServer(
           agent_type: meta.agent_type,
           memory_mode: meta.memory_mode,
           visible_to: meta.visible_to ? JSON.stringify(meta.visible_to) : null,
+          workflow: meta.workflow ? JSON.stringify(meta.workflow) : null,
           enabled: 1,
           org_id: auth.orgId,
-        })
+          })
+        } catch (error) {
+          if (avatar) await removeTenantAssistantAvatar(config.runtimeDir, avatar)
+          rmSync(assistantDir, { recursive: true, force: true })
+          throw error
+        }
 
         const result = runtime.store.getTenantAssistant(assistantId)
         writeJson(res, 200, {
           success: true,
-          data: result,
+          data: result
+            ? {
+                ...result,
+                prompts_i18n: meta.promptsI18n,
+                categories: meta.categories,
+                avatar: formatTenantAssistantAvatarUrl(result.avatar, config.publicBaseUrl),
+              }
+            : result,
           status: storeAdmin ? 'approved' : 'pending',
           message: storeAdmin ? undefined : '发布申请已提交，等待管理员审批',
         })
@@ -6551,19 +6808,13 @@ export function startServer(
         const assistantDir = filePath && existsSync(filePath)
           ? filePath
           : join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant', tenantAssistant.name as string)
-        const rules = await getAssistantSystemPrompt(String(tenantAssistant.name || ''))
-
-        if (rules === null && !existsSync(assistantDir)) {
+        if (!existsSync(assistantDir)) {
           throw new HttpError(404, `Tenant assistant rules not found: ${tenantAssistantId}`)
         }
-
-        if (rules !== null) {
-          writeJson(res, 200, { rules, can_edit: canEditRules })
-          return
-        }
-
-        const fallback = await readFile(join(assistantDir, 'system.md'), 'utf8').catch(() => '')
-        writeJson(res, 200, { rules: fallback, can_edit: canEditRules })
+        const meta = await readAssistantMeta(assistantDir)
+        const rulePath = await resolveTenantAssistantRulePath(assistantDir, meta?.ruleFile || 'system.md', false)
+        const rules = await readFile(rulePath, 'utf8').catch(() => '')
+        writeJson(res, 200, { rules, can_edit: canEditRules })
         return
       }
 
@@ -6666,6 +6917,7 @@ export function startServer(
           }
         } else {
           runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
+          await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
           // Clean up staged files for a rejected non-admin submission.
           const sourcePath = tenantAssistant.file_path as string | undefined
           const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
@@ -6699,7 +6951,25 @@ export function startServer(
             throw new HttpError(403, 'You cannot manage this tenant assistant')
           }
         }
-        const body = await readJsonBody(req)
+        const request = await readTenantAssistantRequest(req)
+        const body = request.body
+        const avatarFile = request.avatar
+        for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps', 'enabledSkills', 'enabledWikis', 'enabledCorpApps']) {
+          if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
+        }
+        const enabled = parseTenantBoolean(body.enabled, 'enabled')
+        if (enabled !== undefined) body.enabled = enabled
+        const removeAvatar = parseTenantBoolean(body.remove_avatar, 'remove_avatar')
+        if (removeAvatar !== undefined) body.remove_avatar = removeAvatar
+        const hasAvatarField = Object.prototype.hasOwnProperty.call(body, 'avatar') || avatarFile !== null
+        if (removeAvatar === true && hasAvatarField) {
+          throw new HttpError(400, 'remove_avatar cannot be combined with avatar')
+        }
+        for (const fieldName of ['visible_to', 'workflow']) {
+          if (body[fieldName] !== undefined) body[fieldName] = parseTenantObject(body[fieldName], fieldName)
+        }
+        const enableCorpAuth = parseTenantBoolean(body.enableCorpAuth, 'enableCorpAuth')
+        if (enableCorpAuth !== undefined) body.enableCorpAuth = enableCorpAuth
         // A non-admin cannot widen visibility beyond their own scope: keep only
         // the in-scope department/user ids they requested (out-of-scope ids an
         // admin set are dropped — the client warns before this happens). This
@@ -6709,14 +6979,31 @@ export function startServer(
         }
 
         const updates: Record<string, unknown> = {}
+        const priorAvatar = existingAssistant.avatar as string | null | undefined
+        if (body.promptsI18n !== undefined && body.prompts_i18n !== undefined) {
+          const current = parseTenantPrompts(body.promptsI18n)
+          const legacy = parseTenantPrompts(body.prompts_i18n)
+          if (JSON.stringify(current) !== JSON.stringify(legacy)) {
+            throw new HttpError(400, 'promptsI18n 与 prompts_i18n 不能同时传递不同内容')
+          }
+        }
+        const promptField = body.promptsI18n ?? body.prompts_i18n
+        if (promptField !== undefined) updates.prompts_i18n = JSON.stringify(parseTenantPrompts(promptField))
+        if (typeof body.default_init_prompt === 'string') updates.default_init_prompt = body.default_init_prompt
+        if (body.categories !== undefined) updates.categories = JSON.stringify(parseTenantStringArray(body.categories, 'categories'))
+        if (body.remove_avatar === true) {
+          updates.avatar = null
+        } else if (avatarFile) {
+          validateTenantAssistantAvatar(avatarFile)
+          updates.avatar = await saveTenantAssistantAvatar(config.runtimeDir, avatarFile)
+        } else if (typeof body.avatar === 'string') {
+          updates.avatar = body.avatar
+        }
         if (typeof body.display_name === 'string') {
           updates.display_name = body.display_name
         }
         if (typeof body.description === 'string') {
           updates.description = body.description
-        }
-        if (typeof body.avatar === 'string') {
-          updates.avatar = body.avatar
         }
         if (typeof body.emoji === 'string') {
           updates.emoji = body.emoji
@@ -6752,21 +7039,41 @@ export function startServer(
           updates.workflow = body.workflow ? JSON.stringify(body.workflow) : null
         }
 
-        runtime.store.updateTenantAssistantMeta(tenantAssistantId, updates)
+        const tenantAssistantBeforeUpdate = runtime.store.getTenantAssistant(tenantAssistantId)
+        const assistantDirBeforeUpdate = tenantAssistantBeforeUpdate?.file_path as string | undefined
+        const metaBeforeUpdate = assistantDirBeforeUpdate && existsSync(assistantDirBeforeUpdate)
+          ? await readAssistantMeta(assistantDirBeforeUpdate)
+          : null
+        const rulePath = typeof body.rules === 'string' && assistantDirBeforeUpdate && metaBeforeUpdate
+          ? await resolveTenantAssistantRulePath(assistantDirBeforeUpdate, metaBeforeUpdate.ruleFile || 'system.md', true)
+          : undefined
+        if (typeof body.rules === 'string' && !rulePath) {
+          throw new HttpError(404, 'Tenant assistant rules not found')
+        }
 
-        // Sync to file metadata if approved
+        try {
+          runtime.store.updateTenantAssistantMeta(tenantAssistantId, updates)
+        } catch (error) {
+          if (updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, updates.avatar as string)
+          throw error
+        }
+
+        // Sync the metadata in the record's current approved or pending directory.
         const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
-        if (tenantAssistant && tenantAssistant.status === 'approved') {
-          const assistantName = tenantAssistant.name as string
-          const MOSS_HOME_LOCAL = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-          const ASSISTANT_TENANT_DIR = join(MOSS_HOME_LOCAL, 'assistants', 'tenant')
-          const assistantDir = join(ASSISTANT_TENANT_DIR, assistantName)
-          if (existsSync(assistantDir)) {
+        if (tenantAssistant) {
+          const assistantDir = tenantAssistant.file_path as string | undefined
+          if (assistantDir && existsSync(assistantDir)) {
             const meta = await readAssistantMeta(assistantDir)
             if (meta) {
               if (updates.display_name !== undefined) meta.display_name = updates.display_name as string
               if (updates.description !== undefined) meta.description = updates.description as string
-              if (updates.avatar !== undefined) meta.avatar = updates.avatar as string
+              if (updates.default_init_prompt !== undefined) meta.defaultInitPrompt = updates.default_init_prompt as string
+              if (updates.prompts_i18n !== undefined) meta.promptsI18n = JSON.parse(updates.prompts_i18n as string) as Record<string, string[]>
+              if (updates.categories !== undefined) {
+                meta.categories = JSON.parse(updates.categories as string) as string[]
+                meta.category = meta.categories[0] ?? ''
+              }
+              if (updates.avatar !== undefined) meta.avatar = updates.avatar === null ? '' : updates.avatar as string
               if (updates.emoji !== undefined) meta.emoji = updates.emoji as string
               if (updates.agent_type !== undefined) meta.agent_type = updates.agent_type as 'chat' | 'workflow'
               if (updates.memory_mode !== undefined) meta.memory_mode = updates.memory_mode as 'session' | 'user'
@@ -6778,15 +7085,15 @@ export function startServer(
               if (body.enableCorpAuth !== undefined) meta.enableCorpAuth = body.enableCorpAuth as boolean
               if (body.skills !== undefined) meta.skills = body.skills as string[]
               if (body.workflow !== undefined) meta.workflow = body.workflow as AssistantStoreMeta['workflow']
-              if (typeof body.rules === 'string') {
-                const ruleFile = meta.ruleFile || 'system.md'
-                await writeFile(join(assistantDir, ruleFile), body.rules, 'utf8')
-                meta.ruleFile = ruleFile
+              if (typeof body.rules === 'string' && rulePath) {
+                await writeFile(rulePath, body.rules, 'utf8')
+                meta.ruleFile = metaBeforeUpdate?.ruleFile || 'system.md'
               }
               await writeAssistantMeta(assistantDir, meta)
             }
           }
         }
+        if (updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, priorAvatar)
 
         writeJson(res, 200, { ok: true })
         return
@@ -6808,6 +7115,7 @@ export function startServer(
           }
         }
         if (tenantAssistant) {
+          await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
           const assistantName = tenantAssistant.name as string
           // Delete from tenant directory if exists
           const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')

@@ -251,6 +251,9 @@ export interface TenantAssistantInfo {
   description?: string
   avatar?: string
   emoji?: string
+  default_init_prompt?: string
+  prompts_i18n?: Record<string, string[]>
+  categories?: string[]
   version?: string
   author_id: string
   author_name?: string
@@ -310,7 +313,10 @@ export interface CreateTenantAssistantRequest {
   name: string
   display_name: string
   description?: string
-  avatar?: string
+  default_init_prompt?: string
+  promptsI18n?: Record<string, string[]>
+  categories?: string[]
+  avatar?: File | null
   emoji?: string
   rules?: string
   skills?: string[]
@@ -323,35 +329,60 @@ export interface CreateTenantAssistantRequest {
   workflow?: TenantAssistantInfo['workflow']
 }
 
+function appendTenantAssistantFormData(form: FormData, data: Omit<CreateTenantAssistantRequest, 'name' | 'display_name'>): void {
+  if (data.description !== undefined) form.set('description', data.description)
+  if (data.default_init_prompt !== undefined) form.set('default_init_prompt', data.default_init_prompt)
+  if (data.promptsI18n !== undefined) form.set('promptsI18n', JSON.stringify(data.promptsI18n))
+  if (data.categories !== undefined) form.set('categories', JSON.stringify(data.categories))
+  if (data.avatar) form.set('avatar', data.avatar)
+  if (data.emoji !== undefined) form.set('emoji', data.emoji)
+  if (data.rules !== undefined) form.set('rules', data.rules)
+  if (data.skills !== undefined) form.set('skills', JSON.stringify(data.skills))
+  if (data.enabled_skills !== undefined) form.set('enabled_skills', JSON.stringify(data.enabled_skills))
+  if (data.enabled_wikis !== undefined) form.set('enabled_wikis', JSON.stringify(data.enabled_wikis))
+  if (data.enabled_corp_apps !== undefined) form.set('enabled_corp_apps', JSON.stringify(data.enabled_corp_apps))
+  if (data.agent_type !== undefined) form.set('agent_type', data.agent_type)
+  if (data.memory_mode !== undefined) form.set('memory_mode', data.memory_mode)
+  if (data.visible_to !== undefined) form.set('visible_to', JSON.stringify(data.visible_to))
+  if (data.workflow !== undefined) form.set('workflow', JSON.stringify(data.workflow))
+}
+
 export function createTenantAssistant(
   data: CreateTenantAssistantRequest,
 ): Promise<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }> {
+  const form = new FormData()
+  form.set('name', data.name)
+  form.set('display_name', data.display_name)
+  appendTenantAssistantFormData(form, data)
   return authClient.post<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }>(
     '/api/v1/agents/tenant/create',
-    data,
+    form,
   )
 }
 
-export function updateTenantAssistantMeta(params: {
+export type UpdateTenantAssistantRequest = Omit<Partial<CreateTenantAssistantRequest>, 'name'> & {
   id: string
-  display_name?: string
-  description?: string
-  avatar?: string
-  emoji?: string
-  rules?: string
-  agent_type?: 'chat' | 'workflow'
-  memory_mode?: 'session' | 'user'
-  visible_to?: VisibleTo | null
-  workflow?: TenantAssistantInfo['workflow']
+  removeAvatar?: boolean
   enabled?: boolean
   enabledSkills?: string[]
   enabledWikis?: string[]
   enabledCorpApps?: string[]
-  skills?: string[]
-}): Promise<{ ok: boolean }> {
+  enableCorpAuth?: boolean
+}
+
+export function updateTenantAssistantMeta(params: UpdateTenantAssistantRequest): Promise<{ ok: boolean }> {
+  const form = new FormData()
+  if (params.display_name !== undefined) form.set('display_name', params.display_name)
+  appendTenantAssistantFormData(form, params)
+  if (params.enabledSkills !== undefined) form.set('enabledSkills', JSON.stringify(params.enabledSkills))
+  if (params.enabledWikis !== undefined) form.set('enabledWikis', JSON.stringify(params.enabledWikis))
+  if (params.enabledCorpApps !== undefined) form.set('enabledCorpApps', JSON.stringify(params.enabledCorpApps))
+  if (params.enableCorpAuth !== undefined) form.set('enableCorpAuth', String(params.enableCorpAuth))
+  if (params.enabled !== undefined) form.set('enabled', String(params.enabled))
+  if (params.removeAvatar === true) form.set('remove_avatar', 'true')
   return authClient.patch<{ ok: boolean }>(
     `/api/v1/agents/tenant/${encodeURIComponent(params.id)}`,
-    params,
+    form,
   )
 }
 

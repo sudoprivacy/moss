@@ -471,6 +471,9 @@ export class DirectConnectStore {
         name TEXT NOT NULL,
         display_name TEXT,
         description TEXT,
+        default_init_prompt TEXT,
+        prompts_i18n TEXT,
+        categories TEXT,
         version TEXT,
         author_id TEXT NOT NULL,
         author_name TEXT,
@@ -521,6 +524,15 @@ export class DirectConnectStore {
     }
     if (!assistantColumns.some(col => col.name === 'workflow')) {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN workflow TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'default_init_prompt')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN default_init_prompt TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'prompts_i18n')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN prompts_i18n TEXT`)
+    }
+    if (!assistantColumns.some(col => col.name === 'categories')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN categories TEXT`)
     }
 
     // Multi-org: add org_id to tenant skills/assistants (backfilled to the
@@ -2353,6 +2365,11 @@ export class DirectConnectStore {
     name: string
     display_name?: string | null
     description?: string | null
+    default_init_prompt?: string | null
+    prompts_i18n?: string | null
+    categories?: string | null
+    avatar?: string | null
+    emoji?: string | null
     version?: string | null
     author_id: string
     author_name?: string | null
@@ -2375,14 +2392,19 @@ export class DirectConnectStore {
     const ts = now()
     this.db.prepare(`
       INSERT INTO tenant_assistants (
-        id, name, display_name, description, version, author_id, author_name, status,
+        id, name, display_name, description, default_init_prompt, prompts_i18n, categories, avatar, emoji, version, author_id, author_name, status,
         source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, enabled_corp_apps, workflow, org_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.name,
       row.display_name ?? null,
       row.description ?? null,
+      row.default_init_prompt ?? null,
+      row.prompts_i18n ?? null,
+      row.categories ?? null,
+      row.avatar ?? null,
+      row.emoji ?? null,
       row.version ?? null,
       row.author_id,
       row.author_name ?? null,
@@ -2418,6 +2440,9 @@ export class DirectConnectStore {
   updateTenantAssistantMeta(id: string, updates: {
     display_name?: string
     description?: string
+    default_init_prompt?: string | null
+    prompts_i18n?: string | null
+    categories?: string | null
     enabled?: number
     visible_to?: string | null
     enabled_skills?: string | null
@@ -2436,6 +2461,9 @@ export class DirectConnectStore {
 
     const displayName = updates.display_name ?? existing.display_name
     const description = updates.description ?? existing.description
+    const defaultInitPrompt = updates.default_init_prompt !== undefined ? updates.default_init_prompt : (existing.default_init_prompt as string | null)
+    const promptsI18n = updates.prompts_i18n !== undefined ? updates.prompts_i18n : (existing.prompts_i18n as string | null)
+    const categories = updates.categories !== undefined ? updates.categories : (existing.categories as string | null)
     const enabled = updates.enabled ?? existing.enabled
     const visibleTo = updates.visible_to !== undefined ? updates.visible_to : existing.visible_to
     const enabledSkills = updates.enabled_skills ?? existing.enabled_skills
@@ -2450,13 +2478,16 @@ export class DirectConnectStore {
 
     this.db.prepare(`
       UPDATE tenant_assistants
-      SET display_name = ?, description = ?, enabled = ?, visible_to = ?, enabled_skills = ?,
+      SET display_name = ?, description = ?, default_init_prompt = ?, prompts_i18n = ?, categories = ?, enabled = ?, visible_to = ?, enabled_skills = ?,
           avatar = ?, emoji = ?, agent_type = ?, memory_mode = ?, enabled_wikis = ?, enabled_corp_apps = ?, skills = ?, workflow = ?,
           updated_at = ?
       WHERE id = ?
     `).run(
       displayName as string,
       description as string,
+      defaultInitPrompt,
+      promptsI18n,
+      categories,
       enabled as number,
       visibleTo as string | null,
       enabledSkills as string | null,
