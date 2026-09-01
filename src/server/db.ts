@@ -40,7 +40,9 @@ function parseJsonArray(value: unknown): string[] {
 }
 
 function mapRuntime(row: SqlRow): SessionRuntimeInfo {
-  const type = String(row.runtime_type) === 'docker' ? 'docker' : 'host'
+  const rawType = String(row.runtime_type)
+  const type: SessionRuntimeInfo['type'] =
+    rawType === 'docker' ? 'docker' : rawType === 'k8s' ? 'k8s' : 'host'
   const mode =
     row.docker_mode === 'user'
       ? 'user'
@@ -56,6 +58,10 @@ function mapRuntime(row: SqlRow): SessionRuntimeInfo {
       typeof row.container_name === 'string' ? row.container_name : undefined,
     configDir: typeof row.config_dir === 'string' ? row.config_dir : undefined,
     hostMode: type === 'host' ? mode : undefined,
+    // k8s image/namespace/runtimeClass are re-derived from config.k8s by the
+    // K8sBackend (not persisted as columns); only the reuse mode is carried in
+    // the shared docker_mode column.
+    k8sMode: type === 'k8s' ? mode : undefined,
   }
 }
 
@@ -1360,7 +1366,9 @@ export class DirectConnectStore {
       input.runtime.dockerImage ?? null,
       (input.runtime.type === 'docker'
         ? input.runtime.dockerMode
-        : input.runtime.hostMode) ?? null,
+        : input.runtime.type === 'k8s'
+          ? input.runtime.k8sMode
+          : input.runtime.hostMode) ?? null,
       input.runtime.configDir ?? null,
       input.runtime.containerName ?? null,
       input.status,
@@ -1383,7 +1391,7 @@ export class DirectConnectStore {
   createAttempt(input: {
     sessionId: string
     generation: number
-    backendType: 'host' | 'docker'
+    backendType: 'host' | 'docker' | 'k8s'
     resumeTranscriptSessionId: string
     serverInstanceId: string
     containerName?: string
@@ -3930,6 +3938,7 @@ export function mergeRuntime(
   const dockerMode =
     type === 'docker' ? runtime?.dockerMode || config.dockerMode : undefined
   const hostMode = type === 'host' ? runtime?.hostMode : undefined
+  const k8sMode = type === 'k8s' ? runtime?.k8sMode : undefined
   return {
     type,
     engine: runtime?.engine || config.engine || 'scode',
@@ -3938,5 +3947,15 @@ export function mergeRuntime(
     configDir: runtime?.configDir,
     scodePath: runtime?.scodePath || config.scodePath,
     hostMode,
+    ...(type === 'k8s'
+      ? {
+          k8sImage: runtime?.k8sImage || config.k8s?.image,
+          k8sNamespace: runtime?.k8sNamespace || config.k8s?.namespace,
+          k8sRuntimeClassName: runtime?.k8sRuntimeClassName || config.k8s?.runtimeClassName,
+          k8sKubeconfig: runtime?.k8sKubeconfig || config.k8s?.kubeconfig,
+          k8sScodePath: runtime?.k8sScodePath || config.k8s?.scodePath,
+          k8sMode,
+        }
+      : {}),
   }
 }

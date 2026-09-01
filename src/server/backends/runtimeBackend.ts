@@ -5,6 +5,7 @@ import type {
   SessionRuntimeOptions,
 } from '../sessionManager.js'
 import { DockerBackend } from './dockerBackend.js'
+import { K8sBackend, type K8sBackendDefaults } from './k8sBackend.js'
 import { ScodeBackend } from './scodeBackend.js'
 
 type RuntimeBackendOptions = {
@@ -18,16 +19,19 @@ type RuntimeBackendOptions = {
     network?: string
     labels?: Record<string, string>
   }
+  k8s?: K8sBackendDefaults
 }
 
 export class RuntimeBackend implements SessionBackend {
   readonly #dockerBackend: SessionBackend
   readonly #scodeBackend: SessionBackend
+  readonly #k8sBackend: SessionBackend
   readonly #defaultRuntime: SessionRuntimeOptions
   readonly #scodePath?: string
 
   constructor(options: RuntimeBackendOptions = {}) {
     this.#dockerBackend = new DockerBackend(options.docker)
+    this.#k8sBackend = new K8sBackend(options.k8s)
     this.#scodeBackend = new ScodeBackend()
     this.#defaultRuntime = options.defaultRuntime ?? {
       type: 'host',
@@ -52,6 +56,10 @@ export class RuntimeBackend implements SessionBackend {
 
     if (runtimeType === 'docker') {
       return this.#dockerBackend.spawn(mergedOptions)
+    }
+
+    if (runtimeType === 'k8s') {
+      return this.#k8sBackend.spawn(mergedOptions)
     }
 
     return this.#scodeBackend.spawn(mergedOptions)
