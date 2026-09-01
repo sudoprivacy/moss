@@ -362,6 +362,7 @@ export function createTenantAssistant(
 
 export type UpdateTenantAssistantRequest = Omit<Partial<CreateTenantAssistantRequest>, 'name'> & {
   id: string
+  removeAvatar?: boolean
   enabled?: boolean
   enabledSkills?: string[]
   enabledWikis?: string[]
@@ -378,6 +379,7 @@ export function updateTenantAssistantMeta(params: UpdateTenantAssistantRequest):
   if (params.enabledCorpApps !== undefined) form.set('enabledCorpApps', JSON.stringify(params.enabledCorpApps))
   if (params.enableCorpAuth !== undefined) form.set('enableCorpAuth', String(params.enableCorpAuth))
   if (params.enabled !== undefined) form.set('enabled', String(params.enabled))
+  if (params.removeAvatar === true) form.set('remove_avatar', 'true')
   return authClient.patch<{ ok: boolean }>(
     `/api/v1/agents/tenant/${encodeURIComponent(params.id)}`,
     form,

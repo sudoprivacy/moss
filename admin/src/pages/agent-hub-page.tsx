@@ -625,6 +625,7 @@ export default function AgentHubPage() {
   const [tenantEditDescription, setTenantEditDescription] = useState('')
   const [tenantEditAvatar, setTenantEditAvatar] = useState<File | null>(null)
   const [tenantEditAvatarUrl, setTenantEditAvatarUrl] = useState('')
+  const [tenantEditRemoveAvatar, setTenantEditRemoveAvatar] = useState(false)
   const [tenantEditDefaultInitPrompt, setTenantEditDefaultInitPrompt] = useState('')
   const [tenantEditCategories, setTenantEditCategories] = useState<string[]>([])
   const [tenantEditPromptExamples, setTenantEditPromptExamples] = useState<string[]>([])
@@ -1527,6 +1528,7 @@ export default function AgentHubPage() {
     setTenantEditDescription(assistant.description || '')
     setTenantEditAvatar(null)
     setTenantEditAvatarUrl(assistant.avatar || '')
+    setTenantEditRemoveAvatar(false)
     setTenantEditDefaultInitPrompt(assistant.default_init_prompt || '')
     setTenantEditCategories(assistant.categories || [])
     setTenantEditPromptExamples(assistant.prompts_i18n?.['zh-CN'] || [])
@@ -1664,6 +1666,7 @@ export default function AgentHubPage() {
         promptsI18n: { 'zh-CN': tenantEditPromptExamples.map(value => value.trim()).filter(Boolean) },
         categories: tenantEditCategories.map(value => value.trim()).filter(Boolean),
         avatar: tenantEditAvatar,
+        removeAvatar: tenantEditRemoveAvatar,
         emoji: tenantEditEmoji,
         ...(tenantEditRulesEditable && !tenantEditRulesLoadFailed
           ? { rules: tenantEditRules }
@@ -1687,7 +1690,7 @@ export default function AgentHubPage() {
     } finally {
       setSavingTenantEdit(false)
     }
-  }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditCategories, tenantEditDefaultInitPrompt, tenantEditEmoji, tenantEditPromptExamples, tenantEditRules,
+  }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditRemoveAvatar, tenantEditCategories, tenantEditDefaultInitPrompt, tenantEditEmoji, tenantEditPromptExamples, tenantEditRules,
       tenantEditRulesEditable, tenantEditRulesLoadFailed,
       tenantEditAgentType, tenantEditMemoryMode, tenantEditVisibilityMode, tenantEditVisibleTo,
       tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
@@ -4545,13 +4548,30 @@ export default function AgentHubPage() {
 
               <div className="space-y-2">
                 <label className="text-sm font-medium">头像</label>
-                {tenantEditAvatarUrl && !tenantEditAvatar && (
+                {tenantEditAvatarUrl && !tenantEditAvatar && !tenantEditRemoveAvatar && (
                   <img src={tenantEditAvatarUrl} alt="当前头像" className="size-12 rounded object-cover" />
+                )}
+                {tenantEditAvatarUrl && !tenantEditAvatar && !tenantEditRemoveAvatar && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setTenantEditAvatar(null)
+                      setTenantEditAvatarUrl('')
+                      setTenantEditRemoveAvatar(true)
+                    }}
+                  >
+                    移除头像
+                  </Button>
                 )}
                 <Input
                   type="file"
                   accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml"
-                  onChange={event => setTenantEditAvatar(event.target.files?.[0] || null)}
+                  onChange={event => {
+                    setTenantEditAvatar(event.target.files?.[0] || null)
+                    if (event.target.files?.[0]) setTenantEditRemoveAvatar(false)
+                  }}
                 />
               </div>
 
