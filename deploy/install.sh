@@ -128,7 +128,6 @@ if [ -z "$DOCKER_VERSION" ] || [ "${DOCKER_MAJOR:-0}" -lt 20 ] \
   die "Docker daemon 20.10 or newer is required; found ${DOCKER_VERSION:-unknown}"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
@@ -137,6 +136,9 @@ SERVER_ARCHIVE="moss-server-$VERSION-linux-$ARCH.tar.gz"
 RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
 
 if [ "$OFFLINE" = 1 ]; then
+  SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+  [ -n "$SCRIPT_PATH" ] || die "--offline must be run from the unpacked install.sh file"
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
   SOURCE_DIR="$SCRIPT_DIR"
   [ -f "$SOURCE_DIR/$SERVER_ARCHIVE" ] || die "missing offline asset: $SERVER_ARCHIVE"
   [ -f "$SOURCE_DIR/$RUNTIME_ARCHIVE" ] || die "missing offline asset: $RUNTIME_ARCHIVE"
@@ -324,6 +326,7 @@ fi
 
 ENV_PATH="$INSTALL_DIR/moss-server.env"
 cat > "$ENV_PATH" <<EOF
+HOME=$INSTALL_DIR
 MOSS_SERVER_CONFIG=$INSTALL_DIR/server.json
 MOSS_HOME=$INSTALL_DIR/.moss
 MOSS_MODELS_DIR=$INSTALL_DIR/current/app/models
