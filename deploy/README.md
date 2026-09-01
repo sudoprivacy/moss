@@ -1,148 +1,127 @@
-# Moss 部署说明
+# Moss Server 部署
 
-## 环境要求
+Moss Server 在 Linux 宿主机上使用安装包自带的 Node.js 22 运行，用户会话在
+Docker Runtime 镜像中运行。安装不依赖系统 Node.js 或 Docker Compose。
 
-- Docker 20.10+
-- Docker Compose 2.0+
-- Linux x64 或 Linux ARM64 操作系统。DGX Spark 使用 ARM64 部署包。
+## 系统要求
 
-## 快速开始
+- Linux x86_64 或 ARM64
+- glibc 2.35+（Ubuntu 22.04 或同等级新版本 Linux）
+- systemd
+- Docker 20.10+，且 Docker daemon 已启动
+- root 权限
+- `tar`、`gzip`、`sha256sum` 和 `curl`
 
-### 1. 解压部署包
+Nexus 使用 `https://github.com/nexi-lab/nexus` 发布的官方
+`nexusd-cluster` 二进制，不在 Moss CI 中重新编译。该二进制及宿主原生依赖以
+Ubuntu 22.04 为最低验证基线；Ubuntu 20.04 和 CentOS 7 会在安装器写入文件或
+加载镜像前被拒绝。
 
-```bash
-tar -xzf moss-deploy-*.tar.gz
-cd moss
-```
+## 在线安装
 
-### 2. 修改配置
-
-编辑 `server.json` 文件，修改以下配置：
-
-```json
-{
-  "server": {
-    "advertisedHost": "YOUR_SERVER_IP"  // 修改为服务器公网 IP 或域名
-  }
-}
-```
-
-> **注意**: `dockerImage` 配置会在打包时自动更新为正确的镜像 tag，无需手动修改。
-
-### 3. 设置环境变量（可选）
+每个服务端版本使用独立的 `server-v*` Release。版本固定的安装命令为：
 
 ```bash
-# API Key（必须设置）
-export ANTHROPIC_API_KEY="your-api-key"
-
-# API Base URL（可选，默认使用 sudorouter）
-export ANTHROPIC_BASE_URL="https://hk.sudorouter.ai/v1"
-
-# 服务端口（可选，默认 43127）
-export MOSS_PORT="43127"
-
-# Cabin AI token 签名密钥（生产必须修改）
-export CABIN_TOKEN_SECRET="a-long-random-secret"
-
-# 客舱平板当前乘客信息接口（按实际后台服务地址调整）
-export CABIN_PASSENGER_INFO_URL="http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current"
-export CABIN_PASSENGER_INFO_AUTH="test1"
-
-# DGX 本机 AI 服务地址（按实际 docker compose 服务名调整）
-export CABIN_ASR_URL="http://asr-proxy:8002/v1/audio/transcriptions"
-export CABIN_TTS_URL="http://qwen3-tts:8004/v1/audio/speech"
-export CABIN_LLM_BASE_URL="http://vllm-qwen-llm:8000/v1"
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.0/install.sh | sudo bash
 ```
 
-### 4. 启动服务
+安装器会提示安装目录、端口、对外地址、管理员账号密码及可选 API 配置。默认
+目录是 `/opt/moss`，默认端口是 `43127`。
+
+也可以使用环境变量进行非交互安装：
 
 ```bash
-chmod +x start.sh shutdown.sh
-./start.sh
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.0/install.sh \
+  | sudo MOSS_NON_INTERACTIVE=1 \
+      MOSS_INSTALL_DIR=/data/moss \
+      MOSS_ADVERTISED_HOST=10.0.1.133 \
+      MOSS_ADMIN_PASSWORD='replace-me' \
+      bash
 ```
 
-### 5. 验证服务
+支持的变量包括 `MOSS_INSTALL_DIR`、`MOSS_PORT`、`MOSS_ADVERTISED_HOST`、
+`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`MOSS_DOWNLOAD_BASE`、
+`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY`。如果服务器不能访问 GitHub
+Release 大文件域名，可将
+Release 资产同步到同一个 HTTP 目录，并通过 `MOSS_DOWNLOAD_BASE` 指定镜像：
 
 ```bash
-# 检查容器状态
-docker ps | grep moss-server
-
-# 查看日志
-docker logs -f moss-server
-
-# 访问服务
-curl http://localhost:43127/healthz
+curl -fsSL https://mirror.example.com/moss/server-v0.1.0/install.sh \
+  | sudo MOSS_DOWNLOAD_BASE=https://mirror.example.com/moss/server-v0.1.0 \
+      bash
 ```
 
-## 停止服务
+镜像下载仍会使用 Release 内的 `SHA256SUMS` 校验 server 和 Runtime 包。
+
+## 离线安装
+
+在有网络的机器下载与目标架构对应的离线包并传到服务器：
 
 ```bash
-./shutdown.sh
+tar -xzf moss-offline-0.1.0-linux-amd64.tar.gz
+cd moss-offline
+sudo ./install.sh --offline
 ```
 
-## 配置说明
+离线包内已经包含宿主 server 包、Docker Runtime 镜像、安装器和 SHA-256
+校验文件。安装过程不会访问网络。
 
-### server.json 关键配置
+## 目录与服务
 
-| 配置项 | 说明 | 是否需要修改 |
-|--------|------|--------------|
-| `server.host` | 监听地址，默认 `0.0.0.0` | 否 |
-| `server.port` | 服务端口，默认 `43127` | 否（通过 MOSS_PORT 环境变量修改） |
-| `server.advertisedHost` | 对外通告地址 | **是**，改为服务器 IP |
-| `bootstrapAdmin.username` | 管理员用户名 | 可选 |
-| `bootstrapAdmin.password` | 管理员密码 | **建议修改** |
-| `runtimeDefaults.dockerImage` | 会话容器镜像 | 否（自动匹配） |
-| `runtimeDefaults.scodePath` | scode 路径 | 否 |
-| `storage.rootDir` | 数据存储目录 | 否 |
+默认目录结构：
 
-### docker-compose.yml 环境变量
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `MOSS_IMAGE_TAG` | 镜像 tag | 从镜像文件名自动提取 |
-| `MOSS_PORT` | 服务端口 | 43127 |
-| `ANTHROPIC_API_KEY` | API Key | 无（必须设置） |
-| `ANTHROPIC_BASE_URL` | API Base URL | https://hk.sudorouter.ai/v1 |
-| `CABIN_TOKEN_SECRET` | Cabin 会话 token 签名密钥 | CHANGE_ME_LONG_RANDOM_TOKEN_SECRET |
-| `CABIN_PASSENGER_INFO_URL` | 客舱平板当前乘客信息接口 | http://cabin-admin-api:18081/admin-api/cabin/tablet-passenger-info/current |
-| `CABIN_PASSENGER_INFO_AUTH` | 调用乘客信息接口时透传的 Authorization | CHANGE_ME_ADMIN_API_AUTH |
-| `CABIN_ASR_URL` | ASR 服务 OpenAI 兼容接口 | http://asr-proxy:8002/v1/audio/transcriptions |
-| `CABIN_TTS_URL` | TTS 服务 OpenAI 兼容接口 | http://qwen3-tts:8004/v1/audio/speech |
-| `CABIN_LLM_BASE_URL` | LLM OpenAI 兼容接口 base URL | http://vllm-qwen-llm:8000/v1 |
-
-## 目录结构
-
-```
-moss/
-├── my-moss-runtime-*.tar.gz  # 会话容器镜像
-├── my-moss-server-*.tar.gz   # 主服务镜像
-├── server.json               # 服务配置
-├── docker-compose.yml        # Docker Compose 配置
-├── start.sh                  # 启动脚本
-├── shutdown.sh               # 关闭脚本
-├── README.md                 # 本说明文件
-├── data/                     # 数据目录（启动后自动创建）
-│   ├── moss.db              # SQLite 数据库
-│   ├── transcripts/         # 会话记录
-│   └── runtime/             # 运行时数据
-└── logs/                     # 日志目录（启动后自动创建）
+```text
+/opt/moss/
+  current -> releases/server-v0.1.0
+  releases/server-v0.1.0/   # Node 22、moss-server.mjs 和运行依赖
+  data/                      # SQLite、transcript 和 session runtime 数据
+  .moss/                     # 设置、技能、assistant 和 Nexus 数据
+  server.json
+  moss-server.env
+  start.sh
+  stop.sh
+  status.sh
+  uninstall.sh
 ```
 
-## 常见问题
+常用操作：
 
-### Q: 启动失败，提示镜像加载错误
+```bash
+sudo /opt/moss/status.sh
+sudo /opt/moss/stop.sh
+sudo /opt/moss/start.sh
+journalctl -u moss-server.service -f
+curl http://127.0.0.1:43127/healthz
+```
 
-确保 Docker 有足够的磁盘空间，且镜像文件完整。
+访问 `http://SERVER:43127/admin/`，使用安装阶段设置的管理员账号登录。
 
-### Q: 会话容器无法启动
+## 升级、回滚与卸载
 
-检查 `my-moss-runtime-*.tar.gz` 是否存在，且 tag 与 `server.json` 中的配置匹配。
+执行新版本安装命令即可原地升级。安装器保留 `data`、`.moss` 和配置，切换
+`current` 后等待健康检查；新版本无法启动时自动恢复原版本。
 
-### Q: 无法连接 API
+普通卸载保留数据和配置：
 
-检查 `ANTHROPIC_API_KEY` 是否正确设置，网络是否能访问 API Base URL。
+```bash
+sudo /opt/moss/uninstall.sh
+```
 
-## 技术支持
+明确删除全部 Moss 数据：
 
-- GitHub: https://github.com/sudoprivacy/moss
-- Issues: https://github.com/sudoprivacy/moss/issues
+```bash
+sudo /opt/moss/uninstall.sh --purge
+```
+
+`--purge` 不会删除不属于 Moss 的目录、容器或 Docker 镜像。
+
+## Release 资产
+
+每个 `server-vX.Y.Z` Release 包含两个架构的以下文件：
+
+- `moss-server-X.Y.Z-linux-ARCH.tar.gz`：宿主服务和内置 Node.js。
+- `moss-runtime-X.Y.Z-linux-ARCH.tar.gz`：通过 `docker load` 加载的会话镜像。
+- `moss-offline-X.Y.Z-linux-ARCH.tar.gz`：上述两项和安装器的离线组合包。
+- `install.sh` 与 `SHA256SUMS`。
+
+应用内部版本与部署通道版本相互独立；首个部署通道版本是 `server-v0.1.0`。

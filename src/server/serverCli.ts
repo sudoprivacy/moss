@@ -4,8 +4,10 @@ import { startStandaloneDirectConnectServer } from './startStandaloneServer.js'
 async function main(): Promise<void> {
   const { configPath, config } = await readServerConfig()
 
-  process.stderr.write(`\n[ServerCli] DEBUG: Parsed Configuration:\n`)
-  process.stderr.write(`${JSON.stringify(config, null, 2)}\n\n`)
+  // server.json can contain bootstrap credentials and integration secrets.
+  // Log only its location; dumping the parsed object leaks those values into
+  // journald in host deployments.
+  process.stderr.write(`\n[ServerCli] Configuration: ${configPath}\n`)
 
   const running = await startStandaloneDirectConnectServer(config)
 
@@ -15,12 +17,6 @@ async function main(): Promise<void> {
   }
   if (running.bootstrapAdminEmail) {
     process.stderr.write(`Bootstrap admin email: ${running.bootstrapAdminEmail}\n`)
-  }
-  if (running.bootstrapAdminPassword) {
-    process.stderr.write(`Bootstrap admin password: ${running.bootstrapAdminPassword}\n`)
-  }
-  if (running.bootstrapAdminApiKey) {
-    process.stderr.write(`Bootstrap admin API key: ${running.bootstrapAdminApiKey}\n`)
   }
 
   const shutdown = async () => {
