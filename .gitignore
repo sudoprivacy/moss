@@ -20,3 +20,4 @@ tests/
 
 # Staged sudocode clone for deploy/server.Dockerfile.local (see build-server-local.sh)
 .sudocode-build-context/
+.nexus-build-context/

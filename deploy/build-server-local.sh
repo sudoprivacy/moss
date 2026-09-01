@@ -64,7 +64,7 @@ git -C "$SUDOCODE_DIR" archive --format=tar "$SUDOCODE_REF" | tar -x -C "$STAGE_
 #    are not retriable inside the Dockerfile, and a flaky proxy can drop them
 #    (registry EOF). Pulling them first into the local cache makes the build
 #    resilient to transient registry failures.
-BASE_IMAGES=(oven/bun:1 golang:1.22-alpine rust:1-slim-bookworm debian:bookworm-slim node:22-trixie-slim)
+BASE_IMAGES=(oven/bun:1 golang:1.22-alpine ubuntu:20.04 debian:bookworm-slim node:22-trixie-slim)
 for img in "${BASE_IMAGES[@]}"; do
   for attempt in 1 2 3 4 5; do
     if docker pull --platform "$BUILD_PLATFORM" "$img" >/dev/null 2>&1; then

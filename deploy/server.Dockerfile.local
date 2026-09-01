@@ -177,7 +177,7 @@ RUN set -e; \
 # Use Debian trixie (glibc 2.41) rather than bookworm (glibc 2.36): current
 # scode releases (v0.1.10+) are linked against GLIBC_2.39 and fail to run on
 # bookworm with "version `GLIBC_2.39' not found". Node 22 line is unchanged.
-FROM node:22-trixie-slim
+FROM node:22-trixie-slim AS server-runtime
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
@@ -353,6 +353,30 @@ COPY deploy/runtime-deps.package.json package.json
 RUN npm install --omit=dev --no-audit --no-fund \
     && node -e "Promise.all([import('@xenova/transformers'), import('sharp')]).then(() => console.log('runtime deps ok'))"
 
+# Upstream nexusd-cluster 0.1.1 Linux releases are built on Ubuntu 22.04 and
+# require glibc 2.34. Rebuild the exact tagged source on our Ubuntu 20.04 floor
+# so the host package works on glibc 2.31 without changing the Nexus version.
+FROM ubuntu:20.04 AS host-nexus-builder
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl git pkg-config protobuf-compiler python3 python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH \
+    CARGO_NET_RETRY=10 \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_HTTP_MULTIPLEXING=false
+WORKDIR /src
+COPY .nexus-build-context ./
+RUN for attempt in 1 2 3; do \
+      cargo build --locked --release -p nexusd --bin nexusd-cluster && break; \
+      test "$attempt" -lt 3 || exit 1; \
+      sleep 10; \
+    done \
+    && cp target/release/nexusd-cluster /out-nexusd \
+    && /out-nexusd --version
+
 FROM ubuntu:20.04 AS host-package
 ARG RELEASE_VERSION
 RUN apt-get update \
@@ -367,7 +391,7 @@ COPY --from=js-builder /src/skills ./app/skills
 COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/index.d.ts ./app/native/nexus-napi/
 COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./app/native/nexus-napi/
 COPY --from=go-builder /out/wiki /out/corpapp ./app/bin/
-COPY --from=nexus-dl /out/bin/nexus/nexusd ./app/bin/nexus/nexusd
+COPY --from=host-nexus-builder /out-nexusd ./app/bin/nexus/nexusd
 COPY --from=host-runtime-deps /deps/node_modules ./app/node_modules
 COPY --from=model-stage /m/out/Xenova ./app/models/Xenova
 COPY deploy/server.json ./server.json.template
@@ -379,3 +403,7 @@ RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd \
 
 FROM scratch AS host-export
 COPY --from=host-package /out/ /
+
+# Preserve the historical default: a build without --target still produces the
+# fully self-contained server container image.
+FROM server-runtime AS server-image
