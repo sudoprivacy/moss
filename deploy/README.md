@@ -23,13 +23,14 @@ Server 是仓库唯一发布产品。Release CI 会将每个 `server-v*` Release
 GitHub Latest，日常安装和升级使用以下固定命令，URL 不随版本变化：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh | sudo bash
+curl -fL --progress-bar https://github.com/sudoprivacy/moss/releases/latest/download/install.sh | sudo bash
 ```
 
 每个服务端版本仍保留独立的 `server-v*` Release，锁定版本或回滚时可以使用：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.3/install.sh | sudo bash
+curl -fL --progress-bar https://github.com/sudoprivacy/moss/releases/download/server-v0.1.4/install.sh \
+  | sudo env MOSS_ALLOW_OLD_VERSION=1 bash
 ```
 
 安装器会提示安装目录、端口、对外地址、管理员账号密码及可选 API 配置。默认
@@ -45,7 +46,7 @@ systemd 单元的写入仍需要 root 权限。
 也可以使用环境变量进行非交互安装：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh \
+curl -fL --progress-bar https://github.com/sudoprivacy/moss/releases/latest/download/install.sh \
   | sudo MOSS_NON_INTERACTIVE=1 \
       MOSS_INSTALL_DIR=/data/moss \
       MOSS_ADVERTISED_HOST=10.0.1.133 \
@@ -55,24 +56,29 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.
 
 支持的变量包括 `MOSS_INSTALL_USER`、`MOSS_INSTALL_DIR`、`MOSS_PORT`、
 `MOSS_ADVERTISED_HOST`、`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`MOSS_DOWNLOAD_BASE`、
-`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY`。如果服务器不能访问 GitHub
+`MOSS_ALLOW_OLD_VERSION`、`MOSS_REQUIRE_LATEST`、`ANTHROPIC_BASE_URL` 和
+`ANTHROPIC_API_KEY`。如果服务器不能访问 GitHub
 Release 大文件域名，可将
 Release 资产同步到同一个 HTTP 目录，并通过 `MOSS_DOWNLOAD_BASE` 指定镜像。
 例如使用固定的 GitHub 代理入口：
 
 ```bash
 BASE=https://ghfast.top/https://github.com/sudoprivacy/moss/releases/latest/download
-curl -fsSL "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
+curl -fL --progress-bar "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
 ```
 
-镜像下载仍会使用 Release 内的 `SHA256SUMS` 校验 server 和 Runtime 包。
+安装器先通过 GitHub Latest 的重定向确认脚本版本。镜像未同步 Latest 时会在下载
+大文件前中止；随后检查镜像的 `SHA256SUMS` 是否包含当前版本和架构的 server、
+Runtime 包，并在下载后校验内容。GitHub Latest 元数据不可达时默认告警并继续，
+设置 `MOSS_REQUIRE_LATEST=1` 可改为直接失败。只有明确锁定旧版本或回滚时才应设置
+`MOSS_ALLOW_OLD_VERSION=1`。
 
 ## 离线安装
 
 在有网络的机器下载与目标架构对应的离线包并传到服务器：
 
 ```bash
-tar -xzf moss-offline-0.1.3-linux-amd64.tar.gz
+tar -xzf moss-offline-0.1.4-linux-amd64.tar.gz
 cd moss-offline
 sudo ./install.sh --offline
 ```
@@ -86,8 +92,8 @@ sudo ./install.sh --offline
 
 ```text
 ~/.moss/server/
-  current -> releases/server-v0.1.3
-  releases/server-v0.1.3/   # Node 22、moss-server.mjs 和运行依赖
+  current -> releases/server-v0.1.4
+  releases/server-v0.1.4/   # Node 22、moss-server.mjs 和运行依赖
   data/                      # SQLite、transcript 和 session runtime 数据
   .moss/                     # 设置、技能、assistant 和 Nexus 数据
   server.json
@@ -138,5 +144,5 @@ sudo ~/.moss/server/uninstall.sh --purge
 - `moss-offline-X.Y.Z-linux-ARCH.tar.gz`：上述两项和安装器的离线组合包。
 - `install.sh` 与 `SHA256SUMS`。
 
-应用内部版本与部署通道版本相互独立；GitHub Latest 当前为
-`server-v0.1.3`，后续版本发布时由 CI 自动更新。
+应用内部版本与部署通道版本相互独立；发布 `server-v*` tag 时，CI 会将该版本自动
+更新为 GitHub Latest。

@@ -11,6 +11,7 @@ NON_INTERACTIVE="${MOSS_NON_INTERACTIVE:-0}"
 INSTALL_DIR="${MOSS_INSTALL_DIR:-}"
 
 log() { printf '[moss-install] %s\n' "$*"; }
+warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[moss-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -26,7 +27,7 @@ Options:
 Configuration environment variables:
   MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
   MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, ANTHROPIC_BASE_URL,
-  ANTHROPIC_API_KEY.
+  ANTHROPIC_API_KEY, MOSS_ALLOW_OLD_VERSION, MOSS_REQUIRE_LATEST.
 EOF
 }
 
@@ -199,11 +200,57 @@ else
   mkdir -p "$SOURCE_DIR"
   DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG}"
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
-  log "Downloading $SERVER_ARCHIVE"
-  curl -fL --retry 3 --connect-timeout 20 -o "$SOURCE_DIR/$SERVER_ARCHIVE" "$DOWNLOAD_BASE/$SERVER_ARCHIVE"
-  log "Downloading $RUNTIME_ARCHIVE"
-  curl -fL --retry 3 --connect-timeout 20 -o "$SOURCE_DIR/$RUNTIME_ARCHIVE" "$DOWNLOAD_BASE/$RUNTIME_ARCHIVE"
-  curl -fL --retry 3 --connect-timeout 20 -o "$SOURCE_DIR/SHA256SUMS" "$DOWNLOAD_BASE/SHA256SUMS"
+
+  if [ "${MOSS_ALLOW_OLD_VERSION:-0}" = 1 ]; then
+    warn "Latest release check skipped for intentional version install: $RELEASE_TAG"
+  else
+    log "Checking GitHub Latest release"
+    LATEST_RELEASE_TAG="$(curl -fsS --retry 1 --connect-timeout 8 --max-time 20 \
+      -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/$REPOSITORY/releases/latest" 2>/dev/null \
+      | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+      | head -n 1 || true)"
+    if [ -z "$LATEST_RELEASE_TAG" ]; then
+      LATEST_RELEASE_URL="$(curl -fsS --retry 1 --connect-timeout 8 --max-time 20 \
+        -o /dev/null -w '%{redirect_url}' "https://github.com/$REPOSITORY/releases/latest" \
+        2>/dev/null || true)"
+      case "$LATEST_RELEASE_URL" in
+        */releases/tag/server-v*) LATEST_RELEASE_TAG="${LATEST_RELEASE_URL##*/}" ;;
+        *) LATEST_RELEASE_TAG='' ;;
+      esac
+    fi
+    case "$LATEST_RELEASE_TAG" in
+      server-v*) ;;
+      *) LATEST_RELEASE_TAG='' ;;
+    esac
+    if [ -z "$LATEST_RELEASE_TAG" ]; then
+      if [ "${MOSS_REQUIRE_LATEST:-0}" = 1 ]; then
+        die "could not determine GitHub Latest; refusing to install because MOSS_REQUIRE_LATEST=1"
+      fi
+      warn "Could not determine GitHub Latest; continuing with $RELEASE_TAG and checksum verification"
+    elif [ "$LATEST_RELEASE_TAG" != "$RELEASE_TAG" ]; then
+      die "download source has $RELEASE_TAG but GitHub Latest is $LATEST_RELEASE_TAG; the mirror may not be synchronized (set MOSS_ALLOW_OLD_VERSION=1 only for an intentional version install)"
+    else
+      log "Release source is current: $RELEASE_TAG"
+    fi
+  fi
+
+  download_asset() {
+    local step="$1" filename="$2"
+    log "Downloading [$step/3] $filename"
+    curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
+      -o "$SOURCE_DIR/$filename" "$DOWNLOAD_BASE/$filename"
+  }
+
+  download_asset 1 SHA256SUMS
+  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+    if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
+      "$SOURCE_DIR/SHA256SUMS"; then
+      die "checksum manifest does not contain $archive; the mirror may not be synchronized"
+    fi
+  done
+  download_asset 2 "$SERVER_ARCHIVE"
+  download_asset 3 "$RUNTIME_ARCHIVE"
 fi
 
 verify_asset() {

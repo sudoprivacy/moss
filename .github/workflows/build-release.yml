@@ -74,6 +74,8 @@ jobs:
           chmod +x deploy/install.sh deploy/package-server.sh
           help_output="$(MOSS_RELEASE_TAG=server-vtest bash -s -- --help < deploy/install.sh 2>&1)"
           grep -Fq 'Usage: install.sh' <<< "$help_output"
+          grep -Fq 'MOSS_ALLOW_OLD_VERSION' <<< "$help_output"
+          grep -Fq 'MOSS_REQUIRE_LATEST' <<< "$help_output"
           ! grep -Fq 'unbound variable' <<< "$help_output"
           offline_output="$(sudo env SUDO_USER="$USER" MOSS_RELEASE_TAG=server-vtest MOSS_NON_INTERACTIVE=1 \
             bash -s -- --offline < deploy/install.sh 2>&1 || true)"
@@ -139,6 +141,8 @@ jobs:
           ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
           EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "server-v$VERSION")"
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh
+          grep -Fq 'Checking GitHub Latest release' dist/install.sh
+          grep -Fq -- '--progress-bar' dist/install.sh
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5

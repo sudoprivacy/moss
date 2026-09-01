@@ -27,7 +27,7 @@ Docker Runtime 中运行 `scode`。
 固定安装入口使用 GitHub 标准 Latest Release，URL 不随版本变化：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh | sudo bash
+curl -fL --progress-bar https://github.com/sudoprivacy/moss/releases/latest/download/install.sh | sudo bash
 ```
 
 安装器会提示安装目录、对外地址、管理员账号、密码及可选模型 API 配置。通过
@@ -38,7 +38,7 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.
 非交互安装：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh \
+curl -fL --progress-bar https://github.com/sudoprivacy/moss/releases/latest/download/install.sh \
   | sudo env MOSS_NON_INTERACTIVE=1 \
       MOSS_ADVERTISED_HOST=10.0.1.206 \
       MOSS_ADMIN_USERNAME=admin \
@@ -53,13 +53,19 @@ GitHub Release 大文件访问受限时，可以使用同样固定的镜像入�
 
 ```bash
 BASE=https://ghfast.top/https://github.com/sudoprivacy/moss/releases/latest/download
-curl -fsSL "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
+curl -fL --progress-bar "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
 ```
+
+安装器会在下载大文件前确认脚本版本与 GitHub Latest 一致，并检查镜像中的
+`SHA256SUMS` 是否包含当前架构的完整资产；下载完成后还会验证文件校验和。镜像
+尚未同步时安装会中止。GitHub Latest 元数据不可达时默认告警后继续，可增加
+`MOSS_REQUIRE_LATEST=1` 要求无法确认时也中止。
 
 需要锁定版本或回滚时使用版本 URL：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.3/install.sh | sudo bash
+curl -fL --progress-bar https://github.com/sudoprivacy/moss/releases/download/server-v0.1.4/install.sh \
+  | sudo env MOSS_ALLOW_OLD_VERSION=1 bash
 ```
 
 ## 离线安装
@@ -67,8 +73,8 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.3/i
 下载与目标机器架构一致的离线包：
 
 ```bash
-curl -fLO https://github.com/sudoprivacy/moss/releases/latest/download/moss-offline-0.1.3-linux-amd64.tar.gz
-tar -xzf moss-offline-0.1.3-linux-amd64.tar.gz
+curl -fLO https://github.com/sudoprivacy/moss/releases/latest/download/moss-offline-0.1.4-linux-amd64.tar.gz
+tar -xzf moss-offline-0.1.4-linux-amd64.tar.gz
 cd moss-offline
 sudo ./install.sh --offline
 ```
