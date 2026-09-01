@@ -19,10 +19,17 @@ Ubuntu 22.04 为最低验证基线；Ubuntu 20.04 和 CentOS 7 会在安装器�
 
 ## 在线安装
 
-每个服务端版本使用独立的 `server-v*` Release。版本固定的安装命令为：
+Server 是仓库唯一发布产品。Release CI 会将每个 `server-v*` Release 标记为
+GitHub Latest，日常安装和升级使用以下固定命令，URL 不随版本变化：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh | sudo bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh | sudo bash
+```
+
+每个服务端版本仍保留独立的 `server-v*` Release，锁定版本或回滚时可以使用：
+
+```bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.3/install.sh | sudo bash
 ```
 
 安装器会提示安装目录、端口、对外地址、管理员账号密码及可选 API 配置。默认
@@ -38,7 +45,7 @@ systemd 单元的写入仍需要 root 权限。
 也可以使用环境变量进行非交互安装：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh \
+curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh \
   | sudo MOSS_NON_INTERACTIVE=1 \
       MOSS_INSTALL_DIR=/data/moss \
       MOSS_ADVERTISED_HOST=10.0.1.133 \
@@ -50,12 +57,12 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/i
 `MOSS_ADVERTISED_HOST`、`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`MOSS_DOWNLOAD_BASE`、
 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY`。如果服务器不能访问 GitHub
 Release 大文件域名，可将
-Release 资产同步到同一个 HTTP 目录，并通过 `MOSS_DOWNLOAD_BASE` 指定镜像：
+Release 资产同步到同一个 HTTP 目录，并通过 `MOSS_DOWNLOAD_BASE` 指定镜像。
+例如使用固定的 GitHub 代理入口：
 
 ```bash
-curl -fsSL https://mirror.example.com/moss/server-v0.1.2/install.sh \
-  | sudo MOSS_DOWNLOAD_BASE=https://mirror.example.com/moss/server-v0.1.2 \
-      bash
+BASE=https://ghfast.top/https://github.com/sudoprivacy/moss/releases/latest/download
+curl -fsSL "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
 ```
 
 镜像下载仍会使用 Release 内的 `SHA256SUMS` 校验 server 和 Runtime 包。
@@ -65,7 +72,7 @@ curl -fsSL https://mirror.example.com/moss/server-v0.1.2/install.sh \
 在有网络的机器下载与目标架构对应的离线包并传到服务器：
 
 ```bash
-tar -xzf moss-offline-0.1.2-linux-amd64.tar.gz
+tar -xzf moss-offline-0.1.3-linux-amd64.tar.gz
 cd moss-offline
 sudo ./install.sh --offline
 ```
@@ -79,8 +86,8 @@ sudo ./install.sh --offline
 
 ```text
 ~/.moss/server/
-  current -> releases/server-v0.1.2
-  releases/server-v0.1.2/   # Node 22、moss-server.mjs 和运行依赖
+  current -> releases/server-v0.1.3
+  releases/server-v0.1.3/   # Node 22、moss-server.mjs 和运行依赖
   data/                      # SQLite、transcript 和 session runtime 数据
   .moss/                     # 设置、技能、assistant 和 Nexus 数据
   server.json
@@ -131,4 +138,5 @@ sudo ~/.moss/server/uninstall.sh --purge
 - `moss-offline-X.Y.Z-linux-ARCH.tar.gz`：上述两项和安装器的离线组合包。
 - `install.sh` 与 `SHA256SUMS`。
 
-应用内部版本与部署通道版本相互独立；当前部署版本是 `server-v0.1.2`。
+应用内部版本与部署通道版本相互独立；GitHub Latest 当前为
+`server-v0.1.3`，后续版本发布时由 CI 自动更新。

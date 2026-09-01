@@ -1,33 +1,44 @@
-# Moss — AgentHub
+# Moss Server
 
-Moss 是一个多用户 AI coding agent 平台：一个 HTTP/WebSocket 服务端（`moss-server`，端口 43127）加一个 Electron 桌面客户端。每个会话运行 sudocode（`scode`）作为 agent 引擎，并提供可视化的聊天界面、工作区文件管理以及生成式 Mini App 的运行环境。
+Moss Server 是多用户 AI coding agent 服务。服务端通过 HTTP/WebSocket 提供管理、
+认证和会话接口，在 Linux 宿主机运行编译后的 `moss-server.mjs`；每个用户会话在
+Docker Runtime 中运行 `scode`。
 
 ## 文档
 
 - [Moss Server API](src/server/API.md)
-- [Moss Server 部署说明](deploy/README.md)
-- [Moss Server v0.1.2 Release](https://github.com/sudoprivacy/moss/releases/tag/server-v0.1.2)
+- [完整部署说明](deploy/README.md)
+- [最新 Server Release](https://github.com/sudoprivacy/moss/releases/latest)
 
-## Moss Server 一键安装
+## 系统要求
 
-适用于 Linux x86_64/ARM64、glibc 2.35+、systemd 和 Docker 20.10+。安装包
-自带 Node.js 22、编译后的 `moss-server.mjs`、运行依赖和官方 Nexus；用户会话
-使用随 Release 发布的 Docker Runtime 镜像。
+- Linux x86_64 或 ARM64
+- glibc 2.35+，推荐 Ubuntu 22.04 或更新版本
+- systemd
+- Docker 20.10+，且 Docker daemon 已启动
+- root/sudo 权限
+- `curl`、`tar`、`gzip` 和 `sha256sum`
 
-交互式在线安装：
+安装包自带 Node.js 22、编译后的 `moss-server.mjs`、运行依赖和官方 Nexus，
+不依赖系统 Node.js 或 Docker Compose。
+
+## 一键安装
+
+固定安装入口使用 GitHub 标准 Latest Release，URL 不随版本变化：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh | sudo bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh | sudo bash
 ```
 
-安装器会提示对外地址、管理员账号、密码和可选模型 API 配置。通过 `sudo` 安装
-时，默认目录为发起用户的 `$HOME/.moss/server`，systemd 服务也以该用户运行；
-直接使用 root 安装时才会使用 `/root/.moss/server`。默认端口是 `43127`。
+安装器会提示安装目录、对外地址、管理员账号、密码及可选模型 API 配置。通过
+`sudo` 安装时，默认目录是发起用户的 `$HOME/.moss/server`，systemd 服务也以
+该用户运行；直接使用 root 安装时才会使用 `/root/.moss/server`。默认端口是
+`43127`。
 
-非交互安装示例：
+非交互安装：
 
 ```bash
-curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh \
+curl -fsSL https://github.com/sudoprivacy/moss/releases/latest/download/install.sh \
   | sudo env MOSS_NON_INTERACTIVE=1 \
       MOSS_ADVERTISED_HOST=10.0.1.206 \
       MOSS_ADMIN_USERNAME=admin \
@@ -35,21 +46,59 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/i
       bash
 ```
 
-需要指定其他目录时增加 `MOSS_INSTALL_DIR=/data/moss`；直接由 root 为其他用户
-安装时可以增加 `MOSS_INSTALL_USER=username`。
+指定其他目录时增加 `MOSS_INSTALL_DIR=/data/moss`；root 为其他用户安装时可以
+增加 `MOSS_INSTALL_USER=username`。
 
-离线安装：
+GitHub Release 大文件访问受限时，可以使用同样固定的镜像入口：
 
 ```bash
-curl -fLO https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/moss-offline-0.1.2-linux-amd64.tar.gz
-tar -xzf moss-offline-0.1.2-linux-amd64.tar.gz
+BASE=https://ghfast.top/https://github.com/sudoprivacy/moss/releases/latest/download
+curl -fsSL "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
+```
+
+需要锁定版本或回滚时使用版本 URL：
+
+```bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.3/install.sh | sudo bash
+```
+
+## 离线安装
+
+下载与目标机器架构一致的离线包：
+
+```bash
+curl -fLO https://github.com/sudoprivacy/moss/releases/latest/download/moss-offline-0.1.3-linux-amd64.tar.gz
+tar -xzf moss-offline-0.1.3-linux-amd64.tar.gz
 cd moss-offline
 sudo ./install.sh --offline
 ```
 
-ARM64 机器将文件名中的 `amd64` 替换为 `arm64`。
+ARM64 机器将文件名中的 `amd64` 替换为 `arm64`。离线包包含宿主 Server、
+Docker Runtime 镜像、安装器和 SHA-256 校验文件，安装过程不访问网络。
 
-常用服务命令：
+## 目录与配置
+
+默认目录结构：
+
+```text
+~/.moss/server/
+  current -> releases/server-vX.Y.Z
+  releases/server-vX.Y.Z/   # Node.js、moss-server.mjs 和运行依赖
+  data/                      # SQLite、transcript 和 session runtime 数据
+  .moss/                     # 系统设置、Skill、Assistant 和 Nexus 数据
+  server.json                # 服务、认证、存储和 Runtime 主配置
+  moss-server.env            # systemd 环境变量
+  start.sh
+  stop.sh
+  status.sh
+  uninstall.sh
+```
+
+`server.json`、`moss-server.env` 和 `.moss/settings.json` 权限为 `600`。修改
+`server.json` 后执行 `sudo systemctl restart moss-server` 生效。模型和 API Key
+也可以通过管理后台的系统设置维护。
+
+## 服务管理
 
 ```bash
 sudo systemctl status moss-server
@@ -60,101 +109,32 @@ journalctl -u moss-server -f
 curl http://127.0.0.1:43127/healthz
 ```
 
-安装完成后访问 `http://SERVER:43127/admin/`。升级时执行新版本的一键安装命令，
-安装器会保留配置和数据；完整的镜像下载、目录、回滚及卸载说明见
-[Moss Server 部署说明](deploy/README.md)。
+安装完成后访问 `http://SERVER:43127/admin/`。
 
-## 快速启动
+## 升级与卸载
 
-### 1. 构建服务端
+再次执行一键安装命令即可升级。安装器自动发现已有 systemd 服务及安装目录，
+保留配置和数据；新版本健康检查失败时会恢复上一版本。
 
-启动前先在仓库根目录构建服务端：
+保留配置和数据卸载程序：
 
 ```bash
-# 生成 bin/moss-server.mjs + bin/direct-connect-session-runner.mjs
-bun run build:node
+sudo ~/.moss/server/uninstall.sh
 ```
 
-### 2. 启动 UI
+删除程序、配置和全部运行数据：
 
 ```bash
-# 进入 ui 目录
-cd ui
+sudo ~/.moss/server/uninstall.sh --purge
+```
 
-# 安装 UI 依赖 (仅首次需要)
+## 从源码构建
+
+```bash
 bun install
-
-# 启动程序 (会自动执行 vite build 并运行 electron)
-bun run start
-```
-
-## 开发与打包
-
-### 1. 构建服务端
-
-```bash
-# 生成 bin/moss-server.mjs + bin/direct-connect-session-runner.mjs
 bun run build:node
 ```
 
-### 2. 应用打包 (EXE/DMG)
-
-确保已执行上述二进制准备步骤，然后进入 `ui` 目录执行打包命令：
-
-```bash
-cd ui
-
-# 打包 Windows (exe)
-bun run dist:win
-
-# 打包 macOS (dmg)
-bun run dist:mac
-
-# 打包所有平台
-bun run dist:all
-```
-
-生成的安装包将位于 `ui/dist/installers` 目录下。
-
-## 核心功能
-
-- **可视化 Agent 对话**：直接连接本地 Agent，支持流式输出和思考过程展示。
-- **工作区管理**：右侧面板实时展示当前工作区文件树，支持文件预览和变更监听。
-- **Mini App 生成**：支持通过自然语言描述生成单文件 HTML 应用，并提供 Host API 访问宿主能力。
-- **自动 Git 初始化**：每个新会话创建的工作区会自动执行 `git init`，方便 Agent 使用版本控制工具。
-
-## 桌面端配置文件
-
-桌面端配置存储在 `~/.moss/settings.json`。你可以手动修改该文件来配置自定义的 API 地址、模型名称或环境变量。
-
-通过一键脚本安装的服务端使用独立目录：主配置为
-`~/.moss/server/server.json`，模型与系统设置为
-`~/.moss/server/.moss/settings.json`，运行数据位于
-`~/.moss/server/data/`。这里的 `~` 指安装发起用户的 home。
-
-### 配置示例
-
-```json
-{
-  "model": "MiniMax-M2.7",
-  "bypassPermissions": true,
-  "maxTurns": 100,
-  "thinkingMode": "disabled",
-  "thinkingBudgetTokens": 16000,
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "your-api-key"
-  }
-}
-```
-
-### 参数说明
-
-- **model**: 指定使用的模型名称。
-- **bypassPermissions**: 是否跳过工具执行的权限确认（建议仅在受控环境下开启）。
-- **maxTurns**: 单次会话的最大轮数。
-- **thinkingMode**: 思考模式配置（如 `disabled`, `enabled`）。
-- **thinkingBudgetTokens**: 思考过程的 Token 预算。
-- **env**: 环境变量配置，可用于设置 `ANTHROPIC_BASE_URL` (API 中转地址) 和 `ANTHROPIC_AUTH_TOKEN` (API Key)。
-
-UI 的设置页面会以增量方式更新此文件，不会删除你手动添加的自定义 Key。
+生成文件包括 `bin/moss-server.mjs` 和
+`bin/direct-connect-session-runner.mjs`。Release CI 会分别生成 amd64/arm64
+宿主包、Docker Runtime 镜像、离线整包、`install.sh` 和 `SHA256SUMS`。
