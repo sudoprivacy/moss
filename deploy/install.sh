@@ -101,8 +101,8 @@ GLIBC_VERSION="$(ldd --version 2>&1 | head -n1 | grep -Eo '[0-9]+\.[0-9]+' | tai
 [ -n "$GLIBC_VERSION" ] || die "could not determine glibc version"
 GLIBC_MAJOR="${GLIBC_VERSION%%.*}"
 GLIBC_MINOR="${GLIBC_VERSION#*.}"
-if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 31 ]; }; then
-  die "glibc 2.31 or newer is required; found $GLIBC_VERSION"
+if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 35 ]; }; then
+  die "glibc 2.35 or newer is required (Ubuntu 22.04+); found $GLIBC_VERSION"
 fi
 
 for command_name in tar gzip sha256sum systemctl docker curl; do

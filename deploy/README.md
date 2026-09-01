@@ -6,14 +6,16 @@ Docker Runtime 镜像中运行。安装不依赖系统 Node.js 或 Docker Compos
 ## 系统要求
 
 - Linux x86_64 或 ARM64
-- glibc 2.31+
+- glibc 2.35+（Ubuntu 22.04 或同等级新版本 Linux）
 - systemd
 - Docker 20.10+，且 Docker daemon 已启动
 - root 权限
 - `tar`、`gzip`、`sha256sum` 和 `curl`
 
-Ubuntu 20.04 是当前最低验证基线。CentOS 7 的 glibc 2.17 不受支持，安装器会在
-写入文件或加载镜像前退出。
+Nexus 使用 `https://github.com/nexi-lab/nexus` 发布的官方
+`nexusd-cluster` 二进制，不在 Moss CI 中重新编译。该二进制及宿主原生依赖以
+Ubuntu 22.04 为最低验证基线；Ubuntu 20.04 和 CentOS 7 会在安装器写入文件或
+加载镜像前被拒绝。
 
 ## 在线安装
 
