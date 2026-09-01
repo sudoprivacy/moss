@@ -8,6 +8,7 @@ import {
   buildNexusArgs,
   formatNexusStartupFailure,
   parseNexusVersion,
+  resolveNexusConfigFromEnv,
 } from '../nexusManager.js'
 
 const tempDirs: string[] = []
@@ -63,6 +64,57 @@ describe('NexusManager', () => {
     const manager = new NexusManager({ nexusDir, grpcPort: address.port })
 
     await expect(manager.start()).rejects.toThrow('already in use or unavailable')
+  })
+
+  it('defaults to embedded serve-local mode when MOSS_NEXUS_MODE is unset', () => {
+    expect(resolveNexusConfigFromEnv({})).toEqual({ mode: 'embedded', grpcPort: 2126 })
+    expect(resolveNexusConfigFromEnv({ MOSS_NEXUS_GRPC_PORT: '2200' })).toEqual({
+      mode: 'embedded',
+      grpcPort: 2200,
+    })
+  })
+
+  it('resolves external mTLS config from the environment', () => {
+    expect(
+      resolveNexusConfigFromEnv({
+        MOSS_NEXUS_MODE: 'external',
+        MOSS_NEXUS_ENDPOINT: 'https://100.64.0.1:8443',
+        MOSS_NEXUS_TLS_CA: '/certs/ca.pem',
+        MOSS_NEXUS_TLS_CERT: '/certs/moss.pem',
+        MOSS_NEXUS_TLS_KEY: '/certs/moss-key.pem',
+        MOSS_NEXUS_AUTH_TOKEN: 'tok',
+      }),
+    ).toEqual({
+      mode: 'external',
+      endpoint: 'https://100.64.0.1:8443',
+      authToken: 'tok',
+      tls: { caPath: '/certs/ca.pem', certPath: '/certs/moss.pem', keyPath: '/certs/moss-key.pem', serverName: undefined },
+    })
+  })
+
+  it('rejects external mode without an endpoint', () => {
+    expect(() => resolveNexusConfigFromEnv({ MOSS_NEXUS_MODE: 'external' })).toThrow(
+      'requires MOSS_NEXUS_ENDPOINT',
+    )
+  })
+
+  it('rejects partial mTLS material', () => {
+    expect(() =>
+      resolveNexusConfigFromEnv({
+        MOSS_NEXUS_MODE: 'external',
+        MOSS_NEXUS_ENDPOINT: 'https://127.0.0.1:8443',
+        MOSS_NEXUS_TLS_CA: '/certs/ca.pem',
+      }),
+    ).toThrow('requires all of MOSS_NEXUS_TLS_CA, MOSS_NEXUS_TLS_CERT, MOSS_NEXUS_TLS_KEY')
+  })
+
+  it('rejects an https endpoint without client certs', () => {
+    expect(() =>
+      resolveNexusConfigFromEnv({
+        MOSS_NEXUS_MODE: 'external',
+        MOSS_NEXUS_ENDPOINT: 'https://127.0.0.1:8443',
+      }),
+    ).toThrow('no client certs were provided')
   })
 
   it('includes exit code, signal, pid, and stderr in startup failures', () => {

@@ -9,7 +9,12 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3", features = ["napi9"] }
 napi-derive = "3"
-nexus-vfs-client = { git = "https://github.com/sudoprivacy/sudocode", rev = "0686ed9b" }
+# Bumped 0686ed9b -> 1463842f to pick up `NexusVfsClient::connect_tls` (mTLS:
+# ClientTlsConfig + ca_certificate + client identity), needed to reach the
+# auth-on production `nexusd-cluster`. This is the same rev the nexus repo
+# itself consumes, so moss's client no longer skews from the cluster. The
+# plaintext `connect` + read/write/delete/call API is unchanged at this rev.
+nexus-vfs-client = { git = "https://github.com/sudoprivacy/sudocode", rev = "1463842f" }
 
 [build-dependencies]
 napi-build = "2"
