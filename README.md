@@ -79,11 +79,11 @@ sudo ~/.moss/server/uninstall.sh --purge
 ```
 
 升级不需要重新配置，只替换 Server 程序和 Runtime 镜像；管理员、API 配置和运行
-数据保持不变，启动失败会自动回滚。同版本仅检查最新版安装脚本，不下载 Server 包
-和 Runtime 镜像，也不重启服务。
+数据保持不变，启动失败会自动回滚。安装目录内的升级脚本只获取小型最新版脚本确认
+版本，同版本不下载 Server 包和 Runtime 镜像，也不重启服务。
 
 在线安装的原始包保留在 `~/.moss/server/packages/server-vX.Y.Z/`。重复执行同版本
-`install.sh` 会直接退出，不重新下载，也不重启服务。
+的外部 `install.sh`（包括 `--upgrade`）会直接退出，不联网、不重启服务。
 
 更多参数和目录说明见 [部署文档](deploy/README.md)，接口见
 [Moss Server API](src/server/API.md)。

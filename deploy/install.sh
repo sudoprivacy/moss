@@ -251,6 +251,34 @@ fi
 log "Service user: $INSTALL_USER"
 log "Install directory: $INSTALL_DIR"
 
+INSTALLED_RELEASE_DIR="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
+INSTALLED_RELEASE_TAG="${INSTALLED_RELEASE_DIR##*/}"
+CURRENT_SCRIPT="${BASH_SOURCE[0]:-}"
+RUNNING_INSTALLED_SCRIPT=0
+if [ -n "$CURRENT_SCRIPT" ] && [ -f "$CURRENT_SCRIPT" ] \
+  && [ -f "$INSTALL_DIR/install.sh" ] \
+  && [ "$(readlink -f "$CURRENT_SCRIPT")" = "$(readlink -f "$INSTALL_DIR/install.sh")" ]; then
+  RUNNING_INSTALLED_SCRIPT=1
+fi
+
+SKIP_SAME_RELEASE=0
+if [ -f "$INSTALL_DIR/server.json" ] && [ "$INSTALLED_RELEASE_TAG" = "$RELEASE_TAG" ]; then
+  if [ "$UPGRADE_ONLY" = 0 ] || [ "$OFFLINE" = 1 ] || [ "$INSTALLER_REFRESHED" = 1 ] \
+    || [ "$RUNNING_INSTALLED_SCRIPT" = 0 ]; then
+    SKIP_SAME_RELEASE=1
+  fi
+fi
+
+if [ "$SKIP_SAME_RELEASE" = 1 ]; then
+  if [ -n "$CURRENT_SCRIPT" ] && [ -f "$CURRENT_SCRIPT" ] \
+    && [ "$CURRENT_SCRIPT" != "$INSTALL_DIR/install.sh" ]; then
+    install -m 755 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
+      "$CURRENT_SCRIPT" "$INSTALL_DIR/install.sh"
+  fi
+  log "Moss Server $RELEASE_TAG is already installed; no downloads needed"
+  exit 0
+fi
+
 if [ "$UPGRADE_ONLY" = 1 ] && [ "$OFFLINE" = 0 ] && [ "$INSTALLER_REFRESHED" != 1 ]; then
   command -v curl >/dev/null 2>&1 || die "curl is required"
   LATEST_INSTALLER_URL="${MOSS_INSTALLER_URL:-https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh}"
@@ -270,19 +298,6 @@ if [ "$UPGRADE_ONLY" = 1 ] && [ "$OFFLINE" = 0 ] && [ "$INSTALLER_REFRESHED" != 
   set -e
   rm -f "$LATEST_INSTALLER"
   exit "$UPGRADE_STATUS"
-fi
-
-INSTALLED_RELEASE_DIR="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
-INSTALLED_RELEASE_TAG="${INSTALLED_RELEASE_DIR##*/}"
-if [ -f "$INSTALL_DIR/server.json" ] && [ "$INSTALLED_RELEASE_TAG" = "$RELEASE_TAG" ]; then
-  CURRENT_SCRIPT="${BASH_SOURCE[0]:-}"
-  if [ -n "$CURRENT_SCRIPT" ] && [ -f "$CURRENT_SCRIPT" ] \
-    && [ "$CURRENT_SCRIPT" != "$INSTALL_DIR/install.sh" ]; then
-    install -m 755 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
-      "$CURRENT_SCRIPT" "$INSTALL_DIR/install.sh"
-  fi
-  log "Moss Server $RELEASE_TAG is already installed; no packages downloaded"
-  exit 0
 fi
 
 command -v ldd >/dev/null 2>&1 || die "ldd is required"

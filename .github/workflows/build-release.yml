@@ -139,7 +139,7 @@ jobs:
           grep -Fq 'sudo systemctl stop' dist/install.sh
           grep -Fq 'sudo systemctl restart' dist/install.sh
           grep -Fq -- '--upgrade' dist/install.sh
-          grep -Fq 'already installed; no packages downloaded' dist/install.sh
+          grep -Fq 'already installed; no downloads needed' dist/install.sh
           grep -Fq 'packages/$RELEASE_TAG' dist/install.sh
           grep -Fq -- '--progress-bar' dist/install.sh
           grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
