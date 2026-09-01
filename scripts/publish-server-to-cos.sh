@@ -48,11 +48,7 @@ EXPECTED_FILES=(
   install.sh
   SHA256SUMS
   "moss-server-$VERSION-linux-amd64.tar.gz"
-  "moss-server-$VERSION-linux-arm64.tar.gz"
   "moss-runtime-$VERSION-linux-amd64.tar.gz"
-  "moss-runtime-$VERSION-linux-arm64.tar.gz"
-  "moss-offline-$VERSION-linux-amd64.tar.gz"
-  "moss-offline-$VERSION-linux-arm64.tar.gz"
 )
 
 for file_name in "${EXPECTED_FILES[@]}"; do
