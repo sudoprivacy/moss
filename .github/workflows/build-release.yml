@@ -72,6 +72,13 @@ jobs:
           bash -n deploy/install.sh
           bash -n deploy/package-server.sh
           chmod +x deploy/install.sh deploy/package-server.sh
+          help_output="$(MOSS_RELEASE_TAG=server-vtest bash -s -- --help < deploy/install.sh 2>&1)"
+          grep -Fq 'Usage: install.sh' <<< "$help_output"
+          ! grep -Fq 'unbound variable' <<< "$help_output"
+          offline_output="$(MOSS_RELEASE_TAG=server-vtest MOSS_INSTALL_DIR=/tmp/moss-install-check \
+            MOSS_NON_INTERACTIVE=1 bash -s -- --offline < deploy/install.sh 2>&1 || true)"
+          grep -Fq -- '--offline must be run from the unpacked install.sh file' <<< "$offline_output"
+          ! grep -Fq 'unbound variable' <<< "$offline_output"
 
       - name: Build host server package
         env:
