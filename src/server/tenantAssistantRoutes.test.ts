@@ -235,6 +235,32 @@ describe('tenant assistant routes fixture', () => {
     })
   })
 
+  it('accepts multipart null values for visible_to and workflow', async () => {
+    const fixture = await startFixture()
+    const createForm = new FormData()
+    createForm.set('name', 'null-object-agent')
+    createForm.set('display_name', 'Null Object Agent')
+    createForm.set('visible_to', 'null')
+    createForm.set('workflow', 'null')
+    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
+      method: 'POST',
+      headers: authHeaders(fixture),
+      body: createForm,
+    })
+    expect(createResponse.status, fixture.stderrOutput.join('')).toBe(200)
+    const created = await createResponse.json() as { data: { id: string } }
+
+    const patchForm = new FormData()
+    patchForm.set('visible_to', 'null')
+    patchForm.set('workflow', 'null')
+    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${created.data.id}`, {
+      method: 'PATCH',
+      headers: authHeaders(fixture),
+      body: patchForm,
+    })
+    expect(patchResponse.status, fixture.stderrOutput.join('')).toBe(200)
+  })
+
   it('returns structured create fields and public tenant avatar URLs', async () => {
     const fixture = await startFixture('https://api.example.test')
     const form = new FormData()

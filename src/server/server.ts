@@ -483,6 +483,7 @@ function parseTenantObject(value: unknown, fieldName: string): JsonBody | null {
       throw new HttpError(400, `${fieldName} 必须是 JSON 对象`)
     }
   }
+  if (parsed === null) return null
   if (!isJsonBody(parsed)) {
     throw new HttpError(400, `${fieldName} 必须是 JSON 对象`)
   }
