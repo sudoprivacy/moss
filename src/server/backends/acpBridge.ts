@@ -480,8 +480,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
     // 写入 transcript 时只保存原始用户消息（trimmedText），不包含系统提示词
     // 系统提示词是给 agent 的，不应该出现在用户可见的历史记录中
-    // displayText 只在剥离掉客户端注入的 [User Request]/cron 前言后与原文不同时写入，
-    // 供渲染层展示；raw content 仍保留完整文本以保证 resume 保真度。
+    // displayText is written only when it differs from the original after stripping the client-injected
+    // [User Request]/cron preamble (for the render layer); raw content keeps the full text for resume fidelity.
     const displayText = extractDisplayUserText(trimmedText)
     const userEvent: Record<string, unknown> = {
       type: 'user',

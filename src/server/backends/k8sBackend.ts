@@ -128,7 +128,7 @@ export class K8sBackend implements SessionBackend {
     const memoryLimit = this.defaults.memoryLimit || '4Gi'
     const podReadyTimeoutSec = this.defaults.podReadyTimeoutSec ?? 90
 
-    // 读取 assistant 配置（与 docker/scode backend 一致）
+    // Read the assistant config (same as the docker/scode backend).
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
     const enabledSkills = options.assistantName
       ? assistantConfig.enabledSkills
@@ -151,7 +151,7 @@ export class K8sBackend implements SessionBackend {
     // scode-session-id here on the moss host, so it must exist moss-side.
     await mkdir(safeCwd, { recursive: true })
 
-    // 同步技能到工作空间目录：the symlinks land on moss's host fs (harmless), but
+    // Sync skills into the workspace dir: the symlinks land on moss's host fs (harmless), but
     // we only need the returned links to (a) build the UI snapshot and (b) read
     // each SKILL.md so it can be packed into the per-session Secret and mounted
     // into the pod (hostPath symlinks would dangle on the remote node).
