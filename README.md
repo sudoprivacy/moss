@@ -5,6 +5,64 @@ Moss 是一个多用户 AI coding agent 平台：一个 HTTP/WebSocket 服务端
 ## 文档
 
 - [Moss Server API](src/server/API.md)
+- [Moss Server 部署说明](deploy/README.md)
+- [Moss Server v0.1.2 Release](https://github.com/sudoprivacy/moss/releases/tag/server-v0.1.2)
+
+## Moss Server 一键安装
+
+适用于 Linux x86_64/ARM64、glibc 2.35+、systemd 和 Docker 20.10+。安装包
+自带 Node.js 22、编译后的 `moss-server.mjs`、运行依赖和官方 Nexus；用户会话
+使用随 Release 发布的 Docker Runtime 镜像。
+
+交互式在线安装：
+
+```bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh | sudo bash
+```
+
+安装器会提示对外地址、管理员账号、密码和可选模型 API 配置。通过 `sudo` 安装
+时，默认目录为发起用户的 `$HOME/.moss/server`，systemd 服务也以该用户运行；
+直接使用 root 安装时才会使用 `/root/.moss/server`。默认端口是 `43127`。
+
+非交互安装示例：
+
+```bash
+curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/install.sh \
+  | sudo env MOSS_NON_INTERACTIVE=1 \
+      MOSS_ADVERTISED_HOST=10.0.1.206 \
+      MOSS_ADMIN_USERNAME=admin \
+      MOSS_ADMIN_PASSWORD='replace-with-a-strong-password' \
+      bash
+```
+
+需要指定其他目录时增加 `MOSS_INSTALL_DIR=/data/moss`；直接由 root 为其他用户
+安装时可以增加 `MOSS_INSTALL_USER=username`。
+
+离线安装：
+
+```bash
+curl -fLO https://github.com/sudoprivacy/moss/releases/download/server-v0.1.2/moss-offline-0.1.2-linux-amd64.tar.gz
+tar -xzf moss-offline-0.1.2-linux-amd64.tar.gz
+cd moss-offline
+sudo ./install.sh --offline
+```
+
+ARM64 机器将文件名中的 `amd64` 替换为 `arm64`。
+
+常用服务命令：
+
+```bash
+sudo systemctl status moss-server
+sudo systemctl start moss-server
+sudo systemctl stop moss-server
+sudo systemctl restart moss-server
+journalctl -u moss-server -f
+curl http://127.0.0.1:43127/healthz
+```
+
+安装完成后访问 `http://SERVER:43127/admin/`。升级时执行新版本的一键安装命令，
+安装器会保留配置和数据；完整的镜像下载、目录、回滚及卸载说明见
+[Moss Server 部署说明](deploy/README.md)。
 
 ## 快速启动
 
@@ -30,10 +88,7 @@ bun install
 bun run start
 ```
 
-## 开发与部署
-
-Linux 服务端支持在线一键安装和完整离线安装，参见
-[Moss Server 部署说明](deploy/README.md)。
+## 开发与打包
 
 ### 1. 构建服务端
 
@@ -68,9 +123,14 @@ bun run dist:all
 - **Mini App 生成**：支持通过自然语言描述生成单文件 HTML 应用，并提供 Host API 访问宿主能力。
 - **自动 Git 初始化**：每个新会话创建的工作区会自动执行 `git init`，方便 Agent 使用版本控制工具。
 
-## 配置文件
+## 桌面端配置文件
 
-程序配置存储在 `~/.moss/settings.json`。你可以手动修改该文件来配置自定义的 API 地址、模型名称或环境变量。
+桌面端配置存储在 `~/.moss/settings.json`。你可以手动修改该文件来配置自定义的 API 地址、模型名称或环境变量。
+
+通过一键脚本安装的服务端使用独立目录：主配置为
+`~/.moss/server/server.json`，模型与系统设置为
+`~/.moss/server/.moss/settings.json`，运行数据位于
+`~/.moss/server/data/`。这里的 `~` 指安装发起用户的 home。
 
 ### 配置示例
 
