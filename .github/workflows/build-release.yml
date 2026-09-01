@@ -127,6 +127,7 @@ jobs:
           grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
           grep -Fxq 'moss-offline/install.sh' dist/offline-contents.txt
           ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
+          grep -Fq "RELEASE_TAG=\"\${MOSS_RELEASE_TAG:-$RELEASE_TAG}\"" dist/install.sh
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5

@@ -53,9 +53,6 @@ case "$(uname -m)" in
   *) die "unsupported architecture: $(uname -m)" ;;
 esac
 
-if [ "$RELEASE_TAG" = '@@MOSS_RELEASE_TAG@@' ] || [ -z "$RELEASE_TAG" ]; then
-  die "this installer is not stamped with a release tag"
-fi
 case "$RELEASE_TAG" in
   server-v*) VERSION="${RELEASE_TAG#server-v}" ;;
   *) die "invalid server release tag: $RELEASE_TAG" ;;
@@ -97,7 +94,18 @@ esac
 [ "$INSTALL_DIR" != / ] || die "refusing to install into /"
 
 command -v ldd >/dev/null 2>&1 || die "ldd is required"
-GLIBC_VERSION="$(ldd --version 2>&1 | head -n1 | grep -Eo '[0-9]+\.[0-9]+' | tail -n1)"
+GLIBC_VERSION="$(ldd --version 2>&1 | awk '
+  NR == 1 {
+    for (i = NF; i >= 1; i--) {
+      if ($i ~ /^[0-9]+\.[0-9]+$/) {
+        print $i
+        found = 1
+        break
+      }
+    }
+  }
+  END { if (!found) exit 1 }
+')"
 [ -n "$GLIBC_VERSION" ] || die "could not determine glibc version"
 GLIBC_MAJOR="${GLIBC_VERSION%%.*}"
 GLIBC_MINOR="${GLIBC_VERSION#*.}"
