@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPOSITORY="sudoprivacy/moss"
 RELEASE_TAG="${MOSS_RELEASE_TAG:-@@MOSS_RELEASE_TAG@@}"
+DEFAULT_DOWNLOAD_BASE="https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/$RELEASE_TAG"
 DEFAULT_INSTALL_DIR=""
 NETWORK_NAME="moss-network"
 SERVICE_NAME="moss-server"
@@ -198,7 +199,7 @@ if [ "$OFFLINE" = 1 ]; then
 else
   SOURCE_DIR="$WORK_DIR/download"
   mkdir -p "$SOURCE_DIR"
-  DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG}"
+  DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-$DEFAULT_DOWNLOAD_BASE}"
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
 
   if [ "${MOSS_ALLOW_OLD_VERSION:-0}" = 1 ]; then
