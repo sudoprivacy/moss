@@ -67,10 +67,12 @@ sudo ./install.sh --offline
 ~/.moss/server/
   current -> releases/server-vX.Y.Z
   releases/          # Server、Node.js 和运行依赖
+  packages/          # 按版本保留安装脚本、校验文件和两个原始压缩包
   data/              # SQLite、transcript 和 session 数据
   .moss/             # 设置、Skill、Assistant 和 Nexus 数据
   server.json        # 主配置
   moss-server.env    # systemd 环境变量
+  install.sh         # 安装与升级脚本
   start.sh
   stop.sh
   status.sh
@@ -78,7 +80,8 @@ sudo ./install.sh --offline
 ```
 
 `server.json`、`moss-server.env` 和 `.moss/settings.json` 权限为 `600`。修改配置后
-重启服务生效。
+重启服务生效。在线安装包保留在 `packages/server-vX.Y.Z/`，重复执行同版本安装时
+直接退出，不重新下载，也不重启服务。
 
 ## 常用操作
 
@@ -95,7 +98,33 @@ curl http://127.0.0.1:43127/healthz
 
 ## 升级与卸载
 
-再次执行在线安装命令即可升级；配置和数据会保留，启动失败时自动回滚。
+在线升级默认使用固定 COS 地址：
+
+```bash
+sudo ~/.moss/server/install.sh --upgrade
+```
+
+国外可使用 GitHub Release：
+
+```bash
+BASE=https://github.com/sudoprivacy/moss/releases/latest/download
+sudo env MOSS_INSTALLER_URL="$BASE/install.sh" MOSS_DOWNLOAD_BASE="$BASE" \
+  ~/.moss/server/install.sh --upgrade
+```
+
+离线升级使用新版本离线目录，不访问网络：
+
+```bash
+cd moss-offline
+sudo ./install.sh --offline --upgrade
+```
+
+升级无需重新输入配置，只替换 Server 版本目录、Runtime 镜像及其内部镜像引用；
+`data/`、管理员信息、Anthropic 配置和其他用户配置保持不变。启动或健康检查失败
+会自动恢复上一版程序和配置。同版本仅获取小安装脚本确认版本，不下载 Server 包和
+Runtime 镜像，也不重启服务。
+
+卸载：
 
 ```bash
 # 保留配置和数据

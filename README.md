@@ -65,15 +65,25 @@ sudo journalctl -u moss-server -f
 curl http://127.0.0.1:43127/healthz
 ```
 
-再次执行在线安装命令即可升级，配置和数据会保留。
+## 升级与卸载
 
 ```bash
+# 从固定 COS 地址升级到最新版
+sudo ~/.moss/server/install.sh --upgrade
+
 # 卸载程序，保留配置和数据
 sudo ~/.moss/server/uninstall.sh
 
 # 删除程序、配置和数据
 sudo ~/.moss/server/uninstall.sh --purge
 ```
+
+升级不需要重新配置，只替换 Server 程序和 Runtime 镜像；管理员、API 配置和运行
+数据保持不变，启动失败会自动回滚。同版本仅检查最新版安装脚本，不下载 Server 包
+和 Runtime 镜像，也不重启服务。
+
+在线安装的原始包保留在 `~/.moss/server/packages/server-vX.Y.Z/`。重复执行同版本
+`install.sh` 会直接退出，不重新下载，也不重启服务。
 
 更多参数和目录说明见 [部署文档](deploy/README.md)，接口见
 [Moss Server API](src/server/API.md)。

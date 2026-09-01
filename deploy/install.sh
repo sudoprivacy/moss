@@ -9,6 +9,8 @@ SERVICE_NAME="moss-server"
 OFFLINE=0
 DOWNLOAD_ONLY=0
 DOWNLOAD_DIR=""
+UPGRADE_ONLY="${MOSS_PROGRAM_UPGRADE:-0}"
+INSTALLER_REFRESHED="${MOSS_INSTALLER_REFRESHED:-0}"
 NON_INTERACTIVE="${MOSS_NON_INTERACTIVE:-0}"
 INSTALL_DIR="${MOSS_INSTALL_DIR:-}"
 
@@ -22,20 +24,22 @@ Usage: install.sh [options]
 Options:
   --offline                 Read release archives next to this script.
   --download PATH           Download files for a later offline installation.
+  --upgrade                 Upgrade an existing installation without changing user data.
   --install-dir PATH        Installation root (default: <install-user-home>/.moss/server).
   --non-interactive         Read configuration from MOSS_* environment variables.
   -h, --help                Show this help.
 
 Configuration environment variables:
   MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
-  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, ANTHROPIC_BASE_URL,
-  ANTHROPIC_API_KEY.
+  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL,
+  ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --offline) OFFLINE=1 ;;
+    --upgrade) UPGRADE_ONLY=1 ;;
     --download)
       [ "$#" -ge 2 ] || die "--download requires a path"
       DOWNLOAD_ONLY=1
@@ -56,6 +60,8 @@ done
 
 [ "$OFFLINE" = 0 ] || [ "$DOWNLOAD_ONLY" = 0 ] \
   || die "--offline and --download cannot be used together"
+[ "$UPGRADE_ONLY" = 0 ] || [ "$DOWNLOAD_ONLY" = 0 ] \
+  || die "--upgrade and --download cannot be used together"
 ARCH=amd64
 
 case "$RELEASE_TAG" in
@@ -140,9 +146,38 @@ INSTALL_USER="${MOSS_INSTALL_USER:-${SUDO_USER:-$(id -un)}}"
 resolve_install_account
 DEFAULT_INSTALL_DIR="${INSTALL_USER_HOME%/}/.moss/server"
 
+read_masked_value() {
+  local label="$1" value='' char='' tty_state=''
+  tty_state="$(stty -g < /dev/tty)"
+  trap 'stty "$tty_state" < /dev/tty' EXIT
+  trap 'exit 130' HUP INT TERM
+  stty -echo < /dev/tty
+  printf '%s' "$label" > /dev/tty
+  while IFS= read -r -n 1 char < /dev/tty; do
+    case "$char" in
+      '') break ;;
+      $'\177'|$'\b')
+        if [ -n "$value" ]; then
+          value="${value%?}"
+          printf '\b \b' > /dev/tty
+        fi
+        ;;
+      *)
+        value+="$char"
+        printf '*' > /dev/tty
+        ;;
+    esac
+  done
+  stty "$tty_state" < /dev/tty
+  trap - EXIT HUP INT TERM
+  printf '\n' > /dev/tty
+  printf '%s' "$value"
+}
+
 prompt_value() {
   local variable="$1" label="$2" default_value="$3" secret="${4:-0}"
-  local current="${!variable:-}" answer=''
+  local confirmation_label="${5:-}" mismatch_message="${6:-Values do not match; try again.}"
+  local current="${!variable:-}" answer='' confirmation=''
   if [ -n "$current" ]; then
     return
   fi
@@ -151,9 +186,17 @@ prompt_value() {
     return
   fi
   if [ "$secret" = 1 ]; then
-    printf '%s' "$label" > /dev/tty
-    IFS= read -r -s answer < /dev/tty || true
-    printf '\n' > /dev/tty
+    while true; do
+      answer="$(read_masked_value "$label")"
+      if [ -z "$answer" ] || [ -z "$confirmation_label" ]; then
+        break
+      fi
+      confirmation="$(read_masked_value "$confirmation_label")"
+      if [ "$answer" = "$confirmation" ]; then
+        break
+      fi
+      printf '[moss-install] %s\n' "$mismatch_message" > /dev/tty
+    done
   else
     if [ -n "$default_value" ]; then
       printf '%s [%s]: ' "$label" "$default_value" > /dev/tty
@@ -178,7 +221,11 @@ if [ -z "$INSTALL_DIR" ] && [ -f "/etc/systemd/system/$SERVICE_NAME.service" ]; 
   fi
 fi
 [ -n "$INSTALL_DIR" ] || USING_DEFAULT_INSTALL_DIR=1
-prompt_value INSTALL_DIR 'Install directory' "$DEFAULT_INSTALL_DIR"
+if [ "$UPGRADE_ONLY" = 1 ]; then
+  INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+else
+  prompt_value INSTALL_DIR 'Install directory' "$DEFAULT_INSTALL_DIR"
+fi
 case "$INSTALL_DIR" in
   /*) ;;
   *) die "install directory must be an absolute path" ;;
@@ -199,8 +246,44 @@ if [ -f "$INSTALL_DIR/server.json" ]; then
     resolve_install_account
   fi
 fi
+[ "$UPGRADE_ONLY" = 0 ] || [ -f "$INSTALL_DIR/server.json" ] \
+  || die "no existing Moss Server installation found in $INSTALL_DIR"
 log "Service user: $INSTALL_USER"
 log "Install directory: $INSTALL_DIR"
+
+if [ "$UPGRADE_ONLY" = 1 ] && [ "$OFFLINE" = 0 ] && [ "$INSTALLER_REFRESHED" != 1 ]; then
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  LATEST_INSTALLER_URL="${MOSS_INSTALLER_URL:-https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh}"
+  LATEST_INSTALLER="$(mktemp)"
+  log "Downloading latest installer"
+  if ! curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
+    -o "$LATEST_INSTALLER" "$LATEST_INSTALLER_URL"; then
+    rm -f "$LATEST_INSTALLER"
+    die "could not download latest installer"
+  fi
+  chmod +x "$LATEST_INSTALLER"
+  set +e
+  MOSS_PROGRAM_UPGRADE=1 MOSS_INSTALLER_REFRESHED=1 \
+    MOSS_INSTALL_USER="$INSTALL_USER" MOSS_INSTALL_DIR="$INSTALL_DIR" \
+    bash "$LATEST_INSTALLER"
+  UPGRADE_STATUS=$?
+  set -e
+  rm -f "$LATEST_INSTALLER"
+  exit "$UPGRADE_STATUS"
+fi
+
+INSTALLED_RELEASE_DIR="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
+INSTALLED_RELEASE_TAG="${INSTALLED_RELEASE_DIR##*/}"
+if [ -f "$INSTALL_DIR/server.json" ] && [ "$INSTALLED_RELEASE_TAG" = "$RELEASE_TAG" ]; then
+  CURRENT_SCRIPT="${BASH_SOURCE[0]:-}"
+  if [ -n "$CURRENT_SCRIPT" ] && [ -f "$CURRENT_SCRIPT" ] \
+    && [ "$CURRENT_SCRIPT" != "$INSTALL_DIR/install.sh" ]; then
+    install -m 755 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
+      "$CURRENT_SCRIPT" "$INSTALL_DIR/install.sh"
+  fi
+  log "Moss Server $RELEASE_TAG is already installed; no packages downloaded"
+  exit 0
+fi
 
 command -v ldd >/dev/null 2>&1 || die "ldd is required"
 GLIBC_VERSION="$(ldd --version 2>&1 | awk '
@@ -222,7 +305,7 @@ if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -l
   die "glibc 2.35 or newer is required (Ubuntu 22.04+); found $GLIBC_VERSION"
 fi
 
-for command_name in tar gzip sha256sum systemctl docker curl install stat; do
+for command_name in tar gzip sha256sum systemctl docker curl install stat stty; do
   command -v "$command_name" >/dev/null 2>&1 || die "$command_name is required"
 done
 docker info >/dev/null 2>&1 || die "Docker daemon is not available"
@@ -243,8 +326,18 @@ if [ -z "$DOCKER_VERSION" ] || [ "${DOCKER_MAJOR:-0}" -lt 20 ] \
   die "Docker daemon 20.10 or newer is required; found ${DOCKER_VERSION:-unknown}"
 fi
 
+if [ "$USING_DEFAULT_INSTALL_DIR" = 1 ]; then
+  install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$INSTALL_USER_HOME/.moss"
+fi
+install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
+  "$INSTALL_DIR" "$INSTALL_DIR/packages"
+
 WORK_DIR="$(mktemp -d)"
-cleanup() { rm -rf "$WORK_DIR"; }
+DOWNLOAD_PART=""
+cleanup() {
+  rm -rf "$WORK_DIR"
+  [ -z "$DOWNLOAD_PART" ] || rm -f "$DOWNLOAD_PART"
+}
 trap cleanup EXIT
 
 if [ "$OFFLINE" = 1 ]; then
@@ -256,28 +349,71 @@ if [ "$OFFLINE" = 1 ]; then
   [ -f "$SOURCE_DIR/$RUNTIME_ARCHIVE" ] || die "missing offline asset: $RUNTIME_ARCHIVE"
   [ -f "$SOURCE_DIR/SHA256SUMS" ] || die "missing offline asset: SHA256SUMS"
 else
-  SOURCE_DIR="$WORK_DIR/download"
-  mkdir -p "$SOURCE_DIR"
+  SOURCE_DIR="$INSTALL_DIR/packages/$RELEASE_TAG"
+  install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$SOURCE_DIR"
   DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-$DEFAULT_DOWNLOAD_BASE}"
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
 
   download_asset() {
     local step="$1" filename="$2"
-    log "Downloading [$step/3] $filename"
-    curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
-      -o "$SOURCE_DIR/$filename" "$DOWNLOAD_BASE/$filename"
+    log "Downloading [$step/4] $filename"
+    DOWNLOAD_PART="$SOURCE_DIR/.$filename.part.$$"
+    rm -f "$DOWNLOAD_PART"
+    if ! curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
+      -o "$DOWNLOAD_PART" "$DOWNLOAD_BASE/$filename"; then
+      rm -f "$DOWNLOAD_PART"
+      DOWNLOAD_PART=""
+      die "could not download $filename"
+    fi
+    mv -f "$DOWNLOAD_PART" "$SOURCE_DIR/$filename"
+    DOWNLOAD_PART=""
   }
 
-  download_asset 1 SHA256SUMS
+  cached_asset_is_valid() {
+    local filename="$1" checksum_file=''
+    checksum_file="$WORK_DIR/$filename.cached.sha256"
+    [ -f "$SOURCE_DIR/$filename" ] || return 1
+    awk -v filename="$filename" '$2 == filename || $2 == "*" filename { print }' \
+      "$SOURCE_DIR/SHA256SUMS" > "$checksum_file"
+    [ -s "$checksum_file" ] \
+      && (cd "$SOURCE_DIR" && sha256sum -c "$checksum_file" >/dev/null 2>&1)
+  }
+
+  CURRENT_SCRIPT="${BASH_SOURCE[0]:-}"
+  if [ -n "$CURRENT_SCRIPT" ] && [ -f "$CURRENT_SCRIPT" ]; then
+    log "Preparing [1/4] install.sh"
+    if [ "$CURRENT_SCRIPT" != "$SOURCE_DIR/install.sh" ]; then
+      install -m 755 "$CURRENT_SCRIPT" "$SOURCE_DIR/install.sh"
+    else
+      chmod 755 "$SOURCE_DIR/install.sh"
+    fi
+  else
+    download_asset 1 install.sh
+  fi
+  download_asset 2 SHA256SUMS
   for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
     if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
       "$SOURCE_DIR/SHA256SUMS"; then
       die "checksum manifest does not contain $archive; the download source is incomplete"
     fi
   done
-  download_asset 2 "$SERVER_ARCHIVE"
-  download_asset 3 "$RUNTIME_ARCHIVE"
+  step=3
+  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+    if cached_asset_is_valid "$archive"; then
+      log "Using cached [$step/4] $archive"
+    else
+      rm -f "$SOURCE_DIR/$archive"
+      download_asset "$step" "$archive"
+    fi
+    step=$((step + 1))
+  done
+  chmod 644 "$SOURCE_DIR/SHA256SUMS" "$SOURCE_DIR/$SERVER_ARCHIVE" "$SOURCE_DIR/$RUNTIME_ARCHIVE"
+  chown -R "$INSTALL_USER:$INSTALL_USER_GROUP" "$SOURCE_DIR"
 fi
+
+EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "$RELEASE_TAG")"
+grep -Fq "$EXPECTED_RELEASE_LINE" "$SOURCE_DIR/install.sh" \
+  || die "installer script does not match $RELEASE_TAG"
 
 verify_asset() {
   local filename="$1"
@@ -318,8 +454,8 @@ if [ "$EXISTING_INSTALL" = 1 ]; then
   EXISTING_PORT="$($NODE_BINARY -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).server.port" "$INSTALL_DIR/server.json")"
   EXISTING_HOST="$($NODE_BINARY -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).server.advertisedHost || '$DEFAULT_HOST'" "$INSTALL_DIR/server.json")"
 fi
-MOSS_PORT_VALUE="${MOSS_PORT:-$EXISTING_PORT}"
-MOSS_ADVERTISED_HOST_VALUE="${MOSS_ADVERTISED_HOST:-$EXISTING_HOST}"
+MOSS_PORT_VALUE="${MOSS_PORT:-}"
+MOSS_ADVERTISED_HOST_VALUE="${MOSS_ADVERTISED_HOST:-}"
 MOSS_ADMIN_USERNAME_VALUE="${MOSS_ADMIN_USERNAME:-}"
 MOSS_ADMIN_PASSWORD_VALUE="${MOSS_ADMIN_PASSWORD:-}"
 ANTHROPIC_BASE_URL_VALUE="${ANTHROPIC_BASE_URL:-}"
@@ -328,17 +464,21 @@ GENERATED_PASSWORD=0
 
 if [ "$EXISTING_INSTALL" = 0 ]; then
   prompt_value MOSS_PORT_VALUE 'Service port' '43127'
-  prompt_value MOSS_ADVERTISED_HOST_VALUE 'Public IP or hostname' "$DEFAULT_HOST"
+  prompt_value MOSS_ADVERTISED_HOST_VALUE 'Public server address (IP or hostname)' "$DEFAULT_HOST"
   prompt_value MOSS_ADMIN_USERNAME_VALUE 'Administrator username' 'admin'
-  prompt_value MOSS_ADMIN_PASSWORD_VALUE 'Administrator password (blank generates one): ' '' 1
+  prompt_value MOSS_ADMIN_PASSWORD_VALUE 'Administrator password (blank generates one): ' '' 1 \
+    'Confirm administrator password: ' 'Passwords do not match; try again.'
   if [ -z "$MOSS_ADMIN_PASSWORD_VALUE" ]; then
     MOSS_ADMIN_PASSWORD_VALUE="$($NODE_BINARY -e "console.log(require('crypto').randomBytes(18).toString('base64url'))")"
     GENERATED_PASSWORD=1
   fi
   prompt_value ANTHROPIC_BASE_URL_VALUE 'Anthropic API Base URL' 'https://hk.sudorouter.ai/v1'
-  prompt_value ANTHROPIC_API_KEY_VALUE 'Anthropic API Key (optional): ' '' 1
+  prompt_value ANTHROPIC_API_KEY_VALUE 'Anthropic API Key (optional): ' '' 1 \
+    'Confirm Anthropic API Key: ' 'API Keys do not match; try again.'
 else
-  log "Existing configuration found; preserving administrator and API settings"
+  MOSS_PORT_VALUE="$EXISTING_PORT"
+  MOSS_ADVERTISED_HOST_VALUE="$EXISTING_HOST"
+  log "Existing installation found; upgrading program only"
 fi
 
 case "$MOSS_PORT_VALUE" in
@@ -358,19 +498,33 @@ fi
 NETWORK_GATEWAY="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK_NAME")"
 [ -n "$NETWORK_GATEWAY" ] || die "could not determine $NETWORK_NAME gateway"
 
-if [ "$USING_DEFAULT_INSTALL_DIR" = 1 ]; then
-  install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$INSTALL_USER_HOME/.moss"
-fi
 install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
-  "$INSTALL_DIR" "$INSTALL_DIR/releases" "$INSTALL_DIR/data" "$INSTALL_DIR/.moss"
+  "$INSTALL_DIR" "$INSTALL_DIR/releases" "$INSTALL_DIR/data" "$INSTALL_DIR/.moss" \
+  "$INSTALL_DIR/packages"
+if [ "$SOURCE_DIR/install.sh" != "$INSTALL_DIR/install.sh" ]; then
+  install -m 755 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
+    "$SOURCE_DIR/install.sh" "$INSTALL_DIR/install.sh"
+else
+  chmod 755 "$INSTALL_DIR/install.sh"
+  chown "$INSTALL_USER:$INSTALL_USER_GROUP" "$INSTALL_DIR/install.sh"
+fi
 RELEASE_DIR="$INSTALL_DIR/releases/$RELEASE_TAG"
 NEW_RELEASE_DIR="$INSTALL_DIR/releases/.$RELEASE_TAG.new.$$"
 PREVIOUS_TARGET="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
+CONFIG_PATH="$INSTALL_DIR/server.json"
+CONFIG_BACKUP=""
+if [ "$EXISTING_INSTALL" = 1 ]; then
+  CONFIG_BACKUP="$WORK_DIR/server.json.backup"
+  cp -a "$CONFIG_PATH" "$CONFIG_BACKUP"
+fi
 SERVICE_STOPPED=0
 
 rollback_on_error() {
   local status=$?
   trap - ERR
+  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
+    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
+  fi
   if [ "$SERVICE_STOPPED" = 1 ] && [ -n "$PREVIOUS_TARGET" ] && [ -d "$PREVIOUS_TARGET" ]; then
     log "Installation failed; restoring $PREVIOUS_TARGET"
     ln -sfn "$PREVIOUS_TARGET" "$INSTALL_DIR/.current.rollback"
@@ -391,9 +545,9 @@ chown -R "$INSTALL_USER:$INSTALL_USER_GROUP" "$NEW_RELEASE_DIR"
 rm -rf "$RELEASE_DIR"
 mv "$NEW_RELEASE_DIR" "$RELEASE_DIR"
 
-CONFIG_PATH="$INSTALL_DIR/server.json"
 TEMPLATE_PATH="$RELEASE_DIR/server.json.template"
 CONFIG_PATH="$CONFIG_PATH" TEMPLATE_PATH="$TEMPLATE_PATH" \
+EXISTING_INSTALL="$EXISTING_INSTALL" \
 MOSS_INSTALL_ROOT="$INSTALL_DIR" MOSS_PORT_VALUE="$MOSS_PORT_VALUE" \
 MOSS_ADVERTISED_HOST_VALUE="$MOSS_ADVERTISED_HOST_VALUE" \
 MOSS_ADMIN_USERNAME_VALUE="$MOSS_ADMIN_USERNAME_VALUE" \
@@ -407,6 +561,15 @@ const source = fs.existsSync(configPath) ? configPath : process.env.TEMPLATE_PAT
 const config = JSON.parse(fs.readFileSync(source, 'utf8'))
 const root = process.env.MOSS_INSTALL_ROOT
 const port = Number(process.env.MOSS_PORT_VALUE)
+if (process.env.EXISTING_INSTALL === '1') {
+  config.runtimeDefaults = {
+    ...config.runtimeDefaults,
+    dockerImage: process.env.MOSS_RUNTIME_IMAGE,
+  }
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+  fs.chmodSync(configPath, 0o600)
+  process.exit(0)
+}
 config.server = { ...config.server, host: '0.0.0.0', port }
 if (process.env.MOSS_ADVERTISED_HOST_VALUE) {
   config.server.advertisedHost = process.env.MOSS_ADVERTISED_HOST_VALUE
@@ -437,7 +600,7 @@ fs.chmodSync(configPath, 0o600)
 NODE
 
 SETTINGS_PATH="$INSTALL_DIR/.moss/settings.json"
-if [ "$EXISTING_INSTALL" = 0 ] || [ -n "$ANTHROPIC_API_KEY_VALUE" ]; then
+if [ "$EXISTING_INSTALL" = 0 ]; then
   SETTINGS_PATH="$SETTINGS_PATH" ANTHROPIC_BASE_URL_VALUE="$ANTHROPIC_BASE_URL_VALUE" \
   ANTHROPIC_API_KEY_VALUE="$ANTHROPIC_API_KEY_VALUE" "$RELEASE_DIR/node/bin/node" <<'NODE'
 const fs = require('node:fs')
@@ -528,13 +691,17 @@ fi
 EOF
 chmod +x "$INSTALL_DIR/start.sh" "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh" "$INSTALL_DIR/uninstall.sh"
 for owned_path in "$CONFIG_PATH" "$ENV_PATH" "$SETTINGS_PATH" \
-  "$INSTALL_DIR/start.sh" "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh" "$INSTALL_DIR/uninstall.sh"; do
+  "$INSTALL_DIR/install.sh" "$INSTALL_DIR/start.sh" "$INSTALL_DIR/stop.sh" \
+  "$INSTALL_DIR/status.sh" "$INSTALL_DIR/uninstall.sh"; do
   [ ! -e "$owned_path" ] || chown "$INSTALL_USER:$INSTALL_USER_GROUP" "$owned_path"
 done
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME.service" >/dev/null
 if ! systemctl restart "$SERVICE_NAME.service"; then
+  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
+    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
+  fi
   if [ -n "$PREVIOUS_TARGET" ] && [ -d "$PREVIOUS_TARGET" ]; then
     ln -sfn "$PREVIOUS_TARGET" "$INSTALL_DIR/.current.rollback"
     mv -Tf "$INSTALL_DIR/.current.rollback" "$INSTALL_DIR/current"
@@ -553,6 +720,9 @@ for _ in $(seq 1 60); do
 done
 if [ "$HEALTHY" != 1 ]; then
   journalctl -u "$SERVICE_NAME.service" -n 80 --no-pager >&2 || true
+  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
+    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
+  fi
   if [ -n "$PREVIOUS_TARGET" ] && [ -d "$PREVIOUS_TARGET" ]; then
     log "Health check failed; rolling back to $PREVIOUS_TARGET"
     systemctl stop "$SERVICE_NAME.service" || true
@@ -566,7 +736,11 @@ fi
 SERVICE_STOPPED=0
 trap - ERR
 
-log "Moss Server $RELEASE_TAG installed successfully"
+if [ "$EXISTING_INSTALL" = 1 ]; then
+  log "Moss Server upgraded to $RELEASE_TAG successfully"
+else
+  log "Moss Server $RELEASE_TAG installed successfully"
+fi
 log "URL: http://$MOSS_ADVERTISED_HOST_VALUE:$MOSS_PORT_VALUE/admin/"
 if [ "$EXISTING_INSTALL" = 0 ]; then
   log "Administrator: $MOSS_ADMIN_USERNAME_VALUE"
@@ -579,3 +753,10 @@ log "Stop: sudo systemctl stop $SERVICE_NAME"
 log "Restart: sudo systemctl restart $SERVICE_NAME"
 log "Status: sudo systemctl status $SERVICE_NAME"
 log "Logs: sudo journalctl -u $SERVICE_NAME.service -f"
+log "Upgrade: sudo $INSTALL_DIR/install.sh --upgrade"
+log "Uninstall: sudo $INSTALL_DIR/uninstall.sh"
+if [ "$OFFLINE" = 0 ]; then
+  log "Packages: $SOURCE_DIR"
+else
+  log "Offline packages retained: $SOURCE_DIR"
+fi
