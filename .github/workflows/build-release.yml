@@ -1,238 +1,175 @@
-# ---------------------------------------------------------
-# Moss Release Package Builder
-# 触发条件:
-#   - dev 分支推送
-#   - 手动触发 (可指定 scode 版本)
-#   - tag 推送 (创建 GitHub Release)
-#
-# 产出物:
-#   - moss-deploy-{commit8}-amd64.tar.gz
-#   - moss-deploy-{commit8}-arm64.tar.gz
-#   包含:
-#     - my-moss-runtime-{tag}.tar.gz (会话容器镜像)
-#     - my-moss-server-{tag}.tar.gz (主服务镜像)
-#     - server.json
-#     - docker-compose.yml
-#     - start.sh
-#     - shutdown.sh
-# ---------------------------------------------------------
-
-name: Build Moss Release Package
+name: Build Moss Server Release
 
 on:
   push:
     branches:
       - dev
+    tags:
+      - 'server-v*'
   workflow_dispatch:
     inputs:
       scode_version:
-        description: 'scode release version (e.g., v0.1.0)'
+        description: 'scode release version'
         required: false
-        default: 'latest'
+        default: 'v0.1.10'
+
+permissions:
+  contents: write
 
 env:
-  BUN_VERSION: '1.3'
+  SCODE_VERSION: ${{ inputs.scode_version || 'v0.1.10' }}
 
 jobs:
   build:
+    name: build-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target_platform: linux/amd64
-            target_arch: amd64
-            scode_arch: x64
+          - platform: linux/amd64
+            arch: amd64
             runner: ubuntu-latest
-          - target_platform: linux/arm64
-            target_arch: arm64
-            scode_arch: arm64
+          - platform: linux/arm64
+            arch: arm64
             runner: ubuntu-24.04-arm
-    name: build-${{ matrix.target_arch }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout moss
         uses: actions/checkout@v5
         with:
-          # 拉取 git-lfs 对象（deploy/models/Xenova.zip 嵌入模型）。否则 checkout
-          # 只得到 LFS 指针文件，server.Dockerfile.local 会把指针而非真模型打进镜像。
           lfs: true
 
-      # 1. 设置镜像 tag (git commit 前 8 位)
-      - name: Set image tag
-        id: tag
+      - name: Resolve release metadata
+        id: release
+        shell: bash
         run: |
-          COMMIT_TAG=$(echo $GITHUB_SHA | cut -c1-8)
-          TARGET_ARCH="${{ matrix.target_arch }}"
-          IMAGE_TAG="$COMMIT_TAG-$TARGET_ARCH"
-          echo "COMMIT_TAG=$COMMIT_TAG" >> $GITHUB_OUTPUT
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "TARGET_PLATFORM=${{ matrix.target_platform }}" >> $GITHUB_OUTPUT
-          echo "TARGET_ARCH=$TARGET_ARCH" >> $GITHUB_OUTPUT
-          echo "Commit tag: $COMMIT_TAG"
-          echo "Image tag: $IMAGE_TAG"
-          echo "Target platform: ${{ matrix.target_platform }}"
-
-      # 2. 安装 Bun 并构建 (build:node 已包含前端构建)
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Install Dependencies
-        run: |
-          bun install
-          cd admin && bun install && cd ..
-
-      - name: Build All (Backend + Frontend)
-        run: bun run build:node
-
-      # 3. 下载 scode
-      - name: Get scode version
-        id: scode-version
-        run: |
-          # 优先级: 手动输入 > 配置文件(server.json) > latest
-          INPUT_VERSION="${{ github.event.inputs.scode_version }}"
-          CONFIG_VERSION=$(grep -o '"scodeVersion"[[:space:]]*:[[:space:]]*"[^"]*"' deploy/server.json | sed 's/.*"scodeVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-
-          if [ -n "$INPUT_VERSION" ] && [ "$INPUT_VERSION" != "latest" ]; then
-            VERSION="$INPUT_VERSION"
-            echo "Using version from workflow input: $VERSION"
-          elif [ -n "$CONFIG_VERSION" ] && [ "$CONFIG_VERSION" != "latest" ]; then
-            VERSION="$CONFIG_VERSION"
-            echo "Using version from server.json config: $VERSION"
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/server-v* ]]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+            VERSION="${GITHUB_REF_NAME#server-v}"
           else
-            VERSION=$(curl -sI "https://github.com/sudoprivacy/sudocode/releases/latest" | grep -i "location:" | sed 's/.*tag\///' | tr -d '\r\n')
-            if [ -z "$VERSION" ]; then
-              VERSION=$(curl -s https://api.github.com/repos/sudoprivacy/sudocode/releases/latest | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-            fi
-            echo "Using latest version: $VERSION"
+            VERSION="dev-${GITHUB_SHA::8}"
+            RELEASE_TAG="server-v$VERSION"
           fi
+          [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$VERSION-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
 
-          echo "Detected scode version: $VERSION"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Download scode
-        env:
-          SCODE_VERSION: ${{ steps.scode-version.outputs.version }}
-        run: |
-          SCODE_ARCH="${{ matrix.scode_arch }}"
-
-          echo "Downloading scode $SCODE_VERSION for linux-$SCODE_ARCH"
-
-          DOWNLOAD_URL="https://github.com/sudoprivacy/sudocode/releases/download/$SCODE_VERSION/scode-linux-$SCODE_ARCH.tar.gz"
-          echo "Downloading from: $DOWNLOAD_URL"
-          curl -L -o scode.tar.gz "$DOWNLOAD_URL"
-
-          tar -xzf scode.tar.gz
-          mv "scode-linux-$SCODE_ARCH/scode" bin/scode
-          chmod +x bin/scode
-          rm -rf "scode-linux-$SCODE_ARCH" scode.tar.gz
-
-          echo "scode ready: $(ls -la bin/scode)"
-
-      # 4. 设置 Docker Buildx（原生 runner，无需 QEMU 模拟）
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Stage sudocode for server image
+      - name: Stage sudocode source for nexus-napi
         uses: actions/checkout@v5
         with:
           repository: sudoprivacy/sudocode
           path: .sudocode-build-context
           token: ${{ secrets.SUDOCODE_REPO_TOKEN || github.token }}
 
-      # 5. 构建 Runtime 镜像 (会话容器)
-      - name: Build Runtime Docker Image
-        env:
-          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
-          TARGET_PLATFORM: ${{ steps.tag.outputs.TARGET_PLATFORM }}
+      - name: Validate deployment scripts
         run: |
-          echo "Building runtime image with tag: $IMAGE_TAG platform: $TARGET_PLATFORM"
-          docker buildx build --platform "$TARGET_PLATFORM" --load -t my-moss-runtime:$IMAGE_TAG -f deploy/runtime/Dockerfile .
-          docker save --platform "$TARGET_PLATFORM" my-moss-runtime:$IMAGE_TAG | gzip > my-moss-runtime-$IMAGE_TAG.tar.gz
-          echo "Runtime image size: $(ls -lh my-moss-runtime-$IMAGE_TAG.tar.gz)"
+          bash -n deploy/install.sh
+          bash -n deploy/package-server.sh
+          chmod +x deploy/install.sh deploy/package-server.sh
 
-      # 6. 构建 Server 镜像 (主服务)
-      - name: Build Server Docker Image
+      - name: Build host server package
         env:
-          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
-          SCODE_VERSION: ${{ steps.scode-version.outputs.version }}
-          TARGET_PLATFORM: ${{ steps.tag.outputs.TARGET_PLATFORM }}
+          VERSION: ${{ steps.release.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: deploy/package-server.sh "$VERSION" "$ARCH" dist
+
+      - name: Build and smoke-test session runtime image
+        env:
+          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
         run: |
-          echo "Building server image with tag: $IMAGE_TAG platform: $TARGET_PLATFORM"
+          set -euo pipefail
           docker buildx build \
-            --platform "$TARGET_PLATFORM" \
+            --platform '${{ matrix.platform }}' \
             --load \
-            --build-arg SCODE_VERSION="$SCODE_VERSION" \
-            -t my-moss-server:$IMAGE_TAG \
-            -f deploy/server.Dockerfile.local .
-          docker save --platform "$TARGET_PLATFORM" my-moss-server:$IMAGE_TAG | gzip > my-moss-server-$IMAGE_TAG.tar.gz
-          echo "Server image size: $(ls -lh my-moss-server-$IMAGE_TAG.tar.gz)"
+            --build-arg "SCODE_VERSION=$SCODE_VERSION" \
+            -t "my-moss-runtime:$IMAGE_TAG" \
+            -f deploy/runtime/Dockerfile .
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version
+          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
 
-      # 7. 组装部署包
-      - name: Assemble Release Package
+      - name: Assemble installer and offline package
         env:
-          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
-          TARGET_ARCH: ${{ steps.tag.outputs.TARGET_ARCH }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p release/moss
+          set -euo pipefail
+          sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/install.sh > dist/install.sh
+          chmod +x dist/install.sh
+          SERVER_ARCHIVE="moss-server-$VERSION-linux-$ARCH.tar.gz"
+          RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
+          (
+            cd dist
+            sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" > "SHA256SUMS-$ARCH"
+          )
+          mkdir -p "dist/offline-$ARCH/moss-offline"
+          cp dist/install.sh "dist/offline-$ARCH/moss-offline/"
+          cp "dist/$SERVER_ARCHIVE" "dist/$RUNTIME_ARCHIVE" "dist/offline-$ARCH/moss-offline/"
+          cp "dist/SHA256SUMS-$ARCH" "dist/offline-$ARCH/moss-offline/SHA256SUMS"
+          tar -C "dist/offline-$ARCH" -czf "dist/moss-offline-$VERSION-linux-$ARCH.tar.gz" moss-offline
+          (cd dist && sha256sum "moss-offline-$VERSION-linux-$ARCH.tar.gz" >> "SHA256SUMS-$ARCH")
 
-          # 复制镜像文件
-          cp my-moss-runtime-$IMAGE_TAG.tar.gz release/moss/
-          cp my-moss-server-$IMAGE_TAG.tar.gz release/moss/
+      - name: Validate release contents
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          tar -tzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" > dist/server-contents.txt
+          tar -tzf "dist/moss-offline-$VERSION-linux-$ARCH.tar.gz" > dist/offline-contents.txt
+          grep -Fxq 'moss-server/app/bin/moss-server.mjs' dist/server-contents.txt
+          grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
+          grep -Fxq 'moss-offline/install.sh' dist/offline-contents.txt
+          ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
 
-          # 复制配置文件，并更新镜像 tag
-          cp deploy/server.json release/moss/
-          sed -i "s/my-moss-runtime:v1/my-moss-runtime:$IMAGE_TAG/g" release/moss/server.json
-          cp deploy/docker-compose.yml release/moss/
-
-          # 复制启动脚本
-          cp deploy/start.sh release/moss/
-          cp deploy/shutdown.sh release/moss/
-          chmod +x release/moss/start.sh
-          chmod +x release/moss/shutdown.sh
-
-          # 复制说明文档
-          cp deploy/README.md release/moss/
-
-          # 打包
-          cd release
-          tar -czvf ../moss-deploy-$IMAGE_TAG.tar.gz moss
-          cd ..
-
-          echo "Package ready: $(ls -lh moss-deploy-$IMAGE_TAG.tar.gz)"
-          echo "Package contents:"
-          tar -tzvf moss-deploy-$IMAGE_TAG.tar.gz
-          echo ""
-          echo "server.json dockerImage config:"
-          grep "dockerImage" release/moss/server.json
-
-      # 8. 上传构建产物
-      - name: Upload Release Artifact
+      - name: Upload architecture assets
         uses: actions/upload-artifact@v5
         with:
-          name: moss-deploy-${{ steps.tag.outputs.IMAGE_TAG }}
-          path: moss-deploy-${{ steps.tag.outputs.IMAGE_TAG }}.tar.gz
+          name: moss-server-release-${{ matrix.arch }}
+          path: |
+            dist/moss-server-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-offline-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/SHA256SUMS-${{ matrix.arch }}
+            dist/install.sh
           retention-days: 30
 
-  # 创建 GitHub Release（当打 tag 时）
   release:
+    name: publish-server-release
+    if: startsWith(github.ref, 'refs/tags/server-v')
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
     steps:
-      - name: Download all artifacts
+      - name: Download build assets
         uses: actions/download-artifact@v5
         with:
+          pattern: moss-server-release-*
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f -name "*.tar.gz"
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          find artifacts -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          find artifacts -type f -name 'SHA256SUMS-*' -exec cat {} \; | sort -k2 > release-assets/SHA256SUMS
+          cp "$(find artifacts -type f -name install.sh -print -quit)" release-assets/install.sh
+          chmod +x release-assets/install.sh
+          (cd release-assets && sha256sum -c SHA256SUMS)
+          ls -lh release-assets
 
-      - name: Create GitHub Release
+      - name: Publish server release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/moss-*.tar.gz
+          name: Moss Server ${{ github.ref_name }}
           generate_release_notes: true
+          make_latest: false
+          files: |
+            release-assets/*.tar.gz
+            release-assets/install.sh
+            release-assets/SHA256SUMS

@@ -32,6 +32,9 @@ bun run start
 
 ## 开发与部署
 
+Linux 服务端支持在线一键安装和完整离线安装，参见
+[Moss Server 部署说明](deploy/README.md)。
+
 ### 1. 构建服务端
 
 ```bash

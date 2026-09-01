@@ -80,16 +80,19 @@ RUN test -n "$TARGETARCH" \
 # --- Stage 3: nexus-napi (Rust) for the target arch --------------------------
 # Uses the locally-staged sudocode clone (./.sudocode-build-context) via a Cargo
 # [patch], so no GitHub token is needed for the private nexus-vfs-client dep.
-# Base on rust:1-bookworm — Rust/cargo are preinstalled, so no rustup toolchain
-# download (static.rust-lang.org) is needed. We build the addon with plain
-# `cargo build` (the crate is crate-type=["cdylib"]; build.rs runs
-# napi_build::setup()) and rename the resulting .so to nexus-napi.node — this
-# avoids needing Node/npm/@napi-rs/cli at all, removing every flaky external
-# download from this stage except the unavoidable crates.io fetch (hardened via
-# the sparse protocol + retries below).
-FROM rust:1-slim-bookworm AS napi-builder
+# Build on Ubuntu 20.04 so the same addon can be reused by the host package,
+# whose documented compatibility floor is glibc 2.31. The server container is
+# newer and can also load this backwards-compatible artifact.
+FROM ubuntu:20.04 AS napi-builder
 WORKDIR /src
 ARG TARGETARCH
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
 # Cargo network resilience: sparse crates.io protocol (plain HTTPS, no git index
 # clone) + built-in retries survive the transient TLS drops the mirror throws.
 ENV CARGO_NET_RETRY=10 CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse CARGO_HTTP_MULTIPLEXING=false
@@ -121,7 +124,7 @@ RUN cd native/nexus-napi \
 # Output: native/nexus-napi/nexus-napi.node
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
-FROM debian:bookworm-slim AS dl
+FROM debian:bookworm-slim AS nexus-dl
 # nexusd-cluster assembly release. Keep this in step with
 # src/server/nexus/runtime-versions.json and the current sudowork demo runtime.
 ARG NEXUSD_CLUSTER_VERSION=0.1.1
@@ -146,6 +149,13 @@ RUN case "$TARGETARCH" in \
     && mkdir -p /out/bin/nexus \
     && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
     && chmod +x /out/bin/nexus/nexusd
+# The container image also carries a host-side scode binary. Keep that download
+# in a child stage so the host package can reuse nexus-dl without downloading a
+# binary that only exists inside the session Runtime image.
+FROM nexus-dl AS dl
+ARG SCODE_VERSION=latest
+ARG TARGETARCH
+WORKDIR /dl
 # scode (resolve "latest" tag when not pinned).
 RUN set -e; \
     case "$TARGETARCH" in \
@@ -310,3 +320,62 @@ ENV MOSS_MODELS_DIR=/app/models
 EXPOSE 43127
 
 CMD ["node", "bin/moss-server.mjs", "start"]
+
+# --- Host package targets ----------------------------------------------------
+# The deployment release runs moss-server on the Linux host and only uses
+# Docker for session runtimes. Keep these stages in this Dockerfile so the
+# container and host distributions share the exact same application build.
+FROM ubuntu:20.04 AS host-node-runtime
+ARG NODE_VERSION=22.22.1
+ARG TARGETARCH
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /tmp/node
+RUN case "$TARGETARCH" in \
+      amd64) NODE_ARCH=x64 ;; \
+      arm64) NODE_ARCH=arm64 ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && NODE_FILE="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+    && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_FILE}" \
+    && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+    && grep " ${NODE_FILE}$" SHASUMS256.txt | sha256sum -c - \
+    && mkdir -p /opt/node \
+    && tar -xJf "$NODE_FILE" --strip-components=1 -C /opt/node \
+    && /opt/node/bin/node --version
+
+FROM ubuntu:20.04 AS host-runtime-deps
+COPY --from=host-node-runtime /opt/node /opt/node
+ENV PATH=/opt/node/bin:$PATH
+WORKDIR /deps
+COPY deploy/runtime-deps.package.json package.json
+RUN npm install --omit=dev --no-audit --no-fund \
+    && node -e "Promise.all([import('@xenova/transformers'), import('sharp')]).then(() => console.log('runtime deps ok'))"
+
+FROM ubuntu:20.04 AS host-package
+ARG RELEASE_VERSION
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /out/moss-server
+COPY --from=host-node-runtime /opt/node ./node
+COPY --from=js-builder /src/bin/moss-server.mjs /src/bin/direct-connect-session-runner.mjs ./app/bin/
+COPY --from=js-builder /src/admin/dist ./app/admin/dist
+COPY --from=js-builder /src/assistants ./app/assistants
+COPY --from=js-builder /src/skills ./app/skills
+COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/index.d.ts ./app/native/nexus-napi/
+COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./app/native/nexus-napi/
+COPY --from=go-builder /out/wiki /out/corpapp ./app/bin/
+COPY --from=nexus-dl /out/bin/nexus/nexusd ./app/bin/nexus/nexusd
+COPY --from=host-runtime-deps /deps/node_modules ./app/node_modules
+COPY --from=model-stage /m/out/Xenova ./app/models/Xenova
+COPY deploy/server.json ./server.json.template
+RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd \
+    && printf '%s\n' "$RELEASE_VERSION" > VERSION \
+    && node/bin/node --check app/bin/moss-server.mjs \
+    && node/bin/node -e "require('node:sqlite'); Promise.all([import('./app/native/nexus-napi/index.js'), import('./app/node_modules/@xenova/transformers/src/transformers.js'), import('./app/node_modules/sharp/lib/index.js')]).then(() => console.log('host runtime ok'))" \
+    && app/bin/nexus/nexusd --version
+
+FROM scratch AS host-export
+COPY --from=host-package /out/ /
