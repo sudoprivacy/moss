@@ -124,6 +124,11 @@ sudo ./install.sh --offline --upgrade
 会自动恢复上一版程序和配置。同版本仅获取小安装脚本确认版本，不下载 Server 包和
 Runtime 镜像，也不重启服务。
 
+固定版本脚本（例如 `/root/install.sh`）已经知道目标版本；目标版本与当前版本相同时，
+普通安装和 `--upgrade` 都会在联网前直接退出。安装目录内的
+`~/.moss/server/install.sh --upgrade` 是长期升级入口，会从 `latest` 获取小安装脚本
+以发现后续版本。
+
 卸载：
 
 ```bash
