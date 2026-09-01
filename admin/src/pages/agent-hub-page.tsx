@@ -248,17 +248,7 @@ function StoreAgentCard({
       )}
     >
       <div className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted text-xl">
-        {agent.avatar ? (
-          <img
-            src={agent.avatar}
-            alt={agent.display_name}
-            className="size-full object-cover"
-          />
-        ) : agent.emoji ? (
-          <span>{agent.emoji}</span>
-        ) : (
-          <Bot className="size-5 text-muted-foreground" />
-        )}
+        <AgentAvatar avatar={agent.avatar} emoji={agent.emoji} alt={agent.display_name} />
       </div>
 
       <div className="min-w-0 flex-1 space-y-3">
@@ -348,6 +338,14 @@ function StoreAgentCard({
   )
 }
 
+function AgentAvatar({ avatar, emoji, alt }: { avatar?: string | null; emoji?: string | null; alt: string }) {
+  const [failed, setFailed] = useState(false)
+  if (avatar && !failed) {
+    return <img src={avatar} alt={alt} className="size-full object-cover" onError={() => setFailed(true)} />
+  }
+  return emoji ? <span>{emoji}</span> : <Bot className="size-5 text-muted-foreground" />
+}
+
 type InstalledAgentCardProps = {
   agent: InstalledAgentInfo
   uninstalling: boolean
@@ -385,17 +383,7 @@ function InstalledAgentCard({
       className="flex items-start gap-4 rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent/30"
     >
       <div className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted text-xl">
-        {agent.avatar ? (
-          <img
-            src={agent.avatar}
-            alt={agent.displayName}
-            className="size-full object-cover"
-          />
-        ) : agent.emoji ? (
-          <span>{agent.emoji}</span>
-        ) : (
-          <Bot className="size-5 text-muted-foreground" />
-        )}
+        <AgentAvatar avatar={agent.avatar} emoji={agent.emoji} alt={agent.displayName} />
       </div>
 
       <div className="min-w-0 flex-1 space-y-3">
@@ -560,7 +548,10 @@ export default function AgentHubPage() {
   const [createName, setCreateName] = useState('')
   const [createDisplayName, setCreateDisplayName] = useState('')
   const [createDescription, setCreateDescription] = useState('')
-  const [createAvatar, setCreateAvatar] = useState('')
+  const [createAvatar, setCreateAvatar] = useState<File | null>(null)
+  const [createDefaultInitPrompt, setCreateDefaultInitPrompt] = useState('')
+  const [createCategories, setCreateCategories] = useState<string[]>([])
+  const [createPromptExamples, setCreatePromptExamples] = useState<string[]>([])
   const [createEmoji, setCreateEmoji] = useState('')
   const [createRules, setCreateRules] = useState('')
   const [createAgentType, setCreateAgentType] = useState<'chat' | 'workflow'>('chat')
@@ -632,7 +623,11 @@ export default function AgentHubPage() {
   const [editingTenantAgent, setEditingTenantAgent] = useState<TenantAssistantInfo | null>(null)
   const [tenantEditName, setTenantEditName] = useState('')
   const [tenantEditDescription, setTenantEditDescription] = useState('')
-  const [tenantEditAvatar, setTenantEditAvatar] = useState('')
+  const [tenantEditAvatar, setTenantEditAvatar] = useState<File | null>(null)
+  const [tenantEditAvatarUrl, setTenantEditAvatarUrl] = useState('')
+  const [tenantEditDefaultInitPrompt, setTenantEditDefaultInitPrompt] = useState('')
+  const [tenantEditCategories, setTenantEditCategories] = useState<string[]>([])
+  const [tenantEditPromptExamples, setTenantEditPromptExamples] = useState<string[]>([])
   const [tenantEditEmoji, setTenantEditEmoji] = useState('')
   const [tenantEditAgentType, setTenantEditAgentType] = useState<'chat' | 'workflow'>('chat')
   const [tenantEditMemoryMode, setTenantEditMemoryMode] = useState<'session' | 'user'>('session')
@@ -1385,7 +1380,10 @@ export default function AgentHubPage() {
         name,
         display_name: displayName,
         description: createDescription.trim() || undefined,
-        avatar: createAvatar.trim() || undefined,
+        default_init_prompt: createDefaultInitPrompt,
+        promptsI18n: { 'zh-CN': createPromptExamples.map(value => value.trim()).filter(Boolean) },
+        categories: createCategories.map(value => value.trim()).filter(Boolean),
+        avatar: createAvatar,
         emoji: createEmoji.trim() || undefined,
         rules: createRules,
         skills: createSelectedSkills.length > 0 ? createSelectedSkills : undefined,
@@ -1407,7 +1405,10 @@ export default function AgentHubPage() {
       setCreateName('')
       setCreateDisplayName('')
       setCreateDescription('')
-      setCreateAvatar('')
+      setCreateAvatar(null)
+      setCreateDefaultInitPrompt('')
+      setCreateCategories([])
+      setCreatePromptExamples([])
       setCreateEmoji('')
       setCreateRules('')
       setCreateAgentType('chat')
@@ -1433,7 +1434,7 @@ export default function AgentHubPage() {
     } finally {
       setCreatingAssistant(false)
     }
-  }, [createAvatar, createDescription, createDisplayName, createEmoji, createName, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, isStoreAdmin, user, fetchInstalledState, fetchTenantAssistants])
+  }, [createAvatar, createCategories, createDefaultInitPrompt, createDescription, createDisplayName, createEmoji, createName, createPromptExamples, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, isStoreAdmin, user, fetchInstalledState, fetchTenantAssistants])
 
   const handleApproveTenantAssistant = useCallback(async (approved: boolean) => {
     if (!approvingAssistant) return
@@ -1524,7 +1525,11 @@ export default function AgentHubPage() {
     setEditingTenantAgent(assistant)
     setTenantEditName(assistant.display_name || assistant.name)
     setTenantEditDescription(assistant.description || '')
-    setTenantEditAvatar(assistant.avatar || '')
+    setTenantEditAvatar(null)
+    setTenantEditAvatarUrl(assistant.avatar || '')
+    setTenantEditDefaultInitPrompt(assistant.default_init_prompt || '')
+    setTenantEditCategories(assistant.categories || [])
+    setTenantEditPromptExamples(assistant.prompts_i18n?.['zh-CN'] || [])
     setTenantEditEmoji(assistant.emoji || '')
     setTenantEditAgentType(assistant.agent_type || 'chat')
     setTenantEditMemoryMode(assistant.memory_mode || 'session')
@@ -1655,6 +1660,9 @@ export default function AgentHubPage() {
         id: editingTenantAgent.id,
         display_name: tenantEditName,
         description: tenantEditDescription,
+        default_init_prompt: tenantEditDefaultInitPrompt,
+        promptsI18n: { 'zh-CN': tenantEditPromptExamples.map(value => value.trim()).filter(Boolean) },
+        categories: tenantEditCategories.map(value => value.trim()).filter(Boolean),
         avatar: tenantEditAvatar,
         emoji: tenantEditEmoji,
         ...(tenantEditRulesEditable && !tenantEditRulesLoadFailed
@@ -1679,7 +1687,7 @@ export default function AgentHubPage() {
     } finally {
       setSavingTenantEdit(false)
     }
-  }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditEmoji, tenantEditRules,
+  }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditCategories, tenantEditDefaultInitPrompt, tenantEditEmoji, tenantEditPromptExamples, tenantEditRules,
       tenantEditRulesEditable, tenantEditRulesLoadFailed,
       tenantEditAgentType, tenantEditMemoryMode, tenantEditVisibilityMode, tenantEditVisibleTo,
       tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
@@ -2242,8 +2250,21 @@ export default function AgentHubPage() {
                         className="rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent/30"
                       >
                         <div className="flex items-start gap-4">
-                          <div className="flex size-12 items-center justify-center rounded-xl bg-muted text-xl">
-                            <Bot className="size-6" />
+                          <div className="flex size-12 items-center justify-center overflow-hidden rounded-xl bg-muted text-xl">
+                            {assistant.avatar ? (
+                              <img
+                                src={assistant.avatar}
+                                alt={assistant.display_name || assistant.name}
+                                className="size-full object-cover"
+                                onError={event => {
+                                  event.currentTarget.style.display = 'none'
+                                  event.currentTarget.parentElement?.querySelector('[data-avatar-fallback]')?.classList.remove('hidden')
+                                }}
+                              />
+                            ) : null}
+                            <span data-avatar-fallback className={assistant.avatar ? 'hidden' : ''}>
+                              {assistant.emoji || <Bot className="size-6" />}
+                            </span>
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
@@ -2478,17 +2499,11 @@ export default function AgentHubPage() {
                 <>
                   <div className="flex items-start gap-4">
                     <div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-muted text-2xl">
-                      {detailData?.avatar || detailAgent?.avatar ? (
-                        <img
-                          src={detailData?.avatar || detailAgent?.avatar}
-                          alt={detailDisplayName}
-                          className="size-full object-cover"
-                        />
-                      ) : detailData?.emoji || detailAgent?.emoji ? (
-                        <span>{detailData?.emoji || detailAgent?.emoji}</span>
-                      ) : (
-                        <Bot className="size-6 text-muted-foreground" />
-                      )}
+                      <AgentAvatar
+                        avatar={detailData?.avatar || detailAgent?.avatar}
+                        emoji={detailData?.emoji || detailAgent?.emoji}
+                        alt={detailDisplayName}
+                      />
                     </div>
 
                     <div className="min-w-0 flex-1 space-y-3">
@@ -3328,7 +3343,10 @@ export default function AgentHubPage() {
             setCreateName('')
             setCreateDisplayName('')
             setCreateDescription('')
-            setCreateAvatar('')
+            setCreateAvatar(null)
+            setCreateDefaultInitPrompt('')
+            setCreateCategories([])
+            setCreatePromptExamples([])
             setCreateEmoji('')
             setCreateRules('')
             setCreateAgentType('chat')
@@ -3402,11 +3420,11 @@ export default function AgentHubPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-medium">头像地址</label>
+                <label className="text-sm font-medium">头像</label>
                 <Input
-                  value={createAvatar}
-                  onChange={event => setCreateAvatar(event.target.value)}
-                  placeholder="https://..."
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml"
+                  onChange={event => setCreateAvatar(event.target.files?.[0] || null)}
                 />
               </div>
             </div>
@@ -3418,6 +3436,33 @@ export default function AgentHubPage() {
                 onChange={event => setCreateDescription(event.target.value)}
                 rows={2}
                 placeholder="输入智能体描述"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">默认问候语</label>
+              <Textarea
+                value={createDefaultInitPrompt}
+                onChange={event => setCreateDefaultInitPrompt(event.target.value)}
+                rows={2}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">分类（每行一项）</label>
+              <Textarea
+                value={createCategories.join('\n')}
+                onChange={event => setCreateCategories(event.target.value.split('\n'))}
+                rows={2}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">案例提示词（每行一条）</label>
+              <Textarea
+                value={createPromptExamples.join('\n')}
+                onChange={event => setCreatePromptExamples(event.target.value.split('\n'))}
+                rows={4}
               />
             </div>
 
@@ -4500,11 +4545,14 @@ export default function AgentHubPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-medium">头像地址</label>
+                <label className="text-sm font-medium">头像</label>
+                {tenantEditAvatarUrl && !tenantEditAvatar && (
+                  <img src={tenantEditAvatarUrl} alt="当前头像" className="size-12 rounded object-cover" />
+                )}
                 <Input
-                  value={tenantEditAvatar}
-                  onChange={event => setTenantEditAvatar(event.target.value)}
-                  placeholder="https://..."
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml"
+                  onChange={event => setTenantEditAvatar(event.target.files?.[0] || null)}
                 />
               </div>
 
@@ -4525,6 +4573,33 @@ export default function AgentHubPage() {
                   onChange={event => setTenantEditDescription(event.target.value)}
                   rows={4}
                   placeholder="输入智能体描述"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">默认问候语</label>
+                <Textarea
+                  value={tenantEditDefaultInitPrompt}
+                  onChange={event => setTenantEditDefaultInitPrompt(event.target.value)}
+                  rows={2}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">分类（每行一项）</label>
+                <Textarea
+                  value={tenantEditCategories.join('\n')}
+                  onChange={event => setTenantEditCategories(event.target.value.split('\n'))}
+                  rows={2}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">案例提示词（每行一条）</label>
+                <Textarea
+                  value={tenantEditPromptExamples.join('\n')}
+                  onChange={event => setTenantEditPromptExamples(event.target.value.split('\n'))}
+                  rows={4}
                 />
               </div>
 
