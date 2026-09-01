@@ -49,7 +49,21 @@ interface SecretMetadata {
   version: number
 }
 
-const SECRETS_ROOT = '/secrets'
+// VFS root under which secrets are stored. Defaults to `/secrets` (embedded
+// serve-local, which lands in the daemon's node-local root zone). On the merged
+// cluster, point this at a moss-owned zone subtree (e.g. `/moss/secrets`) via
+// MOSS_NEXUS_SECRETS_ROOT so writes are zone-scoped rather than in the shared
+// federated root — avoiding cross-node leakage on a multi-node cluster.
+const SECRETS_ROOT = process.env.MOSS_NEXUS_SECRETS_ROOT?.trim().replace(/\/+$/, '') || '/secrets'
+
+/** mTLS material for connecting to an auth-on external `nexusd-cluster`. */
+export type NexusClientTlsConfig = {
+  caPath: string
+  certPath: string
+  keyPath: string
+  /** Server-cert SAN to validate; defaults to the cluster's `nexus-node`. */
+  serverName?: string
+}
 
 let db: DatabaseSync | null = null
 
@@ -77,17 +91,28 @@ export class NexusClient {
   private client: InstanceType<ReturnType<typeof loadNativeBinding>['NexusGrpcClient']> | null = null
   private readonly endpoint: string
   private readonly authToken: string
+  private readonly tls: NexusClientTlsConfig | null
   private nativeBinding: ReturnType<typeof loadNativeBinding> | null = null
 
-  constructor(grpcEndpoint: string, authToken = '') {
+  constructor(grpcEndpoint: string, authToken = '', tls: NexusClientTlsConfig | null = null) {
     this.endpoint = grpcEndpoint
     this.authToken = authToken
+    this.tls = tls
   }
 
   private getClient(): InstanceType<ReturnType<typeof loadNativeBinding>['NexusGrpcClient']> {
     if (!this.client) {
       this.nativeBinding = loadNativeBinding()
-      this.client = new this.nativeBinding.NexusGrpcClient(this.endpoint)
+      // mTLS to an auth-on cluster vs. plaintext trusted-loopback serve-local.
+      this.client = this.tls
+        ? this.nativeBinding.NexusGrpcClient.withMtls(
+            this.endpoint,
+            this.tls.caPath,
+            this.tls.certPath,
+            this.tls.keyPath,
+            this.tls.serverName,
+          )
+        : new this.nativeBinding.NexusGrpcClient(this.endpoint)
     }
     return this.client
   }

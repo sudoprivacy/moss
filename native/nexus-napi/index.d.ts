@@ -8,11 +8,20 @@
  */
 export declare class NexusGrpcClient {
   /**
-   * Create a new gRPC client targeting the given endpoint
-   * (e.g. "http://localhost:2028").
+   * Create a new **plaintext** gRPC client targeting the given endpoint
+   * (e.g. "http://127.0.0.1:2126"). Used by the embedded/dev `serve-local`
+   * daemon (trusted loopback, no TLS).
    * The TCP connection is lazy — established on first RPC call.
    */
   constructor(endpoint: string)
+  /**
+   * Create a new **mTLS** gRPC client targeting `endpoint`
+   * (e.g. "https://127.0.0.1:8443"), authenticating with moss's client
+   * identity against the cluster CA. `caPath`, `certPath`, `keyPath` are
+   * filesystem paths to PEM files. `domain` optionally overrides the SNI /
+   * cert-verification hostname. The TLS handshake is lazy.
+   */
+  static withMtls(endpoint: string, caPath: string, certPath: string, keyPath: string, domain?: string | undefined | null): NexusGrpcClient
   /**
    * Generic gRPC call: method name + JSON payload string + auth token.
    * Returns the response as a JSON string.
@@ -22,6 +31,8 @@ export declare class NexusGrpcClient {
   read(path: string, authToken: string): Buffer
   /** Write raw bytes to a VFS path. */
   write(path: string, content: Buffer, authToken: string): void
+  /** Delete a VFS path. */
+  delete(path: string, authToken: string): void
   /** Ping the nexus gRPC server. Returns the response as a JSON string. */
   ping(authToken: string): string
 }

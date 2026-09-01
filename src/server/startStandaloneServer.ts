@@ -37,10 +37,12 @@ export async function startStandaloneDirectConnectServer(
   })
   await ensureServerDirectories(config)
 
-  // Start Nexus subprocess for secrets storage (required, no fallback)
+  // Nexus is the secrets backend (required, no in-memory fallback). Depending
+  // on MOSS_NEXUS_MODE this either spawns an embedded `serve-local` daemon
+  // (default) or connects to an external production `nexusd-cluster` over mTLS
+  // without spawning anything (start() is connect-only in that mode).
   const nexusManager = new NexusManager()
 
-  // Start nexus - must succeed, no in-memory fallback
   await nexusManager.start()
   try {
     return await finishStandaloneServerStartup(config, nexusManager)
@@ -58,8 +60,14 @@ async function finishStandaloneServerStartup(
   config: ServerConfig,
   nexusManager: NexusManager,
 ) {
-  const nexusClient: NexusClientType = new NexusClient(nexusManager.grpcUrl)
-  console.log('[Startup] Nexus started successfully for secrets management (gRPC mode)')
+  const nexusClient: NexusClientType = new NexusClient(
+    nexusManager.grpcUrl,
+    nexusManager.authToken,
+    nexusManager.tlsConfig,
+  )
+  console.log(
+    `[Startup] Nexus ready for secrets management (gRPC ${nexusManager.mode} mode, endpoint=${nexusManager.grpcUrl})`,
+  )
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
   const store = openDirectConnectStore(config)
