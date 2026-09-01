@@ -20,17 +20,17 @@ Ubuntu 22.04 为最低验证基线；Ubuntu 20.04 和 CentOS 7 会在安装器�
 ## 在线安装
 
 Server 是仓库唯一发布产品。Release CI 会将每个 `server-v*` Release 同步到腾讯
-云 COS 并标记为 GitHub Latest。日常安装和升级使用以下固定 COS 命令，URL 不随
-版本变化：
+云 COS 并标记为 GitHub Latest。日常安装和升级使用以下 COS 全球加速固定命令，
+URL 不随版本变化：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/latest/install.sh | sudo bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh | sudo bash
 ```
 
 每个服务端版本仍保留独立的 `server-v*` Release，锁定版本或回滚时可以使用：
 
 ```bash
-BASE=https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/server-v0.1.5
+BASE=https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/server-v0.1.5
 curl -fL --progress-bar "$BASE/install.sh" \
   | sudo env MOSS_DOWNLOAD_BASE="$BASE" MOSS_ALLOW_OLD_VERSION=1 bash
 ```
@@ -48,7 +48,7 @@ systemd 单元的写入仍需要 root 权限。
 也可以使用环境变量进行非交互安装：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/latest/install.sh \
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
   | sudo MOSS_NON_INTERACTIVE=1 \
       MOSS_INSTALL_DIR=/data/moss \
       MOSS_ADVERTISED_HOST=10.0.1.133 \

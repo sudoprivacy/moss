@@ -11,7 +11,7 @@ Modes:
   --all            Run both phases (default).
 
 Environment variables:
-  COS_BUCKET, COS_REGION, COS_ROOT_PATH, COS_PUBLIC_BASE_URL.
+  COS_BUCKET, COS_ROOT_PATH, COS_PUBLIC_BASE_URL.
 EOF
 }
 
@@ -26,9 +26,8 @@ ASSETS_DIR="$1"
 RELEASE_TAG="$2"
 MODE="${3:---all}"
 COS_BUCKET="${COS_BUCKET:-sudowork-release-1309794936}"
-COS_REGION="${COS_REGION:-ap-beijing}"
 COS_ROOT_PATH="${COS_ROOT_PATH:-moss/server}"
-COS_PUBLIC_BASE_URL="${COS_PUBLIC_BASE_URL:-https://${COS_BUCKET}.cos.${COS_REGION}.myqcloud.com}"
+COS_PUBLIC_BASE_URL="${COS_PUBLIC_BASE_URL:-https://${COS_BUCKET}.cos.accelerate.myqcloud.com}"
 
 case "$RELEASE_TAG" in
   server-v*) VERSION="${RELEASE_TAG#server-v}" ;;
@@ -64,7 +63,7 @@ done
 EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "$RELEASE_TAG")"
 grep -Fq "$EXPECTED_RELEASE_LINE" "$ASSETS_DIR/install.sh" \
   || { echo "FAIL: install.sh is not stamped for $RELEASE_TAG" >&2; exit 1; }
-grep -Fq 'sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/$RELEASE_TAG' \
+grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' \
   "$ASSETS_DIR/install.sh" \
   || { echo "FAIL: install.sh does not use the COS release source" >&2; exit 1; }
 (cd "$ASSETS_DIR" && sha256sum -c SHA256SUMS)
