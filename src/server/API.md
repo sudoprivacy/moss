@@ -525,6 +525,47 @@ API key 登录：
 
 需要 `Authorization: Bearer <token>` header。
 
+## Cron Job Workspace Files
+
+给定时任务上传它每次执行都能读到的文件（对照表、模板等）。
+
+**为什么挂在 job 上而不是 session 上**：`conversationMode='new'` 时每次执行都是新
+session，传给其中一个，下次执行就没了；`conversationMode='reuse'` 时 session 要到
+第一次执行才存在，之前无处可传。**job 的工作目录是两种模式都共享的唯一位置**，
+也正是 `createCronSession` 解析出的那个目录（两处共用同一个解析函数，不会漂移）。
+
+权限：`canManageJob`（创建者 / 共同所有者 / `admin:cron` 等）—— 往工作目录写文件会
+改变任务下次执行的行为，属于编辑而非读取。
+
+### POST `/api/v1/cron/jobs/:jobId/workspace/file`
+
+```json
+{ "path": "对照表.xlsx", "content_base64": "<base64>" }
+```
+
+- `path` 必须是相对路径；绝对路径与 `..` 穿越一律拒绝（400 / 403）。
+- **同名覆盖**：重传修正后的文件是常见操作，留着旧文件会让任务继续按旧数据跑。
+- 大小上限取 `workspaceUploadLimitBytes`（settings.json，默认 20MB），超出返回 413。
+
+返回：`{ "success": true, "relativePath": "对照表.xlsx", "size": 10558 }`
+
+### DELETE `/api/v1/cron/jobs/:jobId/workspace/file?path=<相对路径>`
+
+返回：`{ "success": true, "relativePath": "..." }`
+
+### GET `/api/v1/cron/jobs/:jobId/workspace/tree?path=<相对路径>`
+
+返回 `{ "success": true, "workspace": "<绝对路径>", "tree": { ... } }`，
+`tree` 是 `MossWorkspaceNode`（`name` / `relativePath` / `isFile` / `isDir` /
+`size` / `mtime` / `children`）。
+
+目录不存在时会先创建再返回空列表，**不返回 404** —— 「先上传、等排期执行」是正常
+流程，空列表必须能被读成「还没传」而不是「任务没了」。
+
+> docker user-container 模式下，job 的 workspace 必须位于 `runtimeDir` 或
+> `MOSS_HOME` 之下，否则上传即被拒并在消息里给出允许的根路径 —— 而不是收下文件、
+> 等到执行时才失败。
+
 ## Event Triggers API
 
 外部系统通过 HTTP POST 通知 moss，触发 agent 近实时执行分析任务。
