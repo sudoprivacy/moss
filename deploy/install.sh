@@ -25,7 +25,8 @@ Options:
 
 Configuration environment variables:
   MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST, MOSS_ADMIN_USERNAME,
-  MOSS_ADMIN_PASSWORD, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
+  MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, ANTHROPIC_BASE_URL,
+  ANTHROPIC_API_KEY.
 EOF
 }
 
@@ -143,7 +144,8 @@ if [ "$OFFLINE" = 1 ]; then
 else
   SOURCE_DIR="$WORK_DIR/download"
   mkdir -p "$SOURCE_DIR"
-  DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
+  DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG}"
+  DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
   log "Downloading $SERVER_ARCHIVE"
   curl -fL --retry 3 --connect-timeout 20 -o "$SOURCE_DIR/$SERVER_ARCHIVE" "$DOWNLOAD_BASE/$SERVER_ARCHIVE"
   log "Downloading $RUNTIME_ARCHIVE"

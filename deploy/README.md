@@ -40,8 +40,18 @@ curl -fsSL https://github.com/sudoprivacy/moss/releases/download/server-v0.1.0/i
 ```
 
 支持的变量包括 `MOSS_INSTALL_DIR`、`MOSS_PORT`、`MOSS_ADVERTISED_HOST`、
-`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`ANTHROPIC_BASE_URL` 和
-`ANTHROPIC_API_KEY`。
+`MOSS_ADMIN_USERNAME`、`MOSS_ADMIN_PASSWORD`、`MOSS_DOWNLOAD_BASE`、
+`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY`。如果服务器不能访问 GitHub
+Release 大文件域名，可将
+Release 资产同步到同一个 HTTP 目录，并通过 `MOSS_DOWNLOAD_BASE` 指定镜像：
+
+```bash
+curl -fsSL https://mirror.example.com/moss/server-v0.1.0/install.sh \
+  | sudo MOSS_DOWNLOAD_BASE=https://mirror.example.com/moss/server-v0.1.0 \
+      bash
+```
+
+镜像下载仍会使用 Release 内的 `SHA256SUMS` 校验 server 和 Runtime 包。
 
 ## 离线安装
 
