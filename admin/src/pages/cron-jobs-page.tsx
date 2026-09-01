@@ -41,7 +41,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
-import { getAdminCronJobs, getCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob, type CronJobRun, type CronJobFormInput } from '@/lib/api/cron'
+import { getAdminCronJobs, getCronJobs, getCronJobRuns, disableCronJob, enableCronJob, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, getCronJobWorkspaceTree, uploadCronJobWorkspaceFile, deleteCronJobWorkspaceFile, type CronJob, type CronJobRun, type CronJobFormInput, type CronWorkspaceEntry } from '@/lib/api/cron'
 import { resolveOwnerName } from '@/lib/utils'
 import { getUsers } from '@/lib/api/auth'
 import { getInstalledAgents, type InstalledAgentInfo } from '@/lib/api/agent-hub'
@@ -49,7 +49,7 @@ import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { hasScope } from '@/lib/api/client'
 import type { AuthUser } from '@/lib/api/types'
-import { Search, RefreshCw, Clock, Pause, Play, History, Loader2, ExternalLink, Plus, Pencil, Trash2, Zap } from 'lucide-react'
+import { Search, RefreshCw, Clock, Pause, Play, History, Loader2, ExternalLink, Plus, Pencil, Trash2, Zap, Paperclip, Upload, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { format } from 'date-fns'
 import { Link } from 'react-router-dom'
@@ -102,6 +102,82 @@ export default function CronJobsPage() {
   const [runsLoading, setRunsLoading] = useState(false)
   const [togglingJobId, setTogglingJobId] = useState<string | null>(null)
   const [triggeringJobId, setTriggeringJobId] = useState<string | null>(null)
+
+  // Job workspace files — what this job's runs will see, in both 'new' and
+  // 'reuse' conversation modes.
+  const [filesJob, setFilesJob] = useState<CronJob | null>(null)
+  const [files, setFiles] = useState<CronWorkspaceEntry[]>([])
+  const [filesLoading, setFilesLoading] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [workspacePath, setWorkspacePath] = useState<string>('')
+
+  const loadFiles = useCallback(async (jobId: string) => {
+    setFilesLoading(true)
+    try {
+      const res = await getCronJobWorkspaceTree(jobId)
+      if (!res.success) {
+        toast.error(res.message || '读取失败')
+        setFiles([])
+        return
+      }
+      setWorkspacePath(res.workspace || '')
+      // The tree root is the workspace itself; show its immediate children.
+      setFiles(res.tree?.children ?? [])
+    } catch (error) {
+      toast.error(`读取失败：${error instanceof Error ? error.message : String(error)}`)
+      setFiles([])
+    } finally {
+      setFilesLoading(false)
+    }
+  }, [])
+
+  const handleViewFiles = useCallback((job: CronJob) => {
+    setFilesJob(job)
+    void loadFiles(job.id)
+  }, [loadFiles])
+
+  const handleUpload = useCallback(async (file: File) => {
+    if (!filesJob) return
+    setUploading(true)
+    try {
+      // FileReader gives a data: URL; the API wants bare base64.
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      const existed = files.some(f => f.name === file.name)
+      const res = await uploadCronJobWorkspaceFile(filesJob.id, file.name, base64)
+      if (!res.success) {
+        toast.error(res.message || '上传失败')
+        return
+      }
+      // Say plainly that an existing file was replaced — silently overwriting
+      // the file a scheduled job runs on is not something to discover later.
+      toast.success(existed ? `已覆盖 ${file.name}` : `已上传 ${file.name}`)
+      await loadFiles(filesJob.id)
+    } catch (error) {
+      toast.error(`上传失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setUploading(false)
+    }
+  }, [filesJob, files, loadFiles])
+
+  const handleDeleteFile = useCallback(async (relativePath: string) => {
+    if (!filesJob) return
+    try {
+      const res = await deleteCronJobWorkspaceFile(filesJob.id, relativePath)
+      if (!res.success) {
+        toast.error(res.message || '删除失败')
+        return
+      }
+      toast.success(`已删除 ${relativePath}`)
+      await loadFiles(filesJob.id)
+    } catch (error) {
+      toast.error(`删除失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [filesJob, loadFiles])
 
   // Create/edit form dialog
   // Executor defaults to the creator (current user); co-owners start empty.
@@ -556,6 +632,14 @@ export default function CronJobsPage() {
                           <History className="h-4 w-4" />
                         </Button>
                         <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleViewFiles(job)}
+                          title="任务文件"
+                        >
+                          <Paperclip className="h-4 w-4" />
+                        </Button>
+                        <Button
                           variant={job.enabled ? 'secondary' : 'default'}
                           size="sm"
                           onClick={() => handleToggleJob(job)}
@@ -587,6 +671,88 @@ export default function CronJobsPage() {
           </Table>
         </div>
       </div>
+
+      {/* Job workspace files */}
+      <Dialog open={!!filesJob} onOpenChange={(o) => { if (!o) { setFilesJob(null); setFiles([]) } }}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>任务文件 - {filesJob?.name}</DialogTitle>
+          </DialogHeader>
+
+          <p className="text-sm text-muted-foreground">
+            这些文件放在该任务的工作目录里，**每次执行都能看到** —— 无论会话模式是
+            「新建」还是「复用」。上传同名文件会**覆盖**原文件。
+          </p>
+          {workspacePath && (
+            <p className="text-xs text-muted-foreground break-all">
+              工作目录：<code>{workspacePath}</code>
+            </p>
+          )}
+
+          <div>
+            <input
+              id="cron-file-input"
+              type="file"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                // Reset so re-picking the same filename fires onChange again —
+                // re-uploading a corrected file under the same name is the
+                // common case here.
+                e.target.value = ''
+                if (f) void handleUpload(f)
+              }}
+            />
+            <Button
+              variant="outline"
+              disabled={uploading}
+              onClick={() => document.getElementById('cron-file-input')?.click()}
+            >
+              {uploading
+                ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />上传中…</>
+                : <><Upload className="h-4 w-4 mr-2" />选择文件上传</>}
+            </Button>
+          </div>
+
+          {filesLoading ? (
+            <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin" /></div>
+          ) : files.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center">
+              还没有文件。上传后，该任务下次执行时即可读取。
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>文件名</TableHead>
+                  <TableHead className="w-28">大小</TableHead>
+                  <TableHead className="w-16"></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {files.map((f) => (
+                  <TableRow key={f.relativePath}>
+                    <TableCell className="font-mono text-xs break-all">{f.name}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {f.isDir
+                        ? '目录'
+                        : f.size != null ? `${(f.size / 1024).toFixed(1)} KB` : '-'}
+                    </TableCell>
+                    <TableCell>
+                      {!f.isDir && (
+                        <Button variant="ghost" size="sm" title="删除"
+                          onClick={() => void handleDeleteFile(f.relativePath)}>
+                          <X className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Runs Dialog */}
       <Dialog open={!!selectedJob} onOpenChange={() => setSelectedJob(null)}>

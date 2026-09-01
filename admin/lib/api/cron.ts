@@ -107,6 +107,59 @@ export async function enableCronJob(jobId: string): Promise<{ success: boolean; 
   )
 }
 
+// ---- Job workspace files ----
+// Uploaded against the JOB, not a session: 'new' mode gives every run a fresh
+// session and 'reuse' keeps one across many runs, so a session-scoped file
+// would either vanish next run or be unreachable before the first.
+
+/** Mirrors the server's MossWorkspaceNode. */
+export interface CronWorkspaceEntry {
+  name: string
+  relativePath: string
+  fullPath?: string
+  isFile: boolean
+  isDir: boolean
+  size?: number
+  mtime?: number
+  children?: CronWorkspaceEntry[]
+}
+
+export interface CronWorkspaceTreeResponse {
+  success: boolean
+  message?: string
+  workspace?: string
+  tree?: CronWorkspaceEntry
+}
+
+export async function getCronJobWorkspaceTree(jobId: string): Promise<CronWorkspaceTreeResponse> {
+  return dcClient.get<CronWorkspaceTreeResponse>(`/api/v1/cron/jobs/${jobId}/workspace/tree`)
+}
+
+/**
+ * Upload one file into the job's workspace. Same `path` overwrites — re-uploading
+ * a corrected file is the common case, and leaving the stale copy would let the
+ * job keep running against it.
+ */
+export async function uploadCronJobWorkspaceFile(
+  jobId: string,
+  path: string,
+  contentBase64: string,
+): Promise<{ success: boolean; relativePath?: string; size?: number; message?: string }> {
+  return dcClient.post(`/api/v1/cron/jobs/${jobId}/workspace/file`, {
+    path,
+    content_base64: contentBase64,
+  })
+}
+
+export async function deleteCronJobWorkspaceFile(
+  jobId: string,
+  path: string,
+): Promise<{ success: boolean; message?: string }> {
+  return dcClient.delete(
+    `/api/v1/cron/jobs/${jobId}/workspace/file?path=${encodeURIComponent(path)}`,
+  )
+}
+
 export interface CronJobFormInput {
   name: string
   /** Cron expression (kind is fixed to 'cron' for console-created jobs) */
