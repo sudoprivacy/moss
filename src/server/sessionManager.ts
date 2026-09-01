@@ -42,6 +42,7 @@ export type SessionRuntimeOptions = {
 export type SessionRuntimeInfo = {
   type: SessionRuntimeType
   engine: 'scode'
+  scodePath?: string
   model?: string
   dockerImage?: string
   dockerMode?: 'session' | 'user'

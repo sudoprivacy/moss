@@ -2,13 +2,19 @@
 
 ## 环境要求
 
-- Linux x86_64/amd64，glibc 2.35+（推荐 Ubuntu 22.04+）
+- Linux x86_64/amd64，glibc 2.39+（推荐 Ubuntu 24.04+）
 - systemd、Docker 20.10+
 - root/sudo 权限
 - `curl`、`tar`、`gzip`、`sha256sum`
 
-安装包自带 Node.js 22、编译后的 `moss-server.mjs`、运行依赖和官方
-`nexusd-cluster`，无需系统 Node.js 或 Docker Compose。
+安装包自带 Node.js 22、编译后的 `moss-server.mjs`、host 模式 `scode`、运行依赖
+和官方 `nexusd-cluster`；Runtime 镜像包含 Docker 模式 `scode`，无需系统 Node.js
+或 Docker Compose。
+
+host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
+`/usr/local/bin/scode`，对应 `runtimeDefaults.hostScodePath` 和
+`runtimeDefaults.dockerScodePath`。两者统一读取
+`src/server/nexus/runtime-versions.json` 中的 `scode` 版本；升级时只修改这一处。
 
 ## 在线安装
 
@@ -66,7 +72,7 @@ sudo ./install.sh --offline
 ```text
 ~/.moss/server/
   current -> releases/server-vX.Y.Z
-  releases/          # Server、Node.js 和运行依赖
+  releases/          # Server、Node.js、host scode 和运行依赖
   packages/          # 按版本保留安装脚本、校验文件和两个原始压缩包
   data/              # SQLite、transcript 和 session 数据
   .moss/             # 设置、Skill、Assistant 和 Nexus 数据

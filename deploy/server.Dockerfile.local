@@ -123,16 +123,14 @@ RUN cd native/nexus-napi \
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
 FROM debian:bookworm-slim AS nexus-dl
-# nexusd-cluster assembly release. Keep this in step with
-# src/server/nexus/runtime-versions.json and the current sudowork demo runtime.
-ARG NEXUSD_CLUSTER_VERSION=0.1.1
-ARG SCODE_VERSION=latest
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates jq tar \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
+COPY src/server/nexus/runtime-versions.json /runtime-versions.json
 # nexusd-cluster (Rust nexus daemon).
-RUN case "$TARGETARCH" in \
+RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)" \
+    && case "$TARGETARCH" in \
       amd64) NEXUS_ARCH="x86_64" ;; \
       arm64) NEXUS_ARCH="aarch64" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
@@ -147,33 +145,38 @@ RUN case "$TARGETARCH" in \
     && mkdir -p /out/bin/nexus \
     && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
     && chmod +x /out/bin/nexus/nexusd
-# The container image also carries a host-side scode binary. Keep that download
-# in a child stage so the host package can reuse nexus-dl without downloading a
-# binary that only exists inside the session Runtime image.
+# Download the host scode binary in a child stage so the nexus-only server image
+# stages do not fetch it unless the host package is being exported.
 FROM nexus-dl AS dl
-ARG SCODE_VERSION=latest
 ARG TARGETARCH
 WORKDIR /dl
-# scode (resolve "latest" tag when not pinned).
-RUN set -e; \
+# scode version comes from the same repository config used by the Runtime image.
+RUN set -e; SCODE_VERSION="$(jq -er '.scode' /runtime-versions.json)"; \
     case "$TARGETARCH" in \
       amd64) SCODE_ARCH="x64" ;; \
       arm64) SCODE_ARCH="arm64" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac; \
-    V="${SCODE_VERSION}"; \
-    if [ "$V" = "latest" ]; then \
-      V=$(curl -sI "https://github.com/sudoprivacy/sudocode/releases/latest" | grep -i "location:" | sed 's/.*tag\///' | tr -d '\r\n'); \
-    fi; \
-    echo "scode version: $V arch: $SCODE_ARCH"; \
-    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${V}/scode-linux-${SCODE_ARCH}.tar.gz" -o scode.tar.gz; \
+    echo "scode version: $SCODE_VERSION arch: $SCODE_ARCH"; \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/scode-linux-${SCODE_ARCH}.tar.gz" -o scode.tar.gz; \
     tar -xzf scode.tar.gz; \
     mv "scode-linux-${SCODE_ARCH}/scode" /out/bin/scode; \
-    chmod +x /out/bin/scode
+    chmod +x /out/bin/scode; \
+    printf '%s\n' "$SCODE_VERSION" > /out/bin/scode.version
+
+# Validate the configured host scode binary in the same GLIBC 2.39 userspace
+# required by the installer before exporting the package.
+FROM ubuntu:24.04 AS host-scode-runtime
+COPY --from=dl /out/bin/scode /usr/local/bin/scode
+COPY --from=dl /out/bin/scode.version /tmp/scode.version
+RUN chmod +x /usr/local/bin/scode \
+    && EXPECTED_VERSION_PATTERN="$(sed 's/^v//; s/\./\\./g' /tmp/scode.version)" \
+    && /usr/local/bin/scode --version 2>&1 | grep -Eq "(^|[^0-9])${EXPECTED_VERSION_PATTERN}([^0-9]|$)" \
+    && rm -f /tmp/scode.version
 
 # --- Stage 5: runtime image --------------------------------------------------
-# Use Debian trixie (glibc 2.41) rather than bookworm (glibc 2.36): current
-# scode releases (v0.1.10+) are linked against GLIBC_2.39 and fail to run on
+# Use Debian trixie (glibc 2.41) rather than bookworm (glibc 2.36): the
+# configured scode binary is linked against GLIBC_2.39 and fails to run on
 # bookworm with "version `GLIBC_2.39' not found". Node 22 line is unchanged.
 FROM node:22-trixie-slim AS server-runtime
 # Let apt auto-retry transient mirror failures and download serially so a flaky
@@ -366,10 +369,11 @@ COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/in
 COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./app/native/nexus-napi/
 COPY --from=go-builder /out/wiki /out/corpapp ./app/bin/
 COPY --from=nexus-dl /out/bin/nexus/nexusd ./app/bin/nexus/nexusd
+COPY --from=host-scode-runtime /usr/local/bin/scode ./app/bin/scode
 COPY --from=host-runtime-deps /deps/node_modules ./app/node_modules
 COPY --from=model-stage /m/out/Xenova ./app/models/Xenova
 COPY deploy/server.json ./server.json.template
-RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd \
+RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd app/bin/scode \
     && printf '%s\n' "$RELEASE_VERSION" > VERSION \
     && node/bin/node --check app/bin/moss-server.mjs \
     && node/bin/node -e "require('node:sqlite'); Promise.all([import('./app/native/nexus-napi/index.js'), import('./app/node_modules/@xenova/transformers/src/transformers.js'), import('./app/node_modules/sharp/lib/index.js')]).then(() => console.log('host runtime ok'))" \
