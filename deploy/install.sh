@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPOSITORY="sudoprivacy/moss"
 RELEASE_TAG="${MOSS_RELEASE_TAG:-@@MOSS_RELEASE_TAG@@}"
 DEFAULT_DOWNLOAD_BASE="https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG"
 DEFAULT_INSTALL_DIR=""
 NETWORK_NAME="moss-network"
 SERVICE_NAME="moss-server"
 OFFLINE=0
+DOWNLOAD_ONLY=0
+DOWNLOAD_DIR=""
 NON_INTERACTIVE="${MOSS_NON_INTERACTIVE:-0}"
 INSTALL_DIR="${MOSS_INSTALL_DIR:-}"
 
 log() { printf '[moss-install] %s\n' "$*"; }
-warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[moss-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -21,6 +21,7 @@ Usage: install.sh [options]
 
 Options:
   --offline                 Read release archives next to this script.
+  --download PATH           Download files for a later offline installation.
   --install-dir PATH        Installation root (default: <install-user-home>/.moss/server).
   --non-interactive         Read configuration from MOSS_* environment variables.
   -h, --help                Show this help.
@@ -28,13 +29,19 @@ Options:
 Configuration environment variables:
   MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
   MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, ANTHROPIC_BASE_URL,
-  ANTHROPIC_API_KEY, MOSS_ALLOW_OLD_VERSION, MOSS_REQUIRE_LATEST.
+  ANTHROPIC_API_KEY.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --offline) OFFLINE=1 ;;
+    --download)
+      [ "$#" -ge 2 ] || die "--download requires a path"
+      DOWNLOAD_ONLY=1
+      DOWNLOAD_DIR="$2"
+      shift
+      ;;
     --install-dir)
       [ "$#" -ge 2 ] || die "--install-dir requires a path"
       INSTALL_DIR="$2"
@@ -47,8 +54,74 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+[ "$OFFLINE" = 0 ] || [ "$DOWNLOAD_ONLY" = 0 ] \
+  || die "--offline and --download cannot be used together"
+ARCH=amd64
+
+case "$RELEASE_TAG" in
+  server-v*) VERSION="${RELEASE_TAG#server-v}" ;;
+  *) die "invalid server release tag: $RELEASE_TAG" ;;
+esac
+
+SERVER_ARCHIVE="moss-server-$VERSION-linux-$ARCH.tar.gz"
+RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
+
+if [ "$DOWNLOAD_ONLY" = 1 ]; then
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  if command -v sha256sum >/dev/null 2>&1; then
+    CHECKSUM_COMMAND=(sha256sum -c)
+  elif command -v shasum >/dev/null 2>&1; then
+    CHECKSUM_COMMAND=(shasum -a 256 -c)
+  else
+    die "sha256sum or shasum is required"
+  fi
+
+  mkdir -p "$DOWNLOAD_DIR"
+  DOWNLOAD_DIR="$(cd "$DOWNLOAD_DIR" && pwd)"
+  DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-$DEFAULT_DOWNLOAD_BASE}"
+  DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+
+  download_offline_file() {
+    local step="$1" filename="$2"
+    log "Downloading [$step/4] $filename"
+    curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
+      -o "$DOWNLOAD_DIR/$filename" "$DOWNLOAD_BASE/$filename"
+  }
+
+  download_offline_file 1 install.sh
+  download_offline_file 2 SHA256SUMS
+  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+    if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
+      "$DOWNLOAD_DIR/SHA256SUMS"; then
+      die "checksum manifest does not contain $archive"
+    fi
+  done
+  download_offline_file 3 "$SERVER_ARCHIVE"
+  download_offline_file 4 "$RUNTIME_ARCHIVE"
+
+  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+    CHECKSUM_FILE="$(mktemp)"
+    awk -v filename="$archive" '$2 == filename || $2 == "*" filename { print }' \
+      "$DOWNLOAD_DIR/SHA256SUMS" > "$CHECKSUM_FILE"
+    (cd "$DOWNLOAD_DIR" && "${CHECKSUM_COMMAND[@]}" "$CHECKSUM_FILE")
+    rm -f "$CHECKSUM_FILE"
+  done
+  EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "$RELEASE_TAG")"
+  grep -Fq "$EXPECTED_RELEASE_LINE" "$DOWNLOAD_DIR/install.sh" \
+    || die "downloaded install.sh does not match $RELEASE_TAG"
+  chmod +x "$DOWNLOAD_DIR/install.sh"
+
+  log "Offline files are ready: $DOWNLOAD_DIR"
+  log "Copy this directory to the target server, then run: sudo ./install.sh --offline"
+  exit 0
+fi
+
 [ "$(id -u)" -eq 0 ] || die "run as root (for example: curl ... | sudo bash)"
 [ "$(uname -s)" = Linux ] || die "only Linux is supported"
+case "$(uname -m)" in
+  x86_64|amd64) ;;
+  *) die "only x86_64/amd64 is supported" ;;
+esac
 
 command -v getent >/dev/null 2>&1 || die "getent is required"
 resolve_install_account() {
@@ -66,17 +139,6 @@ resolve_install_account() {
 INSTALL_USER="${MOSS_INSTALL_USER:-${SUDO_USER:-$(id -un)}}"
 resolve_install_account
 DEFAULT_INSTALL_DIR="${INSTALL_USER_HOME%/}/.moss/server"
-
-case "$(uname -m)" in
-  x86_64|amd64) ARCH=amd64 ;;
-  aarch64|arm64) ARCH=arm64 ;;
-  *) die "unsupported architecture: $(uname -m)" ;;
-esac
-
-case "$RELEASE_TAG" in
-  server-v*) VERSION="${RELEASE_TAG#server-v}" ;;
-  *) die "invalid server release tag: $RELEASE_TAG" ;;
-esac
 
 prompt_value() {
   local variable="$1" label="$2" default_value="$3" secret="${4:-0}"
@@ -185,9 +247,6 @@ WORK_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
-SERVER_ARCHIVE="moss-server-$VERSION-linux-$ARCH.tar.gz"
-RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
-
 if [ "$OFFLINE" = 1 ]; then
   SCRIPT_PATH="${BASH_SOURCE[0]:-}"
   [ -n "$SCRIPT_PATH" ] || die "--offline must be run from the unpacked install.sh file"
@@ -202,40 +261,6 @@ else
   DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-$DEFAULT_DOWNLOAD_BASE}"
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
 
-  if [ "${MOSS_ALLOW_OLD_VERSION:-0}" = 1 ]; then
-    warn "Latest release check skipped for intentional version install: $RELEASE_TAG"
-  else
-    log "Checking GitHub Latest release"
-    LATEST_RELEASE_TAG="$(curl -fsS --retry 1 --connect-timeout 8 --max-time 20 \
-      -H 'Accept: application/vnd.github+json' \
-      "https://api.github.com/repos/$REPOSITORY/releases/latest" 2>/dev/null \
-      | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
-      | head -n 1 || true)"
-    if [ -z "$LATEST_RELEASE_TAG" ]; then
-      LATEST_RELEASE_URL="$(curl -fsS --retry 1 --connect-timeout 8 --max-time 20 \
-        -o /dev/null -w '%{redirect_url}' "https://github.com/$REPOSITORY/releases/latest" \
-        2>/dev/null || true)"
-      case "$LATEST_RELEASE_URL" in
-        */releases/tag/server-v*) LATEST_RELEASE_TAG="${LATEST_RELEASE_URL##*/}" ;;
-        *) LATEST_RELEASE_TAG='' ;;
-      esac
-    fi
-    case "$LATEST_RELEASE_TAG" in
-      server-v*) ;;
-      *) LATEST_RELEASE_TAG='' ;;
-    esac
-    if [ -z "$LATEST_RELEASE_TAG" ]; then
-      if [ "${MOSS_REQUIRE_LATEST:-0}" = 1 ]; then
-        die "could not determine GitHub Latest; refusing to install because MOSS_REQUIRE_LATEST=1"
-      fi
-      warn "Could not determine GitHub Latest; continuing with $RELEASE_TAG and checksum verification"
-    elif [ "$LATEST_RELEASE_TAG" != "$RELEASE_TAG" ]; then
-      die "download source has $RELEASE_TAG but GitHub Latest is $LATEST_RELEASE_TAG; the mirror may not be synchronized (set MOSS_ALLOW_OLD_VERSION=1 only for an intentional version install)"
-    else
-      log "Release source is current: $RELEASE_TAG"
-    fi
-  fi
-
   download_asset() {
     local step="$1" filename="$2"
     log "Downloading [$step/3] $filename"
@@ -247,7 +272,7 @@ else
   for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
     if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
       "$SOURCE_DIR/SHA256SUMS"; then
-      die "checksum manifest does not contain $archive; the mirror may not be synchronized"
+      die "checksum manifest does not contain $archive; the download source is incomplete"
     fi
   done
   download_asset 2 "$SERVER_ARCHIVE"
@@ -274,7 +299,7 @@ NODE_BINARY="$PACKAGE_DIR/node/bin/node"
 [ -x "$NODE_BINARY" ] || die "server package does not contain Node"
 [ "$($NODE_BINARY -p 'process.versions.node.split(`.`)[0]')" -eq 22 ] \
   || die "server package must contain Node 22"
-"$NODE_BINARY" -e "require('node:sqlite')" >/dev/null
+"$NODE_BINARY" --no-warnings -e "require('node:sqlite')" >/dev/null
 [ -f "$PACKAGE_DIR/app/bin/moss-server.mjs" ] || die "server package is incomplete"
 
 log "Loading Docker runtime image"
@@ -549,5 +574,8 @@ if [ "$EXISTING_INSTALL" = 0 ]; then
     log "Generated administrator password: $MOSS_ADMIN_PASSWORD_VALUE"
   fi
 fi
-log "Status: $INSTALL_DIR/status.sh"
-log "Logs: journalctl -u $SERVICE_NAME.service -f"
+log "Start: sudo systemctl start $SERVICE_NAME"
+log "Stop: sudo systemctl stop $SERVICE_NAME"
+log "Restart: sudo systemctl restart $SERVICE_NAME"
+log "Status: sudo systemctl status $SERVICE_NAME"
+log "Logs: sudo journalctl -u $SERVICE_NAME.service -f"

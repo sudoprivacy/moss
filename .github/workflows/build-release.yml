@@ -21,18 +21,8 @@ env:
 
 jobs:
   build:
-    name: build-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            arch: amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
+    name: build-amd64
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout moss
@@ -55,7 +45,7 @@ jobs:
           [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$VERSION-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$VERSION-amd64" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -79,9 +69,14 @@ jobs:
           grep -Fq -- '--latest-only' <<< "$cos_help_output"
           help_output="$(MOSS_RELEASE_TAG=server-vtest bash -s -- --help < deploy/install.sh 2>&1)"
           grep -Fq 'Usage: install.sh' <<< "$help_output"
-          grep -Fq 'MOSS_ALLOW_OLD_VERSION' <<< "$help_output"
-          grep -Fq 'MOSS_REQUIRE_LATEST' <<< "$help_output"
+          grep -Fq -- '--download PATH' <<< "$help_output"
           ! grep -Fq 'unbound variable' <<< "$help_output"
+          download_dir="$(mktemp -d)"
+          download_output="$(MOSS_RELEASE_TAG=server-vtest MOSS_DOWNLOAD_BASE=http://127.0.0.1:9 \
+            deploy/install.sh --download "$download_dir" 2>&1 || true)"
+          grep -Fq '[moss-install] Downloading [1/4] install.sh' <<< "$download_output"
+          ! grep -Fq 'run as root' <<< "$download_output"
+          rm -rf "$download_dir"
           offline_output="$(sudo env SUDO_USER="$USER" MOSS_RELEASE_TAG=server-vtest MOSS_NON_INTERACTIVE=1 \
             bash -s -- --offline < deploy/install.sh 2>&1 || true)"
           install_home="$(getent passwd "$USER" | awk -F: 'NR == 1 { print $6 }')"
@@ -93,7 +88,7 @@ jobs:
       - name: Build host server package
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: ${{ matrix.arch }}
+          ARCH: amd64
         run: deploy/package-server.sh "$VERSION" "$ARCH" dist
 
       - name: Build and smoke-test session runtime image
@@ -102,19 +97,19 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx build \
-            --platform '${{ matrix.platform }}' \
+            --platform linux/amd64 \
             --load \
             --build-arg "SCODE_VERSION=$SCODE_VERSION" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
           docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version
-          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz"
 
-      - name: Assemble installer and offline package
+      - name: Assemble installer and checksums
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: ${{ matrix.arch }}
+          ARCH: amd64
         run: |
           set -euo pipefail
           sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/install.sh > dist/install.sh
@@ -125,40 +120,35 @@ jobs:
             cd dist
             sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" > "SHA256SUMS-$ARCH"
           )
-          mkdir -p "dist/offline-$ARCH/moss-offline"
-          cp dist/install.sh "dist/offline-$ARCH/moss-offline/"
-          cp "dist/$SERVER_ARCHIVE" "dist/$RUNTIME_ARCHIVE" "dist/offline-$ARCH/moss-offline/"
-          cp "dist/SHA256SUMS-$ARCH" "dist/offline-$ARCH/moss-offline/SHA256SUMS"
-          tar -C "dist/offline-$ARCH" -czf "dist/moss-offline-$VERSION-linux-$ARCH.tar.gz" moss-offline
-          (cd dist && sha256sum "moss-offline-$VERSION-linux-$ARCH.tar.gz" >> "SHA256SUMS-$ARCH")
 
       - name: Validate release contents
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: ${{ matrix.arch }}
+          ARCH: amd64
         run: |
           set -euo pipefail
           tar -tzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" > dist/server-contents.txt
-          tar -tzf "dist/moss-offline-$VERSION-linux-$ARCH.tar.gz" > dist/offline-contents.txt
           grep -Fxq 'moss-server/app/bin/moss-server.mjs' dist/server-contents.txt
           grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
-          grep -Fxq 'moss-offline/install.sh' dist/offline-contents.txt
           ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
           EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "server-v$VERSION")"
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh
-          grep -Fq 'Checking GitHub Latest release' dist/install.sh
+          ! grep -Fq 'api.github.com/repos' dist/install.sh
+          grep -Fq 'Offline files are ready' dist/install.sh
+          grep -Fq 'sudo systemctl start' dist/install.sh
+          grep -Fq 'sudo systemctl stop' dist/install.sh
+          grep -Fq 'sudo systemctl restart' dist/install.sh
           grep -Fq -- '--progress-bar' dist/install.sh
           grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5
         with:
-          name: moss-server-release-${{ matrix.arch }}
+          name: moss-server-release-amd64
           path: |
-            dist/moss-server-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
-            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
-            dist/moss-offline-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
-            dist/SHA256SUMS-${{ matrix.arch }}
+            dist/moss-server-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
+            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
+            dist/SHA256SUMS-amd64
             dist/install.sh
           retention-days: 30
 
@@ -207,7 +197,7 @@ jobs:
       - name: Publish server release
         uses: softprops/action-gh-release@v2
         with:
-          name: Moss Server ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           make_latest: true
           files: |
