@@ -71,7 +71,12 @@ jobs:
         run: |
           bash -n deploy/install.sh
           bash -n deploy/package-server.sh
-          chmod +x deploy/install.sh deploy/package-server.sh
+          bash -n scripts/publish-server-to-cos.sh
+          chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh
+          cos_help_output="$(scripts/publish-server-to-cos.sh --help)"
+          grep -Fq 'Usage: publish-server-to-cos.sh' <<< "$cos_help_output"
+          grep -Fq -- '--release-only' <<< "$cos_help_output"
+          grep -Fq -- '--latest-only' <<< "$cos_help_output"
           help_output="$(MOSS_RELEASE_TAG=server-vtest bash -s -- --help < deploy/install.sh 2>&1)"
           grep -Fq 'Usage: install.sh' <<< "$help_output"
           grep -Fq 'MOSS_ALLOW_OLD_VERSION' <<< "$help_output"
@@ -143,6 +148,7 @@ jobs:
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh
           grep -Fq 'Checking GitHub Latest release' dist/install.sh
           grep -Fq -- '--progress-bar' dist/install.sh
+          grep -Fq 'sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5
@@ -162,6 +168,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout moss
+        uses: actions/checkout@v5
+
       - name: Download build assets
         uses: actions/download-artifact@v5
         with:
@@ -179,6 +188,23 @@ jobs:
           (cd release-assets && sha256sum -c SHA256SUMS)
           ls -lh release-assets
 
+      - name: Upload immutable release to Tencent COS
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          COS_BUCKET: sudowork-release-1309794936
+          COS_REGION: ap-beijing
+          COS_ROOT_PATH: moss/server
+          COS_PUBLIC_BASE_URL: https://sudowork-release-1309794936.cos.accelerate.myqcloud.com
+        run: |
+          set -euo pipefail
+          [ -n "$TENCENT_SECRET_ID" ] || { echo 'TENCENT_SECRET_ID is not configured'; exit 1; }
+          [ -n "$TENCENT_SECRET_KEY" ] || { echo 'TENCENT_SECRET_KEY is not configured'; exit 1; }
+          pip install coscmd==1.9.0.6
+          coscmd config -a "$TENCENT_SECRET_ID" -s "$TENCENT_SECRET_KEY" \
+            -b "$COS_BUCKET" -e cos.accelerate.myqcloud.com
+          bash scripts/publish-server-to-cos.sh release-assets "$GITHUB_REF_NAME" --release-only
+
       - name: Publish server release
         uses: softprops/action-gh-release@v2
         with:
@@ -189,3 +215,11 @@ jobs:
             release-assets/*.tar.gz
             release-assets/install.sh
             release-assets/SHA256SUMS
+
+      - name: Publish Tencent COS Latest entrypoint
+        env:
+          COS_BUCKET: sudowork-release-1309794936
+          COS_REGION: ap-beijing
+          COS_ROOT_PATH: moss/server
+          COS_PUBLIC_BASE_URL: https://sudowork-release-1309794936.cos.accelerate.myqcloud.com
+        run: bash scripts/publish-server-to-cos.sh release-assets "$GITHUB_REF_NAME" --latest-only
