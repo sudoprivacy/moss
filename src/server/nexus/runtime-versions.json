@@ -1,4 +1,5 @@
 {
   "nexusd-cluster": "0.1.1",
-  "scode": "v0.1.10"
+  "scode": "v0.2.0",
+  "scode-linux-x64-bundle-sha256": "a13fc41a23e54e3e04ad28a1b308cde7badc993cec9eec3e5fceb6f58a334b2a"
 }
