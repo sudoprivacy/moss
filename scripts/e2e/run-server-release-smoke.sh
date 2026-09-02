@@ -203,7 +203,7 @@ node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" \
   --runtimes host,docker \
   --timeout-seconds 180
 
-"$INSTALL_DIR/current/node/bin/node" "$ROOT_DIR/scripts/e2e/server-admin-browser-smoke.mjs" \
+sudo "$INSTALL_DIR/current/node/bin/node" "$ROOT_DIR/scripts/e2e/server-admin-browser-smoke.mjs" \
   --base-url "http://127.0.0.1:$PORT" \
   --username "$ADMIN_USERNAME" \
   --password "$ADMIN_PASSWORD" \
@@ -272,32 +272,124 @@ docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"browserUi":true,"lifecycle":true}\n' \
   "$VERSION" "$ARCH" > "$DIAGNOSTICS_DIR/release-smoke-result.json"
 
-node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" <<'NODE'
+node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" "$DIST_DIR" "$SCODE_VERSION" <<'NODE'
 const fs = require('node:fs')
 const path = require('node:path')
-const [diagnosticsDir, version, arch] = process.argv.slice(2)
+const [diagnosticsDir, version, arch, distDir, scodeVersion] = process.argv.slice(2)
 const sessions = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'e2e-summary.json'), 'utf8'))
 const browser = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'browser-e2e-summary.json'), 'utf8'))
 const runtime = name => sessions.runtimes.find(item => item.runtime === name)
-const lines = [
+const resultRows = [
+  ['离线安装、校验和、Docker 镜像加载', '✅'],
+  ['浏览器表单登录', '✅'],
+  [`浏览器创建用户 \`${browser.createdUser}\``, '✅'],
+  [`host 会话聊天 \`${runtime('host').sessionId}\``, '✅'],
+  [`Docker 会话聊天 \`${runtime('docker').sessionId}\``, '✅'],
+  ['同版本升级不下载', '✅'],
+  ['systemd 停止、启动、重启', '✅'],
+  ['卸载并清理数据、容器、镜像', '✅'],
+]
+const summaryLines = [
   `**版本：** \`${version}-${arch}\``,
   '',
   '| 验证项 | 结果 |',
   '| --- | --- |',
-  '| 离线安装、校验和、Docker 镜像加载 | ✅ |',
-  '| 浏览器表单登录 | ✅ |',
-  `| 浏览器创建用户 \`${browser.createdUser}\` | ✅ |`,
-  `| host 会话聊天 \`${runtime('host').sessionId}\` | ✅ |`,
-  `| Docker 会话聊天 \`${runtime('docker').sessionId}\` | ✅ |`,
-  '| 同版本升级不下载 | ✅ |',
-  '| systemd 停止、启动、重启 | ✅ |',
-  '| 卸载并清理数据、容器、镜像 | ✅ |',
+  ...resultRows.map(([name, result]) => `| ${name} | ${result} |`),
   '',
   '**浏览器截图：**',
   '',
   '- 下载 artifact 后打开 `browser-evidence.html` 可一次查看全部截图。',
   ...browser.screenshots.map(item => `- \`${item.file}\`（${item.width}×${item.height}）`),
 ]
-fs.writeFileSync(path.join(diagnosticsDir, 'ci-summary.md'), `${lines.join('\n')}\n`)
+fs.writeFileSync(path.join(diagnosticsDir, 'ci-summary.md'), `${summaryLines.join('\n')}\n`)
+
+const repository = process.env.GITHUB_REPOSITORY || 'sudoprivacy/moss'
+const releaseTag = `server-v${version}`
+const reportAsset = `moss-server-e2e-report-${version}-${arch}.md`
+const screenshotAssets = new Map()
+for (const screenshot of browser.screenshots) {
+  const stem = path.basename(screenshot.file, '.png')
+  const asset = `moss-server-e2e-${stem}-${version}-${arch}.png`
+  fs.copyFileSync(path.join(diagnosticsDir, screenshot.file), path.join(distDir, asset))
+  screenshotAssets.set(screenshot.file, asset)
+}
+
+function reportLines(imageHref) {
+  return [
+    '# Moss Server E2E 测试报告',
+    '',
+    '> 结论：✅ 最终 Server 安装包通过离线安装、host/Docker 会话、真实浏览器管理操作、升级、服务生命周期和卸载验证。',
+    '',
+    '## 测试对象',
+    '',
+    '| 项目 | 值 |',
+    '| --- | --- |',
+    `| Server | \`${version}-${arch}\` |`,
+    `| scode | \`${scodeVersion || '未指定'}\` |`,
+    `| Commit | \`${process.env.GITHUB_SHA || 'local'}\` |`,
+    `| 管理端测试用户 | \`${browser.createdUser}\` |`,
+    '',
+    '## 测试结论',
+    '',
+    '| 验证项 | 结果 |',
+    '| --- | --- |',
+    ...resultRows.map(([name, result]) => `| ${name} | ${result} |`),
+    '',
+    '## 浏览器操作断言',
+    '',
+    ...browser.assertions.map(item => `- ${item.ok ? '✅' : '❌'} ${item.name}`),
+    '',
+    '## 浏览器截图',
+    '',
+    ...browser.screenshots.flatMap((item, index) => [
+      `### ${index + 1}. ${path.basename(item.file, '.png')}`,
+      '',
+      `页面：\`${item.path}\`　尺寸：\`${item.width}×${item.height}\``,
+      '',
+      `![${path.basename(item.file)}](${imageHref(item)})`,
+      '',
+    ]),
+    '## 可复核数据',
+    '',
+    `- host Session ID：\`${runtime('host').sessionId}\``,
+    `- host Mock 回复：\`${runtime('host').response}\``,
+    `- Docker Session ID：\`${runtime('docker').sessionId}\``,
+    `- Docker Mock 回复：\`${runtime('docker').response}\``,
+    '- 完整 JSON、版本记录与升级日志位于 E2E 证据压缩包。',
+  ]
+}
+
+const localReport = reportLines(item => item.file)
+fs.writeFileSync(path.join(diagnosticsDir, 'e2e-report.md'), `${localReport.join('\n')}\n`)
+const releaseReport = reportLines(item => {
+  const asset = screenshotAssets.get(item.file)
+  return `https://github.com/${repository}/releases/download/${releaseTag}/${asset}`
+})
+fs.writeFileSync(path.join(distDir, reportAsset), `${releaseReport.join('\n')}\n`)
 NODE
+
+EVIDENCE_NAME="moss-server-e2e-evidence-$VERSION-$ARCH"
+EVIDENCE_ROOT="$(mktemp -d)"
+EVIDENCE_DIR="$EVIDENCE_ROOT/$EVIDENCE_NAME"
+mkdir -p "$EVIDENCE_DIR/screenshots"
+cp "$DIAGNOSTICS_DIR/e2e-report.md" "$EVIDENCE_DIR/README.md"
+cp "$DIAGNOSTICS_DIR/browser-evidence.html" \
+  "$DIAGNOSTICS_DIR/e2e-summary.json" \
+  "$DIAGNOSTICS_DIR/browser-e2e-summary.json" \
+  "$DIAGNOSTICS_DIR/release-smoke-result.json" \
+  "$DIAGNOSTICS_DIR/host-scode-version.txt" \
+  "$DIAGNOSTICS_DIR/runtime-scode-version.txt" \
+  "$DIAGNOSTICS_DIR/same-version-upgrade.log" \
+  "$EVIDENCE_DIR/"
+cp "$DIAGNOSTICS_DIR/screenshots/"*.png "$EVIDENCE_DIR/screenshots/"
+(
+  cd "$EVIDENCE_DIR"
+  find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+)
+tar -C "$EVIDENCE_ROOT" -czf "$DIST_DIR/$EVIDENCE_NAME.tar.gz" "$EVIDENCE_NAME"
+(
+  cd "$DIST_DIR"
+  sha256sum "$EVIDENCE_NAME.tar.gz" > "$EVIDENCE_NAME.tar.gz.sha256"
+)
+rm -rf "$EVIDENCE_ROOT"
 echo "Moss Server packaged E2E smoke passed: $VERSION-$ARCH"

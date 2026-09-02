@@ -207,6 +207,10 @@ jobs:
             dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
             dist/SHA256SUMS-amd64
             dist/install.sh
+            dist/moss-server-e2e-evidence-${{ steps.release.outputs.version }}-amd64.tar.gz
+            dist/moss-server-e2e-evidence-${{ steps.release.outputs.version }}-amd64.tar.gz.sha256
+            dist/moss-server-e2e-report-${{ steps.release.outputs.version }}-amd64.md
+            dist/moss-server-e2e-*-${{ steps.release.outputs.version }}-amd64.png
           retention-days: 30
 
   release:
@@ -229,6 +233,9 @@ jobs:
           set -euo pipefail
           mkdir release-assets
           find artifacts -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          find artifacts -type f -name 'moss-server-e2e-*.md' -exec cp {} release-assets/ \;
+          find artifacts -type f -name 'moss-server-e2e-*.png' -exec cp {} release-assets/ \;
+          find artifacts -type f -name 'moss-server-e2e-*.sha256' -exec cp {} release-assets/ \;
           find artifacts -type f -name 'SHA256SUMS-*' -exec cat {} \; | sort -k2 > release-assets/SHA256SUMS
           cp "$(find artifacts -type f -name install.sh -print -quit)" release-assets/install.sh
           chmod +x release-assets/install.sh
@@ -261,6 +268,9 @@ jobs:
             release-assets/*.tar.gz
             release-assets/install.sh
             release-assets/SHA256SUMS
+            release-assets/moss-server-e2e-*.md
+            release-assets/moss-server-e2e-*.png
+            release-assets/moss-server-e2e-*.sha256
 
       - name: Publish Tencent COS Latest entrypoint
         env:
