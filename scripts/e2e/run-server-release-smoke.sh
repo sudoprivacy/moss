@@ -40,7 +40,8 @@ collect_diagnostics() {
     docker ps -a --no-trunc > "$DIAGNOSTICS_DIR/docker-ps.txt" 2>&1
     docker images --digests --no-trunc > "$DIAGNOSTICS_DIR/docker-images.txt" 2>&1
     docker network inspect "$NETWORK_NAME" > "$DIAGNOSTICS_DIR/docker-network.json" 2>&1
-    if [ -f "$INSTALL_DIR/server.json" ] && [ -x "$INSTALL_DIR/current/node/bin/node" ]; then
+    if sudo test -f "$INSTALL_DIR/server.json" \
+      && sudo test -x "$INSTALL_DIR/current/node/bin/node"; then
       sudo "$INSTALL_DIR/current/node/bin/node" - "$INSTALL_DIR/server.json" "$DIAGNOSTICS_DIR/server.json.redacted" <<'NODE'
 const fs = require('node:fs')
 const input = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
@@ -56,7 +57,7 @@ function redact(value) {
 fs.writeFileSync(process.argv[3], `${JSON.stringify(redact(input), null, 2)}\n`)
 NODE
     fi
-    if [ -d "$INSTALL_DIR/data/runtime" ]; then
+    if sudo test -d "$INSTALL_DIR/data/runtime"; then
       while IFS= read -r -d '' file; do
         relative="${file#"$INSTALL_DIR/data/runtime/"}"
         target="$DIAGNOSTICS_DIR/runtime/$relative"
@@ -70,7 +71,7 @@ NODE
 
 cleanup() {
   set +e
-  if [ -x "$INSTALL_DIR/uninstall.sh" ]; then
+  if sudo test -x "$INSTALL_DIR/uninstall.sh"; then
     sudo "$INSTALL_DIR/uninstall.sh" --purge >/dev/null 2>&1
   else
     sudo systemctl disable --now "$SERVICE_NAME.service" >/dev/null 2>&1
@@ -184,7 +185,7 @@ sudo systemctl show "$SERVICE_NAME.service" -p ExecStart --value | grep -Fq "$IN
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -Fq '"ready":true'
 curl -fsS "http://127.0.0.1:$PORT/readyz" | grep -Fq '"ready":true'
 test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/admin/")" = 200
-HOST_SCODE_VERSION="$("$INSTALL_DIR/current/app/bin/scode" --version 2>&1)"
+HOST_SCODE_VERSION="$(sudo -u "$TEST_USER" "$INSTALL_DIR/current/app/bin/scode" --version 2>&1)"
 docker run --rm --network "$NETWORK_NAME" "$RUNTIME_IMAGE" \
   sh -c "curl -fsS http://$NETWORK_GATEWAY:$MOCK_PORT/healthz >/dev/null && scode --version" \
   > "$DIAGNOSTICS_DIR/runtime-scode-version.txt"
@@ -253,7 +254,7 @@ RESTART_PID="$(sudo systemctl show "$SERVICE_NAME.service" -p MainPID --value)"
 
 collect_diagnostics
 sudo "$INSTALL_DIR/uninstall.sh" --purge
-test ! -e "$INSTALL_DIR"
+! sudo test -e "$INSTALL_DIR"
 ! sudo systemctl cat "$SERVICE_NAME.service" >/dev/null 2>&1
 ! docker ps -aq --filter label=moss.kind=user-container | grep -q .
 docker image rm "$RUNTIME_IMAGE" >/dev/null
