@@ -20,6 +20,7 @@
     "dockerImage": "my-moss-runtime:v1",
     "dockerMode": "session",
     "hostScodePath": "./bin/scode",
+    "hostScodeEnabled": true,
     "dockerScodePath": "/usr/local/bin/scode",
     "idleTimeoutMs": 600000,
     "maxSessions": 32

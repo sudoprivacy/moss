@@ -48,6 +48,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
     runtimeDefaults: {
       type: 'host',
       engine: 'scode',
+      hostScodeEnabled: true,
       dockerMode: 'session',
       idleTimeoutMs: 10 * 60 * 1000,
       maxSessions: 32,
@@ -141,6 +142,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     hostScodePath: raw.runtimeDefaults.hostScodePath
       ? normalizePath(raw.runtimeDefaults.hostScodePath)
       : undefined,
+    hostScodeEnabled: raw.runtimeDefaults.hostScodeEnabled,
     // This path is resolved inside the Runtime container, not on the host.
     dockerScodePath: raw.runtimeDefaults.dockerScodePath,
     dockerImage: raw.runtimeDefaults.dockerImage,

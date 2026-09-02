@@ -15,6 +15,7 @@ NON_INTERACTIVE="${MOSS_NON_INTERACTIVE:-0}"
 INSTALL_DIR="${MOSS_INSTALL_DIR:-}"
 
 log() { printf '[moss-install] %s\n' "$*"; }
+warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[moss-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -316,8 +317,13 @@ GLIBC_VERSION="$(ldd --version 2>&1 | awk '
 [ -n "$GLIBC_VERSION" ] || die "could not determine glibc version"
 GLIBC_MAJOR="${GLIBC_VERSION%%.*}"
 GLIBC_MINOR="${GLIBC_VERSION#*.}"
-if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 39 ]; }; then
-  die "glibc 2.39 or newer is required for host scode (Ubuntu 24.04+); found $GLIBC_VERSION"
+if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 35 ]; }; then
+  die "glibc 2.35 or newer is required (Ubuntu 22.04+); found $GLIBC_VERSION"
+fi
+HOST_SCODE_SUPPORTED=1
+if [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 39 ]; then
+  HOST_SCODE_SUPPORTED=0
+  warn "host sessions require glibc 2.39+; found $GLIBC_VERSION. Docker sessions remain available."
 fi
 
 for command_name in tar gzip sha256sum systemctl docker curl install stat stty; do
@@ -453,9 +459,13 @@ NODE_BINARY="$PACKAGE_DIR/node/bin/node"
 "$NODE_BINARY" --no-warnings -e "require('node:sqlite')" >/dev/null
 [ -f "$PACKAGE_DIR/app/bin/moss-server.mjs" ] || die "server package is incomplete"
 [ -x "$PACKAGE_DIR/app/bin/scode" ] || die "server package does not contain host scode"
-HOST_SCODE_VERSION="$($PACKAGE_DIR/app/bin/scode --version 2>&1)" \
-  || die "host scode could not run"
-log "Host scode: $HOST_SCODE_VERSION"
+if [ "$HOST_SCODE_SUPPORTED" = 1 ]; then
+  HOST_SCODE_VERSION="$($PACKAGE_DIR/app/bin/scode --version 2>&1)" \
+    || die "host scode could not run"
+  log "Host scode: $HOST_SCODE_VERSION"
+else
+  log "Host scode disabled on glibc $GLIBC_VERSION; using Docker runtime"
+fi
 
 log "Loading Docker runtime image"
 docker load -i "$SOURCE_DIR/$RUNTIME_ARCHIVE"
@@ -571,6 +581,7 @@ MOSS_INSTALL_ROOT="$INSTALL_DIR" MOSS_PORT_VALUE="$MOSS_PORT_VALUE" \
 MOSS_ADVERTISED_HOST_VALUE="$MOSS_ADVERTISED_HOST_VALUE" \
 MOSS_ADMIN_USERNAME_VALUE="$MOSS_ADMIN_USERNAME_VALUE" \
 MOSS_ADMIN_PASSWORD_VALUE="$MOSS_ADMIN_PASSWORD_VALUE" \
+MOSS_HOST_SCODE_SUPPORTED="$HOST_SCODE_SUPPORTED" \
 MOSS_RUNTIME_IMAGE="$RUNTIME_IMAGE" MOSS_NETWORK_NAME="$NETWORK_NAME" \
 "$RELEASE_DIR/node/bin/node" <<'NODE'
 const fs = require('node:fs')
@@ -582,15 +593,22 @@ const root = process.env.MOSS_INSTALL_ROOT
 const port = Number(process.env.MOSS_PORT_VALUE)
 const hostScodePath = path.join(root, 'current', 'app', 'bin', 'scode')
 const dockerScodePath = '/usr/local/bin/scode'
+const bundledHostScodeSupported = process.env.MOSS_HOST_SCODE_SUPPORTED === '1'
 if (process.env.EXISTING_INSTALL === '1') {
   const legacyScodePath = config.runtimeDefaults?.scodePath
+  const configuredHostScodePath = config.runtimeDefaults?.hostScodePath
+    || (legacyScodePath && legacyScodePath !== dockerScodePath
+      ? legacyScodePath
+      : undefined)
+  const usesBundledHostScode = !configuredHostScodePath
+    || configuredHostScodePath === hostScodePath
   config.runtimeDefaults = {
     ...config.runtimeDefaults,
     dockerImage: process.env.MOSS_RUNTIME_IMAGE,
-    hostScodePath: config.runtimeDefaults?.hostScodePath
-      || (legacyScodePath && legacyScodePath !== dockerScodePath
-        ? legacyScodePath
-        : hostScodePath),
+    hostScodePath: configuredHostScodePath || hostScodePath,
+    hostScodeEnabled: usesBundledHostScode
+      ? bundledHostScodeSupported
+      : config.runtimeDefaults?.hostScodeEnabled !== false,
     dockerScodePath: config.runtimeDefaults?.dockerScodePath
       || (legacyScodePath === dockerScodePath ? legacyScodePath : undefined)
       || dockerScodePath,
@@ -616,6 +634,7 @@ config.runtimeDefaults = {
   dockerImage: process.env.MOSS_RUNTIME_IMAGE,
   dockerMode: 'session',
   hostScodePath,
+  hostScodeEnabled: bundledHostScodeSupported,
   dockerScodePath,
 }
 config.storage = {

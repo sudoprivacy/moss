@@ -5,13 +5,15 @@ Moss Server 是多用户 AI coding agent 服务。Server 在 Linux 宿主机运�
 
 ## 环境要求
 
-- Linux x86_64/amd64，glibc 2.39+（推荐 Ubuntu 24.04+）
+- Linux x86_64/amd64，glibc 2.35+（Ubuntu 22.04+）
 - systemd、Docker 20.10+
 - root/sudo 权限
 - `curl`、`tar`、`gzip`、`sha256sum`
 
 安装包已包含 Node.js 22、`moss-server.mjs`、host 模式 `scode`、运行依赖和 Nexus；
 Runtime 镜像也包含 Docker 模式 `scode`，无需安装 Node.js 或 Docker Compose。
+Docker 会话在 Ubuntu 22.04 宿主机上可用；host 会话需要 glibc 2.39+
+（Ubuntu 24.04+）。
 
 ## 在线安装
 
