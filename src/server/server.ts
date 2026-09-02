@@ -8346,8 +8346,12 @@ export function startServer(
         // instance owns it (the LB routed us the wrong backend, or a failover is
         // mid-flight), reject with 409 so the client re-fetches ws_url / re-routes
         // to the owner rather than us proxying a runner we do not hold.
+        const locallyOwnedAttempt = session.currentAttemptId
+          ? runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
+          : null
         if (
           session.currentAttemptId &&
+          !locallyOwnedAttempt &&
           !runtime.tryOwnAttempt(session.currentAttemptId)
         ) {
           process.stderr.write(
@@ -8358,7 +8362,13 @@ export function startServer(
           return
         }
 
-        const ready = await runtime.ensureSessionReady(sessionId)
+        // A freshly started local runner was already probed by spawnAttempt().
+        // Reusing it here avoids a second disposable socket racing the actual
+        // WebSocket attachment. Missing, stale, or newly adopted attempts still
+        // go through the regular probe/recovery path.
+        const ready = locallyOwnedAttempt
+          ? { session, attempt: locallyOwnedAttempt }
+          : await runtime.ensureSessionReady(sessionId)
         wss.handleUpgrade(req, socket, head, ws => {
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
             let buffer = ''
