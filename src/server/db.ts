@@ -1774,6 +1774,35 @@ export class DirectConnectStore {
     return rows.map(mapSession)
   }
 
+  /**
+   * Concurrent multi-instance HA: active sessions whose current attempt is owned
+   * by a DEAD *other* instance (stopped, gone, or heartbeat stale beyond
+   * `heartbeatTimeoutMs`). These are orphans a surviving instance should adopt +
+   * recover. Our own sessions are excluded — we already run them, so a periodic
+   * adoption pass never re-probes healthy local sessions.
+   */
+  listOrphanedActiveSessions(selfInstanceId: string, heartbeatTimeoutMs: number): SessionRecord[] {
+    const deadBefore = now() - heartbeatTimeoutMs
+    const rows = this.db.prepare(`
+      SELECT s.*
+      FROM sessions s
+      JOIN session_attempts a ON a.attempt_id = s.current_attempt_id
+      WHERE s.desired_state = 'active'
+        AND s.deleted_at IS NULL
+        AND s.status IN ('creating', 'active', 'detached', 'lost', 'failed')
+        AND a.server_instance_id IS NOT NULL
+        AND a.server_instance_id != ?
+        AND NOT EXISTS (
+          SELECT 1 FROM server_instances si
+          WHERE si.instance_id = a.server_instance_id
+            AND si.status = 'running'
+            AND si.heartbeat_at >= ?
+        )
+      ORDER BY s.last_active_at DESC
+    `).all(selfInstanceId, deadBefore) as SqlRow[]
+    return rows.map(mapSession)
+  }
+
   countActiveSessions(): number {
     const row = this.db.prepare(`
       SELECT COUNT(*) AS count

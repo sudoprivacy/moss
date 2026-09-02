@@ -159,11 +159,24 @@ async function finishStandaloneServerStartup(
   }, Math.max(5_000, Math.floor(config.heartbeatTimeoutMs / 2)))
   heartbeatTimer.unref?.()
 
+  // Concurrent multi-instance HA: periodically adopt sessions orphaned by a dead
+  // instance so a survivor takes them over within ~a heartbeat timeout, instead
+  // of only on the next restart. The claim CAS makes concurrent survivors safe.
+  const adoptionTimer = setInterval(() => {
+    void runtime.adoptOrphanedSessions().catch((err: unknown) => {
+      process.stderr.write(
+        `[server] adoptOrphanedSessions failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
+  }, Math.max(5_000, config.heartbeatTimeoutMs))
+  adoptionTimer.unref?.()
+
   let stopped = false
   const stop = async () => {
     if (stopped) return
     stopped = true
     clearInterval(heartbeatTimer)
+    clearInterval(adoptionTimer)
     authService.destroy()
     if (config.docker?.containerMode === 'user') {
       try {

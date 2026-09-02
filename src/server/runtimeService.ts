@@ -673,6 +673,54 @@ export class RuntimeService {
     return { session: this.store.getSession(sessionId) ?? session }
   }
 
+  /**
+   * Concurrent multi-instance HA: adopt sessions orphaned by a dead instance.
+   * Run periodically. For each orphan, atomically claim its attempt (skip if
+   * another surviving instance claimed it first) and make it ready under our
+   * ownership — `ensureSessionReadyNonBlocking` reattaches to a still-alive
+   * scode/pod or respawns. This is what turns startup-only recovery into live
+   * failover: when an instance dies, a survivor picks up its sessions within a
+   * heartbeat timeout instead of on the next restart.
+   */
+  async adoptOrphanedSessions(): Promise<void> {
+    let orphans: SessionRecord[]
+    try {
+      orphans = this.store.listOrphanedActiveSessions(
+        this.options.serverInstanceId,
+        this.options.config.heartbeatTimeoutMs,
+      )
+    } catch (err) {
+      process.stderr.write(
+        `[RuntimeService] listOrphanedActiveSessions failed: ${errorMessage(err)}\n`,
+      )
+      return
+    }
+    for (const session of orphans) {
+      const attemptId = session.currentAttemptId
+      if (!attemptId) continue
+      // Atomically adopt; another survivor may have claimed it first.
+      if (
+        !this.store.claimAttempt(
+          attemptId,
+          this.options.serverInstanceId,
+          this.options.config.heartbeatTimeoutMs,
+        )
+      ) {
+        continue
+      }
+      this.store.addEvent(session.sessionId, attemptId, 'adopted_orphan_session', {
+        byInstance: this.options.serverInstanceId,
+      })
+      try {
+        await this.ensureSessionReadyNonBlocking(session.sessionId)
+      } catch (err) {
+        this.store.addEvent(session.sessionId, attemptId, 'adopt_recover_failed', {
+          error: errorMessage(err),
+        })
+      }
+    }
+  }
+
   async reconcileOnStartup(): Promise<void> {
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning

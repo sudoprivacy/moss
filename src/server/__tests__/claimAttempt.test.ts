@@ -29,6 +29,7 @@ function setup() {
     resumeTranscriptSessionId: "s1",
     serverInstanceId: a.instanceId,
   });
+  store.setCurrentAttempt("s1", attempt.attemptId);
   return { store, a, b, attempt };
 }
 
@@ -72,5 +73,33 @@ describe("claimAttempt — concurrent multi-instance HA", () => {
     store.stopServerInstance(a.instanceId);
     assert.equal(store.claimAttempt(attempt.attemptId, b.instanceId, TIMEOUT), true);
     assert.equal(store.getAttempt(attempt.attemptId)!.serverInstanceId, b.instanceId);
+  });
+});
+
+describe("listOrphanedActiveSessions — periodic adoption target", () => {
+  it("returns a session whose attempt is owned by a dead other instance", () => {
+    const { store, a, b } = setup();
+    makeStale(store, a.instanceId, TIMEOUT + 60_000);
+    const orphans = store.listOrphanedActiveSessions(b.instanceId, TIMEOUT);
+    assert.equal(orphans.length, 1);
+    assert.equal(orphans[0]!.sessionId, "s1");
+  });
+
+  it("excludes our own sessions (never re-probe healthy local sessions)", () => {
+    const { store, a } = setup(); // owned by A, A live
+    assert.equal(store.listOrphanedActiveSessions(a.instanceId, TIMEOUT).length, 0);
+  });
+
+  it("excludes sessions owned by a live other instance", () => {
+    const { store, b } = setup(); // owned by A (live), self = B
+    assert.equal(store.listOrphanedActiveSessions(b.instanceId, TIMEOUT).length, 0);
+  });
+
+  it("stops listing an orphan once it has been claimed (adopted)", () => {
+    const { store, a, b, attempt } = setup();
+    store.stopServerInstance(a.instanceId);
+    assert.equal(store.listOrphanedActiveSessions(b.instanceId, TIMEOUT).length, 1);
+    store.claimAttempt(attempt.attemptId, b.instanceId, TIMEOUT);
+    assert.equal(store.listOrphanedActiveSessions(b.instanceId, TIMEOUT).length, 0);
   });
 });
