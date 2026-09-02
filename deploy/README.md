@@ -2,7 +2,7 @@
 
 ## 环境要求
 
-- Linux x86_64/amd64，glibc 2.35+（Ubuntu 22.04+）
+- Linux x86_64/amd64，glibc 2.39+（推荐 Ubuntu 24.04+）
 - systemd、Docker 20.10+
 - root/sudo 权限
 - `curl`、`tar`、`gzip`、`sha256sum`
@@ -11,14 +11,9 @@
 和官方 `nexusd-cluster`；Runtime 镜像包含 Docker 模式 `scode`，无需系统 Node.js
 或 Docker Compose。
 
-Runtime 镜像基于 Ubuntu 24.04。Ubuntu 22.04 宿主机可以使用 Docker 会话；
-host 会话直接执行安装包内的 scode，需要 glibc 2.39+（Ubuntu 24.04+）。安装器会在
-glibc 2.35–2.38 上自动禁用 host 会话，不影响默认的 Docker 会话。
-
 host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
 `/usr/local/bin/scode`，对应 `runtimeDefaults.hostScodePath` 和
-`runtimeDefaults.dockerScodePath`；`runtimeDefaults.hostScodeEnabled` 表示宿主机
-是否满足 host scode 的运行条件。两者统一读取
+`runtimeDefaults.dockerScodePath`。两者统一读取
 `src/server/nexus/runtime-versions.json` 中的 `scode` 版本；升级时只修改这一处。
 
 ## 在线安装

@@ -11,7 +11,6 @@ const config = {
   engine: 'scode',
   scodePath: '/legacy/scode',
   hostScodePath: '/opt/moss/bin/scode',
-  hostScodeEnabled: true,
   dockerScodePath: '/usr/local/bin/scode',
 } as ServerConfig
 
@@ -29,27 +28,17 @@ describe('runtime scode paths', () => {
       .toBe('/legacy/scode')
   })
 
-  it('disables only host sessions when the bundled binary is incompatible', () => {
-    const disabled = { ...config, hostScodeEnabled: false }
-    expect(() => resolveRuntimeScodePath(disabled, 'host')).toThrow(
-      'bundled scode requires glibc 2.39 or newer',
-    )
-    expect(resolveRuntimeScodePath(disabled, 'docker')).toBe('/usr/local/bin/scode')
-  })
-
   it('only expands the host path on the host filesystem', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'moss-scode-config-'))
     const configPath = join(dir, 'server.json')
     const raw = getDefaultServerConfig()
     raw.runtimeDefaults.hostScodePath = './bin/scode'
-    raw.runtimeDefaults.hostScodeEnabled = false
     raw.runtimeDefaults.dockerScodePath = 'scode'
     writeFileSync(configPath, JSON.stringify(raw), 'utf8')
 
     try {
       const { config: loaded } = await readServerConfig(configPath)
       expect(loaded.hostScodePath).toBe(join(process.cwd(), 'bin', 'scode'))
-      expect(loaded.hostScodeEnabled).toBe(false)
       expect(loaded.dockerScodePath).toBe('scode')
     } finally {
       rmSync(dir, { recursive: true, force: true })
