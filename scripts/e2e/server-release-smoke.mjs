@@ -166,6 +166,7 @@ async function runConversation(wsUrl, token, runtime) {
     let fragments = [];
     let sawAssistant = false;
     let sawResult = false;
+    let promptSent = false;
     let assistantText = "";
     let settled = false;
     const timer = setTimeout(
@@ -202,6 +203,21 @@ async function runConversation(wsUrl, token, runtime) {
           ),
         );
         return;
+      }
+      if (event.type === "hello" && !promptSent) {
+        promptSent = true;
+        socket.write(
+          encodeClientFrame(
+            JSON.stringify({
+              type: "user",
+              uuid: crypto.randomUUID(),
+              message: {
+                role: "user",
+                content: `Reply with this exact token and no additional text: ${nonce}`,
+              },
+            }),
+          ),
+        );
       }
       if (event.type === "assistant") {
         sawAssistant = true;
@@ -296,18 +312,6 @@ async function runConversation(wsUrl, token, runtime) {
             `${runtime} WebSocket accept header mismatch`,
           );
           handshakeComplete = true;
-          socket.write(
-            encodeClientFrame(
-              JSON.stringify({
-                type: "user",
-                uuid: crypto.randomUUID(),
-                message: {
-                  role: "user",
-                  content: `Reply with this exact token and no additional text: ${nonce}`,
-                },
-              }),
-            ),
-          );
         }
         processFrames();
       } catch (error) {
