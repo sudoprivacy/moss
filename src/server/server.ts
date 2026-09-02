@@ -8340,6 +8340,24 @@ export function startServer(
           return
         }
 
+        // Concurrent multi-instance HA (WS affinity): the instance that bridges a
+        // session's socket must own its runner. Claim the current attempt — this
+        // confirms our ownership or adopts a dead owner's orphan. If a LIVE other
+        // instance owns it (the LB routed us the wrong backend, or a failover is
+        // mid-flight), reject with 409 so the client re-fetches ws_url / re-routes
+        // to the owner rather than us proxying a runner we do not hold.
+        if (
+          session.currentAttemptId &&
+          !runtime.tryOwnAttempt(session.currentAttemptId)
+        ) {
+          process.stderr.write(
+            `[WS Upgrade] session ${sessionId} is owned by a live other instance — not bridging here\n`,
+          )
+          socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+          socket.destroy()
+          return
+        }
+
         const ready = await runtime.ensureSessionReady(sessionId)
         wss.handleUpgrade(req, socket, head, ws => {
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {

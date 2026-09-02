@@ -721,6 +721,20 @@ export class RuntimeService {
     }
   }
 
+  /**
+   * Concurrent HA WS affinity: claim an attempt for this instance (confirm our
+   * ownership, or adopt a dead owner). Returns false when a live OTHER instance
+   * owns it — the WS upgrade path then rejects so the client re-routes to the
+   * owner instead of this instance bridging a runner it does not hold.
+   */
+  tryOwnAttempt(attemptId: string): boolean {
+    return this.store.claimAttempt(
+      attemptId,
+      this.options.serverInstanceId,
+      this.options.config.heartbeatTimeoutMs,
+    )
+  }
+
   async reconcileOnStartup(): Promise<void> {
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning
