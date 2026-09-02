@@ -59,6 +59,19 @@ describe("claimAttempt — concurrent multi-instance HA", () => {
     assert.equal(store.getAttempt(attempt.attemptId)!.serverInstanceId, a.instanceId);
   });
 
+  it("does not rewrite an attempt that is already owned by this instance", () => {
+    const { store, a, attempt } = setup();
+    store.db.exec(`
+      CREATE TRIGGER reject_redundant_attempt_owner_update
+      BEFORE UPDATE OF server_instance_id ON session_attempts
+      WHEN OLD.attempt_id = '${attempt.attemptId}'
+      BEGIN
+        SELECT RAISE(ABORT, 'attempt owner must not be rewritten');
+      END;
+    `);
+    assert.equal(store.claimAttempt(attempt.attemptId, a.instanceId, TIMEOUT), true);
+  });
+
   it("after failover the new live owner is protected from a third instance", () => {
     const { store, a, b, attempt } = setup();
     makeStale(store, a.instanceId, TIMEOUT + 60_000);

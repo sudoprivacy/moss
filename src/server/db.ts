@@ -1479,6 +1479,14 @@ export class DirectConnectStore {
    * exactly one contending instance wins (`changes === 1`).
    */
   claimAttempt(attemptId: string, selfInstanceId: string, heartbeatTimeoutMs: number): boolean {
+    // The common WebSocket path checks an attempt already owned by this process.
+    // Avoid rewriting that row: besides being unnecessary, a write here can wait
+    // behind another SQLite writer and delay the HTTP upgrade even though no
+    // ownership transfer is needed.
+    const current = this.getAttempt(attemptId)
+    if (!current) return false
+    if (current.serverInstanceId === selfInstanceId) return true
+
     const deadBefore = now() - heartbeatTimeoutMs
     const res = this.db.prepare(`
       UPDATE session_attempts
