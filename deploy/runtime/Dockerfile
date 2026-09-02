@@ -1,5 +1,5 @@
 # ---------------------------------------------------------
-# 使用 Ubuntu 24.04 以支持最新的 GLIBC 2.39
+# Session Runtime 使用 Ubuntu 24.04；scode bundle 本身为静态二进制。
 # docker build -t my-moss-runtime:v1 -f deploy/runtime/Dockerfile .
 # scode 版本统一读取 src/server/nexus/runtime-versions.json。
 # ---------------------------------------------------------
@@ -69,22 +69,24 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 从 GitHub 下载 scode 引擎并赋予执行权限
+# 3. 从 GitHub 下载并校验 scode bundle，只安装静态 scode 二进制
 # 版本与 Server host 安装包共用仓库配置
-# 根据 TARGETARCH 自动选择对应架构的二进制文件
+# 当前 Release 仅发布 linux/amd64 bundle
 ARG TARGETARCH
 COPY src/server/nexus/runtime-versions.json /tmp/moss-runtime-versions.json
 RUN SCODE_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json").scode')" && \
-    test -n "$SCODE_VERSION" && \
-    ARCH=$(echo ${TARGETARCH} | sed 's/amd64/x64/' | sed 's/arm64/arm64/') && \
-    curl -fsSL https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/scode-linux-${ARCH}.tar.gz | tar -xz -C /tmp && \
-    mv /tmp/scode-linux-${ARCH}/scode /usr/local/bin/scode && \
-    rm -rf /tmp/scode-linux-${ARCH} && \
+    SCODE_SHA256="$(node -p 'require("/tmp/moss-runtime-versions.json")["scode-linux-x64-bundle-sha256"]')" && \
+    case "$TARGETARCH" in amd64) ;; *) echo "scode bundle only supports amd64, got: $TARGETARCH"; exit 1 ;; esac && \
+    SCODE_ASSET=scode-linux-x64-bundle.tar.gz && \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/${SCODE_ASSET}" -o "/tmp/$SCODE_ASSET" && \
+    echo "$SCODE_SHA256  /tmp/$SCODE_ASSET" | sha256sum -c - && \
+    tar -xzf "/tmp/$SCODE_ASSET" -C /tmp && \
+    (cd /tmp/scode-linux-x64-bundle && sha256sum -c SHA256SUMS.txt) && \
+    install -m 0755 /tmp/scode-linux-x64-bundle/scode /usr/local/bin/scode && \
+    scode --version && \
+    rm -rf /tmp/scode-linux-x64-bundle "/tmp/$SCODE_ASSET" && \
     rm -f /tmp/moss-runtime-versions.json && \
-    chmod +x /usr/local/bin/scode
-
-# 4. 设置别名或链接，确保直接输入 scode 就能运行
-RUN ln -s /usr/local/bin/scode /usr/bin/scode
+    ln -s /usr/local/bin/scode /usr/bin/scode
 
 # 5. Agent-facing CLIs (built in the wiki / corpapp / corpauth / fetchurl stages):
 #    wiki (Document Center), corpapp (企业应用), corpauth (企业鉴权),

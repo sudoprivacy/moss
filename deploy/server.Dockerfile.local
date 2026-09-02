@@ -145,28 +145,30 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
     && mkdir -p /out/bin/nexus \
     && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
     && chmod +x /out/bin/nexus/nexusd
-# Download the host scode binary in a child stage so the nexus-only server image
-# stages do not fetch it unless the host package is being exported.
+# Download the scode bundle in a child stage so nexus-only stages do not fetch
+# it. The host Server package copies the verified static binary from this stage.
 FROM nexus-dl AS dl
 ARG TARGETARCH
 WORKDIR /dl
-# scode version comes from the same repository config used by the Runtime image.
-RUN set -e; SCODE_VERSION="$(jq -er '.scode' /runtime-versions.json)"; \
+# The static x64 bundle has no host glibc dependency. Verify the complete
+# bundle, then copy only the scode binary; Moss generates session config itself.
+RUN set -e; \
+    SCODE_VERSION="$(jq -er '.scode' /runtime-versions.json)"; \
+    SCODE_SHA256="$(jq -er '."scode-linux-x64-bundle-sha256"' /runtime-versions.json)"; \
     case "$TARGETARCH" in \
-      amd64) SCODE_ARCH="x64" ;; \
-      arm64) SCODE_ARCH="arm64" ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+      amd64) SCODE_ASSET="scode-linux-x64-bundle.tar.gz" ;; \
+      *) echo "scode bundle only supports amd64, got: $TARGETARCH" && exit 1 ;; \
     esac; \
-    echo "scode version: $SCODE_VERSION arch: $SCODE_ARCH"; \
-    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/scode-linux-${SCODE_ARCH}.tar.gz" -o scode.tar.gz; \
-    tar -xzf scode.tar.gz; \
-    mv "scode-linux-${SCODE_ARCH}/scode" /out/bin/scode; \
-    chmod +x /out/bin/scode; \
+    echo "scode version: $SCODE_VERSION asset: $SCODE_ASSET"; \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/${SCODE_ASSET}" -o "$SCODE_ASSET"; \
+    echo "$SCODE_SHA256  $SCODE_ASSET" | sha256sum -c -; \
+    tar -xzf "$SCODE_ASSET"; \
+    (cd scode-linux-x64-bundle && sha256sum -c SHA256SUMS.txt); \
+    install -D -m 0755 scode-linux-x64-bundle/scode /out/bin/scode; \
     printf '%s\n' "$SCODE_VERSION" > /out/bin/scode.version
 
-# Validate the configured host scode binary in the same GLIBC 2.39 userspace
-# required by the installer before exporting the package.
-FROM ubuntu:24.04 AS host-scode-runtime
+# Validate the installed static bundle on the oldest supported host userspace.
+FROM ubuntu:22.04 AS host-scode-runtime
 COPY --from=dl /out/bin/scode /usr/local/bin/scode
 COPY --from=dl /out/bin/scode.version /tmp/scode.version
 RUN chmod +x /usr/local/bin/scode \
@@ -175,9 +177,8 @@ RUN chmod +x /usr/local/bin/scode \
     && rm -f /tmp/scode.version
 
 # --- Stage 5: runtime image --------------------------------------------------
-# Use Debian trixie (glibc 2.41) rather than bookworm (glibc 2.36): the
-# configured scode binary is linked against GLIBC_2.39 and fails to run on
-# bookworm with "version `GLIBC_2.39' not found". Node 22 line is unchanged.
+# Keep the existing Node 22 trixie server runtime. The scode bundle is
+# static-pie and no longer depends on this image's glibc version.
 FROM node:22-trixie-slim AS server-runtime
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.

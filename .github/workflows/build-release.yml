@@ -36,7 +36,9 @@ jobs:
           fi
           [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
           SCODE_VERSION="$(node -p "require('./src/server/nexus/runtime-versions.json').scode")"
+          SCODE_BUNDLE_SHA256="$(node -p "require('./src/server/nexus/runtime-versions.json')['scode-linux-x64-bundle-sha256']")"
           [[ "$SCODE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SCODE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "image_tag=$VERSION-amd64" >> "$GITHUB_OUTPUT"
