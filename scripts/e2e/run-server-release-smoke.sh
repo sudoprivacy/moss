@@ -353,6 +353,67 @@ const reportLines = [
     '- `SHA256SUMS`：压缩包内所有证据文件的校验和。',
 ]
 fs.writeFileSync(path.join(diagnosticsDir, 'e2e-report.md'), `${reportLines.join('\n')}\n`)
+
+const escapeHtml = value => String(value)
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;')
+const checkRows = resultRows.map(([name, result]) =>
+  `<tr><td>${escapeHtml(name.replaceAll('`', ''))}</td><td class="result">${result}</td></tr>`,
+).join('\n')
+const assertionRows = browser.assertions.map(item =>
+  `<li><span class="pass">${item.ok ? '通过' : '失败'}</span>${escapeHtml(item.name)}</li>`,
+).join('\n')
+const screenshotCards = browser.screenshots.map((item, index) => `
+<figure id="screenshot-${index + 1}">
+  <figcaption><strong>${index + 1}. ${escapeHtml(path.basename(item.file, '.png'))}</strong><span>${escapeHtml(item.path)} · ${item.width}×${item.height}</span></figcaption>
+  <a href="${escapeHtml(item.file)}"><img loading="lazy" src="${escapeHtml(item.file)}" alt="${escapeHtml(path.basename(item.file))}"></a>
+</figure>`).join('\n')
+const htmlReport = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moss Server ${escapeHtml(version)} E2E 测试报告</title>
+  <style>
+    :root{color-scheme:light;--ink:#172033;--muted:#64748b;--line:#dbe2ea;--panel:#fff;--bg:#f4f7fb;--ok:#08783e}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 system-ui,-apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif}
+    main{max-width:1480px;margin:0 auto;padding:32px}.hero,.section,figure{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 4px 18px #1e293b0d}
+    .hero{padding:28px;margin-bottom:24px}.hero h1{margin:0 0 10px}.verdict{padding:14px 18px;border-radius:10px;background:#eaf8ef;color:var(--ok);font-weight:700}
+    .section{padding:24px;margin:24px 0}h2{margin-top:0}table{width:100%;border-collapse:collapse}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left}.result,.pass{color:var(--ok);font-weight:700}
+    code{background:#eef2f7;padding:2px 6px;border-radius:5px;overflow-wrap:anywhere}ul{padding-left:22px}li{margin:7px 0}.pass{display:inline-block;margin-right:9px}
+    figure{margin:24px 0;padding:16px}figcaption{display:flex;justify-content:space-between;gap:16px;margin-bottom:12px}figcaption span{color:var(--muted);font-family:ui-monospace,monospace;font-size:13px}
+    img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:8px}a{color:#0755b5}footer{color:var(--muted);margin-top:24px}
+    @media(max-width:700px){main{padding:14px}.hero,.section,figure{padding:14px}figcaption{display:block}figcaption span{display:block;margin-top:4px}}
+  </style>
+</head>
+<body><main>
+  <section class="hero"><h1>Moss Server E2E 测试报告</h1><div class="verdict">✓ 最终安装包全链路验证通过</div></section>
+  <section class="section"><h2>测试对象</h2><table><tbody>
+    <tr><th>Server</th><td><code>${escapeHtml(`${version}-${arch}`)}</code></td></tr>
+    <tr><th>scode</th><td><code>${escapeHtml(scodeVersion || '未指定')}</code></td></tr>
+    <tr><th>Commit</th><td><code>${escapeHtml(process.env.GITHUB_SHA || 'local')}</code></td></tr>
+    <tr><th>管理端测试用户</th><td><code>${escapeHtml(browser.createdUser)}</code></td></tr>
+  </tbody></table></section>
+  <section class="section"><h2>测试结论</h2><table><thead><tr><th>验证项</th><th>结果</th></tr></thead><tbody>${checkRows}</tbody></table></section>
+  <section class="section"><h2>浏览器操作断言</h2><ul>${assertionRows}</ul></section>
+  <section><h2>浏览器截图</h2>${screenshotCards}</section>
+  <section class="section"><h2>可复核数据</h2><ul>
+    <li>host Session ID：<code>${escapeHtml(runtime('host').sessionId)}</code></li>
+    <li>host Mock 回复：<code>${escapeHtml(runtime('host').response)}</code></li>
+    <li>Docker Session ID：<code>${escapeHtml(runtime('docker').sessionId)}</code></li>
+    <li>Docker Mock 回复：<code>${escapeHtml(runtime('docker').response)}</code></li>
+    <li><a href="evidence/e2e-summary.json">会话结果 JSON</a></li>
+    <li><a href="evidence/browser-e2e-summary.json">浏览器断言 JSON</a></li>
+    <li><a href="evidence/release-smoke-result.json">整体验证结果 JSON</a></li>
+    <li><a href="evidence/same-version-upgrade.log">同版本升级日志</a></li>
+    <li><a href="SHA256SUMS">内部文件 SHA256</a></li>
+  </ul></section>
+  <footer>同目录的 README.md 提供等价 Markdown 版本。</footer>
+</main></body></html>\n`
+fs.writeFileSync(path.join(diagnosticsDir, 'e2e-report.html'), htmlReport)
 NODE
 
 EVIDENCE_NAME="moss-server-e2e-report-$VERSION-$ARCH"
@@ -360,6 +421,7 @@ EVIDENCE_ROOT="$(mktemp -d)"
 EVIDENCE_DIR="$EVIDENCE_ROOT/$EVIDENCE_NAME"
 mkdir -p "$EVIDENCE_DIR/screenshots" "$EVIDENCE_DIR/evidence"
 cp "$DIAGNOSTICS_DIR/e2e-report.md" "$EVIDENCE_DIR/README.md"
+cp "$DIAGNOSTICS_DIR/e2e-report.html" "$EVIDENCE_DIR/index.html"
 cp "$DIAGNOSTICS_DIR/e2e-summary.json" \
   "$DIAGNOSTICS_DIR/browser-e2e-summary.json" \
   "$DIAGNOSTICS_DIR/release-smoke-result.json" \
