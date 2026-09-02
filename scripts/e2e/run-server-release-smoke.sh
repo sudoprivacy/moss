@@ -97,7 +97,7 @@ finish() {
 }
 trap finish EXIT
 
-for command_name in node curl docker systemctl sha256sum; do
+for command_name in node curl docker systemctl sha256sum zip; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "$command_name is required" >&2; exit 1; }
 done
 test -f "$DIST_DIR/install.sh"
@@ -272,10 +272,10 @@ docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"browserUi":true,"lifecycle":true}\n' \
   "$VERSION" "$ARCH" > "$DIAGNOSTICS_DIR/release-smoke-result.json"
 
-node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" "$DIST_DIR" "$SCODE_VERSION" <<'NODE'
+node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" "$SCODE_VERSION" <<'NODE'
 const fs = require('node:fs')
 const path = require('node:path')
-const [diagnosticsDir, version, arch, distDir, scodeVersion] = process.argv.slice(2)
+const [diagnosticsDir, version, arch, scodeVersion] = process.argv.slice(2)
 const sessions = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'e2e-summary.json'), 'utf8'))
 const browser = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'browser-e2e-summary.json'), 'utf8'))
 const runtime = name => sessions.runtimes.find(item => item.runtime === name)
@@ -303,22 +303,12 @@ const summaryLines = [
 ]
 fs.writeFileSync(path.join(diagnosticsDir, 'ci-summary.md'), `${summaryLines.join('\n')}\n`)
 
-const repository = process.env.GITHUB_REPOSITORY || 'sudoprivacy/moss'
-const releaseTag = `server-v${version}`
-const reportAsset = `moss-server-e2e-report-${version}-${arch}.md`
-const screenshotAssets = new Map()
-for (const screenshot of browser.screenshots) {
-  const stem = path.basename(screenshot.file, '.png')
-  const asset = `moss-server-e2e-${stem}-${version}-${arch}.png`
-  fs.copyFileSync(path.join(diagnosticsDir, screenshot.file), path.join(distDir, asset))
-  screenshotAssets.set(screenshot.file, asset)
-}
-
-function reportLines(imageHref) {
-  return [
+const reportLines = [
     '# Moss Server E2E 测试报告',
     '',
     '> 结论：✅ 最终 Server 安装包通过离线安装、host/Docker 会话、真实浏览器管理操作、升级、服务生命周期和卸载验证。',
+    '',
+    '此 ZIP 是 Release 中唯一的 E2E 验证入口。直接打开本文件即可查看结论和全部截图；原始可复核数据位于 `evidence/`。',
     '',
     '## 测试对象',
     '',
@@ -346,7 +336,7 @@ function reportLines(imageHref) {
       '',
       `页面：\`${item.path}\`　尺寸：\`${item.width}×${item.height}\``,
       '',
-      `![${path.basename(item.file)}](${imageHref(item)})`,
+      `![${path.basename(item.file)}](${item.file})`,
       '',
     ]),
     '## 可复核数据',
@@ -355,41 +345,36 @@ function reportLines(imageHref) {
     `- host Mock 回复：\`${runtime('host').response}\``,
     `- Docker Session ID：\`${runtime('docker').sessionId}\``,
     `- Docker Mock 回复：\`${runtime('docker').response}\``,
-    '- 完整 JSON、版本记录与升级日志位于 E2E 证据压缩包。',
-  ]
-}
-
-const localReport = reportLines(item => item.file)
-fs.writeFileSync(path.join(diagnosticsDir, 'e2e-report.md'), `${localReport.join('\n')}\n`)
-const releaseReport = reportLines(item => {
-  const asset = screenshotAssets.get(item.file)
-  return `https://github.com/${repository}/releases/download/${releaseTag}/${asset}`
-})
-fs.writeFileSync(path.join(distDir, reportAsset), `${releaseReport.join('\n')}\n`)
+    '- `evidence/e2e-summary.json`：会话结果。',
+    '- `evidence/browser-e2e-summary.json`：浏览器断言和截图清单。',
+    '- `evidence/release-smoke-result.json`：整体验证结果。',
+    '- `evidence/host-scode-version.txt`、`runtime-scode-version.txt`：两种运行时版本。',
+    '- `evidence/same-version-upgrade.log`：同版本升级不下载的日志。',
+    '- `SHA256SUMS`：压缩包内所有证据文件的校验和。',
+]
+fs.writeFileSync(path.join(diagnosticsDir, 'e2e-report.md'), `${reportLines.join('\n')}\n`)
 NODE
 
-EVIDENCE_NAME="moss-server-e2e-evidence-$VERSION-$ARCH"
+EVIDENCE_NAME="moss-server-e2e-report-$VERSION-$ARCH"
 EVIDENCE_ROOT="$(mktemp -d)"
 EVIDENCE_DIR="$EVIDENCE_ROOT/$EVIDENCE_NAME"
-mkdir -p "$EVIDENCE_DIR/screenshots"
+mkdir -p "$EVIDENCE_DIR/screenshots" "$EVIDENCE_DIR/evidence"
 cp "$DIAGNOSTICS_DIR/e2e-report.md" "$EVIDENCE_DIR/README.md"
-cp "$DIAGNOSTICS_DIR/browser-evidence.html" \
-  "$DIAGNOSTICS_DIR/e2e-summary.json" \
+cp "$DIAGNOSTICS_DIR/e2e-summary.json" \
   "$DIAGNOSTICS_DIR/browser-e2e-summary.json" \
   "$DIAGNOSTICS_DIR/release-smoke-result.json" \
   "$DIAGNOSTICS_DIR/host-scode-version.txt" \
   "$DIAGNOSTICS_DIR/runtime-scode-version.txt" \
   "$DIAGNOSTICS_DIR/same-version-upgrade.log" \
-  "$EVIDENCE_DIR/"
+  "$EVIDENCE_DIR/evidence/"
 cp "$DIAGNOSTICS_DIR/screenshots/"*.png "$EVIDENCE_DIR/screenshots/"
 (
   cd "$EVIDENCE_DIR"
   find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 )
-tar -C "$EVIDENCE_ROOT" -czf "$DIST_DIR/$EVIDENCE_NAME.tar.gz" "$EVIDENCE_NAME"
 (
-  cd "$DIST_DIR"
-  sha256sum "$EVIDENCE_NAME.tar.gz" > "$EVIDENCE_NAME.tar.gz.sha256"
+  cd "$EVIDENCE_ROOT"
+  zip -q -r "$DIST_DIR/$EVIDENCE_NAME.zip" "$EVIDENCE_NAME"
 )
 rm -rf "$EVIDENCE_ROOT"
 echo "Moss Server packaged E2E smoke passed: $VERSION-$ARCH"

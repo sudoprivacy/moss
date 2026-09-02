@@ -27,10 +27,10 @@ describe("packaged Server E2E smoke", () => {
     expect(releaseAssets).toBeGreaterThan(evidence);
     expect(workflow).toContain("scripts/e2e/run-server-release-smoke.sh");
     expect(workflow).toContain("steps.server_e2e_diagnostics.outputs.artifact-url");
-    expect(workflow).toContain("fonts-noto-cjk");
-    expect(workflow).toContain("moss-server-e2e-evidence-");
-    expect(workflow).toContain("release-assets/moss-server-e2e-*.md");
-    expect(workflow).toContain("release-assets/moss-server-e2e-*.png");
+    expect(workflow).toContain("fonts-noto-cjk zip");
+    expect(workflow).toContain("moss-server-e2e-report-");
+    expect(workflow).toContain("release-assets/moss-server-e2e-report-*.zip");
+    expect(workflow).not.toContain("release-assets/moss-server-e2e-*.png");
   });
 
   it("exercises both packaged scode runtimes without a real provider", () => {
@@ -63,7 +63,8 @@ describe("packaged Server E2E smoke", () => {
     expect(runner).toContain("server-admin-browser-smoke.mjs");
     expect(runner).toContain('sudo "$INSTALL_DIR/current/node/bin/node"');
     expect(runner).toContain("e2e-report.md");
-    expect(runner).toContain("moss-server-e2e-evidence-");
+    expect(runner).toContain('EVIDENCE_NAME="moss-server-e2e-report-');
+    expect(runner).toContain('zip -q -r "$DIST_DIR/$EVIDENCE_NAME.zip"');
     expect(runner).toContain('install.sh" --offline');
     expect(runner).toContain('uninstall.sh" --purge');
     expect(runner).toContain("MOSS_MODEL_LIST_URL=");
