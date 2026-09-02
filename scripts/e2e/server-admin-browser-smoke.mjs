@@ -287,7 +287,21 @@ async function stopBrowser() {
   }
   if (browserProcess.exitCode === null) browserProcess.kill("SIGKILL");
   fs.closeSync(browserLog);
-  fs.rmSync(browserProfile, { recursive: true, force: true });
+  try {
+    fs.rmSync(browserProfile, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 200,
+    });
+  } catch (error) {
+    // Chrome helpers can briefly retain profile files after the main process
+    // exits. The hosted runner is disposable, so never replace a passed E2E
+    // result with a best-effort /tmp cleanup failure.
+    process.stderr.write(
+      `[browser-e2e] warning: could not remove temporary profile: ${error.message}\n`,
+    );
+  }
 }
 
 async function evaluate(expression) {
@@ -399,6 +413,13 @@ async function clickSession(sessionId) {
 
 async function capture(name, expectedText = []) {
   for (const text of expectedText) await waitForText(text);
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1600,
+    height: 1200,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(150);
   const expandedHeight = await evaluate(`(() => {
     const main = document.querySelector("main");
     const contentHeight = main ? main.scrollHeight + 160 : document.documentElement.scrollHeight;

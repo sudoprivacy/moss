@@ -27,6 +27,7 @@ describe("packaged Server E2E smoke", () => {
     expect(releaseAssets).toBeGreaterThan(evidence);
     expect(workflow).toContain("scripts/e2e/run-server-release-smoke.sh");
     expect(workflow).toContain("steps.server_e2e_diagnostics.outputs.artifact-url");
+    expect(workflow).toContain("fonts-noto-cjk");
     expect(workflow).toContain("moss-server-e2e-evidence-");
     expect(workflow).toContain("release-assets/moss-server-e2e-*.md");
     expect(workflow).toContain("release-assets/moss-server-e2e-*.png");
