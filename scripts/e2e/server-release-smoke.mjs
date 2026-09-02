@@ -191,6 +191,18 @@ async function runConversation(wsUrl, token, runtime) {
       } catch {
         return;
       }
+      if (event.type === "error") {
+        finish(new Error(`${runtime} runtime error: ${event.error || text}`));
+        return;
+      }
+      if (event.type === "exit" && !sawResult) {
+        finish(
+          new Error(
+            `${runtime} runtime exited before a successful result: ${text}`,
+          ),
+        );
+        return;
+      }
       if (event.type === "assistant") {
         sawAssistant = true;
         const content = event.message?.content;
