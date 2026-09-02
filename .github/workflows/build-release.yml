@@ -62,8 +62,10 @@ jobs:
           bash -n scripts/e2e/run-server-release-smoke.sh
           node --check scripts/e2e/mock-openai-server.mjs
           node --check scripts/e2e/server-release-smoke.mjs
+          node --check scripts/e2e/server-admin-browser-smoke.mjs
           chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh \
             scripts/e2e/mock-openai-server.mjs scripts/e2e/server-release-smoke.mjs \
+            scripts/e2e/server-admin-browser-smoke.mjs \
             scripts/e2e/run-server-release-smoke.sh
           cos_help_output="$(scripts/publish-server-to-cos.sh --help)"
           grep -Fq 'Usage: publish-server-to-cos.sh' <<< "$cos_help_output"
@@ -163,6 +165,7 @@ jobs:
             "$VERSION" "$ARCH" dist "$RUNNER_TEMP/moss-server-e2e" "$SCODE_VERSION"
 
       - name: Upload Server E2E diagnostics
+        id: server_e2e_diagnostics
         if: always()
         uses: actions/upload-artifact@v5
         with:
@@ -170,6 +173,30 @@ jobs:
           path: ${{ runner.temp }}/moss-server-e2e/
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Publish Server E2E evidence summary
+        if: always()
+        shell: bash
+        env:
+          E2E_ARTIFACT_URL: ${{ steps.server_e2e_diagnostics.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          REPORT="$RUNNER_TEMP/moss-server-e2e/ci-summary.md"
+          {
+            echo '## Moss Server packaged E2E'
+            echo
+            if [[ -f "$REPORT" ]]; then
+              cat "$REPORT"
+            else
+              echo '❌ E2E 未完整通过；请查看诊断 artifact 中的日志与失败页面截图。'
+            fi
+            echo
+            if [[ -n "$E2E_ARTIFACT_URL" ]]; then
+              echo "[下载浏览器截图与完整诊断]($E2E_ARTIFACT_URL)"
+            else
+              echo '诊断 artifact 未成功上传。'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5

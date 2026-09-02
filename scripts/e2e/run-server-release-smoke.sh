@@ -203,6 +203,14 @@ node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" \
   --runtimes host,docker \
   --timeout-seconds 180
 
+"$INSTALL_DIR/current/node/bin/node" "$ROOT_DIR/scripts/e2e/server-admin-browser-smoke.mjs" \
+  --base-url "http://127.0.0.1:$PORT" \
+  --username "$ADMIN_USERNAME" \
+  --password "$ADMIN_PASSWORD" \
+  --summary-file "$DIAGNOSTICS_DIR/e2e-summary.json" \
+  --output-dir "$DIAGNOSTICS_DIR" \
+  --timeout-seconds 60
+
 grep -Fq 'MOSS_E2E_OK:MOSS_E2E_TOKEN_host_' "$MOCK_LOG_FILE"
 grep -Fq 'MOSS_E2E_OK:MOSS_E2E_TOKEN_docker_' "$MOCK_LOG_FILE"
 USER_CONTAINER="$(docker ps --filter label=moss.kind=user-container --format '{{.Names}}' | head -n 1)"
@@ -261,6 +269,35 @@ docker image rm "$RUNTIME_IMAGE" >/dev/null
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 ! docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1
 
-printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"lifecycle":true}\n' \
+printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"browserUi":true,"lifecycle":true}\n' \
   "$VERSION" "$ARCH" > "$DIAGNOSTICS_DIR/release-smoke-result.json"
+
+node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const [diagnosticsDir, version, arch] = process.argv.slice(2)
+const sessions = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'e2e-summary.json'), 'utf8'))
+const browser = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'browser-e2e-summary.json'), 'utf8'))
+const runtime = name => sessions.runtimes.find(item => item.runtime === name)
+const lines = [
+  `**版本：** \`${version}-${arch}\``,
+  '',
+  '| 验证项 | 结果 |',
+  '| --- | --- |',
+  '| 离线安装、校验和、Docker 镜像加载 | ✅ |',
+  '| 浏览器表单登录 | ✅ |',
+  `| 浏览器创建用户 \`${browser.createdUser}\` | ✅ |`,
+  `| host 会话聊天 \`${runtime('host').sessionId}\` | ✅ |`,
+  `| Docker 会话聊天 \`${runtime('docker').sessionId}\` | ✅ |`,
+  '| 同版本升级不下载 | ✅ |',
+  '| systemd 停止、启动、重启 | ✅ |',
+  '| 卸载并清理数据、容器、镜像 | ✅ |',
+  '',
+  '**浏览器截图：**',
+  '',
+  '- 下载 artifact 后打开 `browser-evidence.html` 可一次查看全部截图。',
+  ...browser.screenshots.map(item => `- \`${item.file}\`（${item.width}×${item.height}）`),
+]
+fs.writeFileSync(path.join(diagnosticsDir, 'ci-summary.md'), `${lines.join('\n')}\n`)
+NODE
 echo "Moss Server packaged E2E smoke passed: $VERSION-$ARCH"
