@@ -735,6 +735,24 @@ export class RuntimeService {
     )
   }
 
+  /**
+   * Return a running attempt already owned by this process. The WebSocket path
+   * can connect to this socket directly instead of opening a disposable probe
+   * connection immediately before the real client connection. Some runners may
+   * still be processing that probe disconnect, which can race with the attach.
+   */
+  getLocallyOwnedRunningAttempt(attemptId: string): AttemptRecord | null {
+    const attempt = this.store.getAttempt(attemptId)
+    if (
+      attempt?.serverInstanceId === this.options.serverInstanceId
+      && attempt.runtimeState === 'running'
+      && attempt.attachPath
+    ) {
+      return attempt
+    }
+    return null
+  }
+
   async reconcileOnStartup(): Promise<void> {
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning
