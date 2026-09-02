@@ -704,6 +704,19 @@ export class RuntimeService {
       const candidates = this.store.listAttemptsByRuntimeState(['starting', 'running', 'detached'])
       let cleaned = 0
       for (const att of candidates) {
+        // Concurrent multi-instance HA: only reap attempts we can own (already
+        // ours, unowned, or a dead owner). An attempt owned by a live other
+        // instance whose runner_pid is simply not on THIS host must be left
+        // alone — reaping it would kill a healthy session on another node.
+        if (
+          !this.store.claimAttempt(
+            att.attemptId,
+            this.options.serverInstanceId,
+            this.options.config.heartbeatTimeoutMs,
+          )
+        ) {
+          continue
+        }
         // No PID at all → cannot have been running.
         // PID present but not alive → runner crashed silently.
         if (att.runnerPid !== null && safeKill0(att.runnerPid)) continue
@@ -745,6 +758,19 @@ export class RuntimeService {
         const attempt = session.currentAttemptId
           ? this.store.getAttempt(session.currentAttemptId)
           : null
+        // Concurrent multi-instance HA: skip sessions whose attempt is owned by
+        // a live other instance; adopt (claim) dead-owner/self attempts before
+        // recovering so at most one instance ever revives a given session.
+        if (
+          attempt &&
+          !this.store.claimAttempt(
+            attempt.attemptId,
+            this.options.serverInstanceId,
+            this.options.config.heartbeatTimeoutMs,
+          )
+        ) {
+          continue
+        }
         const runnerAlive = attempt?.runnerPid
           ? safeKill0(attempt.runnerPid)
           : false
