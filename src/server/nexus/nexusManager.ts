@@ -30,6 +30,80 @@ export type NexusManagerOptions = {
   healthTimeoutMs?: number
   pollIntervalMs?: number
   connectTimeoutMs?: number
+  /** Override the env-resolved runtime config (tests / embedding hosts). */
+  config?: ResolvedNexusConfig
+}
+
+/** mTLS material for connecting to an external `nexusd-cluster`. */
+export type NexusTlsConfig = {
+  caPath: string
+  certPath: string
+  keyPath: string
+  /** Server-cert SAN to validate; defaults to the cluster's `nexus-node`. */
+  serverName?: string
+}
+
+export type NexusMode = 'embedded' | 'external'
+
+/**
+ * Resolved nexus runtime config.
+ *
+ * - `embedded`: moss spawns its own `nexusd serve-local` (trusted loopback,
+ *   `--no-tls`) — the standalone/dev default, unchanged behavior.
+ * - `external`: moss connects to an already-running production
+ *   `nexusd-cluster` over its advertise bind, optionally with mTLS. moss does
+ *   NOT spawn or manage the daemon lifecycle in this mode.
+ */
+export type ResolvedNexusConfig =
+  | { mode: 'embedded'; grpcPort: number }
+  | { mode: 'external'; endpoint: string; authToken: string; tls: NexusTlsConfig | null }
+
+/**
+ * Resolve the nexus runtime config from the environment.
+ *
+ * `MOSS_NEXUS_MODE=external` switches moss from the embedded serve-local
+ * daemon to an external cluster client:
+ *   - `MOSS_NEXUS_ENDPOINT`   host+scheme+port, e.g. `https://127.0.0.1:8443`
+ *   - `MOSS_NEXUS_TLS_CA`     cluster CA cert (PEM path)
+ *   - `MOSS_NEXUS_TLS_CERT`   moss client cert (PEM path)
+ *   - `MOSS_NEXUS_TLS_KEY`    moss client key  (PEM path)
+ *   - `MOSS_NEXUS_TLS_SERVER_NAME`  optional SAN override (default `nexus-node`)
+ *   - `MOSS_NEXUS_AUTH_TOKEN` optional per-RPC auth token
+ *
+ * Anything else stays `embedded` (default), preserving the current
+ * spawn-serve-local behavior for standalone/dev.
+ */
+export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ResolvedNexusConfig {
+  const mode: NexusMode = env.MOSS_NEXUS_MODE?.trim() === 'external' ? 'external' : 'embedded'
+  if (mode === 'embedded') {
+    return { mode, grpcPort: Number(env.MOSS_NEXUS_GRPC_PORT) || NEXUS_DEFAULT_GRPC_PORT }
+  }
+
+  const endpoint = env.MOSS_NEXUS_ENDPOINT?.trim()
+  if (!endpoint) {
+    throw new Error(
+      'MOSS_NEXUS_MODE=external requires MOSS_NEXUS_ENDPOINT (e.g. https://127.0.0.1:8443)',
+    )
+  }
+
+  const caPath = env.MOSS_NEXUS_TLS_CA?.trim()
+  const certPath = env.MOSS_NEXUS_TLS_CERT?.trim()
+  const keyPath = env.MOSS_NEXUS_TLS_KEY?.trim()
+  let tls: NexusTlsConfig | null = null
+  if (caPath || certPath || keyPath) {
+    if (!caPath || !certPath || !keyPath) {
+      throw new Error(
+        'mTLS to the external nexus requires all of MOSS_NEXUS_TLS_CA, MOSS_NEXUS_TLS_CERT, MOSS_NEXUS_TLS_KEY',
+      )
+    }
+    tls = { caPath, certPath, keyPath, serverName: env.MOSS_NEXUS_TLS_SERVER_NAME?.trim() || undefined }
+  } else if (endpoint.startsWith('https://')) {
+    throw new Error(
+      'MOSS_NEXUS_ENDPOINT uses https:// but no client certs were provided; set MOSS_NEXUS_TLS_CA/CERT/KEY for mTLS',
+    )
+  }
+
+  return { mode, endpoint, authToken: env.MOSS_NEXUS_AUTH_TOKEN?.trim() ?? '', tls }
 }
 
 export function buildNexusArgs(grpcPort: number, dataDir: string): string[] {
@@ -120,15 +194,22 @@ export class NexusManager {
   private readonly healthTimeoutMs: number
   private readonly pollIntervalMs: number
   private readonly connectTimeoutMs: number
+  private readonly config: ResolvedNexusConfig
   private isRustBinary = false
 
   constructor(options: NexusManagerOptions = {}) {
+    this.config = options.config ?? resolveNexusConfigFromEnv()
     this.nexusDir = options.nexusDir ?? join(homedir(), '.moss', 'nexus')
     this.binDir = join(this.nexusDir, 'bin')
-    this.grpcPort = options.grpcPort ?? NEXUS_DEFAULT_GRPC_PORT
+    this.grpcPort =
+      options.grpcPort ?? (this.config.mode === 'embedded' ? this.config.grpcPort : NEXUS_DEFAULT_GRPC_PORT)
     this.healthTimeoutMs = options.healthTimeoutMs ?? NEXUS_HEALTH_TIMEOUT_MS
     this.pollIntervalMs = options.pollIntervalMs ?? NEXUS_POLL_INTERVAL_MS
     this.connectTimeoutMs = options.connectTimeoutMs ?? NEXUS_CONNECT_TIMEOUT_MS
+  }
+
+  get mode(): NexusMode {
+    return this.config.mode
   }
 
   get baseUrl(): string {
@@ -137,7 +218,21 @@ export class NexusManager {
   }
 
   get grpcUrl(): string {
-    return `http://127.0.0.1:${this.grpcPort}`
+    // External mode: host + scheme + port come from MOSS_NEXUS_ENDPOINT (may be
+    // https). Embedded mode: fixed trusted loopback.
+    return this.config.mode === 'external'
+      ? this.config.endpoint
+      : `http://127.0.0.1:${this.grpcPort}`
+  }
+
+  /** mTLS material for the external cluster, or null (embedded / plaintext). */
+  get tlsConfig(): NexusTlsConfig | null {
+    return this.config.mode === 'external' ? this.config.tls : null
+  }
+
+  /** Per-RPC auth token to present to the VFS (empty in embedded mode). */
+  get authToken(): string {
+    return this.config.mode === 'external' ? this.config.authToken : ''
   }
 
   get isRust(): boolean {
@@ -145,6 +240,17 @@ export class NexusManager {
   }
 
   async start(): Promise<void> {
+    if (this.config.mode === 'external') {
+      // Connect-only: the production nexusd-cluster owns the daemon lifecycle.
+      // moss neither spawns nor claims the port; it just points its client at
+      // the configured endpoint.
+      console.log(
+        `[NexusManager] External nexus mode: connecting to ${this.config.endpoint}` +
+          `${this.config.tls ? ' over mTLS' : ' (plaintext)'} — not spawning serve-local`,
+      )
+      return
+    }
+
     await assertTcpPortAvailable(this.grpcPort)
 
     const resolvedBin = this.resolveCompatibleBinary()
@@ -204,6 +310,9 @@ export class NexusManager {
   }
 
   async stop(): Promise<void> {
+    // External mode never spawns a child, so there is nothing to stop; the
+    // cluster daemon lifecycle is managed independently.
+    if (this.config.mode === 'external') return
     const child = this.child
     if (!child) return
     console.log(`[NexusManager] Stopping nexusd-cluster pid=${child.pid ?? 'unknown'}...`)

@@ -97,6 +97,18 @@ export class SessionRunnerDaemon {
         network: manifest.config.dockerNetwork,
         labels: manifest.config.dockerLabels,
       },
+      k8s: {
+        image: manifest.session.runtime.k8sImage || manifest.config.k8s?.image,
+        namespace: manifest.session.runtime.k8sNamespace || manifest.config.k8s?.namespace,
+        runtimeClassName:
+          manifest.session.runtime.k8sRuntimeClassName || manifest.config.k8s?.runtimeClassName,
+        kubeconfig: manifest.session.runtime.k8sKubeconfig || manifest.config.k8s?.kubeconfig,
+        scodePath: manifest.session.runtime.k8sScodePath || manifest.config.k8s?.scodePath,
+        cpuLimit: manifest.config.k8s?.cpuLimit,
+        memoryLimit: manifest.config.k8s?.memoryLimit,
+        podReadyTimeoutSec: manifest.config.k8s?.podReadyTimeoutSec,
+        labels: manifest.config.k8s?.labels,
+      },
     })
     this.#heartbeatTimer = setInterval(() => {
       this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)

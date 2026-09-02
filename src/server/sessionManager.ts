@@ -3,7 +3,7 @@ import os from 'os'
 import type { WebSocket } from 'ws'
 import type { SessionIndexEntry } from './types.js'
 
-export type SessionRuntimeType = 'host' | 'docker'
+export type SessionRuntimeType = 'host' | 'docker' | 'k8s'
 
 export type SessionRuntimeOptions = {
   type?: SessionRuntimeType
@@ -37,6 +37,19 @@ export type SessionRuntimeOptions = {
    */
   scodeHomeDir?: string
   hostMode?: 'session' | 'user'
+  // --- k8s (gvisor pod) runtime ---
+  /** scode container image for the pod. Falls back to MOSS_SCODE_IMAGE / config. */
+  k8sImage?: string
+  /** Namespace the pod is created in. Defaults to `default`. */
+  k8sNamespace?: string
+  /** RuntimeClass that provides the gvisor sandbox. Defaults to `gvisor`. */
+  k8sRuntimeClassName?: string
+  /** Path to the kubeconfig that reaches the k3s API server. */
+  k8sKubeconfig?: string
+  /** Path of the scode binary inside the pod. Defaults to /usr/local/bin/scode. */
+  k8sScodePath?: string
+  /** Memory reuse boundary, analogous to dockerMode/hostMode. */
+  k8sMode?: 'session' | 'user'
 }
 
 export type SessionRuntimeInfo = {
@@ -54,6 +67,15 @@ export type SessionRuntimeInfo = {
   scodeHomeDir?: string
   configDir?: string
   hostMode?: 'session' | 'user'
+  // --- k8s (gvisor pod) runtime ---
+  k8sImage?: string
+  k8sNamespace?: string
+  k8sRuntimeClassName?: string
+  k8sKubeconfig?: string
+  k8sScodePath?: string
+  k8sMode?: 'session' | 'user'
+  /** Deterministic pod name (scode-<sessionId>). Set by K8sBackend. */
+  k8sPodName?: string
 }
 
 /**

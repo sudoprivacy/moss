@@ -4,7 +4,7 @@ import type { SessionRuntimeInfo, SessionRuntimeOptions, SessionRuntimeType } fr
 
 export const runtimeInfoSchema = lazySchema(() =>
   z.object({
-    type: z.enum(['host', 'docker']),
+    type: z.enum(['host', 'docker', 'k8s']),
     engine: z.enum(['scode']).optional(),
     scodePath: z.string().optional(),
     dockerImage: z.string().optional(),
@@ -12,6 +12,10 @@ export const runtimeInfoSchema = lazySchema(() =>
     hostMode: z.enum(['session', 'user']).optional(),
     containerName: z.string().optional(),
     configDir: z.string().optional(),
+    k8sImage: z.string().optional(),
+    k8sNamespace: z.string().optional(),
+    k8sRuntimeClassName: z.string().optional(),
+    k8sMode: z.enum(['session', 'user']).optional(),
   }),
 )
 
@@ -81,7 +85,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       runtimeDir: z.string().min(1).optional(),
     }).default({}),
     runtimeDefaults: z.object({
-      type: z.enum(['host', 'docker']).default('host'),
+      type: z.enum(['host', 'docker', 'k8s']).default('host'),
       engine: z.enum(['scode']).default('scode'),
       scodePath: z.string().optional(),
       hostScodePath: z.string().optional(),
@@ -136,6 +140,27 @@ export const serverFileConfigSchema = lazySchema(() =>
         cpus: '2',
         nofile: 4096,
       },
+    }),
+    // gvisor-isolated k8s pod runtime (single-node k3s PoC). Only consulted
+    // when runtimeDefaults.type='k8s' or a session requests runtime.type='k8s'.
+    k8s: z.object({
+      image: z.string().optional(),
+      namespace: z.string().default('default'),
+      runtimeClassName: z.string().default('gvisor'),
+      kubeconfig: z.string().optional(),
+      scodePath: z.string().default('/usr/local/bin/scode'),
+      cpuLimit: z.string().default('2'),
+      memoryLimit: z.string().default('4Gi'),
+      podReadyTimeoutSec: z.number().int().min(1).default(90),
+      labels: z.record(z.string(), z.string()).default({}),
+    }).default({
+      namespace: 'default',
+      runtimeClassName: 'gvisor',
+      scodePath: '/usr/local/bin/scode',
+      cpuLimit: '2',
+      memoryLimit: '4Gi',
+      podReadyTimeoutSec: 90,
+      labels: {},
     }),
     recovery: z.object({
       startupPolicy: z.enum(['reattach-or-resume']).default('reattach-or-resume'),
@@ -324,6 +349,23 @@ export type ServerConfig = {
       nofile: number
     }
   }
+  /**
+   * gvisor-isolated k8s pod runtime settings (single-node k3s PoC). Consumed
+   * by K8sBackend when a session's runtime.type='k8s'. Env overrides:
+   * MOSS_SCODE_IMAGE, MOSS_K8S_NAMESPACE, MOSS_K8S_RUNTIME_CLASS,
+   * MOSS_K8S_KUBECONFIG, MOSS_K8S_SCODE_PATH.
+   */
+  k8s?: {
+    image?: string
+    namespace: string
+    runtimeClassName: string
+    kubeconfig?: string
+    scodePath: string
+    cpuLimit: string
+    memoryLimit: string
+    podReadyTimeoutSec: number
+    labels: Record<string, string>
+  }
   session?: {
     maxDetachedBusyMs: number
   }
@@ -445,6 +487,7 @@ export type SessionRecord = {
   assistantName: string | null
   source?: string
   channelChatId?: string
+  clientMetadata?: Record<string, unknown>
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
@@ -511,6 +554,7 @@ export type SessionSummary = {
   assistantName: string | null
   source?: string
   channelChatId?: string
+  clientMetadata?: Record<string, unknown>
   createdAt: number
   lastActiveAt: number
   endedAt: number | null

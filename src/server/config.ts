@@ -56,6 +56,15 @@ export function getDefaultServerConfig(): ServerFileConfig {
       stopTimeoutSec: 10,
       labels: {},
     },
+    k8s: {
+      namespace: 'default',
+      runtimeClassName: 'gvisor',
+      scodePath: '/usr/local/bin/scode',
+      cpuLimit: '2',
+      memoryLimit: '4Gi',
+      podReadyTimeoutSec: 90,
+      labels: {},
+    },
     recovery: {
       startupPolicy: 'reattach-or-resume',
       heartbeatTimeoutMs: 30_000,
@@ -168,6 +177,20 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       userContainerIdleTimeoutMs: raw.docker.userContainerIdleTimeoutMs,
       execKillGraceMs: raw.docker.execKillGraceMs,
       user: raw.docker.user,
+    },
+    k8s: {
+      // MOSS_SCODE_IMAGE is the primary env knob for the scode pod image.
+      image: process.env.MOSS_SCODE_IMAGE || raw.k8s.image,
+      namespace: process.env.MOSS_K8S_NAMESPACE || raw.k8s.namespace,
+      runtimeClassName: process.env.MOSS_K8S_RUNTIME_CLASS || raw.k8s.runtimeClassName,
+      kubeconfig: (process.env.MOSS_K8S_KUBECONFIG || raw.k8s.kubeconfig)
+        ? normalizePath((process.env.MOSS_K8S_KUBECONFIG || raw.k8s.kubeconfig)!)
+        : undefined,
+      scodePath: process.env.MOSS_K8S_SCODE_PATH || raw.k8s.scodePath,
+      cpuLimit: raw.k8s.cpuLimit,
+      memoryLimit: raw.k8s.memoryLimit,
+      podReadyTimeoutSec: readIntEnv('MOSS_K8S_POD_READY_TIMEOUT_SEC', raw.k8s.podReadyTimeoutSec)!,
+      labels: raw.k8s.labels,
     },
     session: {
       maxDetachedBusyMs: 2 * 60 * 60 * 1000,

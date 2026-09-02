@@ -20,6 +20,7 @@ type SimpleMessage = {
   input?: unknown
   is_error?: boolean
   tool_use_id?: string
+  displayText?: string
 }
 
 function parseJsonlEntries(buf: string): SimpleMessage[] {
@@ -29,7 +30,13 @@ function parseJsonlEntries(buf: string): SimpleMessage[] {
     try {
       const obj = JSON.parse(line) as Record<string, unknown>
       const t = obj.type as string
-      if (t === 'user' || t === 'assistant' || t === 'tool_use' || t === 'tool_result') {
+      if (
+        t === 'user' ||
+        t === 'assistant' ||
+        t === 'thinking' ||
+        t === 'tool_use' ||
+        t === 'tool_result'
+      ) {
         entries.push(obj as unknown as SimpleMessage)
       }
     } catch {
@@ -46,6 +53,9 @@ function simpleMessageToMessage(msg: SimpleMessage): Record<string, unknown> {
       type: 'user',
       role: 'user',
       content,
+      // displayText carries the human-typed text with the client-injected
+      // preambles stripped; present only when it differs from the raw content.
+      ...(typeof msg.displayText === 'string' ? { displayText: msg.displayText } : {}),
       uuid: msg.uuid,
       timestamp: msg.timestamp,
     }
@@ -54,6 +64,16 @@ function simpleMessageToMessage(msg: SimpleMessage): Record<string, unknown> {
     const content = msg.message?.content ?? msg.content
     return {
       type: 'assistant',
+      role: 'assistant',
+      content,
+      uuid: msg.uuid,
+      timestamp: msg.timestamp,
+    }
+  }
+  if (msg.type === 'thinking') {
+    const content = msg.message?.content ?? msg.content
+    return {
+      type: 'thinking',
       role: 'assistant',
       content,
       uuid: msg.uuid,
