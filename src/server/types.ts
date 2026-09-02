@@ -85,6 +85,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       engine: z.enum(['scode']).default('scode'),
       scodePath: z.string().optional(),
       hostScodePath: z.string().optional(),
+      hostScodeEnabled: z.boolean().default(true),
       dockerScodePath: z.string().optional(),
       dockerImage: z.string().optional(),
       dockerMode: z.enum(['session', 'user']).default('session'),
@@ -292,6 +293,7 @@ export type ServerConfig = {
   engine: 'scode'
   scodePath?: string
   hostScodePath?: string
+  hostScodeEnabled: boolean
   dockerScodePath?: string
   dockerImage?: string
   dockerMode?: 'session' | 'user'
