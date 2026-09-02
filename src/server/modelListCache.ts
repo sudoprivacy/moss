@@ -4,6 +4,7 @@
  */
 
 const MODEL_CACHE_DURATION = 24 * 60 * 60 * 1000 // 24 hours in milliseconds
+const DEFAULT_MODEL_LIST_URL = 'https://hk.sudorouter.ai/api/specific_pricing'
 
 interface ModelInfo {
   id: string
@@ -32,7 +33,7 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
 
   try {
     process.stderr.write(`[ModelListCache] Fetching fresh model list from sudorouter...\n`)
-    const response = await fetch('https://hk.sudorouter.ai/api/specific_pricing', {
+    const response = await fetch(process.env.MOSS_MODEL_LIST_URL || DEFAULT_MODEL_LIST_URL, {
       signal: AbortSignal.timeout(10000),
     })
 

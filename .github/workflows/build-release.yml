@@ -59,7 +59,12 @@ jobs:
           bash -n deploy/install.sh
           bash -n deploy/package-server.sh
           bash -n scripts/publish-server-to-cos.sh
-          chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh
+          bash -n scripts/e2e/run-server-release-smoke.sh
+          node --check scripts/e2e/mock-openai-server.mjs
+          node --check scripts/e2e/server-release-smoke.mjs
+          chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh \
+            scripts/e2e/mock-openai-server.mjs scripts/e2e/server-release-smoke.mjs \
+            scripts/e2e/run-server-release-smoke.sh
           cos_help_output="$(scripts/publish-server-to-cos.sh --help)"
           grep -Fq 'Usage: publish-server-to-cos.sh' <<< "$cos_help_output"
           grep -Fq -- '--release-only' <<< "$cos_help_output"
@@ -147,6 +152,24 @@ jobs:
           grep -Fq 'packages/$RELEASE_TAG' dist/install.sh
           grep -Fq -- '--progress-bar' dist/install.sh
           grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
+
+      - name: Run packaged Server E2E smoke
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          ARCH: amd64
+          SCODE_VERSION: ${{ steps.release.outputs.scode_version }}
+        run: |
+          scripts/e2e/run-server-release-smoke.sh \
+            "$VERSION" "$ARCH" dist "$RUNNER_TEMP/moss-server-e2e" "$SCODE_VERSION"
+
+      - name: Upload Server E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: moss-server-e2e-${{ steps.release.outputs.version }}-amd64
+          path: ${{ runner.temp }}/moss-server-e2e/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5
