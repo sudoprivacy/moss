@@ -165,6 +165,10 @@ export class DockerBackend implements SessionBackend {
     // process did not populate scodeHomeDir (e.g. very old manifests).
     const scodeHomeDir = runtime?.scodeHomeDir || join(configDir, '.nexus', 'sudocode')
     await mkdir(scodeHomeDir, { recursive: true })
+    // Keep packaged scode independent of the source path captured when its
+    // binary was compiled; the release bundle has no external bundled plugins.
+    const bundledPluginsDir = join(scodeHomeDir, 'bundled')
+    await mkdir(bundledPluginsDir, { recursive: true })
 
     // Skill symlinks: only useful in legacy session mode where each session
     // has its own configDir / .claude/commands. In user-container mode we
@@ -207,7 +211,7 @@ export class DockerBackend implements SessionBackend {
       process.stderr.write(`[DockerBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
 
-    const scodeSettings = buildScodeSettings(options)
+    const scodeSettings = buildScodeSettings(options, bundledPluginsDir)
     // Write per-session scode settings. Lives in scode-home so concurrent
     // sessions in the same dockerMode=user configDir don't overwrite each other.
     if (Object.keys(scodeSettings).length > 0) {
@@ -549,8 +553,13 @@ export class DockerBackend implements SessionBackend {
   }
 }
 
-function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
-  const settings: Record<string, unknown> = {}
+function buildScodeSettings(
+  options: BackendSpawnOptions,
+  bundledPluginsDir: string,
+): Record<string, unknown> {
+  const settings: Record<string, unknown> = {
+    plugins: { bundledRoot: bundledPluginsDir },
+  }
   if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
     Object.assign(settings, options.mcpSettings)
   }

@@ -59,6 +59,11 @@ export class ScodeBackend implements SessionBackend {
     // scode 需要 HOME 环境变量指向的目录下有这个配置文件来获取认证信息
     const dotNexusDir = join(configDir, '.nexus', 'sudocode')
     await mkdir(dotNexusDir, { recursive: true })
+    // Release bundles do not ship the source-tree bundled plugin directory.
+    // Pin it to an accessible empty directory so scode never probes the
+    // build-time CARGO_MANIFEST_DIR, which may be private on the target host.
+    const bundledPluginsDir = join(dotNexusDir, 'bundled')
+    await mkdir(bundledPluginsDir, { recursive: true })
 
     const scodePath = resolveScodeCliPath(options.runtime?.scodePath)
     const env = buildSessionEnv(options, {
@@ -103,7 +108,7 @@ export class ScodeBackend implements SessionBackend {
       process.stderr.write(`[ScodeBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
 
-    const scodeSettings = buildScodeSettings(options)
+    const scodeSettings = buildScodeSettings(options, bundledPluginsDir)
     // Write per-session scode settings (same dir as sudocode.json) so scode
     // loads them on startup.
     if (Object.keys(scodeSettings).length > 0) {
@@ -158,6 +163,7 @@ export class ScodeBackend implements SessionBackend {
       env: {
         ...env,
         HOME: configDir,
+        SUDO_CODE_CONFIG_HOME: dotNexusDir,
         CLAUDE_CONFIG_DIR: configDir,
         CLAUDE_CODE_REMOTE_MEMORY_DIR: configDir,
       },
@@ -196,8 +202,13 @@ export class ScodeBackend implements SessionBackend {
   }
 }
 
-function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
-  const settings: Record<string, unknown> = {}
+function buildScodeSettings(
+  options: BackendSpawnOptions,
+  bundledPluginsDir: string,
+): Record<string, unknown> {
+  const settings: Record<string, unknown> = {
+    plugins: { bundledRoot: bundledPluginsDir },
+  }
   if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
     Object.assign(settings, options.mcpSettings)
   }
