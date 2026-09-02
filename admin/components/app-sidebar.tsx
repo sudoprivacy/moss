@@ -189,6 +189,12 @@ const systemItems: NavItem[] = [
     icon: Settings,
     requiredScope: 'admin:settings',
   },
+  {
+    title: '服务器凭据',
+    url: '/settings/server-credentials',
+    icon: KeyRound,
+    requiredScope: 'admin:settings',
+  },
 ]
 
 export function AppSidebar() {

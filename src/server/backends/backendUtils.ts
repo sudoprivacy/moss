@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from 'child_process'
 import { createInterface } from 'readline'
 import fs from 'fs'
 import path from 'path'
-import os from 'os'
 import { fileURLToPath } from 'url'
 import { mkdir, readFile, symlink } from 'fs/promises'
 import {
@@ -66,24 +65,12 @@ export function buildSessionEnv(
 ): NodeJS.ProcessEnv {
   const settings = getSystemSettings()
 
-  let fileApiKey = ''
-  let fileBaseUrl = ''
-  try {
-    const settingsPath = path.join(os.homedir(), '.moss', 'settings.json')
-    if (fs.existsSync(settingsPath)) {
-      const content = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
-      fileApiKey = content.env?.ANTHROPIC_AUTH_TOKEN || content.env?.ANTHROPIC_API_KEY || content.apiKey || ''
-      fileBaseUrl = content.env?.ANTHROPIC_BASE_URL || content.url || ''
-    }
-  } catch {
-    // Ignore read errors
-  }
-
+  // 敏感值不再读 settings.json 文件（apiKey 已迁 Nexus；本函数运行于 runner
+  // 子进程，该值由主进程注入 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 提供）
   const forceEnvModelConfig = process.env.MOSS_FORCE_ENV_MODEL_CONFIG === '1'
   const apiKey = forceEnvModelConfig
-    ? (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || fileApiKey || settings.apiKey)
-    : (fileApiKey
-      || settings.apiKey
+    ? (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || settings.apiKey)
+    : (settings.apiKey
       || process.env.ANTHROPIC_API_KEY
       || process.env.ANTHROPIC_AUTH_TOKEN)
 
@@ -122,9 +109,8 @@ export function buildSessionEnv(
     ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
     ...(apiKey ? { PROXY_AUTH_TOKEN: apiKey } : {}),
     ANTHROPIC_BASE_URL: forceEnvModelConfig
-      ? (process.env.ANTHROPIC_BASE_URL || fileBaseUrl || settings.url || 'https://hk.sudorouter.ai/v1')
-      : (fileBaseUrl
-        || settings.url
+      ? (process.env.ANTHROPIC_BASE_URL || settings.url || 'https://hk.sudorouter.ai/v1')
+      : (settings.url
         || process.env.ANTHROPIC_BASE_URL
         || 'https://hk.sudorouter.ai/v1'),
     ...(options.userId ? { MOSS_SESSION_USER_ID: options.userId } : {}),

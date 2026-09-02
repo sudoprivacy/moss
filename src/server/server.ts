@@ -19,6 +19,27 @@ import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.
 import { RuntimeService } from './runtimeService.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
+import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
+import type { ConfigKey } from './configStore/configStore.js'
+import { initHubConfig } from './hubConfig.js'
+
+/** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
+const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
+  key: ConfigKey
+  group: 'hub' | 'wikiIndex' | 'cabin'
+  path: string
+}> = [
+  { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
+  { key: 'server.wiki-index-resource-token-secret', group: 'wikiIndex', path: 'wikiIndex.resourceTokenSecret' },
+  { key: 'server.cabin-token-secret', group: 'cabin', path: 'cabin.tokenSecret' },
+  { key: 'server.cabin-passenger-info-auth', group: 'cabin', path: 'cabin.passengerInfoAuth' },
+  { key: 'server.cabin-asr-api-key', group: 'cabin', path: 'cabin.asrApiKey' },
+  { key: 'server.cabin-tts-api-key', group: 'cabin', path: 'cabin.ttsApiKey' },
+  { key: 'server.cabin-llm-api-key', group: 'cabin', path: 'cabin.llmApiKey' },
+  { key: 'server.cabin-control-auth', group: 'cabin', path: 'cabin.controlAuth' },
+  { key: 'server.cabin-broadcast-api-key', group: 'cabin', path: 'cabin.broadcastApiKey' },
+  { key: 'server.cabin-broadcast-auth', group: 'cabin', path: 'cabin.broadcastAuth' },
+]
 import {
   createCustomAssistant,
   fetchAgentHubAssistantDetail,
@@ -5850,7 +5871,65 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, updateSystemSettings(body))
+        writeJson(res, 200, await updateSystemSettings(body))
+        return
+      }
+
+      // ==================== Server Credentials (Nexus-backed) ====================
+      // server.json 侧 10 个敏感字段的管理入口（settings.json 侧 2 个走系统设置页）。
+      // GET 脱敏返回；PUT 单字段编辑——同步回写内存 config 快照（就地赋值）并按需
+      // 重调 initHubConfig，保存即时生效。前端仅提交实际被修改的字段；服务端忽略
+      // 与脱敏占位格式相同的提交值。
+      if (req.method === 'GET' && pathname === '/api/v1/server-credentials') {
+        authService.requireScope(auth, 'admin:settings')
+        const store = getConfigStore()
+        const items = SERVER_CREDENTIAL_FIELDS.map(field => {
+          const value = store.get(field.key)
+          return {
+            key: field.key,
+            group: field.group,
+            path: field.path,
+            set: Boolean(value),
+            masked: value ? maskConfigValue(value) : null,
+          }
+        })
+        writeJson(res, 200, { items })
+        return
+      }
+
+      if (req.method === 'PUT' && pathname === '/api/v1/server-credentials') {
+        authService.requireScope(auth, 'admin:settings')
+        const body = await readJsonBody(req)
+        const key = typeof body?.key === 'string' ? body.key : ''
+        if (!SERVER_CREDENTIAL_FIELDS.some(field => field.key === key)) {
+          throw new HttpError(400, `Unknown credential key: ${key}`)
+        }
+        const value = typeof body?.value === 'string' ? body.value.trim() : ''
+        if (value.startsWith('****')) {
+          // 脱敏占位值原样提交 = 未实际修改，忽略以防覆盖真实凭据
+          writeJson(res, 200, { ok: true, key, ignored: true })
+          return
+        }
+        const store = getConfigStore()
+        if (value) {
+          await store.put(key as ConfigKey, value, config)
+        } else {
+          await store.remove(key as ConfigKey, config)
+        }
+        if (key === 'server.hub-authorization') {
+          initHubConfig({
+            hubApiBaseUrl: config.hubApiBaseUrl,
+            hubAuthorization: config.hubAuthorization,
+            cosBaseUrl: config.cosBaseUrl,
+          })
+        }
+        const updated = store.get(key as ConfigKey)
+        writeJson(res, 200, {
+          ok: true,
+          key,
+          set: Boolean(updated),
+          masked: updated ? maskConfigValue(updated) : null,
+        })
         return
       }
 

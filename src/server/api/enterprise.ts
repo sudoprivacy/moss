@@ -83,7 +83,7 @@ export function createEnterpriseApi(
             settingsPatch.workspaceUploadLimitBytes = workspace_upload_limit_bytes
           }
           if (Object.keys(settingsPatch).length > 0) {
-            updateSystemSettings(settingsPatch)
+            await updateSystemSettings(settingsPatch)
           }
 
           // Whitelist the actual `enterprises` columns so read-only /
