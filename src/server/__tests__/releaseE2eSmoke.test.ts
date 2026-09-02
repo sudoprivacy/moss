@@ -63,6 +63,8 @@ describe("packaged Server E2E smoke", () => {
     expect(runner).toContain("server-admin-browser-smoke.mjs");
     expect(runner).toContain('sudo "$INSTALL_DIR/current/node/bin/node"');
     expect(runner).toContain("e2e-report.md");
+    expect(runner).toContain("e2e-report.html");
+    expect(runner).toContain('"$EVIDENCE_DIR/index.html"');
     expect(runner).toContain('EVIDENCE_NAME="moss-server-e2e-report-');
     expect(runner).toContain('zip -q -r "$DIST_DIR/$EVIDENCE_NAME.zip"');
     expect(runner).toContain('install.sh" --offline');
