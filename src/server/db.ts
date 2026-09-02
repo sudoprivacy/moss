@@ -1469,6 +1469,35 @@ export class DirectConnectStore {
     `).run(attemptId, sessionId)
   }
 
+  /**
+   * Concurrent multi-instance HA: atomically claim ownership of an attempt for
+   * this instance. Succeeds only when the attempt is already ours, unowned, or
+   * its current owner is dead (server instance stopped, gone, or heartbeat stale
+   * beyond `heartbeatTimeoutMs`). A live owner keeps its attempt untouched, so at
+   * most one instance ever runs a session's runner. The UPDATE is a single
+   * statement, so SQLite (WAL) / any transactional store serialises the CAS and
+   * exactly one contending instance wins (`changes === 1`).
+   */
+  claimAttempt(attemptId: string, selfInstanceId: string, heartbeatTimeoutMs: number): boolean {
+    const deadBefore = now() - heartbeatTimeoutMs
+    const res = this.db.prepare(`
+      UPDATE session_attempts
+      SET server_instance_id = ?
+      WHERE attempt_id = ?
+        AND (
+          server_instance_id = ?
+          OR server_instance_id IS NULL
+          OR NOT EXISTS (
+            SELECT 1 FROM server_instances si
+            WHERE si.instance_id = session_attempts.server_instance_id
+              AND si.status = 'running'
+              AND si.heartbeat_at >= ?
+          )
+        )
+    `).run(selfInstanceId, attemptId, selfInstanceId, deadBefore)
+    return res.changes > 0
+  }
+
   setSessionLifecycle(
     sessionId: string,
     status: SessionStatus,
@@ -1742,6 +1771,35 @@ export class DirectConnectStore {
         AND status IN ('creating', 'active', 'detached', 'lost', 'failed')
       ORDER BY last_active_at DESC
     `).all() as SqlRow[]
+    return rows.map(mapSession)
+  }
+
+  /**
+   * Concurrent multi-instance HA: active sessions whose current attempt is owned
+   * by a DEAD *other* instance (stopped, gone, or heartbeat stale beyond
+   * `heartbeatTimeoutMs`). These are orphans a surviving instance should adopt +
+   * recover. Our own sessions are excluded — we already run them, so a periodic
+   * adoption pass never re-probes healthy local sessions.
+   */
+  listOrphanedActiveSessions(selfInstanceId: string, heartbeatTimeoutMs: number): SessionRecord[] {
+    const deadBefore = now() - heartbeatTimeoutMs
+    const rows = this.db.prepare(`
+      SELECT s.*
+      FROM sessions s
+      JOIN session_attempts a ON a.attempt_id = s.current_attempt_id
+      WHERE s.desired_state = 'active'
+        AND s.deleted_at IS NULL
+        AND s.status IN ('creating', 'active', 'detached', 'lost', 'failed')
+        AND a.server_instance_id IS NOT NULL
+        AND a.server_instance_id != ?
+        AND NOT EXISTS (
+          SELECT 1 FROM server_instances si
+          WHERE si.instance_id = a.server_instance_id
+            AND si.status = 'running'
+            AND si.heartbeat_at >= ?
+        )
+      ORDER BY s.last_active_at DESC
+    `).all(selfInstanceId, deadBefore) as SqlRow[]
     return rows.map(mapSession)
   }
 

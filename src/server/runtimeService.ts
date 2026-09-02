@@ -673,6 +673,68 @@ export class RuntimeService {
     return { session: this.store.getSession(sessionId) ?? session }
   }
 
+  /**
+   * Concurrent multi-instance HA: adopt sessions orphaned by a dead instance.
+   * Run periodically. For each orphan, atomically claim its attempt (skip if
+   * another surviving instance claimed it first) and make it ready under our
+   * ownership — `ensureSessionReadyNonBlocking` reattaches to a still-alive
+   * scode/pod or respawns. This is what turns startup-only recovery into live
+   * failover: when an instance dies, a survivor picks up its sessions within a
+   * heartbeat timeout instead of on the next restart.
+   */
+  async adoptOrphanedSessions(): Promise<void> {
+    let orphans: SessionRecord[]
+    try {
+      orphans = this.store.listOrphanedActiveSessions(
+        this.options.serverInstanceId,
+        this.options.config.heartbeatTimeoutMs,
+      )
+    } catch (err) {
+      process.stderr.write(
+        `[RuntimeService] listOrphanedActiveSessions failed: ${errorMessage(err)}\n`,
+      )
+      return
+    }
+    for (const session of orphans) {
+      const attemptId = session.currentAttemptId
+      if (!attemptId) continue
+      // Atomically adopt; another survivor may have claimed it first.
+      if (
+        !this.store.claimAttempt(
+          attemptId,
+          this.options.serverInstanceId,
+          this.options.config.heartbeatTimeoutMs,
+        )
+      ) {
+        continue
+      }
+      this.store.addEvent(session.sessionId, attemptId, 'adopted_orphan_session', {
+        byInstance: this.options.serverInstanceId,
+      })
+      try {
+        await this.ensureSessionReadyNonBlocking(session.sessionId)
+      } catch (err) {
+        this.store.addEvent(session.sessionId, attemptId, 'adopt_recover_failed', {
+          error: errorMessage(err),
+        })
+      }
+    }
+  }
+
+  /**
+   * Concurrent HA WS affinity: claim an attempt for this instance (confirm our
+   * ownership, or adopt a dead owner). Returns false when a live OTHER instance
+   * owns it — the WS upgrade path then rejects so the client re-routes to the
+   * owner instead of this instance bridging a runner it does not hold.
+   */
+  tryOwnAttempt(attemptId: string): boolean {
+    return this.store.claimAttempt(
+      attemptId,
+      this.options.serverInstanceId,
+      this.options.config.heartbeatTimeoutMs,
+    )
+  }
+
   async reconcileOnStartup(): Promise<void> {
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning
@@ -704,6 +766,19 @@ export class RuntimeService {
       const candidates = this.store.listAttemptsByRuntimeState(['starting', 'running', 'detached'])
       let cleaned = 0
       for (const att of candidates) {
+        // Concurrent multi-instance HA: only reap attempts we can own (already
+        // ours, unowned, or a dead owner). An attempt owned by a live other
+        // instance whose runner_pid is simply not on THIS host must be left
+        // alone — reaping it would kill a healthy session on another node.
+        if (
+          !this.store.claimAttempt(
+            att.attemptId,
+            this.options.serverInstanceId,
+            this.options.config.heartbeatTimeoutMs,
+          )
+        ) {
+          continue
+        }
         // No PID at all → cannot have been running.
         // PID present but not alive → runner crashed silently.
         if (att.runnerPid !== null && safeKill0(att.runnerPid)) continue
@@ -745,6 +820,19 @@ export class RuntimeService {
         const attempt = session.currentAttemptId
           ? this.store.getAttempt(session.currentAttemptId)
           : null
+        // Concurrent multi-instance HA: skip sessions whose attempt is owned by
+        // a live other instance; adopt (claim) dead-owner/self attempts before
+        // recovering so at most one instance ever revives a given session.
+        if (
+          attempt &&
+          !this.store.claimAttempt(
+            attempt.attemptId,
+            this.options.serverInstanceId,
+            this.options.config.heartbeatTimeoutMs,
+          )
+        ) {
+          continue
+        }
         const runnerAlive = attempt?.runnerPid
           ? safeKill0(attempt.runnerPid)
           : false
