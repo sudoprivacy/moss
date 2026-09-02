@@ -37,6 +37,14 @@ describe("packaged Server E2E smoke", () => {
       resolve(root, "scripts/e2e/mock-openai-server.mjs"),
       "utf8",
     );
+    const hostBackend = readFileSync(
+      resolve(root, "src/server/backends/scodeBackend.ts"),
+      "utf8",
+    );
+    const dockerBackend = readFileSync(
+      resolve(root, "src/server/backends/dockerBackend.ts"),
+      "utf8",
+    );
 
     expect(runner).toContain("--runtimes host,docker");
     expect(runner).toContain('install.sh" --offline');
@@ -49,5 +57,8 @@ describe("packaged Server E2E smoke", () => {
     expect(mock).toMatch(
       /["']content-type["']:\s*["']text\/event-stream; charset=utf-8["']/,
     );
+    expect(hostBackend).toContain("plugins: { bundledRoot: bundledPluginsDir }");
+    expect(hostBackend).toContain("SUDO_CODE_CONFIG_HOME: dotNexusDir");
+    expect(dockerBackend).toContain("plugins: { bundledRoot: bundledPluginsDir }");
   });
 });
