@@ -9,8 +9,17 @@ import { SessionManager } from './SessionManager.js';
 import { PluginManager } from '../gateway/PluginManager.js';
 import type { IChannelProvider } from './IChannelProvider.js';
 import type { DirectConnectStore } from '../../server/db.js';
+import type { NexusClient } from '../../server/nexus/nexusClient.js';
 import type { IChannelPluginConfig, IChannelPluginStatus, PluginType } from '../types.js';
 import { channelCredentialIdentity, pluginTypeFromId } from '../types.js';
+import {
+  persistChannelSecrets,
+  fillMissingSecrets,
+  hydrateChannelSecrets,
+  deleteChannelSecrets,
+  stripChannelSecretsForClient,
+  stripInternalMeta,
+} from './channelCredentialSecrets.js';
 import type { PluginMessageHandler } from '../plugins/BasePlugin.js';
 
 /** Human-readable channel names for user-facing errors. */
@@ -36,6 +45,7 @@ class ChannelManager {
   private sessionManager: SessionManager | null = null;
   private pluginManager: PluginManager | null = null;
   private db: DirectConnectStore | null = null;
+  private nexus: NexusClient | null = null;
   private initialized: boolean = false;
   private staleSweepTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -54,16 +64,17 @@ class ChannelManager {
   /**
    * Initialize with database reference
    */
-  initialize(db: DirectConnectStore): void {
+  initialize(db: DirectConnectStore, nexus?: NexusClient | null): void {
     if (this.initialized) {
       console.log('[ChannelManager] Already initialized');
       return;
     }
 
     this.db = db;
+    this.nexus = nexus ?? null;
     this.provider = new LocalChannelProvider(db);
     this.sessionManager = new SessionManager(db);
-    this.pluginManager = new PluginManager(this.sessionManager, db);
+    this.pluginManager = new PluginManager(this.sessionManager, db, this.nexus);
 
     this.initialized = true;
     console.log('[ChannelManager] Initialized');
@@ -162,6 +173,9 @@ class ChannelManager {
     if (!this.db || !this.pluginManager) {
       return { success: false, error: 'ChannelManager not initialized' };
     }
+    if (!this.nexus) {
+      return { success: false, error: '密钥存储服务(Nexus)不可用，无法保存 IM 凭据' };
+    }
 
     try {
       // Get existing plugin config or create new one (scoped by userId)
@@ -169,36 +183,22 @@ class ChannelManager {
 
       const pluginType = this.extractPluginType(pluginId);
 
-      // Preserve existing credentials if incoming credentials are empty
-      let finalCredentials = credentials;
-      if (!credentials || Object.values(credentials).every(v => v === undefined || v === '')) {
-        if (existing?.credentials_json) {
-          try {
-            const parsed = JSON.parse(String(existing.credentials_json));
-            if (parsed && Object.keys(parsed).length > 0) {
-              finalCredentials = parsed;
-            }
-          } catch { /* keep incoming credentials */ }
-        }
-      }
-
-      const pluginConfig: IChannelPluginConfig = {
-        id: pluginId,
-        type: pluginType as PluginType,
-        name: existing ? String(existing.name) : pluginId,
-        enabled: true,
-        status: 'stopped',
-        credentials: finalCredentials,
-        config: config || (existing?.config_json ? JSON.parse(String(existing.config_json)) : {}),
-        createdAt: existing ? Number(existing.created_at) : Date.now(),
-        updatedAt: Date.now(),
-      };
-
-      // Save to database with user_id for isolation
+      // effectiveUserId is needed for the Nexus namespace, so compute it before filling secrets.
       const effectiveUserId = userId || (existing?.user_id ? String(existing.user_id) : '');
       if (!effectiveUserId) {
         return { success: false, error: 'userId is required for enterprise mode' };
       }
+
+      // Build the full plaintext credentials in memory. Sensitive fields live ONLY in Nexus:
+      // start from existing NON-sensitive fields (stripping any legacy plaintext residue and
+      // internal meta), overlay the incoming values, then fill missing sensitive fields from
+      // Nexus only (undefined = not sent, e.g. one-click enable; empty string = user cleared).
+      const existingCreds: Record<string, any> = existing?.credentials_json
+        ? JSON.parse(String(existing.credentials_json))
+        : {};
+      const { credentials: existingNonSensitive } = stripChannelSecretsForClient(pluginType, existingCreds);
+      let finalCredentials: Record<string, any> = { ...(existingNonSensitive ?? {}), ...(credentials ?? {}) };
+      finalCredentials = await fillMissingSecrets(this.nexus, effectiveUserId, pluginId, pluginType, finalCredentials);
 
       // Reject a bot identity another user already connected. Two connections to one bot
       // make the IM platform deliver every message twice, so the chat sees duplicate replies.
@@ -236,13 +236,30 @@ class ChannelManager {
         }
       }
 
+      // Persist sensitive fields to Nexus AFTER dedup passes; get the sanitized copy for the DB.
+      const sanitized = await persistChannelSecrets(this.nexus, effectiveUserId, pluginId, pluginType, finalCredentials);
+
+      // Build pluginConfig AFTER filling secrets so its credentials reference the completed
+      // object used to start the plugin (in-memory plaintext); the DB row stores sanitized only.
+      const pluginConfig: IChannelPluginConfig = {
+        id: pluginId,
+        type: pluginType as PluginType,
+        name: existing ? String(existing.name) : pluginId,
+        enabled: true,
+        status: 'stopped',
+        credentials: finalCredentials,
+        config: config || (existing?.config_json ? JSON.parse(String(existing.config_json)) : {}),
+        createdAt: existing ? Number(existing.created_at) : Date.now(),
+        updatedAt: Date.now(),
+      };
+
       this.db.upsertChannelPlugin({
         id: pluginConfig.id,
         type: pluginConfig.type,
         name: pluginConfig.name,
         enabled: 1,
         status: 'stopped',
-        credentials_json: JSON.stringify(finalCredentials),
+        credentials_json: JSON.stringify(sanitized),
         config_json: pluginConfig.config ? JSON.stringify(pluginConfig.config) : null,
         user_id: effectiveUserId,
         org_id: orgId || (existing?.org_id ? String(existing.org_id) : null),
@@ -303,6 +320,27 @@ class ChannelManager {
    */
   async testPlugin(pluginId: string, credentials: Record<string, any>): Promise<{ success: boolean; botUsername?: string; error?: string }> {
     return this.provider!.testConnection(pluginId, credentials);
+  }
+
+  /**
+   * Get a connection's full plaintext credentials for editing: sensitive fields come ONLY
+   * from Nexus (any residue in credentials_json is stripped first), internal meta removed.
+   * Returns {} when the row is absent (mirrors the API's empty-form behavior).
+   */
+  async getHydratedCredentials(pluginId: string, userId: string): Promise<Record<string, any>> {
+    if (!this.db || !this.nexus) return {};
+    const row = this.db.getChannelPlugin(pluginId, userId);
+    if (!row) return {};
+    const type = pluginTypeFromId(pluginId);
+    const base = row.credentials_json ? JSON.parse(String(row.credentials_json)) : {};
+    const hydrated = await hydrateChannelSecrets(this.nexus, userId, pluginId, type, base);
+    return (stripInternalMeta(hydrated) ?? {}) as Record<string, any>;
+  }
+
+  /** Delete a connection's sensitive secrets from Nexus (on connection removal). */
+  async deletePluginSecrets(pluginId: string, userId: string): Promise<void> {
+    if (!this.nexus) return;
+    await deleteChannelSecrets(this.nexus, userId, pluginId, pluginTypeFromId(pluginId));
   }
 
   /**

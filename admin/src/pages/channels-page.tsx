@@ -259,28 +259,20 @@ export default function ChannelsPage() {
   }
 
   const loadCredentials = async (pluginId: string) => {
-    const plugin = plugins.find(p => p.id === pluginId)
-    if (plugin?.credentials && Object.keys(plugin.credentials).length > 0) {
-      setPlatformFormValues(prev => ({
-        ...prev,
-        [pluginId]: Object.fromEntries(
-          Object.entries(plugin.credentials).map(([k, v]) => [k, String(v || '')])
-        ),
-      }))
-    } else {
-      try {
-        const creds = await getPluginCredentials(pluginId)
-        if (creds && Object.keys(creds).length > 0) {
-          setPlatformFormValues(prev => ({
-            ...prev,
-            [pluginId]: Object.fromEntries(
-              Object.entries(creds).map(([k, v]) => [k, String(v || '')])
-            ),
-          }))
-        }
-      } catch {
-        // No credentials stored yet
+    // Sensitive fields are not in the list payload (getPlugins strips them); always fetch the
+    // full plaintext from the on-demand endpoint (Nexus-backed) so the edit form pre-fills.
+    try {
+      const creds = await getPluginCredentials(pluginId)
+      if (creds && Object.keys(creds).length > 0) {
+        setPlatformFormValues(prev => ({
+          ...prev,
+          [pluginId]: Object.fromEntries(
+            Object.entries(creds).map(([k, v]) => [k, String(v || '')])
+          ),
+        }))
       }
+    } catch {
+      // No credentials stored yet
     }
   }
 
@@ -389,7 +381,11 @@ export default function ChannelsPage() {
           })
           return
         }
-        if (!plugin.credentials || Object.keys(plugin.credentials).length === 0) {
+        // "Configured" now also counts secrets held in Nexus (see configuredSecretFields):
+        // telegram has only the sensitive token, so plugin.credentials is empty once stripped.
+        const hasNonSensitive = !!plugin.credentials && Object.keys(plugin.credentials).length > 0
+        const hasConfiguredSecret = (plugin.configuredSecretFields?.length ?? 0) > 0
+        if (!hasNonSensitive && !hasConfiguredSecret) {
           // No credentials, expand to show form
           if (!expandedPlatforms.has(plugin.id)) {
             toggleExpand(plugin.id)
@@ -822,7 +818,7 @@ export default function ChannelsPage() {
                               <span className="text-xs text-muted-foreground">配置信息</span>
                               <div className="flex flex-wrap gap-x-6 gap-y-1">
                                 {fields.map((field) => {
-                                  const hasValue = plugin.credentials?.[field.key]
+                                  const hasValue = plugin.credentials?.[field.key] || plugin.configuredSecretFields?.includes(field.key)
                                   return (
                                     <div key={field.key} className="text-xs">
                                       <span className="text-muted-foreground">{field.label}:</span>{' '}

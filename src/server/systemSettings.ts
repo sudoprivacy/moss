@@ -1,6 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
+import { getConfigStore } from './configStore/configStore.js'
+import type { ConfigKey } from './configStore/configStore.js'
+
+/** 敏感字段在 Nexus（namespace moss:config）中的 key。 */
+const AUTH_TOKEN_KEY: ConfigKey = 'settings.anthropic-auth-token'
+const IMAGE_API_KEY_KEY: ConfigKey = 'settings.image-api-key'
 
 export type ThinkingMode = 'adaptive' | 'enabled' | 'disabled'
 
@@ -363,19 +369,21 @@ function readSystemSettingsState(): SystemSettingsState {
       typeof env.ANTHROPIC_BASE_URL === 'string'
         ? env.ANTHROPIC_BASE_URL.trim()
         : ''
-    const apiKeyFromEnv =
-      typeof env.ANTHROPIC_AUTH_TOKEN === 'string'
-        ? env.ANTHROPIC_AUTH_TOKEN.trim()
-        : ''
+    // apiKey 与 image.apiKey 为敏感字段：只从 Nexus 缓存读，无文件回退
+    // （Nexus + env 为唯一来源；缓存未初始化/未设置时回落默认值，绝不采用文件值）
+    const storedApiKey = getConfigStore().get(AUTH_TOKEN_KEY)
+    const storedImageApiKey = getConfigStore().get(IMAGE_API_KEY_KEY)
     const normalized = normalizeSystemSettings(rawSettings, rawSettings)
 
     result.value = {
       ...rawSettings,
       ...normalized,
       url: urlFromEnv || normalized.url || DEFAULT_SYSTEM_SETTINGS.url,
-      apiKey:
-        apiKeyFromEnv || normalized.apiKey || DEFAULT_SYSTEM_SETTINGS.apiKey,
-      image: normalized.image || { ...DEFAULT_SYSTEM_SETTINGS.image },
+      apiKey: storedApiKey || DEFAULT_SYSTEM_SETTINGS.apiKey,
+      image: {
+        ...(normalized.image || { ...DEFAULT_SYSTEM_SETTINGS.image }),
+        apiKey: storedImageApiKey || DEFAULT_SYSTEM_SETTINGS.image.apiKey,
+      },
       skillStore: normalized.skillStore || {
         ...DEFAULT_SYSTEM_SETTINGS.skillStore,
       },
@@ -420,7 +428,25 @@ export function getSystemSettings(): SystemSettingsPayload {
   return toSystemSettingsPayload(readSystemSettingsState())
 }
 
-export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
+/**
+ * updateSystemSettings — async 化 + 模块级 promise 链串行化。
+ *
+ * 敏感字段（apiKey / image.apiKey）写 Nexus（清空即 deleteSecret，对齐现状
+ * "清空即从文件删除"）；文件不再落盘这两个值（image 剥离 apiKey、env 不写
+ * ANTHROPIC_AUTH_TOKEN）。串行化原因：AdminHub 600ms 自动保存与 enterprise
+ * PATCH 可能并发，await putSecret 落在文件读与写之间，无串行化会丢失更新
+ * （现状同步执行无此窗口）。
+ */
+let updateSystemSettingsQueue: Promise<unknown> = Promise.resolve()
+
+export function updateSystemSettings(patch: unknown): Promise<SystemSettingsPayload> {
+  const run = updateSystemSettingsQueue.then(() => performUpdateSystemSettings(patch))
+  // 队列只保证顺序，不向后传播前一次的错误
+  updateSystemSettingsQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
+async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettingsPayload> {
   const state = readSystemSettingsState()
   const currentSettings = state.value
   const nextSettings = {
@@ -446,21 +472,32 @@ export function updateSystemSettings(patch: unknown): SystemSettingsPayload {
     // Preserve the current save path even when the previous file is malformed.
   }
 
+  // 敏感字段写 Nexus
+  const store = getConfigStore()
+  if (nextSettings.apiKey) {
+    await store.put(AUTH_TOKEN_KEY, nextSettings.apiKey)
+  } else {
+    await store.remove(AUTH_TOKEN_KEY)
+  }
+  if (nextSettings.image.apiKey) {
+    await store.put(IMAGE_API_KEY_KEY, nextSettings.image.apiKey)
+  } else {
+    await store.remove(IMAGE_API_KEY_KEY)
+  }
+
   const env: Record<string, unknown> = { ...existingEnv }
   if (nextSettings.url) {
     env.ANTHROPIC_BASE_URL = nextSettings.url
   } else {
     delete env.ANTHROPIC_BASE_URL
   }
-  if (nextSettings.apiKey) {
-    env.ANTHROPIC_AUTH_TOKEN = nextSettings.apiKey
-  } else {
-    delete env.ANTHROPIC_AUTH_TOKEN
-  }
 
+  // 文件落盘：image 剥离 apiKey（保留 provider/url/model）
+  const { apiKey: _strippedImageApiKey, ...imageToSave } = nextSettings.image
   const toSave: Record<string, unknown> = {
     ...existingFile,
     ...nextSettings,
+    image: imageToSave,
     env,
   }
 

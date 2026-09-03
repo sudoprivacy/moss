@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Plane,
   Webhook,
+  ServerCog,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -52,6 +53,7 @@ type NavItem = {
   requiredAnyScopes?: string[]
   requiredRole?: string
   feature?: 'cabin'
+  exact?: boolean
   children?: NavItem[]
 }
 
@@ -188,6 +190,13 @@ const systemItems: NavItem[] = [
     url: '/settings',
     icon: Settings,
     requiredScope: 'admin:settings',
+    exact: true,
+  },
+  {
+    title: '服务器凭据',
+    url: '/settings/server-credentials',
+    icon: ServerCog,
+    requiredScope: 'admin:settings',
   },
 ]
 
@@ -275,16 +284,17 @@ export function AppSidebar() {
     navigate('/login', { replace: true })
   }
 
-  const isItemActive = (url: string) => {
-    if (url === '/') return pathname === '/'
-    return pathname === url || pathname.startsWith(`${url}/`)
+  const isItemActive = (item: NavItem) => {
+    if (item.url === '/') return pathname === '/'
+    if (item.exact) return pathname === item.url
+    return pathname === item.url || pathname.startsWith(`${item.url}/`)
   }
 
   const hasActiveDescendant = (item: NavItem): boolean => {
     if (!item.children) return false
     return item.children.some(child => {
       if (child.children) return hasActiveDescendant(child)
-      return child.url ? isItemActive(child.url) : false
+      return child.url ? isItemActive(child) : false
     })
   }
 
@@ -330,7 +340,7 @@ export function AppSidebar() {
                         // Nested menu (level 1 with children, like MCP 服务)
                         (() => {
                           const nestedChildren = child.children!.filter(isItemVisible)
-                          const isAnyNestedActive = nestedChildren.some((c: NavItem) => isItemActive(c.url))
+                          const isAnyNestedActive = nestedChildren.some((c: NavItem) => isItemActive(c))
                           const isNestedExpanded = expandedMenus.has(child.title) || isAnyNestedActive
                           return (
                             <Collapsible open={isNestedExpanded} onOpenChange={(open) => {
@@ -351,7 +361,7 @@ export function AppSidebar() {
                               <CollapsibleContent>
                                 <ul className="space-y-0.5 mt-0.5 ml-4">
                                   {nestedChildren.map((nested: NavItem) => {
-                                    const isActive = isItemActive(nested.url)
+                                    const isActive = isItemActive(nested)
                                     return (
                                       <li key={nested.title}>
                                         <Link
@@ -377,7 +387,7 @@ export function AppSidebar() {
                       ) : (
                         // Regular child (no nested children, like 知识树管理)
                         (() => {
-                          const isActive = isItemActive(child.url)
+                          const isActive = isItemActive(child)
                           return (
                             <Link
                               to={child.url}
@@ -405,7 +415,7 @@ export function AppSidebar() {
     }
 
     // Regular menu item (no children)
-    const isActive = isItemActive(item.url)
+    const isActive = isItemActive(item)
     return (
       <li key={item.title}>
         <Link

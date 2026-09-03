@@ -8,6 +8,7 @@ import {
   pluginTypeFromId,
   pluginScope,
 } from '../../channels/types.js'
+import { stripChannelSecretsForClient } from '../../channels/core/channelCredentialSecrets.js'
 
 // Plugin type to name mapping
 const PLUGIN_NAMES: Record<string, string> = {
@@ -33,12 +34,17 @@ export function createChannelsApi(db: DirectConnectStore) {
       const plugins = rows.map((row) => {
         const id = String(row.id)
         const type = extractType(id, String(row.type)) as PluginType
+        // Never ship sensitive fields to the list endpoint: strip them (and internal meta),
+        // exposing only the non-sensitive fields + which secrets are configured.
+        const rawCreds = row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined
+        const { credentials, configuredSecretFields } = stripChannelSecretsForClient(type, rawCreds)
         return {
           id,
           type,
           name: String(row.name) || PLUGIN_NAMES[type] || type,
           enabled: Boolean(row.enabled),
-          credentials: row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined,
+          credentials,
+          configuredSecretFields,
           config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
           status: String(row.status) as PluginStatus,
           lastConnected: row.last_connected ? Number(row.last_connected) : undefined,
@@ -60,6 +66,7 @@ export function createChannelsApi(db: DirectConnectStore) {
             name: PLUGIN_NAMES[type] || type,
             enabled: false,
             credentials: undefined,
+            configuredSecretFields: [],
             config: undefined,
             status: 'stopped' as PluginStatus,
             lastConnected: undefined,
@@ -91,6 +98,7 @@ export function createChannelsApi(db: DirectConnectStore) {
             createdAt: Date.now(),
             updatedAt: Date.now(),
             credentials: undefined,
+            configuredSecretFields: [],
             config: undefined,
           }
         }
@@ -98,6 +106,8 @@ export function createChannelsApi(db: DirectConnectStore) {
       }
       const rowType = String(row.type)
       const type = KNOWN_TYPES.includes(rowType) ? rowType : pluginTypeFromId(pluginId)
+      const rawCreds = row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined
+      const { credentials, configuredSecretFields } = stripChannelSecretsForClient(type as PluginType, rawCreds)
       return {
         id: String(row.id),
         type,
@@ -107,7 +117,8 @@ export function createChannelsApi(db: DirectConnectStore) {
         lastConnected: row.last_connected ? Number(row.last_connected) : undefined,
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at),
-        credentials: row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined,
+        credentials,
+        configuredSecretFields,
         config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
       }
     },
@@ -220,6 +231,11 @@ export function createChannelsApi(db: DirectConnectStore) {
       db.deletePairingRequestsByUserAndPlatform(userId, scope)
       db.deleteChannelUsersByPlatform(scope, userId)
       db.deleteChannelPlugin(pluginId, userId)
+
+      // Remove the connection's sensitive secrets from Nexus so a reused pluginId can't read them.
+      if (manager.isInitialized()) {
+        await manager.deletePluginSecrets(pluginId, userId)
+      }
 
       return { ok: true }
     },
@@ -390,8 +406,9 @@ export function createChannelsApi(db: DirectConnectStore) {
         if (type) return {}
         return null
       }
-      const credentials = row.credentials_json ? JSON.parse(String(row.credentials_json)) : {}
-      return credentials
+      // Sensitive fields come only from Nexus (via the manager); internal meta is stripped.
+      const manager = getChannelManager()
+      return manager.getHydratedCredentials(pluginId, userId)
     },
 
     /**

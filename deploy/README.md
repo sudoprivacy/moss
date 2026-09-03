@@ -89,6 +89,25 @@ sudo ./install.sh --offline
 重启服务生效。在线安装包保留在 `packages/server-vX.Y.Z/`，重复执行同版本安装时
 直接退出，不重新下载，也不重启服务。
 
+### Nexus vault 插件（敏感值加密存储）
+
+服务端敏感值（系统设置 / 服务器凭据 / 凭据中心）经 nexus vault 插件
+（`GenericSecretsService`）以 AES-256-GCM 密文落盘，`<Nexus 数据目录>/vault/` 下的
+`master.key` 为加密主密钥——**丢失该文件则全部已存密文不可恢复**，请将其纳入备份。
+镜像/安装包已内置插件（`bin/nexus/plugins/libnexus_vault.so` 与 `.sig` 成对）。
+
+- **本地开发（非容器）**：需将插件放入仓库 `bin/nexus/plugins/`（该目录不入库）。
+  Linux/WSL 从 [nexi-lab/nexus releases](https://github.com/nexi-lab/nexus/releases)
+  下载 `vault-v*` 对应平台的 `nexus-vault-linux-x86_64.tar.gz` 解压得到
+  `libnexus_vault.so` + `.sig`；版本以 `src/server/nexus/runtime-versions.json` 的
+  `nexus-vault` 为准。
+- **arm64 边界**：nexus 尚未发布 `linux-aarch64` 插件产物，本地 arm64 镜像构建会
+  显式报错（CI 发布为 amd64 不受影响）；待 nexus 发布后放开。
+- **Windows 原生开发**：另需 `nexusd-cluster-windows-x86_64.zip`（v0.1.1，本机
+  `~/.moss/nexus/bin/nexusd.exe` 为不支持插件的旧版）与
+  `nexus-vault-windows-x86_64.zip`（`nexus_vault.dll` + `.sig`），放入
+  `bin/nexus/plugins/`。
+
 ## 常用操作
 
 ```bash

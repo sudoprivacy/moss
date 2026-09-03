@@ -528,6 +528,8 @@ export interface IChannelPluginConfig {
   name: string
   enabled: boolean
   credentials: Record<string, any>
+  /** Which sensitive fields are stored (in Nexus) for this connection; lets the UI show "configured" without exposing values. */
+  configuredSecretFields?: string[]
   config: Record<string, any>
   status: 'created' | 'initializing' | 'ready' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error'
   lastConnected?: number

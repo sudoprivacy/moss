@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+
 // ==================== Plugin Types ====================
 
 /**
@@ -86,10 +88,26 @@ export function channelCredentialIdentity(type: PluginType, credentials?: IPlugi
   if (type === 'dingtalk') return pick(credentials.clientId);
   if (type === 'wechat') return pick(credentials.accountId);
   if (type === 'wecom') return pick(credentials.botId);
-  // Telegram has no separate id; the bot token itself is the identity.
-  if (type === 'telegram') return pick(credentials.token);
+  // Telegram has no separate id; the token IS the identity. The token now lives only in
+  // Nexus (stripped from credentials_json), so compare by its sha256 fingerprint: a live
+  // token hashes to the same value as the stored tokenFingerprint, keeping duplicate
+  // detection consistent (new sanitized rows vs legacy plaintext) without exposing it.
+  if (type === 'telegram') {
+    const token = pick(credentials.token);
+    if (token) return channelTokenFingerprint(token);
+    return pick(credentials.tokenFingerprint);
+  }
   // Extension plugins: no known identity field, so nothing to compare on.
   return null;
+}
+
+/**
+ * Stable, non-secret fingerprint of a Telegram bot token (sha256 hex).
+ * Stored in credentials_json as `tokenFingerprint` so duplicate detection can compare
+ * telegram connections without keeping the plaintext token in the DB.
+ */
+export function channelTokenFingerprint(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 /**

@@ -10,6 +10,7 @@ import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
+import { initConfigStore } from './configStore/configStore.js'
 import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.js'
 import { TokenMinter } from './authProxy/tokenMinter.js'
 import { setSecretsApiDependencies } from './authProxy/secretsApi.js'
@@ -30,11 +31,6 @@ export async function startStandaloneDirectConnectServer(
   stop: () => Promise<void>
 }> {
   enableConfigs()
-  initHubConfig({
-    hubApiBaseUrl: config.hubApiBaseUrl,
-    hubAuthorization: config.hubAuthorization,
-    cosBaseUrl: config.cosBaseUrl,
-  })
   await ensureServerDirectories(config)
 
   // Nexus is the secrets backend (required, no in-memory fallback). Depending
@@ -68,6 +64,21 @@ async function finishStandaloneServerStartup(
   console.log(
     `[Startup] Nexus ready for secrets management (gRPC ${nexusManager.mode} mode, endpoint=${nexusManager.grpcUrl})`,
   )
+
+  // Config store: probe-sandwich load (fail-fast), then hydrate the
+  // already-parsed ServerConfig snapshot in place with the Nexus values.
+  // The sensitive fields' file values are discarded during hydration — Nexus
+  // (+ env) is the sole source; operators enter them via the admin UI.
+  // initHubConfig runs after hydration so it consumes the Nexus-backed
+  // hubAuthorization (previously it ran before Nexus started, on file values).
+  const configStore = initConfigStore(nexusClient)
+  await configStore.loadAll()
+  configStore.hydrateConfig(config)
+  initHubConfig({
+    hubApiBaseUrl: config.hubApiBaseUrl,
+    hubAuthorization: config.hubAuthorization,
+    cosBaseUrl: config.cosBaseUrl,
+  })
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
   const store = openDirectConnectStore(config)

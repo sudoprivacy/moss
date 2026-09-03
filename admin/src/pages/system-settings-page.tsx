@@ -737,7 +737,7 @@ export default function SystemSettingsPage() {
 
           <SettingField
             label="API Key"
-            description="保存后会写入 ~/.moss/settings.json 的 env 配置。"
+            description="保存后会写入 Nexus 凭据存储（不再明文落盘到 settings.json）。"
           >
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input

@@ -1503,6 +1503,10 @@ export class RuntimeService {
     }
     if (systemSettings.apiKey) {
       runnerEnv.ANTHROPIC_AUTH_TOKEN = systemSettings.apiKey
+      // 同值补设 API_KEY：runner 子进程 buildSessionEnv 的选值链为
+      // settings.apiKey || ANTHROPIC_API_KEY || ANTHROPIC_AUTH_TOKEN，显式注入
+      // 两个同名值可消除主进程 env 自带 ANTHROPIC_API_KEY 时的优先级翻转
+      runnerEnv.ANTHROPIC_API_KEY = systemSettings.apiKey
     }
     if (systemSettings.model) {
       runnerEnv.ANTHROPIC_MODEL = systemSettings.model
