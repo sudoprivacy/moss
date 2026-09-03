@@ -8,8 +8,9 @@
  *    （Nexus + env 为唯一来源；不做任何文件迁移或写回）
  *
  * 设计约束（对抗审核定稿，勿改）：
- *  - NexusClient 零修改（仅用现有 putSecret/getSecret/deleteSecret）；native read 将一切
- *    错误压平为字符串（native/nexus-napi/src/lib.rs:46-51），fail-fast 不依赖错误形态区分
+ *  - 仅用 NexusClient 的 putSecret/getSecret/deleteSecret 门面方法（底层已切换
+ *    vault 插件加密服务，语义适配收在门面层）；通道故障经方法抛错上抛，
+ *    fail-fast 不依赖错误形态区分
  *  - hydrate/回写必须就地字段赋值，禁止对象替换——cabin/api.ts:484 等处持有 config.cabin
  *    子对象引用，对象替换会使这些服务永远持有旧值
  *  - "env 未设置"判定一律用 truthiness 语义（与 config.ts 现状 `env || raw` 同款）
@@ -187,8 +188,8 @@ export class ConfigStore {
       if (record.value === null) {
         throw new Error(
           `[ConfigStore] Nexus 记录损坏（存在但无值）: ${key}。` +
-            `恢复方法：停止 moss-server，用 native NexusGrpcClient 删除 ` +
-            `/secrets/moss/config/${key.replace(/[^a-zA-Z0-9_-]/g, '_')}.json 后重启重新录入`,
+            `恢复方法：停止 moss-server，经加密服务删除该记录 ` +
+            `（password-vault.secret_delete，namespace=${CONFIG_NAMESPACE}）后重启重新录入`,
         )
       }
       this.cache.set(key, record.value)

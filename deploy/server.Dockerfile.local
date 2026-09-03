@@ -145,8 +145,24 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
     && mkdir -p /out/bin/nexus \
     && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
     && chmod +x /out/bin/nexus/nexusd
-# Download the scode bundle in a child stage so nexus-only stages do not fetch
-# it. The host Server package copies the verified static binary from this stage.
+# vault plugin (GenericSecretsService — AES-256-GCM secrets storage). Loaded by
+# nexusd via --plugin-dir; the dylib AND its Ed25519 .sig must ship together
+# (nexusd refuses to load an unsigned/unsigned-looking plugin). NOTE release tag
+# prefix is "vault-v*", NOT "nexusd-cluster-v*". No linux-aarch64 artifact is
+# published — fail fast on non-amd64 instead of shipping an image whose secrets
+# layer cannot load.
+RUN NEXUS_VAULT_VERSION="$(jq -er '."nexus-vault"' /runtime-versions.json)" \
+    && if [ "$TARGETARCH" != "amd64" ]; then \
+      echo "ERROR: nexus-vault plugin has no linux-aarch64 release artifact; amd64 builds only until nexus publishes one" && exit 1; \
+    fi \
+    && VAULT_SHA256="675c72efcff64557f69452625f2c312558e7f0b924e62bd84844165f716a7395" \
+    && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}/nexus-vault-linux-x86_64.tar.gz" -o vault.tar.gz \
+    && echo "${VAULT_SHA256}  vault.tar.gz" | sha256sum -c - \
+    && tar -xzf vault.tar.gz \
+    && mkdir -p /out/bin/nexus/plugins \
+    && mv libnexus_vault.so libnexus_vault.so.sig /out/bin/nexus/plugins/
+# Download the host scode binary in a child stage so the nexus-only server image
+# stages do not fetch it unless the host package is being exported.
 FROM nexus-dl AS dl
 ARG TARGETARCH
 WORKDIR /dl
@@ -303,6 +319,7 @@ COPY --from=go-builder /out/corpapp ./bin/corpapp
 # docker-compose mounts the host ./.moss over /root/.moss and would shadow it;
 # NexusManager.resolveBinary() falls back to <cwd>/bin/nexus/nexusd (cwd=/app).
 COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
+COPY --from=dl /out/bin/nexus/plugins ./bin/nexus/plugins
 COPY --from=dl /out/bin/scode ./bin/scode
 
 RUN chmod +x ./bin/wiki ./bin/corpapp ./bin/scode ./bin/nexus/nexusd
@@ -370,11 +387,12 @@ COPY --from=js-builder /src/native/nexus-napi/index.js /src/native/nexus-napi/in
 COPY --from=napi-builder /src/native/nexus-napi/nexus-napi.node ./app/native/nexus-napi/
 COPY --from=go-builder /out/wiki /out/corpapp ./app/bin/
 COPY --from=nexus-dl /out/bin/nexus/nexusd ./app/bin/nexus/nexusd
+COPY --from=nexus-dl /out/bin/nexus/plugins ./app/bin/nexus/plugins
 COPY --from=host-scode-runtime /usr/local/bin/scode ./app/bin/scode
 COPY --from=host-runtime-deps /deps/node_modules ./app/node_modules
 COPY --from=model-stage /m/out/Xenova ./app/models/Xenova
 COPY deploy/server.json ./server.json.template
-RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd app/bin/scode \
+RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd app/bin/scode app/bin/nexus/plugins/libnexus_vault.so \
     && printf '%s\n' "$RELEASE_VERSION" > VERSION \
     && node/bin/node --check app/bin/moss-server.mjs \
     && node/bin/node -e "require('node:sqlite'); Promise.all([import('./app/native/nexus-napi/index.js'), import('./app/node_modules/@xenova/transformers/src/transformers.js'), import('./app/node_modules/sharp/lib/index.js')]).then(() => console.log('host runtime ok'))" \

@@ -106,13 +106,40 @@ export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
   return { mode, endpoint, authToken: env.MOSS_NEXUS_AUTH_TOKEN?.trim() ?? '', tls }
 }
 
-export function buildNexusArgs(grpcPort: number, dataDir: string): string[] {
+export function buildNexusArgs(grpcPort: number, dataDir: string, pluginDir: string): string[] {
   return [
     'serve-local',
     '--port', String(grpcPort),
     '--data-dir', dataDir,
     '--no-tls',
+    '--plugin-dir', pluginDir,
   ]
+}
+
+/**
+ * vault 插件目录：<cwd>/bin/nexus/plugins（容器内即镜像路径
+ * /app/bin/nexus/plugins；本地开发即仓库 bin/nexus/plugins）。
+ * 有意不使用挂载卷（binDir）路径——宿主残留旧插件与镜像内新 nexusd
+ * 会错配，插件与 nexusd 必须同批进镜像保证版本配套。
+ */
+export function resolveNexusPluginDir(): string {
+  return join(process.cwd(), 'bin', 'nexus', 'plugins')
+}
+
+/** 校验插件目录下存在当前平台的 vault 插件（.so/.dll 与 .sig 成对，缺失即 fail-fast）。 */
+export function assertVaultPluginAvailable(pluginDir: string): void {
+  const dylibName = process.platform === 'win32' ? 'nexus_vault.dll' : 'libnexus_vault.so'
+  const dylibPath = join(pluginDir, dylibName)
+  const sigPath = `${dylibPath}.sig`
+  if (!existsSync(dylibPath) || !existsSync(sigPath)) {
+    throw new Error(
+      `vault plugin not found at ${dylibPath} (+ .sig). ` +
+        `Secrets cannot be stored encrypted without it. ` +
+        `Download nexus-vault-${process.platform === 'win32' ? 'windows' : 'linux'}-x86_64 ` +
+        `from the nexi-lab/nexus releases (see runtime-versions.json "nexus-vault") ` +
+        `and place both the dylib and its .sig into the plugins directory.`,
+    )
+  }
 }
 
 export function parseNexusVersion(output: string): string | null {
@@ -267,12 +294,16 @@ export class NexusManager {
     mkdirSync(this.nexusDir, { recursive: true })
 
     const dataDir = join(this.nexusDir, 'data')
-    const args = buildNexusArgs(this.grpcPort, dataDir)
+    const pluginDir = resolveNexusPluginDir()
+    assertVaultPluginAvailable(pluginDir)
+    const args = buildNexusArgs(this.grpcPort, dataDir, pluginDir)
     console.log(`[NexusManager] Spawning: ${resolvedBin} ${args.join(' ')}`)
 
     const child = spawn(resolvedBin, args, {
       stdio: 'pipe',
-      env: { ...process.env },
+      // vault 插件读 NEXUS_DATA_DIR 决定数据目录（含 master.key），不读
+      // --data-dir 参数；不设置会把加密数据落到 cwd 的 ./nexus-data
+      env: { ...process.env, NEXUS_DATA_DIR: dataDir },
     })
     this.child = child
     console.log(`[NexusManager] Spawned nexusd-cluster pid=${child.pid ?? 'unknown'}`)

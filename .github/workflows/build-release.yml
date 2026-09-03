@@ -136,6 +136,8 @@ jobs:
           grep -Fxq 'moss-server/app/bin/moss-server.mjs' dist/server-contents.txt
           grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/nexus/nexusd' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/nexus/plugins/libnexus_vault.so' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/nexus/plugins/libnexus_vault.so.sig' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/scode' dist/server-contents.txt
           package_check_dir="$(mktemp -d)"
           tar -xzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" -C "$package_check_dir"

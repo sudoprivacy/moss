@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { createServer, type Server } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   NexusManager,
+  assertVaultPluginAvailable,
   buildNexusArgs,
   formatNexusStartupFailure,
   parseNexusVersion,
@@ -30,17 +31,36 @@ describe('NexusManager', () => {
     )
 
     expect(runtimeVersions['nexusd-cluster']).toBe('0.1.1')
+    expect(runtimeVersions['nexus-vault']).toBe('0.5.44')
     expect(dockerfile).toContain('COPY src/server/nexus/runtime-versions.json /runtime-versions.json')
     expect(dockerfile).toContain("NEXUSD_CLUSTER_VERSION=\"$(jq -er '.\"nexusd-cluster\"' /runtime-versions.json)\"")
     expect(dockerfile).toContain('github.com/nexi-lab/nexus/releases/download/nexusd-cluster-v${NEXUSD_CLUSTER_VERSION}')
+    expect(dockerfile).toContain("NEXUS_VAULT_VERSION=\"$(jq -er '.\"nexus-vault\"' /runtime-versions.json)\"")
+    expect(dockerfile).toContain('github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}')
+  })
+
+  it('fail-fasts when the vault plugin dylib or its signature is missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moss-nexus-plugins-'))
+    tempDirs.push(dir)
+    // 与实现相同的平台文件名选择
+    const dylib = process.platform === 'win32' ? 'nexus_vault.dll' : 'libnexus_vault.so'
+    expect(() => assertVaultPluginAvailable(dir)).toThrow('vault plugin not found')
+
+    writeFileSync(join(dir, dylib), 'fake-dylib')
+    // 缺 .sig 仍然失败（nexusd 拒绝加载无签名插件）
+    expect(() => assertVaultPluginAvailable(dir)).toThrow('vault plugin not found')
+
+    writeFileSync(join(dir, `${dylib}.sig`), 'fake-sig')
+    expect(() => assertVaultPluginAvailable(dir)).not.toThrow()
   })
 
   it('builds the nexusd-cluster 0.1.x serve-local arguments used by the demo', () => {
-    expect(buildNexusArgs(2126, '/tmp/nexus-data')).toEqual([
+    expect(buildNexusArgs(2126, '/tmp/nexus-data', '/app/bin/nexus/plugins')).toEqual([
       'serve-local',
       '--port', '2126',
       '--data-dir', '/tmp/nexus-data',
       '--no-tls',
+      '--plugin-dir', '/app/bin/nexus/plugins',
     ])
   })
 
