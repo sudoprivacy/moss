@@ -1809,7 +1809,7 @@ export function startServer(
   // Initialize ChannelManager and PairingService with database
   // 初始化 ChannelManager 和 PairingService
   const channelManager = getChannelManager()
-  channelManager.initialize(runtime.store)
+  channelManager.initialize(runtime.store, nexusClient)
   getPairingService().initialize(runtime.store)
 
   // Agents an IM chat may switch to = those visible to the moss user who owns the

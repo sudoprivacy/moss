@@ -5,10 +5,12 @@
  */
 
 import type { DirectConnectStore } from '../../server/db.js';
+import type { NexusClient } from '../../server/nexus/nexusClient.js';
 import type { SessionManager } from './SessionManager.js';
 import type { BasePlugin, PluginMessageHandler, PluginConfirmHandler } from '../plugins/BasePlugin.js';
 import type { IChannelPluginConfig, IChannelPluginStatus, IUnifiedIncomingMessage, PluginType } from '../types.js';
 import { hasPluginCredentials } from '../types.js';
+import { hydrateChannelSecrets } from '../core/channelCredentialSecrets.js';
 import { LarkPlugin } from '../plugins/lark/LarkPlugin.js';
 import { TelegramPlugin } from '../plugins/telegram/TelegramPlugin.js';
 import { DingTalkPlugin } from '../plugins/dingtalk/DingTalkPlugin.js';
@@ -65,6 +67,9 @@ export class PluginManager {
   // Database reference
   private db: DirectConnectStore;
 
+  // Nexus secrets client (hydrates sensitive channel credentials on startup)
+  private nexus: NexusClient | null = null;
+
   // Message handler for incoming messages
   private messageHandler: PluginMessageHandler | null = null;
 
@@ -74,9 +79,10 @@ export class PluginManager {
   // Runtime error cache: pluginId -> error message
   private pluginErrors: Map<string, string> = new Map();
 
-  constructor(sessionManager: SessionManager, db: DirectConnectStore) {
+  constructor(sessionManager: SessionManager, db: DirectConnectStore, nexus?: NexusClient | null) {
     this.sessionManager = sessionManager;
     this.db = db;
+    this.nexus = nexus ?? null;
   }
 
   /**
@@ -362,6 +368,13 @@ export class PluginManager {
 
         try {
           const instanceKey = userId ? `${config.id}:${userId}` : config.id;
+          if (this.nexus && userId) {
+            // Sensitive fields live only in Nexus; hydrate before starting. Inside this
+            // per-plugin try so one hydrate failure never aborts the whole startup loop.
+            config.credentials = (await hydrateChannelSecrets(
+              this.nexus, userId, config.id, config.type, config.credentials,
+            )) as typeof config.credentials;
+          }
           console.log(`[PluginManager] Starting plugin ${config.id} with instanceKey=${instanceKey}`);
           await this.startPlugin(config, instanceKey);
         } catch (error) {
