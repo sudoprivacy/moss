@@ -1,12 +1,11 @@
 /**
  * configStore — 服务器端敏感配置的 Nexus 存储层（namespace: moss:config）
  *
- * 单一职责（计划步骤 1/2/5）：
+ * 单一职责：
  *  - 探针三明治 + fail-fast 加载 12 个配置 key 到内存缓存（同步消费链读缓存）
  *  - get（同步）/ put / remove（写 Nexus + 更新缓存；server 字段可选同步回写 config 快照）
- *  - migrateFromFiles：一次性把两个配置文件中的敏感字段迁入 Nexus 并从文件删除
- *    （幂等、顺序保证：putSecret 成功才删文件字段、无明文备份）
- *  - hydrateConfig：启动时按分组条件把 Nexus 值就地写入 ServerConfig 快照
+ *  - hydrateConfig：启动时把 Nexus 值就地写入 ServerConfig 快照，并丢弃这些字段的文件值
+ *    （Nexus + env 为唯一来源；不做任何文件迁移或写回）
  *
  * 设计约束（对抗审核定稿，勿改）：
  *  - NexusClient 零修改（仅用现有 putSecret/getSecret/deleteSecret）；native read 将一切
@@ -16,12 +15,8 @@
  *  - "env 未设置"判定一律用 truthiness 语义（与 config.ts 现状 `env || raw` 同款）
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'fs'
-import { homedir } from 'os'
-import { join } from 'path'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { ServerConfig } from '../types.js'
-import { getDefaultServerConfigPath } from '../config.js'
 
 export const CONFIG_NAMESPACE = 'moss:config'
 
@@ -49,19 +44,6 @@ export function maskConfigValue(value: string): string {
 
 const PROBE_KEY = '_health-probe'
 const PROBE_VALUE = 'config-store-health-probe'
-
-/**
- * settings.json 路径 —— 与 systemSettings.ts 的 SYSTEM_SETTINGS_PATH 同规则
- * （不 import 该模块以避免循环依赖：systemSettings → configStore）。
- */
-function settingsFilePath(): string {
-  return join(homedir(), '.moss', 'settings.json')
-}
-
-/** server.json 路径 —— 复用 readServerConfig 的同一解析规则（config.ts:272）。 */
-function serverConfigFilePath(): string {
-  return process.env.MOSS_SERVER_CONFIG || getDefaultServerConfigPath()
-}
 
 /**
  * server.json 侧 10 个字段的回填规格。
@@ -170,10 +152,6 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
   },
 ]
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 export class ConfigStore {
   private readonly client: NexusClient | null
   private readonly cache = new Map<ConfigKey, string>()
@@ -269,146 +247,19 @@ export class ConfigStore {
   }
 
   /**
-   * 启动 hydrate（计划步骤 2）：按分组条件把 Nexus 值就地写入 config 快照。
-   * Nexus 无值的字段不动（保留 resolveServerConfig 的文件值/env 值/zod 默认值——
-   * 防止 undefined 击穿非可选 string）。
+   * 启动 hydrate：把这 10 个字段解析为 env > Nexus > 默认（hub 为 Nexus > env > 默认，
+   * 见 ignoreEnvGate），就地写入 config 快照并丢弃 resolveServerConfig 读入的文件值
+   * （Nexus + env 为唯一来源）。Nexus 无值时回落 fallbackValue（zod 默认）或 undefined，
+   * 避免 undefined 击穿非可选 string。必须就地字段赋值、禁止对象替换（消费者持有
+   * config / config.cabin 引用）。
    */
   hydrateConfig(config: ServerConfig): void {
     for (const field of SERVER_FIELDS) {
-      const value = this.cache.get(field.key)
-      if (!value) continue
+      // env 优先（hub 除外）：config 已由 resolveServerConfig 置为 env 值，保持不动
       if (!field.ignoreEnvGate && process.env[field.envName]) continue
-      field.apply(config, value)
+      // Nexus 有值用 Nexus，否则回落默认/undefined —— 覆盖并丢弃文件值
+      field.apply(config, this.cache.get(field.key) || field.fallbackValue)
     }
-  }
-
-  /**
-   * 一次性迁移（计划步骤 5，幂等，无明文备份）。
-   *
-   * 顺序保证：putSecret 写入成功后才从文件删除对应字段；任一 putSecret 失败 →
-   * throw（启动失败，文件保持原样下次重试）；文件写回失败 → throw（同样启动失败，
-   * 吞错会形成"文件残留明文敏感字段"的假成功）。Nexus 已有值则跳过写入、仅删
-   * 文件字段。空字符串来源值跳过写入、仅删文件键。
-   */
-  async migrateFromFiles(): Promise<void> {
-    if (!this.client) return
-    await this.migrateSettingsFile()
-    await this.migrateServerConfigFile()
-  }
-
-  private readJsonFile(path: string): Record<string, unknown> | null {
-    try {
-      if (!existsSync(path)) return null
-      const parsed = JSON.parse(readFileSync(path, 'utf8'))
-      return isRecord(parsed) ? parsed : null
-    } catch (error) {
-      throw new Error(
-        `[ConfigStore] 迁移前读取配置文件失败: ${path} (${error instanceof Error ? error.message : String(error)})`,
-      )
-    }
-  }
-
-  private writeJsonFile(path: string, data: Record<string, unknown>): void {
-    try {
-      writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
-    } catch (error) {
-      throw new Error(
-        `[ConfigStore] 迁移后写回配置文件失败（敏感字段已入 Nexus，但文件字段删除未完成，请检查路径/权限）: ${path} ` +
-          `(${error instanceof Error ? error.message : String(error)})`,
-      )
-    }
-  }
-
-  /** 迁移一个来源值：非空且 Nexus 未有 → putSecret；返回文件是否被修改。 */
-  private async migrateValue(
-    key: ConfigKey,
-    value: string,
-    removeFromFile: () => void,
-  ): Promise<void> {
-    if (!this.client) return
-    if (value && !this.cache.has(key)) {
-      await this.client.putSecret(CONFIG_NAMESPACE, key, value)
-      this.cache.set(key, value)
-    }
-    removeFromFile()
-  }
-
-  private async migrateSettingsFile(): Promise<void> {
-    const path = settingsFilePath()
-    const raw = this.readJsonFile(path)
-    if (!raw) return
-    let mutated = false
-
-    // --- settings.anthropic-auth-token：三源（ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY > 顶层 apiKey，与 backendUtils.ts:75 现状一致）
-    const env = isRecord(raw.env) ? raw.env : {}
-    // 删除前先捕获原始存在性：removeFromFile 会就地删除这些键，若在其后再判定
-    // 会恒为 false，导致文件删字段不落盘（明文 token 残留在 settings.json）
-    const hadTokenField =
-      env.ANTHROPIC_AUTH_TOKEN !== undefined ||
-      env.ANTHROPIC_API_KEY !== undefined ||
-      raw.apiKey !== undefined
-    const tokenValue =
-      (typeof env.ANTHROPIC_AUTH_TOKEN === 'string' && env.ANTHROPIC_AUTH_TOKEN.trim()) ||
-      (typeof env.ANTHROPIC_API_KEY === 'string' && env.ANTHROPIC_API_KEY.trim()) ||
-      (typeof raw.apiKey === 'string' && raw.apiKey.trim()) ||
-      ''
-    await this.migrateValue('settings.anthropic-auth-token', tokenValue, () => {
-      if (env.ANTHROPIC_AUTH_TOKEN !== undefined) delete env.ANTHROPIC_AUTH_TOKEN
-      if (env.ANTHROPIC_API_KEY !== undefined) delete env.ANTHROPIC_API_KEY
-      if (raw.env !== undefined) raw.env = env
-      if (raw.apiKey !== undefined) delete raw.apiKey
-    })
-    if (hadTokenField) {
-      mutated = true
-    }
-    // env 删空后整体移除（对齐 updateSystemSettings 现状的"空 env 删除"行为）
-    if (raw.env !== undefined && isRecord(raw.env) && Object.keys(raw.env).length === 0) {
-      delete raw.env
-      mutated = true
-    }
-
-    // --- settings.image-api-key
-    if (isRecord(raw.image) && raw.image.apiKey !== undefined) {
-      const imageValue = typeof raw.image.apiKey === 'string' ? raw.image.apiKey.trim() : ''
-      await this.migrateValue('settings.image-api-key', imageValue, () => {
-        delete (raw.image as Record<string, unknown>).apiKey
-      })
-      mutated = true
-    }
-
-    if (mutated) this.writeJsonFile(path, raw)
-  }
-
-  private async migrateServerConfigFile(): Promise<void> {
-    const path = serverConfigFilePath()
-    const raw = this.readJsonFile(path)
-    if (!raw) return
-    let mutated = false
-
-    const sourceSpecs: Array<{ parent: Record<string, unknown> | undefined; field: string; key: ConfigKey }> = [
-      { parent: isRecord(raw.hub) ? raw.hub : undefined, field: 'authorization', key: 'server.hub-authorization' },
-      { parent: isRecord(raw.wikiIndex) ? raw.wikiIndex : undefined, field: 'resourceTokenSecret', key: 'server.wiki-index-resource-token-secret' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'tokenSecret', key: 'server.cabin-token-secret' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'passengerInfoAuth', key: 'server.cabin-passenger-info-auth' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'asrApiKey', key: 'server.cabin-asr-api-key' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'ttsApiKey', key: 'server.cabin-tts-api-key' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'llmApiKey', key: 'server.cabin-llm-api-key' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'controlAuth', key: 'server.cabin-control-auth' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'broadcastApiKey', key: 'server.cabin-broadcast-api-key' },
-      { parent: isRecord(raw.cabin) ? raw.cabin : undefined, field: 'broadcastAuth', key: 'server.cabin-broadcast-auth' },
-    ]
-
-    for (const spec of sourceSpecs) {
-      if (!spec.parent || spec.parent[spec.field] === undefined) continue
-      const rawValue = spec.parent[spec.field]
-      const value = typeof rawValue === 'string' ? rawValue.trim() : ''
-      await this.migrateValue(spec.key, value, () => {
-        delete spec.parent![spec.field]
-      })
-      mutated = true
-    }
-
-    if (mutated) this.writeJsonFile(path, raw)
   }
 }
 

@@ -369,8 +369,8 @@ function readSystemSettingsState(): SystemSettingsState {
       typeof env.ANTHROPIC_BASE_URL === 'string'
         ? env.ANTHROPIC_BASE_URL.trim()
         : ''
-    // apiKey 与 image.apiKey 为敏感字段：只从 Nexus 缓存读，不再从文件读
-    // （迁移后文件中已无这两个值；缓存未初始化/未设置时回退 normalize 结果）
+    // apiKey 与 image.apiKey 为敏感字段：只从 Nexus 缓存读，无文件回退
+    // （Nexus + env 为唯一来源；缓存未初始化/未设置时回落默认值，绝不采用文件值）
     const storedApiKey = getConfigStore().get(AUTH_TOKEN_KEY)
     const storedImageApiKey = getConfigStore().get(IMAGE_API_KEY_KEY)
     const normalized = normalizeSystemSettings(rawSettings, rawSettings)
@@ -379,14 +379,10 @@ function readSystemSettingsState(): SystemSettingsState {
       ...rawSettings,
       ...normalized,
       url: urlFromEnv || normalized.url || DEFAULT_SYSTEM_SETTINGS.url,
-      apiKey:
-        storedApiKey || normalized.apiKey || DEFAULT_SYSTEM_SETTINGS.apiKey,
+      apiKey: storedApiKey || DEFAULT_SYSTEM_SETTINGS.apiKey,
       image: {
         ...(normalized.image || { ...DEFAULT_SYSTEM_SETTINGS.image }),
-        apiKey:
-          storedImageApiKey
-          || normalized.image?.apiKey
-          || DEFAULT_SYSTEM_SETTINGS.image.apiKey,
+        apiKey: storedImageApiKey || DEFAULT_SYSTEM_SETTINGS.image.apiKey,
       },
       skillStore: normalized.skillStore || {
         ...DEFAULT_SYSTEM_SETTINGS.skillStore,

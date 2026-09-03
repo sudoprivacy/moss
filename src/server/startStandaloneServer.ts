@@ -65,14 +65,14 @@ async function finishStandaloneServerStartup(
     `[Startup] Nexus ready for secrets management (gRPC ${nexusManager.mode} mode, endpoint=${nexusManager.grpcUrl})`,
   )
 
-  // Config store: probe-sandwich load (fail-fast), one-time migration of the
-  // sensitive fields out of settings.json / server.json, then hydrate the
+  // Config store: probe-sandwich load (fail-fast), then hydrate the
   // already-parsed ServerConfig snapshot in place with the Nexus values.
+  // The sensitive fields' file values are discarded during hydration — Nexus
+  // (+ env) is the sole source; operators enter them via the admin UI.
   // initHubConfig runs after hydration so it consumes the Nexus-backed
   // hubAuthorization (previously it ran before Nexus started, on file values).
   const configStore = initConfigStore(nexusClient)
   await configStore.loadAll()
-  await configStore.migrateFromFiles()
   configStore.hydrateConfig(config)
   initHubConfig({
     hubApiBaseUrl: config.hubApiBaseUrl,

@@ -1,9 +1,8 @@
 /**
  * configStore 单元测试（计划「验证方案」第 1 项）：
  *  - configStore 读写 / 缓存
- *  - migrateFromFiles() 幂等（跑两遍结果一致）
- *  - updateSystemSettings 后文件无敏感字段
- *  - putSecret 失败时文件字段保留
+ *  - hydrateConfig：Nexus/env 生效、文件值一律丢弃
+ *  - updateSystemSettings 敏感字段写 Nexus、文件不落盘
  *
  * 隔离方式（计划要求）：SYSTEM_SETTINGS_PATH 为模块级常量（取自 os.homedir()），
  * 用模块级 mock（bun test）把 os.homedir() 指向临时目录，避免读写真实用户目录。
@@ -14,6 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import * as nodeOs from 'os'
 import { join } from 'path'
 import type { NexusClient } from '../nexus/nexusClient.js'
+import type { ServerConfig } from '../types.js'
 
 const FAKE_HOME = mkdtempSync(join(nodeOs.tmpdir(), 'moss-configstore-test-'))
 const MOSS_DIR = join(FAKE_HOME, '.moss')
@@ -25,8 +25,7 @@ mock.module('os', () => {
   return { ...patched, default: patched }
 })
 
-// mock 生效后再动态加载被测模块（configStore 的 settingsFilePath / systemSettings 的
-// SYSTEM_SETTINGS_PATH 都基于 os.homedir()）。
+// mock 生效后再动态加载被测模块（systemSettings 的 SYSTEM_SETTINGS_PATH 基于 os.homedir()）。
 const { ConfigStore, initConfigStore, CONFIG_NAMESPACE } = await import('./configStore.js')
 const { updateSystemSettings } = await import('../systemSettings.js')
 
@@ -107,61 +106,100 @@ describe('configStore 读写与缓存', () => {
   })
 })
 
-describe('migrateFromFiles 幂等 + 迁移后文件无敏感字段', () => {
-  it('迁移写 Nexus 并从文件删字段；二次运行幂等', async () => {
-    writeFileSync(
-      SETTINGS_PATH,
-      JSON.stringify({
-        model: 'm',
-        env: { ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_BASE_URL: 'http://x' },
-        image: { provider: 'p', apiKey: 'img', model: 'im' },
-      }),
-      'utf8',
-    )
-    const serverPath = join(FAKE_HOME, 'server.json')
-    process.env.MOSS_SERVER_CONFIG = serverPath
-    writeFileSync(
-      serverPath,
-      JSON.stringify({
-        hub: { authorization: 'hubauth' },
-        cabin: { llmApiKey: 'cabinllm', tokenSecret: 'ts' },
-      }),
-      'utf8',
-    )
+describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
+  // 会用到的 env（用例结束必须清理，避免残留翻转后续断言、使整套运行依赖顺序）
+  const ENV_KEYS = [
+    'CABIN_LLM_API_KEY',
+    'CABIN_TOKEN_SECRET',
+    'MOSS_RESOURCE_TOKEN_SECRET',
+    'MOSS_HUB_AUTHORIZATION',
+  ]
+  function clearEnv(): void {
+    for (const k of ENV_KEYS) delete process.env[k]
+  }
 
+  // 最小 ServerConfig 替身：仅含 hydrate 会就地赋值的字段，预置为"文件旧值"用于验证被丢弃。
+  function makeConfig(file: {
+    hubAuthorization?: string
+    resourceTokenSecret?: string
+    cabinTokenSecret?: string
+    cabinLlmApiKey?: string
+  }): ServerConfig {
+    return {
+      hubAuthorization: file.hubAuthorization,
+      wikiIndex: { resourceTokenSecret: file.resourceTokenSecret ?? 'dev-resource-token-secret' },
+      cabin: {
+        tokenSecret: file.cabinTokenSecret ?? 'dev-cabin-token-secret',
+        passengerInfoAuth: undefined,
+        asrApiKey: undefined,
+        ttsApiKey: undefined,
+        llmApiKey: file.cabinLlmApiKey,
+        controlAuth: undefined,
+        broadcastApiKey: undefined,
+        broadcastAuth: undefined,
+      },
+    } as unknown as ServerConfig
+  }
+
+  it('Nexus 有值 → 采用 Nexus 值，丢弃文件值', async () => {
+    clearEnv()
+    try {
+      const fake = new FakeNexus()
+      fake.seed('server.cabin-llm-api-key', 'nexus-llm')
+      fake.seed('server.hub-authorization', 'nexus-hub')
+      const store = new ConfigStore(asClient(fake))
+      await store.loadAll()
+
+      const config = makeConfig({ cabinLlmApiKey: 'file-llm', hubAuthorization: 'file-hub' })
+      store.hydrateConfig(config)
+
+      expect(config.cabin.llmApiKey).toBe('nexus-llm')
+      expect(config.hubAuthorization).toBe('nexus-hub')
+    } finally {
+      clearEnv()
+    }
+  })
+
+  it('env 设置（非 hub）→ 保持 env 值，不被 Nexus 覆盖', async () => {
+    clearEnv()
+    process.env.CABIN_LLM_API_KEY = 'env-llm'
+    try {
+      const fake = new FakeNexus()
+      fake.seed('server.cabin-llm-api-key', 'nexus-llm')
+      const store = new ConfigStore(asClient(fake))
+      await store.loadAll()
+
+      // resolveServerConfig 现状：env 已设置时 config 取 env 值。此处预置模拟之。
+      const config = makeConfig({ cabinLlmApiKey: 'env-llm' })
+      store.hydrateConfig(config)
+
+      expect(config.cabin.llmApiKey).toBe('env-llm')
+    } finally {
+      clearEnv()
+    }
+  })
+
+  it('Nexus 与 env 均无 → 回落 zod 默认/undefined，文件值被丢弃', async () => {
+    clearEnv()
     try {
       const fake = new FakeNexus()
       const store = new ConfigStore(asClient(fake))
       await store.loadAll()
-      await store.migrateFromFiles()
 
-      // Nexus 已有值
-      expect(fake.read('settings.anthropic-auth-token')).toEqual({ value: 'tok' })
-      expect(fake.read('settings.image-api-key')).toEqual({ value: 'img' })
-      expect(fake.read('server.hub-authorization')).toEqual({ value: 'hubauth' })
-      expect(fake.read('server.cabin-llm-api-key')).toEqual({ value: 'cabinllm' })
-      expect(fake.read('server.cabin-token-secret')).toEqual({ value: 'ts' })
+      const config = makeConfig({
+        cabinTokenSecret: 'file-ts',
+        cabinLlmApiKey: 'file-llm',
+        resourceTokenSecret: 'file-rts',
+      })
+      store.hydrateConfig(config)
 
-      // 文件已删敏感字段，非敏感字段保留
-      const s1 = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
-      expect(s1.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
-      expect(s1.env?.ANTHROPIC_BASE_URL).toBe('http://x')
-      expect(s1.image?.apiKey).toBeUndefined()
-      expect(s1.image?.provider).toBe('p')
-      const c1 = JSON.parse(readFileSync(serverPath, 'utf8'))
-      expect(c1.hub?.authorization).toBeUndefined()
-      expect(c1.cabin?.llmApiKey).toBeUndefined()
-      expect(c1.cabin?.tokenSecret).toBeUndefined()
-
-      // 二次运行幂等：文件字节不变、Nexus 不变
-      const s1raw = readFileSync(SETTINGS_PATH, 'utf8')
-      const c1raw = readFileSync(serverPath, 'utf8')
-      await store.migrateFromFiles()
-      expect(readFileSync(SETTINGS_PATH, 'utf8')).toBe(s1raw)
-      expect(readFileSync(serverPath, 'utf8')).toBe(c1raw)
-      expect(fake.read('settings.anthropic-auth-token')).toEqual({ value: 'tok' })
+      // 非可选字段回落 zod 默认（文件值被丢弃）
+      expect(config.cabin.tokenSecret).toBe('dev-cabin-token-secret')
+      expect(config.wikiIndex.resourceTokenSecret).toBe('dev-resource-token-secret')
+      // optional 字段回落 undefined（文件值被丢弃）
+      expect(config.cabin.llmApiKey).toBeUndefined()
     } finally {
-      delete process.env.MOSS_SERVER_CONFIG
+      clearEnv()
     }
   })
 })
@@ -185,29 +223,5 @@ describe('updateSystemSettings 敏感字段写 Nexus、文件不落盘', () => {
     expect(saved.image?.apiKey).toBeUndefined()
     expect(saved.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(saved.image?.provider).toBe('openai')
-  })
-})
-
-describe('putSecret 失败时文件字段保留（fail-fast）', () => {
-  it('迁移 putSecret 失败则抛错且文件敏感字段不删除', async () => {
-    writeFileSync(SETTINGS_PATH, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'tok' } }), 'utf8')
-    const serverPath = join(FAKE_HOME, 'server-fail.json')
-    process.env.MOSS_SERVER_CONFIG = serverPath
-    writeFileSync(serverPath, JSON.stringify({ hub: { authorization: 'hubauth' } }), 'utf8')
-
-    try {
-      const fake = new FakeNexus()
-      const store = new ConfigStore(asClient(fake))
-      await store.loadAll() // 探针在 putSecret 正常时通过
-      fake.failPut = true // 之后模拟迁移 putSecret 失败
-      await expect(store.migrateFromFiles()).rejects.toThrow(/putSecret failure/)
-
-      const saved = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
-      expect(saved.env?.ANTHROPIC_AUTH_TOKEN).toBe('tok')
-      const c = JSON.parse(readFileSync(serverPath, 'utf8'))
-      expect(c.hub?.authorization).toBe('hubauth')
-    } finally {
-      delete process.env.MOSS_SERVER_CONFIG
-    }
   })
 })
