@@ -36,8 +36,6 @@ export declare class NexusGrpcClient {
   callBinary(method: string, payload: Buffer, authToken: string): Buffer
   /** Read a file from the VFS. Returns raw bytes. */
   read(path: string, authToken: string): Buffer
-  /** Delete a file from the VFS. */
-  delete(path: string, authToken: string): void
   /** Write raw bytes to a VFS path. */
   write(path: string, content: Buffer, authToken: string): void
   /** Delete a VFS path. */
