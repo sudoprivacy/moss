@@ -98,14 +98,6 @@ impl NexusGrpcClient {
         Ok(Buffer::from(response))
     }
 
-    /// Delete a file from the VFS.
-    #[napi]
-    pub fn delete(&self, path: String, auth_token: String) -> Result<()> {
-        self.inner
-            .delete(&path, &auth_token)
-            .map_err(|e| Error::from_reason(format!("gRPC delete failed: {e}")))
-    }
-
     /// Read a file from the VFS. Returns raw bytes.
     #[napi]
     pub fn read(&self, path: String, auth_token: String) -> Result<Buffer> {
