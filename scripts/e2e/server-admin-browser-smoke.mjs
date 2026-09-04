@@ -357,6 +357,26 @@ async function clickText(text, selector = "button, a") {
   assert(clicked, `Could not find visible ${selector} with text: ${text}`);
 }
 
+async function selectTab(text) {
+  const selected = await evaluate(`(() => {
+    const normalize = value => (value || "").replace(/\\s+/g, " ").trim();
+    const tab = [...document.querySelectorAll('[role="tab"]')]
+      .find(item => normalize(item.textContent).startsWith(${JSON.stringify(text)}) && item.getClientRects().length > 0);
+    if (!tab) return false;
+    tab.click();
+    return true;
+  })()`);
+  assert(selected, `Could not find visible tab: ${text}`);
+  await waitForExpression(
+    `(() => {
+      const normalize = value => (value || "").replace(/\\s+/g, " ").trim();
+      return [...document.querySelectorAll('[role="tab"]')]
+        .some(item => normalize(item.textContent).startsWith(${JSON.stringify(text)}) && item.dataset.state === "active");
+    })()`,
+    `active tab ${text}`,
+  );
+}
+
 async function fillSelector(selector, value) {
   const filled = await evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
@@ -556,6 +576,97 @@ async function main() {
   await capture("05-user-created", ["用户列表", options.createdUsername]);
   recordAssertion("通过管理端创建用户并在列表中确认");
 
+  await navigate("/settings/agents");
+  await waitForText("Moss E2E 智能体", "mock Hub agent");
+  await waitForExpression(
+    `Boolean(document.querySelector('input[placeholder="搜索智能体..."]'))`,
+    "agent search input",
+  );
+  await selectTab("专属智能体");
+  await selectTab("自定义智能体");
+  await selectTab("智能体库");
+  await capture("06-agent-management", [
+    "智能体管理",
+    "智能体库",
+    "专属智能体",
+    "自定义智能体",
+    "Moss E2E 智能体",
+  ]);
+  recordAssertion("智能体管理加载 Hub 数据并可切换页签");
+
+  await navigate("/settings/skill");
+  await waitForText("Moss E2E 技能", "mock Hub skill");
+  await waitForExpression(
+    `Boolean(document.querySelector('input[placeholder="搜索技能..."]'))`,
+    "skill search input",
+  );
+  await selectTab("专属技能");
+  await selectTab("自定义技能");
+  await selectTab("技能库");
+  await capture("07-skill-store", [
+    "技能商店",
+    "技能库",
+    "专属技能",
+    "自定义技能",
+    "Moss E2E 技能",
+    "最新版本 1.0.0",
+  ]);
+  recordAssertion("技能商店加载 Hub 数据并可切换页签");
+
+  await navigate("/secrets/config-items");
+  await waitForText("创建配置项", "credential configuration action");
+  await capture("08-credential-config-items", [
+    "配置项列表",
+    "全部分类",
+    "全部状态",
+    "认证方案",
+    "创建配置项",
+  ]);
+  recordAssertion("凭据配置项列表和分类可加载");
+
+  await clickText("创建配置项", "button");
+  await waitForExpression(
+    `Boolean(document.querySelector('[role="dialog"]'))`,
+    "credential configuration dialog",
+  );
+  await fillSelector('input[placeholder="如：禅道"]', "E2E凭据模板");
+  await waitForExpression(
+    `Boolean(document.querySelector('input[placeholder="自动根据名称生成，可手动修改"]')?.value)`,
+    "generated credential identifier",
+  );
+  await fillSelector('input[placeholder="access_token"]', "api_key");
+  await fillSelector('input[placeholder="Access Token"]', "API Key");
+  await capture("09-credential-config-form", [
+    "定义新的凭据服务模板",
+    "认证方式",
+    "字段定义",
+  ]);
+  await clickText("创建", '[role="dialog"] button');
+  await waitForExpression(
+    `!document.querySelector('[role="dialog"]') && document.body?.innerText.includes("E2E凭据模板")`,
+    "created credential configuration in the list",
+  );
+  await capture("10-credential-config-created", [
+    "配置项列表",
+    "E2E凭据模板",
+    "API Key",
+  ]);
+  recordAssertion("凭据模板可通过表单创建并在列表中确认");
+
+  await navigate("/settings/server-credentials");
+  await capture("11-server-credentials", [
+    "服务器凭据",
+    "Hub 授权",
+    "资源令牌密钥",
+    "客舱服务凭据",
+  ]);
+  const credentialInputsAreMasked = await evaluate(`(() => {
+    const inputs = [...document.querySelectorAll('main input')];
+    return inputs.length > 0 && inputs.every(input => input.type === "password");
+  })()`);
+  assert(credentialInputsAreMasked, "Server credential inputs were not password fields");
+  recordAssertion("服务器凭据分组可加载且输入框保持脱敏");
+
   await clickText("会话管理", "a");
   await waitForExpression(
     `location.pathname === "/admin/sessions"`,
@@ -563,7 +674,7 @@ async function main() {
   );
   await waitForText(hostSession.sessionId.slice(0, 12), "host session row");
   await waitForText(dockerSession.sessionId.slice(0, 12), "Docker session row");
-  await capture("06-session-management", [
+  await capture("12-session-management", [
     "会话管理",
     hostSession.sessionId.slice(0, 12),
     dockerSession.sessionId.slice(0, 12),
@@ -577,7 +688,7 @@ async function main() {
     `location.pathname.endsWith(${JSON.stringify(`/sessions/${hostSession.sessionId}`)})`,
     "host session detail route",
   );
-  await capture("07-host-session-chat", [
+  await capture("13-host-session-chat", [
     "对话历史",
     hostSession.sessionId,
     "Reply with this exact token and no additional text",
@@ -596,7 +707,7 @@ async function main() {
     `location.pathname.endsWith(${JSON.stringify(`/sessions/${dockerSession.sessionId}`)})`,
     "Docker session detail route",
   );
-  await capture("08-docker-session-chat", [
+  await capture("14-docker-session-chat", [
     "对话历史",
     dockerSession.sessionId,
     "Reply with this exact token and no additional text",

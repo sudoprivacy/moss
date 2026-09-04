@@ -168,9 +168,11 @@ sudo env \
   ANTHROPIC_API_KEY="$MOCK_API_KEY" \
   "$OFFLINE_DIR/install.sh" --offline
 
-# Keep model discovery hermetic too. Session runners inherit this setting from
-# moss-server, while both host and Docker scode use ANTHROPIC_BASE_URL above.
-printf 'MOSS_MODEL_LIST_URL=http://127.0.0.1:%s/api/specific_pricing\n' "$MOCK_PORT" \
+# Keep model discovery and the agent/skill Hub hermetic too. Session runners
+# inherit these settings from moss-server, while both host and Docker scode use
+# ANTHROPIC_BASE_URL above.
+printf 'MOSS_MODEL_LIST_URL=http://127.0.0.1:%s/api/specific_pricing\nMOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\n' \
+  "$MOCK_PORT" "$MOCK_PORT" \
   | sudo tee -a "$INSTALL_DIR/moss-server.env" >/dev/null
 sudo systemctl restart "$SERVICE_NAME.service"
 for _ in $(seq 1 60); do
@@ -213,6 +215,8 @@ sudo "$INSTALL_DIR/current/node/bin/node" "$ROOT_DIR/scripts/e2e/server-admin-br
 
 grep -Fq 'MOSS_E2E_OK:MOSS_E2E_TOKEN_host_' "$MOCK_LOG_FILE"
 grep -Fq 'MOSS_E2E_OK:MOSS_E2E_TOKEN_docker_' "$MOCK_LOG_FILE"
+grep -Fq '"path":"/api/assistants/cursor"' "$MOCK_LOG_FILE"
+grep -Fq '"path":"/api/skills/cursor"' "$MOCK_LOG_FILE"
 USER_CONTAINER="$(docker ps --filter label=moss.kind=user-container --format '{{.Names}}' | head -n 1)"
 [ -n "$USER_CONTAINER" ]
 SCODE_STOPPED=0
@@ -269,7 +273,7 @@ docker image rm "$RUNTIME_IMAGE" >/dev/null
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 ! docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1
 
-printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"browserUi":true,"lifecycle":true}\n' \
+printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"browserUi":true,"agentHub":true,"skillStore":true,"credentials":true,"lifecycle":true}\n' \
   "$VERSION" "$ARCH" > "$DIAGNOSTICS_DIR/release-smoke-result.json"
 
 node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" "$SCODE_VERSION" <<'NODE'
@@ -283,6 +287,9 @@ const resultRows = [
   ['离线安装、校验和、Docker 镜像加载', '✅'],
   ['浏览器表单登录', '✅'],
   [`浏览器创建用户 \`${browser.createdUser}\``, '✅'],
+  ['智能体管理（Hub 数据、页签切换）', '✅'],
+  ['技能商店（Hub 数据、页签切换）', '✅'],
+  ['凭据配置（模板表单、服务器凭据脱敏）', '✅'],
   [`host 会话聊天 \`${runtime('host').sessionId}\``, '✅'],
   [`Docker 会话聊天 \`${runtime('docker').sessionId}\``, '✅'],
   ['同版本升级不下载', '✅'],
@@ -306,7 +313,7 @@ fs.writeFileSync(path.join(diagnosticsDir, 'ci-summary.md'), `${summaryLines.joi
 const reportLines = [
     '# Moss Server E2E 测试报告',
     '',
-    '> 结论：✅ 最终 Server 安装包通过离线安装、host/Docker 会话、真实浏览器管理操作、升级、服务生命周期和卸载验证。',
+    '> 结论：✅ 最终 Server 安装包通过离线安装、host/Docker 会话、智能体、技能商店、凭据配置、真实浏览器管理操作、升级、服务生命周期和卸载验证。',
     '',
     '此 ZIP 是 Release 中唯一的 E2E 验证入口。直接打开本文件即可查看结论和全部截图；原始可复核数据位于 `evidence/`。',
     '',

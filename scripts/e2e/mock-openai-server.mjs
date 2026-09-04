@@ -34,6 +34,27 @@ function parseArgs(argv) {
 
 const options = parseArgs(process.argv.slice(2));
 
+const mockAgent = {
+  id: "moss-e2e-agent",
+  name: "moss-e2e-agent",
+  display_name: "Moss E2E 智能体",
+  description: "用于验证智能体商店的本地 Mock 数据。",
+  emoji: "🤖",
+  category: "E2E",
+  categories: ["E2E"],
+  skills: [],
+};
+
+const mockSkill = {
+  id: "moss-e2e-skill",
+  name: "moss-e2e-skill",
+  display_name: "Moss E2E 技能",
+  description: "用于验证技能商店的本地 Mock 数据。",
+  emoji: "🧪",
+  category: "E2E",
+  categories: ["E2E"],
+};
+
 function writeJson(response, status, body) {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
@@ -125,6 +146,64 @@ const server = http.createServer(async (request, response) => {
     writeJson(response, 200, {
       success: true,
       data: [{ model_id: "moss-e2e-model", model: "Moss E2E Model", ratio: 1 }],
+    });
+    return;
+  }
+  if (request.method === "GET" && pathname === "/api/categories") {
+    appendRecord({
+      timestamp: new Date().toISOString(),
+      path: pathname,
+      kind: "hub",
+    });
+    writeJson(response, 200, { success: true, data: ["E2E"] });
+    return;
+  }
+  if (request.method === "GET" && pathname === "/api/assistants/cursor") {
+    appendRecord({
+      timestamp: new Date().toISOString(),
+      path: pathname,
+      kind: "hub",
+    });
+    writeJson(response, 200, {
+      success: true,
+      data: {
+        assistants: [mockAgent],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+    return;
+  }
+  if (request.method === "GET" && pathname === "/api/skills/cursor") {
+    appendRecord({
+      timestamp: new Date().toISOString(),
+      path: pathname,
+      kind: "hub",
+    });
+    writeJson(response, 200, {
+      success: true,
+      data: { skills: [mockSkill], next_cursor: null, has_more: false },
+    });
+    return;
+  }
+  if (request.method === "GET" && pathname === "/api/skills/moss-e2e-skill") {
+    appendRecord({
+      timestamp: new Date().toISOString(),
+      path: pathname,
+      kind: "hub",
+    });
+    writeJson(response, 200, {
+      success: true,
+      data: {
+        skill: mockSkill,
+        versions: [
+          {
+            version: "1.0.0",
+            source_url: "http://127.0.0.1/moss-e2e-skill.zip",
+            checksum: "moss-e2e-checksum",
+          },
+        ],
+      },
     });
     return;
   }
