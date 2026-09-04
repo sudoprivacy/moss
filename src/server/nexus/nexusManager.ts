@@ -126,18 +126,31 @@ export function resolveNexusPluginDir(): string {
   return join(process.cwd(), 'bin', 'nexus', 'plugins')
 }
 
-/** 校验插件目录下存在当前平台的 vault 插件（.so/.dll 与 .sig 成对，缺失即 fail-fast）。 */
+/**
+ * 按平台返回 vault 插件动态库文件名：macOS `.dylib` / Windows `.dll` / 其它（Linux）`.so`。
+ * 抽成纯函数以便脱离 process.platform 做平台无关单测（防 darwin 分支回归）。
+ */
+export function resolveVaultDylibName(platform: NodeJS.Platform): string {
+  if (platform === 'win32') return 'nexus_vault.dll'
+  if (platform === 'darwin') return 'libnexus_vault.dylib'
+  return 'libnexus_vault.so'
+}
+
+/** 校验插件目录下存在当前平台的 vault 插件（.so/.dll/.dylib 与 .sig 成对，缺失即 fail-fast）。 */
 export function assertVaultPluginAvailable(pluginDir: string): void {
-  const dylibName = process.platform === 'win32' ? 'nexus_vault.dll' : 'libnexus_vault.so'
+  const dylibName = resolveVaultDylibName(process.platform)
   const dylibPath = join(pluginDir, dylibName)
   const sigPath = `${dylibPath}.sig`
   if (!existsSync(dylibPath) || !existsSync(sigPath)) {
+    const hint =
+      process.platform === 'win32' || process.platform === 'darwin'
+        ? `Run \`bun run build:node\` at the repo root to fetch it automatically (Windows/macOS dev).`
+        : `On Linux it is baked into the server image; for native/WSL dev see deploy/README.md ` +
+          `to download nexus-vault-linux-x86_64 manually (see runtime-versions.json "nexus-vault").`
     throw new Error(
       `vault plugin not found at ${dylibPath} (+ .sig). ` +
         `Secrets cannot be stored encrypted without it. ` +
-        `Download nexus-vault-${process.platform === 'win32' ? 'windows' : 'linux'}-x86_64 ` +
-        `from the nexi-lab/nexus releases (see runtime-versions.json "nexus-vault") ` +
-        `and place both the dylib and its .sig into the plugins directory.`,
+        hint,
     )
   }
 }
