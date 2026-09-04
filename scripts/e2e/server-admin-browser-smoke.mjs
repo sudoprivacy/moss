@@ -363,6 +363,11 @@ async function selectTab(text) {
     const tab = [...document.querySelectorAll('[role="tab"]')]
       .find(item => normalize(item.textContent).startsWith(${JSON.stringify(text)}) && item.getClientRects().length > 0);
     if (!tab) return false;
+    tab.dispatchEvent(new MouseEvent("mousedown", {
+      bubbles: true,
+      button: 0,
+      ctrlKey: false,
+    }));
     tab.click();
     return true;
   })()`);
