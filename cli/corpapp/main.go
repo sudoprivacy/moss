@@ -71,6 +71,11 @@ Usage:
   corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
                      verbs: enqueue|next|claim|release|mark-sent|cancel|reap|list
                             reconcile (diagnostic only — the loop never needs it)
+  corpapp create-internal-group --app <name> --name <群名> --owner <userid>
+                     [--members <a,b,c>] [--chatid <id>]
+  corpapp internal-group --app <name> --chatid <id>
+  corpapp send-internal-group --app <name> --chatid <id> [--text <msg>]
+                     [--format text|markdown] [--file <path>...]
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -225,6 +230,43 @@ The message queue (group-msg-queue):
       --meta '{"type":"daily_chase","customer_id":"C1024"}' \
       --idempotency-key 'daily_chase:C1024:2026-08-27' \
       --expires-at 2026-08-26T10:00:00+08:00
+
+Internal groups (内部群) — a different product from 客户群:
+
+  |                | 客户群 (external)          | 内部群 (internal)          |
+  | daily cap      | ONE per group per day      | none                       |
+  | human step     | admin approval + sender    | none — the call IS the     |
+  |                | confirmation               | delivery                   |
+  | sender shown   | the --sender staff member  | always the application     |
+  | discovery      | groups / group             | none: no list or search    |
+
+  So internal groups need NO queue: nothing to reserve, reconcile or reap.
+  Compose and send.
+
+  TWO CONSTRAINTS, both verified against a live tenant:
+
+  1. The app's 可见范围 must be 根部门. A list of individual members is not
+     enough no matter how many — every appchat call answers 48002 until the
+     range is the root department.
+
+  2. send-internal-group only reaches groups THIS app created, and WeCom has
+     no way to list or search internal groups. So a chat id can only come from
+     create-internal-group — a group someone made in the WeCom client is
+     unreachable and its id unobtainable. KEEP THE CHATID you are given.
+
+  There is no sender argument, and that is not an omission: WeCom rejects
+  sender/from/userid/fromuser/owner with 40058, the group's own owner included.
+  To attribute a message to a person, write the name in the body text.
+
+  --chatid on create is optional (WeCom mints one when omitted) but worth
+  setting: it is the group's only handle, so a predictable id keeps a mapping
+  table reproducible. <=32 chars, 0-9a-zA-Z only. The owner is added to the
+  members automatically; WeCom requires at least 2 distinct members.
+
+    corpapp create-internal-group --app myapp --name '追货内部群' \
+      --owner zhangsan --members lisi,wangwu --chatid chase001
+    corpapp send-internal-group --app myapp --chatid chase001 \
+      --text '今日待办 3 条' --file ./明细.xlsx
 
 Filtering approvals:
   --status <n>    approval status (sp_status):

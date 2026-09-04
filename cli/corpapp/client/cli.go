@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -105,6 +106,12 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runGroupMsgResult(rest, c, opts)
 	case "group-msg-task":
 		err = runGroupMsgTask(rest, c, opts)
+	case "create-internal-group":
+		err = runCreateInternalGroup(rest, c, opts)
+	case "internal-group":
+		err = runInternalGroup(rest, c, opts)
+	case "send-internal-group":
+		err = runSendInternalGroup(rest, c, opts)
 	case "group-msg-queue":
 		err = runGroupMsgQueue(rest, c, opts)
 	case "group-msg-summary":
@@ -125,6 +132,137 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		return 1
 	}
 	return 0
+}
+
+// splitCSV splits a comma-separated list, trimming spaces/tabs around each item
+// and dropping empties. Operators paste these out of spreadsheets, where stray
+// whitespace after a comma is the norm rather than the exception.
+func splitCSV(v string) []string {
+	out := []string{}
+	for _, part := range strings.Split(v, ",") {
+		if t := strings.TrimSpace(part); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func runCreateInternalGroup(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("create-internal-group", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	name := fs.String("name", "", "group name")
+	chatID := fs.String("chatid", "", "chat id to assign (<=32 chars, 0-9a-zA-Z); omit to let WeCom mint one")
+	owner := fs.String("owner", "", "group owner userid (added to members automatically)")
+	members := fs.String("members", "", "member userids, comma separated")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *name == "" || *owner == "" {
+		return errors.New("usage: corpapp create-internal-group --app <name> --name <群名> --owner <userid> [--members <a,b>] [--chatid <id>]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	r, err := c.CreateInternalGroup(resolved.ID, *name, *chatID, *owner, splitCSV(*members))
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return FormatRawJSON(opts.Stdout, mustJSON(r))
+	}
+	// The chat id is the only handle this group will ever have — WeCom cannot
+	// list or search internal groups — so print it prominently.
+	fmt.Fprintf(opts.Stdout, "created  chatid=%s  name=%s\n", r.ChatID, *name)
+	fmt.Fprintln(opts.Stdout, "记下这个 chatid：企微无法枚举内部群，丢了就再也找不回这个群。")
+	return nil
+}
+
+func runInternalGroup(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("internal-group", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	chatID := fs.String("chatid", "", "chat id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *chatID == "" {
+		return errors.New("usage: corpapp internal-group --app <name> --chatid <id>")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.GetInternalGroup(resolved.ID, *chatID)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
+
+func runSendInternalGroup(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("send-internal-group", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	chatID := fs.String("chatid", "", "chat id")
+	text := fs.String("text", "", "message text")
+	format := fs.String("format", "text", "text | markdown")
+	var files stringsFlag
+	fs.Var(&files, "file", "file to send (repeatable); each is uploaded then sent")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *chatID == "" || (*text == "" && len(files) == 0) {
+		return errors.New("usage: corpapp send-internal-group --app <name> --chatid <id> [--text <msg>] [--file <path>...]")
+	}
+	if *format != "text" && *format != "markdown" {
+		return fmt.Errorf("invalid --format %q: must be \"text\" or \"markdown\"", *format)
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	// Text first, then each file as its own message: WeCom has no combined
+	// text+attachment message type for appchat.
+	if *text != "" {
+		r, serr := c.SendInternalGroup(resolved.ID, *chatID, *text, *format, "", "")
+		if serr != nil {
+			return serr
+		}
+		if *asJSON {
+			if werr := FormatRawJSON(opts.Stdout, mustJSON(r)); werr != nil {
+				return werr
+			}
+		} else {
+			fmt.Fprintf(opts.Stdout, "sent text  msgid=%s\n", r.MsgID)
+		}
+	}
+	for _, f := range files {
+		body, rerr := os.ReadFile(f)
+		if rerr != nil {
+			return fmt.Errorf("read %s: %w", f, rerr)
+		}
+		up, uerr := c.UploadMedia(resolved.ID, "file", baseName(f), body)
+		if uerr != nil {
+			return fmt.Errorf("upload %s: %w", f, uerr)
+		}
+		r, serr := c.SendInternalGroup(resolved.ID, *chatID, "", "", up.MediaID, "file")
+		if serr != nil {
+			return fmt.Errorf("send %s: %w", f, serr)
+		}
+		fmt.Fprintf(opts.Stdout, "sent file  %s  msgid=%s\n", baseName(f), r.MsgID)
+	}
+	return nil
+}
+
+// mustJSON marshals a small response struct for --json output. These structs are
+// plain data with no cycles, so a failure here is not reachable in practice.
+func mustJSON(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(b)
 }
 
 func printHelp(w io.Writer, opts RunOptions) {

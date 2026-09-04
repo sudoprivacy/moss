@@ -106,6 +106,37 @@ export class WeComApiClient {
   }
 
   /**
+   * GET a JSON endpoint with the access_token appended. Mirrors `post`'s
+   * token-refresh retry. Most WeCom APIs are POST; a few (appchat/get,
+   * agent/get) are GET and would otherwise have to be faked with an empty
+   * POST body, which those endpoints reject.
+   */
+  async get(endpoint: string): Promise<Record<string, unknown>> {
+    const send = async (token: string) => {
+      const url = `${API_BASE}${endpoint}${endpoint.includes('?') ? '&' : '?'}access_token=${encodeURIComponent(token)}`
+      const resp = await fetch(url)
+      if (!resp.ok) {
+        throw new Error(`${endpoint} HTTP ${resp.status}`)
+      }
+      return (await resp.json()) as Record<string, unknown>
+    }
+
+    const token = await this.getAccessToken()
+    const json = await send(token)
+    const code = Number(json.errcode ?? 0)
+    if (code === 0) return json
+
+    if (TOKEN_INVALID_CODES.has(code)) {
+      this.cachedToken = null
+      const retryJson = await send(await this.getAccessToken())
+      const retryCode = Number(retryJson.errcode ?? 0)
+      if (retryCode === 0) return retryJson
+      throw new Error(`${endpoint} errcode=${retryCode} ${String(retryJson.errmsg ?? '')}`)
+    }
+    throw new Error(`${endpoint} errcode=${code} ${String(json.errmsg ?? '')}`)
+  }
+
+  /**
    * GET binary content from a WeCom endpoint with the access_token
    * appended (e.g. /cgi-bin/media/get?media_id=...). Returns the raw
    * bytes plus the server-provided filename (from Content-Disposition,
