@@ -7,7 +7,7 @@ import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
-import type { ServerConfig, SessionRecord } from './types.js'
+import type { AttemptRecord, ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
 import { readTenantAssistantMultipart, type TenantAssistantMultipartFile } from './utils/tenantAssistantMultipart.js'
@@ -8449,7 +8449,7 @@ export function startServer(
           ? { session, attempt: locallyOwnedAttempt }
           : await runtime.ensureSessionReady(sessionId)
         wss.handleUpgrade(req, socket, head, ws => {
-          void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
+          const bridge = (runnerSocket: net.Socket): void => {
             let buffer = ''
             const sendToRunner = (payload: Record<string, unknown>) => {
               if (!runnerSocket.destroyed) {
@@ -8521,9 +8521,32 @@ export function startServer(
             })
 
             wss.emit('connection', ws, req)
-          }).catch(error => {
+          }
+          const connectAndBridge = (attempt: AttemptRecord): Promise<void> =>
+            runtime.connectToAttempt(attempt).then(bridge)
+          void connectAndBridge(ready.attempt).catch(async error => {
             logger.error(error instanceof Error ? error.message : String(error))
-            ws.close()
+            // The locally-owned fast path skipped the readiness probe, so a
+            // failed connect usually means a runner that stalled right after
+            // spawn (probe-disconnect race). Fall back to the probe-and-recover
+            // path (marks the attempt lost + respawns when needed) and retry
+            // the bridge once with the recovered attempt. The already-probed
+            // slow path keeps the previous close-on-failure behavior.
+            if (!locallyOwnedAttempt || ws.readyState !== ws.OPEN) {
+              ws.close()
+              return
+            }
+            try {
+              const recovered = await runtime.ensureSessionReady(sessionId)
+              await connectAndBridge(recovered.attempt)
+            } catch (recoveryError) {
+              logger.error(
+                recoveryError instanceof Error
+                  ? recoveryError.message
+                  : String(recoveryError),
+              )
+              ws.close()
+            }
           })
         })
       } catch (error) {

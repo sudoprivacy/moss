@@ -7,6 +7,7 @@ import { delimiter, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
 import { loadBudgetStats } from './budgetStats.js'
+import { connectToAttachSocket } from './runnerSocket.js'
 import {
   DirectConnectStore,
   mergeRuntime,
@@ -995,11 +996,10 @@ export class RuntimeService {
     if (!attempt.attachPath) {
       throw new Error('Attempt has no attach path')
     }
-    return await new Promise<net.Socket>((resolve, reject) => {
-      const socket = net.createConnection(attempt.attachPath)
-      socket.once('connect', () => resolve(socket))
-      socket.once('error', reject)
-    })
+    return connectToAttachSocket(
+      attempt.attachPath,
+      this.options.config.reattachProbeTimeoutMs,
+    )
   }
 
   private async ensureAttempt(session: SessionRecord): Promise<AttemptRecord> {
