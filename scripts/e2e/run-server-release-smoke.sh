@@ -171,8 +171,8 @@ sudo env \
 # Keep model discovery and the agent/skill Hub hermetic too. Session runners
 # inherit these settings from moss-server, while both host and Docker scode use
 # ANTHROPIC_BASE_URL above.
-printf 'MOSS_MODEL_LIST_URL=http://127.0.0.1:%s/api/specific_pricing\nMOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\n' \
-  "$MOCK_PORT" "$MOCK_PORT" \
+printf 'MOSS_MODEL_LIST_URL=http://127.0.0.1:%s/api/specific_pricing\nMOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\nANTHROPIC_API_KEY=%s\n' \
+  "$MOCK_PORT" "$MOCK_PORT" "$MOCK_API_KEY" \
   | sudo tee -a "$INSTALL_DIR/moss-server.env" >/dev/null
 sudo systemctl restart "$SERVICE_NAME.service"
 for _ in $(seq 1 60); do
