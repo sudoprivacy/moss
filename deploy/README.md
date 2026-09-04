@@ -103,10 +103,13 @@ sudo ./install.sh --offline
   `nexus-vault` 为准。
 - **arm64 边界**：nexus 尚未发布 `linux-aarch64` 插件产物，本地 arm64 镜像构建会
   显式报错（CI 发布为 amd64 不受影响）；待 nexus 发布后放开。
-- **Windows 原生开发**：另需 `nexusd-cluster-windows-x86_64.zip`（v0.1.1，本机
-  `~/.moss/nexus/bin/nexusd.exe` 为不支持插件的旧版）与
-  `nexus-vault-windows-x86_64.zip`（`nexus_vault.dll` + `.sig`），放入
-  `bin/nexus/plugins/`。
+- **Windows / macOS 原生开发**：无需手工下载。在**仓库根目录**运行 `bun run build:node`
+  会自动从阶梯下载源（COS Runtime → Legacy COS → GitHub）获取当前平台的 vault 插件
+  （Windows `nexus_vault.dll` / macOS `libnexus_vault.dylib`，与 `.sig` 成对）和 nexusd
+  二进制，落盘到 `bin/nexus/plugins/` 与 `bin/nexus/`（已装同版本则跳过；版本以
+  `src/server/nexus/runtime-versions.json` 为准，实现见 `scripts/fetch-nexus-runtime.js`）。
+  **注意**：须在仓库根目录既 `bun run build:node` 又启动 server——运行期按
+  `process.cwd()` 定位 `bin/nexus/plugins`，构建与启动的工作目录必须一致，否则运行期找不到插件。
 
 ## 常用操作
 

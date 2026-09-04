@@ -10,6 +10,7 @@ import {
   formatNexusStartupFailure,
   parseNexusVersion,
   resolveNexusConfigFromEnv,
+  resolveVaultDylibName,
 } from '../nexusManager.js'
 
 const tempDirs: string[] = []
@@ -39,11 +40,17 @@ describe('NexusManager', () => {
     expect(dockerfile).toContain('github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}')
   })
 
+  it('resolves the vault dylib name per platform (covers darwin without a mac)', () => {
+    expect(resolveVaultDylibName('win32')).toBe('nexus_vault.dll')
+    expect(resolveVaultDylibName('darwin')).toBe('libnexus_vault.dylib')
+    expect(resolveVaultDylibName('linux')).toBe('libnexus_vault.so')
+  })
+
   it('fail-fasts when the vault plugin dylib or its signature is missing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'moss-nexus-plugins-'))
     tempDirs.push(dir)
-    // 与实现相同的平台文件名选择
-    const dylib = process.platform === 'win32' ? 'nexus_vault.dll' : 'libnexus_vault.so'
+    // 与实现相同的平台文件名选择（复用实现的纯函数，保证各平台造/查一致）
+    const dylib = resolveVaultDylibName(process.platform)
     expect(() => assertVaultPluginAvailable(dir)).toThrow('vault plugin not found')
 
     writeFileSync(join(dir, dylib), 'fake-dylib')

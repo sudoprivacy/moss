@@ -103,6 +103,20 @@ function buildGoCli(name) {
 
 console.log(`Enabled features (${enabledFeatures.length}): ${enabledFeatures.join(', ') || '(none)'}`)
 
+// 本地开发（Windows/macOS 原生）自动获取 nexus runtime（vault 插件 + nexusd）。
+// 仅 --target=node 且 win32/darwin 且非 CI 触发：Linux 走镜像内置（Dockerfile 亦跑 build:node，
+// platform=linux 在此跳过）；CI 的 mac/win runner 打包 ui/ Electron 不需要 nexus，故用 !CI 排除。
+// 注意：平台判断必须用 includes/显式比较，切勿写成 process.platform==='win32' || 'darwin'
+//（'darwin' 恒真会让 Linux 也进块，架空平台门）。下载失败不阻断构建，运行期有 fail-fast 兜底。
+if (onlyNode && ['win32', 'darwin'].includes(process.platform) && !process.env.CI) {
+  try {
+    const { ensureNexusRuntime } = await import('./fetch-nexus-runtime.js')
+    await ensureNexusRuntime()
+  } catch (e) {
+    console.warn(`⚠  nexus runtime fetch skipped (non-fatal): ${e?.message ?? e}`)
+  }
+}
+
 
 
 // admin/dist（由 moss server 直接挂载到 /admin）
