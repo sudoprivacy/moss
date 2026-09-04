@@ -2,6 +2,7 @@ import net from 'net'
 import { appendFile, mkdir, unlink, writeFile } from 'fs/promises'
 import { dirname } from 'path'
 import { RuntimeBackend } from './backends/runtimeBackend.js'
+import { ApplicationHelloReplayBuffer } from './applicationHelloReplay.js'
 import { DirectConnectStore } from './db.js'
 import { getTranscriptPath, isNamedPipePath } from './runtimePaths.js'
 import { logRuntimeEvent, logRuntimeMetric } from './runtime/runtimeMetrics.js'
@@ -66,6 +67,7 @@ export class SessionRunnerDaemon {
   readonly #store: DirectConnectStore
   readonly #backend: RuntimeBackend
   readonly #clients = new Set<SocketWithBuffer>()
+  readonly #applicationHello: ApplicationHelloReplayBuffer
   readonly #heartbeatTimer: NodeJS.Timeout
   #server: net.Server | null = null
   #handle: BackendHandle | null = null
@@ -85,6 +87,9 @@ export class SessionRunnerDaemon {
 
   constructor(private readonly manifest: RunnerManifest) {
     this.#store = new DirectConnectStore(manifest.config.dbPath)
+    this.#applicationHello = new ApplicationHelloReplayBuffer(
+      manifest.session.sessionId,
+    )
     this.#backend = new RuntimeBackend({
       engine: manifest.session.runtime.engine,
       scodePath: manifest.session.runtime.scodePath,
@@ -261,7 +266,7 @@ export class SessionRunnerDaemon {
         this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)
         this.#store.touchSessionActivity(this.manifest.session.sessionId)
         void appendFile(this.manifest.attempt.stdoutLogPath, line, 'utf8').catch(() => {})
-        this.#broadcast({ type: 'stdout', line })
+        this.#applicationHello.forward(line, message => this.#broadcast(message))
       })
 
       handle.onStderrLine(line => {
@@ -418,6 +423,7 @@ export class SessionRunnerDaemon {
       runtimeType: this.manifest.session.runtime.type,
       state: this.#state,
     })
+    this.#applicationHello.replay(message => this.#send(socket, message))
     socket.on('data', chunk => {
       const text = Buffer.from(chunk).toString('utf8')
       socket.__buffer = (socket.__buffer ?? '') + text
