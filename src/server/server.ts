@@ -4285,6 +4285,9 @@ export function startServer(
           msgType: typeof body.msgType === 'string'
             ? (body.msgType as 'text' | 'markdown' | 'file' | 'image')
             : undefined,
+          mentionedList: Array.isArray(body.mentionedList)
+            ? body.mentionedList.map((u: unknown) => String(u || '').trim()).filter(Boolean)
+            : undefined,
         }))
         return
       }

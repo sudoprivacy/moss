@@ -470,6 +470,17 @@ export class WeComAppConnector implements CorpAppConnector {
    * all rejected with 40058, including the group's own owner. Messages always
    * appear as the application. Unlike 客户群 there is no daily cap (3 sends in a
    * row all returned 0) and no human confirmation: the call IS the delivery.
+   *
+   * @-mentions DO work here, unlike 客户群 where an `@名字` in the body is inert
+   * text. Verified on a live tenant: mentionedList:["zhuyx"] and ["@all"] both
+   * produced a real "[you were mentioned]" / "[@All]" notification, while the
+   * same body text with no mentionedList produced none. So the notification
+   * comes from the field, never from the `@` characters in the content.
+   *
+   * `mentioned_list` rides on the text payload; for markdown WeCom instead wants
+   * `<@userid>` inline in the content, so we translate rather than drop it —
+   * silently ignoring a caller's mention request would be the worst outcome,
+   * since WeCom answers 0 ok either way and nobody would notice.
    */
   async sendInternalGroup(params: {
     chatId: string
@@ -477,17 +488,29 @@ export class WeComAppConnector implements CorpAppConnector {
     format?: 'text' | 'markdown'
     mediaId?: string
     msgType?: 'text' | 'markdown' | 'file' | 'image'
+    mentionedList?: string[]
   }): Promise<{ ok: boolean; msgId?: string }> {
     const type =
       params.msgType ??
       (params.mediaId ? 'file' : params.format === 'markdown' ? 'markdown' : 'text')
+    const mentions = (params.mentionedList ?? []).filter(Boolean)
     const body: Record<string, unknown> = { chatid: params.chatId, msgtype: type }
     if (type === 'file' || type === 'image') {
       if (!params.mediaId) throw new Error(`sendInternalGroup: ${type} requires mediaId`)
       body[type] = { media_id: params.mediaId }
+    } else if (type === 'markdown') {
+      if (!params.text) throw new Error('sendInternalGroup: markdown requires text')
+      // markdown has no mentioned_list; the equivalent is <@userid> in content.
+      // @all has no markdown form, so fall back to the literal text.
+      const prefix = mentions
+        .map((u) => (u === '@all' ? '@all' : `<@${u}>`))
+        .join(' ')
+      body.markdown = { content: prefix ? `${prefix} ${params.text}` : params.text }
     } else {
-      if (!params.text) throw new Error(`sendInternalGroup: ${type} requires text`)
-      body[type] = { content: params.text }
+      if (!params.text) throw new Error('sendInternalGroup: text requires text')
+      const text: Record<string, unknown> = { content: params.text }
+      if (mentions.length > 0) text.mentioned_list = mentions
+      body.text = text
     }
     const json = await this.requireClient().post('/cgi-bin/appchat/send', body)
     return {

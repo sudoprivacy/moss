@@ -76,6 +76,7 @@ Usage:
   corpapp internal-group --app <name> --chatid <id>
   corpapp send-internal-group --app <name> --chatid <id> [--text <msg>]
                      [--format text|markdown] [--file <path>...]
+                     [--mention <userid,...>] [--mention-all]
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -258,6 +259,22 @@ Internal groups (内部群) — a different product from 客户群:
   sender/from/userid/fromuser/owner with 40058, the group's own owner included.
   To attribute a message to a person, write the name in the body text.
 
+  @-MENTIONS DO WORK HERE — the opposite of 客户群, where an @名字 in the body is
+  inert text. But the notification comes from --mention, NEVER from the "@"
+  characters you type. Verified on a live tenant:
+
+    --mention zhuyx        -> recipient sees "[you were mentioned]"
+    --mention-all          -> recipient sees "[@All]"
+    "@zhuyx" in --text     -> no notification at all
+
+  So writing @张三 into the message body and expecting a ping is a silent
+  no-op. Two failure modes look identical to success, because WeCom answers
+  0 ok for both: a body-only @, and an unknown userid in --mention (it is
+  dropped without error). Pass real userids.
+
+  Mentions ride on the text message, so --mention with only --file notifies
+  nobody; put the mention on the accompanying --text.
+
   --chatid on create is optional (WeCom mints one when omitted) but worth
   setting: it is the group's only handle, so a predictable id keeps a mapping
   table reproducible. <=32 chars, 0-9a-zA-Z only. The owner is added to the
@@ -266,7 +283,7 @@ Internal groups (内部群) — a different product from 客户群:
     corpapp create-internal-group --app myapp --name '追货内部群' \
       --owner zhangsan --members lisi,wangwu --chatid chase001
     corpapp send-internal-group --app myapp --chatid chase001 \
-      --text '今日待办 3 条' --file ./明细.xlsx
+      --text '今日待办 3 条' --mention zhangsan,lisi --file ./明细.xlsx
 
 Filtering approvals:
   --status <n>    approval status (sp_status):

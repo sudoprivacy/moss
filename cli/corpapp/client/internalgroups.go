@@ -86,7 +86,12 @@ func (c *Client) GetInternalGroup(id, chatID string) (json.RawMessage, error) {
 // SendInternalGroup posts text/markdown (or a file/image by media id) to an
 // internal group. There is no sender argument on purpose: WeCom has no such
 // parameter and rejects one — the message always shows as the application.
-func (c *Client) SendInternalGroup(id, chatID, text, format, mediaID, msgType string) (*InternalGroupSendResp, error) {
+//
+// `mentions` produces REAL @-notifications (unlike 客户群, where an @名字 in the
+// body is inert text). Verified against a live tenant: the notification comes
+// from this list, never from the `@` characters in the text — the same body with
+// no mentions notifies nobody. Pass "@all" alone to notify everyone.
+func (c *Client) SendInternalGroup(id, chatID, text, format, mediaID, msgType string, mentions []string) (*InternalGroupSendResp, error) {
 	if chatID == "" {
 		return nil, errors.New("chat-id is required")
 	}
@@ -102,6 +107,9 @@ func (c *Client) SendInternalGroup(id, chatID, text, format, mediaID, msgType st
 	}
 	if msgType != "" {
 		body["msgType"] = msgType
+	}
+	if len(mentions) > 0 {
+		body["mentionedList"] = mentions
 	}
 	var resp InternalGroupSendResp
 	path := c.PathPrefix + "/" + url.PathEscape(id) + "/internal-groups/" + url.PathEscape(chatID) + "/messages"
