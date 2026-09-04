@@ -208,6 +208,8 @@ func runSendInternalGroup(args []string, c *Client, opts RunOptions) error {
 	format := fs.String("format", "text", "text | markdown")
 	var files stringsFlag
 	fs.Var(&files, "file", "file to send (repeatable); each is uploaded then sent")
+	mention := fs.String("mention", "", "userids to @-mention, comma separated (real notification)")
+	mentionAll := fs.Bool("mention-all", false, "@-mention everyone in the group")
 	asJSON := fs.Bool("json", false, "print raw JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -222,10 +224,18 @@ func runSendInternalGroup(args []string, c *Client, opts RunOptions) error {
 	if err != nil {
 		return err
 	}
+	mentions := splitCSV(*mention)
+	if *mentionAll {
+		// WeCom treats "@all" as the whole list; mixing it with userids is
+		// meaningless, so it wins outright.
+		mentions = []string{"@all"}
+	}
+
 	// Text first, then each file as its own message: WeCom has no combined
-	// text+attachment message type for appchat.
+	// text+attachment message type for appchat. Mentions ride on the text
+	// message — a bare file notifies nobody.
 	if *text != "" {
-		r, serr := c.SendInternalGroup(resolved.ID, *chatID, *text, *format, "", "")
+		r, serr := c.SendInternalGroup(resolved.ID, *chatID, *text, *format, "", "", mentions)
 		if serr != nil {
 			return serr
 		}
@@ -246,7 +256,7 @@ func runSendInternalGroup(args []string, c *Client, opts RunOptions) error {
 		if uerr != nil {
 			return fmt.Errorf("upload %s: %w", f, uerr)
 		}
-		r, serr := c.SendInternalGroup(resolved.ID, *chatID, "", "", up.MediaID, "file")
+		r, serr := c.SendInternalGroup(resolved.ID, *chatID, "", "", up.MediaID, "file", nil)
 		if serr != nil {
 			return fmt.Errorf("send %s: %w", f, serr)
 		}

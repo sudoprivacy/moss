@@ -355,6 +355,17 @@ export interface CorpAppConnector {
     format?: 'text' | 'markdown'
     mediaId?: string
     msgType?: 'text' | 'markdown' | 'file' | 'image'
+    /**
+     * userids to @-mention, or the single entry `@all`. UNLIKE 客户群 — where
+     * an `@名字` in the body is inert text — internal groups deliver a real
+     * notification, and it comes from THIS field only: verified that a body
+     * containing `@zhuyx` with no mentionedList produces no notification, while
+     * mentionedList:["zhuyx"] and ["@all"] both do.
+     *
+     * WeCom silently ignores unknown userids (returns 0 ok, nobody notified),
+     * so a typo here fails invisibly.
+     */
+    mentionedList?: string[]
   }): Promise<{ ok: boolean; msgId?: string }>
 
   /**

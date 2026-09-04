@@ -285,6 +285,30 @@ to the group, then ping the responsible internal colleague directly.
 `owner` 一律返回 `40058`，连群主本人也不行。要让消息「看起来是某人发的」，只能把
 名字写进正文。
 
+### @提醒：内部群**可用**，但只认参数不认正文
+
+这和客户群相反 —— 客户群的 `@名字` 只是字面文本，内部群能触发**真实提醒**。
+线上实测：
+
+| 写法 | 效果 |
+|---|---|
+| `--mention zhuyx` | ✅ 收到「[you were mentioned]」 |
+| `--mention-all` | ✅ 收到「[@All]」 |
+| 正文里写 `@zhuyx`，不传 `--mention` | ❌ **没有任何提醒** |
+
+**提醒由 `--mention` 触发，与正文里的 `@` 字符无关。** 在正文里写 `@张三` 然后
+指望它响，是一个静默无效的操作。
+
+两种「看起来成功、实际没@到人」的情况，企微**都返回 `0 ok`**：
+
+- 只在正文里写 `@`，没传 `--mention`
+- `--mention` 里的 userid 不存在（企微静默丢弃，不报错）
+
+所以 userid 必须准确 —— 填错不会有任何提示。
+
+`--mention` 挂在文本消息上：只发 `--file` 不发 `--text` 时提醒不到人，要把提醒
+放在配套的 `--text` 上。
+
 ```bash
 # 建群（chatid 可省略由企微生成，但自己指定更利于对照表复现）
 corpapp create-internal-group --app 数牍 --name '追货内部群' \
@@ -295,7 +319,7 @@ corpapp internal-group --app 数牍 --chatid chase001
 
 # 发消息 / 发文件（文件会先上传再发，可重复 --file）
 corpapp send-internal-group --app 数牍 --chatid chase001 \
-  --text '今日待办 3 条' --file ./明细.xlsx
+  --text '今日待办 3 条' --mention zhangsan,lisi --file ./明细.xlsx
 ```
 
 `--chatid` 限 32 字符内、仅 `0-9a-zA-Z`。owner 会自动并入成员列表；企微要求
