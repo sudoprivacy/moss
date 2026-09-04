@@ -259,6 +259,48 @@ To actually notify someone, send them a 1:1 message with `corpapp send
 --to <userid>` — that does push. A common shape is: broadcast the content
 to the group, then ping the responsible internal colleague directly.
 
+## 内部群（内部群 / appchat）
+
+内部群和客户群是**两种不同的产品**，差别决定了用法：
+
+| | 客户群（外部） | 内部群 |
+|---|---|---|
+| 每日限额 | 每群每天 1 条 | **无** |
+| 人工环节 | 管理员审批 + 发送人确认 | **无，调用即送达** |
+| 显示的发送者 | `--sender` 指定的内部成员 | **恒为应用本身** |
+| 能否枚举 | `groups` / `group` | **不能**，无 list/search 接口 |
+
+**所以内部群不需要队列** —— 没有名额要抢、没有回执要对账、没有超时要回收，组装好直接发。
+
+### 两条硬约束（均已对线上租户实测）
+
+1. **应用可见范围必须是「根部门」**。逐个添加成员**不够** —— 实测加到 2 人仍然
+   `48002`，改成根部门后同一个调用立刻成功。
+
+2. **只能发给本应用创建的群**，而企微**没有任何枚举内部群的接口**。所以 chatid
+   只能来自 `create-internal-group` —— 别人在企微客户端手建的群，既发不了、也拿
+   不到它的 chatid。**建群返回的 chatid 一定要记下来。**
+
+没有 `--sender` 参数，这不是遗漏：企微对 `sender`/`from`/`userid`/`fromuser`/
+`owner` 一律返回 `40058`，连群主本人也不行。要让消息「看起来是某人发的」，只能把
+名字写进正文。
+
+```bash
+# 建群（chatid 可省略由企微生成，但自己指定更利于对照表复现）
+corpapp create-internal-group --app 数牍 --name '追货内部群' \
+  --owner zhangsan --members lisi,wangwu --chatid chase001
+
+# 查群
+corpapp internal-group --app 数牍 --chatid chase001
+
+# 发消息 / 发文件（文件会先上传再发，可重复 --file）
+corpapp send-internal-group --app 数牍 --chatid chase001 \
+  --text '今日待办 3 条' --file ./明细.xlsx
+```
+
+`--chatid` 限 32 字符内、仅 `0-9a-zA-Z`。owner 会自动并入成员列表；企微要求
+**至少 2 个不同成员**。
+
 ## 消息队列（group-msg-queue）
 
 发送配额是**在人工确认时**扣掉的，不是创建任务时 —— 而确认时间**完全不可预测**：

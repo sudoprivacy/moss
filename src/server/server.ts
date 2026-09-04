@@ -4005,6 +4005,84 @@ export function startServer(
         return row
       }
 
+      // ---- Internal group chats (appchat) ----
+      // A different product from 客户群: no daily cap, no human confirmation,
+      // delivered on the call — so no queue, no claim, no reconcile. But the
+      // app's 可见范围 must be 根部门 or every appchat call is 48002, and only
+      // groups THIS app created are reachable (WeCom exposes no list/search),
+      // so a chat id can only come from the create call below.
+      const agentCorpAppInternalGroupsMatch = pathname.match(
+        /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/internal-groups$/,
+      )
+      if (req.method === 'POST' && agentCorpAppInternalGroupsMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppInternalGroupsMatch[1] || '')
+        if (!row) return
+        const body = await readJsonBody(req)
+        const connector = await initCorpAppConnector(row)
+        if (!connector.createInternalGroup) {
+          writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot create internal groups' } })
+          return
+        }
+        const userList = Array.isArray(body.userList)
+          ? body.userList.map((u: unknown) => String(u || '').trim()).filter(Boolean)
+          : []
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        const owner = typeof body.owner === 'string' ? body.owner.trim() : ''
+        if (!name || !owner || userList.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name, owner and userList are required' } })
+          return
+        }
+        writeJson(res, 200, await connector.createInternalGroup({
+          name,
+          owner,
+          userList,
+          chatId: typeof body.chatId === 'string' && body.chatId.trim() ? body.chatId.trim() : undefined,
+        }))
+        return
+      }
+
+      const agentCorpAppInternalGroupMatch = pathname.match(
+        /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/internal-groups\/([^/]+)$/,
+      )
+      if (req.method === 'GET' && agentCorpAppInternalGroupMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppInternalGroupMatch[1] || '')
+        if (!row) return
+        const connector = await initCorpAppConnector(row)
+        if (!connector.getInternalGroup) {
+          writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot read internal groups' } })
+          return
+        }
+        writeJson(res, 200, await connector.getInternalGroup(
+          decodeURIComponent(agentCorpAppInternalGroupMatch[2] || ''),
+        ))
+        return
+      }
+
+      const agentCorpAppInternalSendMatch = pathname.match(
+        /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/internal-groups\/([^/]+)\/messages$/,
+      )
+      if (req.method === 'POST' && agentCorpAppInternalSendMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppInternalSendMatch[1] || '')
+        if (!row) return
+        const body = await readJsonBody(req)
+        const connector = await initCorpAppConnector(row)
+        if (!connector.sendInternalGroup) {
+          writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot post to internal groups' } })
+          return
+        }
+        const format = body.format === 'markdown' ? 'markdown' : 'text'
+        writeJson(res, 200, await connector.sendInternalGroup({
+          chatId: decodeURIComponent(agentCorpAppInternalSendMatch[2] || ''),
+          text: typeof body.text === 'string' ? body.text : undefined,
+          format,
+          mediaId: typeof body.mediaId === 'string' ? body.mediaId : undefined,
+          msgType: typeof body.msgType === 'string'
+            ? (body.msgType as 'text' | 'markdown' | 'file' | 'image')
+            : undefined,
+        }))
+        return
+      }
+
       const agentCorpAppGroupsMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/customer-groups$/)
       if (req.method === 'GET' && agentCorpAppGroupsMatch) {
         const row = await resolveAgentCorpAppRow(agentCorpAppGroupsMatch[1] || '')

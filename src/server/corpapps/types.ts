@@ -318,6 +318,46 @@ export interface CorpAppConnector {
   getGroupMsgTask?(msgId: string, cursor?: string): Promise<Record<string, unknown>>
 
   /**
+   * Optional: create an INTERNAL group chat (`appchat/create`).
+   *
+   * Internal groups are a different product from 客户群: no daily cap, no human
+   * confirmation, delivered on the call. But they carry two hard constraints,
+   * both verified against a live tenant:
+   *   - the app's 可见范围 must be 根部门, otherwise every appchat call is 48002;
+   *   - `appchat/send` only reaches groups THIS app created, and WeCom exposes
+   *     no list/search for internal groups — so a chat id can only come from
+   *     here. A human-created group is unreachable and its id unobtainable.
+   * `chatId` is caller-chosen (<=32 chars, [0-9a-zA-Z]); omit to let WeCom mint
+   * one. `owner` must be one of `userList`.
+   */
+  createInternalGroup?(params: {
+    name: string
+    owner: string
+    userList: string[]
+    chatId?: string
+  }): Promise<{ ok: boolean; chatId?: string }>
+
+  /** Optional: read an internal group's name/owner/members (`appchat/get`). */
+  getInternalGroup?(chatId: string): Promise<Record<string, unknown>>
+
+  /**
+   * Optional: post to an internal group (`appchat/send`).
+   *
+   * There is NO sender parameter — verified: WeCom rejects sender/from/userid/
+   * fromuser/owner with 40058, for the group owner too. The message always
+   * appears as the application, never as a person. (客户群 is the opposite: its
+   * `sender` is mandatory.) So the mapping sheet's 发送人 column is meaningless
+   * for internal groups.
+   */
+  sendInternalGroup?(params: {
+    chatId: string
+    text?: string
+    format?: 'text' | 'markdown'
+    mediaId?: string
+    msgType?: 'text' | 'markdown' | 'file' | 'image'
+  }): Promise<{ ok: boolean; msgId?: string }>
+
+  /**
    * Optional: cancel a pending 群发 task (`cancel_groupmsg_send`). Removes it
    * from the approver's and sender's queues so a stale task cannot be
    * confirmed days later and consume that day's quota.

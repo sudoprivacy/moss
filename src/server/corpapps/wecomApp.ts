@@ -68,6 +68,8 @@ export class WeComAppConnector implements CorpAppConnector {
     'listApprovals',
     'getApproval',
     'listCustomerGroups',
+    'createInternalGroup',
+    'sendInternalGroup',
     'sendGroupMsg',
     'groupMsgResult',
     'uploadMedia',
@@ -414,6 +416,84 @@ export class WeComAppConnector implements CorpAppConnector {
     const body: Record<string, unknown> = { msgid: msgId, limit: 1000 }
     if (cursor) body.cursor = cursor
     return this.requireClient().post('/cgi-bin/externalcontact/get_groupmsg_task', body)
+  }
+
+  /**
+   * Create an INTERNAL group chat (doc 90245).
+   *
+   * 权限说明 is strict and non-obvious: "只允许企业自建应用调用，且应用的可见范围
+   * 必须是根部门". Verified on a live tenant — an app whose visible range is a
+   * list of individual members gets 48002 no matter how many members it has;
+   * switching the range to 根部门 made the same call succeed immediately.
+   *
+   * `chatid` is optional (WeCom mints one when omitted) but worth setting: it is
+   * the ONLY way to address the group later, and WeCom offers no way to list or
+   * search internal groups. A caller-chosen id keeps the mapping reproducible.
+   */
+  async createInternalGroup(params: {
+    name: string
+    owner: string
+    userList: string[]
+    chatId?: string
+  }): Promise<{ ok: boolean; chatId?: string }> {
+    const members = Array.from(new Set(params.userList.filter(Boolean)))
+    if (!members.includes(params.owner)) members.unshift(params.owner)
+    if (members.length < 2) {
+      // WeCom answers 86006 for <2 members; say so here rather than surfacing
+      // an opaque provider code, since "add one more person" is the whole fix.
+      throw new Error('createInternalGroup: WeCom requires at least 2 distinct members')
+    }
+    const body: Record<string, unknown> = {
+      name: params.name,
+      owner: params.owner,
+      userlist: members,
+    }
+    if (params.chatId) body.chatid = params.chatId
+    const json = await this.requireClient().post('/cgi-bin/appchat/create', body)
+    return {
+      ok: Number(json.errcode ?? 0) === 0,
+      chatId: json.chatid ? String(json.chatid) : params.chatId,
+    }
+  }
+
+  /** Read an internal group's detail (doc 98914). */
+  async getInternalGroup(chatId: string): Promise<Record<string, unknown>> {
+    return this.requireClient().get(
+      `/cgi-bin/appchat/get?chatid=${encodeURIComponent(chatId)}`,
+    )
+  }
+
+  /**
+   * Post to an internal group (doc 90248).
+   *
+   * No sender parameter exists — verified: sender/from/userid/fromuser/owner are
+   * all rejected with 40058, including the group's own owner. Messages always
+   * appear as the application. Unlike 客户群 there is no daily cap (3 sends in a
+   * row all returned 0) and no human confirmation: the call IS the delivery.
+   */
+  async sendInternalGroup(params: {
+    chatId: string
+    text?: string
+    format?: 'text' | 'markdown'
+    mediaId?: string
+    msgType?: 'text' | 'markdown' | 'file' | 'image'
+  }): Promise<{ ok: boolean; msgId?: string }> {
+    const type =
+      params.msgType ??
+      (params.mediaId ? 'file' : params.format === 'markdown' ? 'markdown' : 'text')
+    const body: Record<string, unknown> = { chatid: params.chatId, msgtype: type }
+    if (type === 'file' || type === 'image') {
+      if (!params.mediaId) throw new Error(`sendInternalGroup: ${type} requires mediaId`)
+      body[type] = { media_id: params.mediaId }
+    } else {
+      if (!params.text) throw new Error(`sendInternalGroup: ${type} requires text`)
+      body[type] = { content: params.text }
+    }
+    const json = await this.requireClient().post('/cgi-bin/appchat/send', body)
+    return {
+      ok: Number(json.errcode ?? 0) === 0,
+      msgId: json.msgid ? String(json.msgid) : undefined,
+    }
   }
 
   /**
