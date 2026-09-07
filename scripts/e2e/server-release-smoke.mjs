@@ -3,6 +3,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import tls from "node:tls";
+
+// The `runtime` block each session is created with. `k8s` drives the gvisor
+// pod path, which is what production runs; it needs a cluster reachable through
+// the server's k8s config, so it is not in the default list.
+const RUNTIME_REQUESTS = {
+  host: { type: "host", hostMode: "session" },
+  docker: { type: "docker", dockerMode: "session" },
+  k8s: { type: "k8s" },
+};
 
 function parseArgs(argv) {
   const result = {
@@ -30,7 +40,7 @@ function parseArgs(argv) {
   }
   if (!result.password) throw new Error("--password is required");
   for (const runtime of result.runtimes) {
-    if (runtime !== "host" && runtime !== "docker")
+    if (!RUNTIME_REQUESTS[runtime])
       throw new Error(`Unsupported runtime: ${runtime}`);
   }
   return result;
@@ -144,17 +154,26 @@ function extractFrames(buffer) {
 
 async function runConversation(wsUrl, token, runtime) {
   const url = new URL(wsUrl);
-  assert(url.protocol === "ws:", `Expected ws URL, got ${wsUrl}`);
+  // A server behind a TLS reverse proxy advertises wss:// (derived from
+  // publicBaseUrl), which is the shape a production deployment has.
+  const secure = url.protocol === "wss:";
+  assert(
+    secure || url.protocol === "ws:",
+    `Expected a ws or wss URL, got ${wsUrl}`,
+  );
   const nonce = `MOSS_E2E_TOKEN_${runtime}_${crypto.randomUUID().replaceAll("-", "")}`;
+  // The mock LLM answers `MOSS_E2E_OK:<nonce>`; a real model answers with the
+  // token alone, as the prompt asks. Assert on the nonce, which both satisfy,
+  // so this test works against a live model as well as the mock.
   const expected = `MOSS_E2E_OK:${nonce}`;
   const eventPath = `${options.outputDir}/${runtime}-session-events.jsonl`;
   fs.writeFileSync(eventPath, "");
 
   await new Promise((resolve, reject) => {
-    const socket = net.createConnection({
-      host: url.hostname,
-      port: Number(url.port || 80),
-    });
+    const port = Number(url.port || (secure ? 443 : 80));
+    const socket = secure
+      ? tls.connect({ host: url.hostname, port, servername: url.hostname })
+      : net.createConnection({ host: url.hostname, port });
     const key = crypto.randomBytes(16).toString("base64");
     const expectedAccept = crypto
       .createHash("sha1")
@@ -238,8 +257,8 @@ async function runConversation(wsUrl, token, runtime) {
       }
       if (sawAssistant && sawResult) {
         assert(
-          assistantText.includes(expected),
-          `${runtime} assistant response did not include ${expected}: ${assistantText}`,
+          assistantText.includes(nonce),
+          `${runtime} assistant response did not include ${nonce}: ${assistantText}`,
         );
         socket.write(encodeControlFrame(0x8));
         finish();
@@ -409,10 +428,7 @@ async function main() {
         headers: authorization(token),
         body: JSON.stringify({
           dangerously_skip_permissions: true,
-          runtime:
-            runtime === "host"
-              ? { type: "host", hostMode: "session" }
-              : { type: "docker", dockerMode: "session" },
+          runtime: RUNTIME_REQUESTS[runtime],
         }),
       });
       sessionId = created?.session_id || "";
@@ -435,10 +451,7 @@ async function main() {
         "active",
         "detached",
       ]);
-      await waitForSessionContext(sessionId, token, [
-        conversation.nonce,
-        conversation.expected,
-      ]);
+      await waitForSessionContext(sessionId, token, [conversation.nonce]);
       summaries.push({
         runtime,
         sessionId,
