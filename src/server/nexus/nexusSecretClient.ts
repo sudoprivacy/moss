@@ -30,9 +30,9 @@ import type {
   SecretMetadata as ProtoSecretMetadata,
 } from './generated/nexus/secrets/v1/secrets_pb.js'
 
-/** native NexusGrpcClient 的最小派发接口（由 NexusClient 注入实例）。 */
+/** 客户端派发接口的最小子集（由 NexusClient 注入实例）。 */
 export interface NativeDispatch {
-  callBinary(method: string, payload: Buffer, authToken: string): Buffer
+  callBinary(method: string, payload: Buffer, authToken: string): Promise<Buffer>
 }
 
 export interface SecretEntryMetadata {
@@ -68,56 +68,56 @@ export class NexusSecretClient {
     private readonly authToken: string,
   ) {}
 
-  private dispatch(method: string, payload: Uint8Array): Buffer {
+  private dispatch(method: string, payload: Uint8Array): Promise<Buffer> {
     return this.native.callBinary(`password-vault.${method}`, Buffer.from(payload), this.authToken)
   }
 
   /** 写入（存在则新版本；隐式恢复软删）。 */
-  putSecret(namespace: string, key: string, value: string): SecretEntryMetadata {
+  async putSecret(namespace: string, key: string, value: string): Promise<SecretEntryMetadata> {
     const req = create(PutSecretRequestSchema, { namespace, key, value })
     const resp = fromBinary(
       PutSecretResponseSchema,
-      new Uint8Array(this.dispatch('secret_put', toBinary(PutSecretRequestSchema, req))),
+      new Uint8Array(await this.dispatch('secret_put', toBinary(PutSecretRequestSchema, req))),
     )
     return toMetadata(resp.metadata!)
   }
 
   /** 读单个（对不存在/软删的 key 由服务端报错——上层负责存在性语义）。 */
-  getSecret(namespace: string, key: string): { value: string; version: number } {
+  async getSecret(namespace: string, key: string): Promise<{ value: string; version: number }> {
     const req = create(GetSecretRequestSchema, { namespace, key })
     const resp = fromBinary(
       GetSecretResponseSchema,
-      new Uint8Array(this.dispatch('secret_get', toBinary(GetSecretRequestSchema, req))),
+      new Uint8Array(await this.dispatch('secret_get', toBinary(GetSecretRequestSchema, req))),
     )
     return { value: resp.value, version: resp.version }
   }
 
   /** 软删。 */
-  deleteSecret(namespace: string, key: string): boolean {
+  async deleteSecret(namespace: string, key: string): Promise<boolean> {
     const req = create(DeleteSecretRequestSchema, { namespace, key })
     const resp = fromBinary(
       DeleteSecretResponseSchema,
-      new Uint8Array(this.dispatch('secret_delete', toBinary(DeleteSecretRequestSchema, req))),
+      new Uint8Array(await this.dispatch('secret_delete', toBinary(DeleteSecretRequestSchema, req))),
     )
     return resp.deleted
   }
 
   /** 恢复软删（对未软删的 key 幂等成功）。 */
-  restoreSecret(namespace: string, key: string): boolean {
+  async restoreSecret(namespace: string, key: string): Promise<boolean> {
     const req = create(RestoreSecretRequestSchema, { namespace, key })
     const resp = fromBinary(
       RestoreSecretResponseSchema,
-      new Uint8Array(this.dispatch('secret_restore', toBinary(RestoreSecretRequestSchema, req))),
+      new Uint8Array(await this.dispatch('secret_restore', toBinary(RestoreSecretRequestSchema, req))),
     )
     return resp.restored
   }
 
   /** 元数据列表（无值）。namespace 省略 = 全量。 */
-  listSecrets(namespace?: string, includeDeleted = false): SecretEntryMetadata[] {
+  async listSecrets(namespace?: string, includeDeleted = false): Promise<SecretEntryMetadata[]> {
     const req = create(ListSecretsRequestSchema, { namespace, includeDeleted })
     const resp = fromBinary(
       ListSecretsResponseSchema,
-      new Uint8Array(this.dispatch('secret_list', toBinary(ListSecretsRequestSchema, req))),
+      new Uint8Array(await this.dispatch('secret_list', toBinary(ListSecretsRequestSchema, req))),
     )
     return resp.secrets.map(toMetadata)
   }
@@ -127,13 +127,13 @@ export class NexusSecretClient {
    * 不存在/软删的键被服务端静默省略（不报错）——这是上层判存在性的
    * 唯一可靠机制（错误文本不可区分，见文件头注释）。
    */
-  batchGet(queries: Array<{ namespace: string; key: string }>): Record<string, string> {
+  async batchGet(queries: Array<{ namespace: string; key: string }>): Promise<Record<string, string>> {
     const req = create(BatchGetSecretsRequestSchema, {
       queries: queries.map(q => create(GetSecretRequestSchema, q)),
     })
     const resp = fromBinary(
       BatchGetSecretsResponseSchema,
-      new Uint8Array(this.dispatch('secret_batch_get', toBinary(BatchGetSecretsRequestSchema, req))),
+      new Uint8Array(await this.dispatch('secret_batch_get', toBinary(BatchGetSecretsRequestSchema, req))),
     )
     return { ...resp.secrets }
   }

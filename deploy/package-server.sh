@@ -12,10 +12,6 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-if [ ! -d "$ROOT_DIR/.sudocode-build-context" ]; then
-  echo "Missing .sudocode-build-context; stage sudocode before packaging." >&2
-  exit 1
-fi
 mkdir -p "$OUTPUT_DIR"
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
@@ -35,7 +31,6 @@ test -x "$STAGE_DIR/moss-server/app/bin/nexus/nexusd"
 test -f "$STAGE_DIR/moss-server/app/bin/nexus/plugins/libnexus_vault.so"
 test -f "$STAGE_DIR/moss-server/app/bin/nexus/plugins/libnexus_vault.so.sig"
 test -x "$STAGE_DIR/moss-server/app/bin/scode"
-test -f "$STAGE_DIR/moss-server/app/native/nexus-napi/nexus-napi.node"
 test -f "$STAGE_DIR/moss-server/app/admin/dist/index.html"
 test -f "$STAGE_DIR/moss-server/app/models/Xenova/multilingual-e5-small/onnx/model_quantized.onnx"
 
