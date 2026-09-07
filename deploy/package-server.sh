@@ -12,10 +12,6 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-if [ ! -d "$ROOT_DIR/.sudocode-build-context" ]; then
-  echo "Missing .sudocode-build-context; stage sudocode before packaging." >&2
-  exit 1
-fi
 mkdir -p "$OUTPUT_DIR"
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
