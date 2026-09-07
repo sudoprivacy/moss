@@ -157,8 +157,12 @@ MOCK_URL="http://$NETWORK_GATEWAY:$MOCK_PORT/v1"
 curl -fsS "http://127.0.0.1:$MOCK_PORT/healthz" >/dev/null
 curl -fsS "http://$NETWORK_GATEWAY:$MOCK_PORT/healthz" >/dev/null
 
+# This smoke test exercises the Docker session runtime end to end -- it runs the
+# loaded runtime image directly and reaches the mock LLM over the moss-network
+# gateway -- so it pins the runtime rather than riding the installer's default.
 sudo env \
   MOSS_NON_INTERACTIVE=1 \
+  MOSS_RUNTIME=docker \
   MOSS_INSTALL_USER="$TEST_USER" \
   MOSS_PORT="$PORT" \
   MOSS_ADVERTISED_HOST=127.0.0.1 \
