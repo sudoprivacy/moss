@@ -14,6 +14,7 @@
     "username": "admin",
     "password": "admin"
   },
+  "//runtimeDefaults.type": "THE runtime switch: 'docker' | 'k8s' | 'host'. Set to 'k8s' to run every session as a gvisor pod (see the k8s block below). Env override: MOSS_DEFAULT_RUNTIME.",
   "runtimeDefaults": {
     "type": "docker",
     "engine": "scode",
@@ -44,6 +45,26 @@
       "cpus": "2",
       "nofile": 4096
     }
+  },
+  "//k8s": "gvisor pod runtime. Only consulted when runtimeDefaults.type='k8s'. Every field below is env-overridable (see per-field notes); the file values persist so a plain restart keeps k8s mode.",
+  "k8s": {
+    "//image": "scode pod image (scode is baked in — nothing staged on the node). 'moss-runtime:latest' is a stable alias install-k3s.sh tags onto whatever version it imported, so this never needs re-pinning per release. Env: MOSS_SCODE_IMAGE.",
+    "image": "moss-runtime:latest",
+    "//namespace": "Session pods live here. Matches install-k3s.sh. Env: MOSS_K8S_NAMESPACE.",
+    "namespace": "moss-sessions",
+    "//runtimeClassName": "gvisor RuntimeClass installed by install-k3s.sh. Set to \"\" (empty) to omit it on a customer cluster that has no gvisor RuntimeClass — pods then use the cluster's default runtime. Env: MOSS_K8S_RUNTIME_CLASS.",
+    "runtimeClassName": "gvisor",
+    "//kubeconfig": "kubeconfig install-k3s.sh generates, written beside this server.json. For an existing customer cluster, point this at their kubeconfig instead. Env: MOSS_K8S_KUBECONFIG.",
+    "kubeconfig": "~/.moss/server/moss-k3s-kubeconfig.yaml",
+    "//imagePullPolicy": "Pod imagePullPolicy. 'IfNotPresent' suits a node-imported image (k3s flow) AND a customer-registry image (pulled when absent). Use 'Always' to always pull. Env: MOSS_K8S_IMAGE_PULL_POLICY.",
+    "imagePullPolicy": "IfNotPresent",
+    "//imagePullSecrets": "Names of pre-created dockerconfigjson Secrets for pulling the runtime image from a private registry (customer clusters). Empty = none. Env: MOSS_K8S_IMAGE_PULL_SECRETS (comma-separated).",
+    "imagePullSecrets": [],
+    "cpuLimit": "2",
+    "memoryLimit": "4Gi",
+    "//podReadyTimeoutSec": "Env: MOSS_K8S_POD_READY_TIMEOUT_SEC.",
+    "podReadyTimeoutSec": 90,
+    "labels": {}
   },
   "recovery": {
     "startupPolicy": "reattach-or-resume",

@@ -1,0 +1,2 @@
+# Offline air-gap dependencies (large binaries) — regenerate with ./fetch-offline-deps.sh
+offline/

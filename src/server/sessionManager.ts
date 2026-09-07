@@ -46,8 +46,6 @@ export type SessionRuntimeOptions = {
   k8sRuntimeClassName?: string
   /** Path to the kubeconfig that reaches the k3s API server. */
   k8sKubeconfig?: string
-  /** Path of the scode binary inside the pod. Defaults to /usr/local/bin/scode. */
-  k8sScodePath?: string
   /** Memory reuse boundary, analogous to dockerMode/hostMode. */
   k8sMode?: 'session' | 'user'
 }
@@ -72,7 +70,6 @@ export type SessionRuntimeInfo = {
   k8sNamespace?: string
   k8sRuntimeClassName?: string
   k8sKubeconfig?: string
-  k8sScodePath?: string
   k8sMode?: 'session' | 'user'
   /** Deterministic pod name (scode-<sessionId>). Set by K8sBackend. */
   k8sPodName?: string

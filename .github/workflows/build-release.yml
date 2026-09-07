@@ -119,6 +119,12 @@ jobs:
           set -euo pipefail
           sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/install.sh > dist/install.sh
           chmod +x dist/install.sh
+          # k3s (gvisor) installer: same release-tag stamp so it imports the SAME
+          # moss-runtime version. Companions ship verbatim (no stamp needed).
+          sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/k3s/install-k3s.sh > dist/install-k3s.sh
+          chmod +x dist/install-k3s.sh
+          cp deploy/k3s/uninstall-k3s.sh deploy/k3s/fetch-offline-deps.sh dist/
+          chmod +x dist/uninstall-k3s.sh dist/fetch-offline-deps.sh
           SERVER_ARCHIVE="moss-server-$VERSION-linux-$ARCH.tar.gz"
           RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
           (
@@ -146,6 +152,12 @@ jobs:
           ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
           EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "server-v$VERSION")"
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh
+          # k3s installer carries the same stamp and must ship alongside install.sh.
+          ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install-k3s.sh
+          grep -Fq "$EXPECTED_RELEASE_LINE" dist/install-k3s.sh
+          test -x dist/install-k3s.sh
+          test -x dist/uninstall-k3s.sh
+          test -x dist/fetch-offline-deps.sh
           ! grep -Fq 'api.github.com/repos' dist/install.sh
           grep -Fq 'Offline files are ready' dist/install.sh
           grep -Fq 'sudo systemctl start' dist/install.sh
@@ -215,6 +227,9 @@ jobs:
             dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
             dist/SHA256SUMS-amd64
             dist/install.sh
+            dist/install-k3s.sh
+            dist/uninstall-k3s.sh
+            dist/fetch-offline-deps.sh
             dist/moss-server-e2e-report-${{ steps.release.outputs.version }}-amd64.zip
           retention-days: 30
 
@@ -241,7 +256,12 @@ jobs:
           find artifacts -type f -name 'moss-server-e2e-report-*.zip' -exec cp {} release-assets/ \;
           find artifacts -type f -name 'SHA256SUMS-*' -exec cat {} \; | sort -k2 > release-assets/SHA256SUMS
           cp "$(find artifacts -type f -name install.sh -print -quit)" release-assets/install.sh
-          chmod +x release-assets/install.sh
+          cp "$(find artifacts -type f -name install-k3s.sh -print -quit)" release-assets/install-k3s.sh
+          cp "$(find artifacts -type f -name uninstall-k3s.sh -print -quit)" release-assets/uninstall-k3s.sh
+          cp "$(find artifacts -type f -name fetch-offline-deps.sh -print -quit)" release-assets/fetch-offline-deps.sh
+          chmod +x release-assets/install.sh release-assets/install-k3s.sh \
+            release-assets/uninstall-k3s.sh release-assets/fetch-offline-deps.sh
+          # SHA256SUMS covers only the tarballs (scripts stay out, like install.sh).
           (cd release-assets && sha256sum -c SHA256SUMS)
           ls -lh release-assets
 
@@ -270,6 +290,9 @@ jobs:
           files: |
             release-assets/*.tar.gz
             release-assets/install.sh
+            release-assets/install-k3s.sh
+            release-assets/uninstall-k3s.sh
+            release-assets/fetch-offline-deps.sh
             release-assets/SHA256SUMS
             release-assets/moss-server-e2e-report-*.zip
 

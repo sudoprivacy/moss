@@ -145,18 +145,24 @@ export const serverFileConfigSchema = lazySchema(() =>
     // when runtimeDefaults.type='k8s' or a session requests runtime.type='k8s'.
     k8s: z.object({
       image: z.string().optional(),
-      namespace: z.string().default('default'),
+      namespace: z.string().default('moss-sessions'),
+      // Empty string → omit runtimeClassName (customer cluster without gvisor).
       runtimeClassName: z.string().default('gvisor'),
       kubeconfig: z.string().optional(),
-      scodePath: z.string().default('/usr/local/bin/scode'),
+      // Pod imagePullPolicy. IfNotPresent works for both a node-imported image
+      // (our k3s flow) and a customer registry image (pulled when absent).
+      imagePullPolicy: z.string().default('IfNotPresent'),
+      // Names of pre-created dockerconfigjson pull secrets (private registries).
+      imagePullSecrets: z.array(z.string()).default([]),
       cpuLimit: z.string().default('2'),
       memoryLimit: z.string().default('4Gi'),
       podReadyTimeoutSec: z.number().int().min(1).default(90),
       labels: z.record(z.string(), z.string()).default({}),
     }).default({
-      namespace: 'default',
+      namespace: 'moss-sessions',
       runtimeClassName: 'gvisor',
-      scodePath: '/usr/local/bin/scode',
+      imagePullPolicy: 'IfNotPresent',
+      imagePullSecrets: [],
       cpuLimit: '2',
       memoryLimit: '4Gi',
       podReadyTimeoutSec: 90,
@@ -353,14 +359,15 @@ export type ServerConfig = {
    * gvisor-isolated k8s pod runtime settings (single-node k3s PoC). Consumed
    * by K8sBackend when a session's runtime.type='k8s'. Env overrides:
    * MOSS_SCODE_IMAGE, MOSS_K8S_NAMESPACE, MOSS_K8S_RUNTIME_CLASS,
-   * MOSS_K8S_KUBECONFIG, MOSS_K8S_SCODE_PATH.
+   * MOSS_K8S_KUBECONFIG. (scode ships in the image — no node-side path.)
    */
   k8s?: {
     image?: string
     namespace: string
     runtimeClassName: string
     kubeconfig?: string
-    scodePath: string
+    imagePullPolicy: string
+    imagePullSecrets: string[]
     cpuLimit: string
     memoryLimit: string
     podReadyTimeoutSec: number

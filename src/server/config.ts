@@ -57,9 +57,8 @@ export function getDefaultServerConfig(): ServerFileConfig {
       labels: {},
     },
     k8s: {
-      namespace: 'default',
+      namespace: 'moss-sessions',
       runtimeClassName: 'gvisor',
-      scodePath: '/usr/local/bin/scode',
       cpuLimit: '2',
       memoryLimit: '4Gi',
       podReadyTimeoutSec: 90,
@@ -142,7 +141,15 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     workspace: raw.runtimeDefaults.workspace
       ? normalizePath(raw.runtimeDefaults.workspace)
       : undefined,
-    defaultRuntime: raw.runtimeDefaults.type,
+    // MOSS_DEFAULT_RUNTIME lets the k3s deploy flip the server to k8s without
+    // hand-editing server.json (the rest of the k8s wiring is already env-driven
+    // via MOSS_K8S_*). Ignored unless it's one of the valid runtime types.
+    defaultRuntime:
+      process.env.MOSS_DEFAULT_RUNTIME === 'host' ||
+      process.env.MOSS_DEFAULT_RUNTIME === 'docker' ||
+      process.env.MOSS_DEFAULT_RUNTIME === 'k8s'
+        ? process.env.MOSS_DEFAULT_RUNTIME
+        : raw.runtimeDefaults.type,
     engine: raw.runtimeDefaults.engine,
     scodePath: raw.runtimeDefaults.scodePath
       ? normalizePath(raw.runtimeDefaults.scodePath)
@@ -182,11 +189,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       // MOSS_SCODE_IMAGE is the primary env knob for the scode pod image.
       image: process.env.MOSS_SCODE_IMAGE || raw.k8s.image,
       namespace: process.env.MOSS_K8S_NAMESPACE || raw.k8s.namespace,
-      runtimeClassName: process.env.MOSS_K8S_RUNTIME_CLASS || raw.k8s.runtimeClassName,
+      // `??` (not `||`): an explicit empty override means "omit runtimeClassName"
+      // (customer cluster without a gvisor RuntimeClass), so don't fall back.
+      runtimeClassName: process.env.MOSS_K8S_RUNTIME_CLASS ?? raw.k8s.runtimeClassName,
       kubeconfig: (process.env.MOSS_K8S_KUBECONFIG || raw.k8s.kubeconfig)
         ? normalizePath((process.env.MOSS_K8S_KUBECONFIG || raw.k8s.kubeconfig)!)
         : undefined,
-      scodePath: process.env.MOSS_K8S_SCODE_PATH || raw.k8s.scodePath,
+      imagePullPolicy: process.env.MOSS_K8S_IMAGE_PULL_POLICY || raw.k8s.imagePullPolicy,
+      imagePullSecrets: process.env.MOSS_K8S_IMAGE_PULL_SECRETS
+        ? process.env.MOSS_K8S_IMAGE_PULL_SECRETS.split(',').map(s => s.trim()).filter(Boolean)
+        : raw.k8s.imagePullSecrets,
       cpuLimit: raw.k8s.cpuLimit,
       memoryLimit: raw.k8s.memoryLimit,
       podReadyTimeoutSec: readIntEnv('MOSS_K8S_POD_READY_TIMEOUT_SEC', raw.k8s.podReadyTimeoutSec)!,
