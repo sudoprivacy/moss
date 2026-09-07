@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Download every artifact install-k3s.sh needs for a FULLY OFFLINE (air-gapped)
+# Download every artifact `install.sh --role compute` needs for a FULLY OFFLINE
 # install, into ./offline next to this script. Run this ONCE on a networked
 # machine; then ship the whole deploy/k3s directory to the air-gapped host.
 #
-# install-k3s.sh prefers these local files and only falls back to the network
+# The installer prefers these local files and only falls back to the network
 # when a file is missing (OFFLINE_MODE=auto), or requires them (OFFLINE_MODE=on).
 #
 # Usage:
@@ -120,14 +120,14 @@ ls -la "$OFFLINE_DIR"
 cat <<EOF
 
 The scode runtime image (images/moss-runtime-*.tar.gz) was fetched automatically;
-install-k3s.sh imports it into containerd. scode ships inside the image, so the
+the installer imports it into containerd. scode ships inside the image, so the
 node needs nothing else staged.
 
 Optional: drop any extra workload image tarballs into $OFFLINE_DIR/images/ (e.g. a
-busybox for smoke tests). install-k3s.sh imports every *.tar / *.tar.gz /
+busybox for smoke tests). The installer imports every *.tar / *.tar.gz /
 *.tar.zst there into k3s containerd after start. Produce one with:
   docker save <image> -o $OFFLINE_DIR/images/<name>.tar
 
 Then ship the whole deploy/k3s directory to the air-gapped host and run
-  sudo OFFLINE_MODE=on ./install-k3s.sh
+  sudo OFFLINE_MODE=on ./install.sh --role compute
 EOF

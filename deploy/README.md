@@ -3,9 +3,10 @@
 ## 环境要求
 
 - Linux x86_64/amd64，glibc 2.39+（推荐 Ubuntu 24.04+）
-- systemd、Docker 20.10+
+- systemd
 - root/sudo 权限
 - `curl`、`tar`、`gzip`、`sha256sum`
+- 仅当会话运行时选 `docker` 时才需要 Docker 20.10+；默认的 `k8s` 运行时不需要
 
 安装包自带 Node.js 22、编译后的 `moss-server.mjs`、host 模式 `scode`、运行依赖
 和官方 `nexusd-cluster`；Runtime 镜像包含 Docker 模式 `scode`，无需系统 Node.js
@@ -15,6 +16,18 @@ host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
 `/usr/local/bin/scode`，对应 `runtimeDefaults.hostScodePath` 和
 `runtimeDefaults.dockerScodePath`。两者统一读取
 `src/server/nexus/runtime-versions.json` 中的 `scode` 版本；升级时只修改这一处。
+
+## 安装入口
+
+只有一个安装脚本 `install.sh`，用 `--role` 指定这台机器承担什么：
+
+| `--role` | 装什么 | 需要 Docker |
+| --- | --- | --- |
+| `all-in-one`（默认） | 会话运行时（k3s + gvisor + runtime 镜像）+ Moss Server | 否 |
+| `control-plane` | 只装 Moss Server，会话跑在另一台计算节点上 | 仅当选 `docker` 运行时 |
+| `compute` | 只装会话运行时 | 否 |
+
+`install-k3s.sh` 已并入 `install.sh --role compute`，保留的同名脚本只是转发。
 
 ## 在线安装
 
@@ -67,32 +80,44 @@ sudo ./install.sh --offline
 
 目录内包含 `install.sh`、Server 包、Docker Runtime 镜像包和 `SHA256SUMS`。
 
-## k3s（gvisor 隔离运行时）安装
+## 会话运行时（k3s + gvisor）
 
-默认运行时是 Docker。若希望每个会话运行在 gvisor 沙箱 Pod 中，先在**计算节点**
-上一键部署 k3s + gvisor + moss-runtime 镜像（与 Server 同一发布版本）：
+默认运行时是 k8s：每个会话跑在 gvisor 沙箱 Pod 里。单机一次装完：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install-k3s.sh | sudo bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh | sudo bash
+```
+
+Server 和计算节点分开部署时，在**计算节点**上：
+
+```bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
+  | sudo bash -s -- --role compute
 ```
 
 脚本会提示节点 IP、命名空间等必要参数（`--non-interactive` 全部取默认值），完成后
-在 moss server.json 旁写出 `moss-k3s-kubeconfig.yaml`，并打印如何让 moss-server 切到
-k8s 的说明。
+在 moss server.json 旁写出 `moss-k3s-kubeconfig.yaml`，并打印 Server 侧要填的值。
+`--role all-in-one` 会把这些值直接写进 server.json，无需手工编辑。
+
+再在 **Server 机器**上：
+
+```bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
+  | sudo bash -s -- --role control-plane
+```
+
+把计算节点写出的 `moss-k3s-kubeconfig.yaml` 拷到 Server 的安装目录，或在 `server.json`
+的 `k8s.kubeconfig` 里指向它。Server 机器需要有 `kubectl`。
 
 离线安装：在有网络的机器运行 `fetch-offline-deps.sh` 生成 `./offline`，连同 `deploy/k3s`
-目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install-k3s.sh`。
+目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install.sh --role compute`。
 
-部署完成后让 moss-server 使用 k8s，二选一：
-
-- **全新安装**：运行 Server 安装脚本，在“Session runtime”提示处选择 `k8s`（自动写入
-  `k8s` 配置块）。
-- **已安装**：编辑 `~/.moss/server/server.json`，将 `runtimeDefaults.type` 改为 `"k8s"`，
-  重启 moss-server。
+已装好的 Server 改用 k8s：编辑 `~/.moss/server/server.json`，把
+`runtimeDefaults.type` 改成 `"k8s"`，重启 moss-server。
 
 ### 接入已有的 k8s 集群
 
-若客户已有 k8s 集群，无需运行 `install-k3s.sh`，只需在 `server.json` 的 `k8s` 块里
+若客户已有 k8s 集群，无需 `--role compute`，只需在 `server.json` 的 `k8s` 块里
 指向他们的 kubeconfig。moss-server 通过本机 `kubectl` + kubeconfig 操作集群，前提是
 集群满足：
 

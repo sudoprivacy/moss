@@ -119,9 +119,9 @@ jobs:
           set -euo pipefail
           sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/install.sh > dist/install.sh
           chmod +x dist/install.sh
-          # k3s (gvisor) installer: same release-tag stamp so it imports the SAME
-          # moss-runtime version. Companions ship verbatim (no stamp needed).
-          sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/k3s/install-k3s.sh > dist/install-k3s.sh
+          # install-k3s.sh is a compatibility shim for `install.sh --role compute`;
+          # it carries no release tag of its own. Companions ship verbatim.
+          cp deploy/k3s/install-k3s.sh dist/install-k3s.sh
           chmod +x dist/install-k3s.sh
           cp deploy/k3s/uninstall-k3s.sh deploy/k3s/fetch-offline-deps.sh dist/
           chmod +x dist/uninstall-k3s.sh dist/fetch-offline-deps.sh
@@ -152,9 +152,11 @@ jobs:
           ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install.sh
           EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "server-v$VERSION")"
           grep -Fq "$EXPECTED_RELEASE_LINE" dist/install.sh
-          # k3s installer carries the same stamp and must ship alongside install.sh.
-          ! grep -q '@@MOSS_RELEASE_TAG@@' dist/install-k3s.sh
-          grep -Fq "$EXPECTED_RELEASE_LINE" dist/install-k3s.sh
+          # One installer entry point: install.sh takes the role, and the k3s
+          # script is only a shim that forwards to it.
+          grep -Fq -- '--role' dist/install.sh
+          grep -Fq 'all-in-one' dist/install.sh
+          grep -Fq -- '--role compute' dist/install-k3s.sh
           test -x dist/install-k3s.sh
           test -x dist/uninstall-k3s.sh
           test -x dist/fetch-offline-deps.sh
