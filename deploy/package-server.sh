@@ -35,7 +35,6 @@ test -x "$STAGE_DIR/moss-server/app/bin/nexus/nexusd"
 test -f "$STAGE_DIR/moss-server/app/bin/nexus/plugins/libnexus_vault.so"
 test -f "$STAGE_DIR/moss-server/app/bin/nexus/plugins/libnexus_vault.so.sig"
 test -x "$STAGE_DIR/moss-server/app/bin/scode"
-test -f "$STAGE_DIR/moss-server/app/native/nexus-napi/nexus-napi.node"
 test -f "$STAGE_DIR/moss-server/app/admin/dist/index.html"
 test -f "$STAGE_DIR/moss-server/app/models/Xenova/multilingual-e5-small/onnx/model_quantized.onnx"
 

@@ -26,7 +26,7 @@ interface FakeEntry {
 }
 
 /**
- * FakeNative — 模拟 native NexusGrpcClient + 加密服务语义。
+ * FakeNative — 模拟 NexusVfsClient 的派发 + 加密服务语义。
  * 响应用真实 proto 编码构造，因此本测试同时覆盖 nexusSecretClient 的
  * 编解码正确性。业务 NotFound 按点分路由的真实形态压平为
  * "method not found" 字符串抛出（对齐 RustCallError::NotFound 的 Display）。
@@ -43,7 +43,7 @@ class FakeNative {
     this.entries.push({ ns, key, value, version, deleted })
   }
 
-  callBinary(method: string, payload: Buffer, _authToken: string): Buffer {
+  async callBinary(method: string, payload: Buffer, _authToken: string): Promise<Buffer> {
     const short = method.replace('password-vault.', '')
     this.calls.push(short)
     const bytes = new Uint8Array(payload)

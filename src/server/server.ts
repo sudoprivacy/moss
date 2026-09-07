@@ -2622,7 +2622,7 @@ export function startServer(
         const result = configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId))
         if (result.success && nexusClient) {
           try {
-            const configuredNs = nexusClient.listConfiguredNamespaces()
+            const configuredNs = await nexusClient.listConfiguredNamespaces()
             const orgPrefix = `org:${auth.orgId}:`
             result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
               // User-scope items are populated per-user *from the client*, so they
@@ -5543,7 +5543,7 @@ export function startServer(
               ...allDeptItems.filter(i => isAdmin || authorizedDeptIds.has(i.id as number))
             ]
             if (nexusClient) {
-              const configuredNs = nexusClient.listConfiguredNamespaces()
+              const configuredNs = await nexusClient.listConfiguredNamespaces()
               const orgPrefix = `org:${auth.orgId}:`
               // The user's department chain (self-first) for hierarchical
               // inheritance: an item is usable if the user's own dept OR any

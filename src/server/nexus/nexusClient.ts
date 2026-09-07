@@ -2,7 +2,7 @@
  * nexusClient — moss 侧 Nexus secrets 门面。
  *
  * 存储通道：vault 插件 GenericSecretsService（AES-256-GCM 服务端加密，经
- * native callBinary 点分路由 "password-vault.secret_*"，见 nexusSecretClient.ts）。
+ * callBinary 点分路由 "password-vault.secret_*"，见 nexusSecretClient.ts）。
  * 公开方法签名与语义适配（null 映射、前缀过滤、status 映射）全部收在本
  * 门面层，上层消费方无感。
  *
@@ -19,26 +19,9 @@
  *    判定阶段返回 null）
  */
 
-import { NexusSecretClient } from './nexusSecretClient.js'
+import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 
-// Lazy-load the native gRPC client
-function loadNativeBinding(): typeof import('../../../native/nexus-napi') {
-  try {
-    const { app } = require('electron')
-    const path = require('path')
-    const appRoot = app.isPackaged
-      ? app.getAppPath().replace('app.asar', 'app.asar.unpacked')
-      : app.getAppPath()
-    return require(path.join(appRoot, 'native', 'nexus-napi'))
-  } catch {
-    // Fallback for non-Electron environment (standalone server)
-    try {
-      return require('../../../native/nexus-napi')
-    } catch {
-      throw new Error('nexus-napi native module not available. Run `bun run build:native` first.')
-    }
-  }
-}
+import { NexusSecretClient } from './nexusSecretClient.js'
 
 interface SecretMetadata {
   namespace: string
@@ -58,12 +41,11 @@ export type NexusClientTlsConfig = {
 }
 
 export class NexusClient {
-  private client: InstanceType<ReturnType<typeof loadNativeBinding>['NexusGrpcClient']> | null = null
+  private client: NexusVfsClient | null = null
   private secretClient: NexusSecretClient | null = null
   private readonly endpoint: string
   private readonly authToken: string
   private readonly tls: NexusClientTlsConfig | null
-  private nativeBinding: ReturnType<typeof loadNativeBinding> | null = null
 
   constructor(grpcEndpoint: string, authToken = '', tls: NexusClientTlsConfig | null = null) {
     this.endpoint = grpcEndpoint
@@ -71,19 +53,17 @@ export class NexusClient {
     this.tls = tls
   }
 
-  private getClient(): InstanceType<ReturnType<typeof loadNativeBinding>['NexusGrpcClient']> {
+  private getClient(): NexusVfsClient {
     if (!this.client) {
-      this.nativeBinding = loadNativeBinding()
       // mTLS to an auth-on cluster vs. plaintext trusted-loopback serve-local.
       this.client = this.tls
-        ? this.nativeBinding.NexusGrpcClient.withMtls(
-            this.endpoint,
-            this.tls.caPath,
-            this.tls.certPath,
-            this.tls.keyPath,
-            this.tls.serverName,
-          )
-        : new this.nativeBinding.NexusGrpcClient(this.endpoint)
+        ? NexusVfsClient.withMtls(this.endpoint, {
+            caPath: this.tls.caPath,
+            certPath: this.tls.certPath,
+            keyPath: this.tls.keyPath,
+            serverName: this.tls.serverName,
+          })
+        : new NexusVfsClient(this.endpoint)
     }
     return this.client
   }
@@ -99,50 +79,49 @@ export class NexusClient {
 
   async putSecret(namespace: string, key: string, value: string, subject?: string): Promise<void> {
     void subject
-    this.getSecretClient().putSecret(namespace, key, value)
+    await this.getSecretClient().putSecret(namespace, key, value)
   }
 
   async getSecret(namespace: string, key: string, subject?: string): Promise<{ value: string | null; status: string; version: number } | null> {
     void subject
     // 存在性用 batch_get 的静默省略语义判定（文件头语义要点）
-    const values = this.getSecretClient().batchGet([{ namespace, key }])
+    const values = await this.getSecretClient().batchGet([{ namespace, key }])
     if (values[`${namespace}:${key}`] === undefined) return null
-    const { value, version } = this.getSecretClient().getSecret(namespace, key)
+    const { value, version } = await this.getSecretClient().getSecret(namespace, key)
     return { value, status: 'enabled', version }
   }
 
   /** 写路径预探：metadata 判定（含软删项——enable 的目标恰是软删项）。 */
-  private existsIncludingDeleted(namespace: string, key: string): boolean {
-    return this.getSecretClient()
-      .listSecrets(namespace, true)
-      .some(m => m.key === key)
+  private async existsIncludingDeleted(namespace: string, key: string): Promise<boolean> {
+    const metadata = await this.getSecretClient().listSecrets(namespace, true)
+    return metadata.some(m => m.key === key)
   }
 
   async deleteSecret(namespace: string, key: string, subject?: string): Promise<void> {
     void subject
-    if (!this.existsIncludingDeleted(namespace, key)) return
-    this.getSecretClient().deleteSecret(namespace, key)
+    if (!(await this.existsIncludingDeleted(namespace, key))) return
+    await this.getSecretClient().deleteSecret(namespace, key)
   }
 
   async enableSecret(namespace: string, key: string, subject?: string): Promise<void> {
     void subject
-    if (!this.existsIncludingDeleted(namespace, key)) return
-    this.getSecretClient().restoreSecret(namespace, key)
+    if (!(await this.existsIncludingDeleted(namespace, key))) return
+    await this.getSecretClient().restoreSecret(namespace, key)
   }
 
   async disableSecret(namespace: string, key: string, subject?: string): Promise<void> {
     void subject
-    if (!this.existsIncludingDeleted(namespace, key)) return
-    this.getSecretClient().deleteSecret(namespace, key)
+    if (!(await this.existsIncludingDeleted(namespace, key))) return
+    await this.getSecretClient().deleteSecret(namespace, key)
   }
 
   async listSecrets(namespace?: string, subject?: string): Promise<SecretMetadata[]> {
     void subject
     const secretClient = this.getSecretClient()
-    const all = secretClient.listSecrets(undefined, true)
+    const all = await secretClient.listSecrets(undefined, true)
     const matchesPrefix = (ns: string) => !namespace || ns === namespace || ns.startsWith(`${namespace}:`)
     const filtered = all.filter(m => matchesPrefix(m.namespace))
-    const values = secretClient.batchGet(filtered.map(m => ({ namespace: m.namespace, key: m.key })))
+    const values = await secretClient.batchGet(filtered.map(m => ({ namespace: m.namespace, key: m.key })))
     return filtered.map(m => ({
       namespace: m.namespace,
       key: m.key,
@@ -156,8 +135,8 @@ export class NexusClient {
    * List namespaces that have at least one secret record.
    * Reads the encrypted service's metadata list — no VFS reads.
    */
-  listConfiguredNamespaces(prefix?: string): Set<string> {
-    const all = this.getSecretClient().listSecrets(undefined, true)
+  async listConfiguredNamespaces(prefix?: string): Promise<Set<string>> {
+    const all = await this.getSecretClient().listSecrets(undefined, true)
     const out = new Set<string>()
     for (const m of all) {
       if (!prefix || m.namespace === prefix || m.namespace.startsWith(`${prefix}:`)) {
