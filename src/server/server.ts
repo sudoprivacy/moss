@@ -116,6 +116,9 @@ import './sources/wecomDrive.js'
 // Corp-app connectors register themselves on import.
 import './corpapps/wecomApp.js'
 import './corpapps/wecomMsgAudit.js'
+import { WeComMsgAuditConnector } from './corpapps/wecomMsgAudit.js'
+import { MsgAuditWorker } from './corpapps/msgaudit/worker.js'
+import type { PullConfig as MsgAuditPullConfig } from './corpapps/msgaudit/puller.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
 import { configItemToRule } from './authProxy/authProxyServer.js'
@@ -1762,6 +1765,32 @@ export function startServer(
     },
   )
   sourceSyncWorker.start()
+
+  // 企微会话存档: poll enabled archive instances for chat records.
+  // Each pull runs in a forked child (the WeCom finance SDK is a native
+  // .so whose crash is not catchable), and instances without pull
+  // credentials configured are skipped — callback-only is a valid state.
+  const msgAuditWorker = new MsgAuditWorker(async () => {
+    const configs: MsgAuditPullConfig[] = []
+    const { readSecret } = await import('./sources/secrets.js')
+    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+      try {
+        const cfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+        const creds =
+          typeof row.credentials_secret_key === 'string' && row.credentials_secret_key
+            ? await readSecret(row.credentials_secret_key)
+            : {}
+        const connector = new WeComMsgAuditConnector()
+        await connector.init(cfg, creds)
+        const pull = connector.pullConfig(String(row.id))
+        if (pull) configs.push(pull)
+      } catch (err) {
+        console.error(`[msgaudit] skip instance ${row.id}:`, err instanceof Error ? err.message : err)
+      }
+    }
+    return configs
+  })
+  msgAuditWorker.start()
 
   // Start cron service for scheduled task execution
   cronService.start().catch(err => {
@@ -8761,6 +8790,7 @@ export function startServer(
       cronService.stop()
       cabinFlightAutomation?.stop()
       wss.close()
+      msgAuditWorker.stop()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())

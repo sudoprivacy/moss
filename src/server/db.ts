@@ -3204,6 +3204,17 @@ export class DirectConnectStore {
     return (this.db.prepare(`SELECT * FROM corp_apps WHERE id = ?`).get(id) as SqlRow) ?? null
   }
 
+  /**
+   * Cross-org listing of enabled instances of one type. Used by the
+   * 会话存档 pull worker, which is a background loop with no caller org
+   * context (like the callback listener above).
+   */
+  listAllCorpAppsByType(type: string): SqlRow[] {
+    return this.db
+      .prepare(`SELECT * FROM corp_apps WHERE type = ? AND enabled = 1 ORDER BY created_at`)
+      .all(type) as SqlRow[]
+  }
+
   getCorpAppByName(orgId: string, name: string): SqlRow | null {
     return (this.db.prepare(`SELECT * FROM corp_apps WHERE org_id = ? AND name = ?`).get(orgId, name) as SqlRow) ?? null
   }
