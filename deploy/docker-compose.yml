@@ -7,11 +7,17 @@ services:
     restart: always
     ports:
       - "${MOSS_PORT:-43127}:43127"
+      # 企业应用回调监听器（会话存档 / 自建应用接收消息）。独立端口，只服务
+      # /api/v1/corp-apps/callback/:id，不暴露 admin/API 路由。未设置
+      # MOSS_CALLBACK_PORT 时监听器不启动，企微的 URL 验证会失败。
+      - "${MOSS_CALLBACK_PORT:-43128}:43128"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.moss:/root/.moss
       - ./data:/app/data
       - ./server.json:/app/server.json:ro
+      # 宿主机脚本目录（如 OAuth2 凭证刷新脚本，见 deploy/oauth2_resolve_refresh.sh.sample）。
+      - ./scripts:/app/scripts
     # 允许 Node.js 创建工作线程
     security_opt:
       - seccomp:unconfined
@@ -19,8 +25,16 @@ services:
       - SYS_ADMIN
     environment:
       - MOSS_SERVER_CONFIG=/app/server.json
+      # scode 子容器回连 moss 的地址。不设置时服务端会推导为
+      # http://127.0.0.1:43127（见 server.ts），那在容器里指向子容器自身，
+      # 因此 Docker 部署必须显式指向本容器名。
+      - MOSS_SERVER_URL=http://moss-server:43127
       - MOSS_HOME=/root/.moss
       - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
+      - MOSS_CALLBACK_PORT=43128
+      # wiki 资源令牌的签名密钥（config.ts / wikiResourceToken.ts）。
+      # 值放在 .env 中，不要写进本文件。
+      - MOSS_RESOURCE_TOKEN_SECRET=${MOSS_RESOURCE_TOKEN_SECRET}
       # Auth proxy must bind all interfaces so session containers can reach it by
       # container name over moss-network (it injects per-user credentials into
       # outbound calls; still gated by the per-session bearer token). The URL
