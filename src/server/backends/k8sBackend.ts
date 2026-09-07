@@ -544,8 +544,15 @@ async function ensureNamespace(kubeconfig: string | undefined, namespace: string
   try {
     await execFileAsync('kubectl', [...base, 'get', 'namespace', namespace], { windowsHide: true })
     return
-  } catch {
-    // Not found (or transient) — attempt to create it below.
+  } catch (getErr) {
+    const getMsg = getErr instanceof Error ? getErr.message : String(getErr)
+    // Our install-k3s.sh kubeconfig authenticates as a namespace-scoped
+    // ServiceAccount (moss-runner) that cannot read or create cluster-scoped
+    // namespaces. It only authenticates because that namespace already exists,
+    // so a Forbidden here means "present, carry on" — attempting create would
+    // just fail with another Forbidden. A genuine NotFound (broad customer
+    // kubeconfig) falls through to the create below.
+    if (/forbidden/i.test(getMsg)) return
   }
   try {
     await execFileAsync('kubectl', [...base, 'create', 'namespace', namespace], { windowsHide: true })
