@@ -1191,14 +1191,17 @@ NODE
 SETTINGS_PATH="$INSTALL_DIR/.moss/settings.json"
 if [ "$EXISTING_INSTALL" = 0 ]; then
   SETTINGS_PATH="$SETTINGS_PATH" ANTHROPIC_BASE_URL_VALUE="$ANTHROPIC_BASE_URL_VALUE" \
-  ANTHROPIC_API_KEY_VALUE="$ANTHROPIC_API_KEY_VALUE" "$RELEASE_DIR/node/bin/node" <<'NODE'
+  "$RELEASE_DIR/node/bin/node" <<'NODE'
 const fs = require('node:fs')
 const settingsPath = process.env.SETTINGS_PATH
 let settings = {}
 if (fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
 settings.env = { ...settings.env }
+// ANTHROPIC_BASE_URL is non-sensitive and read straight from settings.env. The
+// API key is sensitive: the server keeps it in the Nexus vault, never in this
+// file, so it is seeded via the system-settings API once the server (and its
+// vault) is up — see the post-health-check step below.
 if (process.env.ANTHROPIC_BASE_URL_VALUE) settings.env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL_VALUE
-if (process.env.ANTHROPIC_API_KEY_VALUE) settings.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY_VALUE
 fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
 fs.chmodSync(settingsPath, 0o600)
 NODE
@@ -1346,6 +1349,38 @@ fi
 
 SERVICE_STOPPED=0
 trap - ERR
+
+# Seed the model API key into the Nexus secrets vault (fresh installs only).
+# The key is sensitive: it is never written to settings.json, so the vault is
+# its only home. The vault only exists once the server has started, which the
+# health check above just confirmed (/healthz is registered after Nexus is up,
+# see startStandaloneServer.ts). We authenticate as the bootstrap admin and
+# PATCH the system settings — the sole write path into the vault for this key.
+# Failures here are non-fatal: the install still succeeds and the operator can
+# set the key later in Admin → Settings.
+if [ "$EXISTING_INSTALL" = 0 ] && [ -n "$ANTHROPIC_API_KEY_VALUE" ]; then
+  log "Seeding model API key into the secrets vault"
+  SEED_BASE="http://127.0.0.1:$MOSS_PORT_VALUE"
+  SEED_NODE="$RELEASE_DIR/node/bin/node"
+  TOKEN_REQ="$(MOSS_U="$MOSS_ADMIN_USERNAME_VALUE" MOSS_P="$MOSS_ADMIN_PASSWORD_VALUE" \
+    "$SEED_NODE" -e 'process.stdout.write(JSON.stringify({username:process.env.MOSS_U,password:process.env.MOSS_P}))')"
+  TOKEN_JSON="$(curl -fsS -X POST "$SEED_BASE/api/v1/auth/token" \
+    -H 'Content-Type: application/json' -d "$TOKEN_REQ" 2>/dev/null || true)"
+  ADMIN_TOKEN="$(printf '%s' "$TOKEN_JSON" | "$SEED_NODE" -e 'let s="";process.stdin.on("data",d=>{s+=d}).on("end",()=>{try{process.stdout.write(JSON.parse(s).access_token||"")}catch{}})')"
+  if [ -z "$ADMIN_TOKEN" ]; then
+    log "WARNING: could not obtain an admin token to seed the API key; set it later in Admin → Settings"
+  else
+    SEED_BODY="$(MOSS_KEY="$ANTHROPIC_API_KEY_VALUE" MOSS_URL="$ANTHROPIC_BASE_URL_VALUE" \
+      "$SEED_NODE" -e 'const b={apiKey:process.env.MOSS_KEY};if(process.env.MOSS_URL)b.url=process.env.MOSS_URL;process.stdout.write(JSON.stringify(b))')"
+    if curl -fsS -X PATCH "$SEED_BASE/api/v1/settings/system" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H 'Content-Type: application/json' -d "$SEED_BODY" >/dev/null 2>&1; then
+      log "Model API key seeded into the secrets vault"
+    else
+      log "WARNING: failed to seed the API key into the vault; set it later in Admin → Settings"
+    fi
+  fi
+fi
 
 if [ "$EXISTING_INSTALL" = 1 ]; then
   log "Moss Server upgraded to $RELEASE_TAG successfully"
