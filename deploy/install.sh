@@ -320,26 +320,42 @@ if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -l
   die "glibc 2.35 or newer is required (Ubuntu 22.04+); found $GLIBC_VERSION"
 fi
 
-for command_name in tar gzip sha256sum systemctl docker curl install stat stty; do
+# ---- Session runtime (resolved before Docker checks & downloads) ----------
+# The runtime decides whether this host needs Docker at all. 'k8s' runs each
+# session as a gvisor pod in a k3s cluster; the runtime image is imported into
+# the cluster node's own containerd by deploy/k3s/install-k3s.sh, so a k8s
+# control-plane host needs NO Docker — no daemon, no runtime-image download or
+# load, no bridge network. Resolving the choice here lets every Docker-only step
+# below become conditional. Fresh installs prompt (env-overridable, default
+# docker); upgrades inherit server.json's runtimeDefaults.type (default docker
+# when unparseable, so the Docker checks still run — the safe fallback).
+EXISTING_INSTALL=0
+[ -f "$INSTALL_DIR/server.json" ] && EXISTING_INSTALL=1
+MOSS_RUNTIME_VALUE="${MOSS_RUNTIME:-}"
+if [ "$EXISTING_INSTALL" = 1 ]; then
+  EXISTING_RUNTIME="$(awk -F'"' '/"runtimeDefaults"/{f=1} f && /"type"[[:space:]]*:/{print $4; exit}' "$INSTALL_DIR/server.json" 2>/dev/null || true)"
+  if [ "$EXISTING_RUNTIME" = k8s ]; then MOSS_RUNTIME_VALUE=k8s; else MOSS_RUNTIME_VALUE=docker; fi
+else
+  prompt_value MOSS_RUNTIME_VALUE 'Session runtime (docker/k8s)' 'docker'
+fi
+case "$MOSS_RUNTIME_VALUE" in
+  docker|k8s) ;;
+  *) die "runtime must be 'docker' or 'k8s' (got '$MOSS_RUNTIME_VALUE')" ;;
+esac
+
+# Release assets to fetch/verify. The runtime image tarball is Docker-only, so
+# k8s installs skip it entirely (the image lives in the cluster node's containerd).
+ARCHIVES="$SERVER_ARCHIVE"
+[ "$MOSS_RUNTIME_VALUE" = k8s ] || ARCHIVES="$ARCHIVES $RUNTIME_ARCHIVE"
+
+# `docker` is required only for the docker runtime; its daemon/socket/version and
+# the bridge network are validated later (after prompts), once the archives are
+# in place — see the runtime-gated block below.
+REQUIRED_COMMANDS="tar gzip sha256sum systemctl curl install stat stty"
+[ "$MOSS_RUNTIME_VALUE" = k8s ] || REQUIRED_COMMANDS="$REQUIRED_COMMANDS docker"
+for command_name in $REQUIRED_COMMANDS; do
   command -v "$command_name" >/dev/null 2>&1 || die "$command_name is required"
 done
-docker info >/dev/null 2>&1 || die "Docker daemon is not available"
-
-DOCKER_SOCKET="/var/run/docker.sock"
-[ -S "$DOCKER_SOCKET" ] || die "Docker socket is not available: $DOCKER_SOCKET"
-DOCKER_GROUP_ID="$(stat -c %g "$DOCKER_SOCKET")"
-DOCKER_GROUP_ENTRY="$(getent group "$DOCKER_GROUP_ID" || true)"
-[ -n "$DOCKER_GROUP_ENTRY" ] || die "Docker socket group does not exist: $DOCKER_GROUP_ID"
-DOCKER_GROUP="${DOCKER_GROUP_ENTRY%%:*}"
-
-DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
-DOCKER_MAJOR="${DOCKER_VERSION%%.*}"
-DOCKER_REST="${DOCKER_VERSION#*.}"
-DOCKER_MINOR="${DOCKER_REST%%.*}"
-if [ -z "$DOCKER_VERSION" ] || [ "${DOCKER_MAJOR:-0}" -lt 20 ] \
-  || { [ "$DOCKER_MAJOR" -eq 20 ] && [ "${DOCKER_MINOR:-0}" -lt 10 ]; }; then
-  die "Docker daemon 20.10 or newer is required; found ${DOCKER_VERSION:-unknown}"
-fi
 
 if [ "$USING_DEFAULT_INSTALL_DIR" = 1 ]; then
   install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$INSTALL_USER_HOME/.moss"
@@ -360,8 +376,9 @@ if [ "$OFFLINE" = 1 ]; then
   [ -n "$SCRIPT_PATH" ] || die "--offline must be run from the unpacked install.sh file"
   SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
   SOURCE_DIR="$SCRIPT_DIR"
-  [ -f "$SOURCE_DIR/$SERVER_ARCHIVE" ] || die "missing offline asset: $SERVER_ARCHIVE"
-  [ -f "$SOURCE_DIR/$RUNTIME_ARCHIVE" ] || die "missing offline asset: $RUNTIME_ARCHIVE"
+  for archive in $ARCHIVES; do
+    [ -f "$SOURCE_DIR/$archive" ] || die "missing offline asset: $archive"
+  done
   [ -f "$SOURCE_DIR/SHA256SUMS" ] || die "missing offline asset: SHA256SUMS"
 else
   SOURCE_DIR="$INSTALL_DIR/packages/$RELEASE_TAG"
@@ -406,14 +423,14 @@ else
     download_asset 1 install.sh
   fi
   download_asset 2 SHA256SUMS
-  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+  for archive in $ARCHIVES; do
     if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
       "$SOURCE_DIR/SHA256SUMS"; then
       die "checksum manifest does not contain $archive; the download source is incomplete"
     fi
   done
   step=3
-  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+  for archive in $ARCHIVES; do
     if cached_asset_is_valid "$archive"; then
       log "Using cached [$step/4] $archive"
     else
@@ -422,7 +439,8 @@ else
     fi
     step=$((step + 1))
   done
-  chmod 644 "$SOURCE_DIR/SHA256SUMS" "$SOURCE_DIR/$SERVER_ARCHIVE" "$SOURCE_DIR/$RUNTIME_ARCHIVE"
+  chmod 644 "$SOURCE_DIR/SHA256SUMS"
+  for archive in $ARCHIVES; do chmod 644 "$SOURCE_DIR/$archive"; done
   chown -R "$INSTALL_USER:$INSTALL_USER_GROUP" "$SOURCE_DIR"
 fi
 
@@ -437,8 +455,7 @@ verify_asset() {
   [ -s "$WORK_DIR/$filename.sha256" ] || die "no checksum found for $filename"
   (cd "$SOURCE_DIR" && sha256sum -c "$WORK_DIR/$filename.sha256")
 }
-verify_asset "$SERVER_ARCHIVE"
-verify_asset "$RUNTIME_ARCHIVE"
+for archive in $ARCHIVES; do verify_asset "$archive"; done
 
 if tar -tzf "$SOURCE_DIR/$SERVER_ARCHIVE" \
   | awk '$0 !~ /^moss-server\// || $0 ~ /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad ? 0 : 1 }'; then
@@ -457,14 +474,11 @@ HOST_SCODE_VERSION="$($PACKAGE_DIR/app/bin/scode --version 2>&1)" \
   || die "host scode could not run"
 log "Host scode: $HOST_SCODE_VERSION"
 
-log "Loading Docker runtime image"
-docker load -i "$SOURCE_DIR/$RUNTIME_ARCHIVE"
+# Runtime image name (used by the docker load below for docker mode, and written
+# to config.runtimeDefaults.dockerImage for reference). The actual `docker load`
+# is deferred to the runtime-gated block after prompts — k8s never loads it.
 RUNTIME_IMAGE="my-moss-runtime:$VERSION-$ARCH"
-docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1 \
-  || die "runtime archive did not load expected image $RUNTIME_IMAGE"
 
-EXISTING_INSTALL=0
-[ -f "$INSTALL_DIR/server.json" ] && EXISTING_INSTALL=1
 DEFAULT_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
 DEFAULT_HOST="${DEFAULT_HOST:-127.0.0.1}"
 EXISTING_PORT=43127
@@ -479,10 +493,7 @@ MOSS_ADMIN_USERNAME_VALUE="${MOSS_ADMIN_USERNAME:-}"
 MOSS_ADMIN_PASSWORD_VALUE="${MOSS_ADMIN_PASSWORD:-}"
 ANTHROPIC_BASE_URL_VALUE="${ANTHROPIC_BASE_URL:-}"
 ANTHROPIC_API_KEY_VALUE="${ANTHROPIC_API_KEY:-}"
-# Session runtime: 'docker' (default) or 'k8s' (gvisor pods via a k3s cluster set
-# up by deploy/k3s/install-k3s.sh). Chosen at first install only; upgrades keep
-# whatever the existing server.json already has. Users can edit the file later.
-MOSS_RUNTIME_VALUE="${MOSS_RUNTIME:-}"
+# MOSS_RUNTIME_VALUE was resolved earlier (before the Docker checks/downloads).
 GENERATED_PASSWORD=0
 
 if [ "$EXISTING_INSTALL" = 0 ]; then
@@ -498,11 +509,6 @@ if [ "$EXISTING_INSTALL" = 0 ]; then
   prompt_value ANTHROPIC_BASE_URL_VALUE 'Anthropic API Base URL' 'https://hk.sudorouter.ai/v1'
   prompt_value ANTHROPIC_API_KEY_VALUE 'Anthropic API Key (optional): ' '' 1 \
     'Confirm Anthropic API Key: ' 'API Keys do not match; try again.'
-  prompt_value MOSS_RUNTIME_VALUE 'Session runtime (docker/k8s)' 'docker'
-  case "$MOSS_RUNTIME_VALUE" in
-    docker|k8s) ;;
-    *) die "runtime must be 'docker' or 'k8s' (got '$MOSS_RUNTIME_VALUE')" ;;
-  esac
 else
   MOSS_PORT_VALUE="$EXISTING_PORT"
   MOSS_ADVERTISED_HOST_VALUE="$EXISTING_HOST"
@@ -520,11 +526,44 @@ if [ "$EXISTING_INSTALL" = 0 ] && command -v ss >/dev/null 2>&1 \
   die "port $MOSS_PORT_VALUE is already in use"
 fi
 
-if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
-  docker network create "$NETWORK_NAME" >/dev/null
+if [ "$MOSS_RUNTIME_VALUE" = k8s ]; then
+  # k8s runtime: sessions run as pods in the k3s cluster, whose node imports the
+  # runtime image into its own containerd (deploy/k3s/install-k3s.sh). This host
+  # needs no Docker — skip the daemon checks, the `docker load`, and the bridge
+  # network. Session pods reach this server's auth-proxy/API over the cluster
+  # network, so point them at the advertised host rather than a docker gateway.
+  DOCKER_GROUP=""
+  NETWORK_GATEWAY="$MOSS_ADVERTISED_HOST_VALUE"
+  [ -n "$NETWORK_GATEWAY" ] || die "advertised host is required for the k8s runtime"
+else
+  docker info >/dev/null 2>&1 || die "Docker daemon is not available"
+  DOCKER_SOCKET="/var/run/docker.sock"
+  [ -S "$DOCKER_SOCKET" ] || die "Docker socket is not available: $DOCKER_SOCKET"
+  DOCKER_GROUP_ID="$(stat -c %g "$DOCKER_SOCKET")"
+  DOCKER_GROUP_ENTRY="$(getent group "$DOCKER_GROUP_ID" || true)"
+  [ -n "$DOCKER_GROUP_ENTRY" ] || die "Docker socket group does not exist: $DOCKER_GROUP_ID"
+  DOCKER_GROUP="${DOCKER_GROUP_ENTRY%%:*}"
+
+  DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+  DOCKER_MAJOR="${DOCKER_VERSION%%.*}"
+  DOCKER_REST="${DOCKER_VERSION#*.}"
+  DOCKER_MINOR="${DOCKER_REST%%.*}"
+  if [ -z "$DOCKER_VERSION" ] || [ "${DOCKER_MAJOR:-0}" -lt 20 ] \
+    || { [ "$DOCKER_MAJOR" -eq 20 ] && [ "${DOCKER_MINOR:-0}" -lt 10 ]; }; then
+    die "Docker daemon 20.10 or newer is required; found ${DOCKER_VERSION:-unknown}"
+  fi
+
+  log "Loading Docker runtime image"
+  docker load -i "$SOURCE_DIR/$RUNTIME_ARCHIVE"
+  docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1 \
+    || die "runtime archive did not load expected image $RUNTIME_IMAGE"
+
+  if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    docker network create "$NETWORK_NAME" >/dev/null
+  fi
+  NETWORK_GATEWAY="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK_NAME")"
+  [ -n "$NETWORK_GATEWAY" ] || die "could not determine $NETWORK_NAME gateway"
 fi
-NETWORK_GATEWAY="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK_NAME")"
-[ -n "$NETWORK_GATEWAY" ] || die "could not determine $NETWORK_NAME gateway"
 
 install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" \
   "$INSTALL_DIR" "$INSTALL_DIR/releases" "$INSTALL_DIR/data" "$INSTALL_DIR/.moss" \
@@ -653,14 +692,17 @@ NODE
 SETTINGS_PATH="$INSTALL_DIR/.moss/settings.json"
 if [ "$EXISTING_INSTALL" = 0 ]; then
   SETTINGS_PATH="$SETTINGS_PATH" ANTHROPIC_BASE_URL_VALUE="$ANTHROPIC_BASE_URL_VALUE" \
-  ANTHROPIC_API_KEY_VALUE="$ANTHROPIC_API_KEY_VALUE" "$RELEASE_DIR/node/bin/node" <<'NODE'
+  "$RELEASE_DIR/node/bin/node" <<'NODE'
 const fs = require('node:fs')
 const settingsPath = process.env.SETTINGS_PATH
 let settings = {}
 if (fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
 settings.env = { ...settings.env }
+// ANTHROPIC_BASE_URL is non-sensitive and read straight from settings.env. The
+// API key is sensitive: the server keeps it in the Nexus vault, never in this
+// file, so it is seeded via the system-settings API once the server (and its
+// vault) is up — see the post-health-check step below.
 if (process.env.ANTHROPIC_BASE_URL_VALUE) settings.env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL_VALUE
-if (process.env.ANTHROPIC_API_KEY_VALUE) settings.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY_VALUE
 fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
 fs.chmodSync(settingsPath, 0o600)
 NODE
@@ -683,18 +725,30 @@ chmod 600 "$ENV_PATH"
 ln -sfn "releases/$RELEASE_TAG" "$INSTALL_DIR/.current.new"
 mv -Tf "$INSTALL_DIR/.current.new" "$INSTALL_DIR/current"
 
+# Only the docker runtime needs the docker daemon and its socket group; a k8s
+# control-plane host has neither, so those directives are omitted there (empty
+# lines are ignored by systemd).
+if [ "$MOSS_RUNTIME_VALUE" = k8s ]; then
+  UNIT_REQUIRES=""
+  UNIT_AFTER="After=network-online.target"
+  UNIT_DOCKER_GROUP=""
+else
+  UNIT_REQUIRES="Requires=docker.service"
+  UNIT_AFTER="After=docker.service network-online.target"
+  UNIT_DOCKER_GROUP="SupplementaryGroups=$DOCKER_GROUP"
+fi
 cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
 Description=Moss Server
-Requires=docker.service
-After=docker.service network-online.target
+$UNIT_REQUIRES
+$UNIT_AFTER
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=$INSTALL_USER
 Group=$INSTALL_USER_GROUP
-SupplementaryGroups=$DOCKER_GROUP
+$UNIT_DOCKER_GROUP
 WorkingDirectory=$INSTALL_DIR/current/app
 EnvironmentFile=$ENV_PATH
 ExecStart=$INSTALL_DIR/current/node/bin/node $INSTALL_DIR/current/app/bin/moss-server.mjs start
@@ -731,7 +785,9 @@ set -euo pipefail
 systemctl disable --now $SERVICE_NAME.service 2>/dev/null || true
 rm -f /etc/systemd/system/$SERVICE_NAME.service
 systemctl daemon-reload
-docker ps -aq --filter label=moss.kind=user-container | xargs -r docker rm -f
+if command -v docker >/dev/null 2>&1; then
+  docker ps -aq --filter label=moss.kind=user-container | xargs -r docker rm -f || true
+fi
 if [ "\${1:-}" = --purge ]; then
   rm -rf '$INSTALL_DIR'
   echo 'Moss program and data removed.'
@@ -786,6 +842,38 @@ fi
 
 SERVICE_STOPPED=0
 trap - ERR
+
+# Seed the model API key into the Nexus secrets vault (fresh installs only).
+# The key is sensitive: it is never written to settings.json, so the vault is
+# its only home. The vault only exists once the server has started, which the
+# health check above just confirmed (/healthz is registered after Nexus is up,
+# see startStandaloneServer.ts). We authenticate as the bootstrap admin and
+# PATCH the system settings — the sole write path into the vault for this key.
+# Failures here are non-fatal: the install still succeeds and the operator can
+# set the key later in Admin → Settings.
+if [ "$EXISTING_INSTALL" = 0 ] && [ -n "$ANTHROPIC_API_KEY_VALUE" ]; then
+  log "Seeding model API key into the secrets vault"
+  SEED_BASE="http://127.0.0.1:$MOSS_PORT_VALUE"
+  SEED_NODE="$RELEASE_DIR/node/bin/node"
+  TOKEN_REQ="$(MOSS_U="$MOSS_ADMIN_USERNAME_VALUE" MOSS_P="$MOSS_ADMIN_PASSWORD_VALUE" \
+    "$SEED_NODE" -e 'process.stdout.write(JSON.stringify({username:process.env.MOSS_U,password:process.env.MOSS_P}))')"
+  TOKEN_JSON="$(curl -fsS -X POST "$SEED_BASE/api/v1/auth/token" \
+    -H 'Content-Type: application/json' -d "$TOKEN_REQ" 2>/dev/null || true)"
+  ADMIN_TOKEN="$(printf '%s' "$TOKEN_JSON" | "$SEED_NODE" -e 'let s="";process.stdin.on("data",d=>{s+=d}).on("end",()=>{try{process.stdout.write(JSON.parse(s).access_token||"")}catch{}})')"
+  if [ -z "$ADMIN_TOKEN" ]; then
+    log "WARNING: could not obtain an admin token to seed the API key; set it later in Admin → Settings"
+  else
+    SEED_BODY="$(MOSS_KEY="$ANTHROPIC_API_KEY_VALUE" MOSS_URL="$ANTHROPIC_BASE_URL_VALUE" \
+      "$SEED_NODE" -e 'const b={apiKey:process.env.MOSS_KEY};if(process.env.MOSS_URL)b.url=process.env.MOSS_URL;process.stdout.write(JSON.stringify(b))')"
+    if curl -fsS -X PATCH "$SEED_BASE/api/v1/settings/system" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H 'Content-Type: application/json' -d "$SEED_BODY" >/dev/null 2>&1; then
+      log "Model API key seeded into the secrets vault"
+    else
+      log "WARNING: failed to seed the API key into the vault; set it later in Admin → Settings"
+    fi
+  fi
+fi
 
 if [ "$EXISTING_INSTALL" = 1 ]; then
   log "Moss Server upgraded to $RELEASE_TAG successfully"
