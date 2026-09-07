@@ -67,6 +67,41 @@ sudo ./install.sh --offline
 
 目录内包含 `install.sh`、Server 包、Docker Runtime 镜像包和 `SHA256SUMS`。
 
+## k3s（gvisor 隔离运行时）安装
+
+默认运行时是 Docker。若希望每个会话运行在 gvisor 沙箱 Pod 中，先在**计算节点**
+上一键部署 k3s + gvisor + moss-runtime 镜像（与 Server 同一发布版本）：
+
+```bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install-k3s.sh | sudo bash
+```
+
+脚本会提示节点 IP、命名空间等必要参数（`--non-interactive` 全部取默认值），完成后
+在 moss server.json 旁写出 `moss-k3s-kubeconfig.yaml`，并打印如何让 moss-server 切到
+k8s 的说明。
+
+离线安装：在有网络的机器运行 `fetch-offline-deps.sh` 生成 `./offline`，连同 `deploy/k3s`
+目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install-k3s.sh`。
+
+部署完成后让 moss-server 使用 k8s，二选一：
+
+- **全新安装**：运行 Server 安装脚本，在“Session runtime”提示处选择 `k8s`（自动写入
+  `k8s` 配置块）。
+- **已安装**：编辑 `~/.moss/server/server.json`，将 `runtimeDefaults.type` 改为 `"k8s"`，
+  重启 moss-server。
+
+### 接入已有的 k8s 集群
+
+若客户已有 k8s 集群，无需运行 `install-k3s.sh`，只需在 `server.json` 的 `k8s` 块里
+指向他们的 kubeconfig。moss-server 通过本机 `kubectl` + kubeconfig 操作集群，前提是
+集群满足：
+
+- `runtimeClassName`：默认 `gvisor`。集群若无 gvisor RuntimeClass，设为 `""`（留空）即
+  省略该字段，Pod 使用集群默认运行时。
+- 镜像：`image` 需在集群各节点可拉取；私有仓库用 `imagePullSecrets`（预先创建的
+  dockerconfigjson Secret 名），`imagePullPolicy` 默认 `IfNotPresent`。
+- 命名空间：不存在时 moss 会自动创建（需 kubeconfig 具备相应权限）。
+
 ## 目录与配置
 
 ```text
@@ -167,5 +202,5 @@ sudo ~/.moss/server/uninstall.sh
 sudo ~/.moss/server/uninstall.sh --purge
 ```
 
-每个 Release 提供 amd64 Server 包、Runtime 镜像包、`install.sh` 和
-`SHA256SUMS`。
+每个 Release 提供 amd64 Server 包、Runtime 镜像包、`install.sh`、k3s 安装脚本
+（`install-k3s.sh`、`uninstall-k3s.sh`、`fetch-offline-deps.sh`）和 `SHA256SUMS`。

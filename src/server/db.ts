@@ -4103,7 +4103,6 @@ export function mergeRuntime(
           k8sNamespace: runtime?.k8sNamespace || config.k8s?.namespace,
           k8sRuntimeClassName: runtime?.k8sRuntimeClassName || config.k8s?.runtimeClassName,
           k8sKubeconfig: runtime?.k8sKubeconfig || config.k8s?.kubeconfig,
-          k8sScodePath: runtime?.k8sScodePath || config.k8s?.scodePath,
           k8sMode,
         }
       : {}),

@@ -722,6 +722,37 @@ export class RuntimeService {
   }
 
   /**
+   * k8s orphan sweep: reap pods + per-session Secrets left behind when teardown
+   * never ran (runner crash, node reboot). The keep-set is every session we'd
+   * recover (`listSessionsToRecover`); any `app=moss-scode` pod/Secret whose
+   * session-id label is not in that set is deleted. Gated on k8s being the
+   * active default runtime so non-k8s hosts never shell out to kubectl. Runs on
+   * startup and periodically. Best-effort — failures are logged, never thrown.
+   */
+  async gcOrphanedK8sPods(): Promise<void> {
+    if (this.options.config.defaultRuntime !== 'k8s') return
+    const k8s = this.options.config.k8s
+    if (!k8s) return
+    const activeIds = this.store.listSessionsToRecover().map(s => s.sessionId)
+    try {
+      const { gcOrphanedPods } = await import('./backends/k8sBackend.js')
+      const res = await gcOrphanedPods(activeIds, {
+        namespace: k8s.namespace,
+        kubeconfig: k8s.kubeconfig,
+      })
+      if (res.deleted.length > 0 || res.deletedSecrets.length > 0) {
+        process.stderr.write(
+          `[RuntimeService] k8s orphan sweep: reaped ${res.deleted.length} pod(s), ${res.deletedSecrets.length} secret(s)\n`,
+        )
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[RuntimeService] k8s orphan sweep failed: ${errorMessage(err)}\n`,
+      )
+    }
+  }
+
+  /**
    * Concurrent HA WS affinity: claim an attempt for this instance (confirm our
    * ownership, or adopt a dead owner). Returns false when a live OTHER instance
    * owns it — the WS upgrade path then rejects so the client re-routes to the
@@ -825,6 +856,12 @@ export class RuntimeService {
     }
 
     const sessions = this.store.listSessionsToRecover()
+
+    // Reap k8s pods/Secrets orphaned by a crash before recovering — anything
+    // not backing a session we're about to recover is a leak. No-op unless k8s
+    // is the active runtime.
+    await this.gcOrphanedK8sPods()
+
     for (const session of sessions) {
       try {
         // Per-user container mode: probe scode in the container and reap

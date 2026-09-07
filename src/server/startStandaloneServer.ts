@@ -182,12 +182,21 @@ async function finishStandaloneServerStartup(
   }, Math.max(5_000, config.heartbeatTimeoutMs))
   adoptionTimer.unref?.()
 
+  // k8s runtime: periodically reap pods/Secrets orphaned by crashes (no-op
+  // unless k8s is the active runtime). Startup already sweeps once; this catches
+  // leaks that accrue while the server runs.
+  const k8sGcTimer = setInterval(() => {
+    void runtime.gcOrphanedK8sPods()
+  }, Math.max(60_000, config.heartbeatTimeoutMs * 2))
+  k8sGcTimer.unref?.()
+
   let stopped = false
   const stop = async () => {
     if (stopped) return
     stopped = true
     clearInterval(heartbeatTimer)
     clearInterval(adoptionTimer)
+    clearInterval(k8sGcTimer)
     authService.destroy()
     if (config.docker?.containerMode === 'user') {
       try {
