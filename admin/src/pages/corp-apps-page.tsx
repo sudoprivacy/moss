@@ -56,6 +56,7 @@ import {
 
 const TYPE_LABELS: Record<string, string> = {
   wecomapp: '企微自建应用',
+  wecommsgaudit: '企微会话存档',
 }
 
 // Per-type field specs. config fields are non-secret (used to derive the
@@ -102,6 +103,25 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
         '「人工点确认」时才扣除,审批可能几分钟、也可能跨天甚至一直不来 —— 这个值' +
         '是兜底,防止一条迟迟未确认的消息长期占住该群名额。审批快的租户可以调短,' +
         '让客户更早收到下一条。范围 1~720 小时。',
+    },
+  ],
+  // 会话存档是企业级付费服务,不是应用:没有 AgentId,Secret 由「安全与管理 →
+  // 会话内容存档」单独签发,与应用的 Secret 不通用。此处只收事件回调所需的字段;
+  // 拉取聊天记录用的 RSA 私钥待 SDK sidecar 落地后再加。
+  wecommsgaudit: [
+    { key: 'corpId', label: 'CorpID(企业ID)', bucket: 'config' },
+    {
+      key: 'callbackToken',
+      label: '事件回调 Token',
+      bucket: 'credentials',
+      hint: '在「安全与管理 → 会话内容存档」生成,与自建应用的接收消息 Token 不是同一个。',
+    },
+    {
+      key: 'encodingAesKey',
+      label: '事件回调 EncodingAESKey',
+      type: 'password',
+      bucket: 'credentials',
+      hint: '同上,与自建应用的 EncodingAESKey 不通用。',
     },
   ],
 }
