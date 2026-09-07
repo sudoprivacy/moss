@@ -46,9 +46,22 @@ command -v coscmd >/dev/null 2>&1 || { echo "FAIL: coscmd is required" >&2; exit
 
 EXPECTED_FILES=(
   install.sh
+  install-k3s.sh
+  uninstall-k3s.sh
+  fetch-offline-deps.sh
   SHA256SUMS
   "moss-server-$VERSION-linux-amd64.tar.gz"
   "moss-runtime-$VERSION-linux-amd64.tar.gz"
+)
+
+# Scripts also mirrored to the fixed latest/ entrypoint (like install.sh). The
+# k3s companions ride along so an offline operator can grab everything from one
+# stable URL prefix.
+LATEST_SCRIPTS=(
+  install.sh
+  install-k3s.sh
+  uninstall-k3s.sh
+  fetch-offline-deps.sh
 )
 
 for file_name in "${EXPECTED_FILES[@]}"; do
@@ -59,6 +72,8 @@ done
 EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "$RELEASE_TAG")"
 grep -Fq "$EXPECTED_RELEASE_LINE" "$ASSETS_DIR/install.sh" \
   || { echo "FAIL: install.sh is not stamped for $RELEASE_TAG" >&2; exit 1; }
+grep -Fq "$EXPECTED_RELEASE_LINE" "$ASSETS_DIR/install-k3s.sh" \
+  || { echo "FAIL: install-k3s.sh is not stamped for $RELEASE_TAG" >&2; exit 1; }
 grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' \
   "$ASSETS_DIR/install.sh" \
   || { echo "FAIL: install.sh does not use the COS release source" >&2; exit 1; }
@@ -131,9 +146,11 @@ upload_immutable_release() {
 publish_latest_entrypoint() {
   echo "Verifying immutable release before publishing Latest"
   verify_immutable_release
-  echo "Publishing fixed COS entrypoint: $LATEST_URL/install.sh"
-  coscmd upload -H "$LATEST_HEADERS" "$ASSETS_DIR/install.sh" "$LATEST_PATH/install.sh"
-  verify_remote_content "$ASSETS_DIR/install.sh" "$LATEST_URL/install.sh" latest/install.sh
+  for script_name in "${LATEST_SCRIPTS[@]}"; do
+    echo "Publishing fixed COS entrypoint: $LATEST_URL/$script_name"
+    coscmd upload -H "$LATEST_HEADERS" "$ASSETS_DIR/$script_name" "$LATEST_PATH/$script_name"
+    verify_remote_content "$ASSETS_DIR/$script_name" "$LATEST_URL/$script_name" "latest/$script_name"
+  done
 }
 
 case "$MODE" in

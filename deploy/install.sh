@@ -31,8 +31,8 @@ Options:
 
 Configuration environment variables:
   MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
-  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL,
-  ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
+  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_RUNTIME (docker|k8s),
+  MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
 EOF
 }
 
@@ -479,6 +479,10 @@ MOSS_ADMIN_USERNAME_VALUE="${MOSS_ADMIN_USERNAME:-}"
 MOSS_ADMIN_PASSWORD_VALUE="${MOSS_ADMIN_PASSWORD:-}"
 ANTHROPIC_BASE_URL_VALUE="${ANTHROPIC_BASE_URL:-}"
 ANTHROPIC_API_KEY_VALUE="${ANTHROPIC_API_KEY:-}"
+# Session runtime: 'docker' (default) or 'k8s' (gvisor pods via a k3s cluster set
+# up by deploy/k3s/install-k3s.sh). Chosen at first install only; upgrades keep
+# whatever the existing server.json already has. Users can edit the file later.
+MOSS_RUNTIME_VALUE="${MOSS_RUNTIME:-}"
 GENERATED_PASSWORD=0
 
 if [ "$EXISTING_INSTALL" = 0 ]; then
@@ -494,6 +498,11 @@ if [ "$EXISTING_INSTALL" = 0 ]; then
   prompt_value ANTHROPIC_BASE_URL_VALUE 'Anthropic API Base URL' 'https://hk.sudorouter.ai/v1'
   prompt_value ANTHROPIC_API_KEY_VALUE 'Anthropic API Key (optional): ' '' 1 \
     'Confirm Anthropic API Key: ' 'API Keys do not match; try again.'
+  prompt_value MOSS_RUNTIME_VALUE 'Session runtime (docker/k8s)' 'docker'
+  case "$MOSS_RUNTIME_VALUE" in
+    docker|k8s) ;;
+    *) die "runtime must be 'docker' or 'k8s' (got '$MOSS_RUNTIME_VALUE')" ;;
+  esac
 else
   MOSS_PORT_VALUE="$EXISTING_PORT"
   MOSS_ADVERTISED_HOST_VALUE="$EXISTING_HOST"
@@ -572,6 +581,7 @@ MOSS_ADVERTISED_HOST_VALUE="$MOSS_ADVERTISED_HOST_VALUE" \
 MOSS_ADMIN_USERNAME_VALUE="$MOSS_ADMIN_USERNAME_VALUE" \
 MOSS_ADMIN_PASSWORD_VALUE="$MOSS_ADMIN_PASSWORD_VALUE" \
 MOSS_RUNTIME_IMAGE="$RUNTIME_IMAGE" MOSS_NETWORK_NAME="$NETWORK_NAME" \
+MOSS_RUNTIME_VALUE="$MOSS_RUNTIME_VALUE" \
 "$RELEASE_DIR/node/bin/node" <<'NODE'
 const fs = require('node:fs')
 const path = require('node:path')
@@ -610,13 +620,24 @@ if (!fs.existsSync(configPath)) {
     password: process.env.MOSS_ADMIN_PASSWORD_VALUE,
   }
 }
+const runtime = process.env.MOSS_RUNTIME_VALUE === 'k8s' ? 'k8s' : 'docker'
 config.runtimeDefaults = {
   ...config.runtimeDefaults,
-  type: 'docker',
+  type: runtime,
   dockerImage: process.env.MOSS_RUNTIME_IMAGE,
   dockerMode: 'session',
   hostScodePath,
   dockerScodePath,
+}
+if (runtime === 'k8s') {
+  // Seed the k8s block from the template defaults and pin the kubeconfig to the
+  // file deploy/k3s/install-k3s.sh writes beside this server.json. Everything
+  // else (namespace, runtimeClassName, image, imagePullPolicy) is already carried
+  // by the template; the operator edits server.json for a customer cluster.
+  config.k8s = {
+    ...config.k8s,
+    kubeconfig: path.join(root, 'moss-k3s-kubeconfig.yaml'),
+  }
 }
 config.storage = {
   rootDir: path.join(root, 'data'),

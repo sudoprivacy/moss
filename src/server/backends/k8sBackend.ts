@@ -30,16 +30,26 @@ export type K8sBackendDefaults = {
   image?: string
   /** Namespace pods are created in. Defaults to `default`. `MOSS_K8S_NAMESPACE`. */
   namespace?: string
-  /** RuntimeClass that provides the gvisor (runsc) sandbox. Defaults to `gvisor`. */
+  /**
+   * RuntimeClass that provides the gvisor (runsc) sandbox. Defaults to `gvisor`.
+   * Set to an empty string to omit it entirely — needed on a customer cluster
+   * that has no `gvisor` RuntimeClass (pods then use the cluster default runtime).
+   */
   runtimeClassName?: string
+  /**
+   * Pod `imagePullPolicy`. Defaults to `IfNotPresent` so an image imported into
+   * the node's containerd (our k3s flow) is used without a registry round-trip,
+   * while a customer registry image is still pulled when absent. `MOSS_K8S_IMAGE_PULL_POLICY`.
+   */
+  imagePullPolicy?: string
+  /**
+   * Names of pre-created `dockerconfigjson` Secrets used to pull the runtime
+   * image from a private registry (customer clusters). `MOSS_K8S_IMAGE_PULL_SECRETS`
+   * (comma-separated). Empty → none.
+   */
+  imagePullSecrets?: string[]
   /** Path to the kubeconfig that reaches the k3s API server. `MOSS_K8S_KUBECONFIG`. */
   kubeconfig?: string
-  /**
-   * Path of the scode binary ON THE COMPUTE NODE. It is `hostPath`-mounted into
-   * the pod at the same path (node-local, pre-staged out-of-band per node — see
-   * docs/k8s-gvisor-backend.md). Defaults to `/usr/local/bin/scode`. `MOSS_K8S_SCODE_PATH`.
-   */
-  scodePath?: string
   /** CPU limit for the pod (k8s quantity). Defaults to `2`. */
   cpuLimit?: string
   /** Memory limit for the pod (k8s quantity). Defaults to `4Gi`. */
@@ -97,8 +107,8 @@ async function readScodeSessionId(filePath: string): Promise<string | undefined>
  *    `emptyDir`s (scode writes there; moss reads results back over the ACP
  *    stream, and the transcript is written moss-side by {@link createAcpBridgeHandle},
  *    so a pod-local workspace is correct).
- *  - only the scode BINARY is a `hostPath` — it is legitimately node-local
- *    (pre-staged per compute node at `MOSS_K8S_SCODE_PATH`).
+ *  - scode itself ships INSIDE the runtime image, so pods need nothing staged on
+ *    the node — a standard k3s + gvisor node is enough.
  *
  * The ACP bridge is reused UNCHANGED: `spawn('kubectl', ['exec','-i', …])`'s
  * stdio ARE the pod's exec stdio, interchangeable with a docker `exec` child.
@@ -117,13 +127,15 @@ export class K8sBackend implements SessionBackend {
       )
     }
 
-    const namespace = runtime?.k8sNamespace || this.defaults.namespace || 'default'
+    const namespace = runtime?.k8sNamespace || this.defaults.namespace || 'moss-sessions'
+    // `??` (not `||`) so an explicit empty string survives: on a customer cluster
+    // with no gvisor RuntimeClass, `runtimeClassName: ""` in server.json means
+    // "omit runtimeClassName". Only a truly-absent value falls back to `gvisor`.
     const runtimeClassName =
-      runtime?.k8sRuntimeClassName || this.defaults.runtimeClassName || 'gvisor'
+      runtime?.k8sRuntimeClassName ?? this.defaults.runtimeClassName ?? 'gvisor'
     const kubeconfig = runtime?.k8sKubeconfig || this.defaults.kubeconfig
-    // Node-local scode binary path. hostPath-mounted into the pod at the SAME
-    // path; scode is exec'd from there.
-    const scodePath = runtime?.k8sScodePath || this.defaults.scodePath || '/usr/local/bin/scode'
+    const imagePullPolicy = this.defaults.imagePullPolicy || 'IfNotPresent'
+    const imagePullSecrets = this.defaults.imagePullSecrets ?? []
     const cpuLimit = this.defaults.cpuLimit || '2'
     const memoryLimit = this.defaults.memoryLimit || '4Gi'
     const podReadyTimeoutSec = this.defaults.podReadyTimeoutSec ?? 90
@@ -258,13 +270,12 @@ export class K8sBackend implements SessionBackend {
     // ---- Volumes / mounts (cross-node correct) ----
     // emptyDir: pod-local writable HOME / workspace / scode config dir.
     // secret:   read-only config + skill files delivered from moss.
-    // hostPath: ONLY the node-local scode binary.
+    // (scode itself ships in the image — no node-local hostPath.)
     const volumes: PodVolume[] = [
       { name: 'home', emptyDir: {} },
       { name: 'workspace', emptyDir: {} },
       { name: 'scode-cfg', emptyDir: {} },
       { name: 'scode-secret', secret: { secretName } },
-      { name: 'scode-bin', hostPath: { path: scodePath, type: 'File' } },
     ]
     const volumeMounts = dedupeMounts([
       { name: 'home', mountPath: configDir },
@@ -276,7 +287,6 @@ export class K8sBackend implements SessionBackend {
         subPath: m.key,
         readOnly: true,
       })),
-      { name: 'scode-bin', mountPath: scodePath, readOnly: true },
     ])
 
     const podManifest = buildPodManifest({
@@ -284,6 +294,8 @@ export class K8sBackend implements SessionBackend {
       namespace,
       runtimeClassName,
       image,
+      imagePullPolicy,
+      imagePullSecrets,
       sessionId: options.sessionId,
       workDir: safeCwd,
       env: podEnv,
@@ -303,15 +315,17 @@ export class K8sBackend implements SessionBackend {
 
     process.stderr.write(`\n[K8sBackend] Creating gvisor pod for session ${options.sessionId}:\n`)
     process.stderr.write(`  pod: ${podName}  secret: ${secretName}  ns: ${namespace}  runtimeClass: ${runtimeClassName}\n`)
-    process.stderr.write(`  image: ${image}\n`)
-    process.stderr.write(`  scode (node hostPath): ${scodePath}\n`)
+    process.stderr.write(`  image: ${image}  (scode baked in)\n`)
     process.stderr.write(`  cwd (emptyDir): ${safeCwd}\n`)
     process.stderr.write(`  HOME (emptyDir): ${configDir}\n`)
     process.stderr.write(`  SUDO_CODE_CONFIG_HOME (emptyDir + secret): ${scodeHomeDir}\n`)
     process.stderr.write(`  secret files: ${secretMounts.map(m => m.mountPath).join(', ')}\n`)
     process.stderr.write(`  model: ${model}\n\n`)
 
-    // Secret first — the pod mounts it, so it must exist before the pod starts.
+    // Namespace first — on a customer cluster the target ns may not exist yet
+    // (our k3s installer pre-creates it, so this is a no-op there).
+    await ensureNamespace(kubeconfig, namespace)
+    // Secret next — the pod mounts it, so it must exist before the pod starts.
     await kubectlApply(kubectlBase, secretManifest)
     await kubectlApply(kubectlBase, podManifest)
     try {
@@ -331,7 +345,7 @@ export class K8sBackend implements SessionBackend {
       '-i',
       podName,
       '--',
-      scodePath,
+      'scode',
       'acp',
       '--output-format', 'json',
       '--permission-mode', 'danger-full-access',
@@ -355,7 +369,6 @@ export class K8sBackend implements SessionBackend {
       k8sImage: image,
       k8sNamespace: namespace,
       k8sRuntimeClassName: runtimeClassName,
-      k8sScodePath: scodePath,
       k8sPodName: podName,
       k8sMode: memoryMode,
     }
@@ -436,6 +449,8 @@ type PodManifestInput = {
   namespace: string
   runtimeClassName: string
   image: string
+  imagePullPolicy: string
+  imagePullSecrets: string[]
   sessionId: string
   workDir: string
   env: Record<string, string>
@@ -460,14 +475,20 @@ function buildPodManifest(input: PodManifestInput): Record<string, unknown> {
       },
     },
     spec: {
-      // The gvisor (runsc) sandbox. RuntimeClass `gvisor` must be registered.
-      runtimeClassName: input.runtimeClassName,
+      // The gvisor (runsc) sandbox. Omitted when empty so a cluster without a
+      // `gvisor` RuntimeClass falls back to its default runtime.
+      ...(input.runtimeClassName ? { runtimeClassName: input.runtimeClassName } : {}),
+      // Private-registry pull creds (customer clusters); omitted when none.
+      ...(input.imagePullSecrets.length
+        ? { imagePullSecrets: input.imagePullSecrets.map(name => ({ name })) }
+        : {}),
       restartPolicy: 'Never',
       automountServiceAccountToken: false,
       containers: [
         {
           name: 'scode',
           image: input.image,
+          imagePullPolicy: input.imagePullPolicy,
           // Keep the pod alive so moss can `kubectl exec` scode per turn.
           command: ['sleep', 'infinity'],
           workingDir: input.workDir,
@@ -508,6 +529,30 @@ function buildSecretManifest(input: SecretManifestInput): Record<string, unknown
     },
     // stringData: kubectl base64-encodes on apply — we hand it raw file bodies.
     stringData: input.data,
+  }
+}
+
+/**
+ * Create the target namespace if it does not already exist. Idempotent and
+ * best-effort: on our k3s installer the namespace is pre-created (no-op here),
+ * but a customer cluster may point moss at a namespace it must create itself.
+ * A create race (two sessions starting at once) surfaces as "AlreadyExists",
+ * which we treat as success.
+ */
+async function ensureNamespace(kubeconfig: string | undefined, namespace: string): Promise<void> {
+  const base: string[] = kubeconfig ? ['--kubeconfig', kubeconfig] : []
+  try {
+    await execFileAsync('kubectl', [...base, 'get', 'namespace', namespace], { windowsHide: true })
+    return
+  } catch {
+    // Not found (or transient) — attempt to create it below.
+  }
+  try {
+    await execFileAsync('kubectl', [...base, 'create', 'namespace', namespace], { windowsHide: true })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/AlreadyExists/i.test(msg)) return
+    throw new Error(`failed to create namespace ${namespace}: ${msg}`)
   }
 }
 
@@ -578,7 +623,7 @@ export async function gcOrphanedPods(
   activeSessionIds: Iterable<string>,
   opts: { namespace?: string; kubeconfig?: string } = {},
 ): Promise<{ deleted: string[]; skipped: string[]; deletedSecrets: string[] }> {
-  const kubectlBase = buildKubectlBaseArgs(opts.namespace || 'default', opts.kubeconfig)
+  const kubectlBase = buildKubectlBaseArgs(opts.namespace || 'moss-sessions', opts.kubeconfig)
   const active = new Set(activeSessionIds)
   const deleted: string[] = []
   const skipped: string[] = []
