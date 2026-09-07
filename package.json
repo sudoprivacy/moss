@@ -24,7 +24,7 @@
     "@inquirer/prompts": "*",
     "@larksuiteoapi/node-sdk": "^1.64.0",
     "@modelcontextprotocol/sdk": "*",
-    "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vfs/clients/node/0.2.0/nexus-ai-fs-vfs-client-0.2.0.tgz",
+    "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.2.0/nexus-ai-fs-vfs-client-0.2.0.tgz",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.214.0",
     "@opentelemetry/core": "^2.6.1",
