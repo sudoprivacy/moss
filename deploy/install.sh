@@ -688,10 +688,14 @@ fi
 log "Service user: $INSTALL_USER"
 log "Install directory: $INSTALL_DIR"
 
-# Re-running over an existing installation is almost always a program update,
-# so offer that rather than proposing to re-provision the machine.
 if [ -z "$ROLE" ]; then
   if [ -f "$INSTALL_DIR/server.json" ]; then
+    # Re-running over an existing installation is almost always a program
+    # update, not a request to re-provision the machine.
+    ROLE=control-plane
+  elif [ "$NON_INTERACTIVE" = 1 ]; then
+    # Standing up a Kubernetes cluster is too large a side effect to take on by
+    # default in unattended automation; ask for it with --role all-in-one.
     ROLE=control-plane
   else
     prompt_value ROLE 'Install on this machine (all-in-one/control-plane/compute)' 'all-in-one'
@@ -852,11 +856,12 @@ if [ "$MOSS_RUNTIME_VALUE" = docker ]; then
     || { [ "$DOCKER_MAJOR" -eq 20 ] && [ "${DOCKER_MINOR:-0}" -lt 10 ]; }; then
     die "Docker daemon 20.10 or newer is required; found ${DOCKER_VERSION:-unknown}"
   fi
-elif [ "$ROLE" = control-plane ]; then
+elif [ "$ROLE" = control-plane ] && ! command -v kubectl >/dev/null 2>&1; then
   # The server drives a cluster it does not host, so it needs a client and a
-  # kubeconfig. all-in-one just provisioned both.
-  command -v kubectl >/dev/null 2>&1 \
-    || die "kubectl is required for the k8s session runtime; install it, or run --role all-in-one to provision a cluster here"
+  # kubeconfig (all-in-one provisions both). Installing the server before the
+  # cluster exists is a legitimate order, so this is a warning, not a failure.
+  warn "kubectl is not installed; the k8s session runtime needs it plus a kubeconfig before sessions can start"
+  warn "provision a node with: sudo ./install.sh --role compute"
 fi
 
 if [ "$USING_DEFAULT_INSTALL_DIR" = 1 ]; then
