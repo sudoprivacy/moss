@@ -72,8 +72,10 @@ done
 EXPECTED_RELEASE_LINE="$(printf 'RELEASE_TAG="${MOSS_RELEASE_TAG:-%s}"' "$RELEASE_TAG")"
 grep -Fq "$EXPECTED_RELEASE_LINE" "$ASSETS_DIR/install.sh" \
   || { echo "FAIL: install.sh is not stamped for $RELEASE_TAG" >&2; exit 1; }
-grep -Fq "$EXPECTED_RELEASE_LINE" "$ASSETS_DIR/install-k3s.sh" \
-  || { echo "FAIL: install-k3s.sh is not stamped for $RELEASE_TAG" >&2; exit 1; }
+# install-k3s.sh carries no release tag: it is a shim that forwards to
+# `install.sh --role compute`, and install.sh is the stamped script.
+grep -Fq -- '--role compute' "$ASSETS_DIR/install-k3s.sh" \
+  || { echo "FAIL: install-k3s.sh does not forward to install.sh --role compute" >&2; exit 1; }
 grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' \
   "$ASSETS_DIR/install.sh" \
   || { echo "FAIL: install.sh does not use the COS release source" >&2; exit 1; }
