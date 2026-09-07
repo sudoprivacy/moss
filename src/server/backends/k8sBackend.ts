@@ -326,8 +326,9 @@ export class K8sBackend implements SessionBackend {
     // (our k3s installer pre-creates it, so this is a no-op there).
     await ensureNamespace(kubeconfig, namespace)
     // Secret next — the pod mounts it, so it must exist before the pod starts.
+    // (Secrets are mutable, so a plain apply is correct there; the pod is not.)
     await kubectlApply(kubectlBase, secretManifest)
-    await kubectlApply(kubectlBase, podManifest)
+    await applyPodManifest(kubectlBase, podManifest, podName)
     try {
       await waitPodRunning(kubectlBase, podName, podReadyTimeoutSec)
     } catch (err) {
@@ -578,6 +579,43 @@ async function kubectlApply(kubectlBase: string[], manifest: Record<string, unkn
     })
     child.stdin?.end(JSON.stringify(manifest))
   })
+}
+
+/**
+ * A Pod spec is immutable apart from container images, so `kubectl apply` is only
+ * a valid create — never an update. Any session restarted with different config
+ * (rotated API key, different model, changed secret mounts) leaves a live pod
+ * whose spec no longer matches, and every subsequent apply fails permanently with
+ * "may not change fields other than …". A session pod is disposable, per-session
+ * infrastructure, so the correct resolution is to replace it rather than to retry
+ * an apply that can never succeed.
+ */
+function isImmutablePodSpecError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /may not change fields other than|field is immutable/i.test(message)
+}
+
+async function applyPodManifest(
+  kubectlBase: string[],
+  manifest: Record<string, unknown>,
+  podName: string,
+): Promise<void> {
+  try {
+    await kubectlApply(kubectlBase, manifest)
+    return
+  } catch (err) {
+    if (!isImmutablePodSpecError(err)) throw err
+    process.stderr.write(
+      `[K8sBackend] pod ${podName} exists with a stale spec — deleting and recreating\n`,
+    )
+  }
+  // Must fully wait: recreating before the old pod is gone fails with AlreadyExists.
+  await execFileAsync(
+    'kubectl',
+    [...kubectlBase, 'delete', 'pod', podName, '--ignore-not-found', '--wait=true', '--grace-period=5'],
+    { windowsHide: true },
+  )
+  await kubectlApply(kubectlBase, manifest)
 }
 
 async function waitPodRunning(kubectlBase: string[], podName: string, timeoutSec: number): Promise<void> {

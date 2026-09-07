@@ -1094,6 +1094,23 @@ function parseRuntimeOptions(body: JsonBody) {
 }
 
 function buildWsUrl(server: http.Server, config: ServerConfig, sessionId: string): string {
+  const path = `/ws/sessions/${sessionId}`
+
+  // `publicBaseUrl` is the single source of truth for how clients reach this
+  // server from outside, so it also decides the WebSocket origin. Behind a
+  // TLS-terminating reverse proxy the bind scheme/port describe the private
+  // socket, not the reachable URL — deriving from them yields `ws://host:43127`,
+  // which is plaintext and bypasses the proxy. `advertisedHost` cannot express
+  // this on its own because it carries no scheme or port.
+  if (config.publicBaseUrl) {
+    const publicUrl = tryParseUrl(config.publicBaseUrl)
+    if (publicUrl) {
+      const scheme = publicUrl.protocol === 'https:' ? 'wss' : 'ws'
+      const basePath = publicUrl.pathname.replace(/\/+$/, '')
+      return `${scheme}://${publicUrl.host}${basePath}${path}`
+    }
+  }
+
   const address = server.address()
   const actualPort =
     typeof address === 'object' && address ? address.port : config.port
@@ -1108,7 +1125,15 @@ function buildWsUrl(server: http.Server, config: ServerConfig, sessionId: string
     host = config.host
   }
 
-  return `ws://${host}:${actualPort}/ws/sessions/${sessionId}`
+  return `ws://${host}:${actualPort}${path}`
+}
+
+function tryParseUrl(value: string): URL | null {
+  try {
+    return new URL(value)
+  } catch {
+    return null
+  }
 }
 
 function canAccessSession(
