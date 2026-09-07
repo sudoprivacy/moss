@@ -115,6 +115,7 @@ import './sources/filesystem.js'
 import './sources/wecomDrive.js'
 // Corp-app connectors register themselves on import.
 import './corpapps/wecomApp.js'
+import './corpapps/wecomMsgAudit.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
 import { configItemToRule } from './authProxy/authProxyServer.js'
