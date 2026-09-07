@@ -42,11 +42,8 @@ export type RawChatRecord = {
   encrypt_chat_msg: string
 }
 
-type Koffi = {
-  load(path: string): {
-    func(signature: string): (...args: unknown[]) => unknown
-  }
-}
+type KoffiLib = { func(signature: string): (...args: unknown[]) => unknown }
+type Koffi = { load(path: string): KoffiLib }
 
 let koffiCache: Koffi | null = null
 
@@ -83,7 +80,7 @@ export function sdkLibraryPath(): string {
  */
 export function openSdk(corpId: string, secret: string): SdkHandle {
   const koffi = loadKoffi()
-  let lib: ReturnType<Koffi['load']>
+  let lib: KoffiLib
   try {
     lib = koffi.load(sdkLibraryPath())
   } catch (err) {
@@ -93,9 +90,71 @@ export function openSdk(corpId: string, secret: string): SdkHandle {
     )
   }
 
-  throw new Error(
-    'msgaudit: SDK binding not implemented yet — ' +
-      `library ${sdkLibraryPath()} loaded, but GetChatData/DecryptData signatures ` +
-      'must be bound against the vendored SDK headers. See docs/wecom-msgaudit.md.',
+  // Signatures per the vendored SDK header. The library fills caller-
+  // allocated Slice_t buffers rather than returning strings, so every
+  // call pairs a NewSlice with a FreeSlice.
+  const NewSdk = lib.func('void* NewSdk()')
+  const Init = lib.func('int Init(void*, const char*, const char*)')
+  const DestroySdk = lib.func('void DestroySdk(void*)')
+  const NewSlice = lib.func('void* NewSlice()')
+  const FreeSlice = lib.func('void FreeSlice(void*)')
+  const GetContentFromSlice = lib.func('const char* GetContentFromSlice(void*)')
+  const GetChatDataFn = lib.func(
+    'int GetChatData(void*, unsigned long long, unsigned int, const char*, const char*, int, void*)',
   )
+  const DecryptDataFn = lib.func('int DecryptData(const char*, const char*, void*)')
+
+  const sdk = NewSdk() as unknown
+  const initRc = Number(Init(sdk, corpId, secret))
+  if (initRc !== 0) {
+    try {
+      DestroySdk(sdk)
+    } catch {
+      // best-effort
+    }
+    throw new Error(`msgaudit: SDK Init failed (rc=${initRc}) — check corpId and the 会话存档 Secret`)
+  }
+
+  /** Run `fn` against a fresh Slice and return its content, always freeing. */
+  const withSlice = (fn: (slice: unknown) => number): string => {
+    const slice = NewSlice() as unknown
+    try {
+      const rc = fn(slice)
+      if (rc !== 0) throw new Error(`rc=${rc}`)
+      return String(GetContentFromSlice(slice) ?? '')
+    } finally {
+      try {
+        FreeSlice(slice)
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  return {
+    async getChatData(seq: number, limit: number): Promise<RawChatRecord[]> {
+      let body: string
+      try {
+        // proxy/passwd null, 10s timeout — matches the SDK's own default.
+        body = withSlice((slice) =>
+          Number(GetChatDataFn(sdk, BigInt(seq), limit, null, null, 10, slice)),
+        )
+      } catch (err) {
+        throw new Error(`msgaudit: GetChatData failed at seq ${seq} (${err instanceof Error ? err.message : err})`)
+      }
+      const parsed = JSON.parse(body) as { errcode?: number; errmsg?: string; chatdata?: RawChatRecord[] }
+      if (parsed.errcode && parsed.errcode !== 0) {
+        throw new Error(`msgaudit: GetChatData errcode=${parsed.errcode} ${parsed.errmsg ?? ''}`)
+      }
+      return parsed.chatdata ?? []
+    },
+
+    decryptData(randomKey: string, encryptedMsg: string): string {
+      return withSlice((slice) => Number(DecryptDataFn(randomKey, encryptedMsg, slice)))
+    },
+
+    destroy(): void {
+      DestroySdk(sdk)
+    },
+  }
 }

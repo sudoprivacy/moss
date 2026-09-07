@@ -128,4 +128,17 @@ jq -r '.[] | "\(.count)\t\(.roomid)"' rooms.json | sort -rn
 
 - **媒体文件**：图片/语音/文件的二进制需 `GetMediaData` 单独拉取，当前只存元数据
 - **明文加密存储**：解密后的聊天内容以明文 JSONL 落盘。是否静态加密、保留多久，取决于你的合规要求
-- **SDK 函数绑定**：`sdk.ts` 中 `openSdk()` 的 FFI 签名需对照企微 SDK 头文件绑定后才能真正拉取（见文件内 TODO）
+## 十、FFI 绑定验证状态
+
+`sdk.ts` 的函数签名已在 **linux/amd64（CentOS 7, glibc 2.17）** 上、于实际部署镜像
+`my-moss-server` 内验证通过：
+
+- koffi 2.16.3 安装并加载 `.so` 正常
+- 五个签名全部绑定成功：`NewSdk` / `Init` / `GetChatData` / `DecryptData` / `DestroySdk`，
+  含 Slice_t out-pointer 的分配、内容读回与释放
+- 全链路跑通：SDK 取页 → 真实 RSA 私钥解出对称密钥 → 规范化 → JSONL 落盘 → rooms.json
+- 错误路径：`errcode` 非 0 抛出、`Init` 失败守卫、解密失败计数跳过且游标继续前进
+
+验证使用 gcc 编译的同签名替身库（企微 SDK 需登录后台下载，服务器上没有）。
+**与真实 SDK 的剩余风险**：函数签名若与实际头文件不符（参数个数/类型），
+会在首次调用时报错而非静默出错 —— 替换真库后跑一次拉取即可确认。
