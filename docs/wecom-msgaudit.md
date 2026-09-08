@@ -37,6 +37,12 @@
 
 ## 四、生成 RSA 密钥对
 
+**推荐：在管理后台点「生成密钥对」按钮。** 先保存该应用，再回到配置弹窗，
+点击生成 —— 私钥直接写入加密凭据（不回显、不经过剪贴板），公钥显示在弹窗里
+供复制。公钥常驻保存在 `config_json` 中，随时可以回来重新复制。
+
+也可以手动生成后粘贴私钥：
+
 ```bash
 openssl genrsa -out msgaudit_v1_private.pem 2048
 openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
@@ -44,7 +50,9 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 
 公钥全文（含 `-----BEGIN/END PUBLIC KEY-----`）贴进企微后台；私钥填进 moss。
 
-**私钥丢失 = 历史记录永久无法解密**，企微没有副本。
+**私钥丢失的影响**：已归档到 moss 的 JSONL **不受影响** —— 记录在拉取时就已解密，
+落盘的是明文。但企微保留期内**尚未拉取**的记录将永久无法取回（企微只有公钥，
+没有你的私钥副本，且保留期过后原始数据即删除）。
 
 ### 密钥轮换
 
@@ -55,6 +63,16 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 ```
 
 只有一个版本时直接粘贴 PEM 即可（视为版本 1）。
+
+管理后台提供两条路径，**都是追加语义**，不会动到其他版本：
+
+- **生成密钥对 / 轮换** —— 服务端生成 RSA-2048，私钥直接入库不回显，版本号自动递增
+- **导入已有私钥**（迁移场景）—— 手动指定 `publickey_ver` 并粘贴 PEM。用于公钥已在
+  企微后台注册、你手里有对应私钥的情况。版本号必须与企微记录中的一致，否则那批记录解不开。
+
+两者都只影响指定的那一个版本。凭据 blob 里的 Secret / 回调 Token / EncodingAESKey
+也会被保留 —— 这是走专用端点而不是通用 PATCH 的原因：PATCH 是整体替换，
+会静默清掉同一 blob 中的其他字段。
 
 ## 五、配置步骤
 

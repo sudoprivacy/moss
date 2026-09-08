@@ -72,3 +72,45 @@ export function deleteCorpApp(id: string): Promise<{ ok: boolean }> {
 export function testCorpApp(id: string): Promise<TestConnectionResult> {
   return authClient.post<TestConnectionResult>(`/api/v1/corp-apps/${id}/test`, undefined)
 }
+
+/** Result of generating a 会话存档 RSA keypair (private key stays server-side). */
+export type GenerateKeypairResult = {
+  ok: boolean
+  /** publickey_ver assigned to the new key. */
+  version: number
+  /** PEM public key — paste this into the WeCom console. */
+  publicKey: string
+  /** All private-key versions now held, oldest first. */
+  versions: string[]
+}
+
+/**
+ * Generate an RSA-2048 keypair for a 会话存档 instance. The private key is
+ * stored in the encrypted credential blob and never returned; only the
+ * public half comes back. Repeat calls APPEND a new version rather than
+ * replacing, so records encrypted under an older key stay decryptable.
+ */
+export function generateCorpAppKeypair(id: string): Promise<GenerateKeypairResult> {
+  return authClient.post<GenerateKeypairResult>(`/api/v1/corp-apps/${id}/generate-keypair`, undefined)
+}
+
+export type ImportKeyResult = GenerateKeypairResult & {
+  /** True when this version already existed and was overwritten. */
+  replaced: boolean
+}
+
+/**
+ * Import an existing RSA private key under a specific publickey_ver
+ * (migration path). Like generate, this MERGES into the stored key map —
+ * only the named version is added or replaced, never the whole set.
+ */
+export function importCorpAppKey(
+  id: string,
+  version: number,
+  privateKey: string,
+): Promise<ImportKeyResult> {
+  return authClient.post<ImportKeyResult>(`/api/v1/corp-apps/${id}/import-key`, {
+    version,
+    privateKey,
+  })
+}
