@@ -2,6 +2,7 @@ import { Suspense, lazy } from 'react'
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { DashboardShell } from './layouts/dashboard-shell'
+import { OPERATION_ROUTES } from './operations-navigation'
 
 const LoginPage = lazy(() => import('./pages/login-page'))
 const DashboardPage = lazy(() => import('./pages/dashboard-page'))
@@ -28,6 +29,10 @@ const AuditLogPage = lazy(() => import('./pages/secrets/audit-log-page'))
 const RotationAlertsPage = lazy(() => import('./pages/secrets/rotation-alerts-page'))
 const CronJobsPage = lazy(() => import('./pages/cron-jobs-page'))
 const EventTriggersPage = lazy(() => import('./pages/event-triggers-page'))
+const OperationsInvitationsPage = lazy(() => import('./pages/operations-invitations-page'))
+const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page'))
+const OperationsAuditPage = lazy(() => import('./pages/operations-audit-page'))
+const OperationsQualityPage = lazy(() => import('./pages/operations-quality-page'))
 const McpServersPage = lazy(() => import('./pages/mcp/mcp-servers-page'))
 const McpEnterpriseServersPage = lazy(() => import('./pages/mcp/mcp-enterprise-servers-page'))
 const McpDepartmentServersPage = lazy(() => import('./pages/mcp/mcp-department-servers-page'))
@@ -278,6 +283,22 @@ export default function App() {
               <EventTriggersPage />
             </SuspendedRoute>
           }
+        />
+        <Route
+          path={OPERATION_ROUTES.invitations}
+          element={<SuspendedRoute><OperationsInvitationsPage /></SuspendedRoute>}
+        />
+        <Route
+          path={OPERATION_ROUTES.billing}
+          element={<SuspendedRoute><OperationsBillingPage /></SuspendedRoute>}
+        />
+        <Route
+          path={OPERATION_ROUTES.audit}
+          element={<SuspendedRoute><OperationsAuditPage /></SuspendedRoute>}
+        />
+        <Route
+          path={OPERATION_ROUTES.quality}
+          element={<SuspendedRoute><OperationsQualityPage /></SuspendedRoute>}
         />
         {/* MCP Management */}
         <Route path="/mcp" element={<Navigate to="/mcp/servers/enterprise" replace />} />

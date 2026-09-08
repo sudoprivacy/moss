@@ -117,8 +117,8 @@ export class EventTriggerService {
   private config: EventTriggerServiceConfig
   private timer?: ReturnType<typeof setTimeout>
   private stopped = true
-  /** Runs in flight in THIS process, used for the slot calculation. */
-  private inFlight = new Set<string>()
+  /** Runs in flight in THIS process, used for the slot calculation and shutdown drain. */
+  private inFlight = new Map<string, Promise<void>>()
 
   constructor(db: DatabaseSync, config: EventTriggerServiceConfig) {
     // Fail loud on missing config: the project has no type-check step (the
@@ -162,25 +162,35 @@ export class EventTriggerService {
     console.log(`[EventTriggerService] started (tick=${TICK_INTERVAL_MS}ms, maxConcurrent=${MAX_CONCURRENT_RUNS})`)
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = undefined
     }
+    await Promise.allSettled(Array.from(this.inFlight.values()))
     console.log('[EventTriggerService] stopped')
   }
 
   /** Exposed for tests: run a single drain pass synchronously. */
   async tickOnce(): Promise<void> {
+    // A timeout callback may already be queued when stop() clears its handle.
+    // Re-check here before touching the queue so shutdown cannot claim work
+    // that would outlive the database and runtime resources.
+    if (this.stopped) return
     const slots = MAX_CONCURRENT_RUNS - this.inFlight.size
     if (slots <= 0) return
 
     const claimed = this.store.claimQueuedRuns(slots)
     for (const run of claimed) {
-      this.inFlight.add(run.id)
-      // Fire-and-forget: executeRun owns its own status transitions.
-      void this.executeRun(run).finally(() => this.inFlight.delete(run.id))
+      // Fire-and-forget during normal operation, but retain the Promise so
+      // stop() can drain it before the database is closed.
+      const execution = this.executeRun(run)
+      this.inFlight.set(run.id, execution)
+      void execution.then(
+        () => this.inFlight.delete(run.id),
+        () => this.inFlight.delete(run.id),
+      )
     }
   }
 

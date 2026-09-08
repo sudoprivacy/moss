@@ -2,7 +2,9 @@ import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, ra
 import { mkdirSync } from 'fs'
 import { dirname, join } from 'path'
 import { DatabaseSync } from 'node:sqlite'
+import { compareSync as verifyBcryptPassword } from 'bcryptjs'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -32,7 +34,7 @@ export type AuthCenterUser = {
   displayName: string | null
   departmentId: string | null
   role: string
-  status: 'active' | 'disabled'
+  status: 'pending' | 'active' | 'locked' | 'disabled'
   localAuth: boolean
   tokenLimit: number | null
   createdAt: number
@@ -141,7 +143,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     displayName: row.display_name == null ? null : String(row.display_name),
     departmentId: row.department_id == null ? null : String(row.department_id),
     role: String(row.role),
-    status: String(row.status) as 'active' | 'disabled',
+    status: String(row.status) as AuthCenterUser['status'],
     localAuth: Boolean(row.local_auth),
     tokenLimit: row.token_limit == null ? null : Number(row.token_limit),
     createdAt: Number(row.created_at),
@@ -224,7 +226,7 @@ export class AuthCenterDb {
         name TEXT NOT NULL,
         department_id TEXT REFERENCES departments(id),
         role TEXT NOT NULL DEFAULT 'user',
-        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'locked', 'disabled')),
         password_hash TEXT,
         password_updated_at INTEGER,
         last_login_at INTEGER,
@@ -362,6 +364,7 @@ export class AuthCenterDb {
       'display_name',
       'ALTER TABLE users ADD COLUMN display_name TEXT',
     )
+    this.ensureUnifiedUserStatusConstraint()
     this.ensureColumn(
       'departments',
       'ext_dept_id',
@@ -413,6 +416,55 @@ export class AuthCenterDb {
     const hasColumn = columns.some(column => String(column.name) === columnName)
     if (!hasColumn) {
       this.db.exec(statement)
+    }
+  }
+
+  private ensureUnifiedUserStatusConstraint(): void {
+    const table = this.db.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'
+    `).get() as SqlRow | undefined
+    if (String(table?.sql ?? '').includes("'locked'")) return
+    if (this.db.isTransaction) {
+      throw new Error('AuthCenter user status migration must run outside a transaction')
+    }
+
+    this.db.exec('PRAGMA foreign_keys=OFF')
+    try {
+      runInTransaction(this.db, () => {
+        this.db.exec(`
+          DROP TABLE IF EXISTS users_unified_status;
+          CREATE TABLE users_unified_status (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES organizations(id),
+            email TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            display_name TEXT,
+            department_id TEXT REFERENCES departments(id),
+            role TEXT NOT NULL DEFAULT 'user',
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'locked', 'disabled')),
+            password_hash TEXT,
+            password_updated_at INTEGER,
+            last_login_at INTEGER,
+            created_at INTEGER NOT NULL,
+            token_limit INTEGER,
+            local_auth INTEGER NOT NULL DEFAULT 0,
+            ext_user_id TEXT
+          );
+          INSERT INTO users_unified_status (
+            id, org_id, email, name, display_name, department_id, role, status,
+            password_hash, password_updated_at, last_login_at, created_at,
+            token_limit, local_auth, ext_user_id
+          )
+          SELECT id, org_id, email, name, display_name, department_id, role, status,
+                 password_hash, password_updated_at, last_login_at, created_at,
+                 token_limit, local_auth, ext_user_id
+          FROM users;
+          DROP TABLE users;
+          ALTER TABLE users_unified_status RENAME TO users;
+        `)
+      })
+    } finally {
+      this.db.exec('PRAGMA foreign_keys=ON')
     }
   }
 
@@ -604,9 +656,9 @@ export class AuthCenterDb {
   // User operations
   createUser(user: AuthCenterUser): void {
     this.db.prepare(`
-      INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, password_hash,
+      INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, local_auth, password_hash,
                          password_updated_at, last_login_at, created_at, ext_user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       user.id,
       user.orgId,
@@ -616,6 +668,7 @@ export class AuthCenterDb {
       user.departmentId,
       user.role,
       user.status,
+      user.localAuth ? 1 : 0,
       user.passwordHash,
       user.passwordUpdatedAt,
       user.lastLoginAt,
@@ -688,7 +741,7 @@ export class AuthCenterDb {
       orgId?: string
       departmentId?: string | null
       role?: string
-      status?: 'active' | 'disabled'
+      status?: AuthCenterUser['status']
       extUserId?: string | null
     },
   ): void {
@@ -731,6 +784,11 @@ export class AuthCenterDb {
     this.db.prepare(`
       UPDATE users SET org_id = ? WHERE id = ?
     `).run(orgId, id)
+  }
+
+  deleteUser(id: string): void {
+    this.db.prepare(`DELETE FROM api_keys WHERE user_id = ?`).run(id)
+    this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id)
   }
 
   setUserTokenLimit(id: string, tokenLimit: number | null): void {
@@ -992,8 +1050,7 @@ export class AuthCenterDb {
       scopes: ['*'],
     })
 
-    this.db.exec('BEGIN TRANSACTION')
-    try {
+    return runInTransaction(this.db, () => {
       this.createOrganization(orgId, 'Default Organization', now())
       this.createUser({
         id: adminUserId,
@@ -1018,19 +1075,14 @@ export class AuthCenterDb {
       this.createApiKey(apiKey)
       this.setConfig('issuer', 'moss-server')
       this.setConfig('jwt_secret', randomBytes(32).toString('base64url'))
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
-
-    return {
-      created: true,
-      bootstrapAdminUsername: resolvedAdmin.username,
-      bootstrapAdminApiKey: plainTextKey,
-      bootstrapAdminEmail: resolvedAdmin.email,
-      bootstrapAdminPassword: resolvedAdmin.password,
-    }
+      return {
+        created: true,
+        bootstrapAdminUsername: resolvedAdmin.username,
+        bootstrapAdminApiKey: plainTextKey,
+        bootstrapAdminEmail: resolvedAdmin.email,
+        bootstrapAdminPassword: resolvedAdmin.password,
+      }
+    })
   }
 
   ensureBootstrapAdmin(config: BootstrapAdminConfig = { username: 'admin' }): AuthCenterBootstrap {
@@ -1077,8 +1129,7 @@ export class AuthCenterDb {
       scopes: ['*'],
     })
 
-    this.db.exec('BEGIN TRANSACTION')
-    try {
+    return runInTransaction(this.db, () => {
       if (!org) {
         this.createOrganization(orgId, 'Default Organization', now())
       }
@@ -1101,19 +1152,14 @@ export class AuthCenterDb {
         extUserId: null,
       })
       this.createApiKey(apiKey)
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
-
-    return {
-      created: true,
-      bootstrapAdminUsername: resolvedAdmin.username,
-      bootstrapAdminApiKey: plainTextKey,
-      bootstrapAdminEmail: resolvedAdmin.email,
-      bootstrapAdminPassword: resolvedAdmin.password,
-    }
+      return {
+        created: true,
+        bootstrapAdminUsername: resolvedAdmin.username,
+        bootstrapAdminApiKey: plainTextKey,
+        bootstrapAdminEmail: resolvedAdmin.email,
+        bootstrapAdminPassword: resolvedAdmin.password,
+      }
+    })
   }
 
   isInitialized(): boolean {
@@ -1125,8 +1171,7 @@ export class AuthCenterDb {
 
   // Migration from JSON store
   migrateFromJson(jsonStore: AuthCenterStore): void {
-    this.db.exec('BEGIN TRANSACTION')
-    try {
+    runInTransaction(this.db, () => {
       // Migrate organizations
       for (const org of jsonStore.organizations) {
         this.createOrganization(org.id, org.name, org.createdAt)
@@ -1151,11 +1196,7 @@ export class AuthCenterDb {
       this.setConfig('issuer', jsonStore.issuer)
       this.setConfig('jwt_secret', jsonStore.jwtSecret)
 
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
+    })
   }
 }
 
@@ -1180,6 +1221,13 @@ export function verifyPassword(
   if (!passwordHash) {
     return false
   }
+  if (isLegacyPasswordHash(passwordHash)) {
+    try {
+      return verifyBcryptPassword(password, passwordHash)
+    } catch {
+      return false
+    }
+  }
   const match = passwordHash.match(/^scrypt\$([^$]+)\$([0-9a-f]+)$/)
   if (!match) {
     return false
@@ -1193,6 +1241,10 @@ export function verifyPassword(
   return (
     actual.length === expected.length && timingSafeEqual(actual, expected)
   )
+}
+
+export function isLegacyPasswordHash(passwordHash: string | null | undefined): boolean {
+  return typeof passwordHash === 'string' && /^\$2[aby]\$/.test(passwordHash)
 }
 
 export function createTemporaryPassword(length = 20): string {

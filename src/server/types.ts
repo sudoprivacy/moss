@@ -1,6 +1,7 @@
 import { z } from 'zod/v4'
 import { lazySchema } from '../utils/lazySchema.js'
 import type { SessionRuntimeInfo, SessionRuntimeOptions, SessionRuntimeType } from './sessionManager.js'
+import type { QmsRuntimeConfig } from './qms/config.js'
 
 export const runtimeInfoSchema = lazySchema(() =>
   z.object({
@@ -184,6 +185,62 @@ export const serverFileConfigSchema = lazySchema(() =>
       authorization: z.string().optional(),
       cosBaseUrl: z.string().optional(),
     }).default({}),
+    sudoworkCompatibility: z.object({
+      enabled: z.boolean().default(false),
+      hosts: z.array(z.string().min(1)).default([]),
+      publicBaseUrl: z.string().url().optional(),
+      loginMethod: z.enum(['sms', 'password', 'cas']).default('password'),
+      dify: z.object({
+        baseUrl: z.string().url().default('http://localhost:5001'),
+      }).default({
+        baseUrl: 'http://localhost:5001',
+      }),
+      sms: z.object({
+        provider: z.enum(['disabled', 'tencent']).default('disabled'),
+        sdkAppId: z.string().default(''),
+        signName: z.string().default(''),
+        templateId: z.string().default(''),
+        signId: z.string().default(''),
+        region: z.string().default('ap-beijing'),
+        codeLength: z.number().int().min(4).max(8).default(6),
+        expireMinutes: z.number().int().min(1).default(5),
+        sendIntervalSeconds: z.number().int().min(1).default(60),
+        maxPerDay: z.number().int().min(1).default(10),
+      }).default({
+        provider: 'disabled',
+        sdkAppId: '',
+        signName: '',
+        templateId: '',
+        signId: '',
+        region: 'ap-beijing',
+        codeLength: 6,
+        expireMinutes: 5,
+        sendIntervalSeconds: 60,
+        maxPerDay: 10,
+      }),
+    }).default({
+      enabled: false,
+      hosts: [],
+      loginMethod: 'password',
+      dify: { baseUrl: 'http://localhost:5001' },
+    }),
+    qms: z.object({
+      enabled: z.boolean().default(false),
+      apiKeyHeader: z.string().min(1).default('X-API-Key'),
+      queueFlushIntervalMs: z.number().int().min(250).default(3_000),
+      queueBatchSize: z.number().int().min(1).max(10_000).default(50),
+      perfRetentionDays: z.number().int().min(1).default(90),
+      conversationRetentionDays: z.number().int().min(1).default(180),
+      encryptionRequired: z.boolean().default(false),
+    }).default({
+      enabled: false,
+      apiKeyHeader: 'X-API-Key',
+      queueFlushIntervalMs: 3_000,
+      queueBatchSize: 50,
+      perfRetentionDays: 90,
+      conversationRetentionDays: 180,
+      encryptionRequired: false,
+    }),
     wikiIndex: z.object({
       enabled: z.boolean().default(true),
       modelId: z.string().default('Xenova/multilingual-e5-small'),
@@ -378,6 +435,35 @@ export type ServerConfig = {
   hubApiBaseUrl?: string
   hubAuthorization?: string
   cosBaseUrl?: string
+  sudoworkCompatibility: {
+    enabled: boolean
+    hosts: string[]
+    publicBaseUrl?: string
+    loginMethod: 'sms' | 'password' | 'cas'
+    legacyJwtSecret?: string
+    redisUrl?: string
+    dify: {
+      baseUrl: string
+      systemToken?: string
+      provisionSecret?: string
+      ssoSecret?: string
+    }
+    sms: {
+      provider: 'disabled' | 'tencent'
+      sdkAppId: string
+      signName: string
+      templateId: string
+      signId: string
+      region: string
+      codeLength: number
+      expireMinutes: number
+      sendIntervalSeconds: number
+      maxPerDay: number
+      secretId?: string
+      secretKey?: string
+    }
+  }
+  qms: QmsRuntimeConfig
   /**
    * Local vector index for wiki semantic search. When `enabled=true`,
    * WikiJobExecutor builds a Float32 embedding sidecar at wiki publish time

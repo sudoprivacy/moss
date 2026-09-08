@@ -5,6 +5,7 @@
  */
 
 import type { DirectConnectStore } from '../../server/db.js';
+import { randomUUID } from 'node:crypto';
 import type { NexusClient } from '../../server/nexus/nexusClient.js';
 import type { SessionManager } from './SessionManager.js';
 import type { BasePlugin, PluginMessageHandler, PluginConfirmHandler } from '../plugins/BasePlugin.js';
@@ -21,6 +22,9 @@ import { WeComPlugin } from '../plugins/wecom/WeComPlugin.js';
 // Key is the full pluginId (e.g., 'lark_default', 'telegram_default')
 type PluginConstructor = new () => BasePlugin;
 const pluginRegistry: Map<string, PluginConstructor> = new Map();
+
+const CHANNEL_LEASE_DURATION_MS = 45_000;
+const CHANNEL_LEASE_RENEW_INTERVAL_MS = 10_000;
 
 // Register built-in plugins with their default IDs
 pluginRegistry.set('lark_default', LarkPlugin as PluginConstructor);
@@ -79,7 +83,14 @@ export class PluginManager {
   // Runtime error cache: pluginId -> error message
   private pluginErrors: Map<string, string> = new Map();
 
-  constructor(sessionManager: SessionManager, db: DirectConnectStore, nexus?: NexusClient | null) {
+  private leaseRenewTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    sessionManager: SessionManager,
+    db: DirectConnectStore,
+    nexus?: NexusClient | null,
+    private readonly leaseOwnerId = `channel-${randomUUID()}`,
+  ) {
     this.sessionManager = sessionManager;
     this.db = db;
     this.nexus = nexus ?? null;
@@ -105,8 +116,8 @@ export class PluginManager {
   setMessageHandler(handler: PluginMessageHandler): void {
     this.messageHandler = handler;
 
-    for (const plugin of this.plugins.values()) {
-      plugin.onMessage(handler);
+    for (const [key, plugin] of this.plugins.entries()) {
+      this.attachMessageHandler(plugin, key);
     }
   }
 
@@ -116,8 +127,8 @@ export class PluginManager {
   setConfirmHandler(handler: PluginConfirmHandler): void {
     this.confirmHandler = handler;
 
-    for (const plugin of this.plugins.values()) {
-      plugin.onConfirm(handler);
+    for (const [key, plugin] of this.plugins.entries()) {
+      this.attachConfirmHandler(plugin, key);
     }
   }
 
@@ -157,14 +168,30 @@ export class PluginManager {
    * instanceKey: unique key for this plugin instance (defaults to config.id).
    * In enterprise mode, use "pluginId:userId" to support per-user plugin instances.
    */
-  async startPlugin(config: IChannelPluginConfig, instanceKey?: string): Promise<void> {
+  async startPlugin(config: IChannelPluginConfig, instanceKey?: string): Promise<boolean> {
     const { type } = config;
     const key = instanceKey || config.id;
 
     this.pluginErrors.delete(key);
 
     if (this.plugins.has(key)) {
-      return;
+      return true;
+    }
+
+    const leaseIdentity = this.parseLeaseIdentity(key);
+    if (leaseIdentity) {
+      const now = Date.now();
+      const acquired = this.db.acquireChannelPluginLease(
+        leaseIdentity.pluginId,
+        leaseIdentity.userId,
+        this.leaseOwnerId,
+        now,
+        now + CHANNEL_LEASE_DURATION_MS,
+      );
+      if (!acquired) {
+        console.log(`[PluginManager] Plugin ${key} is active on another Moss instance`);
+        return false;
+      }
     }
 
     const Constructor = pluginRegistry.get(type);
@@ -175,7 +202,7 @@ export class PluginManager {
     }
 
     const plugin = new Constructor();
-    const userId = instanceKey ? instanceKey.split(':').pop() : undefined;
+    const userId = leaseIdentity?.userId;
 
     try {
       await plugin.initialize(config);
@@ -186,15 +213,15 @@ export class PluginManager {
 
       this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
+      this.releaseLease(leaseIdentity);
+
       throw error;
     }
 
-    if (this.messageHandler) {
-      plugin.onMessage(this.messageHandler);
-    }
+    this.attachMessageHandler(plugin, key);
 
     if (this.confirmHandler) {
-      plugin.onConfirm(this.confirmHandler);
+      this.attachConfirmHandler(plugin, key);
     }
 
     try {
@@ -206,6 +233,8 @@ export class PluginManager {
 
       this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
+      this.releaseLease(leaseIdentity);
+
       throw error;
     }
 
@@ -213,7 +242,10 @@ export class PluginManager {
 
     this.db.updateChannelPluginStatus(config.id, 'running', Date.now(), userId);
 
+    this.ensureLeaseRenewalTimer();
+
     console.log(`[PluginManager] Plugin ${key} started successfully`);
+    return true;
   }
 
   /**
@@ -222,6 +254,7 @@ export class PluginManager {
   async stopPlugin(pluginId: string): Promise<void> {
     const plugin = this.plugins.get(pluginId);
     if (!plugin) {
+      this.releaseLease(this.parseLeaseIdentity(pluginId));
       return;
     }
 
@@ -234,6 +267,7 @@ export class PluginManager {
     // Extract bare pluginId from composite key
     const barePluginId = pluginId.includes(':') ? pluginId.split(':')[0] : pluginId;
     this.db.updateChannelPluginStatus(barePluginId, 'stopped', undefined, userId);
+    this.releaseLease(this.parseLeaseIdentity(pluginId));
 
     console.log(`[PluginManager] Plugin ${pluginId} stopped`);
   }
@@ -242,6 +276,10 @@ export class PluginManager {
    * Stop all plugins
    */
   async stopAll(): Promise<void> {
+    if (this.leaseRenewTimer) {
+      clearInterval(this.leaseRenewTimer);
+      this.leaseRenewTimer = null;
+    }
     const stopPromises = Array.from(this.plugins.keys()).map((id) => this.stopPlugin(id));
     await Promise.allSettled(stopPromises);
     console.log('[PluginManager] All plugins stopped');
@@ -303,6 +341,85 @@ export class PluginManager {
 
     if (this.messageHandler) {
       await this.messageHandler(message);
+    }
+  }
+
+  private parseLeaseIdentity(instanceKey: string): { pluginId: string; userId: string } | null {
+    const separator = instanceKey.lastIndexOf(':');
+    if (separator <= 0 || separator === instanceKey.length - 1) return null;
+    return {
+      pluginId: instanceKey.slice(0, separator),
+      userId: instanceKey.slice(separator + 1),
+    };
+  }
+
+  private releaseLease(identity: { pluginId: string; userId: string } | null): void {
+    if (!identity) return;
+    this.db.releaseChannelPluginLease(identity.pluginId, identity.userId, this.leaseOwnerId);
+  }
+
+  private attachMessageHandler(plugin: BasePlugin, instanceKey: string): void {
+    plugin.onMessage(async (message, sourcePlugin) => {
+      const identity = this.parseLeaseIdentity(instanceKey);
+      if (
+        identity &&
+        !this.db.ownsChannelPluginLease(identity.pluginId, identity.userId, this.leaseOwnerId, Date.now())
+      ) {
+        console.warn(`[PluginManager] Dropping message for ${instanceKey}: channel lease is no longer owned`);
+        return;
+      }
+      if (this.messageHandler) await this.messageHandler(message, sourcePlugin);
+    });
+  }
+
+  private attachConfirmHandler(plugin: BasePlugin, instanceKey: string): void {
+    plugin.onConfirm(async (userId, platform, callId, value) => {
+      const identity = this.parseLeaseIdentity(instanceKey);
+      if (
+        identity &&
+        !this.db.ownsChannelPluginLease(identity.pluginId, identity.userId, this.leaseOwnerId, Date.now())
+      ) {
+        console.warn(`[PluginManager] Dropping confirmation for ${instanceKey}: channel lease is no longer owned`);
+        return;
+      }
+      if (this.confirmHandler) await this.confirmHandler(userId, platform, callId, value);
+    });
+  }
+
+  private ensureLeaseRenewalTimer(): void {
+    if (this.leaseRenewTimer || this.plugins.size === 0) return;
+    this.leaseRenewTimer = setInterval(() => {
+      void this.renewLeases();
+    }, CHANNEL_LEASE_RENEW_INTERVAL_MS);
+    this.leaseRenewTimer.unref?.();
+  }
+
+  private async renewLeases(): Promise<void> {
+    const now = Date.now();
+    for (const [key, plugin] of Array.from(this.plugins.entries())) {
+      const identity = this.parseLeaseIdentity(key);
+      if (!identity) continue;
+      const renewed = this.db.renewChannelPluginLease(
+        identity.pluginId,
+        identity.userId,
+        this.leaseOwnerId,
+        now,
+        now + CHANNEL_LEASE_DURATION_MS,
+      );
+      if (renewed) continue;
+
+      this.pluginErrors.set(key, 'Channel lease lost to another Moss instance');
+      try {
+        await plugin.stop();
+      } catch (error) {
+        console.error(`[PluginManager] Failed to stop ${key} after lease loss:`, error);
+      } finally {
+        this.plugins.delete(key);
+      }
+    }
+    if (this.plugins.size === 0 && this.leaseRenewTimer) {
+      clearInterval(this.leaseRenewTimer);
+      this.leaseRenewTimer = null;
     }
   }
 

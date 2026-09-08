@@ -19,13 +19,24 @@ const PLUGIN_NAMES: Record<string, string> = {
   wecom: '企业微信 Bot',
 }
 
-export function createChannelsApi(db: DirectConnectStore) {
+export function createChannelsApi(
+  db: DirectConnectStore,
+  runtime?: { terminateSession(sessionId: string): Promise<void> },
+) {
+  const isInaccessiblePlugin = (orgId: string, userId: string, pluginId: string): boolean => {
+    const row = db.getChannelPlugin(pluginId, userId)
+    if (row) return String(row.org_id ?? '') !== orgId
+    return !KNOWN_CHANNEL_TYPES.some(
+      type => pluginId === type || pluginId === defaultPluginId(type),
+    )
+  }
+
   const channelsApi = {
     /**
      * GET /api/v1/channels/plugins
      */
     getPlugins: async (orgId: string, userId: string) => {
-      const rows = db.listChannelPlugins(userId)
+      const rows = db.listChannelPlugins(userId, orgId)
       const KNOWN_TYPES = KNOWN_CHANNEL_TYPES
       const extractType = (id: string, rowType: string): string => {
         if (KNOWN_TYPES.includes(rowType)) return rowType
@@ -83,10 +94,13 @@ export function createChannelsApi(db: DirectConnectStore) {
      * GET /api/v1/channels/plugins/:id
      */
     getPlugin: async (orgId: string, userId: string, pluginId: string) => {
-      const row = db.getChannelPlugin(pluginId, userId)
+      const row = db.getChannelPlugin(pluginId, userId, orgId)
       const KNOWN_TYPES = KNOWN_CHANNEL_TYPES
       if (!row) {
-        const type = KNOWN_TYPES.find(t => pluginId === t || pluginId.startsWith(`${t}_`))
+        // Only legacy fixed ids have a synthetic placeholder. Treat an
+        // arbitrary custom id as missing; otherwise a cross-org custom
+        // connection is distinguishable from a genuinely absent record.
+        const type = KNOWN_TYPES.find(t => pluginId === t || pluginId === defaultPluginId(t))
         if (type) {
           return {
             id: pluginId,
@@ -129,6 +143,10 @@ export function createChannelsApi(db: DirectConnectStore) {
     enablePlugin: async (orgId: string, userId: string, pluginId: string, body: any) => {
       console.log(`[ChannelsAPI] enablePlugin called: orgId=${orgId}, userId=${userId}, pluginId=${pluginId}`)
 
+      if (isInaccessiblePlugin(orgId, userId, pluginId)) {
+        return { ok: false, message: 'Channel not configured' }
+      }
+
       const manager = getChannelManager()
       if (!manager.isInitialized()) {
         console.error('[ChannelsAPI] ChannelManager not initialized')
@@ -151,6 +169,10 @@ export function createChannelsApi(db: DirectConnectStore) {
      */
     disablePlugin: async (orgId: string, userId: string, pluginId: string) => {
       console.log(`[ChannelsAPI] disablePlugin called: orgId=${orgId}, userId=${userId}, pluginId=${pluginId}`)
+
+      if (isInaccessiblePlugin(orgId, userId, pluginId)) {
+        return { ok: false, message: 'Channel not configured' }
+      }
 
       const manager = getChannelManager()
       if (!manager.isInitialized()) {
@@ -190,7 +212,7 @@ export function createChannelsApi(db: DirectConnectStore) {
 
       // The first connection of a type keeps the legacy `<type>_default` id, so existing
       // sessions, authorizations and pairings continue to resolve to it after upgrade.
-      const existing = db.listChannelPlugins(userId).filter(
+      const existing = db.listChannelPlugins(userId, orgId).filter(
         (row) => pluginTypeFromId(String(row.id)) === type,
       )
       const id = existing.some((row) => String(row.id) === defaultPluginId(type))
@@ -222,6 +244,9 @@ export function createChannelsApi(db: DirectConnectStore) {
      * pending pairings scoped to it. Sibling connections of the same type are untouched.
      */
     removePlugin: async (orgId: string, userId: string, pluginId: string) => {
+      if (isInaccessiblePlugin(orgId, userId, pluginId)) {
+        return { ok: false, message: 'Channel not configured' }
+      }
       const manager = getChannelManager()
       if (manager.isInitialized()) {
         await manager.disablePlugin(pluginId, userId)
@@ -256,7 +281,7 @@ export function createChannelsApi(db: DirectConnectStore) {
      * GET /api/v1/channels/pairings/pending
      */
     getPendingPairings: async (orgId: string, userId: string) => {
-      const rows = db.listPendingPairingRequests(userId)
+      const rows = db.listPendingPairingRequests(userId, orgId)
       const pairings = rows
         .map((row) => ({
           code: String(row.code),
@@ -276,10 +301,8 @@ export function createChannelsApi(db: DirectConnectStore) {
      */
     approvePairing: async (orgId: string, userId: string, code: string) => {
       // Validate the pairing code belongs to this user
-      const pairingRow = db.getPairingRequest(code)
-      if (pairingRow && pairingRow.user_id && String(pairingRow.user_id) !== userId) {
-        return { ok: false, message: 'Forbidden' }
-      }
+      const pairingRow = db.getPairingRequest(code, userId, orgId)
+      if (!pairingRow) return { ok: false }
       const result = await getPairingService().approvePairing(code)
       if (result.success && result.user) {
         db.upsertChannelUser({
@@ -304,10 +327,8 @@ export function createChannelsApi(db: DirectConnectStore) {
      */
     rejectPairing: async (orgId: string, userId: string, code: string) => {
       // Validate the pairing code belongs to this user
-      const pairingRow = db.getPairingRequest(code)
-      if (pairingRow && pairingRow.user_id && String(pairingRow.user_id) !== userId) {
-        return { ok: false, message: 'Forbidden' }
-      }
+      const pairingRow = db.getPairingRequest(code, userId, orgId)
+      if (!pairingRow) return { success: false, error: 'Invalid pairing code' }
       const result = await getPairingService().rejectPairing(code)
       return result
     },
@@ -316,7 +337,7 @@ export function createChannelsApi(db: DirectConnectStore) {
      * GET /api/v1/channels/users
      */
     getUsers: async (orgId: string, userId: string) => {
-      const rows = db.listChannelUsers(userId)
+      const rows = db.listChannelUsers(userId, orgId)
       const users = rows
         .map((row) => ({
           id: String(row.id),
@@ -336,10 +357,8 @@ export function createChannelsApi(db: DirectConnectStore) {
      */
     deleteUser: async (orgId: string, userId: string, targetUserId: string) => {
       // Only allow deleting users that belong to this authenticated user
-      const targetUser = db.getChannelUserById(targetUserId)
-      if (targetUser && String(targetUser.user_id) !== userId) {
-        return { ok: false, message: 'Forbidden' }
-      }
+      const targetUser = db.getChannelUserById(targetUserId, userId, orgId)
+      if (!targetUser) return { ok: true }
       db.deleteChannelUser(targetUserId)
       return { ok: true }
     },
@@ -350,7 +369,7 @@ export function createChannelsApi(db: DirectConnectStore) {
     deleteUsersByPlatform: async (orgId: string, userId: string, platformType: string) => {
       // `platform` here is the connection scope: the bare platform for a type's first
       // connection, or a plugin id to clear just that one.
-      const count = db.deleteChannelUsersByPlatform(platformType, userId)
+      const count = db.deleteChannelUsersByPlatform(platformType, userId, orgId)
       return { ok: true, count }
     },
 
@@ -391,7 +410,21 @@ export function createChannelsApi(db: DirectConnectStore) {
      * DELETE /api/v1/channels/sessions/:id
      */
     deleteSession: async (orgId: string, userId: string, sessionId: string) => {
-      db.deleteChannelSession(sessionId)
+      const session = db.getSession(sessionId)
+      if (
+        !session ||
+        session.orgId !== orgId ||
+        session.userId !== userId ||
+        !session.source ||
+        !KNOWN_CHANNEL_TYPES.includes(session.source)
+      ) {
+        return { success: true }
+      }
+
+      await runtime?.terminateSession(sessionId)
+      const manager = getChannelManager()
+      manager.getSessionManager()?.clearSessionByConversationId(sessionId)
+      db.deleteSession(sessionId)
       return { success: true }
     },
 
@@ -399,10 +432,10 @@ export function createChannelsApi(db: DirectConnectStore) {
      * GET /api/v1/channels/plugins/:id/credentials
      */
     getPluginCredentials: async (orgId: string, userId: string, pluginId: string) => {
-      const row = db.getChannelPlugin(pluginId, userId)
+      const row = db.getChannelPlugin(pluginId, userId, orgId)
       if (!row) {
         const KNOWN_TYPES = KNOWN_CHANNEL_TYPES
-        const type = KNOWN_TYPES.find(t => pluginId === t || pluginId.startsWith(`${t}_`))
+        const type = KNOWN_TYPES.find(t => pluginId === t || pluginId === defaultPluginId(t))
         if (type) return {}
         return null
       }
@@ -423,7 +456,7 @@ export function createChannelsApi(db: DirectConnectStore) {
       pluginId: string,
       listAgents: (ownerUserId: string) => Promise<Array<{ name: string; displayName: string; description?: string }>>,
     ) => {
-      const row = db.getChannelPlugin(pluginId, userId)
+      const row = db.getChannelPlugin(pluginId, userId, orgId)
       let defaultAgent: string | null = null
       if (row?.config_json) {
         try {
@@ -451,7 +484,7 @@ export function createChannelsApi(db: DirectConnectStore) {
       agentName: string | null,
       listAgents: (ownerUserId: string) => Promise<Array<{ name: string; displayName: string }>>,
     ) => {
-      const row = db.getChannelPlugin(pluginId, userId)
+      const row = db.getChannelPlugin(pluginId, userId, orgId)
       if (!row) return { ok: false, message: 'Channel not configured' }
 
       if (agentName) {
@@ -509,7 +542,7 @@ export function createChannelsApi(db: DirectConnectStore) {
 
       const sessionManager = manager.getSessionManager()
       if (sessionManager) {
-        const cleared = sessionManager.clearAllSessions()
+        const cleared = sessionManager.clearSessionsForOwner(orgId, userId)
         console.log(`[ChannelsAPI] Cleared ${cleared} sessions for settings sync`)
       }
 
@@ -517,7 +550,7 @@ export function createChannelsApi(db: DirectConnectStore) {
       // Settings belong to one connection; fall back to the type's first connection for
       // older clients that only send a platform.
       const pluginId = body.pluginId || defaultPluginId(platform)
-      const existing = db.getChannelPlugin(pluginId, userId)
+      const existing = db.getChannelPlugin(pluginId, userId, orgId)
 
       if (existing) {
         const config = existing.config_json ? JSON.parse(String(existing.config_json)) : {}

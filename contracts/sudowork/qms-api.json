@@ -1,0 +1,1362 @@
+{
+  "schema_version": 1,
+  "source_commit": "311636c7bbfa4fa1c655aa8bd5c7e898f565f263",
+  "routes": [
+    {
+      "method": "DELETE",
+      "path": "/api/v1/qms/alerts/configs/:id",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 204,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "alert_write"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 360,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/events/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 424,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/issues",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 189,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 249,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/stats/distribution",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 489,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/stats/summary",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 451,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/stats/trend",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 469,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/alerts/configs",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 28,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/alerts/configs/:id",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 49,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/alerts/history",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 240,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 360,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/events/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 424,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/issues",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 189,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 249,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/stats/distribution",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 489,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/stats/summary",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 451,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/stats/trend",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 469,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/conversations/dimensions",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 910,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/conversations/errors/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 772,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/conversations/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 810,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/installs/dimensions",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 1073,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/installs/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 966,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/overview",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 31,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/perf/dimensions",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 707,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/perf/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 291,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/aggregation-info",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 45,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/config",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 233,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/config/:key",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 247,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/env",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 319,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/error-codes",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 779,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/health",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 26,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/notifications",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 338,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/raw-stats",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 656,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/stats",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 173,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/tasks",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 549,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/conversations",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 166,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/leaderboard/:type",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 837,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/realtime",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 1318,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/steps",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 672,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/turns",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 517,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/users/:userId",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 1181,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/telemetry/queue/stats",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 251,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "query",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "ingestion_required",
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/admin/aggregate",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 518,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "aggregation_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/admin/cleanup",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 536,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "cleanup_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 140,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/events/batch",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 71,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "hybrid_optional",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/issues/:id/ignore",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 329,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/issues/:id/resolve",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 302,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/alerts/configs",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 79,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "alert_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/alerts/configs/:id/test",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 353,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "notification_send"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/alerts/history/:id/acknowledge",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 312,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "alert_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/admin/aggregate",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 518,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "aggregation_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/admin/cleanup",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 536,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "cleanup_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 140,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/events/batch",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 71,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "hybrid_optional",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/issues/:id/ignore",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 329,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/issues/:id/resolve",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 302,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/aggregation/backfill",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 735,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "aggregation_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/aggregation/run",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 580,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "aggregation_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/init-schema",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 62,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "schema_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/notifications/test/:channel",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 476,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "notification_send"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/switch-to-continuous-aggregates",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 95,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "schema_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/batch",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 68,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "hybrid_optional",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "telemetry_enqueue"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/conversation",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 291,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "telemetry_enqueue"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/install",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 319,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "telemetry_enqueue"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/perf",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 263,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms",
+      "authentication": "api_key",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "ingestion_required",
+      "side_effects": [
+        "telemetry_enqueue"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 275,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/alerts/configs/:id",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 114,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "alert_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 275,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "crash_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/system/config/:key",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 273,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "system_config_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/system/notifications",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 371,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms",
+      "authentication": "jwt",
+      "request_kind": "json",
+      "response_kind": "json",
+      "encryption": "none",
+      "tenant_scope": "administrator",
+      "side_effects": [
+        "system_config_write"
+      ]
+    }
+  ]
+}

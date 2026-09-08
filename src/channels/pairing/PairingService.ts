@@ -57,9 +57,9 @@ class PairingService {
    * `scope` is the connection scope, not the platform: with several bots of a type
    * connected, checking the platform would let anyone paired with one bot use them all.
    */
-  isUserAuthorized(platformUserId: string, scope: string, mossUserId?: string): boolean {
+  isUserAuthorized(platformUserId: string, scope: string, mossUserId?: string, orgId?: string): boolean {
     if (!this.db) return false;
-    const user = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
+    const user = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId, orgId);
     return !!user;
   }
 
@@ -95,6 +95,7 @@ class PairingService {
     displayName?: string,
     userId?: string,
     scope?: string,
+    orgId?: string,
   ): Promise<{ code: string; expiresAt: number }> {
     if (!this.db) {
       throw new Error('Database not initialized');
@@ -109,7 +110,7 @@ class PairingService {
     }
 
     const ttlMs = 10 * 60 * 1000;
-    const code = this.generatePairingCode(platformUserId, platformType, displayName, ttlMs, userId, effectiveScope);
+    const code = this.generatePairingCode(platformUserId, platformType, displayName, ttlMs, userId, effectiveScope, orgId);
     return { code, expiresAt: Date.now() + ttlMs };
   }
 
@@ -186,6 +187,7 @@ class PairingService {
     ttlMs: number = 10 * 60 * 1000, // 10 minutes default
     userId?: string,
     scope?: string,
+    orgId?: string,
   ): string {
     if (!this.db) {
       throw new Error('Database not initialized');
@@ -204,6 +206,7 @@ class PairingService {
       expires_at: now + ttlMs,
       status: 'pending',
       user_id: userId ?? null,
+      org_id: orgId ?? null,
     });
 
     // Emit pairing requested event

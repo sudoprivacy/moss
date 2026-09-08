@@ -5,6 +5,7 @@ import { serverFileConfigSchema, type ServerConfig, type ServerFileConfig } from
 import { normalizeHubApiBaseUrl } from './hubConfig.js'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { expandPath } from '../utils/path.js'
+import { resolveQmsConfig } from './qms/config.js'
 
 export function getDefaultServerConfigPath(): string {
   return join(getClaudeConfigHomeDir(), 'server', 'server.json')
@@ -75,6 +76,35 @@ export function getDefaultServerConfig(): ServerFileConfig {
       level: 'info',
     },
     hub: {},
+    sudoworkCompatibility: {
+      enabled: false,
+      hosts: [],
+      loginMethod: 'password',
+      dify: {
+        baseUrl: 'http://localhost:5001',
+      },
+      sms: {
+        provider: 'disabled',
+        sdkAppId: '',
+        signName: '',
+        templateId: '',
+        signId: '',
+        region: 'ap-beijing',
+        codeLength: 6,
+        expireMinutes: 5,
+        sendIntervalSeconds: 60,
+        maxPerDay: 10,
+      },
+    },
+    qms: {
+      enabled: false,
+      apiKeyHeader: 'X-API-Key',
+      queueFlushIntervalMs: 3_000,
+      queueBatchSize: 50,
+      perfRetentionDays: 90,
+      conversationRetentionDays: 180,
+      encryptionRequired: false,
+    },
     wikiIndex: {
       enabled: true,
       modelId: 'Xenova/multilingual-e5-small',
@@ -208,6 +238,26 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       : undefined,
     hubAuthorization: raw.hub?.authorization?.trim() || undefined,
     cosBaseUrl: raw.hub?.cosBaseUrl?.trim() || undefined,
+    sudoworkCompatibility: {
+      enabled: raw.sudoworkCompatibility.enabled,
+      hosts: raw.sudoworkCompatibility.hosts.map(host => host.trim().toLowerCase()).filter(Boolean),
+      publicBaseUrl: raw.sudoworkCompatibility.publicBaseUrl?.replace(/\/+$/, ''),
+      loginMethod: raw.sudoworkCompatibility.loginMethod,
+      legacyJwtSecret: process.env.SUDOWORK_LEGACY_JWT_SECRET || undefined,
+      redisUrl: process.env.SUDOWORK_REDIS_URL || undefined,
+      dify: {
+        baseUrl: (process.env.DIFY_BASE_URL || raw.sudoworkCompatibility.dify.baseUrl).replace(/\/+$/, ''),
+        systemToken: process.env.DIFY_SYSTEM_TOKEN || undefined,
+        provisionSecret: process.env.DIFY_SYSTEM_SECRET || undefined,
+        ssoSecret: process.env.DIFY_SSO_SECRET || undefined,
+      },
+      sms: {
+        ...raw.sudoworkCompatibility.sms,
+        secretId: process.env.SUDOWORK_TENCENT_SECRET_ID || undefined,
+        secretKey: process.env.SUDOWORK_TENCENT_SECRET_KEY || undefined,
+      },
+    },
+    qms: resolveQmsConfig(raw.qms, process.env, { validateSecrets: false }),
     wikiIndex: {
       enabled: raw.wikiIndex.enabled && process.env.MOSS_WIKI_INDEX_DISABLED !== '1',
       modelId: raw.wikiIndex.modelId,

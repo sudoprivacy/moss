@@ -26,6 +26,10 @@ import {
   Plane,
   Webhook,
   ServerCog,
+  TicketCheck,
+  ReceiptText,
+  Activity,
+  ClipboardList,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -44,6 +48,7 @@ import { getOrganizations, switchOrg } from '@/lib/api/auth'
 import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import type { AuthOrgWithCounts } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
+import { OPERATION_ROUTES } from '@/src/operations-navigation'
 
 type NavItem = {
   title: string
@@ -176,6 +181,18 @@ const menuItems: NavItem[] = [
       },
     ],
   },
+  {
+    title: '运营中心',
+    url: '/operations',
+    icon: Activity,
+    requiredScope: 'admin:settings',
+    children: [
+      { title: '邀请码管理', url: OPERATION_ROUTES.invitations, icon: TicketCheck },
+      { title: '账务运营', url: OPERATION_ROUTES.billing, icon: ReceiptText },
+      { title: '业务审计', url: OPERATION_ROUTES.audit, icon: ClipboardList },
+      { title: '质量管理', url: OPERATION_ROUTES.quality, icon: Activity },
+    ],
+  },
 ]
 
 const systemItems: NavItem[] = [
@@ -200,7 +217,7 @@ const systemItems: NavItem[] = [
   },
 ]
 
-export function AppSidebar() {
+export function AppSidebar({ className }: { className?: string } = {}) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const { user, scopes, activeOrgId, logout } = useAuth()
@@ -435,7 +452,7 @@ export function AppSidebar() {
   }
 
   return (
-    <aside className="w-64 border-r bg-card flex flex-col h-full">
+    <aside className={cn('w-64 border-r bg-card flex flex-col h-full', className)}>
       {/* Header */}
       <div className="border-b px-4 py-3 flex flex-col gap-3">
         <div className="flex items-center gap-3">

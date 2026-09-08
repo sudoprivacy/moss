@@ -8,7 +8,6 @@ import type { DatabaseSync } from 'node:sqlite'
 import { CronStore, type CronJob, type CronJobRun, type CronJobRunWithSession, type CreateCronJobInput, type UpdateCronJobInput } from '../services/cron/CronStore.js'
 import { CronService } from '../services/cron/CronService.js'
 import { hasScope, isCronAdminCapable } from '../auth/token.js'
-import { getSystemSettings } from '../systemSettings.js'
 
 /**
  * Auth shape carrying the fields needed for the clientCronEnabled gate.
@@ -33,8 +32,11 @@ export function isCronMutationBlocked(clientCronEnabled: boolean, auth: CronAuth
  * wired. Admins bypass, matching the route-level and scheduler checks. Returns
  * an error result when blocked so callers surface a clean message.
  */
-function cronDisabledError(auth: CronAuth): { success: false; message: string } | null {
-  if (isCronMutationBlocked(getSystemSettings().clientCronEnabled, auth)) {
+function cronDisabledError(
+  auth: CronAuth,
+  isClientCronEnabled: (orgId: string) => boolean,
+): { success: false; message: string } | null {
+  if (isCronMutationBlocked(isClientCronEnabled(auth.orgId), auth)) {
     return { success: false, message: 'cron_disabled_by_org' }
   }
   return null
@@ -222,11 +224,13 @@ export interface CronApiConfig {
    * validation is skipped (tests may pass a stub or leave it unset).
    */
   isOrgUser?: (userId: string, orgId: string) => boolean
+  isClientCronEnabled?: (orgId: string) => boolean
 }
 
 export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
   const store = new CronStore(db)
   const mapJob = (job: CronJob) => mapJobToResponse(job, config.getUserName)
+  const isClientCronEnabled = config.isClientCronEnabled ?? (() => true)
 
   return {
     /**
@@ -325,7 +329,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     createJob: async (auth: CronAuth, input: Omit<CreateCronJobInput, 'orgId' | 'userId'>) => {
       try {
-        const blocked = cronDisabledError(auth)
+        const blocked = cronDisabledError(auth, isClientCronEnabled)
         if (blocked) return blocked
         // Executor defaults to the creator; validate any co-owners/executor the
         // caller supplied (org membership + executor ∈ {creator} ∪ co_owners).

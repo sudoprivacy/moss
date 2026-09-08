@@ -22,11 +22,14 @@ import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
 import { initHubConfig } from './hubConfig.js'
+import type { FetchCallback } from '@hono/node-server'
+import { createHostDispatch } from './api/compat/sudowork/hostDispatch.js'
+import { MOSS_SHARED_SUDOWORK_ROUTES } from './api/compat/sudowork/sharedOperationalRoutes.js'
 
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudowork' | 'qms'
   path: string
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
@@ -39,6 +42,20 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.cabin-control-auth', group: 'cabin', path: 'cabin.controlAuth' },
   { key: 'server.cabin-broadcast-api-key', group: 'cabin', path: 'cabin.broadcastApiKey' },
   { key: 'server.cabin-broadcast-auth', group: 'cabin', path: 'cabin.broadcastAuth' },
+  { key: 'server.sudowork-legacy-jwt-secret', group: 'sudowork', path: 'sudoworkCompatibility.legacyJwtSecret' },
+  { key: 'server.sudowork-redis-url', group: 'sudowork', path: 'sudoworkCompatibility.redisUrl' },
+  { key: 'server.sudowork-tencent-secret-id', group: 'sudowork', path: 'sudoworkCompatibility.sms.secretId' },
+  { key: 'server.sudowork-tencent-secret-key', group: 'sudowork', path: 'sudoworkCompatibility.sms.secretKey' },
+  { key: 'server.sudowork-dify-system-token', group: 'sudowork', path: 'sudoworkCompatibility.dify.systemToken' },
+  { key: 'server.sudowork-dify-provision-secret', group: 'sudowork', path: 'sudoworkCompatibility.dify.provisionSecret' },
+  { key: 'server.sudowork-dify-sso-secret', group: 'sudowork', path: 'sudoworkCompatibility.dify.ssoSecret' },
+  { key: 'server.qms-postgres-url', group: 'qms', path: 'qms.postgresUrl' },
+  { key: 'server.qms-redis-url', group: 'qms', path: 'qms.redisUrl' },
+  { key: 'server.qms-api-key', group: 'qms', path: 'qms.apiKey' },
+  { key: 'server.qms-telemetry-private-key', group: 'qms', path: 'qms.privateKeyPem' },
+  { key: 'server.qms-telemetry-public-key', group: 'qms', path: 'qms.publicKeyPem' },
+  { key: 'server.qms-lark-webhook-url', group: 'qms', path: 'qms.larkWebhookUrl' },
+  { key: 'server.qms-smtp-url', group: 'qms', path: 'qms.smtpUrl' },
 ]
 import {
   createCustomAssistant,
@@ -123,6 +140,7 @@ import { createCronApi } from './api/cron.js'
 import { CronService } from './services/cron/CronService.js'
 import { createEventTriggerApi, createEventTriggerIngest } from './api/eventTriggers.js'
 import { EventTriggerService } from './services/eventTrigger/EventTriggerService.js'
+import { AutomationLifecycle } from './services/automation/AutomationLifecycle.js'
 import { createMcpAdminApi } from './api/mcpAdmin.js'
 import { createMcpUserApi } from './api/mcpUser.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
@@ -1573,6 +1591,11 @@ export function startServer(
   authService: AuthService,
   logger: ServerLogger = createServerLogger(),
   nexusClient?: NexusClient,
+  sudoworkCompatibility?: {
+    hosts: readonly string[]
+    fetch: FetchCallback
+    routes: readonly { method: string; path: string }[]
+  },
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -1582,6 +1605,8 @@ export function startServer(
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
+    getClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
+    setClientCronEnabled: (orgId, enabled) => authService.setOrganizationClientCronEnabled(orgId, enabled),
   })
   const configItemsApi = createConfigItemsApi(runtime.store)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, (userId: string) => {
@@ -1609,6 +1634,7 @@ export function startServer(
         return null
       }
     },
+    isClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
   })
 
   // Org-agnostic user-id -> display-name resolver, shared by the API modules
@@ -1624,6 +1650,7 @@ export function startServer(
     // A user may be a co-owner/executor only if they belong to the job's org.
     // getUserOrNull (no auth arg) resolves org membership without a viewer check.
     isOrgUser: (userId: string, orgId: string) => authService.getUserOrNull(userId, orgId) != null,
+    isClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
   })
 
   // Event Triggers - external systems POST an event to start an agent run.
@@ -1762,14 +1789,6 @@ export function startServer(
   )
   sourceSyncWorker.start()
 
-  // Start cron service for scheduled task execution
-  cronService.start().catch(err => {
-    console.error('[server] Failed to start cron service:', err)
-  })
-
-  // Start the event trigger executor (drains externally-POSTed events)
-  eventTriggerService.start()
-
   // Startup integrity check: approved tenant skills must have their files on
   // disk. The DB row is the source of truth for "this skill exists", but the
   // runtime loads the actual skill from file_path; if the on-disk dir was wiped
@@ -1868,8 +1887,26 @@ export function startServer(
 
   // Start enabled plugins (for enterprise mode)
   // 启动已启用的插件（企业模式）
-  channelManager.startEnabledPlugins().catch((error) => {
-    console.error('[Server] Failed to start enabled plugins:', error)
+  const automationLifecycle = new AutomationLifecycle([
+    {
+      name: 'cron',
+      start: () => cronService.start(),
+      stop: () => cronService.stop(),
+    },
+    {
+      name: 'event-trigger',
+      start: () => eventTriggerService.start(),
+      stop: () => eventTriggerService.stop(),
+    },
+    {
+      name: 'channel',
+      start: () => channelManager.startEnabledPlugins(),
+      stop: () => channelManager.stopAllPlugins(),
+    },
+  ])
+  const automationStartup = automationLifecycle.start()
+  automationStartup.catch((error) => {
+    console.error('[Server] Failed to start enterprise automation:', error)
   })
 
   const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.db) : null
@@ -1877,14 +1914,14 @@ export function startServer(
   const cabinHealthReports = config.cabin.enabled && config.cabin.healthReportEnabled && cabinAdminStore
     ? new CabinHealthReportService({ config: config.cabin, store: cabinAdminStore, logger: cabinLogger })
     : undefined
-  const channelsApi = createChannelsApi(runtime.store)
+  const channelsApi = createChannelsApi(runtime.store, runtime)
   const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime, healthReports: cabinHealthReports }) : null
   const cabinFlightAutomation = config.cabin.enabled && cabinAdminStore
     ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports)
     : null
   cabinFlightAutomation?.start()
 
-  const server = http.createServer(async (req, res) => {
+  const mossRequestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
     try {
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
@@ -2294,7 +2331,8 @@ export function startServer(
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/tenant/config') {
-        writeJson(res, 200, await enterpriseApi.getConfig())
+        const tenantAuth = authenticateRequest(req, authService)
+        writeJson(res, 200, await enterpriseApi.getConfig(tenantAuth?.orgId))
         return
       }
 
@@ -2741,9 +2779,14 @@ export function startServer(
           200,
           authService.createOrganization({
             name: typeof body.name === 'string' ? body.name : '',
+            code: typeof body.code === 'string' ? body.code : undefined,
             extOrgId:
               body.ext_org_id === null || typeof body.ext_org_id === 'string'
                 ? body.ext_org_id
+                : undefined,
+            idempotencyKey:
+              typeof req.headers['idempotency-key'] === 'string'
+                ? req.headers['idempotency-key']
                 : undefined,
           }),
         )
@@ -4919,6 +4962,10 @@ export function startServer(
               body.ext_user_id === null || typeof body.ext_user_id === 'string'
                 ? body.ext_user_id
                 : undefined,
+            idempotencyKey:
+              typeof req.headers['idempotency-key'] === 'string'
+                ? req.headers['idempotency-key']
+                : undefined,
           }, auth),
         )
         return
@@ -6017,7 +6064,7 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/enterprise') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await enterpriseApi.updateConfig(body))
+        writeJson(res, 200, await enterpriseApi.updateConfig(auth.orgId, body))
         return
       }
 
@@ -8433,7 +8480,17 @@ export function startServer(
     } catch (error) {
       writeError(logger, res, error)
     }
-  })
+  }
+
+  const server = http.createServer(sudoworkCompatibility
+    ? createHostDispatch({
+        sudoworkHosts: sudoworkCompatibility.hosts,
+        sudoworkFetch: sudoworkCompatibility.fetch,
+        sudoworkRoutes: sudoworkCompatibility.routes,
+        sharedSudoworkRoutes: MOSS_SHARED_SUDOWORK_ROUTES,
+        mossHandler: mossRequestHandler,
+      })
+    : mossRequestHandler)
 
   server.on('upgrade', (req, socket, head) => {
     void (async () => {
@@ -8614,7 +8671,7 @@ export function startServer(
     })()
   })
 
-  const ready = new Promise<number | null>((resolvePort, reject) => {
+  const listenerReady = new Promise<number | null>((resolvePort, reject) => {
     const onError = (error: Error) => {
       logger.error(error.message)
       reject(error)
@@ -8639,6 +8696,10 @@ export function startServer(
   })
 
   server.listen(config.port, config.host)
+
+  // Readiness includes the Channel startup path, so callers never route
+  // enterprise messages to a process whose plugins are still initializing.
+  const ready = Promise.all([listenerReady, automationStartup]).then(([port]) => port)
 
   // ============================================================
   // 企业应用管理: PUBLIC corp-app callback listener (separate port)
@@ -8751,29 +8812,53 @@ export function startServer(
     })
   }
 
-  return {
-    port: null,
-    ready,
-    stop: async () => {
-      wikiJobExecutor.stop()
-      sourceSyncWorker.stop()
-      cronService.stop()
-      cabinFlightAutomation?.stop()
-      wss.close()
-      if (callbackServer) {
-        await new Promise<void>((resolveClose) => {
-          callbackServer!.close(() => resolveClose())
-        })
-      }
-      await new Promise<void>((resolveClose, reject) => {
+  let stopPromise: Promise<void> | null = null
+  const stop = (): Promise<void> => {
+    if (stopPromise) return stopPromise
+    stopPromise = (async () => {
+      // Stop accepting new HTTP work before draining background producers.
+      const listenerClose = new Promise<void>((resolveClose, reject) => {
         server.close(error => {
-          if (error) {
-            reject(error)
-          } else {
+          if (!error || (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING') {
             resolveClose()
+          } else {
+            reject(error)
           }
         })
       })
-    },
+      const callbackClose = callbackServer
+        ? new Promise<void>((resolveClose, reject) => {
+            callbackServer!.close(error => {
+              if (!error || (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING') {
+                resolveClose()
+              } else {
+                reject(error)
+              }
+            })
+          })
+        : Promise.resolve()
+
+      wikiJobExecutor.stop()
+      sourceSyncWorker.stop()
+      cabinFlightAutomation?.stop()
+      wss.close()
+      eventTriggerIngest.stop()
+      // Reverse-order stop drains Channel, Event Trigger and Cron work before
+      // the caller is allowed to close the backing store.
+      await Promise.all([automationLifecycle.stop(), listenerClose, callbackClose])
+    })()
+    return stopPromise
+  }
+
+  // A listener or Channel startup failure must not leave other background
+  // executors alive. The original ready promise remains rejected for callers.
+  void ready.catch(() => stop().catch(error => {
+    logger.error(error instanceof Error ? error.message : String(error))
+  }))
+
+  return {
+    port: null,
+    ready,
+    stop,
   }
 }

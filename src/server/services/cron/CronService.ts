@@ -81,6 +81,7 @@ export interface CronServiceConfig {
   workspace?: string
   /** Get user auth context (role, scopes) for session creation */
   getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[] } | null>
+  isClientCronEnabled?: (orgId: string) => boolean
 }
 
 function isPathInside(base: string, candidate: string): boolean {
@@ -141,6 +142,7 @@ export class CronService {
   private db: DatabaseSync
   private running = false
   private checkInterval?: ReturnType<typeof setInterval>
+  private inFlight = new Set<Promise<void>>()
 
   constructor(db: DatabaseSync, config: CronServiceConfig) {
     // Fail loud if required config is missing. The project has no type-check
@@ -229,8 +231,8 @@ export class CronService {
   /**
    * Stop all timers and cleanup
    */
-  stop(): void {
-    if (!this.running) return
+  async stop(): Promise<void> {
+    if (!this.running && this.inFlight.size === 0) return
     this.running = false
 
     for (const [jobId, timer] of this.timers) {
@@ -240,9 +242,21 @@ export class CronService {
 
     if (this.checkInterval) {
       clearInterval(this.checkInterval)
+      this.checkInterval = undefined
     }
 
+    await Promise.allSettled(Array.from(this.inFlight))
+
     console.log('[CronService] Stopped')
+  }
+
+  private trackExecution(execution: Promise<void>): Promise<void> {
+    this.inFlight.add(execution)
+    void execution.then(
+      () => this.inFlight.delete(execution),
+      () => this.inFlight.delete(execution),
+    )
+    return execution
   }
 
   /**
@@ -257,7 +271,7 @@ export class CronService {
 
     try {
       const timer = new Cron(job.schedule.value, { timezone: resolveCronTz(job.schedule.tz) }, () => {
-        this.executeDueJob(job.id).catch(error => {
+        this.trackExecution(this.executeDueJob(job.id)).catch(error => {
           console.error(`[CronService] Error executing cron job ${job.id}:`, error)
         })
       })
@@ -323,7 +337,7 @@ export class CronService {
 
     for (const job of dueJobs) {
       // Try to acquire lease before executing
-      this.executeDueJob(job.id, now).catch(error => {
+      this.trackExecution(this.executeDueJob(job.id, now)).catch(error => {
         console.error(`[CronService] Error executing job ${job.id}:`, error)
       })
     }
@@ -398,7 +412,9 @@ export class CronService {
       // separate path behind the admin-bypassed API route. (#83)
       const creatorAuth =
         executorId === job.userId ? userAuth : await this.config.getUserAuth(job.userId, job.orgId)
-      if (!getSystemSettings().clientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
+      const clientCronEnabled = this.config.isClientCronEnabled?.(job.orgId)
+        ?? getSystemSettings().clientCronEnabled
+      if (!clientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
         this.store.updateRunStatus(run.id, {
           status: 'skipped',
           summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',
@@ -777,7 +793,9 @@ export class CronService {
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `manual trigger of job ${job.id}`)
       this.markRunSessionStarted(job, run, sessionId)
 
-      void this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`)
+      this.trackExecution(
+        this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`),
+      )
 
       return this.store.getRunById(run.id)!
     } catch (error) {

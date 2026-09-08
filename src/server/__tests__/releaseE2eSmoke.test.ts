@@ -80,9 +80,9 @@ describe("packaged Server E2E smoke", () => {
     expect(browser).toContain('capture("01-login-page"');
     expect(browser).toContain('clickText("新建用户"');
     expect(browser).toContain('capture("05-user-created"');
-    expect(browser).toContain('capture("06-session-management"');
-    expect(browser).toContain('capture("07-host-session-chat"');
-    expect(browser).toContain('capture("08-docker-session-chat"');
+    expect(browser).toContain('capture("12-session-management"');
+    expect(browser).toContain('capture("13-host-session-chat"');
+    expect(browser).toContain('capture("14-docker-session-chat"');
     expect(browser).toContain("Page.captureScreenshot");
     expect(browser).toContain('"browser-evidence.html"');
     expect(hostBackend).toContain("plugins: { bundledRoot: bundledPluginsDir }");

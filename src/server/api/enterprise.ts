@@ -6,7 +6,11 @@ import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
 export function createEnterpriseApi(
   db: DirectConnectStore,
   runtimeDir: string,
-  options: { cabinEnabled?: boolean } = {},
+  options: {
+    cabinEnabled?: boolean
+    getClientCronEnabled?: (orgId: string) => boolean
+    setClientCronEnabled?: (orgId: string, enabled: boolean) => void
+  } = {},
 ) {
   const api = {
     /**
@@ -15,7 +19,7 @@ export function createEnterpriseApi(
      * sourced from settings.json (clientCronEnabled / clientShowToolCalls) —
      * the source of truth for the client-facing toggles.
      */
-    getConfig: async () => {
+    getConfig: async (orgId?: string) => {
       try {
         const enterprise = db.getEnterprise()
         let logoBase64: string | null = null
@@ -40,7 +44,9 @@ export function createEnterpriseApi(
           data: {
             ...enterprise,
             logo: logoBase64,
-            client_cron_enabled: systemSettings.clientCronEnabled,
+            client_cron_enabled: orgId && options.getClientCronEnabled
+              ? options.getClientCronEnabled(orgId)
+              : systemSettings.clientCronEnabled,
             client_show_tool_calls: systemSettings.clientShowToolCalls,
             workspace_upload_limit_bytes: systemSettings.workspaceUploadLimitBytes,
             cabin_enabled: options.cabinEnabled === true,
@@ -63,7 +69,7 @@ export function createEnterpriseApi(
      * workspace_upload_limit_bytes) that the client PATCHes back, and writing
      * those to `enterprises` would throw "no such column" and fail the save.
      */
-    updateConfig: async (patch: any) => {
+    updateConfig: async (orgId: string, patch: any) => {
       try {
         if (patch && typeof patch === 'object') {
           const {
@@ -74,7 +80,11 @@ export function createEnterpriseApi(
 
           const settingsPatch: Record<string, unknown> = {}
           if (client_cron_enabled !== undefined) {
-            settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
+            if (options.setClientCronEnabled) {
+              options.setClientCronEnabled(orgId, Boolean(client_cron_enabled))
+            } else {
+              settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
+            }
           }
           if (client_show_tool_calls !== undefined) {
             settingsPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
@@ -90,7 +100,7 @@ export function createEnterpriseApi(
           // settings-sourced fields in the round-tripped config can't reach SQL.
           const ENTERPRISE_COLUMNS = [
             'logo', 'app_name', 'top_name', 'about_name',
-            'app_company_name', 'login_desp', 'client_cron_enabled',
+            'app_company_name', 'login_desp',
           ] as const
           const dbPatch: Record<string, unknown> = {}
           for (const col of ENTERPRISE_COLUMNS) {
@@ -102,7 +112,7 @@ export function createEnterpriseApi(
         } else {
           db.updateEnterprise(patch)
         }
-        return await api.getConfig()
+        return await api.getConfig(orgId)
       } catch (err) {
         console.error('Failed to update enterprise config:', err)
         return {

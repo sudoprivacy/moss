@@ -235,6 +235,22 @@ export class SessionManager {
   }
 
   /**
+   * Clear routing sessions owned by one authenticated Organization user.
+   * Channel session rows point at channel_users.id, so ownership must be
+   * resolved through channel_users rather than inferred from the session key.
+   */
+  clearSessionsForOwner(orgId: string, ownerUserId: string): number {
+    let cleared = 0;
+    for (const [key, session] of this.activeSessions.entries()) {
+      if (!this.db.getChannelUserById(session.userId, ownerUserId, orgId)) continue;
+      this.db.deleteChannelSession(session.id);
+      this.activeSessions.delete(key);
+      cleared++;
+    }
+    return cleared;
+  }
+
+  /**
    * Clear session by conversation ID
    */
   clearSessionByConversationId(conversationId: string): IChannelSession | null {

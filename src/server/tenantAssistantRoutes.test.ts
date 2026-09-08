@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test'
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
@@ -14,6 +14,9 @@ type TenantFixture = {
 }
 
 const fixtures: TenantFixture[] = []
+
+// Each case bundles and boots a real Node fixture; cold starts exceed Bun's 5s default under full-suite load.
+setDefaultTimeout(15_000)
 
 function authHeaders(fixture: TenantFixture): HeadersInit {
   return { Authorization: `Bearer ${fixture.token}` }

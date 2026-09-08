@@ -16,10 +16,12 @@ import { resolve } from 'path'
 function sanitizePaths(outfile) {
   const fullPath = resolve(outfile)
   const content = readFileSync(fullPath, 'utf8')
-  const replaced = content.replace(
+  const withoutNodeModulesPaths = content.replace(
     /(["'])\/[^"']*?\/node_modules\//g,
     (match, quote) => quote + './node_modules/'
   )
+  const workspacePrefix = `${resolve('.').replaceAll('\\', '/').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`
+  const replaced = withoutNodeModulesPaths.replace(new RegExp(workspacePrefix, 'g'), './')
   if (replaced !== content) {
     writeFileSync(fullPath, replaced, 'utf8')
     console.log(`  Sanitized absolute paths in ${outfile}`)
@@ -149,6 +151,18 @@ build('bin/moss-server.mjs', [
   ...external,
 ])
 sanitizePaths('bin/moss-server.mjs')
+
+// bin/migrate-sudowork.mjs（Sudowork 到 Moss 一次性迁移入口）
+build('bin/migrate-sudowork.mjs', [
+  'build', 'src/server/migrationCli.ts',
+  '--outfile=bin/migrate-sudowork.mjs',
+  '--target=node',
+  '--format=esm',
+  ...aliases,
+  ...defines,
+  ...external,
+])
+sanitizePaths('bin/migrate-sudowork.mjs')
 
 // bin/direct-connect-session-runner.mjs（session detached runner）
 build('bin/direct-connect-session-runner.mjs', [

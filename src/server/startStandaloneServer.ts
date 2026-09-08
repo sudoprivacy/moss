@@ -15,6 +15,18 @@ import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.j
 import { TokenMinter } from './authProxy/tokenMinter.js'
 import { setSecretsApiDependencies } from './authProxy/secretsApi.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
+import { createSudoworkCompatibilityApp } from './api/compat/sudowork/app.js'
+import { createRedisLegacyTokenStore } from './api/compat/sudowork/redisLegacyStore.js'
+import { SmsVerificationService } from './identity/smsVerification.js'
+import { createTencentSmsSender } from './identity/tencentSmsSender.js'
+import { ManagedImageStore } from './configuration/managedImageStore.js'
+import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { SudorouterAdapter } from './billing/sudorouterAdapter.js'
+import { FuiouAdapter } from './billing/fuiouAdapter.js'
+import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
+import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
+import { getAvailableModels } from './modelListCache.js'
 
 export type StandaloneServerOptions = ServerConfig
 
@@ -74,6 +86,9 @@ async function finishStandaloneServerStartup(
   const configStore = initConfigStore(nexusClient)
   await configStore.loadAll()
   configStore.hydrateConfig(config)
+  if (config.qms.enabled && !config.sudoworkCompatibility.enabled) {
+    throw new Error('QMS requires Sudowork compatibility to be enabled so its frozen routes are reachable')
+  }
   initHubConfig({
     hubApiBaseUrl: config.hubApiBaseUrl,
     hubAuthorization: config.hubAuthorization,
@@ -151,8 +166,169 @@ async function finishStandaloneServerStartup(
   await runtime.reconcileOnStartup()
 
   const logger = createServerLogger()
-  const server = startServer(config, runtime, authService, logger, nexusClient)
-  const actualPort = (await server.ready) ?? config.port
+  let closeSudoworkRedis: (() => Promise<void>) | undefined
+  let qmsRuntime: StartedQmsRuntime | undefined
+  let sudoworkCompatibility: {
+    hosts: readonly string[]
+    fetch: ReturnType<typeof createSudoworkCompatibilityApp>['fetch']
+    routes: ReturnType<typeof createSudoworkCompatibilityApp>['routes']
+  } | undefined
+  if (config.sudoworkCompatibility.enabled) {
+    if (config.sudoworkCompatibility.hosts.length === 0) {
+      throw new Error('Sudowork compatibility requires at least one trusted host')
+    }
+    if (!config.sudoworkCompatibility.legacyJwtSecret) {
+      throw new Error('Sudowork compatibility requires SUDOWORK_LEGACY_JWT_SECRET or its Nexus value')
+    }
+    if (!config.sudoworkCompatibility.redisUrl) {
+      throw new Error('Sudowork compatibility requires SUDOWORK_REDIS_URL or its Nexus value')
+    }
+    if (!config.sudoworkCompatibility.publicBaseUrl) {
+      throw new Error('Sudowork compatibility requires sudoworkCompatibility.publicBaseUrl')
+    }
+    const redis = createRedisLegacyTokenStore(config.sudoworkCompatibility.redisUrl)
+    closeSudoworkRedis = redis.close
+    try {
+    const identity = authService.createSudoworkIdentityService({
+      tokenStore: redis.store,
+      legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret,
+    })
+    const administration = authService.createSudoworkAdministrationService({
+      getDifyFeatureFlags: () => {
+        const values: Record<string, string | undefined> = {
+          DIFY_BASE_URL: config.sudoworkCompatibility.dify.baseUrl,
+          DIFY_SYSTEM_TOKEN: config.sudoworkCompatibility.dify.systemToken,
+          DIFY_SYSTEM_SECRET: config.sudoworkCompatibility.dify.provisionSecret,
+          DIFY_SSO_SECRET: config.sudoworkCompatibility.dify.ssoSecret,
+        }
+        const missingEnv = Object.entries(values)
+          .filter(([, value]) => !value?.trim())
+          .map(([key]) => key)
+        return { enabled: missingEnv.length === 0, missingEnv }
+      },
+    })
+    const cas = authService.createSudoworkCasService({ identity, tokenStore: redis.store })
+    const catalog = authService.createSudoworkCatalogService({
+      artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
+      publicBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+    })
+    const dify = authService.createSudoworkDifyServices({
+      baseUrl: config.sudoworkCompatibility.dify.baseUrl,
+      systemToken: config.sudoworkCompatibility.dify.systemToken,
+      provisionSecret: config.sudoworkCompatibility.dify.provisionSecret,
+      ssoSecret: config.sudoworkCompatibility.dify.ssoSecret,
+      publicBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+      artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
+      secrets: nexusClient,
+    })
+    const managedImages = new ManagedImageStore(join(config.runtimeDir, 'uploads'))
+    const configuration = authService.createSudoworkConfigService(store, managedImages)
+    const smsConfig = config.sudoworkCompatibility.sms
+    const smsConfigured = smsConfig.provider === 'tencent' && [
+      smsConfig.secretId, smsConfig.secretKey, smsConfig.sdkAppId,
+      smsConfig.signName, smsConfig.templateId, smsConfig.signId,
+    ].every(value => typeof value === 'string' && value.trim().length > 0)
+    const sms = smsConfig.provider === 'tencent'
+      ? new SmsVerificationService({
+          store: redis.store,
+          sender: createTencentSmsSender({
+            secretId: smsConfig.secretId ?? '',
+            secretKey: smsConfig.secretKey ?? '',
+            sdkAppId: smsConfig.sdkAppId,
+            signName: smsConfig.signName,
+            templateId: smsConfig.templateId,
+            signId: smsConfig.signId,
+            region: smsConfig.region,
+          }),
+          codeLength: smsConfig.codeLength,
+          expireMinutes: smsConfig.expireMinutes,
+          sendIntervalSeconds: smsConfig.sendIntervalSeconds,
+          maxPerDay: smsConfig.maxPerDay,
+        })
+      : undefined
+    const systemConfiguration = authService.createSudoworkSystemConfigService({
+      secrets: configStore,
+      loginMethod: config.sudoworkCompatibility.loginMethod,
+      skillhubBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+      sudorouterBaseUrl: process.env.SUDOROUTER_BASE_URL,
+      smsConfigured,
+      productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
+    })
+    const billingEnabled = process.env.SUDOWORK_BILLING_ENABLED === 'true'
+    const billing = billingEnabled
+      ? createBillingCompatibilityService(authService, systemConfiguration, config.sudoworkCompatibility.publicBaseUrl)
+      : undefined
+    const legacyUsage = authService.createSudoworkLegacyUsageService({ listModels: getAvailableModels })
+    const qmsSecrets = new QmsNexusSecretAdapter(config.qms, {
+      get: key => configStore.get(key),
+      put: (key, value) => configStore.put(key, value, config),
+    })
+    qmsRuntime = await startQmsRuntime({
+      config: config.qms,
+      ownerId: instance.instanceId,
+      organizations: authService.createQmsOrganizationDirectory(),
+      secrets: qmsSecrets,
+      environment: {
+        NODE_ENV: process.env.NODE_ENV ?? 'production',
+        PORT: config.port,
+        HOST: config.host,
+        LOG_LEVEL: config.logLevel,
+      },
+    })
+    const app = createSudoworkCompatibilityApp({
+      identity,
+      administration,
+      legacyAdministration: administration,
+      catalog,
+      configuration,
+      managedImages,
+      systemConfiguration,
+      billing,
+      legacyUsage,
+      rateLimit: process.env.RATE_LIMIT_ENABLED === 'false' ? undefined : redis.store,
+      difyRuntime: dify.runtime,
+      difyEnhancement: dify.enhancement,
+      difyDataset: dify.dataset,
+      difyAdministration: dify.administration,
+      resolveEnterpriseAlias: dify.resolveEnterpriseAlias,
+      buildVisibility: dify.buildVisibility,
+      difyUpstreamBaseUrl: config.sudoworkCompatibility.dify.baseUrl,
+      cas,
+      loginMethod: config.sudoworkCompatibility.loginMethod,
+      sms,
+      systemConfig: {
+        skillhubBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+      },
+      qms: qmsRuntime ? {
+        apiKeyHeader: qmsRuntime.apiKeyHeader,
+        authorization: qmsRuntime.authorization,
+        encryption: qmsRuntime.encryption,
+        operations: qmsRuntime.operations,
+      } : undefined,
+    })
+    sudoworkCompatibility = {
+      hosts: config.sudoworkCompatibility.hosts,
+      fetch: app.fetch,
+      routes: app.routes,
+    }
+    } catch (error) {
+      await qmsRuntime?.stop()
+      qmsRuntime = undefined
+      await closeSudoworkRedis?.()
+      closeSudoworkRedis = undefined
+      throw error
+    }
+  }
+  let server: ReturnType<typeof startServer>
+  let actualPort: number
+  try {
+    server = startServer(config, runtime, authService, logger, nexusClient, sudoworkCompatibility)
+    actualPort = (await server.ready) ?? config.port
+  } catch (error) {
+    await qmsRuntime?.stop()
+    await closeSudoworkRedis?.()
+    throw error
+  }
   const connectHost =
     config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host
   const httpUrl = `http://${connectHost}:${actualPort}`
@@ -200,6 +376,8 @@ async function finishStandaloneServerStartup(
       }
     }
     await server.stop()
+    await qmsRuntime?.stop()
+    await closeSudoworkRedis?.()
     await authProxy.stop()
     await nexusManager.stop()
     store.stopServerInstance(instance.instanceId)
@@ -216,4 +394,49 @@ async function finishStandaloneServerStartup(
     bootstrapAdminPassword: bootstrap.bootstrapAdminPassword,
     stop,
   }
+}
+
+function createBillingCompatibilityService(
+  authService: Awaited<ReturnType<typeof createAuthService>>['service'],
+  systemConfiguration: ReturnType<typeof authService.createSudoworkSystemConfigService>,
+  publicBaseUrl: string,
+) {
+  const required = (name: string): string => {
+    const value = process.env[name]?.trim()
+    if (!value) throw new Error(`Sudowork Billing requires ${name}`)
+    return value
+  }
+  const testMode = process.env.FUIOU_TEST_MODE === 'true'
+  const privateKey = readFuiouKey('private')
+  const publicKey = readFuiouKey('public')
+  const payment = new FuiouAdapter({
+    merchantCode: required('FUIOU_MERCHANT_CODE'),
+    merchantPrivateKey: privateKey,
+    fuiouPublicKey: publicKey,
+    callbackUrl: `${publicBaseUrl.replace(/\/+$/, '')}/api/v1/recharge/callback`,
+    baseUrl: process.env[testMode ? 'FUIOU_TEST_API_URL' : 'FUIOU_PROD_API_URL'],
+    refundUrl: process.env[testMode ? 'FUIOU_TEST_REFUND_URL' : 'FUIOU_PROD_REFUND_URL'],
+    timeoutMs: Number.parseInt(process.env.FUIOU_TIMEOUT_MS || '10000', 10),
+    testMode,
+  })
+  const sudorouter = new SudorouterAdapter({
+    baseUrl: required('SUDOROUTER_BASE_URL'),
+    apiToken: required('SUDOROUTER_API_TOKEN'),
+    adminUserId: process.env.SUDOROUTER_ADMIN_USER_ID || '13',
+    timeoutMs: Number.parseInt(process.env.SUDOROUTER_TIMEOUT_MS || '10000', 10),
+  })
+  return authService.createSudoworkBillingService({
+    sudorouter, payment,
+    getCreditPolicy: () => systemConfiguration.getCreditApplicationPolicy(),
+    testPaymentAmountCents: testMode ? 1 : undefined,
+  })
+}
+
+function readFuiouKey(type: 'private' | 'public'): string {
+  const prefix = type === 'private' ? 'FUIOU_MERCHANT_PRIVATE_KEY' : 'FUIOU_PUBLIC_KEY'
+  const file = process.env[`${prefix}_FILE`]?.trim()
+  if (file) return readFileSync(file, 'utf8')
+  const encoded = process.env[`${prefix}_BASE64`]?.trim()
+  if (encoded) return Buffer.from(encoded, 'base64').toString('utf8')
+  return process.env[prefix]?.trim() || (() => { throw new Error(`Sudowork Billing requires ${prefix}`) })()
 }

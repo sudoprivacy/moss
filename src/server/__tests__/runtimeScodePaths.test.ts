@@ -45,6 +45,122 @@ describe('runtime scode paths', () => {
     }
   })
 
+  it('loads non-secret Sudowork compatibility settings and keeps secrets out of server.json', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moss-sudowork-config-'))
+    const configPath = join(dir, 'server.json')
+    const raw = getDefaultServerConfig()
+    raw.sudoworkCompatibility = {
+      enabled: true,
+      hosts: ['api.sudowork.test'],
+      publicBaseUrl: 'https://api.sudowork.test/',
+      loginMethod: 'sms',
+      dify: { baseUrl: 'https://dify.sudowork.test/' },
+      sms: {
+        provider: 'tencent',
+        sdkAppId: '1400000000',
+        signName: '测试签名',
+        templateId: '1234',
+        signId: '5678',
+        region: 'ap-beijing',
+        codeLength: 6,
+        expireMinutes: 5,
+        sendIntervalSeconds: 60,
+        maxPerDay: 10,
+      },
+    }
+    writeFileSync(configPath, JSON.stringify(raw), 'utf8')
+    process.env.SUDOWORK_LEGACY_JWT_SECRET = 'env-jwt'
+    process.env.SUDOWORK_REDIS_URL = 'redis://env'
+    process.env.SUDOWORK_TENCENT_SECRET_ID = 'env-secret-id'
+    process.env.SUDOWORK_TENCENT_SECRET_KEY = 'env-secret-key'
+    process.env.DIFY_SYSTEM_TOKEN = 'env-system-token'
+    process.env.DIFY_SYSTEM_SECRET = 'env-system-secret'
+    process.env.DIFY_SSO_SECRET = 'env-sso-secret'
+
+    try {
+      const { config: loaded } = await readServerConfig(configPath)
+      expect(loaded.sudoworkCompatibility).toEqual({
+        enabled: true,
+        hosts: ['api.sudowork.test'],
+        publicBaseUrl: 'https://api.sudowork.test',
+        loginMethod: 'sms',
+        legacyJwtSecret: 'env-jwt',
+        redisUrl: 'redis://env',
+        dify: {
+          baseUrl: 'https://dify.sudowork.test',
+          systemToken: 'env-system-token',
+          provisionSecret: 'env-system-secret',
+          ssoSecret: 'env-sso-secret',
+        },
+        sms: {
+          provider: 'tencent', sdkAppId: '1400000000', signName: '测试签名',
+          templateId: '1234', signId: '5678', region: 'ap-beijing', codeLength: 6,
+          expireMinutes: 5, sendIntervalSeconds: 60, maxPerDay: 10,
+          secretId: 'env-secret-id', secretKey: 'env-secret-key',
+        },
+      })
+      const persisted = JSON.parse(readFileSync(configPath, 'utf8'))
+      expect(persisted.sudoworkCompatibility.legacyJwtSecret).toBeUndefined()
+      expect(persisted.sudoworkCompatibility.redisUrl).toBeUndefined()
+      expect(persisted.sudoworkCompatibility.dify.systemToken).toBeUndefined()
+      expect(persisted.sudoworkCompatibility.dify.provisionSecret).toBeUndefined()
+      expect(persisted.sudoworkCompatibility.dify.ssoSecret).toBeUndefined()
+      expect(persisted.sudoworkCompatibility.loginMethod).toBe('sms')
+    } finally {
+      delete process.env.SUDOWORK_LEGACY_JWT_SECRET
+      delete process.env.SUDOWORK_REDIS_URL
+      delete process.env.SUDOWORK_TENCENT_SECRET_ID
+      delete process.env.SUDOWORK_TENCENT_SECRET_KEY
+      delete process.env.DIFY_SYSTEM_TOKEN
+      delete process.env.DIFY_SYSTEM_SECRET
+      delete process.env.DIFY_SSO_SECRET
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('loads QMS policy while keeping database, queue, API and RSA secrets out of server.json', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moss-qms-config-'))
+    const configPath = join(dir, 'server.json')
+    const raw = getDefaultServerConfig()
+    raw.qms = {
+      enabled: true,
+      apiKeyHeader: 'X-QMS-Key',
+      queueFlushIntervalMs: 1500,
+      queueBatchSize: 25,
+      perfRetentionDays: 30,
+      conversationRetentionDays: 60,
+      encryptionRequired: true,
+    }
+    writeFileSync(configPath, JSON.stringify(raw), 'utf8')
+    process.env.QMS_POSTGRES_URL = 'postgres://qms:secret@db.internal/qms'
+    process.env.QMS_REDIS_URL = 'redis://cache.internal/3'
+    process.env.QMS_API_KEY = 'qms-api-key'
+    process.env.QMS_TELEMETRY_PRIVATE_KEY = 'private-key'
+    process.env.QMS_TELEMETRY_PUBLIC_KEY = 'public-key'
+
+    try {
+      const { config: loaded } = await readServerConfig(configPath)
+      expect(loaded.qms.enabled).toBe(true)
+      expect(loaded.qms.apiKeyHeader).toBe('X-QMS-Key')
+      expect(loaded.qms.secrets.postgresUrl).toBe('postgres://qms:secret@db.internal/qms')
+      expect(loaded.qms.secrets.redisUrl).toBe('redis://cache.internal/3')
+      expect(loaded.qms.secrets.apiKey).toBe('qms-api-key')
+      expect(loaded.qms.secrets.privateKeyPem).toBe('private-key')
+      const persisted = JSON.parse(readFileSync(configPath, 'utf8'))
+      expect(persisted.qms.postgresUrl).toBeUndefined()
+      expect(persisted.qms.redisUrl).toBeUndefined()
+      expect(persisted.qms.apiKey).toBeUndefined()
+      expect(persisted.qms.privateKeyPem).toBeUndefined()
+    } finally {
+      delete process.env.QMS_POSTGRES_URL
+      delete process.env.QMS_REDIS_URL
+      delete process.env.QMS_API_KEY
+      delete process.env.QMS_TELEMETRY_PRIVATE_KEY
+      delete process.env.QMS_TELEMETRY_PUBLIC_KEY
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('keeps host and Docker release scode versions aligned', () => {
     const root = join(import.meta.dir, '..', '..', '..')
     const workflow = readFileSync(join(root, '.github/workflows/build-release.yml'), 'utf8')

@@ -179,6 +179,10 @@ export function createEventTriggerIngest(service: EventTriggerService) {
   sweeper.unref?.()
 
   return {
+    stop(): void {
+      clearInterval(sweeper)
+    },
+
     async handle(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<boolean> {
       const match = pathname.match(/^\/api\/v1\/triggers\/([^/]+)\/events$/)
       if (!match) return false

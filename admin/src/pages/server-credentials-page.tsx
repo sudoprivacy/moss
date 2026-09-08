@@ -35,6 +35,20 @@ const FIELD_LABELS: Record<string, string> = {
   'cabin.controlAuth': '控制接口鉴权',
   'cabin.broadcastApiKey': '广播 API Key',
   'cabin.broadcastAuth': '广播鉴权',
+  'sudoworkCompatibility.legacyJwtSecret': 'Sudowork 旧 JWT 密钥',
+  'sudoworkCompatibility.redisUrl': 'Sudowork Redis URL',
+  'sudoworkCompatibility.sms.secretId': '腾讯云 Secret ID',
+  'sudoworkCompatibility.sms.secretKey': '腾讯云 Secret Key',
+  'sudoworkCompatibility.dify.systemToken': 'Dify 系统令牌',
+  'sudoworkCompatibility.dify.provisionSecret': 'Dify 租户开通签名密钥',
+  'sudoworkCompatibility.dify.ssoSecret': 'Dify SSO 签名密钥',
+  'qms.postgresUrl': 'QMS PostgreSQL URL',
+  'qms.redisUrl': 'QMS Redis URL',
+  'qms.apiKey': 'QMS API Key',
+  'qms.privateKeyPem': '遥测 RSA 私钥',
+  'qms.publicKeyPem': '遥测 RSA 公钥',
+  'qms.larkWebhookUrl': 'QMS 飞书 Webhook',
+  'qms.smtpUrl': 'QMS SMTP URL',
 }
 
 const GROUP_META: Record<
@@ -54,9 +68,17 @@ const GROUP_META: Record<
     title: '客舱服务凭据',
     description: '客舱 AI 相关的服务鉴权与 API Key（server.json 的 cabin.*）。',
   },
+  sudowork: {
+    title: 'Sudowork 兼容凭据',
+    description: '用于旧登录态、Redis、短信和 Dify 兼容接口。',
+  },
+  qms: {
+    title: '质量与遥测凭据',
+    description: 'QMS 独立存储、接收加密和通知通道所需凭据。',
+  },
 }
 
-const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin']
+const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin', 'sudowork', 'qms']
 
 /**
  * 清空后会回落公开 dev 常量、导致已签发资源 URL 失效且可被伪造的 HMAC 密钥字段。

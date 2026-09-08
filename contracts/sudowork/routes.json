@@ -1,0 +1,2551 @@
+{
+  "schema_version": 1,
+  "source_commit": "311636c7bbfa4fa1c655aa8bd5c7e898f565f263",
+  "generated_at": "2026-09-07T04:00:02.954Z",
+  "routes": [
+    {
+      "method": "DELETE",
+      "path": "/api/assistants/:assistantId",
+      "source_file": "src/routes/external-proxy.ts",
+      "source_line": 414,
+      "router": "proxyRoutes",
+      "mount_chain": [
+        "src/index.ts:85 app.route(\"/api\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "POST",
+      "path": "/api/assistants/:assistantId/approve",
+      "source_file": "src/routes/external-proxy.ts",
+      "source_line": 388,
+      "router": "proxyRoutes",
+      "mount_chain": [
+        "src/index.ts:85 app.route(\"/api\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "GET",
+      "path": "/api/assistants/cursor",
+      "source_file": "src/routes/external-proxy.ts",
+      "source_line": 283,
+      "router": "proxyRoutes",
+      "mount_chain": [
+        "src/index.ts:85 app.route(\"/api\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/skills/:skillId",
+      "source_file": "src/routes/external-proxy.ts",
+      "source_line": 362,
+      "router": "proxyRoutes",
+      "mount_chain": [
+        "src/index.ts:85 app.route(\"/api\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "POST",
+      "path": "/api/skills/:skillId/approve",
+      "source_file": "src/routes/external-proxy.ts",
+      "source_line": 336,
+      "router": "proxyRoutes",
+      "mount_chain": [
+        "src/index.ts:85 app.route(\"/api\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills/cursor",
+      "source_file": "src/routes/external-proxy.ts",
+      "source_line": 245,
+      "router": "proxyRoutes",
+      "mount_chain": [
+        "src/index.ts:85 app.route(\"/api\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/approve",
+      "source_file": "src/routes/admin-logs.ts",
+      "source_line": 182,
+      "router": "adminLogRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:19 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/change-password",
+      "source_file": "src/routes/admin-auth.ts",
+      "source_line": 135,
+      "router": "adminAuthRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:15 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/config-items",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 19,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/config-items",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 66,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/config-items/:id",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 141,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/config-items/:id",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 163,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/config-items/:id/enterprises",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 449,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/config-items/:id/enterprises/:enterpriseId",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 589,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/config-items/:id/enterprises/:enterpriseId",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 536,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/config-items/:id/entries",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 335,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/config-items/:id/entries",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 350,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/config-items/:id/status",
+      "source_file": "src/routes/admin/config-items.ts",
+      "source_line": 278,
+      "router": "configItemsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:25 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/credit-applications",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 24,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/credit-applications/:id",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 50,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/credit-applications/:id/approve",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 67,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/credit-applications/:id/reject",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 92,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/credit-applications/:id/retry-sync",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 113,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/datasets",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 105,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/datasets",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 124,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/datasets/:datasetId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 196,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/datasets/:datasetId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 154,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/admin/datasets/:datasetId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 168,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/datasets/:datasetId/documents",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 214,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/datasets/:datasetId/documents",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 244,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/datasets/:datasetId/documents/:documentId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 315,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/datasets/:datasetId/retrieve",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 337,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/delete",
+      "source_file": "src/routes/admin-logs.ts",
+      "source_line": 250,
+      "router": "adminLogRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:19 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/agents",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 326,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/dify/agents",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 333,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/dify/agents/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 384,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/agents/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 369,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/agents/:assistantId/acl",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 403,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/agents/:assistantId/datasets",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 974,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/agents/:assistantId/datasets",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 981,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/binding",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 282,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/dify/binding/provision",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 299,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/datasets",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 584,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/enterprise-assistants",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 434,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/dify/enterprise-assistants",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 607,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 739,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 793,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId/enhancement",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 961,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId/enhancement",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 907,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/shareable-tenants",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 574,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/sso",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 251,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/enterprises",
+      "source_file": "src/routes/admin-enterprises.ts",
+      "source_line": 18,
+      "router": "adminEnterpriseRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:16 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/enterprises",
+      "source_file": "src/routes/admin-enterprises.ts",
+      "source_line": 58,
+      "router": "adminEnterpriseRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:16 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/enterprises/:id",
+      "source_file": "src/routes/admin-enterprises.ts",
+      "source_line": 161,
+      "router": "adminEnterpriseRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:16 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/enterprises/:id",
+      "source_file": "src/routes/admin-enterprises.ts",
+      "source_line": 103,
+      "router": "adminEnterpriseRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:16 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/features",
+      "source_file": "src/routes/admin-features.ts",
+      "source_line": 23,
+      "router": "adminFeaturesRoutes",
+      "mount_chain": [
+        "src/index.ts:87 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/invitation-codes",
+      "source_file": "src/routes/admin-invitation-codes.ts",
+      "source_line": 13,
+      "router": "adminInvitationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:17 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/invitation-codes",
+      "source_file": "src/routes/admin-invitation-codes.ts",
+      "source_line": 73,
+      "router": "adminInvitationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:17 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/invitation-codes/:id",
+      "source_file": "src/routes/admin-invitation-codes.ts",
+      "source_line": 166,
+      "router": "adminInvitationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:17 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/invitation-codes/available",
+      "source_file": "src/routes/admin-invitation-codes.ts",
+      "source_line": 218,
+      "router": "adminInvitationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:17 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/login",
+      "source_file": "src/routes/admin-auth.ts",
+      "source_line": 16,
+      "router": "adminAuthRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:15 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/logs",
+      "source_file": "src/routes/admin-logs.ts",
+      "source_line": 15,
+      "router": "adminLogRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:19 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/members",
+      "source_file": "src/routes/admin-logs.ts",
+      "source_line": 75,
+      "router": "adminLogRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:19 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/members/:id/sync-quota",
+      "source_file": "src/routes/admin-logs.ts",
+      "source_line": 98,
+      "router": "adminLogRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:19 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge-records",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 347,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/orders",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 14,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/orders/:id/retry",
+      "source_file": "src/routes/admin/sync.ts",
+      "source_line": 12,
+      "router": "syncRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:24 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/orders/:orderNo",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 126,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/orders/:orderNo/refund",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 268,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/orders/:orderNo/sync",
+      "source_file": "src/routes/admin/sync.ts",
+      "source_line": 46,
+      "router": "syncRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:24 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/refund-calc/:orderNo",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 297,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/simulate-payment/:orderNo",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 326,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/stats",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 171,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/sync",
+      "source_file": "src/routes/admin/sync.ts",
+      "source_line": 35,
+      "router": "syncRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:24 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/reject",
+      "source_file": "src/routes/admin-logs.ts",
+      "source_line": 218,
+      "router": "adminLogRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:19 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/stats",
+      "source_file": "src/routes/admin/stats.ts",
+      "source_line": 13,
+      "router": "statsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:20 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/system-config",
+      "source_file": "src/routes/system-config.ts",
+      "source_line": 164,
+      "router": "systemConfigRoutes",
+      "mount_chain": [
+        "src/index.ts:115 app.route(\"/api/v1\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/system-config",
+      "source_file": "src/routes/system-config.ts",
+      "source_line": 197,
+      "router": "systemConfigRoutes",
+      "mount_chain": [
+        "src/index.ts:115 app.route(\"/api/v1\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/upload/config-item-icon",
+      "source_file": "src/routes/admin/upload.ts",
+      "source_line": 48,
+      "router": "uploadRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:26 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/upload/enterprise-logo",
+      "source_file": "src/routes/admin/upload.ts",
+      "source_line": 110,
+      "router": "uploadRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:26 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/users",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 20,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 75,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users-password",
+      "source_file": "src/routes/admin/users-password.ts",
+      "source_line": 25,
+      "router": "usersPasswordRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:27 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/users-password/:id",
+      "source_file": "src/routes/admin/users-password.ts",
+      "source_line": 199,
+      "router": "usersPasswordRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:27 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/users/:id",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 624,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/users/:id",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 367,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/users/:id/ledger",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 881,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/manage",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 540,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/points",
+      "source_file": "src/routes/admin/points.ts",
+      "source_line": 17,
+      "router": "pointsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:22 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/recharge",
+      "source_file": "src/routes/admin/points.ts",
+      "source_line": 167,
+      "router": "pointsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:22 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/role",
+      "source_file": "src/routes/admin/users.ts",
+      "source_line": 443,
+      "router": "usersRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:21 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/sync-quota",
+      "source_file": "src/routes/admin/points.ts",
+      "source_line": 291,
+      "router": "pointsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:22 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/audio-to-text",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 857,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/chat",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 604,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/chat/:taskId/stop",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 659,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/conversations",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 678,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/agents/:assistantId/conversations/:conversationId",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 722,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/agents/:assistantId/conversations/:conversationId",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 701,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/conversations/:conversationId/messages",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 744,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/enhancement",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 485,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/enhancement/invoke",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 507,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/enhancement/invoke-stream",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 548,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/files",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 831,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/messages/:messageId/feedback",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 764,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/messages/:messageId/suggested",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 786,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/meta",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 816,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/parameters",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 805,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/text-to-audio",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 877,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/visible",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 260,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/visible/bindings",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 440,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/change-password",
+      "source_file": "src/routes/auth-change-password.ts",
+      "source_line": 23,
+      "router": "authChangePasswordRoutes",
+      "mount_chain": [
+        "src/index.ts:94 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "source_file": "src/routes/auth.ts",
+      "source_line": 67,
+      "router": "authRoutes",
+      "mount_chain": [
+        "src/index.ts:91 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/login-by-config",
+      "source_file": "src/routes/auth-login-by-config.ts",
+      "source_line": 195,
+      "router": "loginByConfigRoutes",
+      "mount_chain": [
+        "src/index.ts:93 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "source_file": "src/routes/auth.ts",
+      "source_line": 785,
+      "router": "authRoutes",
+      "mount_chain": [
+        "src/index.ts:91 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "source_file": "src/routes/auth.ts",
+      "source_line": 720,
+      "router": "authRoutes",
+      "mount_chain": [
+        "src/index.ts:91 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "source_file": "src/routes/auth.ts",
+      "source_line": 345,
+      "router": "authRoutes",
+      "mount_chain": [
+        "src/index.ts:91 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/register-password",
+      "source_file": "src/routes/auth-register-password.ts",
+      "source_line": 31,
+      "router": "authRegisterPasswordRoutes",
+      "mount_chain": [
+        "src/index.ts:95 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/send-code",
+      "source_file": "src/routes/auth.ts",
+      "source_line": 20,
+      "router": "authRoutes",
+      "mount_chain": [
+        "src/index.ts:91 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/auth/third-party/cas/callback/:provider",
+      "source_file": "src/routes/auth-third-party.ts",
+      "source_line": 104,
+      "router": "thirdPartyAuthRoutes",
+      "mount_chain": [
+        "src/index.ts:92 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/third-party/cas/exchange",
+      "source_file": "src/routes/auth-third-party.ts",
+      "source_line": 177,
+      "router": "thirdPartyAuthRoutes",
+      "mount_chain": [
+        "src/index.ts:92 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/third-party/cas/login",
+      "source_file": "src/routes/auth-third-party.ts",
+      "source_line": 62,
+      "router": "thirdPartyAuthRoutes",
+      "mount_chain": [
+        "src/index.ts:92 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/auth/third-party/cas/logout/callback/:provider",
+      "source_file": "src/routes/auth-third-party.ts",
+      "source_line": 156,
+      "router": "thirdPartyAuthRoutes",
+      "mount_chain": [
+        "src/index.ts:92 app.route(\"/api/v1/auth\")"
+      ],
+      "domain": "identity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/config/items",
+      "source_file": "src/routes/misc.ts",
+      "source_line": 108,
+      "router": "miscRoutes",
+      "mount_chain": [
+        "src/index.ts:116 app.route(\"/api/v1\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/admin/aggregate",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 518,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/admin/cleanup",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 536,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 360,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 140,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/events/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 424,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/events/batch",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 71,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/issues",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 189,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 249,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 275,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/issues/:id/ignore",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 329,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/crash/issues/:id/resolve",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 302,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/stats/distribution",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 489,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/stats/summary",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 451,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/crash/stats/trend",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 469,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:106 qmsApp.route(\"/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/credit-applications/",
+      "source_file": "src/routes/credit-applications.ts",
+      "source_line": 23,
+      "router": "creditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:98 app.route(\"/api/v1/credit-applications\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/credit-applications/",
+      "source_file": "src/routes/credit-applications.ts",
+      "source_line": 7,
+      "router": "creditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:98 app.route(\"/api/v1/credit-applications\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/credit-applications/:id",
+      "source_file": "src/routes/credit-applications.ts",
+      "source_line": 37,
+      "router": "creditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:98 app.route(\"/api/v1/credit-applications\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/alerts/configs",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 28,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/alerts/configs",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 79,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/qms/alerts/configs/:id",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 204,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/alerts/configs/:id",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 49,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/alerts/configs/:id",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 114,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/alerts/configs/:id/test",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 353,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/alerts/history",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 240,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/alerts/history/:id/acknowledge",
+      "source_file": "src/qms/routes/alerts.ts",
+      "source_line": 312,
+      "router": "alerts",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:110 qmsApp.route(\"/qms/alerts\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/admin/aggregate",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 518,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/admin/cleanup",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 536,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 360,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/events",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 140,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/events/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 424,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/events/batch",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 71,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/issues",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 189,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 249,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/crash/issues/:id",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 275,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/issues/:id/ignore",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 329,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/crash/issues/:id/resolve",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 302,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/stats/distribution",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 489,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/stats/summary",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 451,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/crash/stats/trend",
+      "source_file": "src/qms/routes/crash.ts",
+      "source_line": 469,
+      "router": "crash",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:109 qmsApp.route(\"/qms/crash\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/conversations/dimensions",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 910,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/conversations/errors/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 772,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/conversations/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 810,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/installs/dimensions",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 1073,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/installs/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 966,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/overview",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 31,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/perf/dimensions",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 707,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/dashboard/perf/trend",
+      "source_file": "src/qms/routes/dashboard.ts",
+      "source_line": 291,
+      "router": "dashboard",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:107 qmsApp.route(\"/qms/dashboard\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/aggregation-info",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 45,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/aggregation/backfill",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 735,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/aggregation/run",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 580,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/config",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 233,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/config/:key",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 247,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/system/config/:key",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 273,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/env",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 319,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/error-codes",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 779,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/health",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 26,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/init-schema",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 62,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/notifications",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 338,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/qms/system/notifications",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 371,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/notifications/test/:channel",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 476,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/raw-stats",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 656,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/stats",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 173,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/qms/system/switch-to-continuous-aggregates",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 95,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/system/tasks",
+      "source_file": "src/qms/routes/system.ts",
+      "source_line": 549,
+      "router": "system",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:111 qmsApp.route(\"/qms/system\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/conversations",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 166,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/leaderboard/:type",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 837,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/realtime",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 1318,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/steps",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 672,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/turns",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 517,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/qms/user-stats/users/:userId",
+      "source_file": "src/qms/routes/userStats.ts",
+      "source_line": 1181,
+      "router": "userStats",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:108 qmsApp.route(\"/qms/user-stats\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/callback",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 98,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/cancel/:orderNo",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 146,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/create",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 29,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recharge/list",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 131,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recharge/packages",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 14,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/pay",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 68,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recharge/query/:orderNo",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 114,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/router/models",
+      "source_file": "src/routes/misc.ts",
+      "source_line": 16,
+      "router": "miscRoutes",
+      "mount_chain": [
+        "src/index.ts:116 app.route(\"/api/v1\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/system-config",
+      "source_file": "src/routes/system-config.ts",
+      "source_line": 155,
+      "router": "systemConfigRoutes",
+      "mount_chain": [
+        "src/index.ts:115 app.route(\"/api/v1\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/system-config/credentials",
+      "source_file": "src/routes/system-config.ts",
+      "source_line": 430,
+      "router": "systemConfigRoutes",
+      "mount_chain": [
+        "src/index.ts:115 app.route(\"/api/v1\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/batch",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 68,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/conversation",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 291,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/install",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 319,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/telemetry/perf",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 263,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/telemetry/queue/stats",
+      "source_file": "src/qms/routes/telemetry.ts",
+      "source_line": 251,
+      "router": "telemetry",
+      "mount_chain": [
+        "src/index.ts:113 app.route(\"/api/v1\")",
+        "src/index.ts:105 qmsApp.route(\"/telemetry\")"
+      ],
+      "domain": "qms"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tenant/config",
+      "source_file": "src/routes/misc.ts",
+      "source_line": 123,
+      "router": "miscRoutes",
+      "mount_chain": [
+        "src/index.ts:116 app.route(\"/api/v1\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/usage/report",
+      "source_file": "src/routes/misc.ts",
+      "source_line": 31,
+      "router": "miscRoutes",
+      "mount_chain": [
+        "src/index.ts:116 app.route(\"/api/v1\")"
+      ],
+      "domain": "integration"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/user/dashboard",
+      "source_file": "src/routes/user.ts",
+      "source_line": 71,
+      "router": "userRoutes",
+      "mount_chain": [
+        "src/index.ts:96 app.route(\"/api/v1/user\")"
+      ],
+      "domain": "user"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/user/ledger",
+      "source_file": "src/routes/user.ts",
+      "source_line": 236,
+      "router": "userRoutes",
+      "mount_chain": [
+        "src/index.ts:96 app.route(\"/api/v1/user\")"
+      ],
+      "domain": "user"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/user/model-usage-stats",
+      "source_file": "src/routes/user.ts",
+      "source_line": 464,
+      "router": "userRoutes",
+      "mount_chain": [
+        "src/index.ts:96 app.route(\"/api/v1/user\")"
+      ],
+      "domain": "user"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/user/profile",
+      "source_file": "src/routes/user.ts",
+      "source_line": 24,
+      "router": "userRoutes",
+      "mount_chain": [
+        "src/index.ts:96 app.route(\"/api/v1/user\")"
+      ],
+      "domain": "user"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/user/stats",
+      "source_file": "src/routes/user.ts",
+      "source_line": 320,
+      "router": "userRoutes",
+      "mount_chain": [
+        "src/index.ts:96 app.route(\"/api/v1/user\")"
+      ],
+      "domain": "user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/user/update-profile",
+      "source_file": "src/routes/user.ts",
+      "source_line": 532,
+      "router": "userRoutes",
+      "mount_chain": [
+        "src/index.ts:96 app.route(\"/api/v1/user\")"
+      ],
+      "domain": "user"
+    }
+  ]
+}

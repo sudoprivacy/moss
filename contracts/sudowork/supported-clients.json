@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "policy_status": "candidate",
+  "clients": [
+    {
+      "product_version": "0.2.17",
+      "git_ref": "v0.2.17",
+      "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+      "channel": "stable",
+      "targets": [
+        { "platform": "darwin", "architecture": "arm64" },
+        { "platform": "darwin", "architecture": "x64" },
+        { "platform": "win32", "architecture": "x64" }
+      ],
+      "auth_profiles": ["password", "sms", "cas", "login_by_config", "refresh_token"],
+      "capabilities": ["local", "cloud", "dify", "cron", "channel"],
+      "support_status": "candidate"
+    },
+    {
+      "product_version": "1.0.1",
+      "git_ref": "558668de116e245561f31b6d541aa5474456cab8",
+      "commit": "558668de116e245561f31b6d541aa5474456cab8",
+      "channel": "private",
+      "targets": [
+        { "platform": "darwin", "architecture": "arm64" },
+        { "platform": "darwin", "architecture": "x64" },
+        { "platform": "win32", "architecture": "x64" },
+        { "platform": "win32", "architecture": "arm64" }
+      ],
+      "auth_profiles": ["password", "sms", "cas", "login_by_config", "refresh_token"],
+      "capabilities": ["local", "cloud", "dify", "cron", "channel"],
+      "support_status": "candidate"
+    }
+  ]
+}

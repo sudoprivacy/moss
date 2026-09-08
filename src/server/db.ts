@@ -21,6 +21,9 @@ import type {
 import type { SessionRuntimeInfo } from './sessionManager.js'
 import { channelCredentialIdentity } from '../channels/types.js'
 import { resolveRuntimeScodePath } from './runtimeScodePath.js'
+import { ensureCatalogSchema } from './catalog/catalogSchema.js'
+import { ensureConfigAvailabilitySchema } from './configuration/configAvailabilitySchema.js'
+import { ensureBillingSchema } from './billing/billingSchema.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -250,6 +253,15 @@ export class DirectConnectStore {
         PRIMARY KEY (id, user_id)
       );
 
+      CREATE TABLE IF NOT EXISTS channel_plugin_leases (
+        plugin_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        lease_until INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (plugin_id, user_id)
+      );
+
       CREATE TABLE IF NOT EXISTS channel_users (
         id TEXT PRIMARY KEY,
         platform_user_id TEXT NOT NULL,
@@ -284,7 +296,8 @@ export class DirectConnectStore {
         requested_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         status TEXT NOT NULL,
-        user_id TEXT
+        user_id TEXT,
+        org_id TEXT
       );
     `)
     ensureCabinTables(this.db)
@@ -332,37 +345,15 @@ export class DirectConnectStore {
       console.log('[DB] Added client_cron_enabled column to enterprises')
     }
 
-    // Migration: backfill org_id on department_secret_policies rows written by
-    // replaceConfigItemDepartments (the admin "authorized departments" flow),
-    // which historically inserted without org_id. The org-scoped readers filter
-    // WHERE org_id = ?, so these NULL rows were invisible — a dept credential
-    // authorized for a department would never surface for that department's
-    // users. config_items.org_id is the source of truth (department_id is
-    // globally unique, so the join is unambiguous).
-    try {
-      const orphanCount = (this.db.prepare(
-        `SELECT COUNT(*) AS n FROM department_secret_policies WHERE org_id IS NULL`,
-      ).get() as { n: number }).n
-      if (orphanCount > 0) {
-        this.db.exec(`
-          UPDATE department_secret_policies
-          SET org_id = (
-            SELECT org_id FROM config_items
-            WHERE config_items.id = department_secret_policies.config_item_id
-          )
-          WHERE org_id IS NULL
-        `)
-        console.log(`[DB] Backfilled org_id on ${orphanCount} department_secret_policies row(s)`)
-      }
-    } catch (err) {
-      console.error('[DB] Failed to backfill department_secret_policies.org_id:', err)
-    }
-
     // Migration: add user_id to channel_pairing_requests
     const pairingRequestsColumns = this.db.prepare(`PRAGMA table_info(channel_pairing_requests)`).all() as { name: string }[]
     if (!pairingRequestsColumns.some(col => col.name === 'user_id')) {
       this.db.exec(`ALTER TABLE channel_pairing_requests ADD COLUMN user_id TEXT`)
       console.log('[DB] Added user_id column to channel_pairing_requests')
+    }
+    if (!pairingRequestsColumns.some(col => col.name === 'org_id')) {
+      this.db.exec(`ALTER TABLE channel_pairing_requests ADD COLUMN org_id TEXT`)
+      console.log('[DB] Added org_id column to channel_pairing_requests')
     }
     // Migrate channel_users UNIQUE constraint from (platform_user_id, platform_type)
     // to (platform_user_id, platform_type, user_id) for multi-user isolation.
@@ -573,6 +564,8 @@ export class DirectConnectStore {
       }
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
     }
+    ensureCatalogSchema(this.db)
+    ensureBillingSchema(this.db)
 
     // Secrets base table must exist before column migrations below. On a fresh
     // DB, PRAGMA table_info(nonexistent) returns an empty list, and ALTER TABLE
@@ -640,6 +633,7 @@ export class DirectConnectStore {
         }
       }
     }
+    ensureConfigAvailabilitySchema(this.db)
 
     // ============================================================
     // Document Center (P0): document tree, documents, wikis, build jobs
@@ -1303,16 +1297,34 @@ export class DirectConnectStore {
       // Tenant skills/assistants: stranded global rows go to the default org.
       this.db.prepare(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`).run(defaultOrgId)
       this.db.prepare(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`).run(defaultOrgId)
-      // Channels: backfill from the owning user's org where resolvable, else default.
+      // Channels: only a unified User is authoritative for org ownership. An
+      // unmapped legacy row must not be assigned to the default org: that can
+      // expose or start another tenant's bot. Leave it unresolved and disable
+      // the connection so migration validation can report it for review.
       this.db.exec(`
         UPDATE channel_plugins
-        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id), '${defaultOrgId}')
+        SET org_id = (SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id)
+        WHERE org_id IS NULL OR org_id = ''
+      `)
+      this.db.exec(`
+        UPDATE channel_plugins
+        SET enabled = 0, status = 'error'
         WHERE org_id IS NULL OR org_id = ''
       `)
       this.db.exec(`
         UPDATE channel_users
-        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id), '${defaultOrgId}')
+        SET org_id = (SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id)
         WHERE org_id IS NULL OR org_id = ''
+      `)
+      this.db.exec(`
+        UPDATE channel_pairing_requests
+        SET org_id = (SELECT u.org_id FROM users u WHERE u.id = channel_pairing_requests.user_id)
+        WHERE org_id IS NULL OR org_id = ''
+      `)
+      this.db.exec(`
+        UPDATE channel_pairing_requests
+        SET status = 'expired'
+        WHERE (org_id IS NULL OR org_id = '') AND status = 'pending'
       `)
     } catch (error) {
       console.error('[DB] backfillOrgScoping failed:', error)
@@ -1964,9 +1976,15 @@ export class DirectConnectStore {
 
   // ==================== Channel Plugins ====================
 
-  listChannelPlugins(userId?: string): SqlRow[] {
+  listChannelPlugins(userId?: string, orgId?: string): SqlRow[] {
+    if (userId && orgId) {
+      return this.db.prepare(`SELECT * FROM channel_plugins WHERE user_id = ? AND org_id = ? ORDER BY created_at DESC`).all(userId, orgId) as SqlRow[]
+    }
     if (userId) {
       return this.db.prepare(`SELECT * FROM channel_plugins WHERE user_id = ? ORDER BY created_at DESC`).all(userId) as SqlRow[]
+    }
+    if (orgId) {
+      return this.db.prepare(`SELECT * FROM channel_plugins WHERE org_id = ? ORDER BY created_at DESC`).all(orgId) as SqlRow[]
     }
     return this.db.prepare(`SELECT * FROM channel_plugins ORDER BY created_at DESC`).all() as SqlRow[]
   }
@@ -2053,7 +2071,10 @@ export class DirectConnectStore {
     return null
   }
 
-  getChannelPlugin(id: string, userId?: string): SqlRow | null {
+  getChannelPlugin(id: string, userId?: string, orgId?: string): SqlRow | null {
+    if (userId && orgId) {
+      return (this.db.prepare(`SELECT * FROM channel_plugins WHERE id = ? AND user_id = ? AND org_id = ?`).get(id, userId, orgId) as SqlRow) ?? null
+    }
     if (userId) {
       return (this.db.prepare(`SELECT * FROM channel_plugins WHERE id = ? AND user_id = ?`).get(id, userId) as SqlRow) ?? null
     }
@@ -2124,9 +2145,62 @@ export class DirectConnectStore {
     this.db.prepare(`DELETE FROM channel_plugins WHERE id = ? AND user_id = ?`).run(id, userId)
   }
 
+  acquireChannelPluginLease(
+    pluginId: string,
+    userId: string,
+    ownerId: string,
+    nowTs: number,
+    leaseUntil: number,
+  ): boolean {
+    const result = this.db.prepare(`
+      INSERT INTO channel_plugin_leases (plugin_id, user_id, owner_id, lease_until, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(plugin_id, user_id) DO UPDATE SET
+        owner_id = excluded.owner_id,
+        lease_until = excluded.lease_until,
+        updated_at = excluded.updated_at
+      WHERE channel_plugin_leases.owner_id = excluded.owner_id
+         OR channel_plugin_leases.lease_until < excluded.updated_at
+    `).run(pluginId, userId, ownerId, leaseUntil, nowTs)
+    return result.changes > 0
+  }
+
+  renewChannelPluginLease(
+    pluginId: string,
+    userId: string,
+    ownerId: string,
+    nowTs: number,
+    leaseUntil: number,
+  ): boolean {
+    const result = this.db.prepare(`
+      UPDATE channel_plugin_leases
+      SET lease_until = ?, updated_at = ?
+      WHERE plugin_id = ? AND user_id = ? AND owner_id = ? AND lease_until >= ?
+    `).run(leaseUntil, nowTs, pluginId, userId, ownerId, nowTs)
+    return result.changes > 0
+  }
+
+  ownsChannelPluginLease(pluginId: string, userId: string, ownerId: string, nowTs: number): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM channel_plugin_leases
+      WHERE plugin_id = ? AND user_id = ? AND owner_id = ? AND lease_until >= ?
+    `).get(pluginId, userId, ownerId, nowTs) != null
+  }
+
+  releaseChannelPluginLease(pluginId: string, userId: string, ownerId: string): boolean {
+    const result = this.db.prepare(`
+      DELETE FROM channel_plugin_leases
+      WHERE plugin_id = ? AND user_id = ? AND owner_id = ?
+    `).run(pluginId, userId, ownerId)
+    return result.changes > 0
+  }
+
   // ==================== Channel Users ====================
 
-  listChannelUsers(userId?: string): SqlRow[] {
+  listChannelUsers(userId?: string, orgId?: string): SqlRow[] {
+    if (userId && orgId) {
+      return this.db.prepare(`SELECT * FROM channel_users WHERE user_id = ? AND org_id = ? ORDER BY authorized_at DESC`).all(userId, orgId) as SqlRow[]
+    }
     if (userId) {
       return this.db.prepare(`SELECT * FROM channel_users WHERE user_id = ? ORDER BY authorized_at DESC`).all(userId) as SqlRow[]
     }
@@ -2140,7 +2214,12 @@ export class DirectConnectStore {
    * connection, the plugin id for any additional one. Matching on the platform instead
    * would let a user paired with one bot talk to every other bot of that type.
    */
-  getChannelUserByPlatform(platformUserId: string, scope: string, userId?: string): SqlRow | null {
+  getChannelUserByPlatform(platformUserId: string, scope: string, userId?: string, orgId?: string): SqlRow | null {
+    if (userId && orgId) {
+      return (this.db.prepare(
+        `SELECT * FROM channel_users WHERE platform_user_id = ? AND plugin_scope = ? AND user_id = ? AND org_id = ?`,
+      ).get(platformUserId, scope, userId, orgId) as SqlRow) ?? null
+    }
     if (userId) {
       return (this.db.prepare(
         `SELECT * FROM channel_users WHERE platform_user_id = ? AND plugin_scope = ? AND user_id = ?`,
@@ -2187,7 +2266,10 @@ export class DirectConnectStore {
     )
   }
 
-  getChannelUserById(id: string): SqlRow | null {
+  getChannelUserById(id: string, userId?: string, orgId?: string): SqlRow | null {
+    if (userId && orgId) {
+      return (this.db.prepare(`SELECT * FROM channel_users WHERE id = ? AND user_id = ? AND org_id = ?`).get(id, userId, orgId) as SqlRow) ?? null
+    }
     return (this.db.prepare(`SELECT * FROM channel_users WHERE id = ?`).get(id) as SqlRow) ?? null
   }
 
@@ -2199,7 +2281,11 @@ export class DirectConnectStore {
    * Drop authorized users for ONE connection (scope), not the whole platform:
    * disabling one bot must not deauthorize everyone paired with its siblings.
    */
-  deleteChannelUsersByPlatform(scope: string, userId?: string): number {
+  deleteChannelUsersByPlatform(scope: string, userId?: string, orgId?: string): number {
+    if (userId && orgId) {
+      const result = this.db.prepare(`DELETE FROM channel_users WHERE plugin_scope = ? AND user_id = ? AND org_id = ?`).run(scope, userId, orgId)
+      return result.changes
+    }
     if (userId) {
       const result = this.db.prepare(`DELETE FROM channel_users WHERE plugin_scope = ? AND user_id = ?`).run(scope, userId)
       return result.changes
@@ -2297,14 +2383,20 @@ export class DirectConnectStore {
 
   // ==================== Channel Pairings ====================
 
-  listPendingPairingRequests(userId?: string): SqlRow[] {
+  listPendingPairingRequests(userId?: string, orgId?: string): SqlRow[] {
+    if (userId && orgId) {
+      return this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ? AND user_id = ? AND org_id = ?`).all(now(), userId, orgId) as SqlRow[]
+    }
     if (userId) {
       return this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ? AND (user_id = ? OR user_id IS NULL)`).all(now(), userId) as SqlRow[]
     }
     return this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ?`).all(now()) as SqlRow[]
   }
 
-  getPairingRequest(code: string): SqlRow | null {
+  getPairingRequest(code: string, userId?: string, orgId?: string): SqlRow | null {
+    if (userId && orgId) {
+      return (this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE code = ? AND user_id = ? AND org_id = ?`).get(code, userId, orgId) as SqlRow) ?? null
+    }
     return (this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE code = ?`).get(code) as SqlRow) ?? null
   }
 
@@ -2318,14 +2410,16 @@ export class DirectConnectStore {
     expires_at: number
     status: string
     user_id?: string | null
+    org_id?: string | null
   }): void {
     this.db.prepare(`
       INSERT INTO channel_pairing_requests (
-        code, platform_user_id, platform_type, plugin_scope, display_name, requested_at, expires_at, status, user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        code, platform_user_id, platform_type, plugin_scope, display_name, requested_at, expires_at, status, user_id, org_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(code) DO UPDATE SET
         status = excluded.status,
         user_id = excluded.user_id,
+        org_id = excluded.org_id,
         platform_type = excluded.platform_type,
         plugin_scope = excluded.plugin_scope,
         display_name = excluded.display_name,
@@ -2341,6 +2435,7 @@ export class DirectConnectStore {
       row.expires_at,
       row.status,
       row.user_id ?? null,
+      row.org_id ?? null,
     )
   }
 
@@ -3590,8 +3685,15 @@ export class DirectConnectStore {
     const conditions: string[] = []
     const params: unknown[] = []
     if (opts.orgId) {
-      conditions.push(`(scope = 'user' OR org_id = ?)`)
-      params.push(opts.orgId)
+      conditions.push(`(
+        scope = 'user' OR org_id = ? OR availability = 'all' OR (
+          availability = 'assigned' AND EXISTS (
+            SELECT 1 FROM config_item_org_assignments assignment
+            WHERE assignment.config_item_id = config_items.id AND assignment.org_id = ?
+          )
+        )
+      )`)
+      params.push(opts.orgId, opts.orgId)
     }
     if (opts.name) {
       conditions.push('(name LIKE ? OR pinyin LIKE ?)')
@@ -3620,8 +3722,11 @@ export class DirectConnectStore {
   getConfigItem(id: number, orgId?: string): SqlRow | null {
     const row = (this.db.prepare('SELECT * FROM config_items WHERE id = ?').get(id) as SqlRow) ?? null
     // Org guard: a non-user-scope item only resolves within its own org.
-    if (row && orgId && row.scope !== 'user' && row.org_id !== orgId) {
-      return null
+    if (row && orgId && row.scope !== 'user' && row.org_id !== orgId && row.availability !== 'all') {
+      const assigned = row.availability === 'assigned' && this.db.prepare(`
+        SELECT 1 FROM config_item_org_assignments WHERE config_item_id = ? AND org_id = ?
+      `).get(id, orgId)
+      if (!assigned) return null
     }
     return row
   }
@@ -3631,8 +3736,19 @@ export class DirectConnectStore {
     // pinyins are unique per org, so resolve within the caller's org.
     if (orgId) {
       const scoped = this.db
-        .prepare(`SELECT * FROM config_items WHERE pinyin = ? AND scope != 'user' AND org_id = ?`)
-        .get(pinyin, orgId) as SqlRow | undefined
+        .prepare(`
+          SELECT * FROM config_items WHERE pinyin = ? AND scope != 'user' AND (
+            org_id = ? OR availability = 'all' OR (
+              availability = 'assigned' AND EXISTS (
+                SELECT 1 FROM config_item_org_assignments assignment
+                WHERE assignment.config_item_id = config_items.id AND assignment.org_id = ?
+              )
+            )
+          )
+          ORDER BY CASE WHEN org_id = ? THEN 0 ELSE 1 END, id
+          LIMIT 1
+        `)
+        .get(pinyin, orgId, orgId, orgId) as SqlRow | undefined
       if (scoped) return scoped
       return (
         (this.db
@@ -3663,8 +3779,18 @@ export class DirectConnectStore {
   getAllActiveConfigItems(orgId?: string): SqlRow[] {
     if (orgId) {
       return this.db
-        .prepare(`SELECT * FROM config_items WHERE status = 1 AND (scope = 'user' OR org_id = ?)`)
-        .all(orgId) as SqlRow[]
+        .prepare(`
+          SELECT * FROM config_items WHERE status = 1 AND (
+            scope = 'user' OR availability = 'all' OR (
+              availability = 'organization' AND org_id = ?
+            ) OR (
+              availability = 'assigned' AND EXISTS (
+                SELECT 1 FROM config_item_org_assignments assignment
+                WHERE assignment.config_item_id = config_items.id AND assignment.org_id = ?
+              )
+            )
+          )
+        `).all(orgId, orgId) as SqlRow[]
     }
     return this.db.prepare('SELECT * FROM config_items WHERE status = 1').all() as SqlRow[]
   }

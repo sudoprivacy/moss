@@ -104,6 +104,8 @@ export class MossActionExecutor {
     // everything keyed below (session, authorization, agent binding) must stay per-bot, or
     // one bot answers with another's conversation.
     const pluginId = instanceKey ? instanceKey.split(':')[0] : defaultPluginId(platform);
+    const owningPlugin = mossUserId ? this.db.getChannelPlugin(pluginId, mossUserId) : null;
+    const mossOrgId = owningPlugin?.org_id ? String(owningPlugin.org_id) : undefined;
 
     // Use the source plugin directly for sending responses (no lookup needed)
     const sendFn = async (msg: any) => sourcePlugin.sendMessage(chatId, msg);
@@ -111,14 +113,23 @@ export class MossActionExecutor {
 
     try {
       // 1. Check authorization
-      const isAuthorized = this.pairingService.isUserAuthorized(user.id, pluginScope(pluginId, platform), mossUserId);
+      if (!mossUserId || !mossOrgId) {
+        await sendFn({ type: 'text', text: 'Channel ownership is not configured.', parseMode: 'HTML' });
+        return;
+      }
+      const isAuthorized = this.pairingService.isUserAuthorized(
+        user.id,
+        pluginScope(pluginId, platform),
+        mossUserId,
+        mossOrgId,
+      );
 
       // Handle /start command
       if (content.type === 'command' && content.text === '/start') {
         if (platform === 'wechat' || platform === 'wecom') {
           // Auto-authorize and continue
         } else {
-          await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId);
+          await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId, mossOrgId);
           return;
         }
       }
@@ -127,10 +138,10 @@ export class MossActionExecutor {
       if (!isAuthorized) {
         if (platform === 'wechat' || platform === 'wecom') {
           // Auto-authorize WeChat/WeCom users
-          this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
+          this.autoAuthorizeUser(user, platform, pluginId, mossUserId, mossOrgId);
         } else {
           // Show pairing flow for other platforms
-          await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId);
+          await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId, mossOrgId);
           return;
         }
       }
@@ -184,7 +195,7 @@ export class MossActionExecutor {
         await existingLock;
       }
 
-      const lockPromise = this.processMessage(platform, pluginId, chatId, user, content.text, sendFn, editFn, mossUserId);
+      const lockPromise = this.processMessage(platform, pluginId, chatId, user, content.text, sendFn, editFn, mossUserId, mossOrgId);
       this.conversationLocks.set(lockKey, lockPromise);
 
       try {
@@ -216,6 +227,7 @@ export class MossActionExecutor {
     sendFn: (msg: any) => Promise<string | null>,
     editFn: (msgId: string, msg: any) => Promise<boolean>,
     mossUserId: string | undefined,
+    mossOrgId: string,
   ): Promise<void> {
     // Scope every key below to the receiving connection: two bots of one type must not
     // share a session, a turn counter or an agent binding.
@@ -224,10 +236,10 @@ export class MossActionExecutor {
     const channelUserKey = `${scope}:${user.id}:${chatId}`;
 
     // Get/create channel user
-    let channelUser = this.getChannelUser(user.id, scope, mossUserId);
+    let channelUser = this.getChannelUser(user.id, scope, mossUserId, mossOrgId);
     if (!channelUser) {
       // Should have been created by auto-authorize or pairing, but create as fallback
-      channelUser = this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
+      channelUser = this.autoAuthorizeUser(user, platform, pluginId, mossUserId, mossOrgId);
       if (!channelUser) {
         await sendFn({ type: 'text', text: '❌ Authorization failed. Please try again.', parseMode: 'HTML' });
         return;
@@ -814,8 +826,8 @@ export class MossActionExecutor {
   /**
    * Get channel user from database
    */
-  private getChannelUser(platformUserId: string, scope: string, mossUserId?: string): IChannelUser | null {
-    const row = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
+  private getChannelUser(platformUserId: string, scope: string, mossUserId?: string, orgId?: string): IChannelUser | null {
+    const row = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId, orgId);
     if (!row) return null;
     return {
       id: String(row.id),
@@ -836,9 +848,10 @@ export class MossActionExecutor {
     platform: string,
     pluginId: string,
     mossUserId?: string,
+    orgId?: string,
   ): IChannelUser | null {
     const scope = pluginScope(pluginId, platform);
-    const existing = this.getChannelUser(user.id, scope, mossUserId);
+    const existing = this.getChannelUser(user.id, scope, mossUserId, orgId);
     if (existing) return existing;
 
     const now = Date.now();
@@ -860,7 +873,7 @@ export class MossActionExecutor {
       authorized_at: channelUser.authorizedAt,
       last_active: null,
       session_id: null,
-      org_id: null,
+      org_id: orgId ?? null,
       user_id: mossUserId ?? null,
     });
 
@@ -1021,6 +1034,7 @@ export class MossActionExecutor {
     user: { id: string; displayName?: string },
     sendFn: (msg: any) => Promise<string | null>,
     mossUserId?: string,
+    orgId?: string,
   ): Promise<void> {
     try {
       const { code, expiresAt } = await this.pairingService.refreshPairingCode(
@@ -1029,6 +1043,7 @@ export class MossActionExecutor {
         user.displayName,
         mossUserId,
         pluginScope(pluginId, platform),
+        orgId,
       );
 
       const ttlMin = Math.max(1, Math.ceil((expiresAt - Date.now()) / 60000));

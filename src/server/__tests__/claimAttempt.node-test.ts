@@ -1,4 +1,4 @@
-// Runs under Node (the store uses node:sqlite, which Bun lacks): `tsx --test`.
+// Runs under Node (the store uses node:sqlite): `bun run test:node`.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DirectConnectStore } from "../db.js";

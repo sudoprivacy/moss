@@ -2,7 +2,7 @@
  * configStore — 服务器端敏感配置的 Nexus 存储层（namespace: moss:config）
  *
  * 单一职责：
- *  - 探针三明治 + fail-fast 加载 12 个配置 key 到内存缓存（同步消费链读缓存）
+ *  - 探针三明治 + fail-fast 加载敏感配置 key 到内存缓存（同步消费链读缓存）
  *  - get（同步）/ put / remove（写 Nexus + 更新缓存；server 字段可选同步回写 config 快照）
  *  - hydrateConfig：启动时把 Nexus 值就地写入 ServerConfig 快照，并丢弃这些字段的文件值
  *    （Nexus + env 为唯一来源；不做任何文件迁移或写回）
@@ -24,6 +24,9 @@ export const CONFIG_NAMESPACE = 'moss:config'
 export const CONFIG_KEYS = [
   'settings.anthropic-auth-token',
   'settings.image-api-key',
+  'client.log-report-key',
+  'client.product-improvement-api-key',
+  'client.product-improvement-public-key',
   'server.hub-authorization',
   'server.wiki-index-resource-token-secret',
   'server.cabin-token-secret',
@@ -34,6 +37,20 @@ export const CONFIG_KEYS = [
   'server.cabin-control-auth',
   'server.cabin-broadcast-api-key',
   'server.cabin-broadcast-auth',
+  'server.sudowork-legacy-jwt-secret',
+  'server.sudowork-redis-url',
+  'server.sudowork-tencent-secret-id',
+  'server.sudowork-tencent-secret-key',
+  'server.sudowork-dify-system-token',
+  'server.sudowork-dify-provision-secret',
+  'server.sudowork-dify-sso-secret',
+  'server.qms-postgres-url',
+  'server.qms-redis-url',
+  'server.qms-api-key',
+  'server.qms-telemetry-private-key',
+  'server.qms-telemetry-public-key',
+  'server.qms-lark-webhook-url',
+  'server.qms-smtp-url',
 ] as const
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number]
@@ -47,7 +64,7 @@ const PROBE_KEY = '_health-probe'
 const PROBE_VALUE = 'config-store-health-probe'
 
 /**
- * server.json 侧 10 个字段的回填规格。
+ * server.json 侧敏感字段的回填规格。
  *
  * 分组条件（源于代码现状，勿改）：
  *  - hub.authorization：config 值优先于 env（hubConfig.ts:42-49），故 hydrate/PUT
@@ -151,6 +168,104 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
       config.cabin.broadcastAuth = value || undefined
     },
   },
+  {
+    key: 'server.sudowork-legacy-jwt-secret',
+    envName: 'SUDOWORK_LEGACY_JWT_SECRET',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.legacyJwtSecret = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-redis-url',
+    envName: 'SUDOWORK_REDIS_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.redisUrl = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-tencent-secret-id',
+    envName: 'SUDOWORK_TENCENT_SECRET_ID',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.sms.secretId = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-tencent-secret-key',
+    envName: 'SUDOWORK_TENCENT_SECRET_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.sms.secretKey = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-dify-system-token',
+    envName: 'DIFY_SYSTEM_TOKEN',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.dify.systemToken = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-dify-provision-secret',
+    envName: 'DIFY_SYSTEM_SECRET',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.dify.provisionSecret = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-dify-sso-secret',
+    envName: 'DIFY_SSO_SECRET',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      config.sudoworkCompatibility.dify.ssoSecret = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-postgres-url',
+    envName: 'QMS_POSTGRES_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.postgresUrl = value || undefined },
+  },
+  {
+    key: 'server.qms-redis-url',
+    envName: 'QMS_REDIS_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.redisUrl = value || undefined },
+  },
+  {
+    key: 'server.qms-api-key',
+    envName: 'QMS_API_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.apiKey = value || undefined },
+  },
+  {
+    key: 'server.qms-telemetry-private-key',
+    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.privateKeyPem = value || undefined },
+  },
+  {
+    key: 'server.qms-telemetry-public-key',
+    envName: 'QMS_TELEMETRY_PUBLIC_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.publicKeyPem = value || undefined },
+  },
+  {
+    key: 'server.qms-lark-webhook-url',
+    envName: 'QMS_LARK_WEBHOOK_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.larkWebhookUrl = value || undefined },
+  },
+  {
+    key: 'server.qms-smtp-url',
+    envName: 'QMS_SMTP_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => { config.qms.secrets.smtpUrl = value || undefined },
+  },
 ]
 
 export class ConfigStore {
@@ -174,7 +289,7 @@ export class ConfigStore {
   /**
    * 探针三明治 + fail-fast 加载（计划步骤 1）。
    *
-   * 前探针（put→get→delete）证通道健康后才读 12 个 key——此时 getSecret 的 null
+   * 前探针（put→get→delete）证通道健康后才读全部 key——此时 getSecret 的 null
    * 才可信任为"未设置"；读取按三分支判定（null=未设置 / 非 null 且 value null=
    * 记录损坏→启动失败 / 其余字符串含空串=采用）；后探针捕获"读取中 nexusd 崩溃"
    * 的窗口。任一致命条件触发即 throw（启动失败，不静默降级 dev 默认密钥）。
@@ -210,7 +325,7 @@ export class ConfigStore {
 
   /**
    * 写值：写 Nexus + 更新缓存；携带 config 时按分组条件同步回写快照（就地赋值）。
-   * 仅用于 server.json 侧 10 个字段时才传 config。
+   * 仅用于 ServerConfig 映射字段时才传 config。
    */
   async put(key: ConfigKey, value: string, config?: ServerConfig): Promise<void> {
     if (!this.client) {
@@ -248,7 +363,7 @@ export class ConfigStore {
   }
 
   /**
-   * 启动 hydrate：把这 10 个字段解析为 env > Nexus > 默认（hub 为 Nexus > env > 默认，
+   * 启动 hydrate：把这些字段解析为 env > Nexus > 默认（hub 为 Nexus > env > 默认，
    * 见 ignoreEnvGate），就地写入 config 快照并丢弃 resolveServerConfig 读入的文件值
    * （Nexus + env 为唯一来源）。Nexus 无值时回落 fallbackValue（zod 默认）或 undefined，
    * 避免 undefined 击穿非可选 string。必须就地字段赋值、禁止对象替换（消费者持有

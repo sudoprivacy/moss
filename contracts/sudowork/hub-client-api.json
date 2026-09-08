@@ -1,0 +1,376 @@
+{
+  "schema_version": 1,
+  "supported_clients": [
+    {
+      "product_version": "0.2.17",
+      "commit": "d8cff4db5522252d86d79cafe877556797796dca"
+    },
+    {
+      "product_version": "1.0.1",
+      "commit": "558668de116e245561f31b6d541aa5474456cab8"
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/assistants/cursor",
+      "query_parameters": [
+        "category",
+        "cursor",
+        "limit",
+        "query",
+        "tenant_id"
+      ],
+      "multipart_fields": [],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 968
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 918
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/assistants/:assistantId",
+      "query_parameters": [],
+      "multipart_fields": [],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 295
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1153
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 295
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1093
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/categories",
+      "query_parameters": [
+        "type"
+      ],
+      "multipart_fields": [],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1454
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1077
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 457
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1454
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1021
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 457
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills",
+      "query_parameters": [
+        "category",
+        "page",
+        "query",
+        "size"
+      ],
+      "multipart_fields": [],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 407
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 407
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills/cursor",
+      "query_parameters": [
+        "categories",
+        "category",
+        "cursor",
+        "limit",
+        "query",
+        "tenant_id"
+      ],
+      "multipart_fields": [],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1401
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 438
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "skills/_builtin/sudoclaw-skill-installer/scripts/sudoclaw-skill.mjs",
+          "source_line": 157
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1401
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 438
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "skills/_builtin/sudoclaw-skill-installer/scripts/sudoclaw-skill.mjs",
+          "source_line": 157
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills/:skillId",
+      "query_parameters": [],
+      "multipart_fields": [],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1042
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1523
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1183
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1311
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/services/skillUpdate/SkillUpdateService.ts",
+          "source_line": 71
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 476
+        },
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "skills/_builtin/sudoclaw-skill-installer/scripts/sudoclaw-skill.mjs",
+          "source_line": 162
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1042
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1523
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1123
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1232
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/services/skillUpdate/SkillUpdateService.ts",
+          "source_line": 71
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/webserver/routes/apiRoutes.ts",
+          "source_line": 476
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "skills/_builtin/sudoclaw-skill-installer/scripts/sudoclaw-skill.mjs",
+          "source_line": 162
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/assistants",
+      "query_parameters": [],
+      "multipart_fields": [
+        "avatar",
+        "categories",
+        "default_init_prompt",
+        "description",
+        "name",
+        "profession",
+        "prompt_file",
+        "skills",
+        "source_url",
+        "tenantIds",
+        "tenant_id"
+      ],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1628
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/assistantHubBridge.ts",
+          "source_line": 1544
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/skills",
+      "query_parameters": [],
+      "multipart_fields": [
+        "applicable_scenarios",
+        "author_id",
+        "categories",
+        "category",
+        "core_features",
+        "description",
+        "display_name",
+        "emoji",
+        "homepage",
+        "icon_file",
+        "name",
+        "skill_file",
+        "status",
+        "tenant_id",
+        "version"
+      ],
+      "authorization_header": true,
+      "evidence": [
+        {
+          "product_version": "0.2.17",
+          "commit": "d8cff4db5522252d86d79cafe877556797796dca",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1742
+        },
+        {
+          "product_version": "1.0.1",
+          "commit": "558668de116e245561f31b6d541aa5474456cab8",
+          "source_file": "src/process/bridge/skillHubBridge.ts",
+          "source_line": 1742
+        }
+      ]
+    }
+  ],
+  "artifact_download": {
+    "method": "GET",
+    "source_fields": [
+      "sourceUrl",
+      "source_url"
+    ],
+    "requires_absolute_url": true,
+    "authorization_header_observed": true,
+    "followed_redirect_statuses": [
+      301,
+      302
+    ]
+  }
+}

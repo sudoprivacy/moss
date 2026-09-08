@@ -113,6 +113,20 @@ describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
     'CABIN_TOKEN_SECRET',
     'MOSS_RESOURCE_TOKEN_SECRET',
     'MOSS_HUB_AUTHORIZATION',
+    'SUDOWORK_LEGACY_JWT_SECRET',
+    'SUDOWORK_REDIS_URL',
+    'SUDOWORK_TENCENT_SECRET_ID',
+    'SUDOWORK_TENCENT_SECRET_KEY',
+    'DIFY_SYSTEM_TOKEN',
+    'DIFY_SYSTEM_SECRET',
+    'DIFY_SSO_SECRET',
+    'QMS_POSTGRES_URL',
+    'QMS_REDIS_URL',
+    'QMS_API_KEY',
+    'QMS_TELEMETRY_PRIVATE_KEY',
+    'QMS_TELEMETRY_PUBLIC_KEY',
+    'QMS_LARK_WEBHOOK_URL',
+    'QMS_SMTP_URL',
   ]
   function clearEnv(): void {
     for (const k of ENV_KEYS) delete process.env[k]
@@ -124,6 +138,13 @@ describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
     resourceTokenSecret?: string
     cabinTokenSecret?: string
     cabinLlmApiKey?: string
+    sudoworkLegacyJwtSecret?: string
+    sudoworkRedisUrl?: string
+    sudoworkTencentSecretId?: string
+    sudoworkTencentSecretKey?: string
+    difySystemToken?: string
+    difyProvisionSecret?: string
+    difySsoSecret?: string
   }): ServerConfig {
     return {
       hubAuthorization: file.hubAuthorization,
@@ -138,6 +159,33 @@ describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
         broadcastApiKey: undefined,
         broadcastAuth: undefined,
       },
+      sudoworkCompatibility: {
+        enabled: true,
+        hosts: ['api.sudowork.test'],
+        legacyJwtSecret: file.sudoworkLegacyJwtSecret,
+        redisUrl: file.sudoworkRedisUrl,
+        dify: {
+          baseUrl: 'http://localhost:5001',
+          systemToken: file.difySystemToken,
+          provisionSecret: file.difyProvisionSecret,
+          ssoSecret: file.difySsoSecret,
+        },
+        sms: {
+          provider: 'tencent', sdkAppId: '', signName: '', templateId: '', signId: '',
+          region: 'ap-beijing', codeLength: 6, expireMinutes: 5,
+          sendIntervalSeconds: 60, maxPerDay: 10,
+          secretId: file.sudoworkTencentSecretId,
+          secretKey: file.sudoworkTencentSecretKey,
+        },
+      },
+      qms: {
+        enabled: true,
+        apiKeyHeader: 'X-API-Key',
+        queue: { flushIntervalMs: 3000, batchSize: 50, visibilityTimeoutMs: 60_000 },
+        retention: { perfDays: 90, conversationDays: 180, crashDays: 90, aggregateDays: 365 },
+        encryptionRequired: false,
+        secrets: {},
+      },
     } as unknown as ServerConfig
   }
 
@@ -147,14 +195,48 @@ describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
       const fake = new FakeNexus()
       fake.seed('server.cabin-llm-api-key', 'nexus-llm')
       fake.seed('server.hub-authorization', 'nexus-hub')
+      fake.seed('server.sudowork-legacy-jwt-secret', 'nexus-jwt')
+      fake.seed('server.sudowork-redis-url', 'redis://nexus')
+      fake.seed('server.sudowork-tencent-secret-id', 'nexus-secret-id')
+      fake.seed('server.sudowork-tencent-secret-key', 'nexus-secret-key')
+      fake.seed('server.sudowork-dify-system-token', 'nexus-dify-token')
+      fake.seed('server.sudowork-dify-provision-secret', 'nexus-dify-provision')
+      fake.seed('server.sudowork-dify-sso-secret', 'nexus-dify-sso')
+      fake.seed('server.qms-postgres-url', 'postgres://qms:secret@db/qms')
+      fake.seed('server.qms-redis-url', 'redis://cache/3')
+      fake.seed('server.qms-api-key', 'nexus-qms-key')
+      fake.seed('server.qms-telemetry-private-key', 'nexus-private-key')
+      fake.seed('server.qms-telemetry-public-key', 'nexus-public-key')
       const store = new ConfigStore(asClient(fake))
       await store.loadAll()
 
-      const config = makeConfig({ cabinLlmApiKey: 'file-llm', hubAuthorization: 'file-hub' })
+      const config = makeConfig({
+        cabinLlmApiKey: 'file-llm',
+        hubAuthorization: 'file-hub',
+        sudoworkLegacyJwtSecret: 'file-jwt',
+        sudoworkRedisUrl: 'redis://file',
+        sudoworkTencentSecretId: 'file-secret-id',
+        sudoworkTencentSecretKey: 'file-secret-key',
+        difySystemToken: 'file-dify-token',
+        difyProvisionSecret: 'file-dify-provision',
+        difySsoSecret: 'file-dify-sso',
+      })
       store.hydrateConfig(config)
 
       expect(config.cabin.llmApiKey).toBe('nexus-llm')
       expect(config.hubAuthorization).toBe('nexus-hub')
+      expect(config.sudoworkCompatibility.legacyJwtSecret).toBe('nexus-jwt')
+      expect(config.sudoworkCompatibility.redisUrl).toBe('redis://nexus')
+      expect(config.sudoworkCompatibility.sms.secretId).toBe('nexus-secret-id')
+      expect(config.sudoworkCompatibility.sms.secretKey).toBe('nexus-secret-key')
+      expect(config.sudoworkCompatibility.dify.systemToken).toBe('nexus-dify-token')
+      expect(config.sudoworkCompatibility.dify.provisionSecret).toBe('nexus-dify-provision')
+      expect(config.sudoworkCompatibility.dify.ssoSecret).toBe('nexus-dify-sso')
+      expect(config.qms.secrets.postgresUrl).toBe('postgres://qms:secret@db/qms')
+      expect(config.qms.secrets.redisUrl).toBe('redis://cache/3')
+      expect(config.qms.secrets.apiKey).toBe('nexus-qms-key')
+      expect(config.qms.secrets.privateKeyPem).toBe('nexus-private-key')
+      expect(config.qms.secrets.publicKeyPem).toBe('nexus-public-key')
     } finally {
       clearEnv()
     }
@@ -198,6 +280,13 @@ describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
       expect(config.wikiIndex.resourceTokenSecret).toBe('dev-resource-token-secret')
       // optional 字段回落 undefined（文件值被丢弃）
       expect(config.cabin.llmApiKey).toBeUndefined()
+      expect(config.sudoworkCompatibility.legacyJwtSecret).toBeUndefined()
+      expect(config.sudoworkCompatibility.redisUrl).toBeUndefined()
+      expect(config.sudoworkCompatibility.sms.secretId).toBeUndefined()
+      expect(config.sudoworkCompatibility.sms.secretKey).toBeUndefined()
+      expect(config.sudoworkCompatibility.dify.systemToken).toBeUndefined()
+      expect(config.sudoworkCompatibility.dify.provisionSecret).toBeUndefined()
+      expect(config.sudoworkCompatibility.dify.ssoSecret).toBeUndefined()
     } finally {
       clearEnv()
     }

@@ -2,6 +2,10 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
+import { onlineCommandContext } from '../application/commandContext.js'
+import { IdentityRepository } from '../identity/identityRepository.js'
+import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { OrganizationIdentityService } from '../identity/organizationIdentityService.js'
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
@@ -17,10 +21,45 @@ import {
   createApiKeyRecord,
   createSyntheticUserEmail,
   hashPassword,
+  isLegacyPasswordHash,
   sanitizeApiKey,
   sanitizeUser,
   verifyPassword,
 } from '../authCenter/db.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import { SudoworkIdentityService } from '../api/compat/sudowork/identityService.js'
+import { SudoworkAdministrationService } from '../api/compat/sudowork/adminService.js'
+import { SudoworkCasService } from '../api/compat/sudowork/casService.js'
+import { SudoworkCatalogService } from '../api/compat/sudowork/catalogService.js'
+import { SudoworkConfigService } from '../api/compat/sudowork/configService.js'
+import { createConfigItemsApi } from '../api/configItems.js'
+import type { DirectConnectStore } from '../db.js'
+import type { ManagedImageStore } from '../configuration/managedImageStore.js'
+import { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
+import { SudoworkSystemConfigService } from '../api/compat/sudowork/systemConfigService.js'
+import type { ConfigStore } from '../configStore/configStore.js'
+import { CatalogRepository } from '../catalog/catalogRepository.js'
+import { CatalogService } from '../catalog/catalogService.js'
+import { CatalogArtifactStore } from '../catalog/catalogArtifactStore.js'
+import { CatalogUploadService } from '../catalog/catalogUploadService.js'
+import type { LegacyKeyValueStore } from '../identity/legacyToken.js'
+import { BillingRepository } from '../billing/billingRepository.js'
+import { WalletService } from '../billing/walletService.js'
+import { BillingCoordinator } from '../billing/billingCoordinator.js'
+import { RechargeService } from '../billing/rechargeService.js'
+import { CreditApplicationService, type CreditApplicationPolicy } from '../billing/creditApplicationService.js'
+import { RefundService, type FuiouRefundPort } from '../billing/refundService.js'
+import type { SudorouterPort } from '../billing/sudorouterAdapter.js'
+import { SudoworkBillingService, type BillingPaymentPort } from '../api/compat/sudowork/billingService.js'
+import { SudoworkLegacyUsageService } from '../api/compat/sudowork/legacyUsageService.js'
+import { DifyHttpAdapter } from '../dify/difyHttpAdapter.js'
+import { DifyConnectionService, type DifySecretPort } from '../dify/difyConnectionService.js'
+import { DifyRuntimeService } from '../dify/difyRuntimeService.js'
+import { DifyEnhancementService } from '../dify/difyEnhancementService.js'
+import { DifyDatasetService } from '../dify/difyDatasetService.js'
+import { DifyAdministrationService, type DifyAdministrationSecretPort } from '../dify/difyAdministrationService.js'
+import { DifyRepository } from '../dify/difyRepository.js'
+import type { QmsOrganizationDirectory } from '../qms/qmsAuthorization.js'
 
 export type AuthRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
 
@@ -172,8 +211,8 @@ function isAuthRole(value: string): value is AuthRole {
   )
 }
 
-function isUserStatus(value: string): value is 'active' | 'disabled' {
-  return value === 'active' || value === 'disabled'
+function isUserStatus(value: string): value is AuthCenterUser['status'] {
+  return value === 'pending' || value === 'active' || value === 'locked' || value === 'disabled'
 }
 
 export async function createAuthService(
@@ -198,11 +237,18 @@ const REVOKED_TOKENS_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 export class AuthService {
   private readonly cleanupTimer: ReturnType<typeof setInterval>
   private readonly oauth2Bridge: OAuth2Bridge
+  private readonly identityRepository: IdentityRepository
+  private readonly unifiedIdentity: UnifiedIdentityService
 
   constructor(
     private readonly db: AuthCenterDb,
     private readonly tokenTtlSec: number,
   ) {
+    this.identityRepository = new IdentityRepository(this.db.db, {
+      legacyClientCronEnabled: getSystemSettings().clientCronEnabled,
+    })
+    this.unifiedIdentity = new UnifiedIdentityService(this.db.db, this.db, this.identityRepository)
+    this.ensureCompatibilityRecords()
     this.cleanupTimer = setInterval(() => {
       this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
@@ -212,6 +258,286 @@ export class AuthService {
 
   destroy(): void {
     clearInterval(this.cleanupTimer)
+  }
+
+  createSudoworkIdentityService(input: {
+    tokenStore: LegacyKeyValueStore
+    legacyJwtSecret: string
+  }): SudoworkIdentityService {
+    return new SudoworkIdentityService({
+      authDb: this.db,
+      identities: this.identityRepository,
+      tokenStore: input.tokenStore,
+      legacyJwtSecret: input.legacyJwtSecret,
+      nativeActorResolver: token => {
+        const auth = this.verifyAccessToken(token)
+        if (!auth) return null
+        const user = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+        if (!user || user.status !== 'active') return null
+        return { userId: user.id, orgId: auth.orgId, role: user.role }
+      },
+    })
+  }
+
+  createOrganizationIdentityService(): OrganizationIdentityService {
+    return new OrganizationIdentityService(
+      this.db.db,
+      this.db,
+      this.identityRepository,
+      this.unifiedIdentity,
+    )
+  }
+
+  createQmsOrganizationDirectory(): QmsOrganizationDirectory {
+    return {
+      getCode: orgId => this.identityRepository.getOrganizationProfile(orgId)?.code ?? null,
+      hasCode: code => this.identityRepository.getOrganizationProfileByCode(code) !== null,
+    }
+  }
+
+  isOrganizationClientCronEnabled(orgId: string): boolean {
+    return this.identityRepository.getOrganizationProfile(orgId)?.clientCronEnabled
+      ?? getSystemSettings().clientCronEnabled
+  }
+
+  setOrganizationClientCronEnabled(orgId: string, enabled: boolean): void {
+    this.identityRepository.setOrganizationClientCronEnabled(orgId, enabled)
+  }
+
+  createSudoworkAdministrationService(input: {
+    getDifyFeatureFlags?: () => { enabled: boolean; missingEnv: string[] }
+  } = {}): SudoworkAdministrationService {
+    return new SudoworkAdministrationService(
+      this.createOrganizationIdentityService(),
+      this.identityRepository,
+      this.db,
+      input,
+    )
+  }
+
+  createSudoworkCasService(input: {
+    identity: SudoworkIdentityService
+    tokenStore: LegacyKeyValueStore
+  }): SudoworkCasService {
+    return new SudoworkCasService({
+      authDb: this.db,
+      identities: this.identityRepository,
+      unifiedIdentity: this.unifiedIdentity,
+      identity: input.identity,
+      tokenStore: input.tokenStore,
+    })
+  }
+
+  createSudoworkCatalogService(input?: {
+    artifactsRoot?: string
+    publicBaseUrl?: string
+  }): SudoworkCatalogService {
+    const repository = new CatalogRepository(this.db.db)
+    const catalog = new CatalogService(this.db.db, repository)
+    const uploads = input?.artifactsRoot && input.publicBaseUrl
+      ? new CatalogUploadService({
+          db: this.db.db,
+          repository,
+          catalog,
+          artifacts: new CatalogArtifactStore(input.artifactsRoot),
+          publicBaseUrl: input.publicBaseUrl,
+        })
+      : undefined
+    return new SudoworkCatalogService({
+      repository,
+      catalog,
+      identities: this.identityRepository,
+      uploads,
+      buildVisibility: actor => this.buildVisibilityFilter({
+        rawToken: '',
+        userId: actor.userId,
+        orgId: actor.orgId,
+        role: actor.role,
+        scopes: defaultScopesForRole(actor.role),
+        keyId: '',
+        jti: '',
+        exp: Number.MAX_SAFE_INTEGER,
+      }),
+    })
+  }
+
+  createSudoworkDifyServices(input: {
+    baseUrl: string
+    systemToken?: string
+    provisionSecret?: string
+    ssoSecret?: string
+    publicBaseUrl: string
+    artifactsRoot: string
+    secrets: DifySecretPort & DifyAdministrationSecretPort
+  }): {
+    runtime: DifyRuntimeService
+    enhancement: DifyEnhancementService
+    dataset: DifyDatasetService
+    administration: DifyAdministrationService
+    resolveEnterpriseAlias: (legacyId: number) => { resourceId: string; orgId: string } | null
+    buildVisibility: (actor: import('../identity/organizationIdentityService.js').IdentityActor) => import('../visibilityFilter.js').VisibilityFilter
+  } {
+    const catalog = new CatalogRepository(this.db.db)
+    const catalogService = new CatalogService(this.db.db, catalog)
+    const difyRepository = new DifyRepository(this.db.db)
+    const adapter = new DifyHttpAdapter({
+      baseUrl: input.baseUrl,
+      systemToken: input.systemToken,
+      provisionSecret: input.provisionSecret,
+    })
+    const connections = new DifyConnectionService({
+      auth: this.db,
+      identities: this.identityRepository,
+      catalog,
+      secrets: input.secrets,
+    })
+    const artifacts = new CatalogArtifactStore(input.artifactsRoot)
+    const administration = new DifyAdministrationService({
+      db: this.db.db,
+      auth: this.db,
+      identities: this.identityRepository,
+      catalog,
+      difyRepository,
+      catalogService,
+      adapter,
+      secrets: input.secrets,
+      artifacts,
+      publicBaseUrl: input.publicBaseUrl,
+      ssoSecret: input.ssoSecret,
+      difyBaseUrl: input.baseUrl,
+    })
+    return {
+      runtime: new DifyRuntimeService({ adapter, connections }),
+      enhancement: new DifyEnhancementService({ adapter, connections }),
+      dataset: new DifyDatasetService({
+        db: this.db.db,
+        repository: difyRepository,
+        adapter,
+        connections,
+        ensureConnection: (orgId, context) => administration.provision(orgId, context),
+      }),
+      administration,
+      resolveEnterpriseAlias: legacyId => this.identityRepository.resolveNumericAliasGlobal('enterprise', legacyId),
+      buildVisibility: actor => this.buildVisibilityFilter({
+        rawToken: '',
+        userId: actor.userId,
+        orgId: actor.orgId,
+        role: actor.role,
+        scopes: defaultScopesForRole(actor.role),
+        keyId: '',
+        jti: '',
+        exp: Number.MAX_SAFE_INTEGER,
+      }),
+    }
+  }
+
+  createSudoworkConfigService(store: DirectConnectStore, managedImages?: ManagedImageStore): SudoworkConfigService {
+    return new SudoworkConfigService({
+      db: this.db.db,
+      configItems: createConfigItemsApi(store),
+      identities: this.identityRepository,
+      authDb: this.db,
+      managedImages,
+    })
+  }
+
+  createSudoworkSystemConfigService(input: {
+    secrets: ConfigStore
+    loginMethod: 'sms' | 'password' | 'cas'
+    skillhubBaseUrl: string
+    sudorouterBaseUrl?: string
+    smsConfigured: boolean
+    productImprovementEncryptionRequired?: boolean
+  }): SudoworkSystemConfigService {
+    return new SudoworkSystemConfigService({
+      db: this.db.db,
+      policies: new ClientPolicyRepository(this.db.db),
+      identities: this.identityRepository,
+      defaults: {
+        loginMethod: input.loginMethod,
+        skillhubBaseUrl: input.skillhubBaseUrl,
+        sudorouterBaseUrl: input.sudorouterBaseUrl,
+        productImprovementEncryptionRequired: input.productImprovementEncryptionRequired,
+        productImprovementApiKey: input.secrets.get('client.product-improvement-api-key'),
+        productImprovementPublicKey: input.secrets.get('client.product-improvement-public-key'),
+      },
+      smsConfigured: input.smsConfigured,
+      secrets: input.secrets,
+    })
+  }
+
+  createSudoworkBillingService(input: {
+    sudorouter: SudorouterPort
+    payment: BillingPaymentPort & FuiouRefundPort
+    getCreditPolicy(orgId: string): CreditApplicationPolicy
+    testPaymentAmountCents?: number
+  }): SudoworkBillingService {
+    const repository = new BillingRepository(this.db.db)
+    const wallet = new WalletService(this.db.db, repository)
+    const coordinator = new BillingCoordinator(this.db.db, repository, wallet, input.sudorouter)
+    const recharge = new RechargeService(this.db.db, repository, {
+      numericAliasAllocator: (orderId, orgId) => (
+        this.identityRepository.allocateNumericAlias('billing_order', orderId, orgId)
+      ),
+      testPaymentAmountCents: input.testPaymentAmountCents,
+    })
+    const credit = new CreditApplicationService(
+      this.db.db, repository, this.identityRepository, coordinator,
+      { getPolicy: input.getCreditPolicy },
+    )
+    const refund = new RefundService(
+      this.db.db, repository, this.identityRepository, wallet, coordinator, input.payment,
+    )
+    return new SudoworkBillingService({
+      db: this.db.db, auth: this.db, identities: this.identityRepository,
+      repository, wallet, recharge, coordinator, credit, refund, payment: input.payment,
+    })
+  }
+
+  createSudoworkLegacyUsageService(input: {
+    listModels: () => Promise<Array<{ id: string; name?: string }>> | Array<{ id: string; name?: string }>
+  }): SudoworkLegacyUsageService {
+    const repository = new BillingRepository(this.db.db)
+    return new SudoworkLegacyUsageService({
+      db: this.db.db,
+      auth: this.db,
+      identities: this.identityRepository,
+      repository,
+      wallet: new WalletService(this.db.db, repository),
+      listModels: input.listModels,
+    })
+  }
+
+  private ensureCompatibilityRecords(): void {
+    runInTransaction(this.db.db, () => {
+      for (const organization of this.db.listOrganizations()) {
+        if (!this.identityRepository.getOrganizationProfile(organization.id)) {
+          this.identityRepository.putOrganizationProfile({
+            orgId: organization.id,
+            code: `moss-${organization.id}`,
+            loginMethod: 'password',
+            localEnabled: true,
+            cloudEnabled: true,
+          })
+        }
+        if (this.identityRepository.getNumericAlias('enterprise', organization.id) === null) {
+          this.identityRepository.allocateNumericAlias('enterprise', organization.id, organization.id)
+        }
+        this.identityRepository.ensureWallet('organization', organization.id)
+      }
+      for (const user of this.db.listOrganizations().flatMap((organization) => this.db.listUsersByOrg(organization.id))) {
+        if (this.identityRepository.getNumericAlias('user', user.id) === null) {
+          this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
+        }
+        this.identityRepository.ensureWallet('user', user.id)
+        if (user.localAuth && !this.identityRepository.findAuthIdentityByUser(user.id, 'password', 'moss')) {
+          this.identityRepository.createAuthIdentity({
+            id: randomUUID(), orgId: user.orgId, userId: user.id,
+            provider: 'password', issuer: 'moss', normalizedSubject: user.name, metadata: {},
+          })
+        }
+      }
+    })
   }
 
   verifyAccessToken(token: string): AuthContext | null {
@@ -318,15 +644,19 @@ export class AuthService {
     const user = username
       ? this.getUniqueUserByName(username)
       : this.db.getUserByEmail(email)
-    if (
-      !user ||
-      user.status !== 'active' ||
-      !verifyPassword(input.password, user.passwordHash)
-    ) {
+    if (!user || user.status !== 'active' || !verifyPassword(input.password, user.passwordHash)) {
       throw new AuthServiceError(401, 'Invalid username/email or password')
     }
 
-    this.db.updateUserLastLogin(user.id)
+    if (isLegacyPasswordHash(user.passwordHash)) {
+      const upgradedHash = hashPassword(input.password)
+      runInTransaction(this.db.db, () => {
+        this.db.updateUserPassword(user.id, upgradedHash, Date.now())
+        this.db.updateUserLastLogin(user.id)
+      })
+    } else {
+      this.db.updateUserLastLogin(user.id)
+    }
     return this.issueToken({
       user,
       scopes: defaultScopesForRole(user.role),
@@ -511,17 +841,13 @@ export class AuthService {
       targetOrg = this.db.getOrganizationByExtId(identity.extOrgId)
       const incomingOrgName = identity.extOrgName?.trim() || ''
       if (!targetOrg) {
-        const orgId = randomUUID()
         const orgName = incomingOrgName || `org-${identity.extOrgId}`
-        const createdAt = Date.now()
         try {
-          this.db.createOrganization(orgId, orgName, createdAt, identity.extOrgId)
-          targetOrg = {
-            id: orgId,
+          const created = this.unifiedIdentity.createOrganization({
             name: orgName,
             extOrgId: identity.extOrgId,
-            createdAt,
-          }
+          }, onlineCommandContext(`oauth2-org:${identity.extOrgId}`))
+          targetOrg = this.db.getOrganization(created.organizationId)
         } catch (err) {
           // Race: another concurrent OAuth2 login created the same org first.
           // Re-read and continue with whichever row won.
@@ -577,31 +903,24 @@ export class AuthService {
     }
 
     if (!user) {
-      const userId = randomUUID()
-      const createdAt = Date.now()
-      const newUser: AuthCenterUser = {
-        id: userId,
-        orgId: targetOrg.id,
-        email,
-        // Login username from the IdP's `username`. Fall back to the legacy
-        // `displayName` (older scripts only emitted that) or email so existing
-        // integrations keep working. The friendly name goes to displayName.
-        name: identity.username?.trim() || identity.displayName?.trim() || email,
-        displayName: identity.displayName?.trim() || null,
-        departmentId: null,
-        role: 'user',
-        status: 'active',
-        localAuth: false,
-        tokenLimit: null,
-        createdAt,
-        passwordHash: null,
-        passwordUpdatedAt: null,
-        lastLoginAt: null,
-        extUserId: identity.extUserId,
-      }
+      const username = identity.username?.trim() || identity.displayName?.trim() || email
       try {
-        this.db.createUser(newUser)
-        user = newUser
+        const created = this.unifiedIdentity.createUser({
+          orgId: targetOrg.id,
+          username,
+          displayName: identity.displayName?.trim() || null,
+          email,
+          role: 'user',
+          status: 'active',
+          extUserId: identity.extUserId,
+          authIdentity: {
+            provider: 'oauth2',
+            issuer: `moss-script:${targetOrg.id}`,
+            subject: identity.extUserId,
+            metadata: {},
+          },
+        }, onlineCommandContext(`oauth2-user:${targetOrg.id}:${identity.extUserId}`))
+        user = this.db.getUserById(created.userId)
       } catch (err) {
         // Race: concurrent login created the same user. Re-read.
         const msg = err instanceof Error ? err.message : String(err)
@@ -616,6 +935,14 @@ export class AuthService {
       // guards — a momentarily-missing IdP field won't clobber the moss row.
       const profilePatch: { orgId?: string; name?: string; displayName?: string; email?: string } = {}
       if (user.orgId !== targetOrg.id) profilePatch.orgId = targetOrg.id
+      const applyProfilePatch = (patch: typeof profilePatch): void => {
+        runInTransaction(this.db.db, () => {
+          this.db.updateUser(user!.id, patch)
+          if (patch.orgId && patch.orgId !== user!.orgId) {
+            this.identityRepository.moveUserOrganization(user!.id, patch.orgId)
+          }
+        })
+      }
 
       // Login username drift (IdP `username`).
       const incomingName = identity.username?.trim() || ''
@@ -634,7 +961,7 @@ export class AuthService {
       // desired behaviour. Catches collisions with the global email UNIQUE.
       if (!isSynthetic && email !== user.email) {
         try {
-          this.db.updateUser(user.id, { ...profilePatch, email })
+          applyProfilePatch({ ...profilePatch, email })
           user = { ...user, ...profilePatch, email }
         } catch (err) {
           // Email collision with another moss user: log-and-continue rather
@@ -642,7 +969,7 @@ export class AuthService {
           const msg = err instanceof Error ? err.message : String(err)
           if (/UNIQUE constraint failed: users\.email/i.test(msg)) {
             if (Object.keys(profilePatch).length > 0) {
-              this.db.updateUser(user.id, profilePatch)
+              applyProfilePatch(profilePatch)
               user = { ...user, ...profilePatch }
             }
           } else {
@@ -650,10 +977,32 @@ export class AuthService {
           }
         }
       } else if (Object.keys(profilePatch).length > 0) {
-        this.db.updateUser(user.id, profilePatch)
+        applyProfilePatch(profilePatch)
         user = { ...user, ...profilePatch }
       }
     }
+
+    if (!user) {
+      throw new AuthServiceError(500, 'OAuth2 user could not be resolved')
+    }
+    runInTransaction(this.db.db, () => {
+      if (this.identityRepository.getNumericAlias('user', user!.id) === null) {
+        this.identityRepository.allocateNumericAlias('user', user!.id, user!.orgId)
+      }
+      this.identityRepository.ensureWallet('user', user!.id)
+      const issuer = `moss-script:${targetOrg!.id}`
+      if (!this.identityRepository.findAuthIdentityByUser(user!.id, 'oauth2', issuer)) {
+        this.identityRepository.createAuthIdentity({
+          id: randomUUID(),
+          orgId: user!.orgId,
+          userId: user!.id,
+          provider: 'oauth2',
+          issuer,
+          normalizedSubject: identity.extUserId,
+          metadata: {},
+        })
+      }
+    })
 
     // ── 3. Department resolution ──────────────────────────────────────────
     let departmentId: string | null = null
@@ -860,6 +1209,8 @@ export class AuthService {
   createOrganization(input: {
     name: string
     extOrgId?: string | null
+    code?: string
+    idempotencyKey?: string
   }): {
     organization: AuthCenterOrganization & { userCount: number; departmentCount: number }
   } {
@@ -874,11 +1225,15 @@ export class AuthService {
     if (this.db.getOrganizationByName(name)) {
       throw new AuthServiceError(409, 'Organization name already exists')
     }
-    const id = randomUUID()
-    const createdAt = Date.now()
-    withExtIdConflict(() => this.db.createOrganization(id, name, createdAt, extOrgId))
+    const result = withExtIdConflict(() => this.unifiedIdentity.createOrganization({
+      name,
+      code: input.code,
+      extOrgId,
+    }, onlineCommandContext(input.idempotencyKey ?? `moss-org:${randomUUID()}`)))
+    const organization = this.db.getOrganization(result.organizationId)
+    if (!organization) throw new AuthServiceError(500, 'Created organization could not be loaded')
     return {
-      organization: { id, name, extOrgId, createdAt, userCount: 0, departmentCount: 0 },
+      organization: { ...organization, userCount: 0, departmentCount: 0 },
     }
   }
 
@@ -1026,6 +1381,7 @@ export class AuthService {
     role: string
     password: string
     extUserId?: string | null
+    idempotencyKey?: string
   }, auth?: AuthContext): {
     user: SanitizedAuthCenterUser
   } {
@@ -1070,26 +1426,18 @@ export class AuthService {
     // extUserId uniqueness is enforced by the partial UNIQUE
     // (users_ext_uniq); the constraint violation is translated to 409 below.
 
-    const createdAt = Date.now()
-    const userId = randomUUID()
-    const user: AuthCenterUser = {
-      id: userId,
+    const result = withExtIdConflict(() => this.unifiedIdentity.createUser({
       orgId: input.orgId,
-      email: email || createSyntheticUserEmail(userId),
-      name,
+      email,
+      username: name,
       displayName,
       departmentId,
-      role,
-      status: 'active',
-      localAuth: true,
-      tokenLimit: null,
-      createdAt,
-      passwordHash: hashPassword(input.password),
-      passwordUpdatedAt: createdAt,
-      lastLoginAt: null,
+      role: role as AuthRole,
+      password: input.password,
       extUserId,
-    }
-    withExtIdConflict(() => this.db.createUser(user))
+    }, onlineCommandContext(input.idempotencyKey ?? `moss-user:${randomUUID()}`)))
+    const user = this.db.getUserById(result.userId)
+    if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
     return { user: sanitizeUser(user) }
   }
 
@@ -1116,7 +1464,7 @@ export class AuthService {
       displayName?: string | null
       departmentId?: string | null
       role?: AuthRole
-      status?: 'active' | 'disabled'
+      status?: AuthCenterUser['status']
       extUserId?: string | null
     } = {}
 

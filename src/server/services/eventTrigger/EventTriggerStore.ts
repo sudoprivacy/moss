@@ -417,8 +417,8 @@ export class EventTriggerStore {
     const result = this.db.prepare(`
       UPDATE event_trigger_runs
       SET status = 'error', error = ?, finished_at = ?
-      WHERE status IN ('queued', 'running')
-        AND COALESCE(started_at, created_at) < ?
+      WHERE status = 'running'
+        AND started_at < ?
     `).run(error, now(), startedBefore)
     return Number(result.changes ?? 0)
   }
