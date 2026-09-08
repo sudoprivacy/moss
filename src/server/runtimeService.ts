@@ -336,6 +336,20 @@ type RuntimeServiceOptions = {
   nexusClient?: NexusClient
 }
 
+/**
+ * Thrown by createSession/spawnAttempt when the server is draining (post-SIGTERM
+ * grace window). Mapped to HTTP 503 by server.ts writeError so the LB / caller
+ * sees "instance unavailable" instead of a session being spun up on an instance
+ * about to exit. Defined here (not server.ts) so RuntimeService can throw it
+ * without a server.ts → runtimeService.ts circular import.
+ */
+export class ServerDrainingError extends Error {
+  constructor(message = 'server is draining, not accepting new sessions') {
+    super(message)
+    this.name = 'ServerDrainingError'
+  }
+}
+
 export class RuntimeService {
   readonly store: DirectConnectStore
   readonly authService: AuthService
@@ -344,6 +358,15 @@ export class RuntimeService {
   private readonly pendingEnsures = new Map<string, Promise<AttemptRecord>>()
   private readonly sessionTokens = new Map<string, { token: string; pid: number }>()
   authProxy: AuthProxyServer | null = null
+  /**
+   * Graceful-drain flag (multi-instance LB). Set true by server.ts beginDrain()
+   * on SIGTERM. While true, createSession/spawnAttempt reject with
+   * ServerDrainingError (no new runner on an exiting instance) and
+   * adoptOrphanedSessions no-ops (don't take over orphans we can't keep serving).
+   * Reconnects to already-running local attempts still pass (they never reach
+   * spawnAttempt). Default false → single-instance behavior unchanged.
+   */
+  draining = false
 
   constructor(private readonly options: RuntimeServiceOptions) {
     this.store = options.store ?? openDirectConnectStore(options.config)
@@ -439,6 +462,10 @@ export class RuntimeService {
   }
 
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
+    // Graceful drain: reject before writing any session row (avoids a stranded
+    // status='failed' half-created record that spawnAttempt-level rejection
+    // would leave behind).
+    if (this.draining) throw new ServerDrainingError()
     const active = this.store.listSessions({
       orgId: input.orgId,
       activeOnly: true,
@@ -683,6 +710,10 @@ export class RuntimeService {
    * heartbeat timeout instead of on the next restart.
    */
   async adoptOrphanedSessions(): Promise<void> {
+    // Graceful drain: an exiting instance must not take over other instances'
+    // orphans — it can't keep serving them, and would just turn them into
+    // orphans again on exit. Heartbeat continues (owned attempts stay ours).
+    if (this.draining) return
     let orphans: SessionRecord[]
     try {
       orphans = this.store.listOrphanedActiveSessions(
@@ -1095,6 +1126,12 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
+    // Graceful drain: this is the single choke point every "spin up a new
+    // runner / new attempt" path funnels through (createSession, resume cold
+    // start, GET respawn, WS cold upgrade, background services). Reconnects to
+    // an already-running local attempt reuse the healthy attach earlier and
+    // never reach here, so they are unaffected.
+    if (this.draining) throw new ServerDrainingError()
     // Effective agent for this attempt. Callers that *create* a session
     // pass `options.assistantName`, but relaunch/reuse paths (e.g. a reused
     // cron session — spawnAttempt is reached via ensureRuntime with only

@@ -18,7 +18,7 @@ import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretA
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
-import { RuntimeService } from './runtimeService.js'
+import { RuntimeService, ServerDrainingError } from './runtimeService.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
@@ -1734,11 +1734,21 @@ async function serveAdminRequest(
   await writeFileResponse(res, join(adminDistDir, 'index.html'), headOnly)
 }
 
-function writeError(
+// Exported for unit testing the ServerDrainingError → 503 mapping (same
+// test-only export convention as computeReadiness / setRouteCookieHeader).
+export function writeError(
   logger: ServerLogger,
   res: http.ServerResponse,
   error: unknown,
 ): void {
+  // Graceful drain: reject during the SIGTERM grace window with 503 (instance
+  // unavailable). Kept as the first check and before the fallback 500 below so
+  // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
+  // matches every other writeError branch.
+  if (error instanceof ServerDrainingError) {
+    writeJson(res, 503, { error: error.message })
+    return
+  }
   if (error instanceof AuthServiceError || error instanceof HttpError) {
     writeJson(res, error.statusCode, { error: error.message })
     return
@@ -8943,6 +8953,15 @@ export function startServer(
         const locallyOwnedAttempt = session.currentAttemptId
           ? runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
           : null
+        // Graceful drain: reject WS handshakes that would cold-start a runner
+        // here (no locally-owned running attempt). Placed before tryOwnAttempt so
+        // a draining instance doesn't adopt a new attempt. Reconnects to an
+        // already-running local attempt (locallyOwnedAttempt set) pass through.
+        if (runtime.draining && !locallyOwnedAttempt) {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+          socket.destroy()
+          return
+        }
         if (
           session.currentAttemptId &&
           !locallyOwnedAttempt &&
@@ -9212,6 +9231,11 @@ export function startServer(
     },
     beginDrain: () => {
       draining = true
+      // Also flip the RuntimeService flag so createSession/spawnAttempt reject
+      // and adoptOrphanedSessions no-ops during the drain window. Kept as two
+      // flags (this closure-local one feeds /readyz) to avoid touching the
+      // existing computeReadiness/readyz logic and its tests.
+      runtime.draining = true
     },
     getConnections: () =>
       new Promise<number>((resolveConnections, rejectConnections) => {
