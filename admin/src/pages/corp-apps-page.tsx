@@ -123,6 +123,26 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       bucket: 'credentials',
       hint: '同上,与自建应用的 EncodingAESKey 不通用。',
     },
+    {
+      key: 'secret',
+      label: '会话存档 Secret(拉取聊天记录时必填)',
+      type: 'password',
+      bucket: 'credentials',
+      optional: true,
+      hint: '「安全与管理 → 会话内容存档」签发的专属 Secret,换不出应用 access_token,与应用 Secret 不通用。',
+    },
+    {
+      key: 'privateKeys',
+      label: 'RSA 私钥(拉取聊天记录时必填)',
+      type: 'password',
+      bucket: 'credentials',
+      optional: true,
+      hint:
+        '你自己用 openssl genrsa -out k.pem 2048 生成,公钥(openssl rsa -pubout)贴到企微后台;' +
+        '企微只有公钥,私钥丢失则历史记录永久无法解密。轮换公钥后旧记录仍需旧私钥,' +
+        '因此可填 {"1":"-----BEGIN...","2":"-----BEGIN..."} 的 JSON 保留所有版本;' +
+        '只有一个版本时直接粘贴 PEM 即可(视为版本 1)。',
+    },
   ],
 }
 

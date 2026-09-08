@@ -136,6 +136,9 @@ const external = [
   '--external=@xenova/transformers',
   '--external=onnxruntime-node',
   '--external=sharp',
+  // koffi loads the WeCom finance SDK (.so) via FFI for 会话存档 pulls.
+  // Native binding: must resolve from node_modules, not be bundled.
+  '--external=koffi',
 ]
 
 // bin/moss-server.mjs（统一服务端入口）
@@ -149,6 +152,20 @@ build('bin/moss-server.mjs', [
   ...external,
 ])
 sanitizePaths('bin/moss-server.mjs')
+
+// 会话存档 pull child. Forked by MsgAuditWorker so a crash inside the
+// native WeCom SDK kills only this process. It is spawned by path, not
+// imported, so it needs its own bundle alongside the server.
+build('bin/msgaudit-pull-child.js', [
+  'build', 'src/server/corpapps/msgaudit/pullChild.ts',
+  '--outfile=bin/msgaudit-pull-child.js',
+  '--target=node',
+  '--format=esm',
+  ...aliases,
+  ...defines,
+  ...external,
+])
+sanitizePaths('bin/msgaudit-pull-child.js')
 
 // bin/direct-connect-session-runner.mjs（session detached runner）
 build('bin/direct-connect-session-runner.mjs', [
