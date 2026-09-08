@@ -1,0 +1,175 @@
+# ============================================================================
+# moss LB — Docker Compose HA 示例（Phase A active/passive，方案 A + nexus external）
+# ============================================================================
+# 现有单实例 deploy/docker-compose.yml 不受影响，本文件为独立 HA 示例。
+#
+# 拓扑：nginx（统一入口）+ nexus（external 模式单容器，vault 单写者）
+#       + moss-server-a（主）+ moss-server-b（备）。a/b 同主机共享同一数据目录
+#       （方案 A：./data 业务数据 + ./.moss nexus vault 数据）。
+#
+# 为什么 nexus 走 external 单容器：embedded 模式下每个 moss 实例各自 spawn 一个
+# nexusd 并写 ~/.moss/nexus/data，双实例共享挂载会“两个 nexusd 同写同一 vault
+# 目录”，代码/文档无多进程支持证据。external 模式让 moss 只连接不 spawn，nexus 由
+# 独立单容器持有 vault 数据的唯一写权，纯部署侧 env 切换，零 moss 代码改动。
+#
+# 前置实测（见计划 §六）：方案 A 共享 SQLite（T1）与 nexus external 双实例（T2）
+# 必须在 Linux 原生文件系统上实测通过后方可用于生产；不得用 Windows 路径 bind mount。
+#
+# 默认加载 Phase A（active/passive）conf。切换到 Phase B 时，把 nginx 挂载改为
+# moss-sticky-active-active.conf，并给 a/b 设置 MOSS_INSTANCE_ID（见下）。
+# ----------------------------------------------------------------------------
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: moss-nginx
+    restart: always
+    ports:
+      - "${MOSS_PUBLIC_PORT:-80}:80"
+    volumes:
+      # 默认 active/passive；Phase B 改挂 moss-sticky-active-active.conf。
+      - ./nginx/moss-active-passive.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      # 避免 nginx 先起、后端未就绪时的启动瞬间 502。
+      - moss-server-a
+      - moss-server-b
+    networks:
+      - moss-network
+
+  nexus:
+    # 必须是含 nexusd + vault 插件的镜像。CI 版 server.Dockerfile 的 COPY 清单不含
+    # bin/nexus，且 scripts/build.js 在 Linux 跳过 nexus fetch；只有
+    # server.Dockerfile.local 产物（nexus-dl 阶段下载 nexusd + vault 插件）含二进制。
+    # 复用同一 moss-server 镜像并 override command 即可（WORKDIR=/app）。
+    image: my-moss-server:${MOSS_IMAGE_TAG:-v1}
+    container_name: moss-nexus
+    # external 模式下 nexus 是双实例的 secrets 单点，须自动拉起。
+    restart: always
+    # 实测确认路径（deploy/server.Dockerfile.local）：
+    #   二进制 /app/bin/nexus/nexusd（由 nexusd-cluster 重命名而来，名为 nexusd）
+    #   插件目录 /app/bin/nexus/plugins（libnexus_vault.so + .sig）
+    #   数据目录落共享卷内 /root/.moss/nexus/data。
+    # 实测要点（nexusd --help + 运行验证）：子命令 `serve-local` 是【强制 loopback】
+    #   模式（"Shorthand for --bind-addr 127.0.0.1:<port>"，--bind-addr 被忽略），
+    #   只供 moss embedded【同容器内】spawn 私有 nexus 用；external 单容器要被 a/b
+    #   跨容器连接，必须用【默认模式】(no subcommand) + --advertise-addr（bind 派生
+    #   为 0.0.0.0:<advertised port>，绑所有网卡）。moss external 走 http 明文且默认
+    #   无 auth token → nexusd 侧需 --no-tls + --insecure-no-auth 才接受该连接。
+    command:
+      - /app/bin/nexus/nexusd
+      - --advertise-addr
+      - nexus:2126
+      - --no-tls
+      - --insecure-no-auth
+      - --data-dir
+      - /root/.moss/nexus/data
+      - --plugin-dir
+      - /app/bin/nexus/plugins
+    environment:
+      # vault 插件读 NEXUS_DATA_DIR 决定数据目录（含 master.key），不读 --data-dir；
+      # 不设置会落到容器 cwd 的 ./nexus-data（卷外，重启即丢）。必须与 --data-dir 一致。
+      - NEXUS_DATA_DIR=/root/.moss/nexus/data
+    volumes:
+      # vault 数据单写者：只有本容器写 ./.moss/nexus/data。
+      - ./.moss:/root/.moss
+    healthcheck:
+      # node 单行 TCP 探测 2126（镜像内必有 node；不假设含 curl）。
+      test: ["CMD", "node", "-e", "require('net').connect(2126,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - moss-network
+
+  moss-server-a:
+    image: my-moss-server:${MOSS_IMAGE_TAG:-v1}
+    container_name: moss-server-a
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.moss:/root/.moss
+      - ./data:/app/data
+      - ./server.json:/app/server.json:ro
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+    # F21：compose 默认 10s 宽限会提前 SIGKILL；须 > shutdownGraceMs(30s) +
+    # serverCli 兜底(10s) = 40s，留 5s 余量避免压线竞态。
+    stop_grace_period: 45s
+    depends_on:
+      nexus:
+        condition: service_healthy
+    environment:
+      # —— 沿用单实例 compose 的必备配置（缺失会破坏方案 A 数据共享/docker runtime）——
+      # 缺 MOSS_SERVER_CONFIG 时 readServerConfig 走默认路径并自动生成配置，storage 落
+      # /root/.moss/server/ 而非共享 ./data，方案 A 前提失效。
+      - MOSS_SERVER_CONFIG=/app/server.json
+      - MOSS_HOME=/root/.moss
+      # docker runtime 的宿主路径映射。注意：宿主前缀是特定部署目录（此处示例
+      # /data/moss/...），HA 部署目录不同时【必须按实际路径调整】，盲目照抄会映射到
+      # 不存在的宿主路径。
+      - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
+      # auth proxy 绑定全网卡，URL 指向本实例容器名（多实例下不能指向固定单容器）。
+      - MOSS_AUTH_PROXY_HOST=0.0.0.0
+      - MOSS_AUTH_PROXY_URL=http://moss-server-a:12013
+      # —— HA 专属增量 env ——
+      - MOSS_INSTANCE_ID=a
+      # nexus external：只连接不 spawn（http 明文允许）。
+      - MOSS_NEXUS_MODE=external
+      - MOSS_NEXUS_ENDPOINT=http://nexus:2126
+      # ws_url 指向 LB 入口（buildWsUrl 优先 publicBaseUrl）。填 Nginx 对外地址。
+      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL}
+      # 显式开启 drain（默认 0=现状行为不 drain）。
+      - MOSS_SHUTDOWN_GRACE_MS=30000
+    networks:
+      - moss-network
+
+  moss-server-b:
+    image: my-moss-server:${MOSS_IMAGE_TAG:-v1}
+    container_name: moss-server-b
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.moss:/root/.moss
+      - ./data:/app/data
+      - ./server.json:/app/server.json:ro
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+    stop_grace_period: 45s
+    depends_on:
+      nexus:
+        condition: service_healthy
+    environment:
+      - MOSS_SERVER_CONFIG=/app/server.json
+      - MOSS_HOME=/root/.moss
+      - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
+      - MOSS_AUTH_PROXY_HOST=0.0.0.0
+      - MOSS_AUTH_PROXY_URL=http://moss-server-b:12013
+      - MOSS_INSTANCE_ID=b
+      - MOSS_NEXUS_MODE=external
+      - MOSS_NEXUS_ENDPOINT=http://nexus:2126
+      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL}
+      - MOSS_SHUTDOWN_GRACE_MS=30000
+    networks:
+      - moss-network
+
+networks:
+  moss-network:
+    name: moss-network
+
+# ----------------------------------------------------------------------------
+# 数据共享（两个卷均双实例共享，依据 deploy/server.json 的 storage.*）：
+#   ./data  → /app/data    业务数据：moss.db、transcripts/、runtime/（storage.* 全指向 ./data）
+#   ./.moss → /root/.moss  nexus vault 数据（nexus/data，由 nexus 容器单写者持有）
+#                          + k8s kubeconfig（~/.moss/server/moss-k3s-kubeconfig.yaml，k8s 模式时）
+#
+# 端口收敛：仅 nginx 暴露宿主端口；a/b/nexus 不暴露（LB 统一入口）。实例级 /readyz
+# 监控接入方式见 deploy/nginx/README-ha.md（docker exec node fetch 或监控容器接入网络）。
+#
+# 竞态兜底：即使 healthcheck 竞态导致 moss 启动时 nexus gRPC 未就绪，restart: always
+# 会重启最终一致。
+# ----------------------------------------------------------------------------

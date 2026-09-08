@@ -121,6 +121,26 @@ function readIntEnv(name: string, fallback: number | undefined): number | undefi
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function readBoolEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]
+  if (!raw || !raw.trim()) return fallback
+  return raw.trim() === '1' || raw.trim().toLowerCase() === 'true'
+}
+
+/**
+ * instanceId / routeCookieName end up interpolated verbatim into Set-Cookie,
+ * so both file and env values must pass the same charset check (env bypasses
+ * the zod schema — `resolveServerConfig` reads it directly). Fail fast on
+ * anything that would break the header or the nginx `map` key.
+ */
+function assertLbTokenValue(name: string, value: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error(
+      `Invalid ${name}: ${JSON.stringify(value)} — must match /^[A-Za-z0-9_-]+$/ (it is interpolated into Set-Cookie and used as an nginx map key)`,
+    )
+  }
+}
+
 function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
   const defaultStorage = getDefaultStoragePaths()
   return {
@@ -131,6 +151,29 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     // can always join with a leading-slash path. Empty → root-relative URLs.
     publicBaseUrl: (process.env.MOSS_PUBLIC_BASE_URL ?? raw.server.publicBaseUrl ?? '')
       .replace(/\/+$/, ''),
+    // Multi-instance LB identity (route cookie value + server_instances key).
+    // Env wins over the file; unset → undefined → random UUID per start
+    // (single-instance behavior, unchanged). Validated for BOTH sources since
+    // env values bypass the zod schema.
+    instanceId: (() => {
+      const value = process.env.MOSS_INSTANCE_ID?.trim() || raw.server.instanceId || undefined
+      if (value !== undefined) assertLbTokenValue('server.instanceId', value)
+      return value
+    })(),
+    routeCookieName: (() => {
+      const value =
+        process.env.MOSS_ROUTE_COOKIE_NAME?.trim() || raw.server.routeCookieName || 'moss_route'
+      assertLbTokenValue('server.routeCookieName', value)
+      return value
+    })(),
+    routeCookieSecure: readBoolEnv('MOSS_ROUTE_COOKIE_SECURE', raw.server.routeCookieSecure ?? false),
+    // 0 (default) = drain disabled → stop() keeps current single-instance
+    // behavior; HA deployments set MOSS_SHUTDOWN_GRACE_MS=30000 explicitly.
+    // Math.max clamps negative env values (readIntEnv passes them through).
+    shutdownGraceMs: Math.max(
+      0,
+      readIntEnv('MOSS_SHUTDOWN_GRACE_MS', raw.server.shutdownGraceMs ?? 0)!,
+    ),
     authMode: 'local',
     tokenTtlSec: raw.auth.tokenTtlSec,
     bootstrapAdmin: {

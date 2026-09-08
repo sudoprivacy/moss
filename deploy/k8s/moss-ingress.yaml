@@ -1,0 +1,51 @@
+# ============================================================================
+# moss LB — K8s Ingress 示例（sticky session via cookie affinity）
+# ============================================================================
+# 说明（务必先读）：
+#   1. 这是 Ingress 示例（源设计文档任务 8 仅要求 K8s Ingress 示例）。仅演示
+#      ingress-nginx 的 cookie affinity + WS/SSE/大 body 相关 annotation。
+#   2. moss 默认 storage 为本地 SQLite + 本地目录，多副本无法共享写。因此“完整
+#      K8s 多副本部署”不在本期范围——本文件是入口层 sticky 的示例，不是可直接多副本
+#      拉起的完整清单（无 Deployment/Service/PVC）。
+#   3. affinity cookie 与 moss route cookie 同名互斥：ingress-nginx 的
+#      session-cookie-name: moss_route 与 moss 自设的 route cookie（当配置
+#      MOSS_INSTANCE_ID 时，见 setRouteCookieHeader）同名——两者相互覆盖、affinity
+#      失效。因此本示例的适用前提是 moss【不配】MOSS_INSTANCE_ID，把 moss_route
+#      cookie 完全交给 ingress-nginx 管理。
+#
+# Deployment vs StatefulSet（源文档 12.2）：Phase A/B 可用 Deployment（instance id
+# 经 pod name/env 注入）；Phase C owner-aware 推荐 StatefulSet + headless service。
+# 本期不涉及 Phase C。
+# ----------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: moss-server
+  namespace: moss-control
+  annotations:
+    # cookie affinity：同一浏览器固定到同一后端 pod。
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    # 该 cookie 名与 moss route cookie 同名互斥（见文件头第 3 点）。
+    nginx.ingress.kubernetes.io/session-cookie-name: "moss_route"
+    nginx.ingress.kubernetes.io/session-cookie-path: "/"
+    nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"
+    # WS/SSE 长连接超时。
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # SSE 不缓冲。
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # 大文件上传。
+    nginx.ingress.kubernetes.io/proxy-body-size: "1024m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: moss.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: moss-server
+                port:
+                  number: 43127
