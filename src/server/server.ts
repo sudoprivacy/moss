@@ -1,6 +1,8 @@
 import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
 import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
 import os from 'os'
@@ -131,6 +133,7 @@ import { handleMcpSseConnection, broadcastMcpEvent } from './api/mcpEvents.js'
 import { McpStore } from './mcp/db.js'
 import type { McpTemplateListFilter } from './mcp/types.js'
 import type { NexusClient } from './nexus/nexusClient.js'
+import { connectTcp, resolveNexusConfigFromEnv } from './nexus/nexusManager.js'
 import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
@@ -1137,6 +1140,179 @@ function tryParseUrl(value: string): URL | null {
   }
 }
 
+/**
+ * Sticky-routing cookie for multi-instance LB deployments (Nginx
+ * `map $cookie_moss_route`). Only set when `config.instanceId` is configured
+ * (`MOSS_INSTANCE_ID`) — single-instance deployments keep their current
+ * behavior (no Set-Cookie at all). HttpOnly + SameSite=Lax per the HA design;
+ * `Secure` is appended when MOSS_ROUTE_COOKIE_SECURE=true (HTTPS entry).
+ * Called once at the top of the HTTP handler so every response (API, static,
+ * SSE, unauthenticated) carries it; WS upgrades don't pass through the HTTP
+ * handler, but browser WebSocket handshakes send cookies automatically.
+ */
+export function setRouteCookieHeader(res: http.ServerResponse, config: ServerConfig): void {
+  if (!config.instanceId) return
+  const parts = [
+    `${config.routeCookieName}=${config.instanceId}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+  ]
+  if (config.routeCookieSecure) parts.push('Secure')
+  res.setHeader('Set-Cookie', parts.join('; '))
+}
+
+const execFileAsync = promisify(execFile)
+
+/** Readiness probe surface for /readyz — injectable for unit tests (M5). */
+export type ReadinessProbes = {
+  isDraining(): boolean
+  probeDb(): Promise<boolean>
+  probeNexus(): Promise<boolean>
+  probeDocker(): Promise<boolean>
+  probeK8s(): Promise<boolean>
+}
+
+export type ReadinessResult = {
+  ok: boolean
+  ready: boolean
+  instance_id: string | null
+  checks: {
+    db: boolean
+    nexus: boolean
+    /** null = not applicable (defaultRuntime has nothing to probe, e.g. host). */
+    runtime: boolean | null
+    /** null unless defaultRuntime='k8s' (same probe as checks.runtime then). */
+    k8s: boolean | null
+    draining: boolean
+  }
+  httpStatus: 200 | 503
+}
+
+async function probeWithTimeout(probe: Promise<boolean>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<boolean>(resolve => {
+    timer = setTimeout(() => resolve(false), timeoutMs)
+  })
+  try {
+    return await Promise.race([probe, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Readiness for /readyz (LB removal signal). Checks run in parallel
+ * (Promise.allSettled; per-probe timeout: db/nexus/docker 2s, k8s 5s — kubectl
+ * cold start + TLS can exceed 2s). `ready = !draining && db && nexus &&
+ * (runtime !== false)`. Probes are injectable so unit tests get deterministic
+ * behavior without a live nexus listener or docker/kubectl binaries.
+ */
+export async function computeReadiness(
+  config: ServerConfig,
+  runtime: RuntimeService,
+  probes?: Partial<ReadinessProbes>,
+): Promise<ReadinessResult> {
+  const isDraining = probes?.isDraining ?? (() => false)
+  const probeDb =
+    probes?.probeDb ??
+    (async () => {
+      try {
+        runtime.store.db.prepare('SELECT 1').get()
+        return true
+      } catch {
+        return false
+      }
+    })
+  const probeNexus =
+    probes?.probeNexus ??
+    (async () => {
+      // Embedded: the child nexusd listens on loopback:grpcPort. External:
+      // parse host:port from MOSS_NEXUS_ENDPOINT (ServerConfig carries no
+      // nexus fields — resolveNexusConfigFromEnv is the source of truth).
+      const nexusConfig = resolveNexusConfigFromEnv()
+      if (nexusConfig.mode === 'external') {
+        const endpoint = tryParseUrl(nexusConfig.endpoint)
+        if (!endpoint) return false
+        const port = endpoint.port ? Number(endpoint.port) : 443
+        try {
+          await connectTcp(port, 2_000, endpoint.hostname)
+          return true
+        } catch {
+          return false
+        }
+      }
+      try {
+        await connectTcp(nexusConfig.grpcPort, 2_000)
+        return true
+      } catch {
+        return false
+      }
+    })
+  const probeDocker =
+    probes?.probeDocker ??
+    (async () => {
+      try {
+        await execFileAsync('docker', ['info'], { timeout: 2_000 })
+        return true
+      } catch {
+        return false
+      }
+    })
+  const probeK8s =
+    probes?.probeK8s ??
+    (async () => {
+      // kubeconfig is optional (kubectl then falls back to its own defaults);
+      // only pass --kubeconfig when set, mirroring k8sBackend's optional wiring.
+      const args: string[] = []
+      if (config.k8s?.kubeconfig) args.push('--kubeconfig', config.k8s.kubeconfig)
+      args.push('get', '--raw', '/readyz')
+      try {
+        await execFileAsync('kubectl', args, { timeout: 5_000 })
+        return true
+      } catch {
+        return false
+      }
+    })
+
+  const draining = isDraining()
+  const settled = await Promise.allSettled([
+    probeWithTimeout(probeDb(), 2_500),
+    probeWithTimeout(probeNexus(), 2_500),
+    // 5.5s outer bound > the 5s kubectl timeout inside the default probe.
+    probeWithTimeout(
+      config.defaultRuntime === 'docker'
+        ? probeDocker()
+        : config.defaultRuntime === 'k8s'
+          ? probeK8s()
+          : Promise.resolve<boolean | null>(null),
+      5_500,
+    ),
+  ])
+  // A probe rejecting (e.g. resolveNexusConfigFromEnv throwing on a misconfigured
+  // https endpoint) must degrade to "not ready" (503), not crash /readyz into a
+  // 500 — hence allSettled with rejected → false.
+  const db = settled[0].status === 'fulfilled' ? settled[0].value : false
+  const nexus = settled[1].status === 'fulfilled' ? settled[1].value : false
+  const runtimeProbe = settled[2].status === 'fulfilled' ? settled[2].value : false
+
+  const runtimeCheck = config.defaultRuntime === 'host' ? null : runtimeProbe
+  const ready = !draining && db && nexus && runtimeCheck !== false
+  return {
+    ok: ready,
+    ready,
+    instance_id: config.instanceId ?? null,
+    checks: {
+      db,
+      nexus,
+      runtime: runtimeCheck,
+      k8s: config.defaultRuntime === 'k8s' ? runtimeCheck : null,
+      draining,
+    },
+    httpStatus: ready ? 200 : 503,
+  }
+}
+
 function canAccessSession(
   auth: AuthContext,
   session: { orgId: string; userId: string },
@@ -1603,6 +1779,10 @@ export function startServer(
   port: number | null
   ready: Promise<number | null>
   stop: () => Promise<void>
+  /** Enter draining mode: /readyz starts returning 503 (LB removal signal). */
+  beginDrain: () => void
+  /** Live connection count (idle keepalive conns included) — drain bookkeeping. */
+  getConnections: () => Promise<number>
 } {
   const adminDistDir = resolveAdminDistDir()
   const wss = new WebSocketServer({ noServer: true })
@@ -1910,12 +2090,22 @@ export function startServer(
     : null
   cabinFlightAutomation?.start()
 
+  // Draining flag: set via beginDrain() on SIGTERM (graceful shutdown) —
+  // /readyz then reports 503 so the LB stops routing new traffic while
+  // existing WS/SSE connections are kept alive during the grace window.
+  let draining = false
+
   const server = http.createServer(async (req, res) => {
     try {
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
       const pathname = url.pathname
       const isHead = req.method === 'HEAD'
+
+      // Sticky-routing cookie (no-op unless MOSS_INSTANCE_ID is configured).
+      // Injected before CORS so every response — including preflights, static
+      // assets and SSE — carries it; Nginx sticky routing keys off this cookie.
+      setRouteCookieHeader(res, config)
 
       // Handle CORS preflight for all API routes
       if ((pathname.startsWith('/api/') || pathname.startsWith('/v1/')) && handleCorsPreflight(req, res)) {
@@ -1955,10 +2145,13 @@ export function startServer(
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/readyz') {
-        writeJson(res, 200, {
-          ok: true,
-          ready: true,
+        const readiness = await computeReadiness(config, runtime, {
+          isDraining: () => draining,
         })
+        // httpStatus is an internal carrier for the status code; the body itself
+        // stays { ok, ready, instance_id, checks } per the HA design doc §10.
+        const { httpStatus, ...body } = readiness
+        writeJson(res, httpStatus, body)
         return
       }
 
@@ -8801,5 +8994,15 @@ export function startServer(
         })
       })
     },
+    beginDrain: () => {
+      draining = true
+    },
+    getConnections: () =>
+      new Promise<number>((resolveConnections, rejectConnections) => {
+        server.getConnections((error, count) => {
+          if (error) rejectConnections(error)
+          else resolveConnections(count)
+        })
+      }),
   }
 }

@@ -192,9 +192,14 @@ export async function assertTcpPortAvailable(port: number): Promise<void> {
   })
 }
 
-function connectTcp(port: number, timeoutMs: number): Promise<void> {
+/**
+ * Bare TCP liveness probe. Exported for the /readyz nexus check: embedded mode
+ * probes 127.0.0.1:<grpcPort>, external mode probes the endpoint's host:port
+ * (hence the optional host parameter — defaults keep existing call sites).
+ */
+export function connectTcp(port: number, timeoutMs: number, host = '127.0.0.1'): Promise<void> {
   return new Promise((resolve, reject) => {
-    const socket = connect(port, '127.0.0.1')
+    const socket = connect(port, host)
     let settled = false
     const finish = (error?: Error) => {
       if (settled) return

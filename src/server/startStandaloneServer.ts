@@ -52,6 +52,28 @@ export async function startStandaloneDirectConnectServer(
   }
 }
 
+/**
+ * Wait until the HTTP connection count reaches zero or the timeout elapses.
+ * Reality check: Nginx upstream `keepalive` idle connections linger on the
+ * socket, so reaching zero is rare — timing out at the grace period is the
+ * expected (designed) outcome; the grace window exists precisely to give the
+ * LB time to stop routing new traffic before the process exits.
+ */
+async function waitForIdleConnections(
+  getConnections: () => Promise<number>,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      if ((await getConnections()) === 0) return
+    } catch {
+      return // server handle already gone — proceed to cleanup
+    }
+    await new Promise(resolve => setTimeout(resolve, 1_000))
+  }
+}
+
 async function finishStandaloneServerStartup(
   config: ServerConfig,
   nexusManager: NexusManager,
@@ -102,7 +124,7 @@ async function finishStandaloneServerStartup(
     tokenTtlSec: config.tokenTtlSec,
     bootstrapAdmin: config.bootstrapAdmin,
   })
-  const instance = store.registerServerInstance(config.host)
+  const instance = store.registerServerInstance(config.host, undefined, config.instanceId)
 
   // Multi-org backfill: now that organizations exist (auth bootstrap ran), assign
   // a default org to any pre-existing credential/secret/channel rows so they
@@ -194,6 +216,18 @@ async function finishStandaloneServerStartup(
   const stop = async () => {
     if (stopped) return
     stopped = true
+    // Graceful drain (multi-instance LB): flip /readyz to 503 so the LB stops
+    // routing new traffic, then keep serving existing WS/SSE — and keep
+    // heartbeating (we still own our attempts) — until connections drain or
+    // the grace timeout elapses. shutdownGraceMs=0 (default) skips this
+    // entirely: stop() proceeds straight to the existing cleanup chain,
+    // preserving single-instance behavior. Heartbeat clearing stays BELOW the
+    // drain on purpose: while draining we must remain a live owner so other
+    // instances don't adopt sessions we are still serving.
+    if (config.shutdownGraceMs > 0) {
+      server.beginDrain()
+      await waitForIdleConnections(server.getConnections, config.shutdownGraceMs)
+    }
     clearInterval(heartbeatTimer)
     clearInterval(adoptionTimer)
     clearInterval(k8sGcTimer)

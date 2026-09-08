@@ -59,6 +59,22 @@ export const serverFileConfigSchema = lazySchema(() =>
       // browser-loadable wiki-asset URLs. Empty → root-relative URLs (works
       // when client and server share an origin). Env: MOSS_PUBLIC_BASE_URL.
       publicBaseUrl: z.string().optional(),
+      // Stable instance identity for multi-instance LB deployments (route cookie
+      // value + server_instances key). Env: MOSS_INSTANCE_ID. Unset → random UUID
+      // per start (single-instance behavior, unchanged).
+      // Charset-restricted: the value is interpolated verbatim into Set-Cookie and
+      // must stay a valid cookie value / nginx map key (';'/'='/space/CRLF would
+      // break the header or make setHeader throw → every request 500s).
+      instanceId: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+      // Route cookie name/secure flag for Nginx sticky routing. Env:
+      // MOSS_ROUTE_COOKIE_NAME / MOSS_ROUTE_COOKIE_SECURE. The name must match
+      // the nginx `map $cookie_...` key; changing it without updating nginx
+      // silently degrades sticky routing to the pool.
+      routeCookieName: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+      routeCookieSecure: z.boolean().optional(),
+      // Grace period after SIGTERM: keep serving existing WS/SSE before forced
+      // exit (0 = disabled, current behavior). Env: MOSS_SHUTDOWN_GRACE_MS.
+      shutdownGraceMs: z.number().int().min(0).optional(),
     }).default({
       host: '0.0.0.0',
       port: 43127,
@@ -311,6 +327,24 @@ export type ServerConfig = {
    * server.publicBaseUrl in the file config). Empty string → root-relative.
    */
   publicBaseUrl: string
+  /**
+   * Stable instance identity for multi-instance LB deployments: route cookie
+   * value + server_instances key. Env: MOSS_INSTANCE_ID. Unset → random UUID
+   * per start (single-instance behavior). Charset-restricted
+   * (`/^[A-Za-z0-9_-]+$/`, enforced in resolveServerConfig for env and file
+   * values alike) because it is interpolated into Set-Cookie.
+   */
+  instanceId?: string
+  /** Route cookie name for Nginx sticky routing (default `moss_route`). */
+  routeCookieName: string
+  /** Append `Secure` to the route cookie (set true behind TLS). */
+  routeCookieSecure: boolean
+  /**
+   * Grace period after SIGTERM: keep serving existing WS/SSE before forced
+   * exit. 0 (default) = disabled — stop() proceeds straight to the existing
+   * cleanup chain, preserving single-instance behavior.
+   */
+  shutdownGraceMs: number
   authMode: 'local'
   tokenTtlSec: number
   bootstrapAdmin: {

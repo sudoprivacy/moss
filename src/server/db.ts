@@ -1328,16 +1328,28 @@ export class DirectConnectStore {
     return !(this as any)._closed
   }
 
-  registerServerInstance(host: string, pid = process.pid): ServerInstanceRecord {
-    const instanceId = randomUUID()
+  registerServerInstance(host: string, pid = process.pid, instanceId?: string): ServerInstanceRecord {
+    // With a stable MOSS_INSTANCE_ID the row survives restarts (stop only
+    // marks it stopped), so a fixed id must UPSERT over its own previous
+    // incarnation instead of INSERT — otherwise the second start crashes on
+    // the PRIMARY KEY with a restart loop. Unset ids stay random and never
+    // conflict (single-instance behavior unchanged).
+    const resolvedInstanceId = instanceId ?? randomUUID()
     const ts = now()
     this.db.prepare(`
       INSERT INTO server_instances (
         instance_id, host, pid, started_at, heartbeat_at, status
       ) VALUES (?, ?, ?, ?, ?, 'running')
-    `).run(instanceId, host, pid, ts, ts)
+      ON CONFLICT(instance_id) DO UPDATE SET
+        host = excluded.host,
+        pid = excluded.pid,
+        started_at = excluded.started_at,
+        heartbeat_at = excluded.heartbeat_at,
+        status = 'running',
+        stopped_at = NULL
+    `).run(resolvedInstanceId, host, pid, ts, ts)
     return {
-      instanceId,
+      instanceId: resolvedInstanceId,
       host,
       pid,
       startedAt: ts,

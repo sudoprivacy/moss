@@ -344,7 +344,7 @@
 
     "@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@0.1.80", "", { "os": "win32", "cpu": "x64" }, "sha512-Z8jPsM6df5V8B1HrCHB05+bDiCxjE9QA//3YrkKIdVDEwn5RKaqOxCJDRJkl48cJbylcrJbW4HxZbTte8juuPg=="],
 
-    "@nexus-ai-fs/vfs-client": ["@nexus-ai-fs/vfs-client@https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.2.4/nexus-ai-fs-vfs-client-0.2.4.tgz", { "dependencies": { "@grpc/grpc-js": "^1.14.4", "@grpc/proto-loader": "^0.8.0", "protobufjs": "^7.6.6" } }, "sha512-s3bkga3w1RcoUsFcBiskxRjfaydclxNXxikta1Vc8l4YAV14CKiAigpXn357qVzGdcFRV93+p3BmUlLh+wQupg=="],
+    "@nexus-ai-fs/vfs-client": ["@nexus-ai-fs/vfs-client@https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.2.4/nexus-ai-fs-vfs-client-0.2.4.tgz", { "dependencies": { "@grpc/grpc-js": "^1.14.4", "@grpc/proto-loader": "^0.8.0", "protobufjs": "^7.6.6" } }, "sha512-RGEJt+Jqh/pWwymdt+SJkjIa8Zu8CqAZsiS/N0gXLyZoP+FUHvSbzo0/UBNCI4oyOEPqd9yy6bYDdUVSPQ3onw=="],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "https://registry.npmmirror.com/@opentelemetry/api/-/api-1.9.1.tgz", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 

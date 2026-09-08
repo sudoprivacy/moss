@@ -20,6 +20,15 @@ async function main(): Promise<void> {
   }
 
   const shutdown = async () => {
+    // Failsafe only when graceful drain is enabled (HA deployments): the stop
+    // chain can hang on server.close() waiting for lingering connections, so
+    // force-exit after grace + margin. The HA compose's stop_grace_period is
+    // sized above this so exit(1) beats docker's SIGKILL. With
+    // shutdownGraceMs=0 (default) no timer is set — single-instance behavior
+    // is unchanged (docker/compose supplies the kill).
+    if (config.shutdownGraceMs > 0) {
+      setTimeout(() => process.exit(1), config.shutdownGraceMs + 10_000).unref()
+    }
     await running.stop()
     process.exit(0)
   }
