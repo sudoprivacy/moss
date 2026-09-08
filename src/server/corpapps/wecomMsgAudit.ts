@@ -6,7 +6,7 @@
  * any app's corpsecret) and no AgentId. It is therefore registered as its
  * own corp-app type rather than as extra capabilities on 'wecomapp'.
  *
- * SCOPE — this connector implements ONLY the event-callback half:
+ * SCOPE — this connector spans both halves:
  *
  *   企微 → moss   事件回调 (this file): 成员同意/取消存档, 外部联系人授权变更.
  *                 Plain WXBizMsgCrypt over HTTP, same framing as a
@@ -15,11 +15,11 @@
  *                 registering an instance yields a callback URL with no
  *                 new route.
  *
- *   moss → 企微   聊天记录 (NOT here): chat records are PULLED via
+ *   moss → 企微   聊天记录 (msgaudit/): records are PULLED via
  *                 libWeWorkFinanceSdk (native .so, linux-x86_64 only) and
  *                 decrypted with an RSA private key selected by each
- *                 record's `publickey_ver`. That needs a sidecar and is
- *                 deliberately out of scope for this file.
+ *                 record's `publickey_ver`. Credentials live here; the
+ *                 pull pipeline and JSONL archive live under msgaudit/.
  *
  * Configuring the service in the WeCom console requires a working event
  * URL that passes the GET handshake, but the events themselves are only
@@ -38,21 +38,22 @@ import type {
   TestConnectionResult,
 } from './types.js'
 import { registerCorpApp } from './types.js'
+import { parsePrivateKeys } from './msgaudit/crypto.js'
+import type { PullConfig } from './msgaudit/puller.js'
 import { extractEncrypt, decrypt, readXmlField, verifyUrl } from './wecomCallbackCrypto.js'
 
 export class WeComMsgAuditConnector implements CorpAppConnector {
   readonly type = 'wecommsgaudit'
 
-  /**
-   * Event callback only. Chat-record pulling ('listChatData' /
-   * 'decryptChatData') is intentionally absent until the SDK sidecar
-   * lands — the agent API returns 501 for undeclared capabilities.
-   */
-  readonly capabilities = ['receive']
+  readonly capabilities = ['receive', 'pullChatData']
 
   private corpId = ''
   private callbackToken = ''
   private encodingAesKey = ''
+  /** 会话存档-specific Secret; cannot mint an app access_token. */
+  private secret = ''
+  /** publickey_ver -> PEM, JSON-encoded (secret store holds strings only). */
+  private privateKeysRaw = ''
 
   /**
    * 会话存档 has no AgentId, so the instance key is the corpId alone. The
@@ -72,6 +73,8 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     this.corpId = String(config.corpId ?? '')
     this.callbackToken = credentials.callbackToken ?? ''
     this.encodingAesKey = credentials.encodingAesKey ?? ''
+    this.secret = credentials.secret ?? ''
+    this.privateKeysRaw = credentials.privateKeys ?? ''
     if (!this.corpId) throw new Error('wecommsgaudit: missing corpId')
   }
 
@@ -83,10 +86,34 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
    * check that will never succeed for this service.
    */
   async testConnection(): Promise<TestConnectionResult> {
-    if (!this.callbackToken || !this.encodingAesKey) {
-      return { ok: false, message: '缺少事件回调 Token / EncodingAESKey，无法通过企微 URL 验证' }
+    const missing: string[] = []
+    if (!this.callbackToken || !this.encodingAesKey) missing.push('事件回调 Token/EncodingAESKey')
+    if (!this.secret) missing.push('会话存档 Secret')
+    if (!this.privateKeysRaw) missing.push('RSA 私钥')
+    if (missing.length === 3) return { ok: false, message: `未配置：${missing.join('、')}` }
+    if (missing.length > 0) {
+      // Partial config is a legitimate intermediate state: callback-only
+      // (to pass the console's URL check) and pull-only are both usable.
+      return { ok: true, message: `已配置，但缺少：${missing.join('、')}` }
     }
-    return { ok: true, message: '回调凭据已配置，可在企微后台完成 URL 验证' }
+    // Key material is validated here rather than at first pull, so a
+    // malformed PEM surfaces in the admin UI instead of in a worker log.
+    const keys = parsePrivateKeys(this.privateKeysRaw)
+    if (Object.keys(keys).length === 0) {
+      return { ok: false, message: 'RSA 私钥无法解析（应为 PEM，或 {"版本号": "PEM"} 的 JSON）' }
+    }
+    return { ok: true, message: `回调与拉取凭据齐备，私钥版本：${Object.keys(keys).sort().join(', ')}` }
+  }
+
+  /** Config for the pull worker; null when this instance cannot pull. */
+  pullConfig(corpAppId: string): PullConfig | null {
+    if (!this.secret || !this.privateKeysRaw) return null
+    return {
+      corpAppId,
+      corpId: this.corpId,
+      secret: this.secret,
+      privateKeysRaw: this.privateKeysRaw,
+    }
   }
 
   async getInfo(): Promise<CorpAppInfo> {

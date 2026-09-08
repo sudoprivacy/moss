@@ -119,6 +119,7 @@ WORKDIR /app
 COPY bin/scode bin/
 COPY bin/wiki bin/
 COPY bin/moss-server.mjs ./bin/
+COPY bin/msgaudit-pull-child.js ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
 COPY admin/dist/ ./admin/dist/
 COPY assistants/ ./assistants/
@@ -140,6 +141,27 @@ COPY --from=runtime-deps /deps/node_modules ./node_modules
 COPY --from=model-stage /m/out/Xenova /app/models/Xenova
 ENV MOSS_MODELS_DIR=/app/models
 
+
+# 企微会话存档 SDK (libWeWorkFinanceSdk_C.so)
+# ------------------------------------------------------------
+# 拉取聊天记录的 GetChatData/DecryptData 在 qyapi 上不存在，只存在于企微
+# 发布的原生 C 库里，官方仅提供 linux/amd64。本镜像本身已是 amd64-only
+# (上方 /lib/x86_64-linux-gnu 符号链接)，故不引入新约束。
+#
+# 该库不在仓库中：需自行从企微后台下载并放到 deploy/wework-finance-sdk/。
+# 这里 COPY 整个 deploy/ 而不是直接 COPY 该文件：COPY 缺失路径会让构建失败，
+# 而通配符也救不了「目录不存在」的情况（已实测）。故整目录拷入后再判断。
+# 缺失时此层跳过，镜像照常构建 —— 只是会话存档拉取不可用（连接器会在
+# 运行时报出可读的错误），其余功能不受影响。
+COPY deploy/ /tmp/deploy-src/
+RUN if [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ]; then \
+        cp /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so /usr/local/lib/ \
+        && ldconfig \
+        && echo "WeCom finance SDK installed"; \
+    else \
+        echo "WeCom finance SDK not vendored; 会话存档 pull will be unavailable"; \
+    fi \
+    && rm -rf /tmp/deploy-src
 
 EXPOSE 43127
 
