@@ -93,3 +93,24 @@ export type GenerateKeypairResult = {
 export function generateCorpAppKeypair(id: string): Promise<GenerateKeypairResult> {
   return authClient.post<GenerateKeypairResult>(`/api/v1/corp-apps/${id}/generate-keypair`, undefined)
 }
+
+export type ImportKeyResult = GenerateKeypairResult & {
+  /** True when this version already existed and was overwritten. */
+  replaced: boolean
+}
+
+/**
+ * Import an existing RSA private key under a specific publickey_ver
+ * (migration path). Like generate, this MERGES into the stored key map —
+ * only the named version is added or replaced, never the whole set.
+ */
+export function importCorpAppKey(
+  id: string,
+  version: number,
+  privateKey: string,
+): Promise<ImportKeyResult> {
+  return authClient.post<ImportKeyResult>(`/api/v1/corp-apps/${id}/import-key`, {
+    version,
+    privateKey,
+  })
+}

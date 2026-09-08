@@ -51,6 +51,7 @@ import {
   listCorpAppTypes,
   listCorpApps,
   generateCorpAppKeypair,
+  importCorpAppKey,
   testCorpApp,
   updateCorpApp,
 } from '@/lib/api/corp-apps'
@@ -131,17 +132,6 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       bucket: 'credentials',
       optional: true,
       hint: '「安全与管理 → 会话内容存档」签发的专属 Secret,换不出应用 access_token,与应用 Secret 不通用。',
-    },
-    {
-      key: 'privateKeys',
-      label: 'RSA 私钥(拉取聊天记录时必填)',
-      type: 'password',
-      bucket: 'credentials',
-      optional: true,
-      hint:
-        '推荐用下方「生成密钥对」按钮,私钥直接存入加密凭据、不经过剪贴板。' +
-        '也可手动粘贴已有私钥:单个版本直接贴 PEM,多版本用 {"1":"-----BEGIN...","2":"..."} 的 JSON。' +
-        '私钥丢失不影响已归档的记录(落盘时已解密),但企微保留期内尚未拉取的记录将永久无法取回。',
     },
   ],
 }
@@ -442,6 +432,40 @@ function CorpAppDialog({
   const allPublicKeys = { ...publicKeys, ...freshKeys }
   const publicKeyVersions = Object.keys(allPublicKeys).sort((a, b) => Number(a) - Number(b))
 
+  // Import path (migration): a key already registered with WeCom, whose
+  // publickey_ver must be preserved. Kept behind a toggle so generating
+  // stays the obvious default.
+  const [showImport, setShowImport] = useState(false)
+  const [importVer, setImportVer] = useState('1')
+  const [importPem, setImportPem] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
+
+  const handleImportKey = async () => {
+    if (!existing) return
+    const ver = Number(importVer)
+    if (!Number.isInteger(ver) || ver < 1) {
+      toast.error('版本号必须是 >= 1 的整数')
+      return
+    }
+    if (!importPem.includes('-----BEGIN')) {
+      toast.error('私钥必须是 PEM 格式(含 -----BEGIN ...----- 首尾行)')
+      return
+    }
+    setImportBusy(true)
+    try {
+      const r = await importCorpAppKey(existing.id, ver, importPem)
+      setFreshKeys((m) => ({ ...m, [String(r.version)]: r.publicKey }))
+      toast.success(r.replaced ? `已覆盖版本 ${r.version} 的私钥` : `已导入私钥(版本 ${r.version})`)
+      setImportPem('')
+      setShowImport(false)
+      onSaved()
+    } catch (err) {
+      toast.error(`导入失败:${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
   const handleGenerateKeypair = async () => {
     if (!existing) return
     setKeygenBusy(true)
@@ -629,6 +653,61 @@ function CorpAppDialog({
                     </div>
                   ))}
                 </>
+              )}
+              {existing && (
+                <div className="border-t pt-2">
+                  {!showImport ? (
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                      onClick={() => setShowImport(true)}
+                    >
+                      导入已有私钥(迁移场景)
+                    </button>
+                  ) : (
+                    <div className="grid gap-2">
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        已在企微后台传过公钥、手里有对应私钥时使用。版本号必须与企微记录中的
+                        publickey_ver 一致,否则那批记录解不开。导入只影响该版本,其余版本保持不变。
+                      </p>
+                      <div className="grid gap-1.5">
+                        <Label className="text-xs">publickey_ver(版本号)</Label>
+                        <Input
+                          value={importVer}
+                          onChange={(e) => setImportVer(e.target.value)}
+                          placeholder="1"
+                          className="w-28"
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label className="text-xs">私钥 PEM</Label>
+                        <textarea
+                          value={importPem}
+                          onChange={(e) => setImportPem(e.target.value)}
+                          rows={5}
+                          placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;..."
+                          className="w-full resize-y rounded border p-2 font-mono text-[10px] leading-tight"
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button type="button" size="sm" disabled={importBusy} onClick={handleImportKey}>
+                          {importBusy ? '导入中...' : '导入'}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            setShowImport(false)
+                            setImportPem('')
+                          }}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}
