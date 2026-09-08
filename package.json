@@ -9,6 +9,7 @@
   "scripts": {
     "build": "bun run scripts/build.js",
     "build:node": "bun run scripts/build.js --target=node",
+    "build:native": "node scripts/build-nexus-napi.js",
     "postinstall": "bun run scripts/copy-vendor.js",
     "contracts:clients": "bun run scripts/contracts/validate-supported-clients.ts",
     "contracts:hub-clients": "bun run scripts/contracts/extract-sudowork-hub-client-api.ts",

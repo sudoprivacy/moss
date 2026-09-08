@@ -13,14 +13,13 @@
 # The nexus-napi addon depends on the PRIVATE crate `nexus-vfs-client` from
 # github.com/sudoprivacy/sudocode. Rather than bake a GitHub token into the
 # image build, this script uses a LOCAL clone of that repo at ~/sudocode:
-#   - clones it (default branch: main) if missing,
-#   - otherwise fetches + fast-forwards to the latest origin HEAD,
-# then stages it into the build context so the Rust stage can `[patch]` the git
-# dependency to the local path.
+#   - clones it if missing,
+#   - fetches the exact revision pinned in runtime-versions.json,
+# then stages that revision into the build context so the Rust stage can
+# `[patch]` the git dependency to the local path without drifting from Cargo.
 #
 # Usage:
 #   deploy/build-server-local.sh [image-tag]
-#   MOSS_BUILD_PLATFORM=linux/arm64 deploy/build-server-local.sh my-moss-server:arm64
 # Default tag: my-moss-server:local
 set -euo pipefail
 
@@ -29,7 +28,7 @@ IMAGE_TAG="${1:-my-moss-server:local}"
 BUILD_PLATFORM="${MOSS_BUILD_PLATFORM:-linux/amd64}"
 SUDOCODE_DIR="${SUDOCODE_DIR:-$HOME/sudocode}"
 SUDOCODE_REMOTE="${SUDOCODE_REMOTE:-https://github.com/sudoprivacy/sudocode.git}"
-SUDOCODE_BRANCH="${SUDOCODE_BRANCH:-main}"
+SUDOCODE_REVISION="$(node -p 'require("./src/server/nexus/runtime-versions.json")["sudocode-revision"]')"
 # Staged copy of sudocode inside the build context (cleaned up on exit).
 STAGE_DIR="$REPO_ROOT/.sudocode-build-context"
 
@@ -38,37 +37,56 @@ log() { echo "[build-server-local] $*"; }
 cleanup() { rm -rf "$STAGE_DIR"; }
 trap cleanup EXIT
 
-# 1. Ensure ~/sudocode exists and fetch the latest branch from origin.
-#    We never checkout/merge the working tree, so a dirty local clone (e.g. an
-#    uncommitted rust/Cargo.lock) does NOT block the build and the user's local
-#    changes are left untouched — we build from origin/<branch> directly.
-if [ -d "$SUDOCODE_DIR/.git" ]; then
-  log "Fetching latest sudocode in $SUDOCODE_DIR (origin/$SUDOCODE_BRANCH)"
-  git -C "$SUDOCODE_DIR" fetch --quiet origin "$SUDOCODE_BRANCH"
-else
-  log "Cloning sudocode into $SUDOCODE_DIR ($SUDOCODE_BRANCH)"
-  git clone --branch "$SUDOCODE_BRANCH" "$SUDOCODE_REMOTE" "$SUDOCODE_DIR"
+if [ "$BUILD_PLATFORM" != "linux/amd64" ]; then
+  log "ERROR: only linux/amd64 is supported; scode and nexus-vault do not publish arm64 artifacts"
+  exit 1
 fi
-SUDOCODE_REF="origin/$SUDOCODE_BRANCH"
-log "sudocode $SUDOCODE_REF -> $(git -C "$SUDOCODE_DIR" rev-parse --short "$SUDOCODE_REF")"
+
+case "$(docker version --format '{{.Server.Arch}}')" in
+  amd64|x86_64) DOCKER_BUILD_PLATFORM=linux/amd64 ;;
+  arm64|aarch64) DOCKER_BUILD_PLATFORM=linux/arm64 ;;
+  *) log "ERROR: unsupported Docker builder architecture"; exit 1 ;;
+esac
+
+if [[ ! "$SUDOCODE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+  log "ERROR: invalid sudocode revision: $SUDOCODE_REVISION"
+  exit 1
+fi
+
+# 1. Ensure ~/sudocode exists and fetch the pinned revision from origin.
+#    We never checkout/merge the working tree, so local changes are untouched.
+if [ -d "$SUDOCODE_DIR/.git" ]; then
+  log "Fetching pinned sudocode revision in $SUDOCODE_DIR ($SUDOCODE_REVISION)"
+  git -C "$SUDOCODE_DIR" fetch --quiet origin "$SUDOCODE_REVISION"
+else
+  log "Cloning sudocode into $SUDOCODE_DIR"
+  git clone --no-checkout "$SUDOCODE_REMOTE" "$SUDOCODE_DIR"
+  git -C "$SUDOCODE_DIR" fetch --quiet origin "$SUDOCODE_REVISION"
+fi
+log "sudocode revision -> $(git -C "$SUDOCODE_DIR" rev-parse --short "$SUDOCODE_REVISION")"
 
 # 2. Stage sudocode into the build context (Docker cannot read arbitrary host
-#    paths). Archive the committed tree at origin/<branch> — exactly the latest
-#    remote HEAD, independent of the local working tree / checked-out branch.
+#    paths). Archive the pinned commit, independent of the local working tree
+#    and checked-out branch.
 log "Staging sudocode into build context: $STAGE_DIR"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
-git -C "$SUDOCODE_DIR" archive --format=tar "$SUDOCODE_REF" | tar -x -C "$STAGE_DIR"
+git -C "$SUDOCODE_DIR" archive --format=tar "$SUDOCODE_REVISION" | tar -x -C "$STAGE_DIR"
 
 # 3. Pre-pull base images (with retry). Docker Hub pulls during `docker build`
 #    are not retriable inside the Dockerfile, and a flaky proxy can drop them
 #    (registry EOF). Pulling them first into the local cache makes the build
 #    resilient to transient registry failures.
-BASE_IMAGES=(oven/bun:1 golang:1.22-alpine ubuntu:22.04 debian:bookworm-slim node:22-trixie-slim)
-for img in "${BASE_IMAGES[@]}"; do
+BUILD_BASE_IMAGES=(oven/bun:1 golang:1.22-alpine debian:bookworm-slim)
+TARGET_BASE_IMAGES=(ubuntu:22.04 node:22-trixie-slim)
+for image_and_platform in \
+  "${BUILD_BASE_IMAGES[@]/%/|$DOCKER_BUILD_PLATFORM}" \
+  "${TARGET_BASE_IMAGES[@]/%/|$BUILD_PLATFORM}"; do
+  img="${image_and_platform%%|*}"
+  image_platform="${image_and_platform#*|}"
   for attempt in 1 2 3 4 5; do
-    if docker pull --platform "$BUILD_PLATFORM" "$img" >/dev/null 2>&1; then
-      log "base image ready: $img"; break
+    if docker pull --platform "$image_platform" "$img" >/dev/null 2>&1; then
+      log "base image ready: $img ($image_platform)"; break
     fi
     log "pull attempt $attempt failed for $img; retrying in 5s..."; sleep 5
     [ "$attempt" = 5 ] && { log "ERROR: could not pull $img"; exit 1; }
@@ -90,6 +108,8 @@ log "Building $IMAGE_TAG ($BUILD_PLATFORM) from deploy/server.Dockerfile.local"
 cd "$REPO_ROOT"
 docker buildx build \
   --platform "$BUILD_PLATFORM" \
+  --build-arg "BUILDPLATFORM=$DOCKER_BUILD_PLATFORM" \
+  --build-arg "TARGETPLATFORM=$BUILD_PLATFORM" \
   --load \
   -t "$IMAGE_TAG" \
   -f deploy/server.Dockerfile.local \

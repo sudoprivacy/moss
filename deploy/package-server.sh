@@ -7,6 +7,12 @@ ARCH="${2:?usage: package-server.sh VERSION ARCH OUTPUT_DIR}"
 OUTPUT_DIR="${3:?usage: package-server.sh VERSION ARCH OUTPUT_DIR}"
 PLATFORM="linux/$ARCH"
 
+case "$(docker version --format '{{.Server.Arch}}')" in
+  amd64|x86_64) DOCKER_BUILD_PLATFORM=linux/amd64 ;;
+  arm64|aarch64) DOCKER_BUILD_PLATFORM=linux/arm64 ;;
+  *) echo "Unsupported Docker builder architecture" >&2; exit 1 ;;
+esac
+
 case "$ARCH" in
   amd64|arm64) ;;
   *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
@@ -22,6 +28,8 @@ trap 'rm -rf "$STAGE_DIR"' EXIT
 
 docker buildx build \
   --platform "$PLATFORM" \
+  --build-arg "BUILDPLATFORM=$DOCKER_BUILD_PLATFORM" \
+  --build-arg "TARGETPLATFORM=$PLATFORM" \
   --target host-export \
   --build-arg "RELEASE_VERSION=$VERSION" \
   --output "type=local,dest=$STAGE_DIR" \

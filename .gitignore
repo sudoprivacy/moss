@@ -8,6 +8,8 @@ tmp/
 ui/dist/
 ui/node_modules/
 bin/
+native/nexus-napi/nexus-napi.*.node
+native/nexus-napi/target/
 data/
 data-cabin-dev/
 data-cabin-mock/

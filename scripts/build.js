@@ -7,6 +7,7 @@ import { RECOMMENDED, EXPERIMENTAL, NATIVE_REQUIRED, INTERNAL_ONLY } from './fea
 import { spawnSync } from 'child_process'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { resolve } from 'path'
+import { buildNexusNapi } from './build-nexus-napi.js'
 
 /**
  * 清理打包产物中由 bun build 内联的绝对路径。
@@ -117,6 +118,13 @@ if (onlyNode && ['win32', 'darwin'].includes(process.platform) && !process.env.C
   } catch (e) {
     console.warn(`⚠  nexus runtime fetch skipped (non-fatal): ${e?.message ?? e}`)
   }
+}
+
+// A source checkout must contain a native addon matching the host before the
+// generated server bundle can be launched with Node. Release Docker builds use
+// their dedicated cross-platform Rust stage and opt out explicitly.
+if (onlyNode && !process.env.CI && process.env.MOSS_SKIP_NEXUS_NAPI_BUILD !== '1') {
+  buildNexusNapi()
 }
 
 

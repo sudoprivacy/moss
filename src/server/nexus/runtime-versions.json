@@ -1,6 +1,7 @@
 {
   "nexusd-cluster": "0.1.1",
   "nexus-vault": "0.5.44",
+  "sudocode-revision": "1463842f71d1518e44dbe364de2faa4b8a77adbe",
   "scode": "v0.2.0",
   "scode-linux-x64-bundle-sha256": "a13fc41a23e54e3e04ad28a1b308cde7badc993cec9eec3e5fceb6f58a334b2a"
 }

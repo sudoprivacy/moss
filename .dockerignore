@@ -8,11 +8,22 @@ admin/node_modules
 native/nexus-napi/target
 **/target
 
-# JS/Go build outputs (rebuilt in the image)
+# JS/Go build outputs. The source Dockerfile rebuilds them; the retained
+# prebuilt Dockerfile needs only the explicitly re-included server artifacts.
 bin
+!bin/
+!bin/moss-server.mjs
+!bin/direct-connect-session-runner.mjs
+!bin/scode
+!bin/wiki
+!bin/corpapp
+!bin/nexus/
+!bin/nexus/**
 out
 dist
 admin/dist
+!admin/dist/
+!admin/dist/**
 
 # VCS / local tooling
 .git

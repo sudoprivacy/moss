@@ -118,15 +118,22 @@ WORKDIR /app
 # 复制本地构建产物
 COPY bin/scode bin/
 COPY bin/wiki bin/
+COPY bin/corpapp bin/
 COPY bin/moss-server.mjs ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
+COPY bin/nexus/ ./bin/nexus/
+COPY native/nexus-napi/index.js native/nexus-napi/index.d.ts ./native/nexus-napi/
+COPY native/nexus-napi/nexus-napi.*.node ./native/nexus-napi/
 COPY admin/dist/ ./admin/dist/
 COPY assistants/ ./assistants/
 COPY skills/ ./skills/
 
 # 复制 wiki (从 Go 构建阶段)
-RUN chmod +x ./bin/wiki
-RUN chmod +x ./bin/scode
+RUN chmod +x ./bin/wiki ./bin/corpapp ./bin/scode ./bin/nexus/nexusd \
+    && test -f ./bin/nexus/plugins/libnexus_vault.so \
+    && test -f ./bin/nexus/plugins/libnexus_vault.so.sig \
+    && node -e "require('./native/nexus-napi')" \
+    && ./bin/nexus/nexusd --version
 
 # Runtime external deps (@xenova/transformers + onnxruntime-node + sharp), so
 # the wiki embedder can import('@xenova/transformers') instead of degrading to
@@ -143,4 +150,4 @@ ENV MOSS_MODELS_DIR=/app/models
 
 EXPOSE 43127
 
-CMD ["node", "bin/moss-server.mjs", "start"]
+CMD ["node", "bin/moss-server.mjs"]

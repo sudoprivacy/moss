@@ -37,12 +37,15 @@ jobs:
           [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
           SCODE_VERSION="$(node -p "require('./src/server/nexus/runtime-versions.json').scode")"
           SCODE_BUNDLE_SHA256="$(node -p "require('./src/server/nexus/runtime-versions.json')['scode-linux-x64-bundle-sha256']")"
+          SUDOCODE_REVISION="$(node -p "require('./src/server/nexus/runtime-versions.json')['sudocode-revision']")"
           [[ "$SCODE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SCODE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SUDOCODE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "image_tag=$VERSION-amd64" >> "$GITHUB_OUTPUT"
           echo "scode_version=$SCODE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "sudocode_revision=${SUDOCODE_REVISION}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -52,6 +55,7 @@ jobs:
         with:
           repository: sudoprivacy/sudocode
           path: .sudocode-build-context
+          ref: ${{ steps.release.outputs.sudocode_revision }}
           token: ${{ secrets.SUDOCODE_REPO_TOKEN || github.token }}
 
       - name: Validate deployment scripts

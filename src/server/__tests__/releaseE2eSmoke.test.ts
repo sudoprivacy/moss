@@ -5,6 +5,99 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dir, "../../..");
 
 describe("packaged Server E2E smoke", () => {
+  it("keeps local Node startup and both server Dockerfiles self-contained", () => {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(root, "package.json"), "utf8"),
+    ) as { scripts: Record<string, string> };
+    const buildScript = readFileSync(resolve(root, "scripts/build.js"), "utf8");
+    const gitignore = readFileSync(resolve(root, ".gitignore"), "utf8");
+    const dockerignore = readFileSync(resolve(root, ".dockerignore"), "utf8");
+    const prebuiltDockerfile = readFileSync(
+      resolve(root, "deploy/server.Dockerfile"),
+      "utf8",
+    );
+    const sourceDockerfile = readFileSync(
+      resolve(root, "deploy/server.Dockerfile.local"),
+      "utf8",
+    );
+    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const releaseSmoke = readFileSync(
+      resolve(root, "scripts/e2e/run-server-release-smoke.sh"),
+      "utf8",
+    );
+
+    expect(packageJson.scripts["build:native"]).toBe("node scripts/build-nexus-napi.js");
+    expect(buildScript).toContain("buildNexusNapi");
+    expect(buildScript).toContain("MOSS_SKIP_NEXUS_NAPI_BUILD");
+    expect(gitignore).toContain("native/nexus-napi/target/");
+    expect(dockerignore).toContain("!bin/moss-server.mjs");
+    expect(dockerignore).toContain("!bin/nexus/**");
+    expect(prebuiltDockerfile).toContain("COPY native/nexus-napi/index.js");
+    expect(prebuiltDockerfile).toContain("COPY native/nexus-napi/nexus-napi.*.node");
+    expect(prebuiltDockerfile).toContain("COPY bin/nexus/ ./bin/nexus/");
+    expect(prebuiltDockerfile).toContain("COPY bin/corpapp bin/");
+    expect(prebuiltDockerfile).toContain("require('./native/nexus-napi')");
+    expect(sourceDockerfile).toContain("MOSS_SKIP_NEXUS_NAPI_BUILD=1 bun run build:node");
+    expect(prebuiltDockerfile).toContain('CMD ["node", "bin/moss-server.mjs"]');
+    expect(sourceDockerfile).toContain('CMD ["node", "bin/moss-server.mjs"]');
+    expect(sourceDockerfile).toContain(
+      "FROM --platform=$BUILDPLATFORM oven/bun:1 AS js-builder",
+    );
+    expect(sourceDockerfile).toContain(
+      "FROM --platform=$BUILDPLATFORM oven/bun:1 AS runtime-deps",
+    );
+    expect(sourceDockerfile).toContain('bun install --os=linux --cpu="$BUN_TARGET_CPU"');
+    expect(sourceDockerfile).toContain(
+      "FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS go-builder",
+    );
+    expect(sourceDockerfile).toContain("ARG BUILDPLATFORM");
+    expect(sourceDockerfile).toContain("ARG TARGETPLATFORM");
+    expect(installer).toContain(
+      "ExecStart=$INSTALL_DIR/current/node/bin/node $INSTALL_DIR/current/app/bin/moss-server.mjs\n",
+    );
+    expect(installer).not.toContain("moss-server.mjs start");
+    expect(releaseSmoke).not.toContain("moss-server.mjs start");
+  });
+
+  it("pins the Docker nexus-napi source and advertises only supported image platforms", () => {
+    const versions = JSON.parse(
+      readFileSync(resolve(root, "src/server/nexus/runtime-versions.json"), "utf8"),
+    ) as Record<string, string>;
+    const cargoToml = readFileSync(
+      resolve(root, "native/nexus-napi/Cargo.toml"),
+      "utf8",
+    );
+    const workflow = readFileSync(
+      resolve(root, ".github/workflows/build-release.yml"),
+      "utf8",
+    );
+    const localBuild = readFileSync(
+      resolve(root, "deploy/build-server-local.sh"),
+      "utf8",
+    );
+    const packageServer = readFileSync(
+      resolve(root, "deploy/package-server.sh"),
+      "utf8",
+    );
+
+    expect(versions["sudocode-revision"]).toMatch(/^[0-9a-f]{40}$/);
+    expect(cargoToml).toContain(`rev = "${versions["sudocode-revision"]}"`);
+    expect(workflow).toContain("sudocode_revision=${SUDOCODE_REVISION}");
+    expect(workflow).toContain("ref: ${{ steps.release.outputs.sudocode_revision }}");
+    expect(localBuild).toContain('SUDOCODE_REVISION="$(node -p');
+    expect(localBuild).toContain('git -C "$SUDOCODE_DIR" fetch --quiet origin "$SUDOCODE_REVISION"');
+    expect(localBuild).toContain('git -C "$SUDOCODE_DIR" archive --format=tar "$SUDOCODE_REVISION"');
+    expect(localBuild).not.toContain('SUDOCODE_REF="origin/$SUDOCODE_BRANCH"');
+    expect(localBuild).toContain('BUILD_PLATFORM" != "linux/amd64"');
+    expect(localBuild).toContain('--build-arg "BUILDPLATFORM=$DOCKER_BUILD_PLATFORM"');
+    expect(localBuild).toContain('--build-arg "TARGETPLATFORM=$BUILD_PLATFORM"');
+    expect(packageServer).toContain('--build-arg "BUILDPLATFORM=$DOCKER_BUILD_PLATFORM"');
+    expect(packageServer).toContain('--build-arg "TARGETPLATFORM=$PLATFORM"');
+    expect(
+      readFileSync(resolve(root, "deploy/server.Dockerfile.local"), "utf8"),
+    ).toContain("cargo build --release --locked --target");
+  });
+
   it("gates release asset upload on the packaged smoke test", () => {
     const workflow = readFileSync(
       resolve(root, ".github/workflows/build-release.yml"),

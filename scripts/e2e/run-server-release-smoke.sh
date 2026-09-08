@@ -183,7 +183,7 @@ done
 test "$INSTALL_DIR" = "$(getent passwd "$TEST_USER" | awk -F: '{print $6}')/.moss/server"
 sudo systemctl is-enabled --quiet "$SERVICE_NAME.service"
 sudo systemctl is-active --quiet "$SERVICE_NAME.service"
-sudo systemctl show "$SERVICE_NAME.service" -p ExecStart --value | grep -Fq "$INSTALL_DIR/current/node/bin/node $INSTALL_DIR/current/app/bin/moss-server.mjs start"
+sudo systemctl show "$SERVICE_NAME.service" -p ExecStart --value | grep -Fq "$INSTALL_DIR/current/node/bin/node $INSTALL_DIR/current/app/bin/moss-server.mjs"
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -Fq '"ready":true'
 curl -fsS "http://127.0.0.1:$PORT/readyz" | grep -Fq '"ready":true'
 test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/admin/")" = 200

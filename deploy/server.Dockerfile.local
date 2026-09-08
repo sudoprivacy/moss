@@ -4,7 +4,8 @@
 # Unlike deploy/server.Dockerfile (which only COPYs prebuilt artifacts produced
 # by CI / a prior local `bun run build:node`), this variant BUILDS EVERYTHING
 # from source inside the image, so a single `docker build` yields a correct
-# linux/amd64 or linux/arm64 image with no host-side preparation:
+# linux/amd64 image with no host-side preparation. arm64 remains blocked until
+# both scode and nexus-vault publish Linux arm64 artifacts:
 #
 #   - moss-server.mjs / direct-connect-session-runner.mjs / admin/dist  (bun)
 #   - bin/wiki, bin/corpapp                                            (Go, target arch)
@@ -15,11 +16,14 @@
 # github.com/sudoprivacy/sudocode. To avoid baking a GitHub token into the
 # build, this Dockerfile expects a LOCAL clone of that repo staged into the
 # build context at ./.sudocode-build-context, and Cargo `[patch]`es the git
-# dependency to that local path. Use deploy/build-server-local.sh, which
-# clones/updates ~/sudocode and stages it automatically.
+# dependency to that local path. Use deploy/build-server-local.sh, which stages
+# the exact revision pinned in runtime-versions.json.
 #
 # Build:  deploy/build-server-local.sh [image-tag]
 # =============================================================================
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
 
 # --- Stage 0: runtime external deps (bun) ------------------------------------
 # scripts/build.js marks @xenova/transformers / onnxruntime-node / sharp as
@@ -28,17 +32,23 @@
 # embedder silently degrades to grep-only. Install just those into an isolated
 # node_modules and COPY it into the runtime stage. (onnxruntime-node is a
 # transitive dep of @xenova and is pulled in automatically.)
-FROM oven/bun:1 AS runtime-deps
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS runtime-deps
 WORKDIR /deps
+ARG TARGETARCH
 COPY deploy/runtime-deps.package.json package.json
-RUN bun install
+RUN case "$TARGETARCH" in \
+      amd64) BUN_TARGET_CPU=x64 ;; \
+      arm64) BUN_TARGET_CPU=arm64 ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+    esac \
+    && bun install --os=linux --cpu="$BUN_TARGET_CPU"
 
 # --- Stage 0b: unzip the embedding model -------------------------------------
 # The model ships in-repo as deploy/models/Xenova.zip (tracked via git-lfs). Its
 # top level is Xenova/multilingual-e5-small/...; unzip it here and strip Mac junk
 # so the runtime stage COPYs only the clean model tree (the zip + unzip tooling
 # never land in the final image).
-FROM debian:bookworm-slim AS model-stage
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS model-stage
 RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
 WORKDIR /m
 COPY deploy/models/Xenova.zip ./Xenova.zip
@@ -49,7 +59,7 @@ RUN unzip -q Xenova.zip -d out \
     && test -f out/Xenova/multilingual-e5-small/onnx/model_quantized.onnx
 
 # --- Stage 1: JS/TS bundles + admin frontend (bun) ---------------------------
-FROM oven/bun:1 AS js-builder
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS js-builder
 WORKDIR /src
 # Install root + admin deps first (better layer caching), then build.
 COPY package.json bun.lock ./
@@ -61,13 +71,13 @@ RUN bun install --frozen-lockfile || bun install
 RUN cd admin && (bun install --frozen-lockfile || bun install)
 # Now the full source and run the build (admin/dist + bin/*.mjs).
 COPY . .
-RUN bun run build:node
+RUN MOSS_SKIP_NEXUS_NAPI_BUILD=1 bun run build:node
 # build:node also builds Go CLIs for the BUILD host arch (wrong for a
 # cross-platform image); the Go stage below rebuilds wiki/corpapp for the target
 # arch and overrides them.
 
 # --- Stage 2: Go CLIs cross-compiled for the target arch ---------------------
-FROM golang:1.22-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS go-builder
 WORKDIR /src
 ARG TARGETARCH
 COPY cli ./cli
@@ -81,7 +91,7 @@ RUN test -n "$TARGETARCH" \
 # Uses the locally-staged sudocode clone (./.sudocode-build-context) via a Cargo
 # [patch], so no GitHub token is needed for the private nexus-vfs-client dep.
 # Build the addon on the same Ubuntu 22.04 baseline as the host package.
-FROM ubuntu:22.04 AS napi-builder
+FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS napi-builder
 WORKDIR /src
 ARG TARGETARCH
 RUN apt-get update \
@@ -100,7 +110,7 @@ COPY .sudocode-build-context /sudocode
 COPY native/nexus-napi ./native/nexus-napi
 # Redirect the git dependency to the local sudocode checkout. Cargo applies this
 # [patch] to the `nexus-vfs-client` git dep regardless of its pinned rev, so the
-# build uses whatever sudocode HEAD was staged into the context.
+# build uses the pinned sudocode revision staged into the context.
 RUN printf '\n[patch."https://github.com/sudoprivacy/sudocode"]\nnexus-vfs-client = { path = "/sudocode/rust/crates/nexus-vfs-client" }\n' \
       >> native/nexus-napi/Cargo.toml
 # Retry loop on top of CARGO_NET_RETRY: a full TLS handshake drop to crates.io
@@ -114,7 +124,7 @@ RUN cd native/nexus-napi \
        esac \
     && rustup target add "$RUST_TARGET" \
     && for i in 1 2 3 4 5; do \
-         cargo build --release --target "$RUST_TARGET" && break \
+         cargo build --release --locked --target "$RUST_TARGET" && break \
          || { echo "cargo build attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && cp "target/$RUST_TARGET/release/libnexus_napi.so" nexus-napi.node \
@@ -122,7 +132,7 @@ RUN cd native/nexus-napi \
 # Output: native/nexus-napi/nexus-napi.node
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
-FROM debian:bookworm-slim AS nexus-dl
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS nexus-dl
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates jq tar \
     && rm -rf /var/lib/apt/lists/*
@@ -184,7 +194,7 @@ RUN set -e; \
     printf '%s\n' "$SCODE_VERSION" > /out/bin/scode.version
 
 # Validate the installed static bundle on the oldest supported host userspace.
-FROM ubuntu:22.04 AS host-scode-runtime
+FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS host-scode-runtime
 COPY --from=dl /out/bin/scode /usr/local/bin/scode
 COPY --from=dl /out/bin/scode.version /tmp/scode.version
 RUN chmod +x /usr/local/bin/scode \
@@ -195,7 +205,7 @@ RUN chmod +x /usr/local/bin/scode \
 # --- Stage 5: runtime image --------------------------------------------------
 # Keep the existing Node 22 trixie server runtime. The scode bundle is
 # static-pie and no longer depends on this image's glibc version.
-FROM node:22-trixie-slim AS server-runtime
+FROM --platform=$TARGETPLATFORM node:22-trixie-slim AS server-runtime
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
@@ -338,13 +348,13 @@ ENV MOSS_MODELS_DIR=/app/models
 
 EXPOSE 43127
 
-CMD ["node", "bin/moss-server.mjs", "start"]
+CMD ["node", "bin/moss-server.mjs"]
 
 # --- Host package targets ----------------------------------------------------
 # The deployment release runs moss-server on the Linux host and only uses
 # Docker for session runtimes. Keep these stages in this Dockerfile so the
 # container and host distributions share the exact same application build.
-FROM ubuntu:22.04 AS host-node-runtime
+FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS host-node-runtime
 ARG NODE_VERSION=22.22.1
 ARG TARGETARCH
 RUN apt-get update \
@@ -364,7 +374,7 @@ RUN case "$TARGETARCH" in \
     && tar -xJf "$NODE_FILE" --strip-components=1 -C /opt/node \
     && /opt/node/bin/node --version
 
-FROM ubuntu:22.04 AS host-runtime-deps
+FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS host-runtime-deps
 COPY --from=host-node-runtime /opt/node /opt/node
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /deps
@@ -372,7 +382,7 @@ COPY deploy/runtime-deps.package.json package.json
 RUN npm install --omit=dev --no-audit --no-fund \
     && node -e "Promise.all([import('@xenova/transformers'), import('sharp')]).then(() => console.log('runtime deps ok'))"
 
-FROM ubuntu:22.04 AS host-package
+FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS host-package
 ARG RELEASE_VERSION
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \

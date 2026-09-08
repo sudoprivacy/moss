@@ -11,6 +11,48 @@
 和官方 `nexusd-cluster`；Runtime 镜像包含 Docker 模式 `scode`，无需系统 Node.js
 或 Docker Compose。
 
+## 源码目录启动
+
+源码开发环境需安装 Node.js 22+、Bun、Rust/Cargo 和 Go。首次启动前执行：
+
+```bash
+bun install
+(cd admin && bun install)
+bun run build:node
+node bin/moss-server.mjs
+```
+
+`build:node` 会构建管理端、Server bundle、Go CLI，并在 Windows/macOS 获取
+Nexus runtime；同时通过 `build:native` 编译当前操作系统和 CPU 架构对应的
+`nexus-napi.<platform>-<arch>.node`，随后使用 Node 做一次加载探测。平台产物和
+Cargo `target/` 均为本地构建文件，不提交到 Git。
+
+服务默认读取 `~/.moss/server/server.json`；首次运行会创建默认配置。可通过
+`MOSS_SERVER_CONFIG=/absolute/path/server.json` 指定配置文件。健康检查地址为
+`http://127.0.0.1:43127/healthz` 和 `/readyz`。
+
+## Docker 与发布构建
+
+当前 GitHub Workflow 使用 `deploy/server.Dockerfile.local` 的 `host-export` target
+生成宿主机 Server 压缩包，并使用 `deploy/runtime/Dockerfile` 生成会话 Runtime
+镜像；Workflow 不发布 `my-moss-server` 容器镜像。
+
+需要构建完整 Server 容器镜像时执行：
+
+```bash
+SUDOCODE_DIR=/path/to/sudocode \
+  deploy/build-server-local.sh my-moss-server:local
+```
+
+该脚本和 Workflow 都从 `src/server/nexus/runtime-versions.json` 读取固定的
+Sudocode commit，避免 N-API 依赖随 `main` 分支漂移。当前 scode 和 Nexus Vault
+发布物只满足 `linux/amd64`，因此 Server、宿主机安装包和 Runtime 镜像均只承诺
+amd64；传入 arm64 会在构建开始前失败。
+
+`deploy/server.Dockerfile` 是保留的预构建产物镜像路径，只适用于已经在
+Linux/amd64 环境完成 `bun run build:node` 并准备好 `bin/scode` 的场景；它会在
+镜像构建期加载 N-API 并检查 Nexus/Vault，平台错误不会拖到容器启动后才暴露。
+
 host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
 `/usr/local/bin/scode`，对应 `runtimeDefaults.hostScodePath` 和
 `runtimeDefaults.dockerScodePath`。两者统一读取
@@ -101,8 +143,8 @@ sudo ./install.sh --offline
   下载 `vault-v*` 对应平台的 `nexus-vault-linux-x86_64.tar.gz` 解压得到
   `libnexus_vault.so` + `.sig`；版本以 `src/server/nexus/runtime-versions.json` 的
   `nexus-vault` 为准。
-- **arm64 边界**：nexus 尚未发布 `linux-aarch64` 插件产物，本地 arm64 镜像构建会
-  显式报错（CI 发布为 amd64 不受影响）；待 nexus 发布后放开。
+- **arm64 边界**：nexus 尚未发布 `linux-aarch64` 插件产物，scode 也没有当前发布
+  流程所需的 arm64 bundle；本地脚本会在构建开始前显式报错，待两者发布后再放开。
 - **Windows / macOS 原生开发**：无需手工下载。在**仓库根目录**运行 `bun run build:node`
   会自动从阶梯下载源（COS Runtime → Legacy COS → GitHub）获取当前平台的 vault 插件
   （Windows `nexus_vault.dll` / macOS `libnexus_vault.dylib`，与 `.sig` 成对）和 nexusd
@@ -110,6 +152,8 @@ sudo ./install.sh --offline
   `src/server/nexus/runtime-versions.json` 为准，实现见 `scripts/fetch-nexus-runtime.js`）。
   **注意**：须在仓库根目录既 `bun run build:node` 又启动 server——运行期按
   `process.cwd()` 定位 `bin/nexus/plugins`，构建与启动的工作目录必须一致，否则运行期找不到插件。
+  此命令也会调用 `build:native` 构建并验证本机架构的 N-API；只下载 Nexus runtime
+  而没有对应 N-API 时，Server 会在 secrets 初始化阶段失败。
 
 ## 常用操作
 
