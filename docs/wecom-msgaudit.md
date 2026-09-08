@@ -37,6 +37,12 @@
 
 ## 四、生成 RSA 密钥对
 
+**推荐：在管理后台点「生成密钥对」按钮。** 先保存该应用，再回到配置弹窗，
+点击生成 —— 私钥直接写入加密凭据（不回显、不经过剪贴板），公钥显示在弹窗里
+供复制。公钥常驻保存在 `config_json` 中，随时可以回来重新复制。
+
+也可以手动生成后粘贴私钥：
+
 ```bash
 openssl genrsa -out msgaudit_v1_private.pem 2048
 openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
@@ -44,7 +50,9 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 
 公钥全文（含 `-----BEGIN/END PUBLIC KEY-----`）贴进企微后台；私钥填进 moss。
 
-**私钥丢失 = 历史记录永久无法解密**，企微没有副本。
+**私钥丢失的影响**：已归档到 moss 的 JSONL **不受影响** —— 记录在拉取时就已解密，
+落盘的是明文。但企微保留期内**尚未拉取**的记录将永久无法取回（企微只有公钥，
+没有你的私钥副本，且保留期过后原始数据即删除）。
 
 ### 密钥轮换
 
@@ -55,6 +63,8 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 ```
 
 只有一个版本时直接粘贴 PEM 即可（视为版本 1）。
+
+管理后台的「轮换（生成新版本）」按钮会**追加**新版本并保留全部旧私钥，不会覆盖。
 
 ## 五、配置步骤
 

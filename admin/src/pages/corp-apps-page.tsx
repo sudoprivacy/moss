@@ -50,6 +50,7 @@ import {
   deleteCorpApp,
   listCorpAppTypes,
   listCorpApps,
+  generateCorpAppKeypair,
   testCorpApp,
   updateCorpApp,
 } from '@/lib/api/corp-apps'
@@ -138,10 +139,9 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       bucket: 'credentials',
       optional: true,
       hint:
-        '你自己用 openssl genrsa -out k.pem 2048 生成,公钥(openssl rsa -pubout)贴到企微后台;' +
-        '企微只有公钥,私钥丢失则历史记录永久无法解密。轮换公钥后旧记录仍需旧私钥,' +
-        '因此可填 {"1":"-----BEGIN...","2":"-----BEGIN..."} 的 JSON 保留所有版本;' +
-        '只有一个版本时直接粘贴 PEM 即可(视为版本 1)。',
+        '推荐用下方「生成密钥对」按钮,私钥直接存入加密凭据、不经过剪贴板。' +
+        '也可手动粘贴已有私钥:单个版本直接贴 PEM,多版本用 {"1":"-----BEGIN...","2":"..."} 的 JSON。' +
+        '私钥丢失不影响已归档的记录(落盘时已解密),但企微保留期内尚未拉取的记录将永久无法取回。',
     },
   ],
 }
@@ -431,6 +431,31 @@ function CorpAppDialog({
   }, [open, existing, types])
 
   const fields = TYPE_FIELDS[type] ?? []
+  // 会话存档 keypair state. publicKeys live in config (non-secret) so they
+  // remain visible for re-copying; the private half never leaves the server.
+  const [keygenBusy, setKeygenBusy] = useState(false)
+  const publicKeys = useMemo(() => {
+    const raw = (existing?.config as Record<string, unknown> | undefined)?.publicKeys
+    return raw && typeof raw === 'object' ? (raw as Record<string, string>) : {}
+  }, [existing])
+  const [freshKeys, setFreshKeys] = useState<Record<string, string>>({})
+  const allPublicKeys = { ...publicKeys, ...freshKeys }
+  const publicKeyVersions = Object.keys(allPublicKeys).sort((a, b) => Number(a) - Number(b))
+
+  const handleGenerateKeypair = async () => {
+    if (!existing) return
+    setKeygenBusy(true)
+    try {
+      const r = await generateCorpAppKeypair(existing.id)
+      setFreshKeys((m) => ({ ...m, [String(r.version)]: r.publicKey }))
+      toast.success(`已生成密钥对(版本 ${r.version})。请将下方公钥贴入企微后台。`)
+      onSaved()
+    } catch (err) {
+      toast.error(`生成失败:${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setKeygenBusy(false)
+    }
+  }
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -538,6 +563,75 @@ function CorpAppDialog({
               )}
             </div>
           ))}
+          {type === 'wecommsgaudit' && (
+            <div className="grid gap-2 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-sm">RSA 密钥对</Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!existing || keygenBusy}
+                  onClick={handleGenerateKeypair}
+                >
+                  {keygenBusy
+                    ? '生成中...'
+                    : publicKeyVersions.length > 0
+                      ? '轮换(生成新版本)'
+                      : '生成密钥对'}
+                </Button>
+              </div>
+              {!existing ? (
+                <p className="text-xs text-muted-foreground">
+                  请先保存该应用,再回到此处生成密钥对。
+                </p>
+              ) : publicKeyVersions.length === 0 ? (
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  点击生成 RSA-2048 密钥对:私钥直接写入加密凭据(不回显、不经过剪贴板),
+                  公钥显示在下方供你复制到企微后台。
+                </p>
+              ) : (
+                <>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    将公钥全文(含首尾 BEGIN/END 行)粘贴到企微后台
+                    「安全与管理 → 会话内容存档」。轮换会新增版本并保留旧私钥 ——
+                    企微不会重新加密历史记录,旧私钥删掉后那批记录就再也拉不回来了。
+                  </p>
+                  {publicKeyVersions.map((ver) => (
+                    <div key={ver} className="grid gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium">
+                          版本 {ver}
+                          {ver === publicKeyVersions[publicKeyVersions.length - 1] && (
+                            <span className="ml-1 text-muted-foreground">(最新)</span>
+                          )}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            navigator.clipboard
+                              .writeText(allPublicKeys[ver])
+                              .then(() => toast.success(`已复制版本 ${ver} 公钥`))
+                              .catch(() => toast.error('复制失败,请手动选中复制'))
+                          }}
+                        >
+                          复制
+                        </Button>
+                      </div>
+                      <textarea
+                        readOnly
+                        value={allPublicKeys[ver]}
+                        rows={4}
+                        className="w-full resize-y rounded border bg-muted/40 p-2 font-mono text-[10px] leading-tight"
+                      />
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>

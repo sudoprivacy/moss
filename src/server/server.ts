@@ -3982,6 +3982,90 @@ export function startServer(
       }
 
 
+      // 会话存档: generate an RSA keypair server-side.
+      //
+      // The private key is written straight into the encrypted credential
+      // blob and never returned; the public key goes into config_json
+      // (non-secret) so the admin UI can display it for pasting into the
+      // WeCom console at any time, not just once at creation.
+      //
+      // Rotation APPENDS a new publickey_ver rather than replacing: WeCom
+      // encrypts each record with whichever public key was current, and
+      // never re-encrypts history. Dropping an old private key would make
+      // any not-yet-pulled record from that era permanently unreadable.
+      const corpAppKeygenMatch = pathname.match(/^\/api\/v1\/corp-apps\/([^/]+)\/generate-keypair$/)
+      if (req.method === 'POST' && corpAppKeygenMatch) {
+        authService.requireScope(auth, 'admin:settings')
+        const id = corpAppKeygenMatch[1] || ''
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return
+        }
+        if (String(row.type) !== 'wecommsgaudit') {
+          writeJson(res, 400, {
+            error: { code: 'unsupported_type', message: '仅企微会话存档类型需要 RSA 密钥对' },
+          })
+          return
+        }
+        try {
+          const { generateKeyPairSync } = await import('node:crypto')
+          const { readSecret } = await import('./sources/secrets.js')
+          const { parsePrivateKeys } = await import('./corpapps/msgaudit/crypto.js')
+
+          // WeCom requires RSA-2048; the private half is PKCS#1 ("BEGIN RSA
+          // PRIVATE KEY"), which is what its SDK expects.
+          const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+          })
+
+          const oldKey = typeof row.credentials_secret_key === 'string' ? row.credentials_secret_key : ''
+          const existingCreds = oldKey ? await readSecret(oldKey) : {}
+          const keys = parsePrivateKeys(existingCreds.privateKeys)
+          // Next version = max existing + 1, matching WeCom's own 1-based
+          // publickey_ver counter.
+          const versions = Object.keys(keys)
+            .map((v) => Number(v))
+            .filter((n) => Number.isFinite(n))
+          const nextVer = versions.length > 0 ? Math.max(...versions) + 1 : 1
+          keys[String(nextVer)] = privateKey
+
+          // Merge, don't replace: the blob also holds secret/callbackToken/
+          // encodingAesKey, and a bare write here would silently drop them.
+          const merged: Record<string, string> = { ...existingCreds, privateKeys: JSON.stringify(keys) }
+          const newSecretKey = await storeSecret(merged)
+
+          const config = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+          const publicKeys =
+            config.publicKeys && typeof config.publicKeys === 'object'
+              ? (config.publicKeys as Record<string, string>)
+              : {}
+          publicKeys[String(nextVer)] = publicKey
+          config.publicKeys = publicKeys
+
+          runtime.store.updateCorpApp(id, auth.orgId, {
+            config_json: JSON.stringify(config),
+            credentials_secret_key: newSecretKey,
+          })
+          if (oldKey) await deleteSecret(oldKey).catch(() => {})
+
+          writeJson(res, 200, {
+            ok: true,
+            version: nextVer,
+            publicKey,
+            versions: Object.keys(keys).sort((a, b) => Number(a) - Number(b)),
+          })
+        } catch (err) {
+          writeJson(res, 500, {
+            error: { code: 'keygen_failed', message: err instanceof Error ? err.message : String(err) },
+          })
+        }
+        return
+      }
+
+
       // ---- Agent-facing wiki endpoints (called by wikiCli from inside scode container) ----
       // Auth model:
       //   1. If the token was issued for an in-container scode session
