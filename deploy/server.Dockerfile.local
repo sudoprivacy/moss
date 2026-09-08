@@ -115,6 +115,9 @@ RUN printf '\n[patch."https://github.com/sudoprivacy/sudocode"]\nnexus-vfs-clien
       >> native/nexus-napi/Cargo.toml
 # Retry loop on top of CARGO_NET_RETRY: a full TLS handshake drop to crates.io
 # can still abort a run; retrying converges (cargo caches what it fetched).
+# The path patch intentionally changes the dependency source recorded in the
+# copied lockfile, so this ephemeral build cannot use --locked. Reproducibility
+# comes from staging the exact 40-character sudocode revision above.
 # napi-rs cdylib output is lib<crate>.so → rename to <binaryName>.node.
 RUN cd native/nexus-napi \
     && case "$TARGETARCH" in \
@@ -124,7 +127,7 @@ RUN cd native/nexus-napi \
        esac \
     && rustup target add "$RUST_TARGET" \
     && for i in 1 2 3 4 5; do \
-         cargo build --release --locked --target "$RUST_TARGET" && break \
+         cargo build --release --target "$RUST_TARGET" && break \
          || { echo "cargo build attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && cp "target/$RUST_TARGET/release/libnexus_napi.so" nexus-napi.node \

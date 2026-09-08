@@ -93,9 +93,12 @@ describe("packaged Server E2E smoke", () => {
     expect(localBuild).toContain('--build-arg "TARGETPLATFORM=$BUILD_PLATFORM"');
     expect(packageServer).toContain('--build-arg "BUILDPLATFORM=$DOCKER_BUILD_PLATFORM"');
     expect(packageServer).toContain('--build-arg "TARGETPLATFORM=$PLATFORM"');
-    expect(
-      readFileSync(resolve(root, "deploy/server.Dockerfile.local"), "utf8"),
-    ).toContain("cargo build --release --locked --target");
+    const sourceDockerfile = readFileSync(
+      resolve(root, "deploy/server.Dockerfile.local"),
+      "utf8",
+    );
+    expect(sourceDockerfile).toContain("cargo build --release --target");
+    expect(sourceDockerfile).not.toContain("cargo build --release --locked --target");
   });
 
   it("gates release asset upload on the packaged smoke test", () => {
