@@ -1,6 +1,7 @@
 export interface OperationsHttpClient {
   get(path: string): Promise<unknown>
   post(path: string, body?: unknown): Promise<unknown>
+  put(path: string, body?: unknown): Promise<unknown>
   delete(path: string): Promise<unknown>
 }
 
@@ -39,10 +40,13 @@ export interface BillingOrderItem {
   amount_usd?: number
   amount_cny?: number
   points?: number
+  bonus_points?: number
+  quota?: number
   payment_method?: string
   status: number
   status_text?: string
   created_at: string
+  [key: string]: unknown
 }
 
 export interface RechargeRecordItem {
@@ -52,9 +56,15 @@ export interface RechargeRecordItem {
   user_phone?: string | null
   user_nickname?: string | null
   points: number
+  quota?: number
   amount_cny?: number | null
+  payment_method?: string | null
+  admin_nickname?: string | null
+  source?: string | null
+  source_text?: string | null
   reason?: string | null
   created_at: string
+  [key: string]: unknown
 }
 
 export interface CreditApplicationItem {
@@ -66,8 +76,12 @@ export interface CreditApplicationItem {
   approved_points?: number | null
   reason?: string | null
   admin_comment?: string | null
+  enterprise_name?: string | null
+  reviewed_at?: string | null
+  sudorouter_error?: string | null
   status: string | number
   created_at: string
+  [key: string]: unknown
 }
 
 export interface AuditEventItem {
@@ -81,6 +95,8 @@ export interface AuditEventItem {
   method?: string | null
   path?: string | null
   ip?: string | null
+  ip_address?: string | null
+  user_agent?: string | null
   detail?: unknown
   request_data?: string | null
   response_data?: string | null
@@ -103,6 +119,61 @@ function withQuery(path: string, query: Record<string, QueryValue>): string {
 
 export function createOperationsApi(client: OperationsHttpClient) {
   return {
+    getAdminStats() {
+      return client.get('/api/v1/admin/stats') as Promise<LegacyEnvelope<Record<string, unknown>>>
+    },
+    listLegacyUsers(input: {
+      keyword?: string
+      enterpriseId?: number
+      status?: number
+      role?: string
+    } = {}) {
+      return client.get(withQuery('/api/v1/admin/users', {
+        keyword: input.keyword,
+        enterprise_id: input.enterpriseId,
+        status: input.status,
+        role: input.role,
+      })) as Promise<LegacyEnvelope<unknown[]>>
+    },
+    approvePendingUser(legacyUserId: number) {
+      return client.post('/api/v1/admin/approve', { userId: legacyUserId }) as Promise<LegacyEnvelope<unknown>>
+    },
+    rejectPendingUser(legacyUserId: number) {
+      return client.post('/api/v1/admin/reject', { userId: legacyUserId }) as Promise<LegacyEnvelope<unknown>>
+    },
+    deletePendingUser(legacyUserId: number) {
+      return client.post('/api/v1/admin/delete', { userId: legacyUserId }) as Promise<LegacyEnvelope<unknown>>
+    },
+    rechargeUser(legacyUserId: number, input: {
+      points: number
+      reason: string
+      paymentReference?: string
+    }) {
+      return client.post(`/api/v1/admin/users/${legacyUserId}/recharge`, {
+        points: input.points,
+        reason: input.reason,
+        ...(input.paymentReference ? { payment_reference: input.paymentReference } : {}),
+      }) as Promise<LegacyEnvelope<unknown>>
+    },
+    adjustUserPoints(legacyUserId: number, input: {
+      amount: number
+      operation: 'add' | 'subtract'
+      reason?: string
+      syncSudorouter?: boolean
+    }) {
+      return client.post(`/api/v1/admin/users/${legacyUserId}/points`, {
+        amount: input.amount,
+        operation: input.operation,
+        ...(input.reason ? { reason: input.reason } : {}),
+        ...(input.syncSudorouter === undefined ? {} : { sync_sudorouter: input.syncSudorouter }),
+      }) as Promise<LegacyEnvelope<unknown>>
+    },
+    syncUserQuota(legacyUserId: number) {
+      return client.post(`/api/v1/admin/users/${legacyUserId}/sync-quota`) as Promise<LegacyEnvelope<unknown>>
+    },
+    listUserLedger(legacyUserId: number, limit = 100) {
+      return client.get(withQuery(`/api/v1/admin/users/${legacyUserId}/ledger`, { limit })) as Promise<LegacyEnvelope<unknown[]>>
+    },
     listInvitations(input: { page: number; pageSize: number; status?: 0 | 1 | 2 }) {
       return client.get(withQuery('/api/v1/admin/invitation-codes', {
         page: input.page, page_size: input.pageSize, status: input.status,
@@ -117,25 +188,57 @@ export function createOperationsApi(client: OperationsHttpClient) {
     deleteInvitation(id: number) {
       return client.delete(`/api/v1/admin/invitation-codes/${id}`) as Promise<LegacyEnvelope<never>>
     },
-    listBillingOrders(input: { page: number; pageSize: number; status?: string; keyword?: string }) {
+    listBillingOrders(input: {
+      page: number
+      pageSize: number
+      status?: string
+      orderNo?: string
+      userPhone?: string
+      startDate?: string
+      endDate?: string
+    }) {
       return client.get(withQuery('/api/v1/admin/recharge/orders', {
-        page: input.page, pageSize: input.pageSize, status: input.status, order_no: input.keyword,
+        page: input.page, pageSize: input.pageSize, status: input.status,
+        order_no: input.orderNo, user_phone: input.userPhone,
+        start_date: input.startDate, end_date: input.endDate,
       })) as Promise<LegacyEnvelope<LegacyPage<BillingOrderItem>>>
     },
-    listRechargeRecords(input: { page: number; pageSize: number; keyword?: string; type?: string }) {
+    listRechargeRecords(input: {
+      page: number
+      pageSize: number
+      keyword?: string
+      type?: string
+      paymentMethod?: string
+    }) {
       return client.get(withQuery('/api/v1/admin/recharge-records', {
-        page: input.page, pageSize: input.pageSize, keyword: input.keyword, type: input.type,
+        page: input.page, pageSize: input.pageSize, keyword: input.keyword,
+        type: input.type, payment_method: input.paymentMethod,
       })) as Promise<LegacyEnvelope<LegacyPage<RechargeRecordItem>>>
     },
     getRechargeStats() {
       return client.get('/api/v1/admin/recharge/stats') as Promise<LegacyEnvelope<Record<string, unknown>>>
     },
+    getBillingOrder(orderNo: string) {
+      return client.get(`/api/v1/admin/recharge/orders/${encodeURIComponent(orderNo)}`) as Promise<LegacyEnvelope<BillingOrderItem>>
+    },
+    retryBillingOrder(legacyOrderId: number) {
+      return client.post(`/api/v1/admin/recharge/orders/${legacyOrderId}/retry`) as Promise<LegacyEnvelope<unknown>>
+    },
+    syncPendingBillingOrders() {
+      return client.post('/api/v1/admin/recharge/sync') as Promise<LegacyEnvelope<unknown>>
+    },
+    getRefundCalculation(orderNo: string) {
+      return client.get(`/api/v1/admin/recharge/refund-calc/${encodeURIComponent(orderNo)}`) as Promise<LegacyEnvelope<Record<string, unknown>>>
+    },
+    refundBillingOrder(orderNo: string, reason: string) {
+      return client.post(`/api/v1/admin/recharge/orders/${encodeURIComponent(orderNo)}/refund`, { reason }) as Promise<LegacyEnvelope<unknown>>
+    },
     syncBillingOrder(orderNo: string) {
       return client.post(`/api/v1/admin/recharge/orders/${encodeURIComponent(orderNo)}/sync`) as Promise<LegacyEnvelope<unknown>>
     },
-    listCreditApplications(input: { page: number; pageSize: number; status?: string }) {
+    listCreditApplications(input: { page: number; pageSize: number; status?: string; keyword?: string }) {
       return client.get(withQuery('/api/v1/admin/credit-applications', {
-        page: input.page, pageSize: input.pageSize, status: input.status,
+        page: input.page, pageSize: input.pageSize, status: input.status, keyword: input.keyword,
       })) as Promise<LegacyEnvelope<LegacyPage<CreditApplicationItem>>>
     },
     approveCreditApplication(id: number, input: { approvedPoints?: number; adminComment?: string }) {
@@ -149,9 +252,22 @@ export function createOperationsApi(client: OperationsHttpClient) {
         ...(adminComment === undefined ? {} : { admin_comment: adminComment }),
       }) as Promise<LegacyEnvelope<unknown>>
     },
-    listAuditEvents(input: { page: number; pageSize: number; action?: string; userId?: number }) {
+    getCreditApplication(id: number) {
+      return client.get(`/api/v1/admin/credit-applications/${id}`) as Promise<LegacyEnvelope<CreditApplicationItem>>
+    },
+    retryCreditApplicationSync(id: number) {
+      return client.post(`/api/v1/admin/credit-applications/${id}/retry-sync`) as Promise<LegacyEnvelope<unknown>>
+    },
+    getSudoworkSystemConfig() {
+      return client.get('/api/v1/admin/system-config') as Promise<LegacyEnvelope<Record<string, unknown>>>
+    },
+    updateSudoworkSystemConfig(input: Record<string, unknown>) {
+      return client.put('/api/v1/admin/system-config', input) as Promise<LegacyEnvelope<Record<string, unknown>>>
+    },
+    listAuditEvents(input: { page: number; pageSize: number; action?: string; userId?: number; dateFrom?: number; dateTo?: number }) {
       return client.get(withQuery('/api/v1/admin/logs', {
         page: input.page, page_size: input.pageSize, action: input.action, user_id: input.userId,
+        date_from: input.dateFrom, date_to: input.dateTo,
       })) as Promise<LegacyEnvelope<LegacyPage<AuditEventItem>>>
     },
     getQualityOverview(input: { startTime?: number; endTime?: number } = {}) {
@@ -182,5 +298,57 @@ export function createOperationsApi(client: OperationsHttpClient) {
     runQualityAggregation() {
       return client.post('/api/v1/qms/system/aggregation/run') as Promise<{ success: boolean; data: unknown }>
     },
+    getConversationTrend(input: { startTime?: number; endTime?: number; dimension?: string } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/conversations/trend', { start_time: input.startTime, end_time: input.endTime, dimension: input.dimension })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getConversationDimensions(input: { startTime?: number; endTime?: number } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/conversations/dimensions', { start_time: input.startTime, end_time: input.endTime })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getConversationErrorTrend(input: { startTime?: number; endTime?: number; errorCode?: string } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/conversations/errors/trend', { start_time: input.startTime, end_time: input.endTime, error_code: input.errorCode })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getInstallTrend(input: { startTime?: number; endTime?: number; dimension?: string } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/installs/trend', { start_time: input.startTime, end_time: input.endTime, dimension: input.dimension })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getInstallDimensions(input: { startTime?: number; endTime?: number } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/installs/dimensions', { start_time: input.startTime, end_time: input.endTime })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getPerformanceTrend(input: { metric?: string; platform?: string; version?: string; startTime?: number; endTime?: number } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/perf/trend', { metric: input.metric, platform: input.platform, version: input.version, start_time: input.startTime, end_time: input.endTime })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getPerformanceDimensions(input: { startTime?: number; endTime?: number } = {}) {
+      return client.get(withQuery('/api/v1/qms/dashboard/perf/dimensions', { start_time: input.startTime, end_time: input.endTime })) as Promise<{ success: boolean; data: unknown }>
+    },
+    listQualityUserStats(type: 'conversations' | 'turns' | 'steps', input: { startTime?: number; endTime?: number; limit?: number; offset?: number } = {}) {
+      return client.get(withQuery(`/api/v1/qms/user-stats/${type}`, { start_time: input.startTime, end_time: input.endTime, limit: input.limit, offset: input.offset })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getQualityUserRealtime(input: { startTime?: number; endTime?: number } = {}) {
+      return client.get(withQuery('/api/v1/qms/user-stats/realtime', { start_time: input.startTime, end_time: input.endTime })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getQualityUserDetail(userId: string, input: { startTime?: number; endTime?: number } = {}) {
+      return client.get(withQuery(`/api/v1/qms/user-stats/users/${encodeURIComponent(userId)}`, { start_time: input.startTime, end_time: input.endTime })) as Promise<{ success: boolean; data: unknown }>
+    },
+    getCrashIssue(id: number) { return client.get(`/api/v1/qms/crash/issues/${id}`) as Promise<{ success: boolean; data: unknown }> },
+    listCrashEvents(input: { issueId?: number; limit?: number; offset?: number } = {}) { return client.get(withQuery('/api/v1/qms/crash/events', { issue_id: input.issueId, limit: input.limit, offset: input.offset })) as Promise<{ success: boolean; data: unknown }> },
+    getCrashStatsSummary() { return client.get('/api/v1/qms/crash/stats/summary') as Promise<{ success: boolean; data: unknown }> },
+    getCrashStatsTrend(days?: number) { return client.get(withQuery('/api/v1/qms/crash/stats/trend', { days })) as Promise<{ success: boolean; data: unknown }> },
+    getCrashStatsDistribution(by?: string) { return client.get(withQuery('/api/v1/qms/crash/stats/distribution', { by })) as Promise<{ success: boolean; data: unknown }> },
+    updateCrashIssue(id: number, input: Record<string, unknown>) { return client.put(`/api/v1/qms/crash/issues/${id}`, input) as Promise<{ success: boolean; data: unknown }> },
+    ignoreCrashIssue(id: number) { return client.post(`/api/v1/qms/crash/issues/${id}/ignore`) as Promise<{ success: boolean; data: unknown }> },
+    listAlertConfigs() { return client.get('/api/v1/qms/alerts/configs') as Promise<{ success: boolean; data: unknown }> },
+    getAlertConfig(id: string) { return client.get(`/api/v1/qms/alerts/configs/${encodeURIComponent(id)}`) as Promise<{ success: boolean; data: unknown }> },
+    createAlertConfig(input: Record<string, unknown>) { return client.post('/api/v1/qms/alerts/configs', input) as Promise<{ success: boolean; data: unknown }> },
+    updateAlertConfig(id: string, input: Record<string, unknown>) { return client.put(`/api/v1/qms/alerts/configs/${encodeURIComponent(id)}`, input) as Promise<{ success: boolean; data: unknown }> },
+    deleteAlertConfig(id: string) { return client.delete(`/api/v1/qms/alerts/configs/${encodeURIComponent(id)}`) as Promise<{ success: boolean }> },
+    testAlertConfig(id: string) { return client.post(`/api/v1/qms/alerts/configs/${encodeURIComponent(id)}/test`) as Promise<{ success: boolean; data: unknown }> },
+    getQmsSystemStats() { return client.get('/api/v1/qms/system/stats') as Promise<{ success: boolean; data: unknown }> },
+    getQmsSystemConfig() { return client.get('/api/v1/qms/system/config') as Promise<{ success: boolean; data: unknown }> },
+    updateQmsSystemConfig(key: string, value: unknown) { return client.put(`/api/v1/qms/system/config/${encodeURIComponent(key)}`, { value }) as Promise<{ success: boolean; data: unknown }> },
+    getQmsNotifications() { return client.get('/api/v1/qms/system/notifications') as Promise<{ success: boolean; data: unknown }> },
+    updateQmsNotifications(input: Record<string, unknown>) { return client.put('/api/v1/qms/system/notifications', input) as Promise<{ success: boolean; data: unknown }> },
+    testQmsNotification(channel: string) { return client.post(`/api/v1/qms/system/notifications/test/${encodeURIComponent(channel)}`) as Promise<{ success: boolean; data: unknown }> },
+    getQmsTasks() { return client.get('/api/v1/qms/system/tasks') as Promise<{ success: boolean; data: unknown }> },
+    getQmsRawStats() { return client.get('/api/v1/qms/system/raw-stats') as Promise<{ success: boolean; data: unknown }> },
+    getQmsAggregationInfo() { return client.get('/api/v1/qms/system/aggregation-info') as Promise<{ success: boolean; data: unknown }> },
   }
 }

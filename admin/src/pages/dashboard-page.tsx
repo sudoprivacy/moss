@@ -11,7 +11,7 @@ import { getDashboardStats, getSessions } from '@/lib/api/sessions'
 import { getUsers, getDepartments } from '@/lib/api/auth'
 import { ApiRequestError, hasAnyScope, hasScope } from '@/lib/api/client'
 import { useAuth } from '@/lib/hooks/use-auth'
-import { Users, MessageSquare, Coins, RefreshCw, Calendar, TrendingUp, Bot, Building2 } from 'lucide-react'
+import { Users, MessageSquare, Coins, RefreshCw, Calendar, TrendingUp, Bot, Building2, Wallet, Activity } from 'lucide-react'
 import {
   LineChart,
   Line,
@@ -32,6 +32,8 @@ import type {
 } from '@/lib/api/types'
 import { resolveOwnerName } from '@/lib/utils'
 import { Link } from 'react-router-dom'
+import { operationsApi } from '@/lib/api/operations'
+import { buildOperationsSummary, type OperationsSummary } from '../operations-dashboard'
 import { format, subDays, startOfDay, endOfDay, isWithinInterval } from 'date-fns'
 
 const chartConfig = {
@@ -119,6 +121,7 @@ export default function DashboardPage() {
   const [users, setUsers] = useState<AuthUser[]>([])
   const [departments, setDepartments] = useState<AuthDepartment[]>([])
   const [dashboardStats, setDashboardStats] = useState<DashboardStatsResponse | null>(null)
+  const [operationsSummary, setOperationsSummary] = useState<OperationsSummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [dateRange, setDateRange] = useState(7)
@@ -149,6 +152,15 @@ export default function DashboardPage() {
       setUsers(usersRes?.users ?? [])
       setDepartments(departmentsRes?.departments ?? [])
       setDashboardStats(statsRes)
+      if (hasScope(scopes, 'admin:settings')) {
+        Promise.all([
+          operationsApi.getAdminStats(),
+          operationsApi.getRechargeStats(),
+          operationsApi.getQualityOverview(),
+        ]).then(([identity, billing, quality]) => {
+          setOperationsSummary(buildOperationsSummary(identity.data, billing.data, quality.data))
+        }).catch(() => setOperationsSummary(null))
+      }
     } catch (error) {
       if (!(error instanceof ApiRequestError && error.status === 401)) {
         console.error('Failed to fetch data:', error)
@@ -157,7 +169,7 @@ export default function DashboardPage() {
       setIsLoading(false)
       setIsRefreshing(false)
     }
-  }, [canListSessions, canListUsers, dateRange, getStatsQuery])
+  }, [canListSessions, canListUsers, dateRange, getStatsQuery, scopes])
 
   useEffect(() => {
     fetchData()
@@ -295,6 +307,17 @@ export default function DashboardPage() {
   return (
     <DashboardLayout title="数据看板">
       <div className="space-y-6">
+        {operationsSummary ? (
+          <section className="space-y-3">
+            <div className="flex items-center justify-between"><h2 className="text-sm font-semibold">Sudowork 运营</h2><Button variant="ghost" size="sm" asChild><Link to="/operations/billing">查看账务</Link></Button></div>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <StatCard title="组织 / 用户" value={`${operationsSummary.organizations} / ${operationsSummary.users}`} icon={Building2} description={`待审批 ${operationsSummary.pendingUsers}`} />
+              <StatCard title="用户积分余额" value={operationsSummary.points.toLocaleString()} icon={Coins} description="统一钱包合计" />
+              <StatCard title="今日充值" value={`$${operationsSummary.todayRechargeUsd}`} icon={Wallet} description={`${operationsSummary.todayOrders} 笔，待处理 ${operationsSummary.pendingOrders}`} />
+              <StatCard title="质量成功率" value={`${operationsSummary.qualitySuccessRate}%`} icon={Activity} description={`${operationsSummary.conversations} 次会话`} />
+            </div>
+          </section>
+        ) : null}
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex gap-2">

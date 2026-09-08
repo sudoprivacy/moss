@@ -22,6 +22,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
 import {
@@ -29,9 +30,11 @@ import {
 } from 'lucide-react'
 import {
   getConfigItems, createConfigItem, updateConfigItem, deleteConfigItem, updateConfigItemStatus, uploadConfigItemIcon,
-  type ConfigItem, type ConfigEntry,
+  getConfigAvailability, updateConfigAvailability,
+  type ConfigAvailability, type ConfigItem, type ConfigEntry,
 } from '@/lib/api/secrets'
 import { getSystemSettings } from '@/lib/api/settings'
+import { useAuth } from '@/lib/hooks/use-auth'
 
 // Fallback shown before system settings load (and matches the server default).
 const DEFAULT_MINT_SCRIPTS_DIR = '/app/scripts'
@@ -135,6 +138,8 @@ function isValidUrlPattern(value: string): boolean {
 }
 
 export default function ConfigItemsPage() {
+  const { user } = useAuth()
+  const isSuperAdmin = user?.role === 'super_admin'
   const [items, setItems] = useState<ConfigItem[]>([])
   const [total, setTotal] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
@@ -148,6 +153,11 @@ export default function ConfigItemsPage() {
   const [form, setForm] = useState<ConfigItemForm>({ ...emptyForm })
   const [isSaving, setIsSaving] = useState(false)
   const [isUploadingIcon, setIsUploadingIcon] = useState(false)
+  const [availabilityTarget, setAvailabilityTarget] = useState<ConfigItem | null>(null)
+  const [availability, setAvailability] = useState<ConfigAvailability | null>(null)
+  const [availabilityMode, setAvailabilityMode] = useState<ConfigAvailability['availability']>('organization')
+  const [selectedOrganizations, setSelectedOrganizations] = useState<Set<string>>(new Set())
+  const [availabilitySaving, setAvailabilitySaving] = useState(false)
 
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<ConfigItem | null>(null)
@@ -330,6 +340,39 @@ export default function ConfigItemsPage() {
     }
   }
 
+  const openAvailability = async (item: ConfigItem) => {
+    setAvailabilityTarget(item)
+    try {
+      const value = await getConfigAvailability(item.id)
+      setAvailability(value)
+      setAvailabilityMode(value.availability)
+      setSelectedOrganizations(new Set(value.organizationIds))
+    } catch (error) {
+      setAvailabilityTarget(null)
+      toast.error(error instanceof Error ? error.message : '获取组织授权失败')
+    }
+  }
+
+  const saveAvailability = async () => {
+    if (!availabilityTarget) return
+    setAvailabilitySaving(true)
+    try {
+      await updateConfigAvailability(
+        availabilityTarget.id,
+        availabilityMode,
+        availabilityMode === 'assigned' ? [...selectedOrganizations] : [],
+      )
+      toast.success('组织授权已更新')
+      setAvailabilityTarget(null)
+      setAvailability(null)
+      await fetchData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存组织授权失败')
+    } finally {
+      setAvailabilitySaving(false)
+    }
+  }
+
   const addEntry = () => setForm(f => ({ ...f, entries: [...f.entries, { ...emptyEntry }] }))
   const removeEntry = (idx: number) => setForm(f => ({ ...f, entries: f.entries.filter((_, i) => i !== idx) }))
   const updateEntry = (idx: number, field: keyof EntryForm, value: string | boolean) => {
@@ -427,6 +470,7 @@ export default function ConfigItemsPage() {
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button variant="ghost" size="icon" onClick={() => handleEdit(item)} title="编辑"><Pencil className="size-4" /></Button>
+                      {isSuperAdmin && item.scope !== 'user' ? <Button variant="ghost" size="icon" onClick={() => void openAvailability(item)} title="组织授权"><Shield className="size-4" /></Button> : null}
                       <Button variant="destructive" size="icon" onClick={() => setDeleteTarget(item)} title="删除"><Trash2 className="size-4" /></Button>
                     </div>
                   </TableCell>
@@ -450,6 +494,20 @@ export default function ConfigItemsPage() {
       </div>
 
       {/* Create/Edit Dialog */}
+      <Dialog open={availabilityTarget !== null} onOpenChange={open => { if (!open) { setAvailabilityTarget(null); setAvailability(null) } }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>组织授权</DialogTitle><DialogDescription>{availabilityTarget?.name}</DialogDescription></DialogHeader>
+          {!availability ? <div className="flex justify-center py-8"><Loader2 className="size-5 animate-spin" /></div> : <div className="space-y-4">
+            <Select value={availabilityMode} onValueChange={value => setAvailabilityMode(value as ConfigAvailability['availability'])}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="organization">仅所属组织</SelectItem><SelectItem value="all">全部组织</SelectItem><SelectItem value="assigned">指定组织</SelectItem></SelectContent>
+            </Select>
+            {availabilityMode === 'assigned' ? <div className="max-h-64 space-y-2 overflow-auto rounded-md border p-3">{availability.organizations.map(org => <label key={org.id} className="flex items-center gap-3 text-sm"><Checkbox checked={selectedOrganizations.has(org.id)} onCheckedChange={checked => setSelectedOrganizations(current => { const next = new Set(current); if (checked) next.add(org.id); else next.delete(org.id); return next })} /><span>{org.name}</span><code className="ml-auto text-xs text-muted-foreground">{org.id}</code></label>)}</div> : null}
+          </div>}
+          <DialogFooter><Button variant="outline" onClick={() => setAvailabilityTarget(null)}>取消</Button><Button disabled={!availability || availabilitySaving || (availabilityMode === 'assigned' && selectedOrganizations.size === 0)} onClick={() => void saveAvailability()}>{availabilitySaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}保存</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto">
           <DialogHeader>

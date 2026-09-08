@@ -48,6 +48,9 @@ test('Moss native organization creation gets a profile, numeric alias, and walle
   assert.equal(repository.getOrganizationProfileByCode('new-org')?.orgId, created.organization.id)
   assert(repository.getNumericAlias('enterprise', created.organization.id) !== null)
   assert.deepEqual(repository.getWallet('organization', created.organization.id), { balanceUnits: 0, version: 0 })
+  const listed = authService.listAllOrganizations().organizations.find(item => item.id === created.organization.id)
+  assert.equal(listed?.legacyId, repository.getNumericAlias('enterprise', created.organization.id))
+  assert.equal(listed?.code, 'new-org')
 
   authService.destroy()
   db.close()
@@ -83,6 +86,54 @@ test('AuthService startup backfills compatibility records without external outbo
   assert.equal(repository.findAuthIdentityByUser('user-oauth', 'password', 'moss'), null)
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM outbox_events').get() as { count: number }).count, 0)
 
+  authService.destroy()
+  db.close()
+})
+
+test('Moss native user list exposes stable legacy alias, wallet summary and full account state', () => {
+  const db = new DatabaseSync(':memory:')
+  const authDb = new AuthCenterDb(db)
+  authDb.createOrganization('org-a', 'Org A', 1)
+  authDb.createUser({
+    id: 'pending-user', orgId: 'org-a', email: 'pending@example.test', name: 'pending',
+    displayName: '待审批用户', departmentId: null, role: 'user', status: 'pending', localAuth: true,
+    tokenLimit: null, createdAt: 1, passwordHash: 'secret-hash', passwordUpdatedAt: null,
+    lastLoginAt: null, extUserId: null,
+  })
+  authDb.setConfig('issuer', 'moss-test')
+  authDb.setConfig('jwt_secret', 'test-secret')
+  const authService = new AuthService(authDb, 3600)
+  const repository = new IdentityRepository(db)
+  const legacyId = repository.getNumericAlias('user', 'pending-user')
+  db.prepare("UPDATE wallets SET balance_units = ? WHERE owner_type = 'user' AND owner_id = ?")
+    .run(125_000, 'pending-user')
+
+  const listed = authService.listUsers('org-a').users[0]!
+  assert.equal(listed.status, 'pending')
+  assert.equal(listed.legacyId, legacyId)
+  assert.equal(listed.balanceUnits, 1250)
+  assert.equal('passwordHash' in listed, false)
+
+  authService.destroy()
+  db.close()
+})
+
+test('Moss /me organization carries the active organization legacy alias and code', () => {
+  const db = new DatabaseSync(':memory:')
+  const authDb = new AuthCenterDb(db)
+  authDb.createOrganization('org-a', 'Org A', 1)
+  authDb.createUser({
+    id: 'admin-a', orgId: 'org-a', email: 'admin@example.test', name: 'admin', displayName: null,
+    departmentId: null, role: 'admin', status: 'active', localAuth: true, tokenLimit: null,
+    createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
+  })
+  authDb.setConfig('issuer', 'moss-test')
+  authDb.setConfig('jwt_secret', 'test-secret')
+  const authService = new AuthService(authDb, 3600)
+  const repository = new IdentityRepository(db)
+  const response = authService.getMe({ userId: 'admin-a', orgId: 'org-a', role: 'admin', scopes: ['*'], keyId: 'key' })
+  assert.equal(response.organization?.legacyId, repository.getNumericAlias('enterprise', 'org-a'))
+  assert.equal(response.organization?.code, repository.getOrganizationProfile('org-a')?.code)
   authService.destroy()
   db.close()
 })

@@ -92,7 +92,7 @@ interface TemplateOauthField {
 }
 
 interface TemplateAuthConfigState {
-  auth_type: string
+  auth_type: McpTemplate['auth_type']
   pre_filled: Record<string, string>
   user_items: TemplateAuthConfigItem[]
   oauth_fields: TemplateOauthField[]
@@ -244,7 +244,7 @@ export default function McpTemplatesPage() {
         getInstalledSkills().catch(() => [] as { id: string; name: string; displayName?: string }[]),
       ])
       setDepartments(depts.departments || [])
-      setUsers(usrs.users || [])
+      setUsers((usrs.users || []).map(user => ({ id: user.id, name: user.name, email: user.email ?? undefined })))
       setAssistants((asts || []).filter(a => a.id && a.id.trim()))
       setSkills((skls || []).filter(s => s.id && s.id.trim()))
       setOptionsLoaded(true)
@@ -463,7 +463,7 @@ export default function McpTemplatesPage() {
     // Build security_policy_json
     const securityPolicyJson = JSON.stringify(securityPolicy)
 
-    const payload = {
+    const payload: McpTemplateFormData = {
       ...formData,
       scope: 'org' as const,
       auth_type: authConfigState.auth_type,  // Dual-write sync: always from authConfigState
@@ -901,7 +901,7 @@ function TemplateAuthConfigStep({
 
   function handleAuthTypeChange(authType: string) {
     const newState: TemplateAuthConfigState = {
-      auth_type: authType,
+      auth_type: authType as McpTemplate['auth_type'],
       pre_filled: {},
       user_items: [],
       oauth_fields: [],

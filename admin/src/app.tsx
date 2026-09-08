@@ -21,6 +21,7 @@ const EnterpriseConfigPage = lazy(() => import('./pages/enterprise-config-page')
 const DocumentCenterPage = lazy(() => import('./pages/document-center-page'))
 const ExternalSourcesPage = lazy(() => import('./pages/external-sources-page'))
 const BuildJobsPage = lazy(() => import('./pages/build-jobs-page'))
+const DifyDatasetsPage = lazy(() => import('./pages/dify-datasets-page'))
 const ConfigItemsPage = lazy(() => import('./pages/secrets/config-items-page'))
 const EnterpriseSecretsPage = lazy(() => import('./pages/secrets/enterprise-secrets-page'))
 const DepartmentSecretsPage = lazy(() => import('./pages/secrets/department-secrets-page'))
@@ -33,6 +34,7 @@ const OperationsInvitationsPage = lazy(() => import('./pages/operations-invitati
 const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page'))
 const OperationsAuditPage = lazy(() => import('./pages/operations-audit-page'))
 const OperationsQualityPage = lazy(() => import('./pages/operations-quality-page'))
+const SudoworkSettingsPage = lazy(() => import('./pages/sudowork-settings-page'))
 const McpServersPage = lazy(() => import('./pages/mcp/mcp-servers-page'))
 const McpEnterpriseServersPage = lazy(() => import('./pages/mcp/mcp-enterprise-servers-page'))
 const McpDepartmentServersPage = lazy(() => import('./pages/mcp/mcp-department-servers-page'))
@@ -217,6 +219,7 @@ export default function App() {
             </SuspendedRoute>
           }
         />
+        <Route path="/document-center/dify-datasets" element={<SuspendedRoute><DifyDatasetsPage /></SuspendedRoute>} />
         {/* Secrets Management */}
         <Route
           path="/secrets/config-items"
@@ -299,6 +302,10 @@ export default function App() {
         <Route
           path={OPERATION_ROUTES.quality}
           element={<SuspendedRoute><OperationsQualityPage /></SuspendedRoute>}
+        />
+        <Route
+          path={OPERATION_ROUTES.sudoworkSettings}
+          element={<SuspendedRoute><SudoworkSettingsPage /></SuspendedRoute>}
         />
         {/* MCP Management */}
         <Route path="/mcp" element={<Navigate to="/mcp/servers/enterprise" replace />} />

@@ -119,6 +119,8 @@ import {
 import { hasScope } from '@/lib/api/client'
 import { getUserSessions } from '@/lib/api/sessions'
 import { useAuth } from '@/lib/hooks/use-auth'
+import { UserOperationsDialogs } from '../components/user-operations-dialogs'
+import { accountStatusLabel, availableUserOperations, type UserOperation } from '../user-operations'
 import type {
   ApiKey,
   AuthDepartment,
@@ -570,6 +572,10 @@ export default function UsersPage() {
   const [isSubmittingPassword, setIsSubmittingPassword] = useState(false)
   const [isSubmittingApiKey, setIsSubmittingApiKey] = useState(false)
   const [pendingUserActionId, setPendingUserActionId] = useState<string | null>(null)
+  const [userOperation, setUserOperation] = useState<{
+    user: AuthUser
+    operation: UserOperation
+  } | null>(null)
   const [pendingDepartmentActionId, setPendingDepartmentActionId] = useState<string | null>(null)
   const [pendingApiKeyActionId, setPendingApiKeyActionId] = useState<string | null>(null)
 
@@ -1277,6 +1283,8 @@ export default function UsersPage() {
                     <SelectContent>
                       <SelectItem value="all">全部状态</SelectItem>
                       <SelectItem value="active">启用</SelectItem>
+                      <SelectItem value="pending">待审批</SelectItem>
+                      <SelectItem value="locked">锁定</SelectItem>
                       <SelectItem value="disabled">禁用</SelectItem>
                     </SelectContent>
                   </Select>
@@ -1291,6 +1299,7 @@ export default function UsersPage() {
                         <TableHead>所属组织</TableHead>
                         <TableHead>所属部门</TableHead>
                         <TableHead>角色</TableHead>
+                        <TableHead>积分余额</TableHead>
                         <TableHead>API Keys</TableHead>
                         <TableHead>状态</TableHead>
                         <TableHead>最后登录</TableHead>
@@ -1324,6 +1333,7 @@ export default function UsersPage() {
                                 {ROLE_LABELS[user.role]}
                               </Badge>
                             </TableCell>
+                            <TableCell>{(user.balanceUnits ?? 0).toLocaleString()}</TableCell>
                             <TableCell>
                               {userKeys.length > 0 ? (
                                 <div className="flex flex-wrap gap-1">
@@ -1346,7 +1356,7 @@ export default function UsersPage() {
                               <Badge
                                 variant={user.status === 'active' ? 'default' : 'secondary'}
                               >
-                                {user.status === 'active' ? '启用' : '禁用'}
+                                {accountStatusLabel(user.status)}
                               </Badge>
                             </TableCell>
                             <TableCell>{formatTimestamp(user.lastLoginAt)}</TableCell>
@@ -1366,6 +1376,21 @@ export default function UsersPage() {
                                     <UserCog className="mr-2 size-4" />
                                     查看详情
                                   </DropdownMenuItem>
+                                  {availableUserOperations(user.status, isSuperAdmin).map(operation => (
+                                    <DropdownMenuItem
+                                      key={operation}
+                                      onClick={() => setUserOperation({ user, operation })}
+                                    >
+                                      <Coins className="mr-2 size-4" />
+                                      {operation === 'approve' ? '审批通过'
+                                        : operation === 'reject' ? '拒绝申请'
+                                          : operation === 'delete_pending' ? '删除待审批用户'
+                                            : operation === 'recharge' ? '后台充值'
+                                              : operation === 'adjust' ? '积分调整'
+                                                : operation === 'sync_quota' ? '同步额度'
+                                                  : '查看账本'}
+                                    </DropdownMenuItem>
+                                  ))}
                                   <DropdownMenuItem
                                     onClick={() =>
                                       setUserDialog({
@@ -1403,7 +1428,7 @@ export default function UsersPage() {
                                       </>
                                     )}
                                   </DropdownMenuItem>
-                                  <DropdownMenuItem onClick={() => void handleToggleUserStatus(user)}>
+                                  {user.status === 'active' || user.status === 'disabled' ? <DropdownMenuItem onClick={() => void handleToggleUserStatus(user)}>
                                     {user.status === 'active' ? (
                                       <>
                                         <UserX className="mr-2 size-4" />
@@ -1415,7 +1440,7 @@ export default function UsersPage() {
                                         启用用户
                                       </>
                                     )}
-                                  </DropdownMenuItem>
+                                  </DropdownMenuItem> : null}
                                 </DropdownMenuContent>
                               </DropdownMenu>
                             </TableCell>
@@ -1424,7 +1449,7 @@ export default function UsersPage() {
                       })}
                       {filteredUsers.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                          <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
                             没有匹配的用户。
                           </TableCell>
                         </TableRow>
@@ -1486,7 +1511,7 @@ export default function UsersPage() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>名称</TableHead>
-                        <TableHead>外部组织 ID</TableHead>
+                        <TableHead>企业标识</TableHead>
                         <TableHead className="text-right">用户数</TableHead>
                         <TableHead className="text-right">部门数</TableHead>
                         <TableHead>创建时间</TableHead>
@@ -1497,8 +1522,8 @@ export default function UsersPage() {
                       {organizations.map(org => (
                         <TableRow key={org.id}>
                           <TableCell className="font-medium">{org.name}</TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground">
-                            {org.extOrgId ?? '—'}
+                          <TableCell className="text-xs text-muted-foreground">
+                            <code>{org.code}</code><div>旧 ID #{org.legacyId}</div><div>{org.extOrgId ?? '无外部 ID'}</div>
                           </TableCell>
                           <TableCell className="text-right">{org.userCount}</TableCell>
                           <TableCell className="text-right">{org.departmentCount}</TableCell>
@@ -2362,6 +2387,14 @@ export default function UsersPage() {
                     <code className="text-xs">{selectedUser.id}</code>
                   </div>
                   <div className="flex justify-between gap-4">
+                    <span className="text-muted-foreground">旧用户 ID</span>
+                    <code className="text-xs">#{selectedUser.legacyId ?? '-'}</code>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-muted-foreground">积分余额</span>
+                    <span>{(selectedUser.balanceUnits ?? 0).toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between gap-4">
                     <span className="text-muted-foreground">所属部门</span>
                     <span>{getDepartmentName(selectedUser.departmentId)}</span>
                   </div>
@@ -2374,7 +2407,7 @@ export default function UsersPage() {
                   <div className="flex justify-between gap-4">
                     <span className="text-muted-foreground">状态</span>
                     <Badge variant={selectedUser.status === 'active' ? 'default' : 'secondary'}>
-                      {selectedUser.status === 'active' ? '启用' : '禁用'}
+                      {accountStatusLabel(selectedUser.status)}
                     </Badge>
                   </div>
                   <div className="flex justify-between gap-4">
@@ -2499,6 +2532,12 @@ export default function UsersPage() {
           ) : null}
         </SheetContent>
       </Sheet>
+      <UserOperationsDialogs
+        target={userOperation?.user ?? null}
+        operation={userOperation?.operation ?? null}
+        onClose={() => setUserOperation(null)}
+        onChanged={fetchData}
+      />
     </DashboardLayout>
   )
 }

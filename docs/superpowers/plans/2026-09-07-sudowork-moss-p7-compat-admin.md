@@ -124,7 +124,7 @@
 - [x] 按矩阵逐页实现邀请码、账务、业务审计与 QMS 工作流，每页均运行聚焦 API/导航测试和正式构建。
 - [x] 运行 Admin 构建；使用隔离的本地 API Fixture 与系统 Chrome/Playwright Core 检查四页桌面 1440×900、移动 390×844 视口，确认无溢出、404 或控制台错误。移动端首次检查发现固定侧栏将主内容压缩至 134px，改为抽屉后复测主内容宽度为 390px。
 
-说明：独立 `tsc -p admin/tsconfig.json` 仍被本阶段之前已存在的 MCP 页面和 `system-settings-page.tsx` 类型错误阻断；本阶段新增文件均已进入 `bun run build` 的 Vite 正式产物，该基线问题继续列入 P9，不得表述为全量类型检查通过。
+补充（2026-09-08）：管理端二次对账发现用户财务、完整订单、Sudowork 策略、配置跨组织授权、Dify Dataset 和 QMS 细分能力仍有页面缺口，已按 `2026-09-08-sudowork-moss-admin-completion.md` 补齐。此前 MCP 页面与 `system-settings-page.tsx` 的类型基线也已完成小范围类型收窄，`bunx tsc -p admin/tsconfig.json --noEmit` 现已通过。
 
 ### Task 6：P7 回归门禁与诚实结论
 
@@ -136,7 +136,7 @@
 - [x] 运行全部 Bun 测试、`bun run build`、`git diff --check`。
 - [x] 运行 216 路由实装检查及兼容契约 fixture。
 - [x] 运行运行时 Smoke、云端 Session 和企业自动化回归。
-- [x] 对照能力矩阵确认旧管理功能都有 Moss 对应入口。
+- [x] 二次对照旧后台逐操作确认旧管理功能都有 Moss 对应入口；不是仅按菜单名称或 216 路由数判定。
 - [x] 仅将本机可验证项标记完成；受支持客户端二进制矩阵、真实基础设施和新旧在线差异测试保留为生产部署门禁。
 
 验证记录（2026-09-08）：
@@ -145,4 +145,5 @@
 - `bun run test:bun`：392 项全部通过；首次两轮全量运行暴露 `tenantAssistantRoutes.test.ts` 的真实 Node fixture 冷启动会超过 Bun 默认 5 秒，单文件连续 3 轮 30 项业务断言全部通过。将该进程型集成测试文件的超时显式设为 15 秒后，单文件 10/10 和全量 392/392 均通过，未放宽业务断言。
 - `bun run build` 与 `git diff --check` 通过。独立 Admin `tsc` 的既有基线错误仍按 Task 5 说明保留，不得表述为通过。
 - 固定旧服务提交 `311636c7bbfa4fa1c655aa8bd5c7e898f565f263`：路由源清单 216/216、Moss 实装 216/216、Dify 45、QMS 72、Billing 28、Hub 客户端调用 8 条契约均通过。
+- 管理端补齐后 `bunx tsc -p admin/tsconfig.json --noEmit` 已全量通过；正式 Admin 产物的 7 个关键页面在桌面/移动双视口浏览器 smoke 通过。
 - `contracts:clients` 只证明矩阵结构有效，状态仍为 `candidate`；真实发布客户端二进制矩阵、真实 PostgreSQL/Redis/Nexus/TimescaleDB、Fuiou 验签样本和新旧在线差异测试仍是生产部署硬门禁。

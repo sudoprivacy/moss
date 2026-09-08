@@ -11,23 +11,23 @@
 
 | Sudowork 旧菜单 | Moss 统一入口 | 结论 | 说明 |
 | --- | --- | --- | --- |
-| 仪表盘 | `/` 数据看板 | 需增强 | Moss 看板继续作为全局入口；财务和质量详情进入各自运营页。 |
-| 企业列表 | `/users` + `/settings/enterprise` | 已有 | 组织切换、成员数量、企业资料和本地/云端策略使用 Moss Organization。 |
-| 配置项列表 | `/secrets/config-items` | 已有 | 配置定义、组织授权和密钥引用均使用 Moss 配置中心与 Nexus。 |
-| 用户管理 | `/users` | 需增强 | Moss 用户页是唯一用户管理入口；旧审批接口映射统一用户状态与钱包命令。 |
+| 仪表盘 | `/` 数据看板 | 已有 | 新增组织、用户、待审批、积分、充值与质量摘要，详情进入各运营页。 |
+| 企业列表 | `/users` + `/settings/enterprise` | 已有 | 组织 CRUD 展示永久企业 code/数字 ID；超级管理员通过统一组织切换器管理目标组织品牌。 |
+| 配置项列表 | `/secrets/config-items` | 已有 | 配置定义、Nexus 引用及仅所属/全部/指定 Organization 授权均已提供。 |
+| 用户管理 | `/users` | 已有 | 完整四态、审批/拒绝/删除、后台充值、积分调整、额度同步、余额与账本均使用统一身份/计费服务。 |
 | 专属技能 | `/settings/skill` | 已有 | 本地与云端共享同一 Skill Catalog。 |
 | 专属智能体 | `/settings/agents` | 已有 | 本地、Moss Runtime、Dify 共用同一 Agent 主数据和可见性。 |
-| 知识库管理 | `/document-center` | 已有 | 统一文档、外部数据源、构建任务和 Dify Dataset 绑定。 |
+| 知识库管理 | `/document-center` | 已有 | 统一文档/Wiki 与独立 Dify Dataset 视图并存；后者支持 Dataset/文档 CRUD、文件/文本、检索和 Studio。 |
 | 定时任务 | `/cron` | 已有 | 本地任务只下发配置，企业任务由 Moss 云端执行。 |
 | 渠道管理 | `/channels`、`/corp-apps` | 已有 | Channel、企业应用、租约和云端 Session 均由 Moss 管理。 |
-| 订单管理 | `/operations/billing` 的“订单”页签 | 新增 | 读取统一 Billing 订单，提供同步、重试和退款操作。 |
-| 充值记录 | `/operations/billing` 的“充值记录”页签 | 新增 | 读取统一 Billing 活动记录，不维护旧充值表。 |
-| 积分申请 | `/operations/billing` 的“授信申请”页签 | 新增 | 读取并审批统一 CreditApplication。 |
+| 订单管理 | `/operations/billing` 的“订单”页签 | 已有 | 提供统计、筛选、详情、单笔/批量同步、失败重试和先计算后确认退款。 |
+| 充值记录 | `/operations/billing` 的“充值记录”页签 | 已有 | 读取统一 Billing 活动，含筛选、操作人、额度、来源和支付字段。 |
+| 积分申请 | `/operations/billing` 的“授信申请”页签 | 已有 | 提供筛选、详情、合法状态审批及同步失败重试，积分仅接受正整数。 |
 | 邀请码管理 | `/operations/invitations` | 新增 | 使用统一 Invitation 与稳定数字别名，支持筛选、批量创建和撤销。 |
 | 操作日志 | `/operations/audit` | 新增 | 查询统一 `operation_audit_events`；历史日志由迁移命令导入。 |
-| QMS 总览/用户/会话/安装 | `/operations/quality` | 新增 | 同页签承接 QMS PostgreSQL 聚合查询。 |
-| QMS 性能/崩溃/告警/系统 | `/operations/quality` | 新增 | 运维页签复用统一 QMS 服务；旧隐藏菜单能力仍可达。 |
-| 系统配置 | `/settings`、`/settings/server-credentials`、`/settings/enterprise` | 已有 | 登录方式、Dify、支付、QMS 和组织品牌分别进入现有统一设置。 |
+| QMS 总览/用户/会话/安装 | `/operations/quality` | 已有 | 八标签页覆盖总览、会话、安装、性能、用户统计与用户详情。 |
+| QMS 性能/崩溃/告警/系统 | `/operations/quality` | 已有 | 覆盖 Crash 统计/详情/状态、告警配置 CRUD/测试/历史、通知、任务、表统计和聚合。 |
+| 系统配置 | `/operations/sudowork-settings` + 既有设置页 | 已有 | Sudowork 登录/CAS、上报、版本、自动模型、充值/授信策略与 Moss 凭据、模型、品牌设置统一维护。 |
 
 ## API 接入
 

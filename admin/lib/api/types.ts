@@ -3,6 +3,7 @@ export type UserRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
 
 export interface AuthUser {
   id: string
+  legacyId?: number
   orgId: string
   email: string | null
   /** Login username. */
@@ -11,7 +12,8 @@ export interface AuthUser {
   displayName: string | null
   departmentId: string | null
   role: UserRole
-  status: 'active' | 'disabled'
+  status: 'pending' | 'active' | 'locked' | 'disabled'
+  balanceUnits?: number
   localAuth: boolean
   tokenLimit: number | null
   createdAt: number
@@ -25,11 +27,15 @@ export interface AuthOrg {
   name: string
   extOrgId: string | null
   createdAt: number
+  legacyId?: number
+  code?: string
 }
 
 export interface AuthOrgWithCounts extends AuthOrg {
   userCount: number
   departmentCount: number
+  legacyId: number
+  code: string
 }
 
 export interface AuthDepartment {

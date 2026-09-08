@@ -3,6 +3,16 @@ import { QMS_LEGACY_ROUTES } from './qmsRoutes.js'
 type SharedRoute = Readonly<{ method: string; path: string }>
 
 const ADMIN_OPERATION_ROUTES: readonly SharedRoute[] = [
+  { method: 'POST', path: '/api/v1/admin/approve' },
+  { method: 'POST', path: '/api/v1/admin/reject' },
+  { method: 'POST', path: '/api/v1/admin/delete' },
+  { method: 'GET', path: '/api/v1/admin/users' },
+  { method: 'GET', path: '/api/v1/admin/users/:id/ledger' },
+  { method: 'POST', path: '/api/v1/admin/users/:id/points' },
+  { method: 'POST', path: '/api/v1/admin/users/:id/recharge' },
+  { method: 'POST', path: '/api/v1/admin/users/:id/sync-quota' },
+  { method: 'GET', path: '/api/v1/admin/system-config' },
+  { method: 'PUT', path: '/api/v1/admin/system-config' },
   { method: 'GET', path: '/api/v1/admin/invitation-codes/available' },
   { method: 'GET', path: '/api/v1/admin/invitation-codes' },
   { method: 'POST', path: '/api/v1/admin/invitation-codes' },
@@ -24,6 +34,16 @@ const ADMIN_OPERATION_ROUTES: readonly SharedRoute[] = [
   { method: 'POST', path: '/api/v1/admin/credit-applications/:id/approve' },
   { method: 'POST', path: '/api/v1/admin/credit-applications/:id/reject' },
   { method: 'POST', path: '/api/v1/admin/credit-applications/:id/retry-sync' },
+  { method: 'GET', path: '/api/v1/admin/datasets' },
+  { method: 'POST', path: '/api/v1/admin/datasets' },
+  { method: 'GET', path: '/api/v1/admin/datasets/:datasetId' },
+  { method: 'PATCH', path: '/api/v1/admin/datasets/:datasetId' },
+  { method: 'DELETE', path: '/api/v1/admin/datasets/:datasetId' },
+  { method: 'GET', path: '/api/v1/admin/datasets/:datasetId/documents' },
+  { method: 'POST', path: '/api/v1/admin/datasets/:datasetId/documents' },
+  { method: 'DELETE', path: '/api/v1/admin/datasets/:datasetId/documents/:documentId' },
+  { method: 'POST', path: '/api/v1/admin/datasets/:datasetId/retrieve' },
+  { method: 'GET', path: '/api/v1/admin/dify/sso' },
 ]
 
 const QMS_OPERATION_ROUTES: readonly SharedRoute[] = QMS_LEGACY_ROUTES

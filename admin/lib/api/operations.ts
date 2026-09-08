@@ -14,5 +14,6 @@ export type {
 export const operationsApi = createOperationsApi({
   get: path => dcClient.get(path),
   post: (path, body) => dcClient.post(path, body),
+  put: (path, body) => dcClient.put(path, body),
   delete: path => dcClient.delete(path),
 })

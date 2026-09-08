@@ -6,12 +6,13 @@ import {
 } from './operations-navigation.js'
 
 describe('Moss Admin 运营中心导航', () => {
-  test('四个运营页面均有稳定路由', () => {
+  test('运营页面均有稳定路由', () => {
     assert.deepEqual(OPERATION_ROUTES, {
       invitations: '/operations/invitations',
       billing: '/operations/billing',
       audit: '/operations/audit',
       quality: '/operations/quality',
+      sudoworkSettings: '/operations/sudowork-settings',
     })
   })
 

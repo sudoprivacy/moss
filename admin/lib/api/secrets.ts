@@ -49,6 +49,13 @@ export interface ConfigItem {
   updated_at: number
 }
 
+export interface ConfigAvailability {
+  availability: 'organization' | 'all' | 'assigned'
+  ownerOrgId: string
+  organizationIds: string[]
+  organizations: Array<{ id: string; name: string }>
+}
+
 export interface SecretEntry {
   namespace: string
   key: string
@@ -225,6 +232,23 @@ export async function uploadConfigItemIcon(file: File): Promise<{ url: string }>
   if (!res.ok) throw new Error('上传图标失败')
   const data = await res.json()
   return { url: data.url }
+}
+
+export async function getConfigAvailability(id: number): Promise<ConfigAvailability> {
+  const response = await dcClient.get<{ success: boolean; data: ConfigAvailability }>(`/api/v1/config-items/${id}/availability`)
+  return response.data
+}
+
+export async function updateConfigAvailability(
+  id: number,
+  availability: ConfigAvailability['availability'],
+  organizationIds: string[],
+): Promise<ConfigAvailability> {
+  const response = await dcClient.put<{ success: boolean; data: ConfigAvailability }>(`/api/v1/config-items/${id}/availability`, {
+    availability,
+    organization_ids: organizationIds,
+  })
+  return response.data
 }
 
 // ============================================================

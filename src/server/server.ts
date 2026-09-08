@@ -25,6 +25,7 @@ import { initHubConfig } from './hubConfig.js'
 import type { FetchCallback } from '@hono/node-server'
 import { createHostDispatch } from './api/compat/sudowork/hostDispatch.js'
 import { MOSS_SHARED_SUDOWORK_ROUTES } from './api/compat/sudowork/sharedOperationalRoutes.js'
+import { ConfigAvailabilityService } from './configuration/configAvailabilityService.js'
 
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
@@ -1609,6 +1610,7 @@ export function startServer(
     setClientCronEnabled: (orgId, enabled) => authService.setOrganizationClientCronEnabled(orgId, enabled),
   })
   const configItemsApi = createConfigItemsApi(runtime.store)
+  const configAvailability = new ConfigAvailabilityService(runtime.store.db)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, (userId: string) => {
     try {
       return authService.getUserName(userId)
@@ -5280,6 +5282,28 @@ export function startServer(
         refreshAuthProxyRules()
         writeJson(res, 200, result)
         return
+      }
+
+      const configItemAvailabilityMatch = pathname.match(/^\/api\/v1\/config-items\/(\d+)\/availability$/)
+      if (configItemAvailabilityMatch) {
+        authService.requireSuperAdmin(auth)
+        const itemId = Number(configItemAvailabilityMatch[1])
+        if (req.method === 'GET') {
+          writeJson(res, 200, { success: true, data: configAvailability.get(itemId) })
+          return
+        }
+        if (req.method === 'PUT') {
+          const body = await readJsonBody(req)
+          configAvailability.replace(itemId, {
+            availability: body.availability as 'organization' | 'all' | 'assigned',
+            organizationIds: Array.isArray(body.organization_ids)
+              ? body.organization_ids.filter((id): id is string => typeof id === 'string')
+              : [],
+          })
+          refreshAuthProxyRules()
+          writeJson(res, 200, { success: true, data: configAvailability.get(itemId) })
+          return
+        }
       }
 
       const configItemEntriesMatch = pathname.match(/^\/api\/v1\/config-items\/(\d+)\/entries$/)

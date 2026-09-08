@@ -1094,7 +1094,7 @@ export class AuthService {
 
   getMe(auth: AuthContext): {
     user: SanitizedAuthCenterUser | null
-    organization: { id: string; name: string; createdAt: number } | null
+    organization: { id: string; name: string; createdAt: number; legacyId: number; code: string } | null
     scopes: string[]
     role: string
     key_id: string
@@ -1104,9 +1104,14 @@ export class AuthService {
     // org still returns their own profile. `organization` reflects the
     // currently-selected org (auth.orgId), which is what the UI should show.
     const actor = this.db.getUserById(auth.userId)
+    const organization = this.db.getOrganization(auth.orgId)
     return {
       user: actor ? sanitizeUser(actor) : null,
-      organization: this.db.getOrganization(auth.orgId),
+      organization: organization ? {
+        ...organization,
+        legacyId: this.requireLegacyAlias('enterprise', organization.id),
+        code: this.identityRepository.getOrganizationProfile(organization.id)?.code ?? '',
+      } : null,
       scopes: auth.scopes,
       role: auth.role,
       key_id: auth.keyId,
@@ -1149,11 +1154,21 @@ export class AuthService {
     orgId: string,
     auth?: AuthContext,
   ): {
-    users: SanitizedAuthCenterUser[]
+    users: Array<SanitizedAuthCenterUser & { legacyId: number; balanceUnits: number }>
   } {
     return {
-      users: this.listVisibleUsers(orgId, auth).map(user => sanitizeUser(user)),
+      users: this.listVisibleUsers(orgId, auth).map(user => ({
+        ...sanitizeUser(user),
+        legacyId: this.requireLegacyAlias('user', user.id),
+        balanceUnits: this.identityRepository.getWallet('user', user.id)?.balanceUnits ?? 0,
+      })),
     }
+  }
+
+  private requireLegacyAlias(namespace: 'user' | 'enterprise', resourceId: string): number {
+    const legacyId = this.identityRepository.getNumericAlias(namespace, resourceId)
+    if (legacyId === null) throw new AuthServiceError(500, `Missing ${namespace} legacy alias`)
+    return legacyId
   }
 
   listDepartments(
@@ -1195,6 +1210,8 @@ export class AuthService {
     organizations: Array<AuthCenterOrganization & {
       userCount: number
       departmentCount: number
+      legacyId: number
+      code: string
     }>
   } {
     return {
@@ -1202,6 +1219,8 @@ export class AuthService {
         ...org,
         userCount: this.db.countUsersByOrg(org.id),
         departmentCount: this.db.countDepartmentsByOrg(org.id),
+        legacyId: this.requireLegacyAlias('enterprise', org.id),
+        code: this.identityRepository.getOrganizationProfile(org.id)?.code ?? '',
       })),
     }
   }

@@ -1454,13 +1454,13 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
               <div className="space-y-4">
                 <AuthConfigForm
                   authType={formData.auth_type}
-                  authConfigJson={formData.auth_config_json}
-                  secretRef={formData.secret_ref}
+                  authConfigJson={formData.auth_config_json ?? null}
+                  secretRef={formData.secret_ref ?? null}
                   scope={formData.scope}
                   departmentId={formData.owner_id}
                   isStdio={isStdio}
                   onChange={(authType, authConfigJson, secretRef) =>
-                    setFormData(prev => ({ ...prev, auth_type: authType, auth_config_json: authConfigJson, secret_ref: secretRef }))
+                    setFormData(prev => ({ ...prev, auth_type: authType as NonNullable<typeof prev.auth_type>, auth_config_json: authConfigJson, secret_ref: secretRef }))
                   }
                 />
               </div>

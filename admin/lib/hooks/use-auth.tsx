@@ -3,7 +3,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { getMe, login as apiLogin, loginWithApiKey, logout as apiLogout, isAuthenticated, switchOrg } from '@/lib/api/auth'
 import { UNAUTHORIZED_EVENT, removeToken, getPreferredOrgId, setPreferredOrgId } from '@/lib/api/client'
-import type { AuthUser } from '@/lib/api/types'
+import type { AuthOrg, AuthUser } from '@/lib/api/types'
 
 interface AuthContextType {
   user: AuthUser | null
@@ -12,6 +12,7 @@ interface AuthContextType {
    *  reflects the org they've switched into (which differs from user.orgId,
    *  the actor's home org). For everyone else it equals user.orgId. */
   activeOrgId: string | null
+  activeOrganization: AuthOrg | null
   isLoading: boolean
   isAuthenticated: boolean
   login: (username: string, password: string) => Promise<void>
@@ -25,6 +26,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [scopes, setScopes] = useState<string[]>([])
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null)
+  const [activeOrganization, setActiveOrganization] = useState<AuthOrg | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   const checkAuth = useCallback(async () => {
@@ -32,6 +34,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(null)
       setScopes([])
       setActiveOrgId(null)
+      setActiveOrganization(null)
       setIsLoading(false)
       return
     }
@@ -58,11 +61,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(response.user)
       setScopes(response.scopes)
       setActiveOrgId(response.organization?.id ?? response.user?.orgId ?? null)
+      setActiveOrganization(response.organization)
     } catch {
       removeToken()
       setUser(null)
       setScopes([])
       setActiveOrgId(null)
+      setActiveOrganization(null)
     } finally {
       setIsLoading(false)
     }
@@ -99,6 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null)
     setScopes([])
     setActiveOrgId(null)
+    setActiveOrganization(null)
   }
 
   return (
@@ -107,6 +113,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         user,
         scopes,
         activeOrgId,
+        activeOrganization,
         isLoading,
         isAuthenticated: !!user,
         login,
