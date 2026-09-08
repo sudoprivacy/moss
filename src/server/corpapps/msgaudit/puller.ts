@@ -35,6 +35,8 @@ export type PullResult = {
   written: number
   failed: number
   cursor: number
+  /** Pages consumed this run; equals maxPages when the cap stopped it. */
+  pages: number
 }
 
 /**
@@ -124,5 +126,5 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     }
   }
 
-  return { fetched, written, failed, cursor }
+  return { fetched, written, failed, cursor, pages }
 }

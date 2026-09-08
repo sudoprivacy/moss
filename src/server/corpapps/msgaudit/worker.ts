@@ -37,11 +37,42 @@ function pullChildPath(): string {
   return path.join(here, 'pullChild.ts')
 }
 
-/** How often to poll each enabled archive instance. */
-const TICK_INTERVAL_MS = 5 * 60 * 1000
+/** How often to poll each enabled archive instance (seconds). */
+const DEFAULT_INTERVAL_SEC = 5 * 60
 
 /** A child that outlives this is assumed wedged in native code. */
 const CHILD_TIMEOUT_MS = 10 * 60 * 1000
+
+/**
+ * Pages per instance per tick while catching up.
+ *
+ * A first run starts at seq=0 and would otherwise drain WeCom's entire
+ * retention window in one pass — for a corp with many groups that is a
+ * long, unbounded run holding a native SDK session open. Capping pages
+ * per tick spreads the backfill over successive ticks instead; the
+ * cursor is committed per page, so each tick simply resumes where the
+ * last stopped. 0 disables the cap (drain fully).
+ */
+const DEFAULT_MAX_PAGES_PER_TICK = 20
+
+export type MsgAuditWorkerOptions = {
+  /** Poll interval in seconds. Env: MOSS_MSGAUDIT_INTERVAL_SEC. */
+  intervalSec?: number
+  /** Pages per instance per tick. Env: MOSS_MSGAUDIT_MAX_PAGES. */
+  maxPagesPerTick?: number
+}
+
+/** Read a positive-integer setting from env, falling back to `dflt`. */
+function envInt(name: string, dflt: number, min: number): number {
+  const raw = process.env[name]
+  if (!raw) return dflt
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < min) {
+    console.warn(`[msgaudit] ignoring ${name}=${raw} (must be a number >= ${min})`)
+    return dflt
+  }
+  return Math.floor(n)
+}
 
 /**
  * Run one pull in a child process. Resolves with the child's result, or
@@ -100,7 +131,20 @@ export class MsgAuditWorker {
   private stopped = false
   private inflight = new Set<string>()
 
-  constructor(private listInstances: InstanceProvider) {}
+  private readonly intervalMs: number
+  private readonly maxPagesPerTick: number
+
+  constructor(
+    private listInstances: InstanceProvider,
+    opts: MsgAuditWorkerOptions = {},
+  ) {
+    // Explicit options win over env so tests and callers can pin values;
+    // the floor of 30s keeps a typo from turning this into a hot loop.
+    this.intervalMs =
+      (opts.intervalSec ?? envInt('MOSS_MSGAUDIT_INTERVAL_SEC', DEFAULT_INTERVAL_SEC, 30)) * 1000
+    this.maxPagesPerTick =
+      opts.maxPagesPerTick ?? envInt('MOSS_MSGAUDIT_MAX_PAGES', DEFAULT_MAX_PAGES_PER_TICK, 0)
+  }
 
   start(): void {
     if (this.timer) return
@@ -111,7 +155,7 @@ export class MsgAuditWorker {
         .catch((err) => console.error('[MsgAuditWorker] tick error:', err))
         .finally(() => {
           if (!this.stopped) {
-            this.timer = setTimeout(tick, TICK_INTERVAL_MS)
+            this.timer = setTimeout(tick, this.intervalMs)
             this.timer.unref()
           }
         })
@@ -134,10 +178,13 @@ export class MsgAuditWorker {
       if (this.inflight.has(cfg.corpAppId)) continue
       this.inflight.add(cfg.corpAppId)
       try {
-        const r = await pullInChild(cfg)
+        const r = await pullInChild({ ...cfg, maxPages: this.maxPagesPerTick })
         if (r.written > 0 || r.failed > 0) {
+          const capped = this.maxPagesPerTick > 0 && r.pages >= this.maxPagesPerTick
           console.log(
-            `[msgaudit] ${cfg.corpAppId}: fetched=${r.fetched} written=${r.written} failed=${r.failed} cursor=${r.cursor}`,
+            `[msgaudit] ${cfg.corpAppId}: fetched=${r.fetched} written=${r.written} ` +
+              `failed=${r.failed} cursor=${r.cursor}` +
+              (capped ? ` (page cap reached; resuming next tick)` : ''),
           )
         }
       } catch (err) {

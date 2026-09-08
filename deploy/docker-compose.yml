@@ -32,6 +32,10 @@ services:
       - MOSS_HOME=/root/.moss
       - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
       - MOSS_CALLBACK_PORT=43128
+      # 企微会话存档拉取节奏。间隔下限 30 秒；MAX_PAGES 限制每实例每轮的
+      # 页数，把首轮的全量回填分摊到多轮（0 = 一次拉完）。
+      - MOSS_MSGAUDIT_INTERVAL_SEC=${MOSS_MSGAUDIT_INTERVAL_SEC:-300}
+      - MOSS_MSGAUDIT_MAX_PAGES=${MOSS_MSGAUDIT_MAX_PAGES:-20}
       # wiki 资源令牌的签名密钥（config.ts / wikiResourceToken.ts）。
       # 值放在 .env 中，不要写进本文件。
       - MOSS_RESOURCE_TOKEN_SECRET=${MOSS_RESOURCE_TOKEN_SECRET}
