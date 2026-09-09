@@ -4429,6 +4429,101 @@ export function startServer(
       }
 
 
+      // 会话存档: relabel a stored private key under a different
+      // publickey_ver, without the key ever leaving the server.
+      //
+      // WeCom numbers public keys per CORP by upload order, while moss
+      // numbers them per INSTANCE from 1. If an earlier pair was uploaded
+      // and later replaced, WeCom stamps records with ver=2 while moss
+      // still holds the surviving pair under ver=1 — every record then
+      // fails with "no private key for publickey_ver=2 (have: 1)".
+      // Re-importing is not an option when the operator no longer has the
+      // PEM in hand, and exporting it to re-import would put a live
+      // private key through the browser and the network for no reason.
+      const corpAppRelabelMatch = pathname.match(/^\/api\/v1\/corp-apps\/([^/]+)\/relabel-key$/)
+      if (req.method === 'POST' && corpAppRelabelMatch) {
+        authService.requireScope(auth, 'admin:settings')
+        const id = corpAppRelabelMatch[1] || ''
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return
+        }
+        if (String(row.type) !== 'wecommsgaudit') {
+          writeJson(res, 400, {
+            error: { code: 'unsupported_type', message: '仅企微会话存档类型有 RSA 密钥版本' },
+          })
+          return
+        }
+        const body = await readJsonBody(req)
+        const from = Number(body.from)
+        const to = Number(body.to)
+        if (!Number.isInteger(from) || from < 1 || !Number.isInteger(to) || to < 1) {
+          writeJson(res, 400, {
+            error: { code: 'invalid_version', message: 'from 和 to 必须是 >= 1 的整数' },
+          })
+          return
+        }
+        try {
+          const { readSecret } = await import('./sources/secrets.js')
+          const { parsePrivateKeys } = await import('./corpapps/msgaudit/crypto.js')
+          const oldKey = typeof row.credentials_secret_key === 'string' ? row.credentials_secret_key : ''
+          const existingCreds = oldKey ? await readSecret(oldKey) : {}
+          const keys = parsePrivateKeys(existingCreds.privateKeys)
+          if (!keys[String(from)]) {
+            writeJson(res, 400, {
+              error: {
+                code: 'version_not_found',
+                message: `没有版本 ${from} 的私钥（现有：${Object.keys(keys).sort().join(', ') || '无'}）`,
+              },
+            })
+            return
+          }
+          if (keys[String(to)]) {
+            writeJson(res, 400, {
+              error: { code: 'version_exists', message: `版本 ${to} 已存在，拒绝覆盖` },
+            })
+            return
+          }
+          // Move the key material verbatim: same PEM, new label.
+          keys[String(to)] = keys[String(from)]
+          delete keys[String(from)]
+          const merged: Record<string, string> = { ...existingCreds, privateKeys: JSON.stringify(keys) }
+          const newSecretKey = await storeSecret(merged)
+
+          // Keep the public half in step so the UI still shows a matching pair.
+          const config = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+          const publicKeys =
+            config.publicKeys && typeof config.publicKeys === 'object'
+              ? (config.publicKeys as Record<string, string>)
+              : {}
+          if (publicKeys[String(from)]) {
+            publicKeys[String(to)] = publicKeys[String(from)]
+            delete publicKeys[String(from)]
+            config.publicKeys = publicKeys
+          }
+
+          runtime.store.updateCorpApp(id, auth.orgId, {
+            config_json: JSON.stringify(config),
+            credentials_secret_key: newSecretKey,
+          })
+          if (oldKey) await deleteSecret(oldKey).catch(() => {})
+
+          writeJson(res, 200, {
+            ok: true,
+            from,
+            to,
+            versions: Object.keys(keys).sort((a, b) => Number(a) - Number(b)),
+          })
+        } catch (err) {
+          writeJson(res, 500, {
+            error: { code: 'relabel_failed', message: err instanceof Error ? err.message : String(err) },
+          })
+        }
+        return
+      }
+
+
       // ---- Agent-facing wiki endpoints (called by wikiCli from inside scode container) ----
       // Auth model:
       //   1. If the token was issued for an in-container scode session
