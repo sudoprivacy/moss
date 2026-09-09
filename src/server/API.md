@@ -143,23 +143,27 @@ Authorization: Bearer <access_token>
 
 ### GET `/api/v1/system-config`
 
-**客户端引导文档。无需鉴权**——客户端在登录之前就要读它，用来知道这个部署使用哪种登录方式。
+**Client bootstrap document. Unauthenticated** — the client reads it *before*
+logging in, to learn which login method this deployment uses.
 
-这是让同一份 binary 既能做 **Sudo Cloud**（我们托管）又能做 **Sudo Private**（客户自建）的接缝：登录方式由**部署**在 `server.json` 里声明，而不是客户端从 URL 猜。
+This is the seam that lets one binary serve both **Sudo Cloud** (we host) and
+**Sudo Private** (the customer hosts): the deployment declares its login method
+in `server.json` instead of the client inferring it from a URL.
 
-配置见 `server.json` 的 `systemConfig` 段；实现与字段口径见 `src/server/publicSystemConfig.ts`。
+Configured under the `systemConfig` section of `server.json`; the field contract
+and its implementation live in `src/server/publicSystemConfig.ts`.
 
-| 字段 | 说明 |
+| Field | Meaning |
 | --- | --- |
-| `login_method` | `0` 手机验证码 · `1` 用户名密码 · `2` 三方认证（CAS）。可用 `MOSS_LOGIN_METHOD` 覆盖 |
-| `third_party_auth` | `login_method=2` 时下发 provider 列表 |
-| `sudorouter_baseurl` | SudoRouter **根**地址（不带 `/v1`，调用方自己拼路径）。未配置时从系统设置的 model service URL 推导 |
-| `skillhub_baseurl` / `scode_auto_model` | 可选 |
-| `recharge_mode` | `pay` / `approve` / `disabled`。moss 自身没有积分账本，默认 `disabled` |
-| `credit_application` | `approve` 模式下的申请额度上下限 |
-| `log_report` / `version_update` / `product_improvement` | 遥测与更新开关 |
+| `login_method` | `0` phone code · `1` username/password · `2` third-party (CAS). Overridable with `MOSS_LOGIN_METHOD` |
+| `third_party_auth` | Provider list, sent when `login_method=2` |
+| `sudorouter_baseurl` | SudoRouter **root** (no `/v1` — call sites append their own path). Derived from the system settings' model service URL when unset |
+| `skillhub_baseurl` / `scode_auto_model` | Optional |
+| `recharge_mode` | `pay` / `approve` / `disabled`. moss holds no credit ledger, so the default is `disabled` |
+| `credit_application` | Requestable point bounds, used in `approve` mode |
+| `log_report` / `version_update` / `product_improvement` | Telemetry and update switches |
 
-示例响应（全部使用默认值的自建部署）：
+Example response from a self-hosted deployment that configured nothing:
 
 ```json
 {
@@ -174,9 +178,16 @@ Authorization: Bearer <access_token>
 }
 ```
 
-> ⚠️ **这三个开关总是显式下发 `enabled: 0`，不能省略。** 客户端按 `enabled !== 0` 判断，也就是**失败即开启**——省略这些字段会让自建部署在没配置任何东西的情况下，继续向公有云的兜底地址上报遥测、检查更新。
+> ⚠️ **Those three switches are always sent as an explicit `enabled: 0`, never
+> omitted.** The client reads them as `enabled !== 0`, i.e. it **fails open** —
+> omitting the blocks would leave a self-hosted deployment that configured
+> nothing still reporting telemetry and checking for updates against the public
+> cloud's hardcoded fallback hosts.
 >
-> ⚠️ **本接口在鉴权墙之前**，内容对任何能访问到端口的人可见。只放功能开关和 base URL；**永远不要**放 key、token、用户或组织数据。持有凭证的管理侧对应物是 `systemSettings.ts`，两者不要混。
+> ⚠️ **This route sits above the auth wall**, so its contents are readable by
+> anyone who can reach the port. Feature switches and base URLs only; **never**
+> keys, tokens, or user/org data. The admin-side counterpart that *does* hold
+> credentials is `systemSettings.ts` — do not confuse the two.
 
 ## Admin UI
 
