@@ -123,7 +123,18 @@ async function finishStandaloneServerStartup(
     dbPath: config.dbPath,
     tokenTtlSec: config.tokenTtlSec,
     bootstrapAdmin: config.bootstrapAdmin,
+    phoneAuth: config.phoneAuth,
   })
+  if (config.phoneAuth.enabled && config.phoneAuth.delivery === 'log') {
+    // Said once, loudly, at boot rather than only per code: a deployment that
+    // enabled self-service signup without wiring an SMS provider is handing
+    // account access to anyone who can read the server log.
+    console.warn(
+      '[PhoneAuth] ENABLED with delivery=log — verification codes are written to ' +
+      'the server log. Anyone who can read the log can sign in as any number. ' +
+      'Development and single-operator use only.',
+    )
+  }
   const instance = store.registerServerInstance(config.host, undefined, config.instanceId)
 
   // Multi-org backfill: now that organizations exist (auth bootstrap ran), assign

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
+import { PhoneAuthService, type PhoneAuthConfig } from './phoneAuth.js'
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
@@ -52,6 +53,8 @@ export type AuthServiceOptions = {
   dbPath: string
   tokenTtlSec: number
   bootstrapAdmin: BootstrapAdminConfig
+  /** Omitted → phone auth is constructed but disabled. */
+  phoneAuth?: PhoneAuthConfig
 }
 
 export class AuthServiceError extends Error {
@@ -188,7 +191,7 @@ export async function createAuthService(
     options.bootstrapAdmin,
   )
   return {
-    service: new AuthService(db, options.tokenTtlSec),
+    service: new AuthService(db, options.tokenTtlSec, options.phoneAuth),
     bootstrap,
   }
 }
@@ -199,15 +202,39 @@ export class AuthService {
   private readonly cleanupTimer: ReturnType<typeof setInterval>
   private readonly oauth2Bridge: OAuth2Bridge
 
+  /**
+   * Phone + code auth. Always constructed so the routes can answer "disabled"
+   * uniformly; the config's `enabled` flag is what gates it, not the presence
+   * of the service.
+   */
+  readonly phoneAuth: PhoneAuthService
+
   constructor(
     private readonly db: AuthCenterDb,
     private readonly tokenTtlSec: number,
+    phoneAuthConfig?: PhoneAuthConfig,
   ) {
     this.cleanupTimer = setInterval(() => {
       this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
     this.cleanupTimer.unref?.()
     this.oauth2Bridge = new OAuth2Bridge(() => getSystemSettings().oauth2.scriptPath || null)
+    this.phoneAuth = new PhoneAuthService(
+      db,
+      phoneAuthConfig ?? {
+        enabled: false,
+        delivery: 'log',
+        codeTtlSec: 300,
+        resendCooldownSec: 60,
+        maxSendsPerHour: 5,
+        maxVerifyAttempts: 5,
+        autoCreateOrg: true,
+      },
+      // Same trust root as access tokens: codes and register tokens are
+      // server-minted artefacts, and a deployment that rotates its JWT
+      // secret should invalidate pending ones too.
+      db.getJwtSecret(),
+    )
   }
 
   destroy(): void {
@@ -332,6 +359,129 @@ export class AuthService {
       scopes: defaultScopesForRole(user.role),
       keyId: 'password-login',
     })
+  }
+
+  /**
+   * Look up the account a verified phone number belongs to.
+   *
+   * Returns null when the number has never signed in — the caller turns that
+   * into the `need_register` response rather than an error, because "no account
+   * yet" is the normal first step of self-service signup, not a failure.
+   */
+  findUserByPhone(phone: string): AuthCenterUser | null {
+    return this.db.getUserByPhone(phone)
+  }
+
+  /**
+   * Issue a token for an existing phone-backed account. The code must already
+   * have been verified by the caller; this method trusts that and only enforces
+   * account state.
+   */
+  issueTokenFromPhone(phone: string): {
+    access_token: string
+    refresh_token: string
+    token_type: 'Bearer'
+    expires_in: number
+    user: SanitizedAuthCenterUser
+    organization: { id: string; name: string; createdAt: number } | null
+    scopes: string[]
+  } {
+    const user = this.db.getUserByPhone(phone)
+    if (!user) {
+      throw new AuthServiceError(404, 'No account for this phone number')
+    }
+    if (user.status !== 'active') {
+      throw new AuthServiceError(403, 'Account is disabled')
+    }
+    this.db.updateUserLastLogin(user.id)
+    return this.issueToken({
+      user,
+      scopes: defaultScopesForRole(user.role),
+      keyId: 'phone-login',
+    })
+  }
+
+  /**
+   * Create an account for a verified phone number and log it in.
+   *
+   * With `autoCreateOrg` (the public-cloud default) the person also gets their
+   * own organisation and is its admin — the one-person-company model, where an
+   * individual is not a special case but an organisation of one. That keeps a
+   * single tenancy model instead of two, and it is what makes later merging or
+   * splitting a matter of org membership rather than of moving anybody's data.
+   *
+   * Without it, the person joins the single existing organisation as a plain
+   * user, which is what a self-hosted deployment with one company wants.
+   */
+  registerWithPhone(input: {
+    phone: string
+    nickname?: string
+    autoCreateOrg: boolean
+  }): {
+    access_token: string
+    refresh_token: string
+    token_type: 'Bearer'
+    expires_in: number
+    user: SanitizedAuthCenterUser
+    organization: { id: string; name: string; createdAt: number } | null
+    scopes: string[]
+  } {
+    const existing = this.db.getUserByPhone(input.phone)
+    if (existing) {
+      // Racing double-submit, or a client that kept a stale register token.
+      // Logging them in is both correct and kinder than a 409.
+      return this.issueTokenFromPhone(input.phone)
+    }
+
+    const displayName = input.nickname?.trim() || ''
+    const createdAt = Date.now()
+    const userId = randomUUID()
+
+    let orgId: string
+    let role: string
+    if (input.autoCreateOrg) {
+      orgId = randomUUID()
+      // Named after the person, disambiguated by user id: org names have no SQL
+      // uniqueness constraint but createOrganization() rejects duplicates, and
+      // two people may well pick the same nickname.
+      const orgName = `${displayName || input.phone}'s workspace (${userId.slice(0, 8)})`
+      this.db.createOrganization(orgId, orgName, createdAt, null)
+      role = 'admin'
+    } else {
+      const orgs = this.db.listOrganizations()
+      const target = orgs[0]
+      if (!target) {
+        throw new AuthServiceError(500, 'No organization exists to join')
+      }
+      orgId = target.id
+      role = 'user'
+    }
+
+    this.db.createUser({
+      id: userId,
+      orgId,
+      // The users table needs a non-null unique email; a phone-only account has
+      // none, so it gets the platform's synthetic form, which sanitizeUser()
+      // already hides from clients.
+      email: createSyntheticUserEmail(input.phone),
+      // `name` is the login username. The phone is the stable handle here; the
+      // chosen nickname is a display name, which is free to collide and change.
+      name: input.phone,
+      displayName: displayName || null,
+      departmentId: null,
+      role,
+      status: 'active',
+      localAuth: true,
+      tokenLimit: null,
+      passwordHash: null,
+      passwordUpdatedAt: null,
+      lastLoginAt: createdAt,
+      createdAt,
+      extUserId: null,
+      phone: input.phone,
+    })
+
+    return this.issueTokenFromPhone(input.phone)
   }
 
   issueTokenFromApiKey(apiKeyValue: string): {
@@ -598,6 +748,7 @@ export class AuthService {
         passwordUpdatedAt: null,
         lastLoginAt: null,
         extUserId: identity.extUserId,
+        phone: null,
       }
       try {
         this.db.createUser(newUser)
@@ -1088,6 +1239,7 @@ export class AuthService {
       passwordUpdatedAt: createdAt,
       lastLoginAt: null,
       extUserId,
+      phone: null,
     }
     withExtIdConflict(() => this.db.createUser(user))
     return { user: sanitizeUser(user) }

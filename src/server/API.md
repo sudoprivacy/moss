@@ -101,6 +101,8 @@ Authorization: Bearer <access_token>
 - `GET /api/v1/system-config`
 - `POST /api/v1/auth/token`
 - `POST /api/v1/auth/login`
+- `POST /api/v1/auth/send-code`
+- `POST /api/v1/auth/register`
 - `POST /api/v1/auth/introspect`
 
 失败格式统一为：
@@ -256,6 +258,92 @@ API key 登录：
 ### POST `/api/v1/auth/login`
 
 `/api/v1/auth/token` 的等价别名。
+
+### POST `/api/v1/auth/send-code`
+
+Phone signup/login, step 1. **Unauthenticated** — the caller may have no account
+yet. Returns `404` unless `phoneAuth.enabled` is set in `server.json`.
+
+```json
+{ "phone": "13800138000" }
+```
+
+```json
+{ "success": true, "next_send_in": 60 }
+```
+
+`next_send_in` is the resend cooldown in seconds; it is also returned alongside
+a `429` when a resend is requested too early, so the client can keep counting
+down instead of guessing.
+
+Two independent limits apply, because they defend different things: a per-number
+cooldown (`resendCooldownSec`) against button-mashing, and a per-number hourly
+cap (`maxSendsPerHour`) bounding the cost and abuse surface of an endpoint that
+is unauthenticated and — once a real SMS provider is wired — spends money per
+call. Verifying a code does **not** refund the hourly budget.
+
+> ⚠️ The only delivery transport that ships is `delivery: "log"`, which writes
+> the code to the server log. **Anyone who can read the log can sign in as any
+> number**, so this is a development and single-operator affordance; the server
+> says so loudly at boot when it is enabled.
+
+### POST `/api/v1/auth/login` (phone form)
+
+Phone signup/login, step 2. Detected by the body shape — a `{ phone, code }`
+body takes the phone branch, anything else falls through to the grant types
+documented above, so password and API-key login are unaffected.
+
+```json
+{ "phone": "13800138000", "code": "123456" }
+```
+
+A code is single-use, expires after `codeTtlSec`, and is destroyed after
+`maxVerifyAttempts` wrong guesses (so brute force costs a rate-limited resend).
+
+**Known number** → the standard token response under `data`:
+
+```json
+{ "success": true, "data": { "access_token": "...", "user": {}, "organization": {} } }
+```
+
+**New number** → not an error; this is the normal first step of signup:
+
+```json
+{
+  "success": false,
+  "need_register": true,
+  "register_token": "...",
+  "phone": "13800138000",
+  "msg": "No account for this number yet, please register"
+}
+```
+
+The register token is a short-lived signed attestation that this number passed a
+code check. It carries no server-side state, so it works across instances behind
+a load balancer, and it means the code is verified exactly once even though
+registration is a second request.
+
+### POST `/api/v1/auth/register`
+
+Phone signup, step 3: exchange the register token for an account, and log in.
+
+```json
+{ "register_token": "...", "nickname": "Ethan", "invitation_code": "optional" }
+```
+
+`invitation_code` is required only when `phoneAuth.invitationCode` is configured.
+
+With `phoneAuth.autoCreateOrg` (the default, and the public-cloud shape) the new
+person also gets **their own organisation and is its admin** — the one-person
+company model, in which an individual is not a second tenancy model but an
+organisation of one. That is what later lets orgs merge or split as a membership
+change rather than a data migration. Turn it off for a single-company
+deployment, where new people should join the organisation that already exists.
+
+The account's login `name` is the phone number (stable); `nickname` becomes the
+display name (free to collide and change). The users table requires a non-null
+unique email, so a phone-only account gets the platform's synthetic form, which
+`sanitizeUser` already hides from clients.
 
 ### GET `/api/v1/auth/me`
 
