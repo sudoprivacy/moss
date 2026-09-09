@@ -1,18 +1,26 @@
 /**
- * Bulk import of phone identities carried over from the previous server.
+ * Bulk import of phone identities from the previous server.
  *
- * The old deployment authenticated every account by phone code and kept each
- * user's credit balance in the upstream model gateway, keyed on a per-user
- * token. Migration therefore moves two things: the identity (phone + display
- * name + which group they belong to) and the gateway token that the balance
- * hangs off. It deliberately does not copy balance numbers — the gateway stays
- * the single source of truth for the ledger, so carrying the token over is what
- * preserves the credits.
+ * This copies accounts; it does not move them. The previous server stays live
+ * and keeps authenticating the same people, so the two deployments hold
+ * overlapping rosters on purpose and the import is a repeatable sync rather
+ * than a one-way cutover.
  *
- * Two properties matter more than throughput here:
+ * That is only safe because of what is *not* copied. Each account's credit
+ * balance lives in the upstream model gateway, keyed on a per-user token, and
+ * this carries the token rather than the numbers. One person therefore keeps
+ * one balance, spent from whichever deployment they sign in to. Copying the
+ * numbers instead would have produced two ledgers for one person and let them
+ * be spent twice.
  *
- * - **Re-runnable.** A phone already on file is left alone, so a run that
- *   partially failed can simply be repeated after the bad rows are fixed.
+ * Two properties follow from being a sync:
+ *
+ * - **Re-runnable, add-only.** A phone already on file is left alone, so the
+ *   sync can be repeated at any time to pick up whoever has signed up on the
+ *   old server since. It deliberately does not update existing accounts: the
+ *   old server is not authoritative over what moss already knows, so a name or
+ *   status changed on one side does not overwrite the other. The cost is that
+ *   the two rosters drift apart over time, which is inherent to running both.
  * - **Rehearsable.** `dryRun` executes the real path and rolls it back, so what
  *   the rehearsal reports is what the real run will do — not what a separate
  *   simulation believes it will do.
@@ -22,9 +30,9 @@ import type { AuthService } from './service.js'
 import { normalizePhone } from './phoneAuth.js'
 
 /**
- * A migration batch is a one-shot operation on a known roster, so the cap is
- * there to keep a malformed or hostile request from turning into an unbounded
- * transaction — not to page a real import.
+ * A sync runs over a known roster, so the cap is there to keep a malformed or
+ * hostile request from turning into an unbounded transaction — not to page a
+ * real import.
  */
 const MAX_ROWS = 2000
 
@@ -97,7 +105,7 @@ export type PhoneImportResult = {
 
 /**
  * Organization names are user-visible, so a group with no supplied name gets a
- * marked placeholder rather than a bare id — it reads as unfinished migration
+ * marked placeholder rather than a bare id — it reads as unfinished imported
  * data, which is what it is, instead of looking like a deliberate name.
  */
 function fallbackOrgName(group: string): string {
@@ -168,11 +176,11 @@ export function importPhoneUsers(
           continue
         }
 
-        // Already present — from an earlier run, or because they signed up
-        // themselves before migration reached them. Their identity is left as
-        // it is, but a missing gateway token is still worth attaching: without
-        // it the account would silently spend the shared server key and their
-        // carried-over balance would never move.
+        // Already present — from an earlier sync, or because they signed up
+        // here directly while the old server was still serving them. Their
+        // identity is left as it is, but a missing gateway token is still worth
+        // attaching: without it the account would silently spend the shared
+        // server key instead of their own balance.
         if (credential && !authService.getUserModelCredential(user.id)) {
           authService.setUserModelCredential(user.id, credential)
           rows.push({ phone: row.phone, outcome: 'linked', orgId: user.orgId, userId: user.id })
