@@ -87,8 +87,14 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 
 `GetChatData`/`DecryptData` **在 qyapi 上不存在**，只存在于企微发布的原生 C 库 `libWeWorkFinanceSdk_C.so`，官方仅提供 **linux/amd64**。
 
-- 该库**不在仓库中**，需自行从企微后台下载，放到 `deploy/wework-finance-sdk/`
-- 缺失时镜像照常构建，只是拉取不可用
+- 该库**已随仓库提供**：`deploy/wework-finance-sdk/libWeWorkFinanceSdk_C.so`（git-lfs），
+  连同官方头文件 `WeWorkFinanceSdk_C.h`。版本 20250205，MD5 与官方 `md5.txt` 一致。
+- 它是**通用库**，不含任何企业信息 —— corpId / Secret / RSA 私钥全部是运行时参数。
+  所有企业用同一个文件，无需各自下载。
+- 官方下载地址（公开，无需登录）：
+  `https://wwcdn.weixin.qq.com/node/wwcomm/sdk_x86_v3_20250205.tgz`（x86_64）；
+  ARM 版为 `sdk_arm_v3_20250205.tgz`，但 moss 镜像是 amd64-only，用不到。
+- 若文件缺失，镜像照常构建，只是拉取不可用
 - moss 镜像本身已是 amd64-only（Dockerfile 中的 `/lib/x86_64-linux-gnu` 符号链接），故 SDK 不引入新约束
 - **macOS 本地无法拉取**；事件回调那半边可以本地开发调试
 
@@ -175,6 +181,10 @@ jq -r '.[] | "\(.count)\t\(.roomid)"' rooms.json | sort -rn
 - 全链路跑通：SDK 取页 → 真实 RSA 私钥解出对称密钥 → 规范化 → JSONL 落盘 → rooms.json
 - 错误路径：`errcode` 非 0 抛出、`Init` 失败守卫、解密失败计数跳过且游标继续前进
 
-验证使用 gcc 编译的同签名替身库（企微 SDK 需登录后台下载，服务器上没有）。
-**与真实 SDK 的剩余风险**：函数签名若与实际头文件不符（参数个数/类型），
-会在首次调用时报错而非静默出错 —— 替换真库后跑一次拉取即可确认。
+**已用真实 SDK 验证**（20250205，x86_64）：8 个函数签名全部绑定成功，
+并逐一比对官方头文件 `WeWorkFinanceSdk_C.h`，参数个数与类型完全一致。
+
+实际调用链路也已跑通：`NewSdk` → `Init` → `GetChatData` → `GetContentFromSlice`
+→ `FreeSlice` → `DestroySdk`，无段错误。用伪造凭据调用时，SDK 真实访问了企微
+服务器并返回 `40001 invalid credential` —— 证明库已正确加载、网络通路正常、
+参数传递无误。剩下的只是填入真实 Secret 与 RSA 私钥。
