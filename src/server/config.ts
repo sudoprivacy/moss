@@ -347,6 +347,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     // the login panel without hand-editing server.json (same reason
     // MOSS_DEFAULT_RUNTIME exists); anything but 0/1/2 is ignored rather than
     // crashing a boot over a typo in an env var.
+    // Env override so a deployment can turn self-service signup on without
+    // hand-editing server.json; anything else leaves the file value in place.
+    phoneAuth: {
+      ...raw.phoneAuth,
+      enabled: process.env.MOSS_PHONE_AUTH === '1' || process.env.MOSS_PHONE_AUTH === 'true'
+        ? true
+        : process.env.MOSS_PHONE_AUTH === '0' || process.env.MOSS_PHONE_AUTH === 'false'
+          ? false
+          : raw.phoneAuth.enabled,
+    },
     systemConfig: {
       ...raw.systemConfig,
       loginMethod:

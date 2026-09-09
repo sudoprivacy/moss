@@ -40,6 +40,17 @@ export type AuthCenterUser = {
   passwordUpdatedAt: number | null
   lastLoginAt: number | null
   extUserId: string | null
+  /** Phone identity for `login_method: 0`; null for password- and IdP-backed users. */
+  phone: string | null
+}
+
+/** A pending phone verification code. Only the HMAC of the code is stored. */
+export type PhoneLoginCode = {
+  phone: string
+  codeHash: string
+  createdAt: number
+  expiresAt: number
+  attempts: number
 }
 
 export type AuthCenterApiKey = {
@@ -149,6 +160,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     passwordUpdatedAt: row.password_updated_at == null ? null : Number(row.password_updated_at),
     lastLoginAt: row.last_login_at == null ? null : Number(row.last_login_at),
     extUserId: row.ext_user_id == null ? null : String(row.ext_user_id),
+    phone: row.phone == null ? null : String(row.phone),
   }
 }
 
@@ -275,6 +287,30 @@ export class AuthCenterDb {
         value TEXT NOT NULL
       );
 
+      -- Pending phone verification codes (login_method: 0). In the shared store
+      -- rather than in a process Map because moss can run several instances
+      -- behind a load balancer: a code minted on one must verify on another.
+      -- Only the HMAC of the code is kept, so a database read does not hand over
+      -- the ability to log in as a pending number.
+      CREATE TABLE IF NOT EXISTS phone_login_codes (
+        phone TEXT PRIMARY KEY,
+        code_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0
+      );
+
+      -- Send log backing the per-number hourly cap. Separate from the code row
+      -- because that row is deleted on successful verification, and a deleted
+      -- row must not reset someone's rate limit.
+      CREATE TABLE IF NOT EXISTS phone_login_sends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS phone_login_sends_idx
+        ON phone_login_sends (phone, sent_at);
+
       CREATE INDEX IF NOT EXISTS departments_org_idx ON departments (org_id);
       CREATE INDEX IF NOT EXISTS departments_parent_idx ON departments (parent_id);
       CREATE INDEX IF NOT EXISTS users_org_idx ON users (org_id);
@@ -362,6 +398,20 @@ export class AuthCenterDb {
       'display_name',
       'ALTER TABLE users ADD COLUMN display_name TEXT',
     )
+    // Phone identity for `login_method: 0`. Nullable: password- and IdP-backed
+    // users never have one. Unique GLOBALLY rather than per-org (unlike
+    // ext_user_id) because a phone number identifies one human across the whole
+    // deployment — the same number signing in twice must reach the same account,
+    // not create a second one in another org.
+    this.ensureColumn(
+      'users',
+      'phone',
+      'ALTER TABLE users ADD COLUMN phone TEXT',
+    )
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS users_phone_uniq
+        ON users (phone) WHERE phone IS NOT NULL;
+    `)
     this.ensureColumn(
       'departments',
       'ext_dept_id',
@@ -605,8 +655,8 @@ export class AuthCenterDb {
   createUser(user: AuthCenterUser): void {
     this.db.prepare(`
       INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, password_hash,
-                         password_updated_at, last_login_at, created_at, ext_user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         password_updated_at, last_login_at, created_at, ext_user_id, phone)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       user.id,
       user.orgId,
@@ -621,6 +671,7 @@ export class AuthCenterDb {
       user.lastLoginAt,
       user.createdAt,
       user.extUserId ?? null,
+      user.phone ?? null,
     )
   }
 
@@ -629,6 +680,69 @@ export class AuthCenterDb {
       SELECT * FROM users WHERE id = ? LIMIT 1
     `).get(id) as SqlRow | undefined
     return row ? mapUser(row) : null
+  }
+
+  getUserByPhone(phone: string): AuthCenterUser | null {
+    const row = this.db.prepare(`
+      SELECT * FROM users WHERE phone = ? LIMIT 1
+    `).get(phone) as SqlRow | undefined
+    return row ? mapUser(row) : null
+  }
+
+  // ---- phone verification codes (login_method: 0) ----
+
+  getPhoneLoginCode(phone: string): PhoneLoginCode | null {
+    const row = this.db.prepare(`
+      SELECT * FROM phone_login_codes WHERE phone = ? LIMIT 1
+    `).get(phone) as SqlRow | undefined
+    if (!row) return null
+    return {
+      phone: String(row.phone),
+      codeHash: String(row.code_hash),
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      attempts: Number(row.attempts),
+    }
+  }
+
+  /** One pending code per number: a resend replaces the previous one. */
+  upsertPhoneLoginCode(code: PhoneLoginCode): void {
+    this.db.prepare(`
+      INSERT INTO phone_login_codes (phone, code_hash, created_at, expires_at, attempts)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(phone) DO UPDATE SET
+        code_hash = excluded.code_hash,
+        created_at = excluded.created_at,
+        expires_at = excluded.expires_at,
+        attempts = excluded.attempts
+    `).run(code.phone, code.codeHash, code.createdAt, code.expiresAt, code.attempts)
+  }
+
+  bumpPhoneLoginCodeAttempts(phone: string): void {
+    this.db.prepare(`
+      UPDATE phone_login_codes SET attempts = attempts + 1 WHERE phone = ?
+    `).run(phone)
+  }
+
+  deletePhoneLoginCode(phone: string): void {
+    this.db.prepare('DELETE FROM phone_login_codes WHERE phone = ?').run(phone)
+  }
+
+  /** Drop expired codes and send-log rows older than the rate-limit window. */
+  prunePhoneLoginCodes(now: number): void {
+    this.db.prepare('DELETE FROM phone_login_codes WHERE expires_at <= ?').run(now)
+    this.db.prepare('DELETE FROM phone_login_sends WHERE sent_at < ?').run(now - 24 * 60 * 60 * 1000)
+  }
+
+  recordPhoneLoginSend(phone: string, sentAt: number): void {
+    this.db.prepare('INSERT INTO phone_login_sends (phone, sent_at) VALUES (?, ?)').run(phone, sentAt)
+  }
+
+  countPhoneLoginSends(phone: string, since: number): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM phone_login_sends WHERE phone = ? AND sent_at >= ?
+    `).get(phone, since) as SqlRow | undefined
+    return row ? Number(row.n) : 0
   }
 
   getUserByEmail(email: string): AuthCenterUser | null {
@@ -1014,6 +1128,7 @@ export class AuthCenterDb {
         passwordUpdatedAt: now(),
         lastLoginAt: null,
         extUserId: null,
+        phone: null,
       })
       this.createApiKey(apiKey)
       this.setConfig('issuer', 'moss-server')
@@ -1099,6 +1214,7 @@ export class AuthCenterDb {
         passwordUpdatedAt: now(),
         lastLoginAt: null,
         extUserId: null,
+        phone: null,
       })
       this.createApiKey(apiKey)
       this.db.exec('COMMIT')

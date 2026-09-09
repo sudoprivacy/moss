@@ -22,6 +22,7 @@ import { RuntimeService, ServerDrainingError } from './runtimeService.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
 import { buildPublicSystemConfig } from './publicSystemConfig.js'
+import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
 import { initHubConfig } from './hubConfig.js'
@@ -2214,11 +2215,121 @@ export function startServer(
         return
       }
 
+      // Self-service signup, step 1: mint and deliver a verification code.
+      // Unauthenticated by necessity — the caller has no account yet.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/send-code') {
+        const body = await readJsonBody(req)
+        const phoneAuth = authService.phoneAuth
+        if (!phoneAuth.enabled) {
+          throw new HttpError(404, 'Phone login is not enabled on this server')
+        }
+        const phone = normalizePhone(body.phone)
+        if (!phone) {
+          // Message mirrors the client-side validator so a number the UI accepts
+          // is never rejected here with a different explanation.
+          writeJson(res, 400, { success: false, msg: 'Invalid phone number' })
+          return
+        }
+        try {
+          const { nextSendIn } = phoneAuth.sendCode(phone)
+          writeJson(res, 200, { success: true, next_send_in: nextSendIn })
+        } catch (error) {
+          if (error instanceof PhoneAuthError) {
+            writeJson(res, error.status, {
+              success: false,
+              msg: error.message,
+              ...(error.retryAfterSec !== undefined ? { next_send_in: error.retryAfterSec } : {}),
+            })
+            return
+          }
+          throw error
+        }
+        return
+      }
+
+      // Self-service signup, step 3: exchange a register token for an account.
+      // Step 2 is the phone branch of /api/v1/auth/login below, which is what
+      // hands out the register token after a code checks out.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/register') {
+        const body = await readJsonBody(req)
+        const phoneAuth = authService.phoneAuth
+        if (!phoneAuth.enabled) {
+          throw new HttpError(404, 'Phone login is not enabled on this server')
+        }
+        const phone = phoneAuth.verifyRegisterToken(body.register_token)
+        if (!phone) {
+          writeJson(res, 400, { success: false, msg: 'Registration token is invalid or expired' })
+          return
+        }
+        if (!phoneAuth.checkInvitationCode(body.invitation_code)) {
+          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+          return
+        }
+        const result = authService.registerWithPhone({
+          phone,
+          nickname: typeof body.nickname === 'string' ? body.nickname : undefined,
+          autoCreateOrg: phoneAuth.autoCreateOrg,
+        })
+        writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+        return
+      }
+
       if (
         req.method === 'POST' &&
         (pathname === '/api/v1/auth/token' || pathname === '/api/v1/auth/login')
       ) {
         const body = await readJsonBody(req)
+
+        // Self-service signup, step 2. Detected by shape rather than by
+        // grant_type because the sudowork client posts a bare {phone, code}; the
+        // branch sits ahead of the grant dispatch so that body never falls
+        // through to the password path and fails with the wrong message.
+        if (typeof body.phone === 'string' && typeof body.code === 'string') {
+          const phoneAuth = authService.phoneAuth
+          if (!phoneAuth.enabled) {
+            throw new HttpError(404, 'Phone login is not enabled on this server')
+          }
+          const phone = normalizePhone(body.phone)
+          if (!phone) {
+            writeJson(res, 400, { success: false, msg: 'Invalid phone number' })
+            return
+          }
+          let verified: boolean
+          try {
+            verified = phoneAuth.verifyCode(phone, body.code)
+          } catch (error) {
+            if (error instanceof PhoneAuthError) {
+              writeJson(res, error.status, { success: false, msg: error.message })
+              return
+            }
+            throw error
+          }
+          if (!verified) {
+            writeJson(res, 401, { success: false, msg: 'Verification code is incorrect or expired' })
+            return
+          }
+
+          const existing = authService.findUserByPhone(phone)
+          if (!existing) {
+            // Not an error: a first-time number is the normal start of signup.
+            // The client shows its register form and comes back to
+            // /api/v1/auth/register with this token, so the code is checked
+            // exactly once even though registration is a second request.
+            writeJson(res, 200, {
+              success: false,
+              need_register: true,
+              register_token: phoneAuth.issueRegisterToken(phone),
+              phone,
+              msg: 'No account for this number yet, please register',
+            })
+            return
+          }
+
+          const result = authService.issueTokenFromPhone(phone)
+          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+          return
+        }
+
         const grantType =
           typeof body.grant_type === 'string'
             ? body.grant_type.trim()

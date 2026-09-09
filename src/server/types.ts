@@ -307,6 +307,38 @@ export const serverFileConfigSchema = lazySchema(() =>
       logEnabled: true,
     }),
     /**
+     * Phone + verification-code auth — the self-service signup path behind
+     * `login_method: 0`. Off by default: the endpoints refuse until a
+     * deployment turns them on, because the only delivery transport that ships
+     * writes codes to the server log.
+     */
+    phoneAuth: z.object({
+      enabled: z.boolean().default(false),
+      /** `log` writes the code to the server log — development only. */
+      delivery: z.enum(['log']).default('log'),
+      codeTtlSec: z.number().int().min(60).max(3600).default(300),
+      resendCooldownSec: z.number().int().min(0).max(600).default(60),
+      maxSendsPerHour: z.number().int().min(1).max(100).default(5),
+      maxVerifyAttempts: z.number().int().min(1).max(20).default(5),
+      /** When set, registration additionally requires this invitation code. */
+      invitationCode: z.string().min(1).optional(),
+      /**
+       * Give each new person their own organisation (one-person company) — the
+       * public-cloud shape, and what makes an individual an organisation of one
+       * rather than a second tenancy model. Turn off for a single-company
+       * deployment, where new people join the organisation that already exists.
+       */
+      autoCreateOrg: z.boolean().default(true),
+    }).default({
+      enabled: false,
+      delivery: 'log',
+      codeTtlSec: 300,
+      resendCooldownSec: 60,
+      maxSendsPerHour: 5,
+      maxVerifyAttempts: 5,
+      autoCreateOrg: true,
+    }),
+    /**
      * Public, unauthenticated client bootstrap (`GET /api/v1/system-config`).
      *
      * This is the seam that lets one binary serve Sudo Cloud and Sudo Private:
@@ -375,6 +407,7 @@ export const serverFileConfigSchema = lazySchema(() =>
 
 export type ServerFileConfig = z.infer<ReturnType<typeof serverFileConfigSchema>>
 export type SystemConfigFileSection = ServerFileConfig['systemConfig']
+export type PhoneAuthFileSection = ServerFileConfig['phoneAuth']
 
 export type ServerConfig = {
   host: string
@@ -556,6 +589,8 @@ export type ServerConfig = {
   }
   /** Public client bootstrap — see the schema section of the same name. */
   systemConfig: SystemConfigFileSection
+  /** Phone + code auth — see the schema section of the same name. */
+  phoneAuth: PhoneAuthFileSection
 }
 
 export type SessionStatus =
