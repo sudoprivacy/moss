@@ -343,6 +343,18 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? normalizePath((process.env.CABIN_LOG_FILE || raw.cabin.logFile)!)
         : undefined,
     },
+    // Public client bootstrap. MOSS_LOGIN_METHOD exists so a deployment can flip
+    // the login panel without hand-editing server.json (same reason
+    // MOSS_DEFAULT_RUNTIME exists); anything but 0/1/2 is ignored rather than
+    // crashing a boot over a typo in an env var.
+    systemConfig: {
+      ...raw.systemConfig,
+      loginMethod:
+        process.env.MOSS_LOGIN_METHOD === '0' ? 0
+          : process.env.MOSS_LOGIN_METHOD === '1' ? 1
+            : process.env.MOSS_LOGIN_METHOD === '2' ? 2
+              : raw.systemConfig.loginMethod,
+    },
   }
 }
 

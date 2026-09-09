@@ -21,6 +21,7 @@ import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.
 import { RuntimeService, ServerDrainingError } from './runtimeService.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
+import { buildPublicSystemConfig } from './publicSystemConfig.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
 import { initHubConfig } from './hubConfig.js'
@@ -2191,6 +2192,17 @@ export function startServer(
         // stays { ok, ready, instance_id, checks } per the HA design doc §10.
         const { httpStatus, ...body } = readiness
         writeJson(res, httpStatus, body)
+        return
+      }
+
+      // Client bootstrap. Deliberately above the auth wall: the client must read
+      // it while logged out, to learn which login method this deployment uses.
+      // Public payload only — see publicSystemConfig.ts for what may go in it.
+      if ((req.method === 'GET' || isHead) && pathname === '/api/v1/system-config') {
+        writeJson(res, 200, {
+          success: true,
+          data: buildPublicSystemConfig(config, getSystemSettings().url),
+        })
         return
       }
 

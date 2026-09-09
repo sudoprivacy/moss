@@ -98,6 +98,7 @@ Authorization: Bearer <access_token>
 - `GET /readyz`
 - `GET /admin`
 - `GET /admin/*`
+- `GET /api/v1/system-config`
 - `POST /api/v1/auth/token`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/introspect`
@@ -137,6 +138,56 @@ Authorization: Bearer <access_token>
   "ready": true
 }
 ```
+
+## System Config
+
+### GET `/api/v1/system-config`
+
+**Client bootstrap document. Unauthenticated** — the client reads it *before*
+logging in, to learn which login method this deployment uses.
+
+This is the seam that lets one binary serve both **Sudo Cloud** (we host) and
+**Sudo Private** (the customer hosts): the deployment declares its login method
+in `server.json` instead of the client inferring it from a URL.
+
+Configured under the `systemConfig` section of `server.json`; the field contract
+and its implementation live in `src/server/publicSystemConfig.ts`.
+
+| Field | Meaning |
+| --- | --- |
+| `login_method` | `0` phone code · `1` username/password · `2` third-party (CAS). Overridable with `MOSS_LOGIN_METHOD` |
+| `third_party_auth` | Provider list, sent when `login_method=2` |
+| `sudorouter_baseurl` | SudoRouter **root** (no `/v1` — call sites append their own path). Derived from the system settings' model service URL when unset |
+| `skillhub_baseurl` / `scode_auto_model` | Optional |
+| `recharge_mode` | `pay` / `approve` / `disabled`. moss holds no credit ledger, so the default is `disabled` |
+| `credit_application` | Requestable point bounds, used in `approve` mode |
+| `log_report` / `version_update` / `product_improvement` | Telemetry and update switches |
+
+Example response from a self-hosted deployment that configured nothing:
+
+```json
+{
+  "success": true,
+  "data": {
+    "login_method": 1,
+    "recharge_mode": "disabled",
+    "log_report": { "enabled": 0 },
+    "version_update": { "enabled": 0 },
+    "product_improvement": { "enabled": 0 }
+  }
+}
+```
+
+> ⚠️ **Those three switches are always sent as an explicit `enabled: 0`, never
+> omitted.** The client reads them as `enabled !== 0`, i.e. it **fails open** —
+> omitting the blocks would leave a self-hosted deployment that configured
+> nothing still reporting telemetry and checking for updates against the public
+> cloud's hardcoded fallback hosts.
+>
+> ⚠️ **This route sits above the auth wall**, so its contents are readable by
+> anyone who can reach the port. Feature switches and base URLs only; **never**
+> keys, tokens, or user/org data. The admin-side counterpart that *does* hold
+> credentials is `systemSettings.ts` — do not confuse the two.
 
 ## Admin UI
 
