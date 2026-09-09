@@ -34,6 +34,16 @@ export type TencentSmsSettings = {
   signName: string
   templateId: string
   region: string
+  /**
+   * Ordered parameters for the template's `{1}`, `{2}`, … placeholders.
+   *
+   * Templates differ per account and Tencent rejects a mismatch with
+   * "request content does not match the template content" — an error that says
+   * nothing about how many it wanted. So the list is configuration, not a
+   * hardcoded shape: `{code}` and `{ttlMinutes}` are substituted, anything else
+   * is passed through literally.
+   */
+  templateParams: string[]
 }
 
 export type TencentSmsCredentials = {
@@ -110,9 +120,21 @@ export function buildAuthorization(input: {
  * sees; the code itself is never logged here — that is the whole point of having
  * a real provider.
  */
+/** Fill `{code}` / `{ttlMinutes}` in the configured parameter list. */
+export function renderTemplateParams(
+  params: string[],
+  values: { code: string; ttlMinutes: number },
+): string[] {
+  return params.map(p =>
+    p.replace(/\{code\}/g, values.code).replace(/\{ttlMinutes\}/g, String(values.ttlMinutes)),
+  )
+}
+
 export async function sendTencentSms(input: {
   phone: string
   code: string
+  /** Code lifetime, for templates that state it. */
+  ttlMinutes: number
   settings: TencentSmsSettings
   credentials: TencentSmsCredentials
   /** Injectable for tests; defaults to global fetch. */
@@ -126,7 +148,10 @@ export async function sendTencentSms(input: {
     SmsSdkAppId: input.settings.sdkAppId,
     SignName: input.settings.signName,
     TemplateId: input.settings.templateId,
-    TemplateParamSet: [input.code],
+    TemplateParamSet: renderTemplateParams(input.settings.templateParams, {
+      code: input.code,
+      ttlMinutes: input.ttlMinutes,
+    }),
   })
 
   const doFetch = input.fetchImpl ?? fetch

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { buildAuthorization, sendTencentSms, SmsDeliveryError } from '../auth/smsTencent.js'
+import { buildAuthorization, renderTemplateParams, sendTencentSms, SmsDeliveryError } from '../auth/smsTencent.js'
 
 /**
  * The signature is the part that fails silently in production — a wrong one
@@ -8,7 +8,13 @@ import { buildAuthorization, sendTencentSms, SmsDeliveryError } from '../auth/sm
  */
 
 const CREDS = { secretId: 'AKIDTEST', secretKey: 'SECRETTEST' }
-const SETTINGS = { sdkAppId: '1400000000', signName: 'Test', templateId: '1234567', region: 'ap-beijing' }
+const SETTINGS = {
+  sdkAppId: '1400000000',
+  signName: 'Test',
+  templateId: '1234567',
+  region: 'ap-beijing',
+  templateParams: ['{code}', '{ttlMinutes}'],
+}
 const TS = 1_700_000_000
 
 describe('buildAuthorization', () => {
@@ -43,6 +49,7 @@ describe('sendTencentSms', () => {
     await sendTencentSms({
       phone: '13800138000',
       code: '123456',
+      ttlMinutes: 5,
       settings: SETTINGS,
       credentials: CREDS,
       now: TS * 1000,
@@ -56,7 +63,7 @@ describe('sendTencentSms', () => {
     const body = JSON.parse(String(seen!.init.body))
     // The stored identity is bare digits; the provider wants E.164.
     expect(body.PhoneNumberSet).toEqual(['+8613800138000'])
-    expect(body.TemplateParamSet).toEqual(['123456'])
+    expect(body.TemplateParamSet).toEqual(['123456', '5'])
     expect(body.SmsSdkAppId).toBe(SETTINGS.sdkAppId)
 
     const headers = seen!.init.headers as Record<string, string>
@@ -74,6 +81,7 @@ describe('sendTencentSms', () => {
     const promise = sendTencentSms({
       phone: '13800138000',
       code: '123456',
+      ttlMinutes: 5,
       settings: SETTINGS,
       credentials: CREDS,
       fetchImpl: (async () => ({
@@ -88,6 +96,7 @@ describe('sendTencentSms', () => {
     const promise = sendTencentSms({
       phone: '13800138000',
       code: '123456',
+      ttlMinutes: 5,
       settings: SETTINGS,
       credentials: CREDS,
       fetchImpl: (async () => ({
@@ -102,10 +111,30 @@ describe('sendTencentSms', () => {
     const promise = sendTencentSms({
       phone: '13800138000',
       code: '123456',
+      ttlMinutes: 5,
       settings: SETTINGS,
       credentials: CREDS,
       fetchImpl: (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch,
     })
     await expect(promise).rejects.toThrow(SmsDeliveryError)
+  })
+})
+
+describe('renderTemplateParams', () => {
+  it('fills the placeholders a template actually declares', () => {
+    // Templates differ per account: Tencent rejects a count mismatch with
+    // "request content does not match the template content", which says nothing
+    // about how many it wanted — so the list is configuration, not a constant.
+    expect(renderTemplateParams(['{code}', '{ttlMinutes}'], { code: '123456', ttlMinutes: 5 }))
+      .toEqual(['123456', '5'])
+  })
+
+  it('supports a single-parameter template', () => {
+    expect(renderTemplateParams(['{code}'], { code: '123456', ttlMinutes: 5 })).toEqual(['123456'])
+  })
+
+  it('passes literals through untouched', () => {
+    expect(renderTemplateParams(['SudoWork', '{code}'], { code: '999999', ttlMinutes: 10 }))
+      .toEqual(['SudoWork', '999999'])
   })
 })

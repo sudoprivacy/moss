@@ -315,7 +315,11 @@ function buildSmsSender(
         signName: tencent.signName,
         templateId: tencent.templateId,
         region: tencent.region,
+        templateParams: tencent.templateParams,
       },
+      // Templates commonly state the validity window; keep it in step with the
+      // TTL actually enforced rather than hardcoding a number in the message.
+      ttlMinutes: Math.max(1, Math.round(config.phoneAuth.codeTtlSec / 60)),
       credentials: { secretId: id.value, secretKey: key.value },
     })
   }
