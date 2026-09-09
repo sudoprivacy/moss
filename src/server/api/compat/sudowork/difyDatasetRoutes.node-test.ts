@@ -74,6 +74,20 @@ describe('Sudowork admin dataset compatibility routes', () => {
     assert.deepEqual([unknown.status, await unknown.json()], [400, { success: false, msg: 'enterprise 10 not found' }])
   })
 
+  test('Moss 组织作用域下的超级管理员固定使用当前组织', async () => {
+    const scoped = setup({
+      userId: 'root', orgId: 'org-a', role: 'super_admin', organizationScoped: true,
+    })
+
+    const current = await scoped.app.request('/api/v1/admin/datasets')
+    assert.equal(current.status, 200)
+    assert.equal(scoped.calls[0]?.args[0], 'org-a')
+    const crossOrg = await scoped.app.request('/api/v1/admin/datasets?enterprise_id=10')
+    assert.deepEqual([crossOrg.status, await crossOrg.json()], [403, {
+      success: false, msg: 'cannot operate on another enterprise',
+    }])
+  })
+
   test('preserves JSON writes and validation messages', async () => {
     const { app, calls } = setup()
     const missing = await app.request('/api/v1/admin/datasets', {

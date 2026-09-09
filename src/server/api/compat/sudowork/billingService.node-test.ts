@@ -83,7 +83,7 @@ function setup() {
     db, auth, identities, repository, wallet, recharge, coordinator, credit, refund, payment,
     clock: () => now,
   })
-  return { db, repository, router, service, setNow(value: number) { now = value } }
+  return { db, auth, identities, repository, router, service, setNow(value: number) { now = value } }
 }
 
 const userActor = { userId: 'user-1', orgId: 'org-1', role: 'user' }
@@ -172,6 +172,55 @@ describe('SudoworkBillingService', () => {
     db.close()
   })
 
+  test('Moss 组织作用域下的超级管理员只能查看和操作当前组织计费数据', async () => {
+    const context = setup()
+    context.auth.createOrganization('org-2', '企业二', 2)
+    context.identities.putOrganizationProfile({
+      orgId: 'org-2', code: 'ENT-2', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
+    })
+    context.identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 10, resourceId: 'org-2', orgId: 'org-2' })
+    context.auth.createUser({
+      id: 'user-2', orgId: 'org-2', email: 'user-2@example.test', name: 'user-2',
+      displayName: '企业二用户', departmentId: null, role: 'user', status: 'active', localAuth: true,
+      tokenLimit: null, createdAt: 2, passwordHash: null, passwordUpdatedAt: null,
+      lastLoginAt: null, extUserId: null,
+    })
+    context.identities.ensureWallet('user', 'user-2')
+    context.identities.assignNumericAlias({ namespace: 'user', legacyId: 18, resourceId: 'user-2', orgId: 'org-2' })
+    context.repository.upsertExternalAccount({
+      provider: 'sudorouter', ownerType: 'user', ownerId: 'user-2', externalAccountId: '92',
+      quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 2,
+    })
+    const first = context.service.createOrder({
+      actor: userActor, amount: 5, paymentMethod: 'ALIPAY', idempotencyKey: 'org-1-order',
+    }) as Record<string, unknown>
+    context.service.createOrder({
+      actor: { userId: 'user-2', orgId: 'org-2', role: 'user' },
+      amount: 8, paymentMethod: 'WECHAT', idempotencyKey: 'org-2-order',
+    })
+    const globalRoot = { userId: 'root-1', orgId: 'org-1', role: 'super_admin' }
+    const scopedRoot = {
+      ...globalRoot,
+      orgId: 'org-2',
+      organizationScoped: true,
+    }
+
+    assert.equal((context.service.listAdminOrders({ actor: globalRoot, query: {} }) as any).total, 2)
+    assert.equal((context.service.listAdminOrders({ actor: scopedRoot, query: {} }) as any).total, 1)
+    assert.equal((context.service.getRechargeStats(scopedRoot) as any).total.orders, 1)
+    assert.throws(
+      () => context.service.getAdminOrder(scopedRoot, String(first.order_no)),
+      /权限不足/,
+    )
+    await assert.rejects(
+      context.service.rechargeUser({
+        actor: scopedRoot, legacyUserId: 17, points: 10, idempotencyKey: 'cross-org-recharge',
+      }),
+      /权限不足/,
+    )
+    context.db.close()
+  })
+
   test('用户积分申请与管理员审批使用同一申请和钱包模型', async () => {
     const { db, repository, service } = setup()
     const application = service.createCreditApplication({
@@ -179,6 +228,20 @@ describe('SudoworkBillingService', () => {
     }) as any
     assert.equal(application.id, 2_000_000_000)
     assert.equal(application.status, 'PENDING')
+
+    const scopedRoot = {
+      userId: 'root-1', orgId: 'org-2', role: 'super_admin', organizationScoped: true,
+    }
+    assert.equal((service.listAdminCreditApplications({ actor: scopedRoot, query: {} }) as any).total, 0)
+    await assert.rejects(
+      service.approveCreditApplication({
+        actor: scopedRoot,
+        legacyApplicationId: application.id,
+        approvedPoints: 180,
+        idempotencyKey: 'cross-org-credit-approve',
+      }),
+      /权限不足/,
+    )
 
     const approved = await service.approveCreditApplication({
       actor: adminActor, legacyApplicationId: application.id, approvedPoints: 180,

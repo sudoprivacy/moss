@@ -20,9 +20,9 @@ describe('Moss Admin 统一运营 API client', () => {
     await api.createInvitations({ count: 3, initialQuotaUsd: 12 })
     await api.deleteInvitation(27)
     assert.deepEqual(calls, [
-      { method: 'GET', path: '/api/v1/admin/invitation-codes?page=2&page_size=10&status=0' },
-      { method: 'POST', path: '/api/v1/admin/invitation-codes', body: { count: 3, initial_quota_usd: 12 } },
-      { method: 'DELETE', path: '/api/v1/admin/invitation-codes/27' },
+      { method: 'GET', path: '/api/moss/v1/operations/invitation-codes?page=2&page_size=10&status=0' },
+      { method: 'POST', path: '/api/moss/v1/operations/invitation-codes', body: { count: 3, initial_quota_usd: 12 } },
+      { method: 'DELETE', path: '/api/moss/v1/operations/invitation-codes/27' },
     ])
   })
 
@@ -36,13 +36,13 @@ describe('Moss Admin 统一运营 API client', () => {
     await api.syncUserQuota(17)
     await api.listUserLedger(17, 50)
     assert.deepEqual(calls, [
-      { method: 'POST', path: '/api/v1/admin/approve', body: { userId: 17 } },
-      { method: 'POST', path: '/api/v1/admin/reject', body: { userId: 18 } },
-      { method: 'POST', path: '/api/v1/admin/delete', body: { userId: 19 } },
-      { method: 'POST', path: '/api/v1/admin/users/17/recharge', body: { points: 1000, reason: '补偿', payment_reference: 'OFFLINE-1' } },
-      { method: 'POST', path: '/api/v1/admin/users/17/points', body: { amount: 20, operation: 'subtract', reason: '冲正', sync_sudorouter: true } },
-      { method: 'POST', path: '/api/v1/admin/users/17/sync-quota', body: undefined },
-      { method: 'GET', path: '/api/v1/admin/users/17/ledger?limit=50' },
+      { method: 'POST', path: '/api/moss/v1/operations/approve', body: { userId: 17 } },
+      { method: 'POST', path: '/api/moss/v1/operations/reject', body: { userId: 18 } },
+      { method: 'POST', path: '/api/moss/v1/operations/delete', body: { userId: 19 } },
+      { method: 'POST', path: '/api/moss/v1/operations/users/17/recharge', body: { points: 1000, reason: '补偿', payment_reference: 'OFFLINE-1' } },
+      { method: 'POST', path: '/api/moss/v1/operations/users/17/points', body: { amount: 20, operation: 'subtract', reason: '冲正', sync_sudorouter: true } },
+      { method: 'POST', path: '/api/moss/v1/operations/users/17/sync-quota', body: undefined },
+      { method: 'GET', path: '/api/moss/v1/operations/users/17/ledger?limit=50' },
     ])
   })
 
@@ -59,16 +59,16 @@ describe('Moss Admin 统一运营 API client', () => {
     await api.getSudoworkSystemConfig()
     await api.updateSudoworkSystemConfig({ recharge_mode: 'approve' })
     assert.deepEqual(calls, [
-      { method: 'GET', path: '/api/v1/admin/recharge/stats' },
-      { method: 'GET', path: '/api/v1/admin/recharge/orders/ORDER%2F7' },
-      { method: 'POST', path: '/api/v1/admin/recharge/orders/7/retry', body: undefined },
-      { method: 'POST', path: '/api/v1/admin/recharge/sync', body: undefined },
-      { method: 'GET', path: '/api/v1/admin/recharge/refund-calc/ORDER%2F7' },
-      { method: 'POST', path: '/api/v1/admin/recharge/orders/ORDER%2F7/refund', body: { reason: '重复付款' } },
-      { method: 'GET', path: '/api/v1/admin/credit-applications/8' },
-      { method: 'POST', path: '/api/v1/admin/credit-applications/8/retry-sync', body: undefined },
-      { method: 'GET', path: '/api/v1/admin/system-config' },
-      { method: 'PUT', path: '/api/v1/admin/system-config', body: { recharge_mode: 'approve' } },
+      { method: 'GET', path: '/api/moss/v1/operations/recharge/stats' },
+      { method: 'GET', path: '/api/moss/v1/operations/recharge/orders/ORDER%2F7' },
+      { method: 'POST', path: '/api/moss/v1/operations/recharge/orders/7/retry', body: undefined },
+      { method: 'POST', path: '/api/moss/v1/operations/recharge/sync', body: undefined },
+      { method: 'GET', path: '/api/moss/v1/operations/recharge/refund-calc/ORDER%2F7' },
+      { method: 'POST', path: '/api/moss/v1/operations/recharge/orders/ORDER%2F7/refund', body: { reason: '重复付款' } },
+      { method: 'GET', path: '/api/moss/v1/operations/credit-applications/8' },
+      { method: 'POST', path: '/api/moss/v1/operations/credit-applications/8/retry-sync', body: undefined },
+      { method: 'GET', path: '/api/moss/v1/operations/system-config' },
+      { method: 'PUT', path: '/api/moss/v1/operations/system-config', body: { recharge_mode: 'approve' } },
     ])
   })
 
@@ -80,18 +80,18 @@ describe('Moss Admin 统一运营 API client', () => {
     await api.approveCreditApplication(8, { approvedPoints: 100, adminComment: '通过' })
     await api.listAuditEvents({ page: 1, pageSize: 20, action: 'USER_APPROVE' })
     assert.deepEqual(calls, [
-      { method: 'GET', path: '/api/v1/admin/recharge/orders?page=1&pageSize=20&status=2' },
-      { method: 'GET', path: '/api/v1/admin/recharge-records?page=3&pageSize=50' },
-      { method: 'GET', path: '/api/v1/admin/credit-applications?page=1&pageSize=20&status=PENDING' },
-      { method: 'POST', path: '/api/v1/admin/credit-applications/8/approve', body: { approved_points: 100, admin_comment: '通过' } },
-      { method: 'GET', path: '/api/v1/admin/logs?page=1&page_size=20&action=USER_APPROVE' },
+      { method: 'GET', path: '/api/moss/v1/operations/recharge/orders?page=1&pageSize=20&status=2' },
+      { method: 'GET', path: '/api/moss/v1/operations/recharge-records?page=3&pageSize=50' },
+      { method: 'GET', path: '/api/moss/v1/operations/credit-applications?page=1&pageSize=20&status=PENDING' },
+      { method: 'POST', path: '/api/moss/v1/operations/credit-applications/8/approve', body: { approved_points: 100, admin_comment: '通过' } },
+      { method: 'GET', path: '/api/moss/v1/operations/logs?page=1&page_size=20&action=USER_APPROVE' },
     ])
   })
 
   test('业务审计透传用户、动作和日期范围', async () => {
     const { calls, api } = setup()
     await api.listAuditEvents({ page: 2, pageSize: 50, userId: 17, action: 'RECHARGE', dateFrom: 10, dateTo: 20 })
-    assert.deepEqual(calls, [{ method: 'GET', path: '/api/v1/admin/logs?page=2&page_size=50&action=RECHARGE&user_id=17&date_from=10&date_to=20' }])
+    assert.deepEqual(calls, [{ method: 'GET', path: '/api/moss/v1/operations/logs?page=2&page_size=50&action=RECHARGE&user_id=17&date_from=10&date_to=20' }])
   })
 
   test('QMS 查询固定使用由服务端解析的当前组织，不发送 tenant_id', async () => {
@@ -103,12 +103,12 @@ describe('Moss Admin 统一运营 API client', () => {
     await api.resolveCrashIssue(9)
     await api.runQualityAggregation()
     assert.deepEqual(calls, [
-      { method: 'GET', path: '/api/v1/qms/dashboard/overview?start_time=10&end_time=20' },
-      { method: 'GET', path: '/api/v1/qms/user-stats/leaderboard/conversations?limit=10' },
-      { method: 'GET', path: '/api/v1/qms/system/health' },
-      { method: 'POST', path: '/api/v1/qms/alerts/history/12/acknowledge', body: undefined },
-      { method: 'POST', path: '/api/v1/qms/crash/issues/9/resolve', body: undefined },
-      { method: 'POST', path: '/api/v1/qms/system/aggregation/run', body: undefined },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/dashboard/overview?start_time=10&end_time=20' },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/user-stats/leaderboard/conversations?limit=10' },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/system/health' },
+      { method: 'POST', path: '/api/moss/v1/operations/qms/alerts/history/12/acknowledge', body: undefined },
+      { method: 'POST', path: '/api/moss/v1/operations/qms/crash/issues/9/resolve', body: undefined },
+      { method: 'POST', path: '/api/moss/v1/operations/qms/system/aggregation/run', body: undefined },
     ])
   })
 
@@ -126,17 +126,17 @@ describe('Moss Admin 统一运营 API client', () => {
     await api.updateQmsSystemConfig('retention/days', '30')
     await api.updateQmsNotifications({ email: { enabled: true } })
     assert.deepEqual(calls, [
-      { method: 'GET', path: '/api/v1/qms/dashboard/conversations/trend?start_time=10&end_time=20&dimension=platform' },
-      { method: 'GET', path: '/api/v1/qms/dashboard/installs/trend?start_time=10&end_time=20&dimension=version' },
-      { method: 'GET', path: '/api/v1/qms/dashboard/perf/trend?metric=latency&platform=darwin' },
-      { method: 'GET', path: '/api/v1/qms/user-stats/users/user%2Fa?start_time=10&end_time=20' },
-      { method: 'GET', path: '/api/v1/qms/crash/issues/9' },
-      { method: 'PUT', path: '/api/v1/qms/crash/issues/9', body: { status: 'processing', assigned_to: 17 } },
-      { method: 'POST', path: '/api/v1/qms/alerts/configs', body: { name: '高错误率', enabled: true } },
-      { method: 'PUT', path: '/api/v1/qms/alerts/configs/cfg%2F1', body: { enabled: false } },
-      { method: 'DELETE', path: '/api/v1/qms/alerts/configs/cfg%2F1' },
-      { method: 'PUT', path: '/api/v1/qms/system/config/retention%2Fdays', body: { value: '30' } },
-      { method: 'PUT', path: '/api/v1/qms/system/notifications', body: { email: { enabled: true } } },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/dashboard/conversations/trend?start_time=10&end_time=20&dimension=platform' },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/dashboard/installs/trend?start_time=10&end_time=20&dimension=version' },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/dashboard/perf/trend?metric=latency&platform=darwin' },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/user-stats/users/user%2Fa?start_time=10&end_time=20' },
+      { method: 'GET', path: '/api/moss/v1/operations/qms/crash/issues/9' },
+      { method: 'PUT', path: '/api/moss/v1/operations/qms/crash/issues/9', body: { status: 'processing', assigned_to: 17 } },
+      { method: 'POST', path: '/api/moss/v1/operations/qms/alerts/configs', body: { name: '高错误率', enabled: true } },
+      { method: 'PUT', path: '/api/moss/v1/operations/qms/alerts/configs/cfg%2F1', body: { enabled: false } },
+      { method: 'DELETE', path: '/api/moss/v1/operations/qms/alerts/configs/cfg%2F1' },
+      { method: 'PUT', path: '/api/moss/v1/operations/qms/system/config/retention%2Fdays', body: { value: '30' } },
+      { method: 'PUT', path: '/api/moss/v1/operations/qms/system/notifications', body: { email: { enabled: true } } },
     ])
   })
 })

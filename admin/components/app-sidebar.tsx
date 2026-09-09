@@ -193,7 +193,7 @@ const menuItems: NavItem[] = [
       { title: '账务运营', url: OPERATION_ROUTES.billing, icon: ReceiptText },
       { title: '业务审计', url: OPERATION_ROUTES.audit, icon: ClipboardList },
       { title: '质量管理', url: OPERATION_ROUTES.quality, icon: Activity },
-      { title: 'Sudowork 策略', url: OPERATION_ROUTES.sudoworkSettings, icon: Settings },
+      { title: 'Sudowork 系统设置', url: OPERATION_ROUTES.sudoworkSettings, icon: Settings },
     ],
   },
 ]

@@ -51,6 +51,21 @@ describe('QMS authorization', () => {
       error instanceof QmsAuthorizationError && error.code === 'TENANT_NOT_FOUND')
   })
 
+  it('scopes a Moss operations super administrator to the selected organization tenant', () => {
+    const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
+    const actor = {
+      userId: 'root', orgId: 'org-b', role: 'super_admin', organizationScoped: true,
+    }
+
+    assert.deepEqual(auth.adminScope(actor, 'tenant-a'), {
+      userId: 'root',
+      orgId: 'org-b',
+      tenantId: 'tenant-b',
+      canViewAllTenants: false,
+      qmsRole: 'admin',
+    })
+  })
+
   it('rejects ordinary users and administrators without an organization mapping', () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
     assert.throws(() => auth.adminScope({ userId: 'u2', orgId: 'org-a', role: 'user' }), /Insufficient permissions/)

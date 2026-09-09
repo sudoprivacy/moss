@@ -50,6 +50,15 @@ function billingContract(): { routes: Array<{
 }
 
 describe('Sudowork Billing 兼容路由', () => {
+  test('Billing 未启用时返回明确的 503 而不是 404 或通用 500', async () => {
+    const app = createSudoworkCompatibilityApp({ identity })
+    const response = await app.request('/api/v1/admin/recharge/stats', {
+      headers: { Authorization: 'Bearer root-token' },
+    })
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { success: false, msg: 'Sudowork Billing 未配置' })
+  })
+
   test('完整注册冻结契约中的 28 条路由', () => {
     const app = createSudoworkCompatibilityApp({ identity, billing: createBilling() })
     const actual = app.routes.map(route => `${route.method} ${route.path}`)

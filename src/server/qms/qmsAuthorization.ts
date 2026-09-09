@@ -1,6 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 
-import type { IdentityActor } from '../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../identity/organizationIdentityService.js'
 
 export class QmsAuthorizationError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -47,7 +50,7 @@ export class QmsAuthorizationService {
 
   adminScope(actor: IdentityActor | null, requestedTenantCode?: string | null): QmsAdminScope {
     if (!actor) throw new QmsAuthorizationError(401, 'UNAUTHORIZED', 'Unauthorized')
-    if (actor.role === 'super_admin') {
+    if (hasGlobalOrganizationAccess(actor)) {
       const tenantId = requestedTenantCode?.trim() || null
       if (tenantId && !this.options.organizations.hasCode(tenantId)) {
         throw new QmsAuthorizationError(404, 'TENANT_NOT_FOUND', 'Tenant not found')
@@ -57,6 +60,19 @@ export class QmsAuthorizationService {
         orgId: actor.orgId,
         tenantId,
         canViewAllTenants: true,
+        qmsRole: 'admin',
+      }
+    }
+    if (actor.role === 'super_admin') {
+      const tenantId = this.options.organizations.getCode(actor.orgId)
+      if (!tenantId) {
+        throw new QmsAuthorizationError(403, 'TENANT_NOT_FOUND', 'Current administrator is not associated with a tenant')
+      }
+      return {
+        userId: actor.userId,
+        orgId: actor.orgId,
+        tenantId,
+        canViewAllTenants: false,
         qmsRole: 'admin',
       }
     }

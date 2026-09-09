@@ -6,7 +6,10 @@ import type { BillingRepository, BillingUsageRecord, LedgerEntryRecord } from '.
 import { BillingDomainError } from '../../../billing/types.js'
 import type { WalletService } from '../../../billing/walletService.js'
 import type { IdentityRepository } from '../../../identity/identityRepository.js'
-import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../../../identity/organizationIdentityService.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
 import type { SudoworkLegacyUsagePort } from './legacyUsageRoutes.js'
 
@@ -205,7 +208,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     this.assertAdmin(input.actor)
     const alias = this.options.identities.resolveNumericAliasGlobal('user', input.legacyUserId)
     if (!alias) throw new SudoworkLegacyUsageError(404, '用户不存在')
-    if (input.actor.role !== 'super_admin' && alias.orgId !== input.actor.orgId) {
+    if (!hasGlobalOrganizationAccess(input.actor) && alias.orgId !== input.actor.orgId) {
       throw new SudoworkLegacyUsageError(403, '无权操作该用户')
     }
     return this.options.repository.listLedgerEntries({

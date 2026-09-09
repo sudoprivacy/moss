@@ -1,4 +1,5 @@
 import { authClient, getToken } from './client'
+import { toMossAdminApiPath } from './api-paths'
 
 // ============================================================
 // Document Center API types — mirror server-side DocumentStore types
@@ -326,10 +327,10 @@ export function subscribeWikiBuildEvents(
 ): () => void {
   // EventSource doesn't support custom headers, so the bearer token is
   // appended as a `?token=` query param. The server has a route-scoped
-  // fallback for /api/v1/wikis/:id/build-events that accepts it; no
+  // fallback for the namespaced wiki build-events route that accepts it; no
   // other route honors this query param.
   const token = getToken()
-  const url = `/api/v1/wikis/${encodeURIComponent(id)}/build-events${
+  const url = `${toMossAdminApiPath(`/api/v1/wikis/${encodeURIComponent(id)}/build-events`)}${
     token ? `?token=${encodeURIComponent(token)}` : ''
   }`
   let es: EventSource | null

@@ -4,7 +4,10 @@ import { onlineCommandContext, type CommandContext } from '../../../application/
 import type { DifyAclEntry, DifyAgentSummary } from '../../../dify/difyAdministrationService.js'
 import { DifyDomainError } from '../../../dify/difyConnectionService.js'
 import { DifyProviderError } from '../../../dify/difyHttpAdapter.js'
-import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../../../identity/organizationIdentityService.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -256,7 +259,7 @@ function resolveOrganization(
   raw: unknown,
 ): string | Response {
   const legacyId = parseEnterpriseId(raw)
-  if (actor.role === 'super_admin') {
+  if (hasGlobalOrganizationAccess(actor)) {
     if (legacyId === null) return failure(context, 400, 'super admin must specify enterprise_id')
     const resolved = options.resolveEnterpriseAlias(legacyId)
     return resolved?.resourceId ?? failure(context, 400, `enterprise ${legacyId} not found`)

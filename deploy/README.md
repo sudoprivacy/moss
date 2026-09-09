@@ -31,6 +31,28 @@ Cargo `target/` 均为本地构建文件，不提交到 Git。
 `MOSS_SERVER_CONFIG=/absolute/path/server.json` 指定配置文件。健康检查地址为
 `http://127.0.0.1:43127/healthz` 和 `/readyz`。
 
+### Sudowork 单域名切换
+
+正式切换后继续使用原 Sudowork 域名，反向代理只把上游从旧
+`sudowork-server` 改为 Moss。旧客户端接口仍使用 `/api/v1/*`；同一域名下的
+Moss Admin 请求统一使用 `/api/moss/v1/*`，运营中心使用
+`/api/moss/v1/operations/*`。Nginx 必须保留原始 `Host`。
+
+配置可以按以下边界收敛：
+
+- 可以立即去掉：为 Moss Admin 单独准备的业务域名、生产配置中的
+  `127.0.0.1`/`localhost` trusted host、Admin 对 Legacy JWT/Redis 的依赖。
+- 仍需保留：`sudoworkCompatibility.enabled`（切换开关）、原 Sudowork 域名
+  `hosts` allowlist、`publicBaseUrl`、旧 `JWT_SECRET`、旧 Refresh Token Redis。
+- 按功能保留：腾讯短信、Dify、Sudorouter、富友和 QMS 凭据；对应功能停用时
+  可以不配置，管理端会返回 503“未配置”，而不是 404。
+- 暂不删除：`loginMethod`、Dify base URL 和短信非敏感参数。它们已有统一管理
+  页面，但当前仍承担首次启动默认值；待迁移程序保证统一策略已经写入后再废弃。
+
+运营中心和“Sudowork 系统设置”始终可访问，不依赖
+`sudoworkCompatibility.enabled`。该开关只决定旧 Sudowork 客户端协议是否对
+`hosts` 中的原域名公开。
+
 ## Docker 与发布构建
 
 当前 GitHub Workflow 使用 `deploy/server.Dockerfile.local` 的 `host-export` target
@@ -52,6 +74,32 @@ amd64；传入 arm64 会在构建开始前失败。
 `deploy/server.Dockerfile` 是保留的预构建产物镜像路径，只适用于已经在
 Linux/amd64 环境完成 `bun run build:node` 并准备好 `bin/scode` 的场景；它会在
 镜像构建期加载 N-API 并检查 Nexus/Vault，平台错误不会拖到容器启动后才暴露。
+
+## Sudowork 单域名切换
+
+停用旧 `sudowork-server` 后，原 Sudowork 域名、客户端 API 地址和旧
+`method + path` 均保持不变，只把 Nginx/负载均衡上游切换到 Moss。Moss Admin
+静态页面继续使用 `/admin/*`，其 API 统一使用 `/api/moss/v1/*`；运营中心使用
+`/api/moss/v1/operations/*`。因此同一个域名下不会再通过请求体、Token 类型或
+客户端版本猜测协议。
+
+生产环境可以立即去掉：
+
+- 为 Moss Admin 单独准备的业务域名；Admin 与 Sudowork 客户端可以使用同一原域名。
+- `hosts` 中仅用于本地测试的 `127.0.0.1`、`localhost`；生产只保留原 Sudowork 主机名。
+- Moss Admin 对 `sudoworkCompatibility.enabled`、旧 JWT 和旧 Redis 的依赖；兼容关闭时运营中心仍可使用。
+
+仍需保留：
+
+- `sudoworkCompatibility.enabled`：维护窗口切流和紧急关闭旧协议的开关。
+- `sudoworkCompatibility.hosts`：旧协议的 Host allowlist，生产只填原 Sudowork 域名，不带协议和端口。
+- `sudoworkCompatibility.publicBaseUrl`：生成下载地址、Dify SSO、支付回调等外部绝对 URL。
+- `SUDOWORK_LEGACY_JWT_SECRET`：验证仍有效的旧 Access Token，并签发兼容 Token。
+- `SUDOWORK_REDIS_URL`：旧 Refresh Token、短信验证码和登录限流；旧协议仍受支持时不能删除。
+- Dify、QMS、短信、富友和 Sudorouter 配置：只在对应能力启用时需要，与 Admin 路由分流无关。
+
+`loginMethod`、短信非敏感参数和 Dify Base URL 后续可以迁入统一系统策略/集成连接，
+但当前仍是启动默认值，不能在本版本直接从 `server.json` 删除。
 
 host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
 `/usr/local/bin/scode`，对应 `runtimeDefaults.hostScodePath` 和

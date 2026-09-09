@@ -279,6 +279,13 @@ function createApp(
 }
 
 describe('Sudowork compatibility Hono app', () => {
+  test('QMS 未启用时已知质量接口返回 503 而不是 404', async () => {
+    const app = createSudoworkCompatibilityApp({ identity: createIdentity() })
+    const response = await app.request('/api/v1/qms/system/health')
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { success: false, msg: 'QMS 未配置' })
+  })
+
   test('maps legacy administration domain errors to the old JSON error envelope', async () => {
     const app = createApp('password', undefined, {
       legacyAdministration: {
@@ -292,6 +299,28 @@ describe('Sudowork compatibility Hono app', () => {
     })
     assert.equal(response.status, 403)
     assert.deepEqual(await response.json(), { success: false, msg: '无权操作该用户' })
+  })
+
+  test('Moss 运营入口把超级管理员标记为当前组织作用域，旧入口保持全局语义', async () => {
+    const received: Array<Record<string, unknown>> = []
+    const administration = {
+      listInvitationCodes(input: { actor: Record<string, unknown> }) {
+        received.push(input.actor)
+        return { items: [], total: 0, page: 1, page_size: 20 }
+      },
+    } as never
+    const legacy = createApp('password', undefined, { administration })
+    const operations = createApp('password', undefined, {
+      administration,
+      organizationScopedAdmin: true,
+    } as never)
+    const headers = { authorization: 'Bearer admin-access' }
+
+    await legacy.request('/api/v1/admin/invitation-codes', { headers })
+    await operations.request('/api/v1/admin/invitation-codes', { headers })
+
+    assert.equal(received[0]?.organizationScoped, undefined)
+    assert.equal(received[1]?.organizationScoped, true)
   })
 
   test('registers Dify administration routes through the compatibility app', async () => {

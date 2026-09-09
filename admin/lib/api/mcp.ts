@@ -1,4 +1,5 @@
 import { authClient, getToken } from './client'
+import { toMossAdminApiPath } from './api-paths'
 
 // ===== Types =====
 
@@ -323,7 +324,7 @@ export type McpSseEventType = 'mcp.changed' | 'mcp.policy.changed'
  * updates; the frontend should re-fetch the relevant resource on receipt.
  *
  * EventSource cannot send Authorization headers, so the bearer token is appended
- * as `?token=` — the server route `/api/v1/mcp/events` accepts this as documented
+ * as `?token=`; only the namespaced MCP events route accepts it.
  * in plan §2.5.
  */
 export function subscribeMcpEvents(handlers: {
@@ -332,7 +333,7 @@ export function subscribeMcpEvents(handlers: {
   onError?: (err: Event) => void
 }): () => void {
   const token = getToken()
-  const url = `/api/v1/mcp/events${token ? `?token=${encodeURIComponent(token)}` : ''}`
+  const url = `${toMossAdminApiPath('/api/v1/mcp/events')}${token ? `?token=${encodeURIComponent(token)}` : ''}`
   let es: EventSource | null
   try {
     es = new EventSource(url, { withCredentials: true })

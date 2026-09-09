@@ -11,7 +11,10 @@ import { pointsToQuota, quotaToPoints } from '../../../billing/sudorouterAdapter
 import { BillingDomainError, type BillingOrderStatus, type CreditApplicationStatus } from '../../../billing/types.js'
 import type { WalletService } from '../../../billing/walletService.js'
 import type { IdentityRepository } from '../../../identity/identityRepository.js'
-import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../../../identity/organizationIdentityService.js'
 
 export class SudoworkBillingError extends Error {
   constructor(readonly statusCode: 400 | 403 | 404 | 409 | 500, message: string) {
@@ -185,7 +188,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
       Number(input.query.page), Number(input.query.pageSize ?? input.query.page_size),
     )
     const result = this.options.repository.listOrders({
-      orgId: input.actor.role === 'super_admin' ? undefined : input.actor.orgId,
+      orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       status: input.query.status ? LEGACY_TO_STATUS[input.query.status] : undefined,
       orderNo: input.query.order_no, userPhone: input.query.user_phone,
       startAt: parseStartDate(input.query.start_date), endAt: parseEndDate(input.query.end_date),
@@ -201,7 +204,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   getRechargeStats(actor: IdentityActor): unknown {
     const allOrders = this.options.repository.listOrders({
-      orgId: actor.role === 'super_admin' ? undefined : actor.orgId,
+      orgId: hasGlobalOrganizationAccess(actor) ? undefined : actor.orgId,
       limit: 1_000_000, offset: 0,
     }).list
     const startToday = startOfUtcDay(this.clock())
@@ -242,6 +245,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async requestRefund(input: { actor: IdentityActor; orderNo: string; reason: string; idempotencyKey?: string }): Promise<unknown> {
+    this.requireScopedOrder(input.actor, input.orderNo)
     const result = await this.options.refund.request(
       { orderNo: input.orderNo, reason: input.reason }, input.actor,
       this.context(input.idempotencyKey, 'refund'),
@@ -265,7 +269,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const activityType = input.query.type === 'CLIENT' || input.query.type === 'ADMIN'
       ? input.query.type : undefined
     const result = this.options.repository.listRechargeActivities({
-      orgId: input.actor.role === 'super_admin' ? undefined : input.actor.orgId,
+      orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       activityType, keyword: input.query.keyword?.trim().slice(0, 50),
       paymentMethod: input.query.payment_method === 'ALIPAY' || input.query.payment_method === 'WECHAT'
         ? input.query.payment_method : undefined,
@@ -319,7 +323,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async syncPendingOrders(input: { actor: IdentityActor; idempotencyKey?: string }): Promise<unknown> {
     const orders = this.options.repository.listOrders({
-      orgId: input.actor.role === 'super_admin' ? undefined : input.actor.orgId,
+      orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       limit: 1_000, offset: 0,
     }).list.filter(order => order.status === 'PENDING' || order.status === 'PAYING' || order.status === 'FAILED')
     let successCount = 0
@@ -374,6 +378,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }): Promise<unknown> {
     if (input.actor.role !== 'super_admin') throw new SudoworkBillingError(403, '只有超级管理员可以为用户充值')
     const user = this.requireLegacyUser(input.legacyUserId)
+    this.assertOrgScope(input.actor, user.orgId)
     const external = this.requireExternal(user.id)
     const context = this.context(input.idempotencyKey, 'admin-recharge')
     const activityKey = `billing:activity:${context.idempotencyKey}`
@@ -433,7 +438,10 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const requestedOrg = input.query.enterprise_id
       ? this.options.identities.resolveNumericAliasGlobal('enterprise', Number(input.query.enterprise_id))?.resourceId
       : undefined
-    const orgId = input.actor.role === 'super_admin' ? requestedOrg : input.actor.orgId
+    if (requestedOrg && !hasGlobalOrganizationAccess(input.actor) && requestedOrg !== input.actor.orgId) {
+      throw new SudoworkBillingError(403, '权限不足')
+    }
+    const orgId = hasGlobalOrganizationAccess(input.actor) ? requestedOrg : input.actor.orgId
     const result = this.options.repository.listCreditApplications({
       orgId, status: input.query.status as CreditApplicationStatus | undefined,
       keyword: input.query.keyword?.trim().slice(0, 50), limit: pageSize, offset,
@@ -452,6 +460,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     adminComment?: string; idempotencyKey?: string
   }): Promise<unknown> {
     const record = this.requireCredit(input.legacyApplicationId)
+    this.assertOrgScope(input.actor, record.orgId)
     const result = await this.options.credit.approveApplication({
       applicationId: record.id, approvedPoints: input.approvedPoints, adminComment: input.adminComment,
     }, input.actor, this.context(input.idempotencyKey, 'credit-approve'))
@@ -460,12 +469,14 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   rejectCreditApplication(input: { actor: IdentityActor; legacyApplicationId: number; adminComment: unknown }): unknown {
     const record = this.requireCredit(input.legacyApplicationId)
+    this.assertOrgScope(input.actor, record.orgId)
     this.options.credit.rejectApplication(record.id, typeof input.adminComment === 'string' ? input.adminComment : '', input.actor)
     return undefined
   }
 
   async retryCreditApplication(input: { actor: IdentityActor; legacyApplicationId: number }): Promise<unknown> {
     const record = this.requireCredit(input.legacyApplicationId)
+    this.assertOrgScope(input.actor, record.orgId)
     return this.creditDto(await this.options.credit.retryApplication(record.id, input.actor), true)
   }
 
@@ -495,7 +506,9 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   private assertOrgScope(actor: IdentityActor, orgId: string): void {
-    if (actor.role !== 'super_admin' && actor.orgId !== orgId) throw new SudoworkBillingError(403, '权限不足')
+    if (!hasGlobalOrganizationAccess(actor) && actor.orgId !== orgId) {
+      throw new SudoworkBillingError(403, '权限不足')
+    }
   }
 
   private requireExternal(userId: string) {

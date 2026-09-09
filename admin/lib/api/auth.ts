@@ -1,4 +1,5 @@
 import { authClient, setToken, removeToken, setRefreshToken, setTokenExpiresAt, getToken, getRefreshToken } from './client'
+import { toMossAdminApiPath } from './api-paths'
 import type {
   LoginRequest,
   LoginResponse,
@@ -59,7 +60,7 @@ export async function logout(): Promise<void> {
 
   if (accessToken) {
     try {
-      await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/v1/auth/logout`, {
+      await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}${toMossAdminApiPath('/api/v1/auth/logout')}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

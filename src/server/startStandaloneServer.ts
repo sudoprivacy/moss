@@ -86,9 +86,6 @@ async function finishStandaloneServerStartup(
   const configStore = initConfigStore(nexusClient)
   await configStore.loadAll()
   configStore.hydrateConfig(config)
-  if (config.qms.enabled && !config.sudoworkCompatibility.enabled) {
-    throw new Error('QMS requires Sudowork compatibility to be enabled so its frozen routes are reachable')
-  }
   initHubConfig({
     hubApiBaseUrl: config.hubApiBaseUrl,
     hubAuthorization: config.hubAuthorization,
@@ -168,11 +165,13 @@ async function finishStandaloneServerStartup(
   const logger = createServerLogger()
   let closeSudoworkRedis: (() => Promise<void>) | undefined
   let qmsRuntime: StartedQmsRuntime | undefined
+  let legacyRedis: ReturnType<typeof createRedisLegacyTokenStore>['store'] | undefined
   let sudoworkCompatibility: {
     hosts: readonly string[]
     fetch: ReturnType<typeof createSudoworkCompatibilityApp>['fetch']
     routes: ReturnType<typeof createSudoworkCompatibilityApp>['routes']
   } | undefined
+
   if (config.sudoworkCompatibility.enabled) {
     if (config.sudoworkCompatibility.hosts.length === 0) {
       throw new Error('Sudowork compatibility requires at least one trusted host')
@@ -187,11 +186,22 @@ async function finishStandaloneServerStartup(
       throw new Error('Sudowork compatibility requires sudoworkCompatibility.publicBaseUrl')
     }
     const redis = createRedisLegacyTokenStore(config.sudoworkCompatibility.redisUrl)
+    legacyRedis = redis.store
     closeSudoworkRedis = redis.close
-    try {
+  }
+
+  try {
+    const mossOnlyTokenStore = {
+      async setex(): Promise<void> { throw new Error('Sudowork legacy sessions are disabled') },
+      async keys(): Promise<string[]> { return [] },
+      async get(): Promise<string | null> { return null },
+      async del(): Promise<void> {},
+      async rotate(): Promise<boolean> { return false },
+    }
     const identity = authService.createSudoworkIdentityService({
-      tokenStore: redis.store,
-      legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret,
+      tokenStore: legacyRedis ?? mossOnlyTokenStore,
+      legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret
+        ?? 'moss-native-operations-no-legacy-jwt',
     })
     const administration = authService.createSudoworkAdministrationService({
       getDifyFeatureFlags: () => {
@@ -207,30 +217,35 @@ async function finishStandaloneServerStartup(
         return { enabled: missingEnv.length === 0, missingEnv }
       },
     })
-    const cas = authService.createSudoworkCasService({ identity, tokenStore: redis.store })
+    const cas = legacyRedis
+      ? authService.createSudoworkCasService({ identity, tokenStore: legacyRedis })
+      : undefined
+    const externalBaseUrl = config.sudoworkCompatibility.publicBaseUrl
+      || config.publicBaseUrl
+      || ''
     const catalog = authService.createSudoworkCatalogService({
       artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
-      publicBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+      publicBaseUrl: externalBaseUrl,
     })
     const dify = authService.createSudoworkDifyServices({
       baseUrl: config.sudoworkCompatibility.dify.baseUrl,
       systemToken: config.sudoworkCompatibility.dify.systemToken,
       provisionSecret: config.sudoworkCompatibility.dify.provisionSecret,
       ssoSecret: config.sudoworkCompatibility.dify.ssoSecret,
-      publicBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+      publicBaseUrl: externalBaseUrl,
       artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
       secrets: nexusClient,
     })
     const managedImages = new ManagedImageStore(join(config.runtimeDir, 'uploads'))
     const configuration = authService.createSudoworkConfigService(store, managedImages)
     const smsConfig = config.sudoworkCompatibility.sms
-    const smsConfigured = smsConfig.provider === 'tencent' && [
+    const smsConfigured = Boolean(legacyRedis) && smsConfig.provider === 'tencent' && [
       smsConfig.secretId, smsConfig.secretKey, smsConfig.sdkAppId,
       smsConfig.signName, smsConfig.templateId, smsConfig.signId,
     ].every(value => typeof value === 'string' && value.trim().length > 0)
-    const sms = smsConfig.provider === 'tencent'
+    const sms = legacyRedis && smsConfig.provider === 'tencent'
       ? new SmsVerificationService({
-          store: redis.store,
+          store: legacyRedis,
           sender: createTencentSmsSender({
             secretId: smsConfig.secretId ?? '',
             secretKey: smsConfig.secretKey ?? '',
@@ -249,14 +264,14 @@ async function finishStandaloneServerStartup(
     const systemConfiguration = authService.createSudoworkSystemConfigService({
       secrets: configStore,
       loginMethod: config.sudoworkCompatibility.loginMethod,
-      skillhubBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+      skillhubBaseUrl: externalBaseUrl,
       sudorouterBaseUrl: process.env.SUDOROUTER_BASE_URL,
       smsConfigured,
       productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
     })
     const billingEnabled = process.env.SUDOWORK_BILLING_ENABLED === 'true'
     const billing = billingEnabled
-      ? createBillingCompatibilityService(authService, systemConfiguration, config.sudoworkCompatibility.publicBaseUrl)
+      ? createBillingCompatibilityService(authService, systemConfiguration, externalBaseUrl)
       : undefined
     const legacyUsage = authService.createSudoworkLegacyUsageService({ listModels: getAvailableModels })
     const qmsSecrets = new QmsNexusSecretAdapter(config.qms, {
@@ -275,7 +290,7 @@ async function finishStandaloneServerStartup(
         LOG_LEVEL: config.logLevel,
       },
     })
-    const app = createSudoworkCompatibilityApp({
+    const appOptions: Parameters<typeof createSudoworkCompatibilityApp>[0] = {
       identity,
       administration,
       legacyAdministration: administration,
@@ -285,7 +300,7 @@ async function finishStandaloneServerStartup(
       systemConfiguration,
       billing,
       legacyUsage,
-      rateLimit: process.env.RATE_LIMIT_ENABLED === 'false' ? undefined : redis.store,
+      rateLimit: process.env.RATE_LIMIT_ENABLED === 'false' ? undefined : legacyRedis,
       difyRuntime: dify.runtime,
       difyEnhancement: dify.enhancement,
       difyDataset: dify.dataset,
@@ -297,7 +312,7 @@ async function finishStandaloneServerStartup(
       loginMethod: config.sudoworkCompatibility.loginMethod,
       sms,
       systemConfig: {
-        skillhubBaseUrl: config.sudoworkCompatibility.publicBaseUrl,
+        skillhubBaseUrl: externalBaseUrl,
       },
       qms: qmsRuntime ? {
         apiKeyHeader: qmsRuntime.apiKeyHeader,
@@ -305,30 +320,58 @@ async function finishStandaloneServerStartup(
         encryption: qmsRuntime.encryption,
         operations: qmsRuntime.operations,
       } : undefined,
+    }
+    const operationsApp = createSudoworkCompatibilityApp({
+      ...appOptions,
+      organizationScopedAdmin: true,
     })
-    sudoworkCompatibility = {
-      hosts: config.sudoworkCompatibility.hosts,
-      fetch: app.fetch,
-      routes: app.routes,
+    if (config.sudoworkCompatibility.enabled) {
+      const compatibilityApp = createSudoworkCompatibilityApp(appOptions)
+      sudoworkCompatibility = {
+        hosts: config.sudoworkCompatibility.hosts,
+        fetch: compatibilityApp.fetch,
+        routes: compatibilityApp.routes,
+      }
     }
-    } catch (error) {
-      await qmsRuntime?.stop()
-      qmsRuntime = undefined
-      await closeSudoworkRedis?.()
-      closeSudoworkRedis = undefined
-      throw error
-    }
-  }
-  let server: ReturnType<typeof startServer>
-  let actualPort: number
-  try {
-    server = startServer(config, runtime, authService, logger, nexusClient, sudoworkCompatibility)
-    actualPort = (await server.ready) ?? config.port
+    const mossOperations = { fetch: operationsApp.fetch }
+
+    const server = startServer(
+      config, runtime, authService, logger, nexusClient,
+      sudoworkCompatibility, mossOperations,
+    )
+    const actualPort = (await server.ready) ?? config.port
+
+    return finishStartedServer({
+      config, runtime, authService, authProxy, nexusManager, store, instance,
+      server, actualPort, qmsRuntime, closeSudoworkRedis, bootstrap,
+    })
   } catch (error) {
     await qmsRuntime?.stop()
+    qmsRuntime = undefined
     await closeSudoworkRedis?.()
+    closeSudoworkRedis = undefined
     throw error
   }
+}
+
+function finishStartedServer(input: {
+  config: ServerConfig
+  runtime: RuntimeService
+  authService: Awaited<ReturnType<typeof createAuthService>>['service']
+  authProxy: AuthProxyServer
+  nexusManager: NexusManager
+  store: ReturnType<typeof openDirectConnectStore>
+  instance: ReturnType<ReturnType<typeof openDirectConnectStore>['registerServerInstance']>
+  server: ReturnType<typeof startServer>
+  actualPort: number
+  qmsRuntime?: StartedQmsRuntime
+  closeSudoworkRedis?: () => Promise<void>
+  bootstrap: Awaited<ReturnType<typeof createAuthService>>['bootstrap']
+}) {
+  const {
+    config, runtime, authService, authProxy, nexusManager, store, instance,
+    server, actualPort, qmsRuntime, closeSudoworkRedis, bootstrap,
+  } = input
   const connectHost =
     config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host
   const httpUrl = `http://${connectHost}:${actualPort}`

@@ -4,7 +4,10 @@ import { onlineCommandContext } from '../../../application/commandContext.js'
 import { DifyDomainError } from '../../../dify/difyConnectionService.js'
 import type { DifyDatasetService } from '../../../dify/difyDatasetService.js'
 import { DifyProviderError } from '../../../dify/difyHttpAdapter.js'
-import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../../../identity/organizationIdentityService.js'
 
 interface LegacyAliasResolution {
   resourceId: string
@@ -160,7 +163,7 @@ function resolveOrganization(
   raw: unknown,
 ): string | Response {
   const legacyId = parseEnterpriseId(raw)
-  if (actor.role === 'super_admin') {
+  if (hasGlobalOrganizationAccess(actor)) {
     if (legacyId === null) return failure(context, 400, 'super admin must specify enterprise_id')
     const resolved = options.resolveEnterpriseAlias(legacyId)
     if (!resolved) return failure(context, 400, `enterprise ${legacyId} not found`)

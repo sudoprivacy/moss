@@ -1,3 +1,5 @@
+import { apiErrorMessage, toMossAdminApiPath } from './api-paths'
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 const TOKEN_KEY = 'moss_access_token'
@@ -84,7 +86,7 @@ export async function ensureValidToken(): Promise<string | null> {
     }
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/auth/token`, {
+      const response = await fetch(`${API_BASE_URL}${toMossAdminApiPath('/api/v1/auth/token')}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -175,7 +177,8 @@ export class ApiClient {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
-    let response = await fetch(`${this.baseUrl}${path}`, {
+    const requestPath = toMossAdminApiPath(path)
+    let response = await fetch(`${this.baseUrl}${requestPath}`, {
       ...options,
       headers,
       credentials: 'include',
@@ -194,7 +197,7 @@ export class ApiClient {
         ) {
           retryHeaders.set('Content-Type', 'application/json')
         }
-        response = await fetch(`${this.baseUrl}${path}`, {
+        response = await fetch(`${this.baseUrl}${requestPath}`, {
           ...options,
           headers: retryHeaders,
           credentials: 'include',
@@ -211,8 +214,7 @@ export class ApiClient {
       }
 
       const error = await response.json().catch(() => ({ error: response.statusText }))
-      const raw = (error as any).error
-      const message = typeof raw === 'string' ? raw : (raw?.message || (error as any).message || 'Request failed')
+      const message = apiErrorMessage(error, 'Request failed')
       throw new ApiRequestError(response.status, message)
     }
 
@@ -267,7 +269,8 @@ export class ApiClient {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
-    let response = await fetch(`${this.baseUrl}${path}`, {
+    const requestPath = toMossAdminApiPath(path)
+    let response = await fetch(`${this.baseUrl}${requestPath}`, {
       headers,
       credentials: 'include',
     })
@@ -277,7 +280,7 @@ export class ApiClient {
       if (newToken) {
         const retryHeaders = new Headers()
         retryHeaders.set('Authorization', `Bearer ${newToken}`)
-        response = await fetch(`${this.baseUrl}${path}`, {
+        response = await fetch(`${this.baseUrl}${requestPath}`, {
           headers: retryHeaders,
           credentials: 'include',
         })

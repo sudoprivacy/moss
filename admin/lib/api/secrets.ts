@@ -4,6 +4,7 @@
  */
 
 import { dcClient } from './client'
+import { toMossAdminApiPath } from './api-paths'
 
 // ============================================================
 // Types
@@ -221,7 +222,7 @@ export async function deleteConfigItem(id: number): Promise<void> {
 
 export async function uploadConfigItemIcon(file: File): Promise<{ url: string }> {
   const buffer = await file.arrayBuffer()
-  const res = await fetch('/api/v1/config-items/icon', {
+  const res = await fetch(toMossAdminApiPath('/api/v1/config-items/icon'), {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${localStorage.getItem('moss_access_token')}`,

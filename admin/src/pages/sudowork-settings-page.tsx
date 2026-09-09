@@ -46,7 +46,7 @@ export default function SudoworkSettingsPage() {
     finally { setSaving(false) }
   }
 
-  if (loading || !config) return <DashboardLayout title="Sudowork 客户端策略"><div className="space-y-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20" />)}</div></DashboardLayout>
+  if (loading || !config) return <DashboardLayout title="Sudowork 系统设置"><div className="space-y-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20" />)}</div></DashboardLayout>
 
   const logReport = object(config.log_report)
   const versionUpdate = object(config.version_update)
@@ -55,7 +55,7 @@ export default function SudoworkSettingsPage() {
   const thirdParty = object(config.third_party_auth)
 
   return (
-    <DashboardLayout title="Sudowork 客户端策略" description="统一管理本地模式客户端的登录、上报、更新与充值策略">
+    <DashboardLayout title="Sudowork 系统设置" description="统一管理本地模式客户端的登录、上报、更新与充值策略">
       <div className="space-y-5">
         <Card><CardHeader><CardTitle className="text-base">登录方式</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
           <Field label="默认登录方式"><Select value={String(config.login_method ?? 1)} onValueChange={value => patch({ login_method: Number(value) })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{SUDOWORK_LOGIN_METHODS.map(method => <SelectItem key={method.value} value={method.value}>{method.label}</SelectItem>)}</SelectContent></Select></Field>

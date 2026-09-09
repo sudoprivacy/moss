@@ -112,6 +112,16 @@ describe('SudoworkLegacyUsageService', () => {
     assert.equal((await service.listAdminUserLedger({
       actor: { userId: 'root-1', orgId: 'org-1', role: 'super_admin' }, legacyUserId: 17, limit: 20,
     })).length, 1)
+    await assert.rejects(
+      Promise.resolve().then(() => service.listAdminUserLedger({
+        actor: {
+          userId: 'root-1', orgId: 'org-2', role: 'super_admin', organizationScoped: true,
+        },
+        legacyUserId: 17,
+        limit: 20,
+      })),
+      /无权操作该用户/,
+    )
     db.close()
   })
 })

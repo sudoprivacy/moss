@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { describe, test } from 'node:test'
 import { registerSudoworkDifyAdministrationRoutes } from './difyAdministrationRoutes.js'
 
-function setup(role = 'admin') {
+function setup(role = 'admin', organizationScoped = false) {
   const calls: Array<{ method: string; args: unknown[] }> = []
   const administration = new Proxy({}, { get(_target, method: string) {
     if (method === 'getBinding') return (...args: unknown[]) => {
@@ -26,7 +26,7 @@ function setup(role = 'admin') {
   const app = new Hono()
   registerSudoworkDifyAdministrationRoutes(app, {
     administration: administration as never,
-    getActor: () => ({ userId: 'admin-a', orgId: 'org-a', role }),
+    getActor: () => ({ userId: 'admin-a', orgId: 'org-a', role, organizationScoped }),
     resolveEnterpriseAlias: id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
     idempotencyKey: () => 'request-key',
   })
@@ -82,6 +82,18 @@ describe('Sudowork Dify administration compatibility routes', () => {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enterprise_id: 9 }),
     })
     assert.deepEqual([invalidDatasets.status, await invalidDatasets.json()], [400, { success: false, msg: 'dataset_ids is required' }])
+  })
+
+  test('Moss 组织作用域下的超级管理员固定使用当前组织', async () => {
+    const { app, calls } = setup('super_admin', true)
+
+    const current = await app.request('/api/v1/admin/dify/binding')
+    assert.equal(current.status, 200)
+    assert.equal(calls[0]?.args[0], 'org-a')
+    const crossOrg = await app.request('/api/v1/admin/dify/binding?enterprise_id=10')
+    assert.deepEqual([crossOrg.status, await crossOrg.json()], [403, {
+      success: false, msg: 'cannot operate on another enterprise',
+    }])
   })
 
   test('keeps multipart validation and immutable enhancement method', async () => {

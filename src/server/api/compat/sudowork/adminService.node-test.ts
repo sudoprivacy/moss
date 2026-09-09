@@ -58,6 +58,19 @@ function createUser(
 }
 
 describe('Sudowork administration compatibility service', () => {
+  test('默认生成旧客户端兼容的 6 位无歧义邀请码', () => {
+    const { db, service, first } = setup()
+    const actor = { userId: 'root', orgId: first.organization.id, role: 'super_admin' }
+    const created = service.createInvitationCodes({ actor, count: 20 })
+
+    assert.equal(created.codes.length, 20)
+    assert.equal(new Set(created.codes).size, 20)
+    for (const code of created.codes) {
+      assert.match(code, /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/)
+    }
+    db.close()
+  })
+
   test('projects organizations through stable legacy ids and admin scope', () => {
     const { db, service, first, identities } = setup()
     const actor = { userId: 'admin-a', orgId: first.organization.id, role: 'admin' }
@@ -113,6 +126,35 @@ describe('Sudowork administration compatibility service', () => {
     const stored = identities.getInvitationById(resourceId)!
     assert.equal(stored.initialCreditUnits, 6_000)
     assert.equal(stored.legacyInitialQuotaUsd, 6)
+    db.close()
+  })
+
+  test('Moss 组织作用域下的超级管理员只读取当前组织邀请码且不能跨组织删除', () => {
+    const { db, service, first, second } = setup()
+    const root = { userId: 'root', orgId: first.organization.id, role: 'super_admin' }
+    service.createInvitationCodes({
+      actor: root, enterpriseId: first.legacyEnterpriseId, count: 1,
+    }, () => 'FIRST-ORG')
+    service.createInvitationCodes({
+      actor: root, enterpriseId: second.legacyEnterpriseId, count: 1,
+    }, () => 'SECOND-ORG')
+
+    assert.equal(service.listInvitationCodes({ actor: root }).total, 2)
+    const scopedRoot = {
+      ...root,
+      orgId: second.organization.id,
+      organizationScoped: true,
+    } as typeof root & { organizationScoped: true }
+    const scoped = service.listInvitationCodes({ actor: scopedRoot })
+
+    assert.deepEqual(scoped.items.map(item => item.code), ['SECOND-ORG'])
+    const firstInvitation = service.listInvitationCodes({
+      actor: root, enterpriseId: first.legacyEnterpriseId,
+    }).items[0]!
+    assert.throws(
+      () => service.deleteInvitationCode(scopedRoot, firstInvitation.id),
+      /Administrator permission required for this organization/,
+    )
     db.close()
   })
 
@@ -179,7 +221,51 @@ describe('Sudowork administration compatibility service', () => {
       points: { total: 5, bonus: 0, consumed: 0 },
     })
     assert.equal((context.service.getAdminStats(root) as any).enterprises, 2)
+    const scopedRoot = {
+      ...root,
+      orgId: context.second.organization.id,
+      organizationScoped: true,
+    }
+    assert.deepEqual(serviceIds(context.service.listMembers(scopedRoot)), [12])
+    assert.deepEqual(context.service.getAdminStats(scopedRoot), {
+      enterprises: 1,
+      users: 1,
+      approved: 1,
+      pending: 0,
+      points: { total: 9, bonus: 0, consumed: 0 },
+    })
     assert.deepEqual(context.service.getFeatureFlags(admin), { dify: { enabled: true, missingEnv: [] } })
+    context.db.close()
+  })
+
+  test('Moss 组织作用域下的超级管理员只能查询当前组织审计并操作当前组织成员', () => {
+    const context = setup()
+    createUser(context, { id: 'pending-a', legacyId: 41, orgId: context.first.organization.id, name: 'a', status: 'pending' })
+    createUser(context, { id: 'pending-b', legacyId: 42, orgId: context.second.organization.id, name: 'b', status: 'pending' })
+    for (const [id, orgId] of [['audit-a', context.first.organization.id], ['audit-b', context.second.organization.id]]) {
+      context.identities.insertOperationAudit({
+        id,
+        orgId,
+        action: 'TEST_ACTION',
+        resource: 'user',
+        idempotencyKey: id,
+      })
+    }
+    const scopedRoot = {
+      userId: 'root',
+      orgId: context.second.organization.id,
+      role: 'super_admin',
+      organizationScoped: true,
+    }
+
+    assert.equal(context.service.listOperationLogs({ actor: scopedRoot, query: {} }).total, 1)
+    assert.throws(
+      () => context.service.rejectUser({ actor: scopedRoot, legacyUserId: 41 }),
+      /无权操作该用户/,
+    )
+    assert.doesNotThrow(
+      () => context.service.rejectUser({ actor: scopedRoot, legacyUserId: 42 }),
+    )
     context.db.close()
   })
 

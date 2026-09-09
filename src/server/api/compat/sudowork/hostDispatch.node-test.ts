@@ -17,6 +17,8 @@ describe('production Sudowork host dispatch', () => {
     }))
     sudowork.get('/api/v1/admin/logs', (context) => context.json({ service: 'sudowork' }))
     sudowork.get('/api/v1/admin/users', (context) => context.json({ service: 'sudowork' }))
+    sudowork.get('/api/v1/admin/enterprises', (context) => context.json({ service: 'sudowork' }))
+    sudowork.get('/api/v1/qms/system/health', (context) => context.json({ service: 'qms' }))
     const moss = (_request: IncomingMessage, response: ServerResponse) => {
       response.setHeader('content-type', 'application/json')
       response.end(JSON.stringify({ service: 'moss' }))
@@ -25,9 +27,7 @@ describe('production Sudowork host dispatch', () => {
       sudoworkHosts: ['api.sudowork.test'],
       sudoworkFetch: sudowork.fetch,
       sudoworkRoutes: sudowork.routes,
-      sharedSudoworkRoutes: [
-        { method: 'GET', path: '/api/v1/admin/logs' },
-      ],
+      mossOperationsFetch: sudowork.fetch,
       mossHandler: moss,
     }))
     await new Promise<void>((resolve, reject) => {
@@ -95,11 +95,23 @@ describe('production Sudowork host dispatch', () => {
     })
   })
 
-  test('shares only approved non-conflicting operational routes on the Moss host', async () => {
-    assert.deepEqual(await send('moss.test', '/api/v1/admin/logs', 'GET'), {
+  test('uses a dedicated Moss operations namespace without exposing legacy paths on the Moss host', async () => {
+    assert.deepEqual(await send('moss.test', '/api/moss/v1/operations/logs', 'GET'), {
       status: 200, body: { service: 'sudowork' },
     })
-    assert.deepEqual(await send('moss.test', '/api/v1/admin/users', 'GET'), {
+    assert.deepEqual(await send('moss.test', '/api/moss/v1/operations/qms/system/health', 'GET'), {
+      status: 200, body: { service: 'qms' },
+    })
+    assert.deepEqual(await send('moss.test', '/api/v1/admin/logs', 'GET'), {
+      status: 200, body: { service: 'moss' },
+    })
+    assert.deepEqual(await send('api.sudowork.test', '/api/moss/v1/operations/logs', 'GET'), {
+      status: 200, body: { service: 'sudowork' },
+    })
+    assert.deepEqual(await send('api.sudowork.test', '/api/moss/v1/auth/token', 'POST'), {
+      status: 200, body: { service: 'moss' },
+    })
+    assert.deepEqual(await send('moss.test', '/api/moss/v1/operations/enterprises', 'GET'), {
       status: 200, body: { service: 'moss' },
     })
   })
@@ -114,5 +126,34 @@ describe('production Sudowork host dispatch', () => {
       status: 200,
       body: { service: 'sudowork', body: { inputTokens: 7, outputTokens: 5 } },
     })
+  })
+
+  test('serves Moss operations when the legacy compatibility surface is disabled', async () => {
+    const operations = new Hono()
+    operations.get('/api/v1/admin/stats', (context) => context.json({ service: 'operations' }))
+    const isolated = createServer(createHostDispatch({
+      mossOperationsFetch: operations.fetch,
+      mossHandler: (_request, response) => response.end(JSON.stringify({ service: 'moss' })),
+    }))
+    await new Promise<void>((resolve, reject) => {
+      isolated.once('error', reject)
+      isolated.listen(0, '127.0.0.1', resolve)
+    })
+    const address = isolated.address()
+    assert(address && typeof address === 'object')
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = request({
+        hostname: '127.0.0.1', port: address.port,
+        path: '/api/moss/v1/operations/stats', method: 'GET',
+      }, response => {
+        const chunks: Buffer[] = []
+        response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        response.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    await new Promise<void>(resolve => isolated.close(() => resolve()))
+    assert.deepEqual(JSON.parse(body), { service: 'operations' })
   })
 })

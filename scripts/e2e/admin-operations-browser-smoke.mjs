@@ -55,7 +55,14 @@ const fixtures = {
 }
 
 function fixtureFor(url, method) {
-  const parsed = new URL(url); const pathName = parsed.pathname
+  const parsed = new URL(url); let pathName = parsed.pathname
+  if (pathName.startsWith('/api/moss/v1/operations/qms/')) {
+    pathName = `/api/v1/qms/${pathName.slice('/api/moss/v1/operations/qms/'.length)}`
+  } else if (pathName.startsWith('/api/moss/v1/operations/')) {
+    pathName = `/api/v1/admin/${pathName.slice('/api/moss/v1/operations/'.length)}`
+  } else if (pathName.startsWith('/api/moss/v1/')) {
+    pathName = `/api/v1/${pathName.slice('/api/moss/v1/'.length)}`
+  }
   if (method !== 'GET') return { success: true, data: {} }
   if (fixtures[pathName]) return fixtures[pathName]
   if (pathName.startsWith('/api/v1/config-items')) return pathName.endsWith('/availability') ? { success: true, data: { availability: 'organization', ownerOrgId: 'org-a', organizationIds: [], organizations: [org] } } : { success: true, data: [], total: 0, page: 1, page_size: 20 }
@@ -75,7 +82,7 @@ try {
   await cdp.send('Page.enable'); await cdp.send('Runtime.enable'); await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*://*/api/*' }] }); await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `localStorage.setItem('moss_access_token','fixture-token')` })
   for (const viewport of [{ width: 1440, height: 900, mobile: false }, { width: 390, height: 844, mobile: true }]) {
     await cdp.send('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: 1 })
-    for (const [route, title] of [['/', '数据看板'], ['/users', '用户与组织管理'], ['/operations/billing', '账务运营'], ['/operations/sudowork-settings', 'Sudowork 客户端策略'], ['/document-center/dify-datasets', 'Dify 数据集'], ['/operations/quality', '质量管理'], ['/secrets/config-items', '配置项列表']]) await navigate(route, title)
+    for (const [route, title] of [['/', '数据看板'], ['/users', '用户与组织管理'], ['/operations/billing', '账务运营'], ['/operations/sudowork-settings', 'Sudowork 系统设置'], ['/document-center/dify-datasets', 'Dify 数据集'], ['/operations/quality', '质量管理'], ['/secrets/config-items', '配置项列表']]) await navigate(route, title)
   }
   assert(errors.length === 0, `browser errors: ${errors.join(', ')}`)
   process.stdout.write('Admin operations browser smoke passed: 7 pages x 2 viewports\n')

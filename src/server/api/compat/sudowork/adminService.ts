@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import type { CommandContext } from '../../../application/commandContext.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import { IdentityRepository, type InvitationRecord, type OperationAuditRecord } from '../../../identity/identityRepository.js'
@@ -8,6 +8,7 @@ import { WalletService } from '../../../billing/walletService.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
 import { sudoworkQuotaToCreditUnits, sudoworkUsdToCreditUnits } from '../../../identity/sudoworkCreditConversion.js'
 import {
+  hasGlobalOrganizationAccess,
   IdentityDomainError,
   OrganizationIdentityService,
   type IdentityActor,
@@ -62,6 +63,15 @@ export class SudoworkAdministrationError extends Error {
     super(message)
     this.name = 'SudoworkAdministrationError'
   }
+}
+
+const LEGACY_INVITATION_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+function generateLegacyInvitationCode(): string {
+  return Array.from(
+    { length: 6 },
+    () => LEGACY_INVITATION_CODE_ALPHABET[randomInt(LEGACY_INVITATION_CODE_ALPHABET.length)]!,
+  ).join('')
 }
 
 export class SudoworkAdministrationService {
@@ -179,7 +189,7 @@ export class SudoworkAdministrationService {
         ? sudoworkQuotaToCreditUnits(this.options.defaultInitialQuota ?? 100_000)
         : sudoworkUsdToCreditUnits(input.initialQuotaUsd),
       legacyInitialQuotaUsd: input.initialQuotaUsd ?? null,
-    }, codeFactory, input.actor)
+    }, codeFactory ?? generateLegacyInvitationCode, input.actor)
     return { codes: invitations.map((item) => item.code), count: invitations.length }
   }
 
@@ -421,13 +431,13 @@ export class SudoworkAdministrationService {
       const alias = Number.isFinite(legacyId)
         ? this.identities.resolveNumericAliasGlobal('user', legacyId)
         : null
-      if (!alias || (input.actor.role !== 'super_admin' && alias.orgId !== input.actor.orgId)) {
+      if (!alias || (!hasGlobalOrganizationAccess(input.actor) && alias.orgId !== input.actor.orgId)) {
         return { items: [], total: 0, page, page_size: pageSize }
       }
       actorUserId = alias.resourceId
     }
     const result = this.identities.listOperationAudits({
-      orgId: input.actor.role === 'super_admin' ? undefined : input.actor.orgId,
+      orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       actorUserId,
       action: input.query.action,
       from: unixSeconds(input.query.date_from),
@@ -527,7 +537,7 @@ export class SudoworkAdministrationService {
   private requireManagedUser(actor: IdentityActor, legacyId: number): AuthCenterUser {
     this.assertAdmin(actor)
     const resolved = this.requireUser(legacyId)
-    if (actor.role !== 'super_admin' && resolved.orgId !== actor.orgId) {
+    if (!hasGlobalOrganizationAccess(actor) && resolved.orgId !== actor.orgId) {
       throw new SudoworkAdministrationError(403, '无权操作该用户')
     }
     const user = this.authDb.getUserById(resolved.resourceId)

@@ -22,6 +22,11 @@ export interface IdentityActor {
   userId: string
   orgId: string
   role: string
+  organizationScoped?: boolean
+}
+
+export function hasGlobalOrganizationAccess(actor: IdentityActor): boolean {
+  return actor.role === 'super_admin' && actor.organizationScoped !== true
 }
 
 export class OrganizationIdentityService {
@@ -60,7 +65,7 @@ export class OrganizationIdentityService {
     if (actor && actor.role !== 'super_admin' && actor.role !== 'admin') {
       throw new IdentityDomainError('FORBIDDEN', 'Administrator permission required')
     }
-    const organizations = actor?.role === 'admin'
+    const organizations = actor && !hasGlobalOrganizationAccess(actor)
       ? this.authDb.listOrganizations().filter((organization) => organization.id === actor.orgId)
       : this.authDb.listOrganizations()
     return organizations.flatMap((organization) => {
@@ -159,7 +164,7 @@ export class OrganizationIdentityService {
       if (actor.role !== 'super_admin' && actor.role !== 'admin') {
         throw new IdentityDomainError('FORBIDDEN', 'Administrator permission required')
       }
-      if (actor.role === 'admin') input = { ...input, orgId: actor.orgId }
+      if (!hasGlobalOrganizationAccess(actor)) input = { ...input, orgId: actor.orgId }
     }
     return this.repository.listInvitations(input)
   }
@@ -190,7 +195,7 @@ export class OrganizationIdentityService {
     if (actor.role !== 'super_admin' && actor.role !== 'admin') {
       throw new IdentityDomainError('FORBIDDEN', 'Administrator permission required')
     }
-    const orgIds = actor.role === 'admin'
+    const orgIds = !hasGlobalOrganizationAccess(actor)
       ? [actor.orgId]
       : filters.orgId ? [filters.orgId] : this.authDb.listOrganizations().map((org) => org.id)
     const keyword = filters.keyword?.trim().toLowerCase()
@@ -305,7 +310,8 @@ export class OrganizationIdentityService {
   }
 
   private assertOrganizationAdmin(actor: IdentityActor, orgId: string): void {
-    if (actor.role === 'super_admin') return
+    if (hasGlobalOrganizationAccess(actor)) return
+    if (actor.role === 'super_admin' && actor.orgId === orgId) return
     if (actor.role === 'admin' && actor.orgId === orgId) return
     throw new IdentityDomainError('FORBIDDEN', 'Administrator permission required for this organization')
   }

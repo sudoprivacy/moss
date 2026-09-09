@@ -324,6 +324,7 @@ function optionalFormStringArray(form: FormData, name: string): string[] {
 
 export function createSudoworkCompatibilityApp(options: {
   identity: SudoworkIdentityPort
+  organizationScopedAdmin?: boolean
   administration?: SudoworkAdministrationPort
   catalog?: SudoworkCatalogPort
   configuration?: SudoworkConfigPort
@@ -626,7 +627,10 @@ export function createSudoworkCompatibilityApp(options: {
   const getAuthenticatedActor = (authorization: string | undefined): IdentityActor | null => {
     const token = bearerToken(authorization)
     if (!token) return null
-    return options.identity.getActor(token)
+    const actor = options.identity.getActor(token)
+    return actor && options.organizationScopedAdmin && actor.role === 'super_admin'
+      ? { ...actor, organizationScoped: true }
+      : actor
   }
 
   const getAdminActor = (authorization: string | undefined): IdentityActor | null => {
@@ -1483,8 +1487,17 @@ export function createSudoworkCompatibilityApp(options: {
   if (options.qms) {
     app.route('/', createSudoworkQmsRoutes({
       ...options.qms,
-      getActor: authorization => options.identity.getActor(authorization ?? ''),
+      getActor: authorization => {
+        const actor = options.identity.getActor(authorization ?? '')
+        return actor && options.organizationScopedAdmin && actor.role === 'super_admin'
+          ? { ...actor, organizationScoped: true }
+          : actor
+      },
     }))
+  } else {
+    app.all('/api/v1/qms/*', context => (
+      context.json({ success: false, msg: 'QMS 未配置' }, 503)
+    ))
   }
 
   return app

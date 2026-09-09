@@ -2,6 +2,17 @@ import { QMS_LEGACY_ROUTES } from './qmsRoutes.js'
 
 type SharedRoute = Readonly<{ method: string; path: string }>
 
+export const MOSS_OPERATIONS_API_PREFIX = '/api/moss/v1/operations'
+
+export function mapMossOperationsPath(pathname: string): string | null {
+  if (!pathname.startsWith(`${MOSS_OPERATIONS_API_PREFIX}/`)) return null
+  const suffix = pathname.slice(MOSS_OPERATIONS_API_PREFIX.length)
+  if (suffix === '/qms' || suffix.startsWith('/qms/')) {
+    return `/api/v1${suffix}`
+  }
+  return `/api/v1/admin${suffix}`
+}
+
 const ADMIN_OPERATION_ROUTES: readonly SharedRoute[] = [
   { method: 'POST', path: '/api/v1/admin/approve' },
   { method: 'POST', path: '/api/v1/admin/reject' },
@@ -50,11 +61,8 @@ const QMS_OPERATION_ROUTES: readonly SharedRoute[] = QMS_LEGACY_ROUTES
   .filter(([, path]) => path.startsWith('/api/v1/qms/'))
   .map(([method, path]) => ({ method, path }))
 
-/**
- * 无冲突、可由 Moss 管理端直接调用的统一运营接口。
- * 旧认证、用户和组织管理等与 Moss 原生 API 冲突的路径不得加入此清单。
- */
-export const MOSS_SHARED_SUDOWORK_ROUTES: readonly SharedRoute[] = [
+/** Moss 运营命名空间在内部复用的旧协议投影清单，不直接对 Moss Host 公开。 */
+export const MOSS_OPERATIONS_LEGACY_ROUTES: readonly SharedRoute[] = [
   ...ADMIN_OPERATION_ROUTES,
   ...QMS_OPERATION_ROUTES,
 ]

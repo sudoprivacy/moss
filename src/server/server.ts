@@ -24,8 +24,8 @@ import type { ConfigKey } from './configStore/configStore.js'
 import { initHubConfig } from './hubConfig.js'
 import type { FetchCallback } from '@hono/node-server'
 import { createHostDispatch } from './api/compat/sudowork/hostDispatch.js'
-import { MOSS_SHARED_SUDOWORK_ROUTES } from './api/compat/sudowork/sharedOperationalRoutes.js'
 import { ConfigAvailabilityService } from './configuration/configAvailabilityService.js'
+import { normalizeMossAdminApiPath } from './api/mossAdminNamespace.js'
 
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
@@ -1597,6 +1597,9 @@ export function startServer(
     fetch: FetchCallback
     routes: readonly { method: string; path: string }[]
   },
+  mossOperations?: {
+    fetch: FetchCallback
+  },
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -1927,7 +1930,7 @@ export function startServer(
     try {
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
-      const pathname = url.pathname
+      const pathname = normalizeMossAdminApiPath(url.pathname)
       const isHead = req.method === 'HEAD'
 
       // Handle CORS preflight for all API routes
@@ -8506,12 +8509,12 @@ export function startServer(
     }
   }
 
-  const server = http.createServer(sudoworkCompatibility
+  const server = http.createServer(sudoworkCompatibility || mossOperations
     ? createHostDispatch({
-        sudoworkHosts: sudoworkCompatibility.hosts,
-        sudoworkFetch: sudoworkCompatibility.fetch,
-        sudoworkRoutes: sudoworkCompatibility.routes,
-        sharedSudoworkRoutes: MOSS_SHARED_SUDOWORK_ROUTES,
+        sudoworkHosts: sudoworkCompatibility?.hosts,
+        sudoworkFetch: sudoworkCompatibility?.fetch,
+        sudoworkRoutes: sudoworkCompatibility?.routes,
+        mossOperationsFetch: mossOperations?.fetch,
         mossHandler: mossRequestHandler,
       })
     : mossRequestHandler)

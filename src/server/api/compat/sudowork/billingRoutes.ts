@@ -1,6 +1,6 @@
 import type { Hono } from 'hono'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
-import type { SudoworkBillingPort } from './billingService.js'
+import { SudoworkBillingError, type SudoworkBillingPort } from './billingService.js'
 
 type ActorResolver = (authorization: string | undefined) => IdentityActor | null
 
@@ -13,7 +13,7 @@ export function registerSudoworkBillingRoutes(
   },
 ): void {
   const billing = () => {
-    if (!options.billing) throw new Error('Sudowork Billing 未配置')
+    if (!options.billing) throw new SudoworkBillingError(503, 'Sudowork Billing 未配置')
     return options.billing
   }
   const user = (authorization: string | undefined) => options.getActor(authorization)
