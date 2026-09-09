@@ -25,9 +25,9 @@ host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
 | --- | --- | --- |
 | `all-in-one`（默认） | 会话运行时（k3s + gvisor + runtime 镜像）+ Moss Server | 否 |
 | `control-plane` | 只装 Moss Server，会话跑在另一台计算节点上 | 仅当选 `docker` 运行时 |
-| `compute` | 只装会话运行时 | 否 |
+| `compute` | 只装会话运行时（可 `--join` 加入已有 k3s 集群） | 否 |
 
-`install-k3s.sh` 已并入 `install.sh --role compute`，保留的同名脚本只是转发。
+计算节点由 `install.sh --role compute` 一键装好（旧的 `install-k3s.sh` 已移除）。
 
 ## 在线安装
 
@@ -114,6 +114,29 @@ curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcl
 
 已装好的 Server 改用 k8s：编辑 `~/.moss/server/server.json`，把
 `runtimeDefaults.type` 改成 `"k8s"`，重启 moss-server。
+
+### 扩容：多计算节点（k3s 集群）
+
+`--role compute` / `all-in-one` 默认起一个单节点 k3s。要让多台机器一起跑会话，把额外
+机器作为 **agent** 加入**种子节点**（第一台 `all-in-one` 或 `compute`）。种子节点装完会在
+结尾打印一条可直接复制的加入命令，含 node-token：
+
+```bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
+  | sudo bash -s -- --join https://<种子IP>:6443 --token <node-token>
+```
+
+`--join` 自动隐含 `--role compute`。每台 agent 会各自装 k3s-agent + gvisor，并**各自**把
+moss-runtime 镜像 import 进本机 containerd —— 因为 `imagePullPolicy` 默认 `IfNotPresent`
+且调度器可能把 Pod 排到任意节点，所以每个节点本地都要有镜像，不存在中心推送。离线扩容时
+把 `moss-runtime-*-linux-amd64.tar.gz` 拷到 agent 的脚本旁（或 `OFFLINE_DIR/images`）即走
+本地导入，省去重复下载。
+
+节点间需放行的端口：种子的 API `6443/tcp`（agent → 种子），以及 flannel `8472/udp`、kubelet
+`10250/tcp`（节点互通）。脚本会在已启用的 ufw/firewalld 上尽力打开；云主机还需在安全组放行。
+
+Server 侧**无需任何改动**：继续用种子节点写出的 `moss-k3s-kubeconfig.yaml`，新增 agent 由
+调度器自动纳入。多 server 高可用（embedded etcd）不在此范围，仍是单 server + 多 agent。
 
 ### 接入已有的 k8s 集群
 
@@ -227,5 +250,5 @@ sudo ~/.moss/server/uninstall.sh
 sudo ~/.moss/server/uninstall.sh --purge
 ```
 
-每个 Release 提供 amd64 Server 包、Runtime 镜像包、`install.sh`、k3s 安装脚本
-（`install-k3s.sh`、`uninstall-k3s.sh`、`fetch-offline-deps.sh`）和 `SHA256SUMS`。
+每个 Release 提供 amd64 Server 包、Runtime 镜像包、`install.sh`、k3s 计算节点脚本
+（`uninstall-k3s.sh`、`fetch-offline-deps.sh`）和 `SHA256SUMS`。
