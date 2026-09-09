@@ -2310,7 +2310,7 @@ export function startServer(
           return
         }
         try {
-          const { nextSendIn } = phoneAuth.sendCode(phone)
+          const { nextSendIn } = await phoneAuth.sendCode(phone)
           writeJson(res, 200, { success: true, next_send_in: nextSendIn })
         } catch (error) {
           if (error instanceof PhoneAuthError) {

@@ -30,8 +30,17 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { AuthCenterDb } from '../authCenter/db.js'
 
-/** How a code reaches the person. `log` is dev-only; real providers come later. */
-export type PhoneCodeDelivery = 'log'
+/** How a code reaches the person. `log` is development-only. */
+export type PhoneCodeDelivery = 'log' | 'tencent'
+
+/**
+ * Sends one code. Returns nothing on success and throws on refusal.
+ *
+ * Injected rather than imported so the provider's credentials are fetched by
+ * whoever composes the server (which has the vault client), and this module
+ * never touches a secret.
+ */
+export type SmsSender = (phone: string, code: string) => Promise<void>
 
 export type PhoneAuthConfig = {
   enabled: boolean
@@ -99,6 +108,8 @@ export class PhoneAuthService {
     private readonly db: AuthCenterDb,
     private readonly config: PhoneAuthConfig,
     private readonly secret: string,
+    /** Required when `delivery` is anything other than `log`. */
+    private readonly smsSender?: SmsSender,
   ) {}
 
   get enabled(): boolean {
@@ -122,7 +133,7 @@ export class PhoneAuthService {
    * cost and abuse potential of an unauthenticated endpoint that (once a real
    * provider is wired) spends money per call.
    */
-  sendCode(phone: string, now = Date.now()): { nextSendIn: number; delivery: PhoneCodeDelivery } {
+  async sendCode(phone: string, now = Date.now()): Promise<{ nextSendIn: number; delivery: PhoneCodeDelivery }> {
     this.db.prunePhoneLoginCodes(now)
 
     const existing = this.db.getPhoneLoginCode(phone)
@@ -149,11 +160,34 @@ export class PhoneAuthService {
     })
     this.db.recordPhoneLoginSend(phone, now)
 
-    this.deliverCode(phone, code)
+    // Deliver BEFORE returning success: a provider refusal (bad credentials,
+    // template not approved, quota exhausted) must surface as a failed send
+    // rather than a countdown for a code that never arrives. The stored code is
+    // dropped so the number is not left in cooldown for nothing.
+    try {
+      await this.deliverCode(phone, code)
+    } catch (error) {
+      this.db.deletePhoneLoginCode(phone)
+      throw new PhoneAuthError(
+        502,
+        error instanceof Error ? error.message : 'Failed to deliver verification code',
+      )
+    }
     return { nextSendIn: this.config.resendCooldownSec, delivery: this.config.delivery }
   }
 
-  private deliverCode(phone: string, code: string): void {
+  private async deliverCode(phone: string, code: string): Promise<void> {
+    if (this.config.delivery !== 'log') {
+      if (!this.smsSender) {
+        throw new Error(`phoneAuth.delivery is '${this.config.delivery}' but no SMS sender is configured`)
+      }
+      await this.smsSender(phone, code)
+      return
+    }
+    this.logCode(phone, code)
+  }
+
+  private logCode(phone: string, code: string): void {
     // The only transport that exists. Loud on purpose: a deployment that ends up
     // here without meaning to should see it in the log rather than discover it
     // when someone reads a code out of journald.

@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
-import { PhoneAuthService, type PhoneAuthConfig } from './phoneAuth.js'
+import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
@@ -55,6 +55,8 @@ export type AuthServiceOptions = {
   bootstrapAdmin: BootstrapAdminConfig
   /** Omitted → phone auth is constructed but disabled. */
   phoneAuth?: PhoneAuthConfig
+  /** Required when phoneAuth.delivery is not 'log'. */
+  smsSender?: SmsSender
 }
 
 export class AuthServiceError extends Error {
@@ -191,7 +193,7 @@ export async function createAuthService(
     options.bootstrapAdmin,
   )
   return {
-    service: new AuthService(db, options.tokenTtlSec, options.phoneAuth),
+    service: new AuthService(db, options.tokenTtlSec, options.phoneAuth, options.smsSender),
     bootstrap,
   }
 }
@@ -213,6 +215,7 @@ export class AuthService {
     private readonly db: AuthCenterDb,
     private readonly tokenTtlSec: number,
     phoneAuthConfig?: PhoneAuthConfig,
+    smsSender?: SmsSender,
   ) {
     this.cleanupTimer = setInterval(() => {
       this.db.cleanupExpiredRevokedTokens()
@@ -234,6 +237,7 @@ export class AuthService {
       // server-minted artefacts, and a deployment that rotates its JWT
       // secret should invalidate pending ones too.
       db.getJwtSecret(),
+      smsSender,
     )
   }
 
