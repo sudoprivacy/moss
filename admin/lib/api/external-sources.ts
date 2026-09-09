@@ -13,6 +13,13 @@ export type ExternalSource = {
   name: string
   config: Record<string, unknown> // connector-specific (rootPath, mountedNodeId, etc.)
   hasCredentials: boolean
+  /**
+   * Names of credential fields that actually hold a value (never the
+   * values themselves). Lets the form show 已填写/未填写 per field —
+   * inputs are blanked on edit, so without this a stored secret and an
+   * empty one look identical. Older servers omit it; treat as unknown.
+   */
+  credentialKeys?: string[]
   syncIntervalSec: number
   autoBuildEnabled: boolean
   enabled: boolean

@@ -341,6 +341,44 @@ function makeUserNameResolver(
   }
 }
 
+/**
+ * Which credential fields are actually stored, by name only.
+ *
+ * The admin form blanks every credential input on edit ("leave empty to
+ * keep"), which makes a filled field indistinguishable from an empty one
+ * — an admin cannot tell whether a token is still set, and a credential
+ * silently lost to an overwrite looks exactly like one that was never
+ * entered. Returning the KEYS (never the values) lets the UI mark each
+ * field 已填写/未填写.
+ *
+ * Field names are not secret: they are already hardcoded in the admin's
+ * per-type form spec. Values never leave the server.
+ *
+ * Returns [] when nothing is stored or the blob cannot be read — a
+ * missing indicator is strictly better than a wrong one.
+ */
+async function readCredentialKeys(secretKeyRef: unknown): Promise<string[]> {
+  if (typeof secretKeyRef !== 'string' || !secretKeyRef) return []
+  try {
+    const { readSecret } = await import('./sources/secrets.js')
+    const creds = await readSecret(secretKeyRef)
+    return Object.entries(creds)
+      .filter(([, v]) => typeof v === 'string' && v.length > 0)
+      .map(([k]) => k)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/** Attach credentialKeys to an already-serialized row. */
+async function withCredentialKeys<T extends Record<string, unknown>>(
+  serialized: T,
+  secretKeyRef: unknown,
+): Promise<T & { credentialKeys: string[] }> {
+  return { ...serialized, credentialKeys: await readCredentialKeys(secretKeyRef) }
+}
+
 function serializeExternalSource(row: Record<string, unknown>) {
   let configParsed: Record<string, unknown> = {}
   try {
@@ -3722,7 +3760,16 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/external-sources') {
         authService.requireScope(auth, 'admin:documents')
         const rows = runtime.store.listExternalSources(auth.orgId)
-        writeJson(res, 200, { sources: rows.map(serializeExternalSource) })
+        writeJson(res, 200, {
+          sources: await Promise.all(
+            rows.map(async (r) =>
+              withCredentialKeys(
+                serializeExternalSource(r as Record<string, unknown>),
+                (r as Record<string, unknown>).credentials_secret_key,
+              ),
+            ),
+          ),
+        })
         return
       }
 
@@ -3775,7 +3822,13 @@ export function startServer(
             created_by: auth.userId,
           })
           const row = runtime.store.getExternalSource(id, auth.orgId)
-          writeJson(res, 200, row ? serializeExternalSource(row) : { id })
+          writeJson(
+            res,
+            200,
+            row
+              ? await withCredentialKeys(serializeExternalSource(row), (row as Record<string, unknown>).credentials_secret_key)
+              : { id },
+          )
         } catch (err) {
           if (secretKey) await deleteSecret(secretKey).catch(() => {})
           writeJson(res, 400, {
@@ -3794,7 +3847,11 @@ export function startServer(
           writeJson(res, 404, { error: { code: 'not_found', message: 'external source not found' } })
           return
         }
-        writeJson(res, 200, serializeExternalSource(row))
+        writeJson(
+          res,
+          200,
+          await withCredentialKeys(serializeExternalSource(row), (row as Record<string, unknown>).credentials_secret_key),
+        )
         return
       }
 
@@ -3845,7 +3902,13 @@ export function startServer(
         }
         runtime.store.updateExternalSource(id, auth.orgId, updates)
         const row = runtime.store.getExternalSource(id, auth.orgId)
-        writeJson(res, 200, row ? serializeExternalSource(row) : { id })
+        writeJson(
+          res,
+          200,
+          row
+            ? await withCredentialKeys(serializeExternalSource(row), (row as Record<string, unknown>).credentials_secret_key)
+            : { id },
+        )
         return
       }
 
@@ -3924,10 +3987,12 @@ export function startServer(
         const rows = runtime.store.listCorpApps(auth.orgId)
         const { getCorpAppCapabilities } = await import('./corpapps/types.js')
         writeJson(res, 200, {
-          apps: rows.map((r) => ({
-            ...serializeCorpApp(r),
-            capabilities: getCorpAppCapabilities(String((r as Record<string, unknown>).type)),
-          })),
+          apps: await Promise.all(
+            rows.map(async (r) => ({
+              ...(await withCredentialKeys(serializeCorpApp(r), (r as Record<string, unknown>).credentials_secret_key)),
+              capabilities: getCorpAppCapabilities(String((r as Record<string, unknown>).type)),
+            })),
+          ),
         })
         return
       }
@@ -3987,7 +4052,13 @@ export function startServer(
             created_by: auth.userId,
           })
           const row = runtime.store.getCorpApp(id, auth.orgId)
-          writeJson(res, 200, row ? serializeCorpApp(row) : { id })
+          writeJson(
+            res,
+            200,
+            row
+              ? await withCredentialKeys(serializeCorpApp(row), (row as Record<string, unknown>).credentials_secret_key)
+              : { id },
+          )
         } catch (err) {
           if (secretKey) await deleteSecret(secretKey).catch(() => {})
           const msg = err instanceof Error ? err.message : String(err)
@@ -4011,7 +4082,10 @@ export function startServer(
           return
         }
         const { getCorpAppCapabilities } = await import('./corpapps/types.js')
-        writeJson(res, 200, { ...serializeCorpApp(row), capabilities: getCorpAppCapabilities(String((row as Record<string, unknown>).type)) })
+        writeJson(res, 200, {
+          ...(await withCredentialKeys(serializeCorpApp(row), (row as Record<string, unknown>).credentials_secret_key)),
+          capabilities: getCorpAppCapabilities(String((row as Record<string, unknown>).type)),
+        })
         return
       }
 
@@ -4069,7 +4143,13 @@ export function startServer(
           throw err
         }
         const row = runtime.store.getCorpApp(id, auth.orgId)
-        writeJson(res, 200, row ? serializeCorpApp(row) : { id })
+        writeJson(
+          res,
+          200,
+          row
+            ? await withCredentialKeys(serializeCorpApp(row), (row as Record<string, unknown>).credentials_secret_key)
+            : { id },
+        )
         return
       }
 
