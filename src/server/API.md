@@ -141,6 +141,26 @@ Authorization: Bearer <access_token>
 }
 ```
 
+## Auth Proxy
+
+An internal HTTP listener that session runtimes fetch credentials through. Not
+part of the public API; documented here because its port collides by default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MOSS_AUTH_PROXY_PORT` | `12013` | Listen port. `0` binds an ephemeral port. |
+| `MOSS_AUTH_PROXY_HOST` | `127.0.0.1` | Bind address. Docker deployments set `0.0.0.0` so session containers can reach it. |
+| `MOSS_AUTH_PROXY_URL` | derived from the bound port | What gets injected into sessions. Docker/k8s deployments set this to a container-reachable address. |
+
+> ⚠️ **12013 is not reserved for moss.** The Nexus vault daemon defaults to the
+> same port, so a machine running both has one of them fail to start — and the
+> symptom points nowhere near the cause (a gRPC client meeting an HTTP/1.x
+> server). Set `MOSS_AUTH_PROXY_PORT` to move moss's listener, and
+> `MOSS_AUTH_PROXY_URL` to match if the deployment pins it.
+
+When `MOSS_AUTH_PROXY_URL` is unset the injected URL is built from the port the
+listener actually bound, so the two cannot drift apart.
+
 ## System Config
 
 ### GET `/api/v1/system-config`

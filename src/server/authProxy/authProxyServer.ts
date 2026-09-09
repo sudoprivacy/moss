@@ -257,7 +257,33 @@ function readRequestBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 const UPSTREAM_TIMEOUT_MS = 30_000
-const AUTH_PROXY_PORT = 12013
+
+/**
+ * Default listen port for the auth proxy.
+ *
+ * 12013 is not reserved for us: the Nexus vault daemon defaults to the same
+ * port, so a machine running both moss and a standalone vault has one of them
+ * fail — and the symptom is confusing (a gRPC client meets an HTTP/1.x server).
+ * The port is therefore a knob, not a constant, and it is exported so the URL
+ * injected into sessions is derived from the listener rather than repeated as a
+ * literal in another module.
+ */
+const DEFAULT_AUTH_PROXY_PORT = 12013
+
+function resolveAuthProxyPort(): number {
+  const raw = process.env.MOSS_AUTH_PROXY_PORT?.trim()
+  if (!raw) return DEFAULT_AUTH_PROXY_PORT
+  const parsed = Number(raw)
+  // 0 is meaningful (bind an ephemeral port); anything unparseable falls back
+  // rather than crashing a boot over a typo in an env var.
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+    console.warn(`[AuthProxy] ignoring invalid MOSS_AUTH_PROXY_PORT='${raw}'; using ${DEFAULT_AUTH_PROXY_PORT}`)
+    return DEFAULT_AUTH_PROXY_PORT
+  }
+  return parsed
+}
+
+const AUTH_PROXY_PORT = resolveAuthProxyPort()
 // Token TTL: tokens older than this are considered expired and will be cleaned up
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const TOKEN_CLEANUP_INTERVAL_MS = 60 * 60 * 1000 // 1 hour
@@ -270,6 +296,8 @@ const AUTH_PROXY_HOST = process.env.MOSS_AUTH_PROXY_HOST?.trim() || '127.0.0.1'
 
 export class AuthProxyServer {
   private server: Server | null = null
+  /** Port actually bound; differs from the configured one when it is 0. */
+  private boundPort: number = AUTH_PROXY_PORT
   private readonly tokenRegistry = new Map<string, TokenEntry>()
   private rules = new Map<number, AuthProxyRule>()
   private nexusClient: NexusClient | null = null
@@ -339,6 +367,11 @@ export class AuthProxyServer {
     }
   }
 
+  /** The port this proxy is listening on. Valid after `start()` resolves. */
+  get port(): number {
+    return this.boundPort
+  }
+
   async start(): Promise<void> {
     // Start token cleanup timer
     this.tokenCleanupTimer = setInterval(() => {
@@ -359,14 +392,20 @@ export class AuthProxyServer {
 
       this.server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
-          reject(new Error(`Auth Proxy port ${AUTH_PROXY_PORT} is already in use`))
+          reject(new Error(
+            `Auth Proxy port ${AUTH_PROXY_PORT} is already in use. ` +
+            'Set MOSS_AUTH_PROXY_PORT to a free port (the Nexus vault daemon ' +
+            'defaults to 12013 too), and point MOSS_AUTH_PROXY_URL at the same port.',
+          ))
         } else {
           reject(err)
         }
       })
 
       this.server.listen(AUTH_PROXY_PORT, AUTH_PROXY_HOST, () => {
-        console.log(`[AuthProxy] Listening on ${AUTH_PROXY_HOST}:${AUTH_PROXY_PORT}`)
+        const addr = this.server?.address()
+        this.boundPort = typeof addr === 'object' && addr ? addr.port : AUTH_PROXY_PORT
+        console.log(`[AuthProxy] Listening on ${AUTH_PROXY_HOST}:${this.boundPort}`)
         resolve()
       })
     })
@@ -391,7 +430,7 @@ export class AuthProxyServer {
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.url === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ status: 'ok', port: AUTH_PROXY_PORT }))
+      res.end(JSON.stringify({ status: 'ok', port: this.boundPort }))
       return
     }
 
