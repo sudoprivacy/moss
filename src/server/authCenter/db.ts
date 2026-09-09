@@ -44,6 +44,16 @@ export type AuthCenterUser = {
   phone: string | null
 }
 
+/**
+ * A user's own credential for the metered model gateway. Kept off
+ * `AuthCenterUser` on purpose so it cannot reach an API response — see the
+ * migration comment in `ensureSchema`.
+ */
+export type UserModelCredential = {
+  sudorouterUserId: string | null
+  sudorouterKey: string
+}
+
 /** A pending phone verification code. Only the HMAC of the code is stored. */
 export type PhoneLoginCode = {
   phone: string
@@ -412,6 +422,28 @@ export class AuthCenterDb {
       CREATE UNIQUE INDEX IF NOT EXISTS users_phone_uniq
         ON users (phone) WHERE phone IS NOT NULL;
     `)
+    // The upstream model gateway (SudoRouter) owns the credit ledger and keys it
+    // on a per-user token. A deployment that bills per user has to spend that
+    // token, not a shared server key — otherwise every session bills one account
+    // and each user's balance never moves. Nullable: deployments without a
+    // metered gateway (private / on-prem) have no per-user token and fall back to
+    // the server key.
+    //
+    // Deliberately NOT part of `AuthCenterUser`: that type flows into
+    // `SanitizedAuthCenterUser`, which only omits `passwordHash` and `email`, so
+    // anything mapped there reaches API responses. Keeping the token off the
+    // mapped type makes leaking it impossible by construction rather than by
+    // remembering to omit it. Reads go through `getUserModelCredential`.
+    this.ensureColumn(
+      'users',
+      'sudorouter_user_id',
+      'ALTER TABLE users ADD COLUMN sudorouter_user_id TEXT',
+    )
+    this.ensureColumn(
+      'users',
+      'sudorouter_key',
+      'ALTER TABLE users ADD COLUMN sudorouter_key TEXT',
+    )
     this.ensureColumn(
       'departments',
       'ext_dept_id',
@@ -687,6 +719,30 @@ export class AuthCenterDb {
       SELECT * FROM users WHERE phone = ? LIMIT 1
     `).get(phone) as SqlRow | undefined
     return row ? mapUser(row) : null
+  }
+
+  // ---- per-user model gateway credential ----
+
+  /**
+   * The user's own token for the metered model gateway, or null when they have
+   * none and the shared server key applies.
+   */
+  getUserModelCredential(userId: string): UserModelCredential | null {
+    const row = this.db.prepare(`
+      SELECT sudorouter_user_id, sudorouter_key FROM users WHERE id = ? LIMIT 1
+    `).get(userId) as SqlRow | undefined
+    const key = row?.sudorouter_key
+    if (key == null || String(key) === '') return null
+    return {
+      sudorouterUserId: row?.sudorouter_user_id == null ? null : String(row.sudorouter_user_id),
+      sudorouterKey: String(key),
+    }
+  }
+
+  setUserModelCredential(userId: string, credential: UserModelCredential): void {
+    this.db.prepare(`
+      UPDATE users SET sudorouter_user_id = ?, sudorouter_key = ? WHERE id = ?
+    `).run(credential.sudorouterUserId, credential.sudorouterKey, userId)
   }
 
   // ---- phone verification codes (login_method: 0) ----

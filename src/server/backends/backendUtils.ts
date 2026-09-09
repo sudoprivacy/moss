@@ -59,6 +59,24 @@ function resolveMossBinDir(): string | null {
   return null
 }
 
+/**
+ * The model-gateway key a session should spend, injected env first.
+ *
+ * Only the main process knows whose key this session belongs to — a metered
+ * deployment issues every user their own gateway token, and the main process
+ * resolves it and injects it here. `settings.apiKey` read inside the runner can
+ * only ever be the shared server key, so letting it win would bill every user
+ * to one account and leave their balances untouched. Env therefore wins
+ * unconditionally; settings remains the fallback for spawn paths that inject
+ * nothing.
+ */
+export function resolveSessionApiKey(
+  env: NodeJS.ProcessEnv,
+  settingsApiKey: string | undefined,
+): string | undefined {
+  return env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || settingsApiKey
+}
+
 export function buildSessionEnv(
   options: BackendSpawnOptions,
   overrides: Record<string, string | undefined> = {},
@@ -68,11 +86,7 @@ export function buildSessionEnv(
   // 敏感值不再读 settings.json 文件（apiKey 已迁 Nexus；本函数运行于 runner
   // 子进程，该值由主进程注入 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 提供）
   const forceEnvModelConfig = process.env.MOSS_FORCE_ENV_MODEL_CONFIG === '1'
-  const apiKey = forceEnvModelConfig
-    ? (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || settings.apiKey)
-    : (settings.apiKey
-      || process.env.ANTHROPIC_API_KEY
-      || process.env.ANTHROPIC_AUTH_TOKEN)
+  const apiKey = resolveSessionApiKey(process.env, settings.apiKey)
 
   // Document Center: in-container scode talks back to moss-server through
   // the `wiki` CLI. The CLI refuses to run unless these two env vars are

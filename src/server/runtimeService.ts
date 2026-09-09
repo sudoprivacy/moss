@@ -1575,12 +1575,22 @@ export class RuntimeService {
     if (systemSettings.url) {
       runnerEnv.ANTHROPIC_BASE_URL = systemSettings.url
     }
-    if (systemSettings.apiKey) {
-      runnerEnv.ANTHROPIC_AUTH_TOKEN = systemSettings.apiKey
+    // A metered deployment keys its credit ledger on a per-user gateway token,
+    // so a session must spend the token of the user who owns it. Falling back to
+    // the shared server key would bill every user to one account and leave each
+    // balance untouched. Users without a token (private / on-prem deployments,
+    // where no metered gateway exists) keep the shared key. Resolved here in the
+    // main process: the runner subprocess has no database.
+    const userModelKey = session.userId
+      ? this.authService.getUserModelCredential(session.userId)?.sudorouterKey
+      : undefined
+    const sessionApiKey = userModelKey || systemSettings.apiKey
+    if (sessionApiKey) {
+      runnerEnv.ANTHROPIC_AUTH_TOKEN = sessionApiKey
       // 同值补设 API_KEY：runner 子进程 buildSessionEnv 的选值链为
       // settings.apiKey || ANTHROPIC_API_KEY || ANTHROPIC_AUTH_TOKEN，显式注入
       // 两个同名值可消除主进程 env 自带 ANTHROPIC_API_KEY 时的优先级翻转
-      runnerEnv.ANTHROPIC_API_KEY = systemSettings.apiKey
+      runnerEnv.ANTHROPIC_API_KEY = sessionApiKey
     }
     if (systemSettings.model) {
       runnerEnv.ANTHROPIC_MODEL = systemSettings.model
