@@ -327,6 +327,13 @@ export const serverFileConfigSchema = lazySchema(() =>
         signName: z.string().min(1),
         templateId: z.string().min(1),
         region: z.string().min(1).default('ap-beijing'),
+        /**
+         * Ordered values for the template's {1}, {2}, … placeholders.
+         * `{code}` and `{ttlMinutes}` are substituted. The default matches a
+         * template of the form "{1} is your code, valid for {2} minutes";
+         * a single-parameter template sets `["{code}"]`.
+         */
+        templateParams: z.array(z.string()).min(1).default(['{code}', '{ttlMinutes}']),
         /** Vault namespace/keys holding the credential pair. */
         vaultNamespace: z.string().min(1).default('system:sms'),
         secretIdKey: z.string().min(1).default('tencent_secret_id'),
