@@ -60,7 +60,8 @@ sudo ./install.sh --offline
 上一键部署 k3s + gvisor + moss-runtime 镜像（与 Server 同一发布版本）：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install-k3s.sh | sudo bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
+  | sudo bash -s -- --role compute
 ```
 
 脚本会提示节点 IP、命名空间等必要参数（`--non-interactive` 全部取默认值），完成后
@@ -68,7 +69,7 @@ curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcl
 k8s 的说明。
 
 离线安装：在有网络的机器运行 `fetch-offline-deps.sh` 生成 `./offline`，连同 `deploy/k3s`
-目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install-k3s.sh`。
+目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install.sh --role compute`。
 
 部署完成后让 moss-server 使用 k8s，二选一：
 
@@ -77,9 +78,24 @@ k8s 的说明。
 - **已安装**：编辑 `~/.moss/server/server.json`，将 `runtimeDefaults.type` 改为 `"k8s"`，
   重启 moss-server。
 
+### 扩容：多计算节点
+
+单节点不够时，把额外机器作为 **agent** 加入种子节点。种子节点装完会打印含 node-token 的
+加入命令，在每台扩容机执行即可：
+
+```bash
+curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
+  | sudo bash -s -- --join https://<种子IP>:6443 --token <node-token>
+```
+
+每台 agent 各自装 gvisor 并把 moss-runtime 镜像 import 进本机 containerd（`imagePullPolicy`
+默认 `IfNotPresent`，Pod 可能被调度到任意节点，故每节点都要有镜像）。节点间需放行种子
+`6443/tcp` 及 flannel `8472/udp`、kubelet `10250/tcp`。Server 侧无需改动，继续用种子的
+kubeconfig。详见 `deploy/README.md`。
+
 ### 接入已有的 k8s 集群
 
-若客户已有 k8s 集群，无需运行 `install-k3s.sh`，只需在 `server.json` 的 `k8s` 块里
+若客户已有 k8s 集群，无需运行 `install.sh --role compute`，只需在 `server.json` 的 `k8s` 块里
 指向他们的 kubeconfig。moss-server 通过本机 `kubectl` + kubeconfig 操作集群，前提是
 集群满足：
 

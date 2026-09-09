@@ -14,6 +14,10 @@ INSTALLER_REFRESHED="${MOSS_INSTALLER_REFRESHED:-0}"
 NON_INTERACTIVE="${MOSS_NON_INTERACTIVE:-0}"
 INSTALL_DIR="${MOSS_INSTALL_DIR:-}"
 ROLE="${MOSS_ROLE:-}"
+# When set, a --role compute node joins that k3s server as an agent instead of
+# starting its own single-node cluster. The token is the seed's node-token.
+K3S_URL_JOIN="${MOSS_K3S_URL:-}"
+K3S_JOIN_TOKEN="${MOSS_K3S_TOKEN:-}"
 
 log() { printf '[moss-install] %s\n' "$*"; }
 warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
@@ -33,8 +37,14 @@ A control-plane install asks which session runtime to drive. 'k8s' (the default)
 talks to a compute node and needs no container engine on this machine. 'docker'
 runs sessions in local containers and requires a Docker daemon here.
 
+A --role compute node starts its own single-node k3s by default. Pass --join to
+attach it to an existing k3s server instead, growing the cluster; the seed node
+prints the exact --join command (with its token) when it finishes.
+
 Options:
   --role ROLE               See above. Default: all-in-one.
+  --join URL                Join this k3s server as an agent (implies --role compute).
+  --token TOKEN             Seed node-token; required with --join.
   --offline                 Read release archives next to this script.
   --download PATH           Download files for a later offline installation.
   --upgrade                 Upgrade an existing installation without changing user data.
@@ -50,6 +60,7 @@ Configuration environment variables:
 Compute-node environment variables:
   MOSS_K8S_NAMESPACE, MOSS_K8S_RUNTIME_CLASS, MOSS_K8S_SA_NAME, MOSS_K8S_OUTPUT_DIR,
   MOSS_RUNTIME_VERSION, NODE_IP, INSTALL_GVISOR, IMPORT_RUNTIME_IMAGE,
+  MOSS_K3S_URL, MOSS_K3S_TOKEN (agent join; same as --join/--token),
   K3S_MIRROR, REGISTRY_MIRROR, INSTALL_K3S_VERSION, OFFLINE_DIR, OFFLINE_MODE.
 EOF
 }
@@ -75,6 +86,19 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --role=*) ROLE="${1#--role=}" ;;
+    --join|--server)
+      [ "$#" -ge 2 ] || die "--join requires a k3s server URL"
+      K3S_URL_JOIN="$2"
+      shift
+      ;;
+    --join=*) K3S_URL_JOIN="${1#--join=}" ;;
+    --server=*) K3S_URL_JOIN="${1#--server=}" ;;
+    --token)
+      [ "$#" -ge 2 ] || die "--token requires a value"
+      K3S_JOIN_TOKEN="$2"
+      shift
+      ;;
+    --token=*) K3S_JOIN_TOKEN="${1#--token=}" ;;
     --non-interactive) NON_INTERACTIVE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -92,6 +116,16 @@ done
 if [ "$UPGRADE_ONLY" = 1 ] && [ -z "$ROLE" ]; then
   ROLE=control-plane
 fi
+# Joining a cluster is a compute-node action; adopt the role so the user can drop
+# --role entirely and just paste the seed's join command.
+if [ -n "$K3S_URL_JOIN" ]; then
+  [ -z "$ROLE" ] || [ "$ROLE" = compute ] \
+    || die "--join only applies to a compute node (got role '$ROLE')"
+  ROLE=compute
+  [ -n "$K3S_JOIN_TOKEN" ] || die "--join requires --token (the seed node-token)"
+fi
+[ -n "$K3S_JOIN_TOKEN" ] && [ -z "$K3S_URL_JOIN" ] \
+  && die "--token needs --join <k3s server URL>"
 case "${ROLE:-}" in
   ''|all-in-one|control-plane|compute) ;;
   *) die "role must be 'all-in-one', 'control-plane' or 'compute' (got '$ROLE')" ;;
@@ -274,6 +308,17 @@ provision_compute_node() {
   local IMPORT_RUNTIME_IMAGE="${IMPORT_RUNTIME_IMAGE:-1}"
   local SCODE_IMAGE=""
 
+  # A join URL turns this node into a k3s agent that grows an existing cluster;
+  # otherwise it is the seed that starts a fresh single-node server. Agents run
+  # gvisor pods too, so they still need runsc + the runtime image locally, but
+  # they never apply cluster resources or write a kubeconfig — the seed owns those.
+  local K3S_ROLE K3S_SERVICE
+  if [ -n "${K3S_URL_JOIN:-}" ]; then
+    K3S_ROLE=agent; K3S_SERVICE=k3s-agent
+  else
+    K3S_ROLE=server; K3S_SERVICE=k3s
+  fi
+
   local K3S_YAML=/etc/rancher/k3s/k3s.yaml
   local CONTAINERD_TMPL=/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
   local K3S_AIRGAP_DIR=/var/lib/rancher/k3s/agent/images
@@ -309,6 +354,41 @@ provision_compute_node() {
   }
   image_in_containerd() { k3s ctr images ls -q 2>/dev/null | grep -qF "$1"; }
 
+  # A server is Ready when the API reports its node Ready; an agent has no local
+  # kubeconfig, so we settle for its containerd answering (that is all the image
+  # import and gvisor registration below need).
+  wait_node_ready() {
+    local i
+    if [ "$K3S_ROLE" = server ]; then
+      for i in $(seq 1 60); do
+        kc get nodes 2>/dev/null | grep -q ' Ready ' && return 0
+        sleep 2
+      done
+      die "the node did not become Ready within 120s"
+    else
+      for i in $(seq 1 60); do
+        k3s ctr version >/dev/null 2>&1 && return 0
+        sleep 2
+      done
+      die "the k3s agent did not come up within 120s (check --join URL/--token and that $NODE_IP can reach the seed on 6443/tcp)"
+    fi
+  }
+
+  # Best-effort: a multi-node cluster needs flannel VXLAN (8472/udp) and kubelet
+  # (10250/tcp) between nodes, plus the API (6443/tcp) reachable on the seed. Only
+  # touch a firewall that is actually active; cloud security groups still apply.
+  open_cluster_ports() {
+    local p
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+      for p in "$@"; do ufw allow "$p" >/dev/null 2>&1 || true; done
+      log "Opened cluster ports via ufw: $*"
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+      for p in "$@"; do firewall-cmd --permanent --add-port="$p" >/dev/null 2>&1 || true; done
+      firewall-cmd --reload >/dev/null 2>&1 || true
+      log "Opened cluster ports via firewalld: $*"
+    fi
+  }
+
   local K3S_USE_OFFLINE=0
   if [ -s "$OFF_K3S" ] && [ -s "$OFF_K3S_INSTALL" ] && [ -s "$OFF_K3S_AIRGAP" ] \
     && [ "$OFFLINE_MODE" != off ]; then
@@ -325,12 +405,17 @@ provision_compute_node() {
     NODE_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
     [ -n "$NODE_IP" ] || NODE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   fi
-  prompt_value NODE_IP 'k3s API address reachable from the Moss Server (IP or hostname)' "$NODE_IP"
-  [ -n "$NODE_IP" ] || die "could not detect the node IP; set NODE_IP=<ip>"
-  prompt_value NAMESPACE 'Kubernetes namespace for session pods' "$NAMESPACE"
+  # The seed advertises this address in the kubeconfig it hands the Moss Server;
+  # an agent only needs the version to import the matching image, so it skips the
+  # API-address and namespace prompts (the seed already owns both).
+  if [ "$K3S_ROLE" = server ]; then
+    prompt_value NODE_IP 'k3s API address reachable from the Moss Server (IP or hostname)' "$NODE_IP"
+    [ -n "$NODE_IP" ] || die "could not detect the node IP; set NODE_IP=<ip>"
+    prompt_value NAMESPACE 'Kubernetes namespace for session pods' "$NAMESPACE"
+  fi
   prompt_value RUNTIME_VERSION 'moss-runtime image version (blank uses the latest release)' "$RUNTIME_VERSION"
   local KUBECONFIG_OUT="$OUTPUT_DIR/moss-k3s-kubeconfig.yaml"
-  log "Compute node: ip=$NODE_IP arch=$KARCH namespace=$NAMESPACE offline=$OFFLINE_MODE"
+  log "Compute node: role=$K3S_ROLE ip=$NODE_IP arch=$KARCH namespace=$NAMESPACE offline=$OFFLINE_MODE"
 
   # A registry mirror for docker.io, written before k3s starts so the very
   # first pause-sandbox pull already uses it. 'auto' only steps in when
@@ -359,49 +444,100 @@ mirrors:
     endpoint:
       - "$mirror_url"
 EOF
-    systemctl is-active --quiet k3s 2>/dev/null && systemctl restart k3s
+    systemctl is-active --quiet "$K3S_SERVICE" 2>/dev/null && systemctl restart "$K3S_SERVICE"
   fi
 
-  if command -v k3s >/dev/null 2>&1 && systemctl is-active --quiet k3s 2>/dev/null; then
-    log "k3s is already installed and running"
+  # Open the ports the cluster fabric needs before k3s starts (best-effort; only
+  # a live host firewall is touched). The seed also exposes the API on 6443/tcp.
+  if [ "$K3S_ROLE" = server ]; then
+    open_cluster_ports 6443/tcp 8472/udp 10250/tcp
+  else
+    open_cluster_ports 8472/udp 10250/tcp
+  fi
+
+  if command -v k3s >/dev/null 2>&1 && systemctl is-active --quiet "$K3S_SERVICE" 2>/dev/null; then
+    log "k3s ($K3S_ROLE) is already installed and running"
   elif [ "$K3S_USE_OFFLINE" = 1 ]; then
-    log "Installing k3s from $OFFLINE_DIR"
+    log "Installing k3s ($K3S_ROLE) from $OFFLINE_DIR"
     install -m 0755 "$OFF_K3S" /usr/local/bin/k3s || die "could not stage the k3s binary"
     mkdir -p "$K3S_AIRGAP_DIR"
     cp -f "$OFF_K3S_AIRGAP" "$K3S_AIRGAP_DIR/" || die "could not stage the airgap images"
-    INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" \
-      sh "$OFF_K3S_INSTALL" || die "offline k3s installation failed"
+    if [ "$K3S_ROLE" = agent ]; then
+      INSTALL_K3S_SKIP_DOWNLOAD=true K3S_URL="$K3S_URL_JOIN" K3S_TOKEN="$K3S_JOIN_TOKEN" \
+        sh "$OFF_K3S_INSTALL" || die "offline k3s agent installation failed"
+    else
+      INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" \
+        sh "$OFF_K3S_INSTALL" || die "offline k3s installation failed"
+    fi
   else
-    log "Installing k3s"
+    log "Installing k3s ($K3S_ROLE)"
+    # Cloud VMs cloned from one image often share hostname "ubuntu"; k3s keys node
+    # identity on the hostname, so a second node with the same name is rejected
+    # ("Node password rejected, duplicate hostname"). Derive a unique, stable node
+    # name from the node IP so agents (and the seed) never collide on join.
+    local NODE_NAME
+    NODE_NAME="moss-$(printf '%s' "$NODE_IP" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+    [ "$NODE_NAME" != moss- ] || NODE_NAME="moss-$(hostname | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-' | sed 's/-*$//')-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    log "k3s node name: $NODE_NAME"
     local mirror="$K3S_MIRROR" installer
     if [ "$mirror" = auto ]; then
-      if curl -sfL -m 5 -o /dev/null https://get.k3s.io 2>/dev/null; then mirror=off; else mirror=cn; fi
+      # Decide by real throughput to the github release *binary* CDN, not mere
+      # reachability. In China get.k3s.io (script CDN), github HTML pages, and even
+      # the first bytes of a release asset are reachable, but sustained downloads
+      # from objects.githubusercontent.com stall — so a plain reachability/1-byte
+      # probe wrongly picks 'off' and then hangs for minutes on the ~60MB k3s
+      # binary. Pull a few MB of the actual binary with a speed floor: a stalled
+      # connection drops below the floor and aborts in seconds, falling back to cn.
+      if curl -sfL --connect-timeout 5 --max-time 8 \
+        --speed-limit 500000 --speed-time 3 -r 0-3000000 -o /dev/null \
+        https://github.com/k3s-io/k3s/releases/latest/download/k3s 2>/dev/null; then
+        mirror=off
+      else
+        mirror=cn
+      fi
     fi
+    # Mirrors to try in order. A probe that picked 'off' (github) can be fooled by
+    # intermittent China connectivity — the first few MB arrive fast enough to pass
+    # the speed floor, then the full ~40MB binary stalls — so fall back to cn if the
+    # off install fails. An explicit K3S_MIRROR=cn skips github entirely.
+    local mirrors m ok=0
+    if [ "$mirror" = cn ]; then mirrors="cn"; else mirrors="off cn"; fi
     installer="$(mktemp)"
-    if [ "$mirror" = cn ]; then
-      curl -sfL -m 30 https://rancher-mirror.rancher.cn/k3s/k3s-install.sh -o "$installer" \
-        || die "could not download the k3s installer from the cn mirror"
-      export INSTALL_K3S_MIRROR=cn
-    else
-      curl -sfL -m 30 https://get.k3s.io -o "$installer" \
-        || die "could not download the k3s installer"
-    fi
     [ -n "$K3S_VERSION" ] && export INSTALL_K3S_VERSION="$K3S_VERSION"
-    INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh "$installer" || die "k3s installation failed"
+    for m in $mirrors; do
+      if [ "$m" = cn ]; then
+        curl -sfL -m 30 https://rancher-mirror.rancher.cn/k3s/k3s-install.sh -o "$installer" \
+          || { warn "could not download the k3s installer from the cn mirror"; continue; }
+        export INSTALL_K3S_MIRROR=cn
+      else
+        curl -sfL -m 30 https://get.k3s.io -o "$installer" \
+          || { warn "could not download the k3s installer from get.k3s.io"; continue; }
+        unset INSTALL_K3S_MIRROR
+      fi
+      # K3S_URL/K3S_TOKEN make the official installer set up an agent unit
+      # (k3s-agent) instead of a server; INSTALL_K3S_EXEC is server-only.
+      if [ "$K3S_ROLE" = agent ]; then
+        if INSTALL_K3S_EXEC="--node-name $NODE_NAME" \
+          K3S_URL="$K3S_URL_JOIN" K3S_TOKEN="$K3S_JOIN_TOKEN" sh "$installer"; then ok=1; break; fi
+      else
+        if INSTALL_K3S_EXEC="--write-kubeconfig-mode 644 --node-name $NODE_NAME" sh "$installer"; then ok=1; break; fi
+      fi
+      warn "k3s ($K3S_ROLE) install via '$m' mirror failed; trying the next mirror"
+    done
     rm -f "$installer"
+    [ "$ok" = 1 ] || die "k3s ($K3S_ROLE) installation failed (check --join URL/--token and network)"
   fi
 
-  log "Waiting for the node to become Ready"
-  local i
-  for i in $(seq 1 60); do
-    kc get nodes 2>/dev/null | grep -q ' Ready ' && break
-    [ "$i" -eq 60 ] && die "the node did not become Ready within 120s"
-    sleep 2
-  done
+  log "Waiting for k3s ($K3S_ROLE) to come up"
+  wait_node_ready
 
-  command -v kubectl >/dev/null 2>&1 || ln -sf "$(command -v k3s)" /usr/local/bin/kubectl
-  printf 'export KUBECONFIG=%s\n' "$K3S_YAML" > /etc/profile.d/k3s-kubeconfig.sh
-  chmod 644 /etc/profile.d/k3s-kubeconfig.sh
+  # kubectl and the shell KUBECONFIG only make sense on the seed; an agent has no
+  # local API access.
+  if [ "$K3S_ROLE" = server ]; then
+    command -v kubectl >/dev/null 2>&1 || ln -sf "$(command -v k3s)" /usr/local/bin/kubectl
+    printf 'export KUBECONFIG=%s\n' "$K3S_YAML" > /etc/profile.d/k3s-kubeconfig.sh
+    chmod 644 /etc/profile.d/k3s-kubeconfig.sh
+  fi
 
   if [ -d "$OFFLINE_DIR/images" ]; then
     # Unmatched globs stay literal, so every loop below tests for the file.
@@ -436,7 +572,15 @@ EOF
       done
       [ -n "$STAGED_TARBALL" ] && break
     done
-    [ -z "$MRV" ] && [ "$RELEASE_TAG" != "@@MOSS_RELEASE_TAG@@" ] && MRV="${RELEASE_TAG#server-v}"
+    # Pin the runtime image to this installer's release when stamped. Match on the
+    # server-v* shape rather than comparing against the literal placeholder: CI
+    # stamps with a global `sed s/@@MOSS_RELEASE_TAG@@/<tag>/g`, which would also
+    # rewrite a literal sentinel here and make the guard always false — leaving MRV
+    # unset so every pinned installer wrongly pulls the COS-latest runtime (version
+    # skew). An unstamped RELEASE_TAG stays "@@…@@", which never matches server-v*.
+    if [ -z "$MRV" ]; then
+      case "$RELEASE_TAG" in server-v*) MRV="${RELEASE_TAG#server-v}" ;; esac
+    fi
     [ -z "$SCODE_IMAGE" ] && [ -n "$MRV" ] && SCODE_IMAGE="docker.io/library/my-moss-runtime:${MRV}-amd64"
 
     if [ -n "$SCODE_IMAGE" ] && image_in_containerd "my-moss-runtime:${MRV}-amd64"; then
@@ -511,9 +655,16 @@ EOF
       log "Downloading gvisor (runsc and its containerd shim)"
       local tmp f
       tmp="$(mktemp -d)"
+      # storage.googleapis.com is only intermittently reachable from China, so a
+      # single attempt flakes. Retry, and set a speed floor (--speed-limit/-time)
+      # so a connection that stalls mid-transfer aborts in seconds and retries
+      # instead of hanging until the -m ceiling.
       for f in runsc containerd-shim-runsc-v1; do
-        curl -fL -m 180 "$GVISOR_BASE/$f" -o "$tmp/$f" || die "could not download $f"
-        curl -fL -m 60 "$GVISOR_BASE/$f.sha512" -o "$tmp/$f.sha512" || die "could not download $f.sha512"
+        curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+          --connect-timeout 15 -m 180 --speed-limit 10240 --speed-time 20 \
+          "$GVISOR_BASE/$f" -o "$tmp/$f" || die "could not download $f"
+        curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+          --connect-timeout 15 -m 60 "$GVISOR_BASE/$f.sha512" -o "$tmp/$f.sha512" || die "could not download $f.sha512"
         (cd "$tmp" && sha512sum -c "$f.sha512") || die "checksum mismatch for $f"
         chmod +x "$tmp/$f"
         mv "$tmp/$f" /usr/local/bin/
@@ -530,15 +681,27 @@ EOF
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
 EOF
-      systemctl restart k3s
-      for i in $(seq 1 60); do
-        kc get nodes 2>/dev/null | grep -q ' Ready ' && break
-        [ "$i" -eq 60 ] && die "the node did not return to Ready after the k3s restart"
-        sleep 2
-      done
+      systemctl restart "$K3S_SERVICE"
+      wait_node_ready
     fi
   else
     warn "INSTALL_GVISOR=0; RuntimeClass '$RUNTIME_CLASS' will have no handler"
+  fi
+
+  # An agent grows an existing cluster: its runsc handler + runtime image are now
+  # in place, and the k8s scheduler will place gvisor pods on it. Cluster
+  # resources (RuntimeClass/namespace/RBAC) and the Moss Server kubeconfig belong
+  # to the seed, which already applied them, so the agent stops here.
+  if [ "$K3S_ROLE" = agent ]; then
+    COMPUTE_KUBECONFIG=""
+    COMPUTE_NAMESPACE="$NAMESPACE"
+    COMPUTE_RUNTIME_CLASS="$RUNTIME_CLASS"
+    COMPUTE_SCODE_IMAGE="$SCODE_IMAGE"
+    COMPUTE_NODE_IP="$NODE_IP"
+    COMPUTE_K3S_ROLE="agent"
+    COMPUTE_JOIN_URL="$K3S_URL_JOIN"
+    log "Compute agent joined $K3S_URL_JOIN"
+    return 0
   fi
 
   log "Applying RuntimeClass/$RUNTIME_CLASS, namespace/$NAMESPACE, ServiceAccount/$SA_NAME and RBAC"
@@ -642,6 +805,10 @@ EOF
   COMPUTE_RUNTIME_CLASS="$RUNTIME_CLASS"
   COMPUTE_SCODE_IMAGE="$SCODE_IMAGE"
   COMPUTE_NODE_IP="$NODE_IP"
+  COMPUTE_K3S_ROLE="server"
+  # The node-token lets a later `--role compute --join` attach an agent. It is a
+  # cluster join secret, so it is surfaced only in the seed's own summary.
+  COMPUTE_K3S_TOKEN="$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || true)"
   log "Compute node ready"
 }
 
@@ -658,7 +825,10 @@ if [ -z "$INSTALL_DIR" ] && [ -f "/etc/systemd/system/$SERVICE_NAME.service" ]; 
   fi
 fi
 [ -n "$INSTALL_DIR" ] || USING_DEFAULT_INSTALL_DIR=1
-if [ "$UPGRADE_ONLY" = 1 ]; then
+if [ "$UPGRADE_ONLY" = 1 ] || [ "$ROLE" = compute ]; then
+  # A compute node installs no Moss Server. It only needs a default path for the
+  # seed variant's kubeconfig output (an agent writes nothing local), so never
+  # prompt for an install directory the way a server install does.
   INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 else
   prompt_value INSTALL_DIR 'Install directory' "$DEFAULT_INSTALL_DIR"
@@ -712,9 +882,49 @@ COMPUTE_NAMESPACE=""
 COMPUTE_RUNTIME_CLASS=""
 COMPUTE_SCODE_IMAGE=""
 COMPUTE_NODE_IP=""
+COMPUTE_K3S_ROLE=""
+COMPUTE_K3S_TOKEN=""
+COMPUTE_JOIN_URL=""
 if [ "$ROLE" = compute ] || [ "$ROLE" = all-in-one ]; then
-  install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$INSTALL_DIR"
+  # all-in-one installs the server here; a compute *seed* writes its kubeconfig
+  # here. A compute *agent* (--join) writes nothing local — don't fabricate an
+  # empty ~/.moss/server that looks like a stray Moss install.
+  if [ "$ROLE" = all-in-one ] || [ -z "$K3S_URL_JOIN" ]; then
+    install -d -m 700 -o "$INSTALL_USER" -g "$INSTALL_USER_GROUP" "$INSTALL_DIR"
+  fi
   provision_compute_node
+fi
+# A compute node is *only* a session runtime — it has no Moss Server to install,
+# so it exits here, before any server-side prompt (install dir, session runtime)
+# or dependency check. Everything below this branch is control-plane work.
+if [ "$ROLE" = compute ]; then
+  if [ "$COMPUTE_K3S_ROLE" = agent ]; then
+    log "Session runtime installed on this node (k3s agent)"
+    log "Joined cluster: $COMPUTE_JOIN_URL"
+    log "scode image: ${COMPUTE_SCODE_IMAGE:-<not imported; stage the runtime tarball or set MOSS_RUNTIME_VERSION>}"
+    log "This node now runs gvisor session pods scheduled by the seed; no kubeconfig lives here."
+    log "The Moss Server keeps using the seed's kubeconfig unchanged."
+    exit 0
+  fi
+  COS_JOIN_INSTALLER="${MOSS_COS_BASE:-https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server}"
+  case "$RELEASE_TAG" in
+    server-v*) COS_JOIN_INSTALLER="$COS_JOIN_INSTALLER/releases/$RELEASE_TAG/install.sh" ;;
+    *)         COS_JOIN_INSTALLER="$COS_JOIN_INSTALLER/latest/install.sh" ;;
+  esac
+  log "Session runtime installed on this node (k3s seed)"
+  log "kubeconfig: $COMPUTE_KUBECONFIG"
+  log "namespace: $COMPUTE_NAMESPACE   RuntimeClass: $COMPUTE_RUNTIME_CLASS"
+  log "scode image: ${COMPUTE_SCODE_IMAGE:-<not imported; set MOSS_SCODE_IMAGE on the server>}"
+  log "Point a Moss Server at it with these values, or install one here with --role all-in-one."
+  log "Verify: KUBECONFIG=$COMPUTE_KUBECONFIG kubectl -n $COMPUTE_NAMESPACE get pods"
+  if [ -n "$COMPUTE_K3S_TOKEN" ]; then
+    log "----------------------------------------------------------------------"
+    log "Add more compute nodes: run this on each extra machine"
+    log "  curl -fsSL $COS_JOIN_INSTALLER | sudo bash -s -- \\"
+    log "    --join https://${COMPUTE_NODE_IP}:6443 --token $COMPUTE_K3S_TOKEN"
+    log "Cluster ports each agent needs open to this seed: 6443/tcp, 8472/udp, 10250/tcp."
+  fi
+  exit 0
 fi
 # Which session runtime this server drives decides what the machine needs: 'k8s'
 # talks to a compute node over the Kubernetes API and needs no container engine
@@ -752,16 +962,6 @@ NEED_RUNTIME_ARCHIVE=0
 [ "$MOSS_RUNTIME_VALUE" = docker ] && NEED_RUNTIME_ARCHIVE=1
 INSTALL_ARCHIVES=("$SERVER_ARCHIVE")
 [ "$NEED_RUNTIME_ARCHIVE" = 1 ] && INSTALL_ARCHIVES+=("$RUNTIME_ARCHIVE")
-
-if [ "$ROLE" = compute ]; then
-  log "Session runtime installed on this node"
-  log "kubeconfig: $COMPUTE_KUBECONFIG"
-  log "namespace: $COMPUTE_NAMESPACE   RuntimeClass: $COMPUTE_RUNTIME_CLASS"
-  log "scode image: ${COMPUTE_SCODE_IMAGE:-<not imported; set MOSS_SCODE_IMAGE on the server>}"
-  log "Point a Moss Server at it with these values, or install one here with --role all-in-one."
-  log "Verify: KUBECONFIG=$COMPUTE_KUBECONFIG kubectl -n $COMPUTE_NAMESPACE get pods"
-  exit 0
-fi
 
 INSTALLED_RELEASE_DIR="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
 INSTALLED_RELEASE_TAG="${INSTALLED_RELEASE_DIR##*/}"
@@ -1398,6 +1598,18 @@ if [ "$MOSS_RUNTIME_VALUE" = k8s ]; then
   if [ -n "$COMPUTE_KUBECONFIG" ]; then
     log "Sessions run on this node: namespace $COMPUTE_NAMESPACE, RuntimeClass $COMPUTE_RUNTIME_CLASS"
     log "Session image: ${COMPUTE_SCODE_IMAGE:-<not imported; set MOSS_SCODE_IMAGE>}"
+    if [ -n "$COMPUTE_K3S_TOKEN" ]; then
+      # Pin to this seed's release so agents import the matching runtime version.
+      COS_JOIN_INSTALLER="${MOSS_COS_BASE:-https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server}"
+      case "$RELEASE_TAG" in
+        server-v*) COS_JOIN_INSTALLER="$COS_JOIN_INSTALLER/releases/$RELEASE_TAG/install.sh" ;;
+        *)         COS_JOIN_INSTALLER="$COS_JOIN_INSTALLER/latest/install.sh" ;;
+      esac
+      log "Add compute nodes to this cluster: run on each extra machine"
+      log "  curl -fsSL $COS_JOIN_INSTALLER | sudo bash -s -- \\"
+      log "    --join https://${COMPUTE_NODE_IP}:6443 --token $COMPUTE_K3S_TOKEN"
+      log "Cluster ports agents need open to this seed: 6443/tcp, 8472/udp, 10250/tcp."
+    fi
   else
     log "Sessions run on the cluster in $INSTALL_DIR/server.json (k8s block)."
     log "Provision one with: sudo ./install.sh --role compute"
