@@ -4145,7 +4145,20 @@ export function startServer(
         } = {}
         if (typeof body.name === 'string') updates.name = body.name.trim()
         if (body.config && typeof body.config === 'object') {
-          const config = body.config as Record<string, unknown>
+          // MERGE, don't replace: config_json also holds server-managed
+          // fields the admin form never submits — notably 会话存档's
+          // publicKeys, written by the generate/import endpoints. A plain
+          // overwrite silently dropped them, so an admin who edited the
+          // secret lost the public key needed to re-register with WeCom.
+          let existingConfig: Record<string, unknown> = {}
+          try {
+            existingConfig = JSON.parse(
+              String((existing as Record<string, unknown>).config_json ?? '{}'),
+            ) as Record<string, unknown>
+          } catch {
+            existingConfig = {}
+          }
+          const config = { ...existingConfig, ...(body.config as Record<string, unknown>) }
           updates.config_json = JSON.stringify(config)
           // Recompute the key whenever config changes (corpId/agentId may move).
           try {

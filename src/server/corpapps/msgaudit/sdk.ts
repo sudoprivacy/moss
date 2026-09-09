@@ -112,15 +112,36 @@ export function openSdk(corpId: string, secret: string): SdkHandle {
     } catch {
       // best-effort
     }
-    throw new Error(`msgaudit: SDK Init failed (rc=${initRc}) — check corpId and the 会话存档 Secret`)
+    throw new Error(
+      `msgaudit: SDK Init failed (rc=${initRc}) — check corpId and the 会话存档 Secret ` +
+        '(it is issued under 安全与管理 → 会话内容存档, and is NOT any app secret)',
+    )
   }
 
   /** Run `fn` against a fresh Slice and return its content, always freeing. */
+  /**
+   * Run `fn` against a fresh Slice and return its content, always freeing.
+   *
+   * On a non-zero return the Slice still carries WeCom's own error JSON
+   * (e.g. {"errcode":40001,...}), and the library ALSO prints it to fd 2
+   * from native code — which never reaches the container log. Reading the
+   * Slice on the failure path is therefore the only way an operator ever
+   * sees why a pull failed; without it every cause collapses into the
+   * SDK's generic rc=10001.
+   */
   const withSlice = (fn: (slice: unknown) => number): string => {
     const slice = NewSlice() as unknown
     try {
       const rc = fn(slice)
-      if (rc !== 0) throw new Error(`rc=${rc}`)
+      if (rc !== 0) {
+        let detail = ''
+        try {
+          detail = String(GetContentFromSlice(slice) ?? '').trim()
+        } catch {
+          // the Slice may be untouched on some failures
+        }
+        throw new Error(detail ? `rc=${rc}: ${detail.slice(0, 300)}` : `rc=${rc}`)
+      }
       return String(GetContentFromSlice(slice) ?? '')
     } finally {
       try {
