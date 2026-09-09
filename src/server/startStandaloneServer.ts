@@ -10,6 +10,7 @@ import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
+import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
 import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.js'
 import { TokenMinter } from './authProxy/tokenMinter.js'
@@ -118,12 +119,18 @@ async function finishStandaloneServerStartup(
     throw error
   }
 
+  // SMS credentials are fetched from the vault per send, not cached at boot:
+  // rotating a leaked key should take effect on the next code, not on the next
+  // restart. The lookup is cheap next to the provider round-trip it precedes.
+  const smsSender = buildSmsSender(config, nexusClient)
+
   const { service: authService, bootstrap } = await createAuthService({
     db: store.db,
     dbPath: config.dbPath,
     tokenTtlSec: config.tokenTtlSec,
     bootstrapAdmin: config.bootstrapAdmin,
     phoneAuth: config.phoneAuth,
+    smsSender,
   })
   if (config.phoneAuth.enabled && config.phoneAuth.delivery === 'log') {
     // Said once, loudly, at boot rather than only per code: a deployment that
@@ -269,5 +276,47 @@ async function finishStandaloneServerStartup(
     bootstrapAdminEmail: bootstrap.bootstrapAdminEmail,
     bootstrapAdminPassword: bootstrap.bootstrapAdminPassword,
     stop,
+  }
+}
+
+
+/**
+ * Build the SMS sender for the configured provider, or undefined when codes go
+ * to the log. Credentials are read from the Nexus vault at send time — they are
+ * never in `server.json`, so a config file that leaks cannot send messages.
+ */
+function buildSmsSender(
+  config: ServerConfig,
+  nexus: NexusClientType,
+): ((phone: string, code: string) => Promise<void>) | undefined {
+  if (!config.phoneAuth.enabled || config.phoneAuth.delivery === 'log') return undefined
+
+  const tencent = config.phoneAuth.tencent
+  if (!tencent) {
+    throw new Error("phoneAuth.delivery is 'tencent' but phoneAuth.tencent is not configured")
+  }
+
+  return async (phone: string, code: string) => {
+    const [id, key] = await Promise.all([
+      nexus.getSecret(tencent.vaultNamespace, tencent.secretIdKey),
+      nexus.getSecret(tencent.vaultNamespace, tencent.secretKeyKey),
+    ])
+    if (!id?.value || !key?.value) {
+      throw new Error(
+        `SMS credentials missing from the vault (${tencent.vaultNamespace}: ` +
+        `${tencent.secretIdKey} / ${tencent.secretKeyKey})`,
+      )
+    }
+    await sendTencentSms({
+      phone,
+      code,
+      settings: {
+        sdkAppId: tencent.sdkAppId,
+        signName: tencent.signName,
+        templateId: tencent.templateId,
+        region: tencent.region,
+      },
+      credentials: { secretId: id.value, secretKey: key.value },
+    })
   }
 }

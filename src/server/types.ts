@@ -314,8 +314,24 @@ export const serverFileConfigSchema = lazySchema(() =>
      */
     phoneAuth: z.object({
       enabled: z.boolean().default(false),
-      /** `log` writes the code to the server log — development only. */
-      delivery: z.enum(['log']).default('log'),
+      /**
+       * `log` writes the code to the server log — development only.
+       * `tencent` sends real SMS; its credentials come from the Nexus vault,
+       * never from this file (see the `tencent` block below for the non-secret
+       * half, and smsTencent.ts for why).
+       */
+      delivery: z.enum(['log', 'tencent']).default('log'),
+      /** Non-secret Tencent Cloud SMS settings. Required when delivery='tencent'. */
+      tencent: z.object({
+        sdkAppId: z.string().min(1),
+        signName: z.string().min(1),
+        templateId: z.string().min(1),
+        region: z.string().min(1).default('ap-beijing'),
+        /** Vault namespace/keys holding the credential pair. */
+        vaultNamespace: z.string().min(1).default('system:sms'),
+        secretIdKey: z.string().min(1).default('tencent_secret_id'),
+        secretKeyKey: z.string().min(1).default('tencent_secret_key'),
+      }).optional(),
       codeTtlSec: z.number().int().min(60).max(3600).default(300),
       resendCooldownSec: z.number().int().min(0).max(600).default(60),
       maxSendsPerHour: z.number().int().min(1).max(100).default(5),
