@@ -44,6 +44,9 @@ export const CONFIG_KEYS = [
   'server.sudowork-dify-system-token',
   'server.sudowork-dify-provision-secret',
   'server.sudowork-dify-sso-secret',
+  'server.fuiou-merchant-private-key',
+  'server.fuiou-public-key',
+  'server.sudorouter-api-token',
   'server.qms-postgres-url',
   'server.qms-redis-url',
   'server.qms-api-key',
@@ -353,7 +356,7 @@ export class ConfigStore {
     }
   }
 
-  /** PUT 写值的分组条件回写（hub 有值即写；其余 9 个字段 env 未设置才写）。 */
+  /** PUT mapped server fields back into the live config when no environment override exists. */
   private applyToConfig(config: ServerConfig | undefined, key: ConfigKey, value: string): void {
     if (!config) return
     const field = SERVER_FIELDS.find(f => f.key === key)

@@ -17,13 +17,27 @@ interface ModelCache {
   fetchedAt: number
 }
 
-let modelCache: ModelCache | null = null
+const modelCaches = new Map<string, ModelCache>()
+let configuredModelListUrl: string | null = null
+
+function resolveModelListUrl(explicitUrl?: string): string {
+  return explicitUrl?.trim()
+    || configuredModelListUrl
+    || process.env.MOSS_MODEL_LIST_URL
+    || DEFAULT_MODEL_LIST_URL
+}
+
+export function configureModelListSource(url: string | null): void {
+  configuredModelListUrl = url?.trim() || null
+}
 
 /**
  * Fetch available models from sudorouter API
  * Returns cached data if valid (within 24 hours)
  */
-export async function getAvailableModels(): Promise<ModelInfo[]> {
+export async function getAvailableModels(modelListUrl?: string): Promise<ModelInfo[]> {
+  const sourceUrl = resolveModelListUrl(modelListUrl)
+  const modelCache = modelCaches.get(sourceUrl) ?? null
   // Check cache validity
   if (modelCache && Date.now() - modelCache.fetchedAt < MODEL_CACHE_DURATION) {
     const age = Math.round((Date.now() - modelCache.fetchedAt) / 1000)
@@ -33,7 +47,7 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
 
   try {
     process.stderr.write(`[ModelListCache] Fetching fresh model list from sudorouter...\n`)
-    const response = await fetch(process.env.MOSS_MODEL_LIST_URL || DEFAULT_MODEL_LIST_URL, {
+    const response = await fetch(sourceUrl, {
       signal: AbortSignal.timeout(10000),
     })
 
@@ -57,10 +71,10 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
     }))
 
     // Update cache
-    modelCache = {
+    modelCaches.set(sourceUrl, {
       data: models,
       fetchedAt: Date.now(),
-    }
+    })
 
     process.stderr.write(`[ModelListCache] Model list cached: ${models.length} models\n`)
 
@@ -81,22 +95,24 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
 /**
  * Force refresh the model cache
  */
-export async function refreshModelCache(): Promise<ModelInfo[]> {
-  modelCache = null
-  return getAvailableModels()
+export async function refreshModelCache(modelListUrl?: string): Promise<ModelInfo[]> {
+  modelCaches.delete(resolveModelListUrl(modelListUrl))
+  return getAvailableModels(modelListUrl)
 }
 
 /**
  * Clear the model cache
  */
 export function clearModelCache(): void {
-  modelCache = null
+  modelCaches.clear()
+  configuredModelListUrl = null
 }
 
 /**
  * Get cache status
  */
 export function getCacheStatus(): { cached: boolean; age: number | null; count: number } {
+  const modelCache = modelCaches.get(resolveModelListUrl()) ?? null
   if (!modelCache) {
     return { cached: false, age: null, count: 0 }
   }

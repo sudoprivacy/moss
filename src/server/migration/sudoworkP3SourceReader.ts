@@ -12,6 +12,7 @@ export interface SudoworkP3User {
   quotaUnits: number
   usedQuotaUnits: number
   externalUserId: string | null
+  sudorouterToken?: string | null
 }
 
 export interface SudoworkP3LedgerEntry {
@@ -159,6 +160,7 @@ export class SudoworkP3SourceReader {
         quotaUnits: integerAmount(row.quota ?? 0, 'users.quota'),
         usedQuotaUnits: integerAmount(row.used_quota ?? 0, 'users.used_quota'),
         externalUserId: row.sudorouter_user_id == null ? null : String(row.sudorouter_user_id),
+        sudorouterToken: nullableText(row.sudorouter_key),
       }))
       const ledger = rows(db, 'ledger').map(row => ({
         id: positiveInteger(row.id, 'ledger.id'), userId: positiveInteger(row.user_id, 'ledger.user_id'),

@@ -7,6 +7,8 @@ import { BillingRepository } from '../../../billing/billingRepository.js'
 import { WalletService } from '../../../billing/walletService.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
 import { sudoworkQuotaToCreditUnits, sudoworkUsdToCreditUnits } from '../../../identity/sudoworkCreditConversion.js'
+import type { SudorouterAccountService } from '../../../billing/sudorouterAccountService.js'
+import { pointsToQuota } from '../../../billing/sudorouterAdapter.js'
 import {
   hasGlobalOrganizationAccess,
   IdentityDomainError,
@@ -85,6 +87,7 @@ export class SudoworkAdministrationService {
     private readonly options: {
       getDifyFeatureFlags?: () => { enabled: boolean; missingEnv: string[] }
       defaultInitialQuota?: number
+      accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     } = {},
   ) {
     this.billing = new BillingRepository(authDb.db)
@@ -251,36 +254,34 @@ export class SudoworkAdministrationService {
     enterpriseId: number
     invitationCodeId: number
     idempotencyKey?: string
-  }): { id: number; phone: string; sudorouter_user_id: null; initial_points: number } {
-    if (this.identities.findAuthIdentity('phone', 'sudowork', input.phone)) {
-      throw new IdentityDomainError('USERNAME_EXISTS', 'Username already exists')
-    }
+  }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> {
     const orgId = this.requireOrganizationId(input.enterpriseId)
     const invitationAlias = this.identities.resolveNumericAliasGlobal('invitation', input.invitationCodeId)
     const invitation = invitationAlias
       ? this.identities.getInvitationById(invitationAlias.resourceId)
       : null
-    if (!invitation || invitation.status !== 'pending') {
+    const createKey = input.idempotencyKey?.trim()
+      || `admin-user:${orgId}:${input.phone.trim()}:${input.invitationCodeId}`
+    const retryUser = this.retryableProvisioningUser(createKey, orgId, input.phone, invitation)
+    if (this.identities.findAuthIdentity('phone', 'sudowork', input.phone) && !retryUser) {
+      throw new IdentityDomainError('USERNAME_EXISTS', 'Username already exists')
+    }
+    if (!invitation || (invitation.status !== 'pending' && !retryUser)) {
       throw new IdentityDomainError('INVITATION_NOT_AVAILABLE', 'Invitation is not available')
     }
     if (invitation.orgId !== orgId) {
       throw new IdentityDomainError('INVITATION_ORGANIZATION_MISMATCH', 'Invitation organization mismatch')
     }
-    const created = this.organizations.createUser({
+    return this.createProvisionedUser({
+      actor: input.actor,
       orgId,
       username: input.phone,
       displayName: input.nickname,
       password: input.password ?? 'Temp@Sudo123',
       phone: input.phone,
       invitationCode: invitation.code,
-    }, this.context(input.idempotencyKey), input.actor)
-    const wallet = this.identities.getWallet('user', created.userId)
-    return {
-      id: created.legacyUserId,
-      phone: input.phone,
-      sudorouter_user_id: null,
-      initial_points: wallet?.balanceUnits ?? 0,
-    }
+      idempotencyKey: createKey,
+    })
   }
 
   createPhoneUser(input: {
@@ -290,24 +291,85 @@ export class SudoworkAdministrationService {
     enterpriseId: number
     invitationCodeId: number
     idempotencyKey?: string
-  }): { id: number; phone: string; sudorouter_user_id: null; initial_points: number } {
-    if (this.identities.findAuthIdentity('phone', 'sudowork', input.phone)) {
+  }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> {
+    const orgId = this.requireOrganizationId(input.enterpriseId)
+    const invitationAlias = this.identities.resolveNumericAliasGlobal('invitation', input.invitationCodeId)
+    const invitation = invitationAlias
+      ? this.identities.getInvitationById(invitationAlias.resourceId)
+      : null
+    const createKey = input.idempotencyKey?.trim()
+      || `admin-user:${orgId}:${input.phone.trim()}:${input.invitationCodeId}`
+    const retryUser = this.retryableProvisioningUser(createKey, orgId, input.phone, invitation)
+    if (this.identities.findAuthIdentity('phone', 'sudowork', input.phone) && !retryUser) {
       throw new IdentityDomainError('PHONE_EXISTS', 'Phone already exists')
     }
-    const orgId = this.requireOrganizationId(input.enterpriseId)
-    const invitation = this.requireAvailableInvitation(input.invitationCodeId, orgId)
-    const created = this.organizations.createUser({
+    if (!invitation || (invitation.status !== 'pending' && !retryUser)) {
+      throw new IdentityDomainError('INVITATION_NOT_AVAILABLE', 'Invitation is not available')
+    }
+    if (invitation.orgId !== orgId) {
+      throw new IdentityDomainError('INVITATION_ORGANIZATION_MISMATCH', 'Invitation organization mismatch')
+    }
+    return this.createProvisionedUser({
+      actor: input.actor,
       orgId,
       username: input.phone,
       displayName: input.nickname,
       invitationCode: invitation.code,
       authIdentity: { provider: 'phone', issuer: 'sudowork', subject: input.phone },
-    }, this.context(input.idempotencyKey), input.actor)
+      idempotencyKey: createKey,
+    })
+  }
+
+  private retryableProvisioningUser(
+    idempotencyKey: string,
+    orgId: string,
+    username: string,
+    invitation: InvitationRecord | null,
+  ): AuthCenterUser | null {
+    const previous = this.identities.getCommandResult<{ userId: string }>('identity.create_user', idempotencyKey)
+    if (!previous) return null
+    const user = this.authDb.getUserById(previous.userId)
+    if (!user || user.status !== 'pending' || user.orgId !== orgId || user.name !== username.trim()) return null
+    if (!invitation || invitation.usedByUserId !== user.id) return null
+    return user
+  }
+
+  private async createProvisionedUser(input: {
+    actor: IdentityActor
+    orgId: string
+    username: string
+    displayName?: string | null
+    password?: string
+    phone?: string
+    invitationCode: string
+    authIdentity?: { provider: string; issuer: string; subject: string }
+    idempotencyKey?: string
+  }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> {
+    const createKey = input.idempotencyKey?.trim() || `admin-user:${randomUUID()}`
+    const created = this.organizations.createUser({
+      orgId: input.orgId, username: input.username, displayName: input.displayName,
+      password: input.password, phone: input.phone, invitationCode: input.invitationCode,
+      authIdentity: input.authIdentity,
+      status: this.options.accountProvisioner ? 'pending' : 'active',
+    }, this.context(createKey), input.actor)
     const wallet = this.identities.getWallet('user', created.userId)
+    let externalUserId: number | null = null
+    if (this.options.accountProvisioner) {
+      try {
+        const account = await this.options.accountProvisioner.ensureAccount({
+          ownerId: created.userId, orgId: input.orgId, username: input.username,
+          displayName: input.displayName?.trim() || input.username,
+          initialQuotaUnits: pointsToQuota(wallet?.balanceUnits ?? 0),
+        }, onlineCommandContext(`sudorouter:${createKey}`))
+        externalUserId = Number(account.externalUserId)
+        this.organizations.updateUser(created.userId, { status: 'active' }, input.actor)
+      } catch {
+        throw new SudoworkAdministrationError(500, 'Sudorouter 用户初始化失败，请稍后重试')
+      }
+    }
     return {
-      id: created.legacyUserId,
-      phone: input.phone,
-      sudorouter_user_id: null,
+      id: created.legacyUserId, phone: input.username,
+      sudorouter_user_id: externalUserId,
       initial_points: wallet?.balanceUnits ?? 0,
     }
   }

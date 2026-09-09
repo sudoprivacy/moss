@@ -4,6 +4,8 @@ import { onlineCommandContext } from '../../../application/commandContext.js'
 import type { AuthCenterDb, AuthCenterUser } from '../../../authCenter/db.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
 import type { LegacyKeyValueStore } from '../../../identity/legacyToken.js'
+import type { SudorouterAccountService } from '../../../billing/sudorouterAccountService.js'
+import { quotaToPoints } from '../../../billing/sudorouterAdapter.js'
 import type { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import type { SudoworkIdentityService, SudoworkLegacySession } from './identityService.js'
 
@@ -102,6 +104,8 @@ export class SudoworkCasService {
     tokenStore: LegacyKeyValueStore
     ticketValidator?: CasTicketValidator
     codeFactory?: () => string
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits?: number
   }) {
     this.validator = options.ticketValidator ?? new HttpCasTicketValidator()
     this.codeFactory = options.codeFactory ?? (() => randomBytes(32).toString('base64url'))
@@ -211,7 +215,10 @@ export class SudoworkCasService {
           username: profile.account,
           displayName: profile.nickname,
           role: 'user',
-          status: 'active',
+          status: this.options.accountProvisioner ? 'pending' : 'active',
+          initialCreditUnits: this.options.accountProvisioner
+            ? quotaToPoints(this.options.initialQuotaUnits ?? 100_000)
+            : 0,
           authIdentity: {
             provider: 'cas', issuer: provider.id, subject: profile.subject,
             metadata: profile.attributes,
@@ -224,6 +231,22 @@ export class SudoworkCasService {
           provider: 'cas', issuer: provider.id, normalizedSubject: profile.subject,
           metadata: profile.attributes,
         })
+      }
+    }
+    if (!user) throw new SudoworkCasError(500, '三方认证身份绑定失败')
+    if (this.options.accountProvisioner) {
+      try {
+        await this.options.accountProvisioner.ensureAccount({
+          ownerId: user.id, orgId: user.orgId, username: profile.account,
+          displayName: profile.nickname || profile.account,
+          initialQuotaUnits: this.options.initialQuotaUnits ?? 100_000,
+        }, onlineCommandContext(`sudorouter:cas-user:${provider.id}:${profile.subject}`))
+        if (user.status === 'pending') {
+          this.options.authDb.updateUser(user.id, { status: 'active' })
+          user = this.options.authDb.getUserById(user.id)
+        }
+      } catch {
+        throw new SudoworkCasError(500, 'Sudorouter 用户初始化失败，请稍后重试')
       }
     }
     if (!user) throw new SudoworkCasError(500, '三方认证身份绑定失败')

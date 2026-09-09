@@ -28,6 +28,7 @@ export interface P3BillingMigrationIssue {
     | 'IN_PROGRESS'
     | 'INVALID_REFERENCE'
     | 'INVALID_STATUS'
+    | 'SUDOROUTER_TOKEN_MISSING'
     | 'TARGET_CONFLICT'
   sourceType: string
   sourceId: string
@@ -39,6 +40,13 @@ interface ResolvedUser {
   userId: string
   orgId: string
 }
+
+interface P3BillingSecretPort {
+  putSecret(namespace: string, key: string, value: string, subject?: string): Promise<void>
+  getSecret(namespace: string, key: string, subject?: string): Promise<{ value: string | null } | null>
+}
+
+const SUDOROUTER_TOKEN_NAMESPACE = 'moss:sudorouter-users'
 
 export interface P3BillingMigrationPlan {
   status: 'ready' | 'blocked'
@@ -90,6 +98,7 @@ export class P3BillingMigrationService {
     private readonly wallet: WalletService,
     private readonly clock: () => number = Date.now,
     private readonly planning?: { isProjected(kind: 'enterprise' | 'user', resourceId: string): boolean },
+    private readonly secrets?: P3BillingSecretPort,
   ) {}
 
   plan(source: SudoworkP3Snapshot): P3BillingMigrationPlan {
@@ -130,6 +139,12 @@ export class P3BillingMigrationService {
         issue(issues, 'TARGET_CONFLICT', 'user', user.id, 'Moss 钱包既非空钱包也非同额 P1 快照')
       }
       users.set(user.id, { legacyUserId: user.id, userId: mapped.resourceId, orgId: mapped.orgId })
+      if (user.externalUserId && !user.sudorouterToken?.trim()) {
+        issue(issues, 'SUDOROUTER_TOKEN_MISSING', 'user', user.id, `旧用户 ${user.id} 缺少 Sudorouter Token`)
+      }
+      if (!user.externalUserId && user.sudorouterToken?.trim()) {
+        issue(issues, 'INVALID_REFERENCE', 'user', user.id, `旧用户 ${user.id} 有 Sudorouter Token 但缺少外部用户 ID`)
+      }
     }
 
     const ledgerByUser = groupBy(source.ledger, row => row.userId)
@@ -230,12 +245,13 @@ export class P3BillingMigrationService {
     }
   }
 
-  execute(plan: P3BillingMigrationPlan, context: CommandContext): P3BillingMigrationReport {
+  async execute(plan: P3BillingMigrationPlan, context: CommandContext): Promise<P3BillingMigrationReport> {
     assertTrustedCommandContext(context)
     if (context.source !== 'migration' || context.externalEffects !== 'suppress_external' || !context.migrationRunId) {
       throw new BillingDomainError('MIGRATION_CONTEXT_REQUIRED', 'P3 财务迁移必须使用抑制外部副作用的迁移上下文')
     }
     if (plan.status === 'blocked') throw new P3BillingMigrationBlockedError(plan)
+    await this.stageSudorouterTokens(plan)
     const source = plan.source
     const before = this.counts()
     const beforeLedger = source.users.reduce((sum, user) => {
@@ -310,7 +326,9 @@ export class P3BillingMigrationService {
         this.repository.upsertExternalAccount({
           provider: 'sudorouter', ownerType: 'user', ownerId: user.userId,
           externalAccountId: sourceUser.externalUserId, quotaUnits: sourceUser.quotaUnits,
-          usedQuotaUnits: sourceUser.usedQuotaUnits, updatedAt: this.clock(),
+          usedQuotaUnits: sourceUser.usedQuotaUnits,
+          tokenSecretRef: sourceUser.sudorouterToken?.trim() ? tokenSecretRef(user.userId) : null,
+          updatedAt: this.clock(),
         })
       }
 
@@ -353,7 +371,7 @@ export class P3BillingMigrationService {
     })
   }
 
-  verify(source: SudoworkP3Snapshot): P3BillingVerificationReport {
+  async verify(source: SudoworkP3Snapshot): Promise<P3BillingVerificationReport> {
     const plan = this.plan(source)
     if (plan.status === 'blocked') {
       return {
@@ -361,7 +379,13 @@ export class P3BillingMigrationService {
         issues: plan.issues.map(item => item.message),
       }
     }
-    return this.verifySnapshot(source, plan)
+    const report = this.verifySnapshot(source, plan)
+    const tokenIssues = await this.verifySudorouterTokens(source, plan)
+    return {
+      ...report,
+      status: report.status === 'matched' && tokenIssues.length === 0 ? 'matched' : 'mismatch',
+      issues: [...report.issues, ...tokenIssues],
+    }
   }
 
   private verifySnapshot(source: SudoworkP3Snapshot, plan: P3BillingMigrationPlan): P3BillingVerificationReport {
@@ -378,7 +402,8 @@ export class P3BillingMigrationService {
       if (sourceUser.externalUserId) {
         const account = this.repository.getExternalAccount('sudorouter', 'user', user.userId)
         if (!account || account.externalAccountId !== sourceUser.externalUserId
-          || account.quotaUnits !== sourceUser.quotaUnits || account.usedQuotaUnits !== sourceUser.usedQuotaUnits) {
+          || account.quotaUnits !== sourceUser.quotaUnits || account.usedQuotaUnits !== sourceUser.usedQuotaUnits
+          || !account.tokenSecretRef) {
           issues.push(`用户 ${sourceUser.id} Sudorouter 快照不一致`)
         }
       }
@@ -401,6 +426,54 @@ export class P3BillingMigrationService {
       if (!this.repository.getActivityByLegacyId('ADMIN', record.id)) issues.push(`管理员充值记录 ${record.id} 未导入`)
     }
     return { status: issues.length ? 'mismatch' : 'matched', sourceChecksum: source.checksum, differenceUnits, issues }
+  }
+
+  private async stageSudorouterTokens(plan: P3BillingMigrationPlan): Promise<void> {
+    const tokenUsers = plan.source.users.filter(user => user.externalUserId && user.sudorouterToken?.trim())
+    if (tokenUsers.length === 0) return
+    if (!this.secrets) throw new BillingDomainError('MIGRATION_SECRET_STORE_REQUIRED', 'P3 财务迁移缺少 Nexus Token 存储')
+    for (const sourceUser of tokenUsers) {
+      const target = requiredMap(plan.users, sourceUser.id, '用户')
+      const expected = normalizeSudorouterToken(sourceUser.sudorouterToken!)
+      const current = await this.secrets.getSecret(
+        SUDOROUTER_TOKEN_NAMESPACE, target.userId, `org:${target.orgId}`,
+      )
+      if (current?.value?.trim() !== expected) {
+        await this.secrets.putSecret(
+          SUDOROUTER_TOKEN_NAMESPACE, target.userId, expected, `org:${target.orgId}`,
+        )
+      }
+      const stored = await this.secrets.getSecret(
+        SUDOROUTER_TOKEN_NAMESPACE, target.userId, `org:${target.orgId}`,
+      )
+      if (stored?.value?.trim() !== expected) {
+        throw new BillingDomainError('MIGRATION_TOKEN_VERIFICATION_FAILED', `旧用户 ${sourceUser.id} Sudorouter Token 写入校验失败`)
+      }
+    }
+  }
+
+  private async verifySudorouterTokens(
+    source: SudoworkP3Snapshot,
+    plan: P3BillingMigrationPlan,
+  ): Promise<string[]> {
+    const issues: string[] = []
+    for (const sourceUser of source.users) {
+      if (!sourceUser.externalUserId) continue
+      const target = plan.users.get(sourceUser.id)
+      if (!target) continue
+      const account = this.repository.getExternalAccount('sudorouter', 'user', target.userId)
+      if (!account?.tokenSecretRef || !this.secrets) {
+        issues.push(`用户 ${sourceUser.id} Sudorouter Token 不存在`)
+        continue
+      }
+      const stored = await this.secrets.getSecret(
+        SUDOROUTER_TOKEN_NAMESPACE, target.userId, `org:${target.orgId}`,
+      )
+      if (!stored?.value?.trim() || stored.value.trim() !== normalizeSudorouterToken(sourceUser.sudorouterToken ?? '')) {
+        issues.push(`用户 ${sourceUser.id} Sudorouter Token 不一致`)
+      }
+    }
+    return issues
   }
 
   private importOrder(order: SudoworkP3Order, plan: P3BillingMigrationPlan, context: CommandContext): void {
@@ -555,6 +628,15 @@ function stableId(namespace: string, legacyId: string | number): string {
 
 function fingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function normalizeSudorouterToken(value: string): string {
+  const token = value.trim()
+  return token.startsWith('sk-') ? token : `sk-${token}`
+}
+
+function tokenSecretRef(userId: string): string {
+  return `nexus://${SUDOROUTER_TOKEN_NAMESPACE}/${userId}`
 }
 
 function mapOrderStatus(status: number): BillingOrderStatus {

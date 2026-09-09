@@ -118,6 +118,26 @@ describe('runtime scode paths', () => {
     }
   })
 
+  it('fills complete SMS defaults when an older server.json has no Sudowork section', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moss-sudowork-defaults-'))
+    const configPath = join(dir, 'server.json')
+    const raw = getDefaultServerConfig()
+    delete raw.sudoworkCompatibility
+    writeFileSync(configPath, JSON.stringify(raw), 'utf8')
+
+    try {
+      const { config: loaded } = await readServerConfig(configPath)
+      expect(loaded.sudoworkCompatibility.sms).toEqual({
+        provider: 'disabled', sdkAppId: '', signName: '', templateId: '', signId: '',
+        region: 'ap-beijing', codeLength: 6, expireMinutes: 5,
+        sendIntervalSeconds: 60, maxPerDay: 10,
+        secretId: undefined, secretKey: undefined,
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('loads QMS policy while keeping database, queue, API and RSA secrets out of server.json', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'moss-qms-config-'))
     const configPath = join(dir, 'server.json')

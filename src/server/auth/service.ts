@@ -36,7 +36,11 @@ import { createConfigItemsApi } from '../api/configItems.js'
 import type { DirectConnectStore } from '../db.js'
 import type { ManagedImageStore } from '../configuration/managedImageStore.js'
 import { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
-import { SudoworkSystemConfigService } from '../api/compat/sudowork/systemConfigService.js'
+import { PlatformIntegrationSettingsRepository } from '../configuration/platformIntegrationSettingsRepository.js'
+import {
+  SudoworkSystemConfigService,
+  type SudoworkInfrastructureConfig,
+} from '../api/compat/sudowork/systemConfigService.js'
 import type { ConfigStore } from '../configStore/configStore.js'
 import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { CatalogService } from '../catalog/catalogService.js'
@@ -49,9 +53,17 @@ import { BillingCoordinator } from '../billing/billingCoordinator.js'
 import { RechargeService } from '../billing/rechargeService.js'
 import { CreditApplicationService, type CreditApplicationPolicy } from '../billing/creditApplicationService.js'
 import { RefundService, type FuiouRefundPort } from '../billing/refundService.js'
-import type { SudorouterPort } from '../billing/sudorouterAdapter.js'
+import {
+  quotaToPoints,
+  type SudorouterPort,
+  type SudorouterAccountPort,
+  type SudorouterUsagePort,
+} from '../billing/sudorouterAdapter.js'
+import { SudorouterAccountService } from '../billing/sudorouterAccountService.js'
+import type { NexusClient } from '../nexus/nexusClient.js'
 import { SudoworkBillingService, type BillingPaymentPort } from '../api/compat/sudowork/billingService.js'
 import { SudoworkLegacyUsageService } from '../api/compat/sudowork/legacyUsageService.js'
+import { SudoworkUserProjectionService } from '../api/compat/sudowork/userProjectionService.js'
 import { DifyHttpAdapter } from '../dify/difyHttpAdapter.js'
 import { DifyConnectionService, type DifySecretPort } from '../dify/difyConnectionService.js'
 import { DifyRuntimeService } from '../dify/difyRuntimeService.js'
@@ -239,6 +251,10 @@ export class AuthService {
   private readonly oauth2Bridge: OAuth2Bridge
   private readonly identityRepository: IdentityRepository
   private readonly unifiedIdentity: UnifiedIdentityService
+  private sudorouterAccounts?: {
+    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits: number
+  }
 
   constructor(
     private readonly db: AuthCenterDb,
@@ -263,12 +279,14 @@ export class AuthService {
   createSudoworkIdentityService(input: {
     tokenStore: LegacyKeyValueStore
     legacyJwtSecret: string
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
   }): SudoworkIdentityService {
     return new SudoworkIdentityService({
       authDb: this.db,
       identities: this.identityRepository,
       tokenStore: input.tokenStore,
       legacyJwtSecret: input.legacyJwtSecret,
+      accountProvisioner: input.accountProvisioner,
       nativeActorResolver: token => {
         const auth = this.verifyAccessToken(token)
         if (!auth) return null
@@ -306,6 +324,8 @@ export class AuthService {
 
   createSudoworkAdministrationService(input: {
     getDifyFeatureFlags?: () => { enabled: boolean; missingEnv: string[] }
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+    defaultInitialQuota?: number
   } = {}): SudoworkAdministrationService {
     return new SudoworkAdministrationService(
       this.createOrganizationIdentityService(),
@@ -318,6 +338,8 @@ export class AuthService {
   createSudoworkCasService(input: {
     identity: SudoworkIdentityService
     tokenStore: LegacyKeyValueStore
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits?: number
   }): SudoworkCasService {
     return new SudoworkCasService({
       authDb: this.db,
@@ -325,7 +347,41 @@ export class AuthService {
       unifiedIdentity: this.unifiedIdentity,
       identity: input.identity,
       tokenStore: input.tokenStore,
+      accountProvisioner: input.accountProvisioner,
+      initialQuotaUnits: input.initialQuotaUnits,
     })
+  }
+
+  createSudorouterAccountService(input: {
+    provider: SudorouterAccountPort
+    secrets: Pick<NexusClient, 'putSecret' | 'getSecret'>
+  }): SudorouterAccountService {
+    return new SudorouterAccountService(
+      this.db.db,
+      new BillingRepository(this.db.db),
+      input.provider,
+      input.secrets,
+    )
+  }
+
+  createSudoworkUserProjectionService(input: {
+    secrets: Pick<NexusClient, 'getSecret'>
+    listModels: () => Promise<Array<{ id: string }>> | Array<{ id: string }>
+    getRuntimeConfig: () => { modelServiceUrl: string; scodeAutoModel: string }
+    quotaReader?: Pick<SudorouterPort, 'getUser'>
+  }): SudoworkUserProjectionService {
+    return new SudoworkUserProjectionService({
+      identities: this.identityRepository,
+      billing: new BillingRepository(this.db.db),
+      ...input,
+    })
+  }
+
+  configureSudorouterAccounts(input: {
+    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits: number
+  }): void {
+    this.sudorouterAccounts = input
   }
 
   createSudoworkCatalogService(input?: {
@@ -446,12 +502,16 @@ export class AuthService {
     loginMethod: 'sms' | 'password' | 'cas'
     skillhubBaseUrl: string
     sudorouterBaseUrl?: string
-    smsConfigured: boolean
+    smsRuntimeAvailable: boolean
+    smsCredentialsAvailable: boolean
+    sms: SudoworkInfrastructureConfig['sms']
+    billing: SudoworkInfrastructureConfig['billing']
     productImprovementEncryptionRequired?: boolean
   }): SudoworkSystemConfigService {
     return new SudoworkSystemConfigService({
       db: this.db.db,
       policies: new ClientPolicyRepository(this.db.db),
+      infrastructureSettings: new PlatformIntegrationSettingsRepository(this.db.db),
       identities: this.identityRepository,
       defaults: {
         loginMethod: input.loginMethod,
@@ -460,8 +520,11 @@ export class AuthService {
         productImprovementEncryptionRequired: input.productImprovementEncryptionRequired,
         productImprovementApiKey: input.secrets.get('client.product-improvement-api-key'),
         productImprovementPublicKey: input.secrets.get('client.product-improvement-public-key'),
+        sms: input.sms,
+        billing: input.billing,
       },
-      smsConfigured: input.smsConfigured,
+      smsRuntimeAvailable: input.smsRuntimeAvailable,
+      smsCredentialsAvailable: input.smsCredentialsAvailable,
       secrets: input.secrets,
     })
   }
@@ -496,6 +559,7 @@ export class AuthService {
 
   createSudoworkLegacyUsageService(input: {
     listModels: () => Promise<Array<{ id: string; name?: string }>> | Array<{ id: string; name?: string }>
+    sudorouter?: SudorouterPort & SudorouterUsagePort
   }): SudoworkLegacyUsageService {
     const repository = new BillingRepository(this.db.db)
     return new SudoworkLegacyUsageService({
@@ -505,6 +569,7 @@ export class AuthService {
       repository,
       wallet: new WalletService(this.db.db, repository),
       listModels: input.listModels,
+      sudorouter: input.sudorouter,
     })
   }
 
@@ -1400,6 +1465,9 @@ export class AuthService {
     role: string
     password: string
     extUserId?: string | null
+    phone?: string
+    status?: AuthCenterUser['status']
+    initialCreditUnits?: number
     idempotencyKey?: string
   }, auth?: AuthContext): {
     user: SanitizedAuthCenterUser
@@ -1454,10 +1522,54 @@ export class AuthService {
       role: role as AuthRole,
       password: input.password,
       extUserId,
+      phone: input.phone,
+      status: input.status,
+      initialCreditUnits: input.initialCreditUnits,
     }, onlineCommandContext(input.idempotencyKey ?? `moss-user:${randomUUID()}`)))
     const user = this.db.getUserById(result.userId)
     if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
     return { user: sanitizeUser(user) }
+  }
+
+  async createProvisionedUser(input: Parameters<AuthService['createUser']>[0], auth?: AuthContext): Promise<{
+    user: SanitizedAuthCenterUser
+  }> {
+    if (!this.sudorouterAccounts) return this.createUser(input, auth)
+
+    const idempotencyKey = input.idempotencyKey ?? `moss-user:${randomUUID()}`
+    const previous = this.identityRepository.getCommandResult<{ userId: string }>(
+      'identity.create_user', idempotencyKey,
+    )
+    let user = previous ? this.db.getUserById(previous.userId) : null
+    if (user && (user.orgId !== input.orgId || user.name !== input.name.trim())) {
+      throw new AuthServiceError(409, 'Idempotency key already used for another user')
+    }
+    if (!user) {
+      const created = this.createUser({
+        ...input,
+        phone: input.phone?.trim() || input.name.trim(),
+        status: 'pending',
+        initialCreditUnits: quotaToPoints(this.sudorouterAccounts.initialQuotaUnits),
+        idempotencyKey,
+      }, auth)
+      user = this.db.getUserById(created.user.id)
+    }
+    if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
+
+    await this.sudorouterAccounts.accountProvisioner.ensureAccount({
+      ownerId: user.id,
+      orgId: user.orgId,
+      username: user.name,
+      displayName: resolveDisplayName(user),
+      initialQuotaUnits: this.sudorouterAccounts.initialQuotaUnits,
+    }, onlineCommandContext(idempotencyKey))
+
+    if (user.status === 'pending') {
+      runInTransaction(this.db.db, () => this.db.updateUser(user!.id, { status: 'active' }))
+    }
+    const active = this.db.getUserById(user.id)
+    if (!active) throw new AuthServiceError(500, 'Created user could not be loaded')
+    return { user: sanitizeUser(active) }
   }
 
   updateUser(input: {

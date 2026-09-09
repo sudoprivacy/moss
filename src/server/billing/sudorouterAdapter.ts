@@ -16,6 +16,44 @@ export interface SudorouterPort {
   changeQuota(input: ChangeQuotaInput): Promise<{ success: boolean; error?: string }>
 }
 
+export interface SudorouterUserAccount extends QuotaSnapshot {
+  username: string
+}
+
+export interface SudorouterUsageLog {
+  id: string
+  createdAtSeconds: number
+  type: string
+  model: string | null
+  costQuotaUnits: number
+  inputTokens: number
+  outputTokens: number
+}
+
+export interface SudorouterUsagePort {
+  listUsageLogs(input: {
+    externalUserId: string
+    fromSeconds: number
+    toSeconds: number
+    page: number
+    pageSize: number
+  }): Promise<{ list: SudorouterUsageLog[]; total: number }>
+}
+
+export interface SudorouterAccountPort extends SudorouterPort {
+  findUserByUsername(username: string): Promise<SudorouterUserAccount | null>
+  createUser(input: {
+    username: string
+    displayName: string
+    idempotencyKey: string
+  }): Promise<SudorouterUserAccount>
+  createToken(input: {
+    externalUserId: string
+    name: string
+    idempotencyKey: string
+  }): Promise<string>
+}
+
 interface SudorouterAdapterOptions {
   baseUrl: string
   apiToken: string
@@ -34,7 +72,7 @@ export function quotaToPoints(quota: number): number {
   return Math.round(quota * 0.002)
 }
 
-export class SudorouterAdapter implements SudorouterPort {
+export class SudorouterAdapter implements SudorouterAccountPort {
   private readonly baseUrl: string
   private readonly fetchImpl: typeof fetch
 
@@ -51,6 +89,117 @@ export class SudorouterAdapter implements SudorouterPort {
     const usedQuotaUnits = Number(payload.data.used_quota ?? 0)
     if (!Number.isSafeInteger(quotaUnits) || !Number.isSafeInteger(usedQuotaUnits)) return null
     return { externalUserId, quotaUnits, usedQuotaUnits }
+  }
+
+  async listUsageLogs(input: {
+    externalUserId: string
+    fromSeconds: number
+    toSeconds: number
+    page: number
+    pageSize: number
+  }): Promise<{ list: SudorouterUsageLog[]; total: number }> {
+    const numericId = Number(input.externalUserId)
+    if (!Number.isSafeInteger(numericId) || numericId <= 0) throw new Error('Sudorouter user id is invalid')
+    const query = new URLSearchParams({
+      user_id: String(numericId),
+      time_from: String(input.fromSeconds),
+      time_to: String(input.toSeconds),
+      page_num: String(input.page),
+      page_size: String(input.pageSize),
+      order_by: 'created_at',
+      desc: 'true',
+    })
+    const response = await this.request(`${this.baseUrl}/api/log/query?${query.toString()}`, { method: 'GET' })
+    const payload = await response.json() as {
+      success?: boolean
+      message?: string
+      data?: { count?: unknown; data?: Array<Record<string, unknown>> }
+    }
+    if (!response.ok || !payload.success || !Array.isArray(payload.data?.data)) {
+      throw new Error(payload.message || `Sudorouter usage query failed: HTTP ${response.status}`)
+    }
+    const list = payload.data.data.map((row): SudorouterUsageLog => ({
+      id: String(row.id),
+      createdAtSeconds: safeInteger(row.created_at, 'created_at'),
+      type: String(row.type ?? ''),
+      model: typeof row.model_name === 'string' && row.model_name ? row.model_name : null,
+      costQuotaUnits: safeInteger(row.cost ?? 0, 'cost'),
+      inputTokens: safeInteger(row.prompt_tokens ?? 0, 'prompt_tokens'),
+      outputTokens: safeInteger(row.completion_tokens ?? 0, 'completion_tokens'),
+    }))
+    const total = safeInteger(payload.data.count ?? list.length, 'count')
+    return { list, total }
+  }
+
+  async findUserByUsername(username: string): Promise<SudorouterUserAccount | null> {
+    const normalized = username.trim()
+    if (!normalized) throw new Error('Sudorouter username is required')
+    const query = new URLSearchParams({ keyword: normalized, page: '1', page_size: '100' })
+    const response = await this.request(`${this.baseUrl}/api/user/search?${query.toString()}`, { method: 'GET' })
+    const payload = await response.json() as {
+      success?: boolean
+      message?: string
+      data?: { items?: Array<Record<string, unknown>> }
+    }
+    if (!response.ok || !payload.success) {
+      throw new Error(payload.message || `Sudorouter user search failed: HTTP ${response.status}`)
+    }
+    const matched = payload.data?.items?.find(item => (
+      item.username === normalized
+      && item.deleted_at == null
+      && item.status !== 0
+    ))
+    return matched ? account(matched, normalized) : null
+  }
+
+  async createUser(input: {
+    username: string
+    displayName: string
+    idempotencyKey: string
+  }): Promise<SudorouterUserAccount> {
+    const username = input.username.trim()
+    if (!username) throw new Error('Sudorouter username is required')
+    const response = await this.request(`${this.baseUrl}/api/user/`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': input.idempotencyKey },
+      body: JSON.stringify({
+        username,
+        password: username.length >= 8 ? username : username.padEnd(8, '1'),
+        display_name: input.displayName.trim() || username,
+        role: 1,
+        utm_source: 'sudowork',
+      }),
+    })
+    const payload = await response.json() as { success?: boolean; message?: string; data?: Record<string, unknown> }
+    if (!response.ok || !payload.success || !payload.data) {
+      throw new Error(payload.message || `Sudorouter user creation failed: HTTP ${response.status}`)
+    }
+    return account(payload.data, username)
+  }
+
+  async createToken(input: {
+    externalUserId: string
+    name: string
+    idempotencyKey: string
+  }): Promise<string> {
+    const numericId = Number(input.externalUserId)
+    if (!Number.isSafeInteger(numericId) || numericId <= 0) throw new Error('Sudorouter user id is invalid')
+    const response = await this.request(`${this.baseUrl}/api/token/`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': input.idempotencyKey },
+      body: JSON.stringify({
+        name: input.name.trim() || `${input.externalUserId}-token`,
+        expired_time: -1,
+        unlimited_quota: true,
+        user_id: numericId,
+      }),
+    })
+    const payload = await response.json() as { success?: boolean; message?: string; data?: { key?: unknown } }
+    const token = typeof payload.data?.key === 'string' ? payload.data.key.trim() : ''
+    if (!response.ok || !payload.success || !token) {
+      throw new Error(payload.message || `Sudorouter token creation failed: HTTP ${response.status}`)
+    }
+    return token
   }
 
   async changeQuota(input: ChangeQuotaInput): Promise<{ success: boolean; error?: string }> {
@@ -86,4 +235,23 @@ export class SudorouterAdapter implements SudorouterPort {
       clearTimeout(timeout)
     }
   }
+}
+
+function safeInteger(value: unknown, field: string): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`Sudorouter ${field} is invalid`)
+  return parsed
+}
+
+function account(value: Record<string, unknown>, expectedUsername: string): SudorouterUserAccount {
+  const externalUserId = String(value.id ?? '')
+  const username = typeof value.username === 'string' ? value.username : expectedUsername
+  const quotaUnits = Number(value.quota ?? 0)
+  const usedQuotaUnits = Number(value.used_quota ?? 0)
+  if (!/^\d+$/.test(externalUserId) || Number(externalUserId) <= 0
+    || username !== expectedUsername
+    || !Number.isSafeInteger(quotaUnits) || !Number.isSafeInteger(usedQuotaUnits)) {
+    throw new Error('Sudorouter returned an invalid user account')
+  }
+  return { externalUserId, username, quotaUnits, usedQuotaUnits }
 }

@@ -43,6 +43,7 @@ describe('Billing Schema', () => {
       'billing_quota_operations',
       'billing_reconciliations',
       'billing_refunds',
+      'billing_sudorouter_provisioning',
       'billing_usage_records',
     ])
     db.close()

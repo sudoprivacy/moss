@@ -25,6 +25,7 @@ export interface CreateUnifiedUserInput {
   departmentId?: string | null
   extUserId?: string | null
   invitationCode?: string
+  initialCreditUnits?: number
   legacyUserId?: number
   authIdentity?: {
     provider: string
@@ -219,7 +220,7 @@ export class UnifiedIdentityService {
         legacyUserId = this.repository.allocateNumericAlias('user', userId, input.orgId)
       }
 
-      this.repository.createWallet('user', userId, invitation?.initialCreditUnits ?? 0)
+      this.repository.createWallet('user', userId, invitation?.initialCreditUnits ?? input.initialCreditUnits ?? 0)
       if (invitation) this.repository.consumeInvitation(invitation.id, userId)
 
       const suppressed = context.externalEffects === 'suppress_external'

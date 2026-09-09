@@ -223,6 +223,18 @@ export const serverFileConfigSchema = lazySchema(() =>
       hosts: [],
       loginMethod: 'password',
       dify: { baseUrl: 'http://localhost:5001' },
+      sms: {
+        provider: 'disabled',
+        sdkAppId: '',
+        signName: '',
+        templateId: '',
+        signId: '',
+        region: 'ap-beijing',
+        codeLength: 6,
+        expireMinutes: 5,
+        sendIntervalSeconds: 60,
+        maxPerDay: 10,
+      },
     }),
     qms: z.object({
       enabled: z.boolean().default(false),

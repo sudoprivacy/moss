@@ -24,9 +24,14 @@ import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { SudorouterAdapter } from './billing/sudorouterAdapter.js'
 import { FuiouAdapter } from './billing/fuiouAdapter.js'
+import {
+  resolveBillingRuntimeConfig,
+  resolveSudorouterRuntimeConfig,
+  type BillingRuntimeConfig,
+} from './billing/billingRuntimeConfig.js'
 import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
-import { getAvailableModels } from './modelListCache.js'
+import { configureModelListSource, getAvailableModels } from './modelListCache.js'
 
 export type StandaloneServerOptions = ServerConfig
 
@@ -198,28 +203,6 @@ async function finishStandaloneServerStartup(
       async del(): Promise<void> {},
       async rotate(): Promise<boolean> { return false },
     }
-    const identity = authService.createSudoworkIdentityService({
-      tokenStore: legacyRedis ?? mossOnlyTokenStore,
-      legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret
-        ?? 'moss-native-operations-no-legacy-jwt',
-    })
-    const administration = authService.createSudoworkAdministrationService({
-      getDifyFeatureFlags: () => {
-        const values: Record<string, string | undefined> = {
-          DIFY_BASE_URL: config.sudoworkCompatibility.dify.baseUrl,
-          DIFY_SYSTEM_TOKEN: config.sudoworkCompatibility.dify.systemToken,
-          DIFY_SYSTEM_SECRET: config.sudoworkCompatibility.dify.provisionSecret,
-          DIFY_SSO_SECRET: config.sudoworkCompatibility.dify.ssoSecret,
-        }
-        const missingEnv = Object.entries(values)
-          .filter(([, value]) => !value?.trim())
-          .map(([key]) => key)
-        return { enabled: missingEnv.length === 0, missingEnv }
-      },
-    })
-    const cas = legacyRedis
-      ? authService.createSudoworkCasService({ identity, tokenStore: legacyRedis })
-      : undefined
     const externalBaseUrl = config.sudoworkCompatibility.publicBaseUrl
       || config.publicBaseUrl
       || ''
@@ -238,17 +221,82 @@ async function finishStandaloneServerStartup(
     })
     const managedImages = new ManagedImageStore(join(config.runtimeDir, 'uploads'))
     const configuration = authService.createSudoworkConfigService(store, managedImages)
-    const smsConfig = config.sudoworkCompatibility.sms
-    const smsConfigured = Boolean(legacyRedis) && smsConfig.provider === 'tencent' && [
-      smsConfig.secretId, smsConfig.secretKey, smsConfig.sdkAppId,
-      smsConfig.signName, smsConfig.templateId, smsConfig.signId,
-    ].every(value => typeof value === 'string' && value.trim().length > 0)
-    const sms = legacyRedis && smsConfig.provider === 'tencent'
+    const systemConfiguration = authService.createSudoworkSystemConfigService({
+      secrets: configStore,
+      loginMethod: config.sudoworkCompatibility.loginMethod,
+      skillhubBaseUrl: externalBaseUrl,
+      sudorouterBaseUrl: process.env.SUDOROUTER_BASE_URL,
+      smsRuntimeAvailable: Boolean(legacyRedis),
+      smsCredentialsAvailable: Boolean(
+        config.sudoworkCompatibility.sms.secretId
+        && config.sudoworkCompatibility.sms.secretKey,
+      ),
+      sms: config.sudoworkCompatibility.sms,
+      billing: {
+        enabled: false,
+        fuiou: { testMode: false, merchantCode: '', timeoutMs: 10_000 },
+        sudorouter: {
+          baseUrl: '', adminUserId: '13', timeoutMs: 10_000, initialQuota: 100_000,
+          modelServiceUrl: '', modelsApiUrl: 'https://hk.sudorouter.ai/api/specific_pricing',
+        },
+      },
+      productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
+    })
+    const infrastructure = systemConfiguration.getInfrastructureConfig()
+    const sudorouterRuntime = resolveSudorouterRuntimeConfig({
+      infrastructure: infrastructure.billing.sudorouter,
+      environment: process.env,
+      getSecret: key => configStore.get(key),
+    })
+    configureModelListSource(sudorouterRuntime?.modelsApiUrl ?? null)
+    if (config.sudoworkCompatibility.enabled && !sudorouterRuntime) {
+      throw new Error('Sudowork compatibility requires Sudorouter configuration')
+    }
+    const sudorouter = sudorouterRuntime ? new SudorouterAdapter(sudorouterRuntime) : undefined
+    const accountProvisioner = sudorouter
+      ? authService.createSudorouterAccountService({ provider: sudorouter, secrets: nexusClient })
+      : undefined
+    if (accountProvisioner && sudorouterRuntime) {
+      authService.configureSudorouterAccounts({
+        accountProvisioner,
+        initialQuotaUnits: sudorouterRuntime.initialQuota,
+      })
+    }
+    const identity = authService.createSudoworkIdentityService({
+      tokenStore: legacyRedis ?? mossOnlyTokenStore,
+      legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret
+        ?? 'moss-native-operations-no-legacy-jwt',
+      accountProvisioner,
+    })
+    const administration = authService.createSudoworkAdministrationService({
+      accountProvisioner,
+      defaultInitialQuota: sudorouterRuntime?.initialQuota,
+      getDifyFeatureFlags: () => {
+        const values: Record<string, string | undefined> = {
+          DIFY_BASE_URL: config.sudoworkCompatibility.dify.baseUrl,
+          DIFY_SYSTEM_TOKEN: config.sudoworkCompatibility.dify.systemToken,
+          DIFY_SYSTEM_SECRET: config.sudoworkCompatibility.dify.provisionSecret,
+          DIFY_SSO_SECRET: config.sudoworkCompatibility.dify.ssoSecret,
+        }
+        const missingEnv = Object.entries(values)
+          .filter(([, value]) => !value?.trim())
+          .map(([key]) => key)
+        return { enabled: missingEnv.length === 0, missingEnv }
+      },
+    })
+    const cas = legacyRedis
+      ? authService.createSudoworkCasService({
+          identity, tokenStore: legacyRedis, accountProvisioner,
+          initialQuotaUnits: sudorouterRuntime?.initialQuota,
+        })
+      : undefined
+    const smsConfig = infrastructure.sms
+    const sms = systemConfiguration.isSmsConfigured() && legacyRedis
       ? new SmsVerificationService({
           store: legacyRedis,
           sender: createTencentSmsSender({
-            secretId: smsConfig.secretId ?? '',
-            secretKey: smsConfig.secretKey ?? '',
+            secretId: config.sudoworkCompatibility.sms.secretId ?? '',
+            secretKey: config.sudoworkCompatibility.sms.secretKey ?? '',
             sdkAppId: smsConfig.sdkAppId,
             signName: smsConfig.signName,
             templateId: smsConfig.templateId,
@@ -261,19 +309,39 @@ async function finishStandaloneServerStartup(
           maxPerDay: smsConfig.maxPerDay,
         })
       : undefined
-    const systemConfiguration = authService.createSudoworkSystemConfigService({
-      secrets: configStore,
-      loginMethod: config.sudoworkCompatibility.loginMethod,
-      skillhubBaseUrl: externalBaseUrl,
-      sudorouterBaseUrl: process.env.SUDOROUTER_BASE_URL,
-      smsConfigured,
-      productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
+    const billingRuntime = resolveBillingRuntimeConfig({
+      infrastructure: infrastructure.billing,
+      environment: process.env,
+      getSecret: key => configStore.get(key),
+      readFile: path => readFileSync(path, 'utf8'),
     })
-    const billingEnabled = process.env.SUDOWORK_BILLING_ENABLED === 'true'
-    const billing = billingEnabled
-      ? createBillingCompatibilityService(authService, systemConfiguration, externalBaseUrl)
+    const billing = billingRuntime
+      ? createBillingCompatibilityService(
+          authService,
+          systemConfiguration,
+          externalBaseUrl,
+          billingRuntime,
+          sudorouter!,
+        )
       : undefined
-    const legacyUsage = authService.createSudoworkLegacyUsageService({ listModels: getAvailableModels })
+    const legacyUsage = authService.createSudoworkLegacyUsageService({
+      listModels: getAvailableModels,
+      sudorouter,
+    })
+    const userProjection = authService.createSudoworkUserProjectionService({
+      secrets: nexusClient,
+      listModels: getAvailableModels,
+      quotaReader: sudorouter,
+      getRuntimeConfig: () => {
+        const publicConfig = systemConfiguration.getPublicConfig()
+        return {
+          modelServiceUrl: systemConfiguration.getInfrastructureConfig().billing.sudorouter.modelServiceUrl,
+          scodeAutoModel: typeof publicConfig.scode_auto_model === 'string'
+            ? publicConfig.scode_auto_model
+            : '',
+        }
+      },
+    })
     const qmsSecrets = new QmsNexusSecretAdapter(config.qms, {
       get: key => configStore.get(key),
       put: (key, value) => configStore.put(key, value, config),
@@ -300,6 +368,7 @@ async function finishStandaloneServerStartup(
       systemConfiguration,
       billing,
       legacyUsage,
+      getUserProjection: user => userProjection.project(user),
       rateLimit: process.env.RATE_LIMIT_ENABLED === 'false' ? undefined : legacyRedis,
       difyRuntime: dify.runtime,
       difyEnhancement: dify.enhancement,
@@ -443,43 +512,22 @@ function createBillingCompatibilityService(
   authService: Awaited<ReturnType<typeof createAuthService>>['service'],
   systemConfiguration: ReturnType<typeof authService.createSudoworkSystemConfigService>,
   publicBaseUrl: string,
+  runtime: BillingRuntimeConfig,
+  sudorouter: SudorouterAdapter,
 ) {
-  const required = (name: string): string => {
-    const value = process.env[name]?.trim()
-    if (!value) throw new Error(`Sudowork Billing requires ${name}`)
-    return value
-  }
-  const testMode = process.env.FUIOU_TEST_MODE === 'true'
-  const privateKey = readFuiouKey('private')
-  const publicKey = readFuiouKey('public')
   const payment = new FuiouAdapter({
-    merchantCode: required('FUIOU_MERCHANT_CODE'),
-    merchantPrivateKey: privateKey,
-    fuiouPublicKey: publicKey,
+    merchantCode: runtime.merchantCode,
+    merchantPrivateKey: runtime.merchantPrivateKey,
+    fuiouPublicKey: runtime.fuiouPublicKey,
     callbackUrl: `${publicBaseUrl.replace(/\/+$/, '')}/api/v1/recharge/callback`,
-    baseUrl: process.env[testMode ? 'FUIOU_TEST_API_URL' : 'FUIOU_PROD_API_URL'],
-    refundUrl: process.env[testMode ? 'FUIOU_TEST_REFUND_URL' : 'FUIOU_PROD_REFUND_URL'],
-    timeoutMs: Number.parseInt(process.env.FUIOU_TIMEOUT_MS || '10000', 10),
-    testMode,
-  })
-  const sudorouter = new SudorouterAdapter({
-    baseUrl: required('SUDOROUTER_BASE_URL'),
-    apiToken: required('SUDOROUTER_API_TOKEN'),
-    adminUserId: process.env.SUDOROUTER_ADMIN_USER_ID || '13',
-    timeoutMs: Number.parseInt(process.env.SUDOROUTER_TIMEOUT_MS || '10000', 10),
+    baseUrl: runtime.baseUrl,
+    refundUrl: runtime.refundUrl,
+    timeoutMs: runtime.timeoutMs,
+    testMode: runtime.testMode,
   })
   return authService.createSudoworkBillingService({
     sudorouter, payment,
     getCreditPolicy: () => systemConfiguration.getCreditApplicationPolicy(),
-    testPaymentAmountCents: testMode ? 1 : undefined,
+    testPaymentAmountCents: runtime.testMode ? 1 : undefined,
   })
-}
-
-function readFuiouKey(type: 'private' | 'public'): string {
-  const prefix = type === 'private' ? 'FUIOU_MERCHANT_PRIVATE_KEY' : 'FUIOU_PUBLIC_KEY'
-  const file = process.env[`${prefix}_FILE`]?.trim()
-  if (file) return readFileSync(file, 'utf8')
-  const encoded = process.env[`${prefix}_BASE64`]?.trim()
-  if (encoded) return Buffer.from(encoded, 'base64').toString('utf8')
-  return process.env[prefix]?.trim() || (() => { throw new Error(`Sudowork Billing requires ${prefix}`) })()
 }

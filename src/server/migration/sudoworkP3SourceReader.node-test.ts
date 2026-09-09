@@ -11,7 +11,7 @@ function createSource(path: string, balance: number | string = 100): void {
   db.exec(`
     CREATE TABLE users (
       id INTEGER PRIMARY KEY, phone TEXT, enterprise_id INTEGER, balance REAL,
-      quota INTEGER, used_quota INTEGER, sudorouter_user_id INTEGER
+      quota INTEGER, used_quota INTEGER, sudorouter_user_id INTEGER, sudorouter_key TEXT
     );
     CREATE TABLE ledger (id INTEGER PRIMARY KEY, user_id INTEGER, amount REAL, type TEXT, memo TEXT, timestamp DATETIME);
     CREATE TABLE recharge_orders (
@@ -46,7 +46,8 @@ function createSource(path: string, balance: number | string = 100): void {
       created_at DATETIME, processed_at DATETIME
     );
   `)
-  db.prepare('INSERT INTO users VALUES (17, ?, 3, ?, 50000, 1000, 91)').run('13800000000', balance)
+  db.prepare('INSERT INTO users VALUES (17, ?, 3, ?, 50000, 1000, 91, ?)')
+    .run('13800000000', balance, 'legacy-router-token')
   db.prepare("INSERT INTO ledger VALUES (1, 17, 120, 'RECHARGE', '充值', '2026-09-07 01:00:00')").run()
   db.prepare("INSERT INTO ledger VALUES (2, 17, -20, 'CONSUME', '消费', '2026-09-07 02:00:00')").run()
   db.prepare(`INSERT INTO recharge_orders VALUES (
@@ -70,6 +71,7 @@ describe('SudoworkP3SourceReader', () => {
       const snapshot = new SudoworkP3SourceReader(root).readSnapshot()
       assert.equal(snapshot.users[0]?.balanceUnits, 100)
       assert.equal(snapshot.users[0]?.externalUserId, '91')
+      assert.equal(snapshot.users[0]?.sudorouterToken, 'legacy-router-token')
       assert.equal(snapshot.ledger.reduce((sum, row) => sum + row.deltaUnits, 0), 100)
       assert.equal(snapshot.orders[0]?.amountUsdMicros, 1_000_000)
       assert.equal(snapshot.orders[0]?.amountCents, 730)

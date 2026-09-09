@@ -166,6 +166,7 @@ export async function createProductionMigrationRuntime(config: MigrationCliConfi
     new WalletService(targetStore.db, billingRepository),
     Date.now,
     identityProjection,
+    nexus,
   )
   const billingSource = new SudoworkP3SourceReader(config.source.snapshotDir)
 

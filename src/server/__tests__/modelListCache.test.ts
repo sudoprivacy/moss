@@ -35,4 +35,24 @@ describe("model list cache", () => {
     ]);
     expect(requestedUrl).toBe(expectedUrl);
   });
+
+  it("uses the explicit Sudorouter model URL instead of the environment fallback", async () => {
+    process.env.MOSS_MODEL_LIST_URL = "https://environment.test/models";
+    const requestedUrls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      requestedUrls.push(String(input));
+      return new Response(JSON.stringify({ success: true, data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await getAvailableModels("https://configured.test/models");
+    await getAvailableModels("https://another.test/models");
+
+    expect(requestedUrls).toEqual([
+      "https://configured.test/models",
+      "https://another.test/models",
+    ]);
+  });
 });

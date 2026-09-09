@@ -1,7 +1,7 @@
 import { authClient } from './client'
 
-/** server.json 侧凭据字段的分组（与服务端 SERVER_CREDENTIAL_FIELDS 一致）。 */
-export type ServerCredentialGroup = 'hub' | 'wikiIndex' | 'cabin' | 'sudowork' | 'qms'
+/** Moss 服务级凭据分组（与服务端 SERVER_CREDENTIAL_FIELDS 一致）。 */
+export type ServerCredentialGroup = 'hub' | 'wikiIndex' | 'cabin' | 'sudowork' | 'billing' | 'qms'
 
 /** GET /api/v1/server-credentials 的单项：脱敏展示，不返回明文。 */
 export interface ServerCredentialItem {
@@ -14,6 +14,7 @@ export interface ServerCredentialItem {
   set: boolean
   /** 脱敏值：长值显示尾 4 位（****abcd），短值仅 ****；未设置为 null */
   masked: string | null
+  restart_required: boolean
 }
 
 export interface ServerCredentialsResponse {

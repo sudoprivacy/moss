@@ -42,6 +42,9 @@ const FIELD_LABELS: Record<string, string> = {
   'sudoworkCompatibility.dify.systemToken': 'Dify 系统令牌',
   'sudoworkCompatibility.dify.provisionSecret': 'Dify 租户开通签名密钥',
   'sudoworkCompatibility.dify.ssoSecret': 'Dify SSO 签名密钥',
+  'billing.fuiou.merchantPrivateKey': '富友商户私钥',
+  'billing.fuiou.publicKey': '富友平台公钥',
+  'billing.sudorouter.apiToken': 'Sudorouter API Token',
   'qms.postgresUrl': 'QMS PostgreSQL URL',
   'qms.redisUrl': 'QMS Redis URL',
   'qms.apiKey': 'QMS API Key',
@@ -72,13 +75,17 @@ const GROUP_META: Record<
     title: 'Sudowork 兼容凭据',
     description: '用于旧登录态、Redis、短信和 Dify 兼容接口。',
   },
+  billing: {
+    title: '支付与额度凭据',
+    description: '富友支付签名、验签和 Sudorouter 额度同步所需凭据。',
+  },
   qms: {
     title: '质量与遥测凭据',
     description: 'QMS 独立存储、接收加密和通知通道所需凭据。',
   },
 }
 
-const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin', 'sudowork', 'qms']
+const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin', 'sudowork', 'billing', 'qms']
 
 /**
  * 清空后会回落公开 dev 常量、导致已签发资源 URL 失效且可被伪造的 HMAC 密钥字段。
@@ -113,7 +120,7 @@ function CredentialRow({
       if (res.ignored) {
         toast.warning(`${label}：提交值与脱敏占位相同，已忽略`)
       } else {
-        toast.success(`${label} 已保存并即时生效`)
+        toast.success(item.restart_required ? `${label} 已保存，重启 Moss 后生效` : `${label} 已保存并即时生效`)
         setValue('')
         onSaved()
       }
@@ -135,7 +142,7 @@ function CredentialRow({
     setSaving(true)
     try {
       await updateServerCredential(item.key, '')
-      toast.success(`${label} 已清空并即时生效`)
+      toast.success(item.restart_required ? `${label} 已清空，重启 Moss 后生效` : `${label} 已清空并即时生效`)
       setValue('')
       onSaved()
     } catch (error) {
@@ -231,7 +238,7 @@ export default function ServerCredentialsPage() {
   return (
     <DashboardLayout
       title="服务器凭据"
-      description="管理 server.json 侧的敏感凭据（存储于 Nexus，不再明文落盘）。保存后即时生效。"
+      description="管理 Moss 服务级敏感凭据，值加密存储于 Nexus；连接类凭据重启后生效。"
     >
       <div className="space-y-6">
         <div className="flex justify-end">

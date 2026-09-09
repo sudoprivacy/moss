@@ -26,7 +26,7 @@ mock.module('os', () => {
 })
 
 // mock 生效后再动态加载被测模块（systemSettings 的 SYSTEM_SETTINGS_PATH 基于 os.homedir()）。
-const { ConfigStore, initConfigStore, CONFIG_NAMESPACE } = await import('./configStore.js')
+const { ConfigStore, initConfigStore, CONFIG_KEYS, CONFIG_NAMESPACE } = await import('./configStore.js')
 const { updateSystemSettings } = await import('../systemSettings.js')
 
 /** value 为 null 表示"记录存在但无值"（损坏记录），用于三分支测试。 */
@@ -72,6 +72,12 @@ function asClient(fake: FakeNexus): NexusClient {
 }
 
 describe('configStore 读写与缓存', () => {
+  it('富友和 Sudorouter 敏感值属于 Nexus 配置清单', () => {
+    expect(CONFIG_KEYS).toContain('server.fuiou-merchant-private-key')
+    expect(CONFIG_KEYS).toContain('server.fuiou-public-key')
+    expect(CONFIG_KEYS).toContain('server.sudorouter-api-token')
+  })
+
   it('put 后 get 读缓存，并写入 Nexus', async () => {
     const fake = new FakeNexus()
     const store = new ConfigStore(asClient(fake))

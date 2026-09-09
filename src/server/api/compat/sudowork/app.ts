@@ -28,6 +28,7 @@ import { registerSudoworkDifyAdministrationRoutes } from './difyAdministrationRo
 import { createSudoworkQmsRoutes } from './qmsRoutes.js'
 import { registerSudoworkLegacyUsageRoutes, type SudoworkLegacyUsagePort } from './legacyUsageRoutes.js'
 import { SudoworkLegacyUsageError } from './legacyUsageService.js'
+import { SudoworkUserProjectionError } from './userProjectionService.js'
 import { registerSudoworkLegacyAdminRoutes, type SudoworkLegacyAdminPort } from './legacyAdminRoutes.js'
 import { createLegacyLoginRateLimit, type LegacyRateLimitStore } from './legacyRateLimit.js'
 
@@ -141,7 +142,7 @@ export interface SudoworkAdministrationPort {
     enterpriseId: number
     invitationCodeId: number
     idempotencyKey?: string
-  }): { id: number; phone: string; sudorouter_user_id: null; initial_points: number }
+  }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> | { id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }
   createPhoneUser(input: {
     actor: IdentityActor
     phone: string
@@ -149,7 +150,7 @@ export interface SudoworkAdministrationPort {
     enterpriseId: number
     invitationCodeId: number
     idempotencyKey?: string
-  }): { id: number; phone: string; sudorouter_user_id: null; initial_points: number }
+  }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> | { id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }
   updateUser(input: {
     actor: IdentityActor
     userId: number
@@ -427,6 +428,9 @@ export function createSudoworkCompatibilityApp(options: {
     if (error instanceof SudoworkLegacyUsageError) {
       return context.json({ success: false, msg: error.message, ...(error.data ? { data: error.data } : {}) }, error.statusCode as 400)
     }
+    if (error instanceof SudoworkUserProjectionError) {
+      return context.json({ success: false, msg: error.message }, error.statusCode as 500)
+    }
     return context.json({ success: false, msg: '服务器内部错误' }, 500)
   })
 
@@ -628,7 +632,7 @@ export function createSudoworkCompatibilityApp(options: {
     const token = bearerToken(authorization)
     if (!token) return null
     const actor = options.identity.getActor(token)
-    return actor && options.organizationScopedAdmin && actor.role === 'super_admin'
+    return actor && options.organizationScopedAdmin
       ? { ...actor, organizationScoped: true }
       : actor
   }
@@ -1021,7 +1025,7 @@ export function createSudoworkCompatibilityApp(options: {
       const error = validatePassword(password)
       if (error) return context.json({ success: false, msg: error }, 400)
     }
-    const result = options.administration.createPasswordUser({
+    const result = await options.administration.createPasswordUser({
       actor, phone, nickname, password, enterpriseId, invitationCodeId,
       idempotencyKey: context.req.header('Idempotency-Key') || undefined,
     })
@@ -1048,7 +1052,7 @@ export function createSudoworkCompatibilityApp(options: {
     if (!Number.isInteger(invitationCodeId)) {
       return context.json({ success: false, msg: '请选择邀请码' }, 400)
     }
-    const result = options.administration.createPhoneUser({
+    const result = await options.administration.createPhoneUser({
       actor,
       phone,
       nickname: typeof body.nickname === 'string' ? body.nickname : null,
@@ -1489,7 +1493,7 @@ export function createSudoworkCompatibilityApp(options: {
       ...options.qms,
       getActor: authorization => {
         const actor = options.identity.getActor(authorization ?? '')
-        return actor && options.organizationScopedAdmin && actor.role === 'super_admin'
+        return actor && options.organizationScopedAdmin
           ? { ...actor, organizationScoped: true }
           : actor
       },

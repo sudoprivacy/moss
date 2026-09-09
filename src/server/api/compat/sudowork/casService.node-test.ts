@@ -121,8 +121,19 @@ describe('Sudowork CAS compatibility service', () => {
       authDb, identities, tokenStore: store, legacyJwtSecret: 'secret',
       refreshTokenFactory: () => 'refresh-cas',
     })
+    const accountCalls: Array<{ input: any; key: string }> = []
     const service = new SudoworkCasService({
       authDb, identities, unifiedIdentity: unified, identity, tokenStore: store,
+      initialQuotaUnits: 500_000,
+      accountProvisioner: {
+        async ensureAccount(input, context) {
+          accountCalls.push({ input, key: context.idempotencyKey })
+          return {
+            externalUserId: '91', token: 'sk-cas', tokenSecretRef: 'nexus://token/cas',
+            quotaUnits: input.initialQuotaUnits, usedQuotaUnits: 0,
+          }
+        },
+      },
       codeFactory: () => 'handoff-code',
       ticketValidator: {
         async validate() {
@@ -139,6 +150,10 @@ describe('Sudowork CAS compatibility service', () => {
     const session = await service.exchange({ providerId: 'cas-main', code: 'handoff-code', deviceId: 'desktop-a' })
     assert.equal(session.user.phone, 'cas-user')
     assert(identities.findAuthIdentity('cas', 'cas-main', 'external-1'))
+    assert.equal(accountCalls.length, 1)
+    assert.equal(accountCalls[0]?.input.initialQuotaUnits, 500_000)
+    assert.equal(authDb.getUserById(accountCalls[0]!.input.ownerId)?.status, 'active')
+    assert.equal(identities.getWallet('user', accountCalls[0]!.input.ownerId)?.balanceUnits, 1_000)
     await assert.rejects(() => service.exchange({
       providerId: 'cas-main', code: 'handoff-code', deviceId: 'desktop-a',
     }))

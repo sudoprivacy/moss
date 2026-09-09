@@ -7,8 +7,9 @@ import { ensureBillingSchema } from '../../../billing/billingSchema.js'
 import { WalletService } from '../../../billing/walletService.js'
 import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { SudoworkLegacyUsageService } from './legacyUsageService.js'
+import type { SudorouterPort, SudorouterUsagePort } from '../../../billing/sudorouterAdapter.js'
 
-function setup(initialBalance = 10) {
+function setup(initialBalance = 10, sudorouter?: SudorouterPort & SudorouterUsagePort) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
@@ -31,6 +32,12 @@ function setup(initialBalance = 10) {
   identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
   ensureBillingSchema(db)
   const repository = new BillingRepository(db)
+  if (sudorouter) {
+    repository.upsertExternalAccount({
+      provider: 'sudorouter', ownerType: 'user', ownerId: 'user-1', externalAccountId: '91',
+      quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 1,
+    })
+  }
   let now = Date.parse('2026-09-07T10:00:00Z')
   const service = new SudoworkLegacyUsageService({
     db,
@@ -39,6 +46,7 @@ function setup(initialBalance = 10) {
     repository,
     wallet: new WalletService(db, repository, () => now),
     listModels: async () => [{ id: 'model-1', name: '模型一' }],
+    sudorouter,
     clock: () => now,
   })
   return { db, repository, service, setNow(value: number) { now = value } }
@@ -97,6 +105,44 @@ describe('SudoworkLegacyUsageService', () => {
       ['model-1', 1000, 1],
       ['model-2', 500, 0.5],
     ])
+    db.close()
+  })
+
+  test('绑定 Sudorouter 时从实时额度和模型日志构造用户查询', async () => {
+    const createdAtSeconds = Math.floor(Date.parse('2026-09-07T09:00:00Z') / 1000)
+    const sudorouter: SudorouterPort & SudorouterUsagePort = {
+      async getUser(externalUserId) {
+        return { externalUserId, quotaUnits: 4_000, usedQuotaUnits: 1_000 }
+      },
+      async changeQuota() { return { success: true } },
+      async listUsageLogs() {
+        return {
+          total: 2,
+          list: [
+            { id: 'log-1', createdAtSeconds, type: '2', model: 'model-a', costQuotaUnits: 500, inputTokens: 30, outputTokens: 20 },
+            { id: 'log-2', createdAtSeconds, type: 'manage', model: null, costQuotaUnits: 0, inputTokens: 0, outputTokens: 0 },
+          ],
+        }
+      },
+    }
+    const { db, service } = setup(10, sudorouter)
+    const dashboard = await service.getDashboard(userActor) as any
+    assert.deepEqual(dashboard.points, { total: 10, used: 2, remaining: 8, bonus: 0 })
+    assert.deepEqual(dashboard.usage_today, { tokens: 50, cost_points: 1, requests: 1 })
+    assert.deepEqual(dashboard.ledger, {
+      list: [{
+        id: 'log-1', model: 'model-a', timestamp: new Date(createdAtSeconds * 1000).toISOString(),
+        prompt_tokens: 30, completion_tokens: 20, created_at: createdAtSeconds,
+      }],
+      total: 2,
+    })
+    const ledger = await service.listLedger({ actor: userActor })
+    assert.equal(ledger.total, 2)
+    assert.equal((ledger.data[0] as any).amount, -1)
+    const stats = await service.getModelUsageStats({
+      actor: userActor, startDate: '2026-09-07', endDate: '2026-09-07',
+    }) as any[]
+    assert.deepEqual(stats.map(item => [item.model, item.total_tokens, item.cost]), [['model-a', 50, 1]])
     db.close()
   })
 

@@ -3,6 +3,7 @@ import { createDecipheriv } from 'node:crypto'
 import { describe, test } from 'node:test'
 import { SudoworkIdentityError, type SudoworkLegacyUser } from './identityService.js'
 import { SudoworkAdministrationError } from './adminService.js'
+import { SudoworkUserProjectionError } from './userProjectionService.js'
 import { QmsAuthorizationService } from '../../../qms/qmsAuthorization.js'
 import {
   createSudoworkCompatibilityApp,
@@ -279,6 +280,20 @@ function createApp(
 }
 
 describe('Sudowork compatibility Hono app', () => {
+  test('登录投影缺少 Sudorouter Token 时返回明确兼容错误', async () => {
+    const app = createApp('password', undefined, {
+      getUserProjection: async () => {
+        throw new SudoworkUserProjectionError(500, 'Sudorouter 用户 Token 不存在')
+      },
+    })
+    const response = await app.request('/api/v1/auth/login-by-config', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ phone: '13800000000', password: 'correct' }),
+    })
+    assert.equal(response.status, 500)
+    assert.deepEqual(await response.json(), { success: false, msg: 'Sudorouter 用户 Token 不存在' })
+  })
+
   test('QMS 未启用时已知质量接口返回 503 而不是 404', async () => {
     const app = createSudoworkCompatibilityApp({ identity: createIdentity() })
     const response = await app.request('/api/v1/qms/system/health')

@@ -70,7 +70,30 @@ export interface ExternalBillingAccount {
   externalAccountId: string
   quotaUnits: number
   usedQuotaUnits: number
+  tokenSecretRef?: string | null
   updatedAt: number
+}
+
+export type SudorouterProvisioningStatus =
+  | 'PENDING' | 'ACCOUNT_READY' | 'QUOTA_READY' | 'TOKEN_READY'
+  | 'COMPLETED' | 'FAILED' | 'UNKNOWN' | 'SUPPRESSED'
+
+export interface SudorouterProvisioningRecord {
+  id: string
+  ownerId: string
+  orgId: string
+  username: string
+  displayName: string
+  initialQuotaUnits: number
+  externalAccountId: string | null
+  quotaUnits: number | null
+  usedQuotaUnits: number | null
+  tokenSecretRef: string | null
+  status: SudorouterProvisioningStatus
+  idempotencyKey: string
+  requestFingerprint: string
+  contextSource: BillingContextSource
+  errorText: string | null
 }
 
 export interface QuotaOperationRecord {
@@ -346,6 +369,23 @@ export class BillingRepository {
     return { list: rows.map(mapUsageRecord), total: Number(total.count) }
   }
 
+  sumUserUsageCost(userId: string): number {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(cost_units), 0) AS total
+      FROM billing_usage_records WHERE user_id = ?
+    `).get(userId) as { total: number }
+    return fromStoredPointUnits(row.total)
+  }
+
+  sumUserLedgerByEntryType(userId: string, entryType: string): number {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(delta_units), 0) AS total
+      FROM billing_ledger_entries
+      WHERE owner_type = 'user' AND owner_id = ? AND entry_type = ?
+    `).get(userId, entryType) as { total: number }
+    return fromStoredPointUnits(row.total)
+  }
+
   insertAuditEvent(input: {
     id: string
     action: string
@@ -608,16 +648,17 @@ export class BillingRepository {
     this.db.prepare(`
       INSERT INTO billing_external_accounts (
         provider, owner_type, owner_id, external_account_id,
-        quota_units, used_quota_units, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        quota_units, used_quota_units, token_secret_ref, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(provider, owner_type, owner_id) DO UPDATE SET
         external_account_id = excluded.external_account_id,
         quota_units = excluded.quota_units,
         used_quota_units = excluded.used_quota_units,
+        token_secret_ref = COALESCE(excluded.token_secret_ref, billing_external_accounts.token_secret_ref),
         updated_at = excluded.updated_at
     `).run(
       input.provider, input.ownerType, input.ownerId, input.externalAccountId,
-      input.quotaUnits, input.usedQuotaUnits, input.updatedAt,
+      input.quotaUnits, input.usedQuotaUnits, input.tokenSecretRef ?? null, input.updatedAt,
     )
   }
 
@@ -630,8 +671,76 @@ export class BillingRepository {
       provider: String(row.provider), ownerType: String(row.owner_type) as BillingOwnerType,
       ownerId: String(row.owner_id), externalAccountId: String(row.external_account_id),
       quotaUnits: Number(row.quota_units), usedQuotaUnits: Number(row.used_quota_units),
+      ...(row.token_secret_ref == null ? {} : { tokenSecretRef: String(row.token_secret_ref) }),
       updatedAt: Number(row.updated_at),
     } : null
+  }
+
+  insertSudorouterProvisioning(input: {
+    id: string
+    ownerId: string
+    orgId: string
+    username: string
+    displayName: string
+    initialQuotaUnits: number
+    status: SudorouterProvisioningStatus
+    idempotencyKey: string
+    requestFingerprint: string
+    contextSource: BillingContextSource
+    createdAt: number
+  }): void {
+    this.db.prepare(`
+      INSERT INTO billing_sudorouter_provisioning (
+        id, owner_id, org_id, username, display_name, initial_quota_units,
+        status, idempotency_key, request_fingerprint, context_source,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id, input.ownerId, input.orgId, input.username, input.displayName,
+      input.initialQuotaUnits, input.status, input.idempotencyKey,
+      input.requestFingerprint, input.contextSource, input.createdAt, input.createdAt,
+    )
+  }
+
+  getSudorouterProvisioningByKey(idempotencyKey: string): SudorouterProvisioningRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM billing_sudorouter_provisioning WHERE idempotency_key = ? LIMIT 1
+    `).get(idempotencyKey) as SqlRow | undefined
+    return row ? this.mapSudorouterProvisioning(row) : null
+  }
+
+  getSudorouterProvisioningByOwner(ownerId: string): SudorouterProvisioningRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM billing_sudorouter_provisioning WHERE owner_id = ? LIMIT 1
+    `).get(ownerId) as SqlRow | undefined
+    return row ? this.mapSudorouterProvisioning(row) : null
+  }
+
+  updateSudorouterProvisioning(input: {
+    id: string
+    status: SudorouterProvisioningStatus
+    externalAccountId?: string | null
+    quotaUnits?: number | null
+    usedQuotaUnits?: number | null
+    tokenSecretRef?: string | null
+    errorText?: string | null
+    updatedAt: number
+    completedAt?: number | null
+  }): void {
+    this.db.prepare(`
+      UPDATE billing_sudorouter_provisioning SET
+        status = ?,
+        external_account_id = COALESCE(?, external_account_id),
+        quota_units = COALESCE(?, quota_units),
+        used_quota_units = COALESCE(?, used_quota_units),
+        token_secret_ref = COALESCE(?, token_secret_ref),
+        error_text = ?, updated_at = ?, completed_at = ?
+      WHERE id = ?
+    `).run(
+      input.status, input.externalAccountId ?? null, input.quotaUnits ?? null,
+      input.usedQuotaUnits ?? null, input.tokenSecretRef ?? null,
+      input.errorText ?? null, input.updatedAt, input.completedAt ?? null, input.id,
+    )
   }
 
   insertQuotaOperation(input: {
@@ -1127,6 +1236,23 @@ export class BillingRepository {
       WHERE source_checksum = ? LIMIT 1
     `).get(sourceChecksum) as { migration_run_id: string; report_json: string } | undefined
     return row ? { migrationRunId: row.migration_run_id, report: JSON.parse(row.report_json) as Record<string, unknown> } : null
+  }
+
+  private mapSudorouterProvisioning(row: SqlRow): SudorouterProvisioningRecord {
+    return {
+      id: String(row.id), ownerId: String(row.owner_id), orgId: String(row.org_id),
+      username: String(row.username), displayName: String(row.display_name),
+      initialQuotaUnits: Number(row.initial_quota_units),
+      externalAccountId: row.external_account_id == null ? null : String(row.external_account_id),
+      quotaUnits: row.quota_units == null ? null : Number(row.quota_units),
+      usedQuotaUnits: row.used_quota_units == null ? null : Number(row.used_quota_units),
+      tokenSecretRef: row.token_secret_ref == null ? null : String(row.token_secret_ref),
+      status: String(row.status) as SudorouterProvisioningStatus,
+      idempotencyKey: String(row.idempotency_key),
+      requestFingerprint: String(row.request_fingerprint),
+      contextSource: String(row.context_source) as BillingContextSource,
+      errorText: row.error_text == null ? null : String(row.error_text),
+    }
   }
 
   private mapActivity(row: SqlRow): BillingActivityRecord {

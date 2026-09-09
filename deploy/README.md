@@ -53,6 +53,28 @@ Moss Admin 请求统一使用 `/api/moss/v1/*`，运营中心使用
 `sudoworkCompatibility.enabled`。该开关只决定旧 Sudowork 客户端协议是否对
 `hosts` 中的原域名公开。
 
+### 短信、富友与 Sudorouter 配置
+
+管理端“运营中心 → Sudowork 系统设置”保存以下非敏感平台集成参数：
+
+- 腾讯云短信服务商、SDK App ID、签名、模板、地域、验证码长度、有效期、发送间隔和每日上限；
+- 在线计费开关、富友测试模式、商户号、支付/退款地址和超时；
+- Sudorouter 地址、管理员 ID 和超时。
+
+这些参数保存在 Moss `platform_integration_settings`，不混入客户端下发策略。
+“系统设置”中的客户端充值模式仍独立控制客户端展示在线支付、积分审批或关闭入口。
+
+敏感值在“系统设置 → 服务器凭据 → 支付与额度凭据”以及“Sudowork 兼容凭据”中录入，
+并加密存入 Nexus：
+
+- 腾讯云 Secret ID、Secret Key；
+- 富友商户私钥、富友平台公钥；
+- Sudorouter API Token。
+
+旧环境变量仍兼容，并且优先于管理端保存值。富友密钥文件和 Base64 环境变量的优先级
+高于直接环境变量和 Nexus。短信、支付、Redis、Dify 与 QMS 等启动期连接配置保存后
+必须重启 Moss；管理端不会把脱敏占位重新写成真实密钥。
+
 ## Docker 与发布构建
 
 当前 GitHub Workflow 使用 `deploy/server.Dockerfile.local` 的 `host-export` target

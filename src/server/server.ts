@@ -27,10 +27,10 @@ import { createHostDispatch } from './api/compat/sudowork/hostDispatch.js'
 import { ConfigAvailabilityService } from './configuration/configAvailabilityService.js'
 import { normalizeMossAdminApiPath } from './api/mossAdminNamespace.js'
 
-/** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
+/** Nexus-backed server credential metadata exposed as masked administration fields. */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudowork' | 'qms'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudowork' | 'billing' | 'qms'
   path: string
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
@@ -50,6 +50,9 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.sudowork-dify-system-token', group: 'sudowork', path: 'sudoworkCompatibility.dify.systemToken' },
   { key: 'server.sudowork-dify-provision-secret', group: 'sudowork', path: 'sudoworkCompatibility.dify.provisionSecret' },
   { key: 'server.sudowork-dify-sso-secret', group: 'sudowork', path: 'sudoworkCompatibility.dify.ssoSecret' },
+  { key: 'server.fuiou-merchant-private-key', group: 'billing', path: 'billing.fuiou.merchantPrivateKey' },
+  { key: 'server.fuiou-public-key', group: 'billing', path: 'billing.fuiou.publicKey' },
+  { key: 'server.sudorouter-api-token', group: 'billing', path: 'billing.sudorouter.apiToken' },
   { key: 'server.qms-postgres-url', group: 'qms', path: 'qms.postgresUrl' },
   { key: 'server.qms-redis-url', group: 'qms', path: 'qms.redisUrl' },
   { key: 'server.qms-api-key', group: 'qms', path: 'qms.apiKey' },
@@ -4949,7 +4952,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createUser({
+          await authService.createProvisionedUser({
             orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6046,6 +6049,7 @@ export function startServer(
             path: field.path,
             set: Boolean(value),
             masked: value ? maskConfigValue(value) : null,
+            restart_required: field.key !== 'server.hub-authorization',
           }
         })
         writeJson(res, 200, { items })

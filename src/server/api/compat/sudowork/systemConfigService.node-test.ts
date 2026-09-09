@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
 import { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
+import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
 import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import { migrationCommandContext } from '../../../application/commandContext.js'
@@ -18,6 +19,7 @@ function setup(secretFailure = false) {
   const service = new SudoworkSystemConfigService({
     db,
     policies: new ClientPolicyRepository(db),
+    infrastructureSettings: new PlatformIntegrationSettingsRepository(db),
     identities,
     defaults: {
       loginMethod: 'password',
@@ -26,8 +28,18 @@ function setup(secretFailure = false) {
       productImprovementEncryptionRequired: true,
       productImprovementApiKey: 'qms-api-key',
       productImprovementPublicKey: 'qms-public-key',
+      sms: {
+        provider: 'disabled', sdkAppId: '', signName: '', templateId: '', signId: '',
+        region: 'ap-beijing', codeLength: 6, expireMinutes: 5,
+        sendIntervalSeconds: 60, maxPerDay: 10,
+      },
+      billing: {
+        enabled: false,
+        fuiou: { testMode: false, merchantCode: '', timeoutMs: 10_000 },
+        sudorouter: { baseUrl: '', adminUserId: '13', timeoutMs: 10_000 },
+      },
     },
-    smsConfigured: true,
+    smsRuntimeAvailable: true,
     secrets: {
       get(key) { return secrets.get(key) },
       async put(key, value) {
@@ -36,7 +48,7 @@ function setup(secretFailure = false) {
       },
       async remove(key) { secrets.delete(key) },
     },
-  })
+  } as never)
   return { db, identities, org, secrets, service }
 }
 
@@ -109,6 +121,93 @@ describe('Sudowork 系统配置统一服务', () => {
         /nexus unavailable/,
       )
       assert.deepEqual(new ClientPolicyRepository(db).getPlatform(), {})
+    } finally {
+      db.close()
+    }
+  })
+
+  test('短信和支付基础设施非敏感参数写入统一平台策略并要求重启', async () => {
+    const { db, org, service } = setup()
+    try {
+      const legacyRoot = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
+      const root = { ...legacyRoot, organizationScoped: true }
+      await service.update(root, {
+        sms: {
+          provider: 'tencent', sdk_app_id: '1400000000', sign_name: '企业签名',
+          template_id: '123456', sign_id: '654321', region: 'ap-guangzhou',
+          code_length: 6, expire_minutes: 8, send_interval_seconds: 90, max_per_day: 20,
+        },
+        billing: {
+          enabled: true,
+          fuiou: {
+            test_mode: true, merchant_code: 'MERCHANT-1', timeout_ms: 12_000,
+            test_api_url: 'https://pay.test', test_refund_url: 'https://refund.test',
+          },
+          sudorouter: {
+            base_url: 'https://router.test', admin_user_id: '91', timeout_ms: 15_000,
+            initial_quota: 50_000_000,
+            model_service_url: 'https://router.test/v1',
+            models_api_url: 'https://router.test/api/specific_pricing',
+          },
+        },
+      })
+
+      const config = service.getAdminConfig(root) as any
+      assert.equal(config.restart_required, true)
+      assert.equal(config.sms.provider, 'tencent')
+      assert.equal(config.sms.expire_minutes, 8)
+      assert.equal(config.billing.enabled, true)
+      assert.equal(config.billing.fuiou.merchant_code, 'MERCHANT-1')
+      assert.equal(config.billing.sudorouter.base_url, 'https://router.test')
+      assert.equal(config.billing.sudorouter.initial_quota, 50_000_000)
+      assert.equal(config.billing.sudorouter.model_service_url, 'https://router.test/v1')
+      assert.equal(service.getPublicConfig().sudorouter_baseurl, 'https://router.test')
+      assert.equal(db.prepare(`
+        SELECT instr(policy_json, 'billingInfrastructure') + instr(policy_json, 'smsInfrastructure') AS leaked
+        FROM client_delivery_policies WHERE scope_type = 'platform' AND scope_id = 'default'
+      `).get()?.leaked, 0)
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM platform_integration_settings
+        WHERE setting_key IN ('sudowork.sms', 'sudowork.billing')
+      `).get()?.count, 2)
+      assert.deepEqual((service as any).getInfrastructureConfig(), {
+        sms: {
+          provider: 'tencent', sdkAppId: '1400000000', signName: '企业签名',
+          templateId: '123456', signId: '654321', region: 'ap-guangzhou',
+          codeLength: 6, expireMinutes: 8, sendIntervalSeconds: 90, maxPerDay: 20,
+        },
+        billing: {
+          enabled: true,
+          fuiou: {
+            testMode: true, merchantCode: 'MERCHANT-1', timeoutMs: 12_000,
+            testApiUrl: 'https://pay.test', testRefundUrl: 'https://refund.test',
+          },
+          sudorouter: {
+            baseUrl: 'https://router.test', adminUserId: '91', timeoutMs: 15_000,
+            initialQuota: 50_000_000, modelServiceUrl: 'https://router.test/v1',
+            modelsApiUrl: 'https://router.test/api/specific_pricing',
+          },
+        },
+      })
+      const legacyConfig = service.getAdminConfig(legacyRoot) as any
+      assert.equal(legacyConfig.sms, undefined)
+      assert.equal(legacyConfig.billing, undefined)
+      assert.equal(legacyConfig.restart_required, undefined)
+    } finally {
+      db.close()
+    }
+  })
+
+  test('拒绝非法短信和支付基础设施参数', async () => {
+    const { db, org, service } = setup()
+    const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
+    try {
+      await assert.rejects(service.update(root, {
+        sms: { provider: 'tencent', code_length: 2 },
+      }), /短信验证码长度/)
+      await assert.rejects(service.update(root, {
+        billing: { enabled: true, fuiou: { timeout_ms: 0 } },
+      }), /富友超时时间/)
     } finally {
       db.close()
     }

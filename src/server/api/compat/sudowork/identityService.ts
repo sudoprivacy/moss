@@ -18,6 +18,8 @@ import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import type { SudorouterAccountService } from '../../../billing/sudorouterAccountService.js'
+import { pointsToQuota } from '../../../billing/sudorouterAdapter.js'
 
 const ACCESS_TOKEN_TTL_SECONDS = 2 * 60 * 60
 const LEGACY_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -59,6 +61,7 @@ interface ServiceOptions {
   nativeActorResolver?: (token: string) => IdentityActor | null
   refreshTokenFactory?: () => string
   registrationTokenFactory?: () => string
+  accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
 }
 
 function toLegacyRole(role: string): SudoworkLegacyUser['role'] {
@@ -149,26 +152,32 @@ export class SudoworkIdentityService {
     if (!phone) {
       throw new SudoworkIdentityError(400, '注册凭证无效或已过期，请重新获取验证码')
     }
-    if (this.options.identities.findAuthIdentity('phone', 'sudowork', phone)) {
+    const existingIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const existingUser = existingIdentity
+      ? this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
+      : null
+    if (existingUser && (existingUser.status !== 'pending' || !this.options.accountProvisioner)) {
       await this.options.tokenStore.del(registerKey)
       throw new SudoworkIdentityError(400, '该手机号已注册，请直接登录')
     }
     const invitation = this.options.identities.getInvitationByCode(input.invitationCode)
-    if (!invitation) throw new SudoworkIdentityError(400, '邀请码不存在')
-    if (invitation.status !== 'pending') {
+    if (!existingUser && !invitation) throw new SudoworkIdentityError(400, '邀请码不存在')
+    if (!existingUser && invitation?.status !== 'pending') {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
     }
-    const created = this.unifiedIdentity.createUser({
-      orgId: invitation.orgId,
+    const createKey = input.idempotencyKey ?? `sudowork-register:${phone}:${input.invitationCode}`
+    const created = existingUser ? { userId: existingUser.id } : this.unifiedIdentity.createUser({
+      orgId: invitation!.orgId,
       username: phone,
       displayName: input.nickname,
       role: 'user',
-      status: 'active',
+      status: this.options.accountProvisioner ? 'pending' : 'active',
       invitationCode: input.invitationCode,
       authIdentity: {
         provider: 'phone', issuer: 'sudowork', subject: phone, metadata: {},
       },
-    }, onlineCommandContext(input.idempotencyKey ?? `sudowork-register:${randomUUID()}`))
+    }, onlineCommandContext(createKey))
+    await this.provisionAccount(created.userId, phone, input.nickname, createKey)
     await this.options.tokenStore.del(registerKey)
     const user = this.options.authDb.getUserById(created.userId)
     if (!user) throw new SudoworkIdentityError(500, '用户企业信息异常')
@@ -189,25 +198,31 @@ export class SudoworkIdentityService {
     const passwordError = validateLegacyPassword(input.password)
     if (passwordError) throw new SudoworkIdentityError(400, passwordError)
     const phone = input.phone.trim()
-    if (this.options.identities.findAuthIdentity('phone', 'sudowork', phone)) {
+    const existingIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const existingUser = existingIdentity
+      ? this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
+      : null
+    if (existingUser && (existingUser.status !== 'pending' || !this.options.accountProvisioner)) {
       throw new SudoworkIdentityError(400, '用户名已存在')
     }
     const invitation = this.options.identities.getInvitationByCode(input.invitationCode)
-    if (!invitation) throw new SudoworkIdentityError(400, '邀请码不存在')
-    if (invitation.status !== 'pending') {
+    if (!existingUser && !invitation) throw new SudoworkIdentityError(400, '邀请码不存在')
+    if (!existingUser && invitation?.status !== 'pending') {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
     }
+    const createKey = input.idempotencyKey ?? `sudowork-register:${phone}:${input.invitationCode}`
     try {
-      this.unifiedIdentity.createUser({
-        orgId: invitation.orgId,
+      const created = existingUser ? { userId: existingUser.id } : this.unifiedIdentity.createUser({
+        orgId: invitation!.orgId,
         username: phone,
         displayName: input.nickname,
         password: input.password,
         phone,
         role: 'user',
-        status: 'active',
+        status: this.options.accountProvisioner ? 'pending' : 'active',
         invitationCode: input.invitationCode,
-      }, onlineCommandContext(input.idempotencyKey ?? `sudowork-register:${randomUUID()}`))
+      }, onlineCommandContext(createKey))
+      await this.provisionAccount(created.userId, phone, input.nickname, createKey)
     } catch (error) {
       if (error instanceof Error && /Username already exists|UNIQUE constraint failed/.test(error.message)) {
         throw new SudoworkIdentityError(400, '用户名已存在')
@@ -219,6 +234,30 @@ export class SudoworkIdentityService {
       password: input.password,
       deviceId: input.deviceId,
     })
+  }
+
+  private async provisionAccount(
+    userId: string,
+    username: string,
+    displayName: string,
+    createKey: string,
+  ): Promise<void> {
+    if (!this.options.accountProvisioner) return
+    const user = this.options.authDb.getUserById(userId)
+    const wallet = this.options.identities.getWallet('user', userId)
+    if (!user || !wallet) throw new SudoworkIdentityError(500, '用户初始化失败')
+    try {
+      await this.options.accountProvisioner.ensureAccount({
+        ownerId: user.id,
+        orgId: user.orgId,
+        username,
+        displayName: displayName.trim() || username,
+        initialQuotaUnits: pointsToQuota(wallet.balanceUnits),
+      }, onlineCommandContext(`sudorouter:${createKey}`))
+      this.options.authDb.updateUser(user.id, { status: 'active' })
+    } catch {
+      throw new SudoworkIdentityError(500, 'Sudorouter 用户初始化失败，请稍后重试')
+    }
   }
 
   async loginByPassword(input: {

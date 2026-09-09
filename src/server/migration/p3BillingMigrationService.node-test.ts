@@ -19,6 +19,7 @@ function snapshot(): SudoworkP3Snapshot {
     users: [{
       id: 17, phone: '13800000000', enterpriseId: 3, balanceUnits: 100,
       quotaUnits: 50_000, usedQuotaUnits: 1_000, externalUserId: '91',
+      sudorouterToken: 'legacy-router-token',
     }],
     ledger: [
       { id: 1, userId: 17, deltaUnits: 1_100, entryType: 'RECHARGE', memo: '充值', createdAt: 10 },
@@ -74,23 +75,35 @@ function setup(initialBalance = 100) {
   ensureBillingSchema(db)
   const repository = new BillingRepository(db)
   const wallet = new WalletService(db, repository, () => 1000)
-  const service = new P3BillingMigrationService(db, identities, repository, wallet, () => 1000)
-  return { db, identities, repository, wallet, service }
+  const secretValues = new Map<string, string>()
+  const secrets = {
+    async putSecret(namespace: string, key: string, value: string) {
+      secretValues.set(`${namespace}:${key}`, value)
+    },
+    async getSecret(namespace: string, key: string) {
+      const value = secretValues.get(`${namespace}:${key}`)
+      return value === undefined ? null : { value, status: 'enabled', version: 1 }
+    },
+  }
+  const service = new P3BillingMigrationService(
+    db, identities, repository, wallet, () => 1000, undefined, secrets,
+  )
+  return { db, identities, repository, wallet, service, secretValues }
 }
 
 describe('P3BillingMigrationService', () => {
-  test('保留旧 ID 和订单号，以可重建账本导入且不产生外部投递', () => {
-    const { db, identities, repository, wallet, service } = setup()
+  test('保留旧 ID、订单号和 Nexus Token，以可重建账本导入且不产生外部投递', async () => {
+    const { db, identities, repository, wallet, service, secretValues } = setup()
     const source = snapshot()
     const plan = service.plan(source)
     assert.equal(plan.status, 'ready')
 
     const context = migrationCommandContext('batch-p3', 'batch-p3-execute')
-    const first = service.execute(plan, context)
-    const second = service.execute(plan, context)
+    const first = await service.execute(plan, context)
+    const second = await service.execute(plan, context)
     const freshPlan = service.plan(source)
-    const third = service.execute(freshPlan, migrationCommandContext('batch-p3-rerun', 'batch-p3-rerun-execute'))
-    const verification = service.verify(source)
+    const third = await service.execute(freshPlan, migrationCommandContext('batch-p3-rerun', 'batch-p3-rerun-execute'))
+    const verification = await service.verify(source)
 
     assert.equal(first.financialDifferenceUnits, 0)
     assert.equal(first.deliverableExternalOutboxCount, 0)
@@ -105,31 +118,46 @@ describe('P3BillingMigrationService', () => {
     assert.equal(identities.resolveNumericAliasGlobal('billing_refund', 11)?.resourceId, repository.getRefundByLegacyId(11)?.id)
     assert.deepEqual(wallet.rebuild('user', 'user-17'), { stored: 100, rebuilt: 100, difference: 0 })
     assert.equal(repository.listRechargeActivities({ limit: 20, offset: 0 }).total, 2)
-    assert.equal(repository.getExternalAccount('sudorouter', 'user', 'user-17')?.externalAccountId, '91')
+    const account = repository.getExternalAccount('sudorouter', 'user', 'user-17')
+    assert.equal(account?.externalAccountId, '91')
+    assert.equal(account?.tokenSecretRef, 'nexus://moss:sudorouter-users/user-17')
+    assert.equal(secretValues.get('moss:sudorouter-users:user-17'), 'sk-legacy-router-token')
+    assert.equal(JSON.stringify(first).includes('legacy-router-token'), false)
     assert.equal(verification.status, 'matched')
     assert.equal(verification.differenceUnits, 0)
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM outbox_events WHERE status = 'pending'").get() as { count: number }).count, 0)
     db.close()
   })
 
-  test('目标钱包为空时从已验证流水原子构建余额', () => {
+  test('目标钱包为空时从已验证流水原子构建余额', async () => {
     const { db, repository, service } = setup(0)
     const plan = service.plan(snapshot())
-    const report = service.execute(plan, migrationCommandContext('batch-zero', 'batch-zero-execute'))
+    const report = await service.execute(plan, migrationCommandContext('batch-zero', 'batch-zero-execute'))
     assert.equal(report.financialDifferenceUnits, 0)
     assert.deepEqual(repository.getWallet('user', 'user-17'), { balanceUnits: 100, version: 1 })
     db.close()
   })
 
-  test('预检阻断余额矛盾、进行中业务和未完成的身份映射', () => {
+  test('Nexus Token 缺失会阻断历史用户校验', async () => {
+    const { db, service, secretValues } = setup()
+    const source = snapshot()
+    await service.execute(service.plan(source), migrationCommandContext('batch-token', 'batch-token-execute'))
+    secretValues.clear()
+    const verification = await service.verify(source)
+    assert.equal(verification.status, 'mismatch')
+    assert(verification.issues.some(issue => issue.includes('Token')))
+    db.close()
+  })
+
+  test('预检阻断余额矛盾、进行中业务和未完成的身份映射', async () => {
     const mismatchSetup = setup()
     const mismatch = snapshot()
     mismatch.users[0]!.balanceUnits = 101
     const mismatchPlan = mismatchSetup.service.plan(mismatch)
     assert.equal(mismatchPlan.status, 'blocked')
     assert(mismatchPlan.issues.some(issue => issue.code === 'BALANCE_MISMATCH'))
-    assert.throws(
-      () => mismatchSetup.service.execute(mismatchPlan, migrationCommandContext('bad', 'bad-execute')),
+    await assert.rejects(
+      mismatchSetup.service.execute(mismatchPlan, migrationCommandContext('bad', 'bad-execute')),
       (error: unknown) => error instanceof P3BillingMigrationBlockedError,
     )
     mismatchSetup.db.close()

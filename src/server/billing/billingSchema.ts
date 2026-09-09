@@ -128,10 +128,35 @@ export function ensureBillingSchema(db: DatabaseSync): void {
       external_account_id TEXT NOT NULL,
       quota_units INTEGER NOT NULL DEFAULT 0 CHECK (typeof(quota_units) = 'integer'),
       used_quota_units INTEGER NOT NULL DEFAULT 0 CHECK (typeof(used_quota_units) = 'integer'),
+      token_secret_ref TEXT,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (provider, owner_type, owner_id),
       UNIQUE (provider, external_account_id)
     );
+
+    CREATE TABLE IF NOT EXISTS billing_sudorouter_provisioning (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      org_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      initial_quota_units INTEGER NOT NULL CHECK (typeof(initial_quota_units) = 'integer' AND initial_quota_units >= 0),
+      external_account_id TEXT,
+      quota_units INTEGER CHECK (quota_units IS NULL OR typeof(quota_units) = 'integer'),
+      used_quota_units INTEGER CHECK (used_quota_units IS NULL OR typeof(used_quota_units) = 'integer'),
+      token_secret_ref TEXT,
+      status TEXT NOT NULL CHECK (status IN ('PENDING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'COMPLETED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      request_fingerprint TEXT NOT NULL,
+      context_source TEXT NOT NULL CHECK (context_source IN ('online', 'migration', 'replay')),
+      error_text TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE (owner_id)
+    );
+    CREATE INDEX IF NOT EXISTS billing_sudorouter_provisioning_status_idx
+      ON billing_sudorouter_provisioning (status, updated_at);
 
     CREATE TABLE IF NOT EXISTS billing_quota_operations (
       id TEXT PRIMARY KEY,
@@ -316,5 +341,10 @@ export function ensureBillingSchema(db: DatabaseSync): void {
   const refundColumns = db.prepare('PRAGMA table_info(billing_refunds)').all() as Array<{ name: string }>
   if (refundColumns.length > 0 && !refundColumns.some(column => column.name === 'request_fingerprint')) {
     db.exec("ALTER TABLE billing_refunds ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''")
+  }
+
+  const externalAccountColumns = db.prepare('PRAGMA table_info(billing_external_accounts)').all() as Array<{ name: string }>
+  if (!externalAccountColumns.some(column => column.name === 'token_secret_ref')) {
+    db.exec('ALTER TABLE billing_external_accounts ADD COLUMN token_secret_ref TEXT')
   }
 }

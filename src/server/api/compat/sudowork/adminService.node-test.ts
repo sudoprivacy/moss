@@ -10,7 +10,10 @@ import { ensureBillingSchema } from '../../../billing/billingSchema.js'
 import { BillingRepository } from '../../../billing/billingRepository.js'
 import { SudoworkAdministrationService } from './adminService.js'
 
-function setup(options: { defaultInitialQuota?: number } = {}) {
+function setup(options: {
+  defaultInitialQuota?: number
+  accountProvisioner?: { ensureAccount(input: any, context: any): Promise<any> }
+} = {}) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
@@ -20,6 +23,7 @@ function setup(options: { defaultInitialQuota?: number } = {}) {
   const service = new SudoworkAdministrationService(organizations, identities, authDb, {
     getDifyFeatureFlags: () => ({ enabled: true, missingEnv: [] }),
     defaultInitialQuota: options.defaultInitialQuota,
+    accountProvisioner: options.accountProvisioner,
   })
   const first = organizations.createOrganization({
     name: '企业 A', code: 'ENT-A', initialCreditUnits: 10_000, appName: '应用 A',
@@ -173,12 +177,12 @@ describe('Sudowork administration compatibility service', () => {
     db.close()
   })
 
-  test('creates and manages users through canonical identity commands', () => {
+  test('creates and manages users through canonical identity commands', async () => {
     const { db, service, first } = setup()
     const actor = { userId: 'root', orgId: first.organization.id, role: 'super_admin' }
     service.createInvitationCodes({ actor, enterpriseId: first.legacyEnterpriseId, count: 1 }, () => 'USER-CODE')
     const invitation = service.listInvitationCodes({ actor, enterpriseId: first.legacyEnterpriseId }).items[0]!
-    const created = service.createPasswordUser({
+    const created = await service.createPasswordUser({
       actor,
       phone: 'new-user',
       nickname: '新用户',
@@ -235,6 +239,76 @@ describe('Sudowork administration compatibility service', () => {
       points: { total: 9, bonus: 0, consumed: 0 },
     })
     assert.deepEqual(context.service.getFeatureFlags(admin), { dify: { enabled: true, missingEnv: [] } })
+    context.db.close()
+  })
+
+  test('后台创建用户时完成 Sudorouter 开户、额度和 Token 后才激活', async () => {
+    const calls: Array<{ input: any; key: string }> = []
+    const context = setup({
+      accountProvisioner: {
+        async ensureAccount(input, command) {
+          calls.push({ input, key: command.idempotencyKey })
+          return {
+            externalUserId: '91', token: 'sk-user', tokenSecretRef: 'nexus://token/user',
+            quotaUnits: input.initialQuotaUnits, usedQuotaUnits: 0,
+          }
+        },
+      },
+    })
+    const actor = { userId: 'root', orgId: context.first.organization.id, role: 'super_admin' }
+    context.service.createInvitationCodes({
+      actor, enterpriseId: context.first.legacyEnterpriseId, count: 1, initialQuotaUsd: 2,
+    }, () => 'ADMIN-USER')
+    const invitation = context.service.listInvitationCodes({ actor }).items[0]!
+
+    const created = await context.service.createPasswordUser({
+      actor, phone: 'admin-created', nickname: '后台用户', password: 'StrongPass123',
+      enterpriseId: context.first.legacyEnterpriseId, invitationCodeId: invitation.id,
+      idempotencyKey: 'admin-create-user',
+    })
+
+    assert.equal(created.sudorouter_user_id, 91)
+    assert.equal(context.authDb.getUserById(calls[0]!.input.ownerId)?.status, 'active')
+    assert.equal(calls[0]?.input.initialQuotaUnits, 1_000_000)
+    assert.equal(calls[0]?.key, 'sudorouter:admin-create-user')
+    context.db.close()
+  })
+
+  test('后台开户失败后同一幂等键恢复原 pending 用户和已用邀请码', async () => {
+    let failuresRemaining = 1
+    const context = setup({
+      accountProvisioner: {
+        async ensureAccount(input) {
+          if (failuresRemaining > 0) {
+            failuresRemaining -= 1
+            throw new Error('temporary provider failure')
+          }
+          return {
+            externalUserId: '92', token: 'sk-user', tokenSecretRef: 'nexus://token/user',
+            quotaUnits: input.initialQuotaUnits, usedQuotaUnits: 0,
+          }
+        },
+      },
+    })
+    const actor = { userId: 'root', orgId: context.first.organization.id, role: 'super_admin' }
+    context.service.createInvitationCodes({
+      actor, enterpriseId: context.first.legacyEnterpriseId, count: 1, initialQuotaUsd: 2,
+    }, () => 'ADMIN-RETRY')
+    const invitation = context.service.listInvitationCodes({ actor }).items[0]!
+    const input = {
+      actor, phone: 'admin-retry', nickname: '后台恢复用户', password: 'StrongPass123',
+      enterpriseId: context.first.legacyEnterpriseId, invitationCodeId: invitation.id,
+      idempotencyKey: 'admin-user-retry',
+    }
+
+    await assert.rejects(context.service.createPasswordUser(input), /Sudorouter 用户初始化失败/)
+    const pending = context.identities.findAuthIdentity('phone', 'sudowork', 'admin-retry')
+    assert(pending)
+    assert.equal(context.authDb.getUserById(pending.userId)?.status, 'pending')
+    const recovered = await context.service.createPasswordUser(input)
+    assert.equal(recovered.sudorouter_user_id, 92)
+    assert.equal(context.authDb.getUserById(pending.userId)?.status, 'active')
+    assert.equal(context.authDb.listUsersByOrg(context.first.organization.id).filter(user => user.name === 'admin-retry').length, 1)
     context.db.close()
   })
 

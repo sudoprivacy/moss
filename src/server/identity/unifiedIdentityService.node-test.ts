@@ -32,6 +32,18 @@ describe('trusted command context', () => {
 })
 
 describe('UnifiedIdentityService.createUser', () => {
+  test('后台创建用户可在同一事务初始化明确积分', () => {
+    const { db, authDb, repository, service } = setup()
+    const created = service.createUser({
+      orgId: 'org-a', username: 'new-admin-user', password: 'StrongPass123',
+      role: 'user', initialCreditUnits: 100_000,
+    }, onlineCommandContext('create-with-initial-credit'))
+
+    assert.equal(authDb.getUserById(created.userId)?.status, 'active')
+    assert.equal(repository.getWallet('user', created.userId)?.balanceUnits, 100_000)
+    db.close()
+  })
+
   test('atomically creates user, identity, numeric alias, wallet, invitation use and pending outbox', () => {
     const { db, authDb, repository, service } = setup()
     repository.createInvitation({ id: 'invite-1', orgId: 'org-a', code: 'JOINME', initialCreditUnits: 500 })

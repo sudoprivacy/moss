@@ -1,5 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
+import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
+import type { ConfigKey } from '../../../configStore/configStore.js'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
@@ -10,6 +12,41 @@ type LoginMethod = 'sms' | 'password' | 'cas'
 type RechargeMode = 'pay' | 'approve' | 'disabled'
 type Json = Record<string, unknown>
 
+export interface SudoworkInfrastructureConfig {
+  sms: {
+    provider: 'disabled' | 'tencent'
+    sdkAppId: string
+    signName: string
+    templateId: string
+    signId: string
+    region: string
+    codeLength: number
+    expireMinutes: number
+    sendIntervalSeconds: number
+    maxPerDay: number
+  }
+  billing: {
+    enabled: boolean
+    fuiou: {
+      testMode: boolean
+      merchantCode: string
+      timeoutMs: number
+      testApiUrl?: string
+      testRefundUrl?: string
+      prodApiUrl?: string
+      prodRefundUrl?: string
+    }
+    sudorouter: {
+      baseUrl: string
+      adminUserId: string
+      timeoutMs: number
+      initialQuota: number
+      modelServiceUrl: string
+      modelsApiUrl: string
+    }
+  }
+}
+
 export class SudoworkSystemConfigError extends Error {
   constructor(readonly statusCode: number, message: string) {
     super(message)
@@ -18,9 +55,12 @@ export class SudoworkSystemConfigError extends Error {
 }
 
 export class SudoworkSystemConfigService {
+  private readonly infrastructureSettings: PlatformIntegrationSettingsRepository
+
   constructor(private readonly options: {
     db: DatabaseSync
     policies: ClientPolicyRepository
+    infrastructureSettings?: PlatformIntegrationSettingsRepository
     identities: IdentityRepository
     defaults: {
       loginMethod: LoginMethod
@@ -29,14 +69,21 @@ export class SudoworkSystemConfigService {
       productImprovementEncryptionRequired?: boolean
       productImprovementApiKey?: string
       productImprovementPublicKey?: string
+      sms?: SudoworkInfrastructureConfig['sms']
+      billing?: SudoworkInfrastructureConfig['billing']
     }
-    smsConfigured: boolean
+    smsRuntimeAvailable?: boolean
+    smsCredentialsAvailable?: boolean
+    smsConfigured?: boolean
     secrets: {
-      get(key: typeof LOG_REPORT_SECRET_KEY): string | undefined
-      put(key: typeof LOG_REPORT_SECRET_KEY, value: string): Promise<void>
-      remove(key: typeof LOG_REPORT_SECRET_KEY): Promise<void>
+      get(key: ConfigKey): string | undefined
+      put(key: ConfigKey, value: string): Promise<void>
+      remove(key: ConfigKey): Promise<void>
     }
-  }) {}
+  }) {
+    this.infrastructureSettings = options.infrastructureSettings
+      ?? new PlatformIntegrationSettingsRepository(options.db)
+  }
 
   getLoginMethod(): LoginMethod {
     return loginMethodFromNumber(this.policy().loginMethod, this.options.defaults.loginMethod)
@@ -44,6 +91,7 @@ export class SudoworkSystemConfigService {
 
   getPublicConfig(): Json {
     const policy = this.policy()
+    const infrastructure = this.getInfrastructureConfig()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
@@ -61,7 +109,10 @@ export class SudoworkSystemConfigService {
       product_improvement: enabledProductImprovement === 1
         ? { enabled: 1, encryption_required: this.options.defaults.productImprovementEncryptionRequired === true }
         : { enabled: 0 },
-      sudorouter_baseurl: withoutTrailingSlash(string(policy.sudorouterBaseUrl, this.options.defaults.sudorouterBaseUrl ?? '')),
+      sudorouter_baseurl: withoutTrailingSlash(string(
+        policy.sudorouterBaseUrl,
+        infrastructure.billing.sudorouter.baseUrl || this.options.defaults.sudorouterBaseUrl || '',
+      )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
       third_party_auth: this.thirdPartyAuth(false),
@@ -86,15 +137,28 @@ export class SudoworkSystemConfigService {
     }
   }
 
+  getInfrastructureConfig(): SudoworkInfrastructureConfig {
+    return {
+      sms: normalizeSmsInfrastructure(
+        this.infrastructureSettings.get('sudowork.sms'),
+        this.options.defaults.sms ?? DEFAULT_SMS_INFRASTRUCTURE,
+      ),
+      billing: normalizeBillingInfrastructure(
+        this.infrastructureSettings.get('sudowork.billing'),
+        this.options.defaults.billing ?? DEFAULT_BILLING_INFRASTRUCTURE,
+      ),
+    }
+  }
+
   getAdminConfig(actor: IdentityActor): Json {
     this.assertAdmin(actor)
     const policy = this.policy()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
-    return {
+    const config: Json = {
       login_method: loginMethodToNumber(this.getLoginMethod()),
-      sms_configured: this.options.smsConfigured,
+      sms_configured: this.isSmsConfigured(),
       third_party_auth: this.thirdPartyAuth(true),
       log_report: {
         enabled: flag(logReport.enabled),
@@ -111,6 +175,14 @@ export class SudoworkSystemConfigService {
       scode_auto_model: string(policy.scodeAutoModel),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
+    }
+    if (!actor.organizationScoped) return config
+    const infrastructure = this.getInfrastructureConfig()
+    return {
+      ...config,
+      restart_required: true,
+      sms: adminSmsConfig(infrastructure.sms),
+      billing: adminBillingConfig(infrastructure.billing),
     }
   }
 
@@ -131,12 +203,20 @@ export class SudoworkSystemConfigService {
   }
 
   async update(actor: IdentityActor, body: Json): Promise<void> {
-    const { patch, providers, nextLogKey } = this.prepareUpdate(actor, body)
+    const {
+      patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure,
+    } = this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
     try {
       runInTransaction(this.options.db, () => {
         this.options.policies.putPlatform(patch, actor.userId)
+        if (smsInfrastructure) {
+          this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
+        }
+        if (billingInfrastructure) {
+          this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
+        }
         if (providers) this.replaceCasConnections(providers)
       })
     } catch (error) {
@@ -156,10 +236,14 @@ export class SudoworkSystemConfigService {
     patch: Json
     providers?: NormalizedProvider[]
     nextLogKey?: string
+    smsInfrastructure?: SudoworkInfrastructureConfig['sms']
+    billingInfrastructure?: SudoworkInfrastructureConfig['billing']
   } {
     if (actor.role !== 'super_admin') throw new SudoworkSystemConfigError(403, '权限不足')
     const patch: Json = {}
     let providers: NormalizedProvider[] | undefined
+    let smsInfrastructure: SudoworkInfrastructureConfig['sms'] | undefined
+    let billingInfrastructure: SudoworkInfrastructureConfig['billing'] | undefined
 
     if (body.third_party_auth !== undefined) {
       const normalized = normalizeThirdPartyAuth(body.third_party_auth)
@@ -174,7 +258,7 @@ export class SudoworkSystemConfigService {
       if (body.login_method !== 0 && body.login_method !== 1 && body.login_method !== 2) {
         throw new SudoworkSystemConfigError(400, '无效的登录方式')
       }
-      if (body.login_method === 0 && !this.options.smsConfigured) {
+      if (body.login_method === 0 && !this.isSmsConfigured()) {
         throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
       }
       const thirdParty = object(patch.thirdPartyAuth ?? this.policy().thirdPartyAuth)
@@ -229,7 +313,31 @@ export class SudoworkSystemConfigService {
     }
     if (body.recharge_mode !== undefined) patch.rechargeMode = rechargeMode(body.recharge_mode)
     if (body.credit_application !== undefined) patch.creditApplication = normalizeCreditApplication(body.credit_application)
-    return { patch, providers, nextLogKey }
+    if (body.sms !== undefined) {
+      smsInfrastructure = parseSmsInfrastructure(
+        body.sms,
+        this.getInfrastructureConfig().sms,
+      )
+    }
+    if (body.billing !== undefined) {
+      billingInfrastructure = parseBillingInfrastructure(
+        body.billing,
+        this.getInfrastructureConfig().billing,
+      )
+    }
+    return { patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure }
+  }
+
+  isSmsConfigured(): boolean {
+    if (this.options.smsConfigured !== undefined) return this.options.smsConfigured
+    const sms = this.getInfrastructureConfig().sms
+    return this.options.smsRuntimeAvailable === true
+      && sms.provider === 'tencent'
+      && [sms.sdkAppId, sms.signName, sms.templateId, sms.signId, sms.region].every(Boolean)
+      && (this.options.smsCredentialsAvailable === true || (
+        Boolean(this.options.secrets.get('server.sudowork-tencent-secret-id'))
+        && Boolean(this.options.secrets.get('server.sudowork-tencent-secret-key'))
+      ))
   }
 
   private policy(): Json {
@@ -302,6 +410,21 @@ export class SudoworkSystemConfigService {
       throw new SudoworkSystemConfigError(403, '权限不足')
     }
   }
+}
+
+const DEFAULT_SMS_INFRASTRUCTURE: SudoworkInfrastructureConfig['sms'] = {
+  provider: 'disabled', sdkAppId: '', signName: '', templateId: '', signId: '',
+  region: 'ap-beijing', codeLength: 6, expireMinutes: 5,
+  sendIntervalSeconds: 60, maxPerDay: 10,
+}
+
+const DEFAULT_BILLING_INFRASTRUCTURE: SudoworkInfrastructureConfig['billing'] = {
+  enabled: false,
+  fuiou: { testMode: false, merchantCode: '', timeoutMs: 10_000 },
+  sudorouter: {
+    baseUrl: '', adminUserId: '13', timeoutMs: 10_000, initialQuota: 100_000,
+    modelServiceUrl: '', modelsApiUrl: 'https://hk.sudorouter.ai/api/specific_pricing',
+  },
 }
 
 interface NormalizedProvider {
@@ -389,6 +512,196 @@ function normalizeCreditApplication(value: unknown): Json {
     max_points: Number.isInteger(max) && max >= minPoints ? max : 1_000_000,
     allow_duplicate_pending: raw.allow_duplicate_pending === true,
   }
+}
+
+function normalizeSmsInfrastructure(
+  value: unknown,
+  fallback: SudoworkInfrastructureConfig['sms'],
+): SudoworkInfrastructureConfig['sms'] {
+  const raw = object(value)
+  return {
+    provider: raw.provider === 'tencent' ? 'tencent' : raw.provider === 'disabled' ? 'disabled' : fallback.provider,
+    sdkAppId: string(raw.sdkAppId, fallback.sdkAppId),
+    signName: string(raw.signName, fallback.signName),
+    templateId: string(raw.templateId, fallback.templateId),
+    signId: string(raw.signId, fallback.signId),
+    region: string(raw.region, fallback.region),
+    codeLength: integer(raw.codeLength, fallback.codeLength),
+    expireMinutes: integer(raw.expireMinutes, fallback.expireMinutes),
+    sendIntervalSeconds: integer(raw.sendIntervalSeconds, fallback.sendIntervalSeconds),
+    maxPerDay: integer(raw.maxPerDay, fallback.maxPerDay),
+  }
+}
+
+function parseSmsInfrastructure(
+  value: unknown,
+  current: SudoworkInfrastructureConfig['sms'],
+): SudoworkInfrastructureConfig['sms'] {
+  const raw = object(value)
+  const provider = raw.provider === undefined ? current.provider : raw.provider
+  if (provider !== 'disabled' && provider !== 'tencent') {
+    throw new SudoworkSystemConfigError(400, '短信服务商无效')
+  }
+  const codeLength = adminInteger(raw.code_length, current.codeLength)
+  const expireMinutes = adminInteger(raw.expire_minutes, current.expireMinutes)
+  const sendIntervalSeconds = adminInteger(raw.send_interval_seconds, current.sendIntervalSeconds)
+  const maxPerDay = adminInteger(raw.max_per_day, current.maxPerDay)
+  if (codeLength < 4 || codeLength > 8) throw new SudoworkSystemConfigError(400, '短信验证码长度必须为 4 至 8 位')
+  if (expireMinutes < 1) throw new SudoworkSystemConfigError(400, '短信验证码有效期必须大于 0')
+  if (sendIntervalSeconds < 1) throw new SudoworkSystemConfigError(400, '短信发送间隔必须大于 0')
+  if (maxPerDay < 1) throw new SudoworkSystemConfigError(400, '短信每日发送上限必须大于 0')
+  return {
+    provider,
+    sdkAppId: adminString(raw.sdk_app_id, current.sdkAppId),
+    signName: adminString(raw.sign_name, current.signName),
+    templateId: adminString(raw.template_id, current.templateId),
+    signId: adminString(raw.sign_id, current.signId),
+    region: adminString(raw.region, current.region),
+    codeLength,
+    expireMinutes,
+    sendIntervalSeconds,
+    maxPerDay,
+  }
+}
+
+function normalizeBillingInfrastructure(
+  value: unknown,
+  fallback: SudoworkInfrastructureConfig['billing'],
+): SudoworkInfrastructureConfig['billing'] {
+  const raw = object(value)
+  const fuiou = object(raw.fuiou)
+  const sudorouter = object(raw.sudorouter)
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : fallback.enabled,
+    fuiou: {
+      testMode: typeof fuiou.testMode === 'boolean' ? fuiou.testMode : fallback.fuiou.testMode,
+      merchantCode: string(fuiou.merchantCode, fallback.fuiou.merchantCode),
+      timeoutMs: integer(fuiou.timeoutMs, fallback.fuiou.timeoutMs),
+      ...optionalString('testApiUrl', fuiou.testApiUrl, fallback.fuiou.testApiUrl),
+      ...optionalString('testRefundUrl', fuiou.testRefundUrl, fallback.fuiou.testRefundUrl),
+      ...optionalString('prodApiUrl', fuiou.prodApiUrl, fallback.fuiou.prodApiUrl),
+      ...optionalString('prodRefundUrl', fuiou.prodRefundUrl, fallback.fuiou.prodRefundUrl),
+    },
+    sudorouter: {
+      baseUrl: string(sudorouter.baseUrl, fallback.sudorouter.baseUrl),
+      adminUserId: string(sudorouter.adminUserId, fallback.sudorouter.adminUserId),
+      timeoutMs: integer(sudorouter.timeoutMs, fallback.sudorouter.timeoutMs),
+      initialQuota: integer(sudorouter.initialQuota, fallback.sudorouter.initialQuota),
+      modelServiceUrl: string(sudorouter.modelServiceUrl, fallback.sudorouter.modelServiceUrl),
+      modelsApiUrl: string(sudorouter.modelsApiUrl, fallback.sudorouter.modelsApiUrl),
+    },
+  }
+}
+
+function parseBillingInfrastructure(
+  value: unknown,
+  current: SudoworkInfrastructureConfig['billing'],
+): SudoworkInfrastructureConfig['billing'] {
+  const raw = object(value)
+  const fuiou = object(raw.fuiou)
+  const sudorouter = object(raw.sudorouter)
+  const timeoutMs = adminInteger(fuiou.timeout_ms, current.fuiou.timeoutMs)
+  const sudorouterTimeoutMs = adminInteger(sudorouter.timeout_ms, current.sudorouter.timeoutMs)
+  const initialQuota = adminInteger(sudorouter.initial_quota, current.sudorouter.initialQuota)
+  if (timeoutMs < 1) throw new SudoworkSystemConfigError(400, '富友超时时间必须大于 0')
+  if (sudorouterTimeoutMs < 1) throw new SudoworkSystemConfigError(400, 'Sudorouter 超时时间必须大于 0')
+  if (initialQuota < 0) throw new SudoworkSystemConfigError(400, 'Sudorouter 初始额度不能小于 0')
+  const urls = {
+    testApiUrl: adminOptionalUrl(fuiou.test_api_url, current.fuiou.testApiUrl, '富友测试支付地址'),
+    testRefundUrl: adminOptionalUrl(fuiou.test_refund_url, current.fuiou.testRefundUrl, '富友测试退款地址'),
+    prodApiUrl: adminOptionalUrl(fuiou.prod_api_url, current.fuiou.prodApiUrl, '富友生产支付地址'),
+    prodRefundUrl: adminOptionalUrl(fuiou.prod_refund_url, current.fuiou.prodRefundUrl, '富友生产退款地址'),
+  }
+  const baseUrl = adminString(sudorouter.base_url, current.sudorouter.baseUrl)
+  if (baseUrl && !validHttpUrl(baseUrl)) throw new SudoworkSystemConfigError(400, 'Sudorouter 地址格式不正确')
+  const modelServiceUrl = adminString(sudorouter.model_service_url, current.sudorouter.modelServiceUrl)
+  if (modelServiceUrl && !validHttpUrl(modelServiceUrl)) throw new SudoworkSystemConfigError(400, '模型服务地址格式不正确')
+  const modelsApiUrl = adminString(sudorouter.models_api_url, current.sudorouter.modelsApiUrl)
+  if (modelsApiUrl && !validHttpUrl(modelsApiUrl)) throw new SudoworkSystemConfigError(400, '模型列表地址格式不正确')
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : current.enabled,
+    fuiou: {
+      testMode: typeof fuiou.test_mode === 'boolean' ? fuiou.test_mode : current.fuiou.testMode,
+      merchantCode: adminString(fuiou.merchant_code, current.fuiou.merchantCode),
+      timeoutMs,
+      ...(urls.testApiUrl ? { testApiUrl: urls.testApiUrl } : {}),
+      ...(urls.testRefundUrl ? { testRefundUrl: urls.testRefundUrl } : {}),
+      ...(urls.prodApiUrl ? { prodApiUrl: urls.prodApiUrl } : {}),
+      ...(urls.prodRefundUrl ? { prodRefundUrl: urls.prodRefundUrl } : {}),
+    },
+    sudorouter: {
+      baseUrl,
+      adminUserId: adminString(sudorouter.admin_user_id, current.sudorouter.adminUserId),
+      timeoutMs: sudorouterTimeoutMs,
+      initialQuota,
+      modelServiceUrl: withoutTrailingSlash(modelServiceUrl),
+      modelsApiUrl: withoutTrailingSlash(modelsApiUrl),
+    },
+  }
+}
+
+function adminSmsConfig(value: SudoworkInfrastructureConfig['sms']): Json {
+  return {
+    provider: value.provider,
+    sdk_app_id: value.sdkAppId,
+    sign_name: value.signName,
+    template_id: value.templateId,
+    sign_id: value.signId,
+    region: value.region,
+    code_length: value.codeLength,
+    expire_minutes: value.expireMinutes,
+    send_interval_seconds: value.sendIntervalSeconds,
+    max_per_day: value.maxPerDay,
+  }
+}
+
+function adminBillingConfig(value: SudoworkInfrastructureConfig['billing']): Json {
+  return {
+    enabled: value.enabled,
+    fuiou: {
+      test_mode: value.fuiou.testMode,
+      merchant_code: value.fuiou.merchantCode,
+      timeout_ms: value.fuiou.timeoutMs,
+      test_api_url: value.fuiou.testApiUrl ?? '',
+      test_refund_url: value.fuiou.testRefundUrl ?? '',
+      prod_api_url: value.fuiou.prodApiUrl ?? '',
+      prod_refund_url: value.fuiou.prodRefundUrl ?? '',
+    },
+    sudorouter: {
+      base_url: value.sudorouter.baseUrl,
+      admin_user_id: value.sudorouter.adminUserId,
+      timeout_ms: value.sudorouter.timeoutMs,
+      initial_quota: value.sudorouter.initialQuota,
+      model_service_url: value.sudorouter.modelServiceUrl,
+      models_api_url: value.sudorouter.modelsApiUrl,
+    },
+  }
+}
+
+function integer(value: unknown, fallback: number): number {
+  return Number.isSafeInteger(value) ? Number(value) : fallback
+}
+
+function adminInteger(value: unknown, fallback: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed)) throw new SudoworkSystemConfigError(400, '配置值必须为整数')
+  return parsed
+}
+
+function adminString(value: unknown, fallback: string): string {
+  return value === undefined ? fallback : string(value)
+}
+
+function optionalString<K extends string>(key: K, value: unknown, fallback: string | undefined): Partial<Record<K, string>> {
+  const normalized = value === undefined ? fallback : string(value)
+  return normalized ? { [key]: normalized } as Record<K, string> : {}
+}
+
+function adminOptionalUrl(value: unknown, fallback: string | undefined, label: string): string | undefined {
+  const normalized = value === undefined ? fallback : string(value)
+  if (normalized && !validHttpUrl(normalized)) throw new SudoworkSystemConfigError(400, `${label}格式不正确`)
+  return normalized || undefined
 }
 
 function loginMethodFromNumber(value: unknown, fallback: LoginMethod): LoginMethod {

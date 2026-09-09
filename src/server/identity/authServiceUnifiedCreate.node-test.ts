@@ -31,6 +31,52 @@ test('Moss native user creation uses the unified identity command', () => {
   db.close()
 })
 
+test('Moss native user creation provisions Sudorouter before activating the Sudowork account', async () => {
+  const db = new DatabaseSync(':memory:')
+  const authDb = new AuthCenterDb(db)
+  authDb.createOrganization('org-a', 'Org A', 1)
+  authDb.setConfig('issuer', 'moss-test')
+  authDb.setConfig('jwt_secret', 'test-secret')
+  const authService = new AuthService(authDb, 3600)
+  const observedStatuses: string[] = []
+  const provisionedOwners: string[] = []
+  authService.configureSudorouterAccounts({
+    initialQuotaUnits: 50_000_000,
+    accountProvisioner: {
+      ensureAccount: async input => {
+        observedStatuses.push(authDb.getUserById(input.ownerId)?.status ?? 'missing')
+        provisionedOwners.push(input.ownerId)
+        return {
+          externalUserId: 'router-71', token: 'secret-token', tokenSecretRef: 'nexus://token/ref',
+          quotaUnits: input.initialQuotaUnits, usedQuotaUnits: 0,
+        }
+      },
+    },
+  })
+
+  const input = {
+    orgId: 'org-a', name: '13800000000', password: 'StrongPass123', role: 'user',
+    idempotencyKey: 'native-provisioned-user-1',
+  }
+  const created = await authService.createProvisionedUser(input)
+  const retried = await authService.createProvisionedUser(input)
+  const repository = new IdentityRepository(db)
+
+  assert.deepEqual(observedStatuses, ['pending', 'active'])
+  assert.deepEqual(provisionedOwners, [created.user.id, created.user.id])
+  assert.equal(retried.user.id, created.user.id)
+  assert.equal(authDb.listUsersByOrg('org-a').length, 1)
+  assert.equal(authDb.getUserById(created.user.id)?.status, 'active')
+  assert.deepEqual(repository.getWallet('user', created.user.id), { balanceUnits: 100_000, version: 0 })
+  assert.equal(
+    repository.findAuthIdentity('phone', 'sudowork', '13800000000')?.userId,
+    created.user.id,
+  )
+
+  authService.destroy()
+  db.close()
+})
+
 test('Moss native organization creation gets a profile, numeric alias, and wallet', () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
