@@ -98,6 +98,7 @@ Authorization: Bearer <access_token>
 - `GET /readyz`
 - `GET /admin`
 - `GET /admin/*`
+- `GET /api/v1/system-config`
 - `POST /api/v1/auth/token`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/introspect`
@@ -137,6 +138,45 @@ Authorization: Bearer <access_token>
   "ready": true
 }
 ```
+
+## System Config
+
+### GET `/api/v1/system-config`
+
+**客户端引导文档。无需鉴权**——客户端在登录之前就要读它，用来知道这个部署使用哪种登录方式。
+
+这是让同一份 binary 既能做 **Sudo Cloud**（我们托管）又能做 **Sudo Private**（客户自建）的接缝：登录方式由**部署**在 `server.json` 里声明，而不是客户端从 URL 猜。
+
+配置见 `server.json` 的 `systemConfig` 段；实现与字段口径见 `src/server/publicSystemConfig.ts`。
+
+| 字段 | 说明 |
+| --- | --- |
+| `login_method` | `0` 手机验证码 · `1` 用户名密码 · `2` 三方认证（CAS）。可用 `MOSS_LOGIN_METHOD` 覆盖 |
+| `third_party_auth` | `login_method=2` 时下发 provider 列表 |
+| `sudorouter_baseurl` | SudoRouter **根**地址（不带 `/v1`，调用方自己拼路径）。未配置时从系统设置的 model service URL 推导 |
+| `skillhub_baseurl` / `scode_auto_model` | 可选 |
+| `recharge_mode` | `pay` / `approve` / `disabled`。moss 自身没有积分账本，默认 `disabled` |
+| `credit_application` | `approve` 模式下的申请额度上下限 |
+| `log_report` / `version_update` / `product_improvement` | 遥测与更新开关 |
+
+示例响应（全部使用默认值的自建部署）：
+
+```json
+{
+  "success": true,
+  "data": {
+    "login_method": 1,
+    "recharge_mode": "disabled",
+    "log_report": { "enabled": 0 },
+    "version_update": { "enabled": 0 },
+    "product_improvement": { "enabled": 0 }
+  }
+}
+```
+
+> ⚠️ **这三个开关总是显式下发 `enabled: 0`，不能省略。** 客户端按 `enabled !== 0` 判断，也就是**失败即开启**——省略这些字段会让自建部署在没配置任何东西的情况下，继续向公有云的兜底地址上报遥测、检查更新。
+>
+> ⚠️ **本接口在鉴权墙之前**，内容对任何能访问到端口的人可见。只放功能开关和 base URL；**永远不要**放 key、token、用户或组织数据。持有凭证的管理侧对应物是 `systemSettings.ts`，两者不要混。
 
 ## Admin UI
 
