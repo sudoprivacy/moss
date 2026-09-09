@@ -1614,7 +1614,10 @@ export class RuntimeService {
     // localhost for the non-Docker path.
     if (this.authProxy) {
       const authToken = randomUUID()
-      const proxyUrl = process.env.MOSS_AUTH_PROXY_URL?.trim() || 'http://localhost:12013'
+      // Derived from the listener rather than repeating its port as a literal:
+      // the two used to be separate constants in separate files, so changing one
+      // silently mis-wired every session's credential fetch.
+      const proxyUrl = process.env.MOSS_AUTH_PROXY_URL?.trim() || `http://localhost:${this.authProxy.port}`
       runnerEnv.SUDOWORK_AUTH_PROXY_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_BASE_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_TOKEN = authToken
