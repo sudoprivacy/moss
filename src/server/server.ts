@@ -341,6 +341,85 @@ function makeUserNameResolver(
   }
 }
 
+/**
+ * Which credential fields are actually stored, by name only.
+ *
+ * The admin form blanks every credential input on edit ("leave empty to
+ * keep"), which makes a filled field indistinguishable from an empty one
+ * — an admin cannot tell whether a token is still set, and a credential
+ * silently lost to an overwrite looks exactly like one that was never
+ * entered. Returning the KEYS (never the values) lets the UI mark each
+ * field 已填写/未填写.
+ *
+ * Field names are not secret: they are already hardcoded in the admin's
+ * per-type form spec. Values never leave the server.
+ *
+ * Returns [] when nothing is stored or the blob cannot be read — a
+ * missing indicator is strictly better than a wrong one.
+ */
+async function readCredentialKeys(secretKeyRef: unknown): Promise<string[]> {
+  if (typeof secretKeyRef !== 'string' || !secretKeyRef) return []
+  try {
+    const { readSecret } = await import('./sources/secrets.js')
+    const creds = await readSecret(secretKeyRef)
+    return Object.entries(creds)
+      .filter(([, v]) => typeof v === 'string' && v.length > 0)
+      .map(([k]) => k)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Merge submitted credential fields into whatever is already stored, and
+ * return the new secret ref (or null to leave the row untouched).
+ *
+ * The admin form blanks every credential input on edit and only submits
+ * the fields actually typed into. Replacing the blob wholesale therefore
+ * DELETED every credential the admin did not retype — filling in just a
+ * token silently discarded the app secret and the archive RSA key next
+ * to it, with no error and no visible sign until a pull or callback
+ * failed. Merging makes "edit one field" mean what it looks like.
+ *
+ * An empty string is treated as "not submitted" rather than "clear this
+ * field", matching the form's own "leave empty to keep" contract; there
+ * is deliberately no way to blank a single credential from this path.
+ */
+async function mergeCredentials(
+  existingSecretRef: unknown,
+  submitted: unknown,
+): Promise<string | null> {
+  if (!submitted || typeof submitted !== 'object') return null
+  const incoming: Record<string, string> = {}
+  for (const [k, v] of Object.entries(submitted as Record<string, unknown>)) {
+    if (typeof v === 'string' && v.length > 0) incoming[k] = v
+  }
+  if (Object.keys(incoming).length === 0) return null
+
+  let current: Record<string, string> = {}
+  if (typeof existingSecretRef === 'string' && existingSecretRef) {
+    try {
+      const { readSecret } = await import('./sources/secrets.js')
+      current = await readSecret(existingSecretRef)
+    } catch {
+      // Unreadable blob: fall back to storing just the new fields rather
+      // than failing the whole update. Nothing recoverable is lost — the
+      // old values were already unreadable.
+      current = {}
+    }
+  }
+  return storeSecret({ ...current, ...incoming })
+}
+
+/** Attach credentialKeys to an already-serialized row. */
+async function withCredentialKeys<T extends Record<string, unknown>>(
+  serialized: T,
+  secretKeyRef: unknown,
+): Promise<T & { credentialKeys: string[] }> {
+  return { ...serialized, credentialKeys: await readCredentialKeys(secretKeyRef) }
+}
+
 function serializeExternalSource(row: Record<string, unknown>) {
   let configParsed: Record<string, unknown> = {}
   try {
@@ -3722,7 +3801,16 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/external-sources') {
         authService.requireScope(auth, 'admin:documents')
         const rows = runtime.store.listExternalSources(auth.orgId)
-        writeJson(res, 200, { sources: rows.map(serializeExternalSource) })
+        writeJson(res, 200, {
+          sources: await Promise.all(
+            rows.map(async (r) =>
+              withCredentialKeys(
+                serializeExternalSource(r as Record<string, unknown>),
+                (r as Record<string, unknown>).credentials_secret_key,
+              ),
+            ),
+          ),
+        })
         return
       }
 
@@ -3775,7 +3863,13 @@ export function startServer(
             created_by: auth.userId,
           })
           const row = runtime.store.getExternalSource(id, auth.orgId)
-          writeJson(res, 200, row ? serializeExternalSource(row) : { id })
+          writeJson(
+            res,
+            200,
+            row
+              ? await withCredentialKeys(serializeExternalSource(row), (row as Record<string, unknown>).credentials_secret_key)
+              : { id },
+          )
         } catch (err) {
           if (secretKey) await deleteSecret(secretKey).catch(() => {})
           writeJson(res, 400, {
@@ -3794,7 +3888,11 @@ export function startServer(
           writeJson(res, 404, { error: { code: 'not_found', message: 'external source not found' } })
           return
         }
-        writeJson(res, 200, serializeExternalSource(row))
+        writeJson(
+          res,
+          200,
+          await withCredentialKeys(serializeExternalSource(row), (row as Record<string, unknown>).credentials_secret_key),
+        )
         return
       }
 
@@ -3828,15 +3926,12 @@ export function startServer(
         if (body.enabled !== undefined) {
           updates.enabled = body.enabled === true ? 1 : 0
         }
-        // Credential rotation: if `credentials` provided, store new secret and replace.
-        if (body.credentials && typeof body.credentials === 'object') {
-          const stringOnly: Record<string, string> = {}
-          for (const [k, v] of Object.entries(body.credentials as Record<string, unknown>)) {
-            if (typeof v === 'string') stringOnly[k] = v
-          }
-          if (Object.keys(stringOnly).length > 0) {
-            const newKey = await storeSecret(stringOnly)
-            const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+        // Credential update: MERGE into the stored blob (see
+        // mergeCredentials) so editing one field cannot drop the others.
+        {
+          const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+          const newKey = await mergeCredentials(oldKey, body.credentials)
+          if (newKey) {
             updates.credentials_secret_key = newKey
             if (typeof oldKey === 'string' && oldKey) {
               await deleteSecret(oldKey).catch(() => {})
@@ -3845,7 +3940,13 @@ export function startServer(
         }
         runtime.store.updateExternalSource(id, auth.orgId, updates)
         const row = runtime.store.getExternalSource(id, auth.orgId)
-        writeJson(res, 200, row ? serializeExternalSource(row) : { id })
+        writeJson(
+          res,
+          200,
+          row
+            ? await withCredentialKeys(serializeExternalSource(row), (row as Record<string, unknown>).credentials_secret_key)
+            : { id },
+        )
         return
       }
 
@@ -3924,10 +4025,12 @@ export function startServer(
         const rows = runtime.store.listCorpApps(auth.orgId)
         const { getCorpAppCapabilities } = await import('./corpapps/types.js')
         writeJson(res, 200, {
-          apps: rows.map((r) => ({
-            ...serializeCorpApp(r),
-            capabilities: getCorpAppCapabilities(String((r as Record<string, unknown>).type)),
-          })),
+          apps: await Promise.all(
+            rows.map(async (r) => ({
+              ...(await withCredentialKeys(serializeCorpApp(r), (r as Record<string, unknown>).credentials_secret_key)),
+              capabilities: getCorpAppCapabilities(String((r as Record<string, unknown>).type)),
+            })),
+          ),
         })
         return
       }
@@ -3987,7 +4090,13 @@ export function startServer(
             created_by: auth.userId,
           })
           const row = runtime.store.getCorpApp(id, auth.orgId)
-          writeJson(res, 200, row ? serializeCorpApp(row) : { id })
+          writeJson(
+            res,
+            200,
+            row
+              ? await withCredentialKeys(serializeCorpApp(row), (row as Record<string, unknown>).credentials_secret_key)
+              : { id },
+          )
         } catch (err) {
           if (secretKey) await deleteSecret(secretKey).catch(() => {})
           const msg = err instanceof Error ? err.message : String(err)
@@ -4011,7 +4120,10 @@ export function startServer(
           return
         }
         const { getCorpAppCapabilities } = await import('./corpapps/types.js')
-        writeJson(res, 200, { ...serializeCorpApp(row), capabilities: getCorpAppCapabilities(String((row as Record<string, unknown>).type)) })
+        writeJson(res, 200, {
+          ...(await withCredentialKeys(serializeCorpApp(row), (row as Record<string, unknown>).credentials_secret_key)),
+          capabilities: getCorpAppCapabilities(String((row as Record<string, unknown>).type)),
+        })
         return
       }
 
@@ -4044,15 +4156,12 @@ export function startServer(
           }
         }
         if (body.enabled !== undefined) updates.enabled = body.enabled === true ? 1 : 0
-        // Credential rotation.
-        if (body.credentials && typeof body.credentials === 'object') {
-          const stringOnly: Record<string, string> = {}
-          for (const [k, v] of Object.entries(body.credentials as Record<string, unknown>)) {
-            if (typeof v === 'string' && v.length > 0) stringOnly[k] = v
-          }
-          if (Object.keys(stringOnly).length > 0) {
-            const newKey = await storeSecret(stringOnly)
-            const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+        // Credential update: MERGE into the stored blob (see
+        // mergeCredentials) so editing one field cannot drop the others.
+        {
+          const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+          const newKey = await mergeCredentials(oldKey, body.credentials)
+          if (newKey) {
             updates.credentials_secret_key = newKey
             if (typeof oldKey === 'string' && oldKey) await deleteSecret(oldKey).catch(() => {})
           }
@@ -4069,7 +4178,13 @@ export function startServer(
           throw err
         }
         const row = runtime.store.getCorpApp(id, auth.orgId)
-        writeJson(res, 200, row ? serializeCorpApp(row) : { id })
+        writeJson(
+          res,
+          200,
+          row
+            ? await withCredentialKeys(serializeCorpApp(row), (row as Record<string, unknown>).credentials_secret_key)
+            : { id },
+        )
         return
       }
 

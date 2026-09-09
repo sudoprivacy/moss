@@ -74,6 +74,18 @@ export default function UserCredentialsPage() {
   useEffect(() => { fetchData() }, [fetchData])
 
   const getSecretsForItem = (itemId: number) => secrets.filter(s => s.config_item.id === itemId)
+
+  /**
+   * Whether the item currently being edited already stores a value for
+   * this field. The edit inputs are intentionally blank ("leave empty to
+   * keep"), which otherwise makes a saved secret indistinguishable from
+   * an unset one.
+   */
+  const editEntryHasValue = (configKey: string) => {
+    if (!editItem) return false
+    const s = getSecretsForItem(editItem.id).find(x => x.key === configKey)
+    return !!s && s.value !== null
+  }
   const getMetadataForItem = (itemId: number) => metadata.find(m => m.config_item_id === itemId)
 
   const handleConfigure = (item: ConfigItem) => {
@@ -257,7 +269,16 @@ export default function UserCredentialsPage() {
             <div className="space-y-4 py-2">
               {editItem.entries.map(entry => (
                 <div key={entry.id} className="space-y-1.5">
-                  <Label>{entry.name} {entry.required ? <span className="text-destructive">*</span> : ''}</Label>
+                  <Label className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span>{entry.name} {entry.required ? <span className="text-destructive">*</span> : ''}</span>
+                    {/* Inputs are blanked on edit, so without this a stored
+                        secret looks identical to an empty one. */}
+                    {editEntryHasValue(entry.config_key) ? (
+                      <Badge variant="secondary" className="text-[10px] font-normal">已填写</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">未填写</Badge>
+                    )}
+                  </Label>
                   <Input
                     type="password"
                     value={editValues[entry.config_key] ?? ''}

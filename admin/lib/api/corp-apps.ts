@@ -13,6 +13,13 @@ export type CorpApp = {
   appKey: string                  // keyOf(config), e.g. corpId:agentId
   config: Record<string, unknown> // non-secret fields (corpId, agentId, ...)
   hasCredentials: boolean
+  /**
+   * Names of credential fields that actually hold a value (never the
+   * values themselves). Lets the form show 已填写/未填写 per field —
+   * inputs are blanked on edit, so without this a stored secret and an
+   * empty one look identical. Older servers omit it; treat as unknown.
+   */
+  credentialKeys?: string[]
   enabled: boolean
   capabilities?: string[]
   createdBy: string

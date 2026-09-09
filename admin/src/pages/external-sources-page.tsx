@@ -446,6 +446,9 @@ function SourceDialog({
   }, [open, existing, connectorTypes])
 
   const fields = CONNECTOR_FIELDS[type] ?? []
+  // Which credential fields the server actually holds. undefined = not
+  // reported (older build); render no badge rather than claiming 未填写.
+  const credentialKeys = existing?.credentialKeys
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -542,12 +545,23 @@ function SourceDialog({
           </div>
           {fields.map((f) => (
             <div key={f.key} className="grid gap-1.5">
-              <Label>
-                {f.label}
+              <Label className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>{f.label}</span>
                 {f.bucket === 'credentials' && existing && (
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    (留空表示保持原凭据不变)
-                  </span>
+                  <>
+                    {credentialKeys === undefined ? null : credentialKeys.includes(f.key) ? (
+                      <Badge variant="secondary" className="text-[10px] font-normal">
+                        已填写
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+                        未填写
+                      </Badge>
+                    )}
+                    <span className="text-xs font-normal text-muted-foreground">
+                      (留空表示保持不变;可只修改其中一项)
+                    </span>
+                  </>
                 )}
               </Label>
               <Input
@@ -556,7 +570,11 @@ function SourceDialog({
                 onChange={(e) =>
                   setFieldValues((m) => ({ ...m, [f.key]: e.target.value }))
                 }
-                placeholder={f.placeholder}
+                placeholder={
+                  f.bucket === 'credentials' && existing && credentialKeys?.includes(f.key)
+                    ? '••••••••  (已保存,留空不修改)'
+                    : f.placeholder
+                }
               />
             </div>
           ))}
