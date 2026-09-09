@@ -371,6 +371,47 @@ async function readCredentialKeys(secretKeyRef: unknown): Promise<string[]> {
   }
 }
 
+/**
+ * Merge submitted credential fields into whatever is already stored, and
+ * return the new secret ref (or null to leave the row untouched).
+ *
+ * The admin form blanks every credential input on edit and only submits
+ * the fields actually typed into. Replacing the blob wholesale therefore
+ * DELETED every credential the admin did not retype — filling in just a
+ * token silently discarded the app secret and the archive RSA key next
+ * to it, with no error and no visible sign until a pull or callback
+ * failed. Merging makes "edit one field" mean what it looks like.
+ *
+ * An empty string is treated as "not submitted" rather than "clear this
+ * field", matching the form's own "leave empty to keep" contract; there
+ * is deliberately no way to blank a single credential from this path.
+ */
+async function mergeCredentials(
+  existingSecretRef: unknown,
+  submitted: unknown,
+): Promise<string | null> {
+  if (!submitted || typeof submitted !== 'object') return null
+  const incoming: Record<string, string> = {}
+  for (const [k, v] of Object.entries(submitted as Record<string, unknown>)) {
+    if (typeof v === 'string' && v.length > 0) incoming[k] = v
+  }
+  if (Object.keys(incoming).length === 0) return null
+
+  let current: Record<string, string> = {}
+  if (typeof existingSecretRef === 'string' && existingSecretRef) {
+    try {
+      const { readSecret } = await import('./sources/secrets.js')
+      current = await readSecret(existingSecretRef)
+    } catch {
+      // Unreadable blob: fall back to storing just the new fields rather
+      // than failing the whole update. Nothing recoverable is lost — the
+      // old values were already unreadable.
+      current = {}
+    }
+  }
+  return storeSecret({ ...current, ...incoming })
+}
+
 /** Attach credentialKeys to an already-serialized row. */
 async function withCredentialKeys<T extends Record<string, unknown>>(
   serialized: T,
@@ -3885,15 +3926,12 @@ export function startServer(
         if (body.enabled !== undefined) {
           updates.enabled = body.enabled === true ? 1 : 0
         }
-        // Credential rotation: if `credentials` provided, store new secret and replace.
-        if (body.credentials && typeof body.credentials === 'object') {
-          const stringOnly: Record<string, string> = {}
-          for (const [k, v] of Object.entries(body.credentials as Record<string, unknown>)) {
-            if (typeof v === 'string') stringOnly[k] = v
-          }
-          if (Object.keys(stringOnly).length > 0) {
-            const newKey = await storeSecret(stringOnly)
-            const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+        // Credential update: MERGE into the stored blob (see
+        // mergeCredentials) so editing one field cannot drop the others.
+        {
+          const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+          const newKey = await mergeCredentials(oldKey, body.credentials)
+          if (newKey) {
             updates.credentials_secret_key = newKey
             if (typeof oldKey === 'string' && oldKey) {
               await deleteSecret(oldKey).catch(() => {})
@@ -4118,15 +4156,12 @@ export function startServer(
           }
         }
         if (body.enabled !== undefined) updates.enabled = body.enabled === true ? 1 : 0
-        // Credential rotation.
-        if (body.credentials && typeof body.credentials === 'object') {
-          const stringOnly: Record<string, string> = {}
-          for (const [k, v] of Object.entries(body.credentials as Record<string, unknown>)) {
-            if (typeof v === 'string' && v.length > 0) stringOnly[k] = v
-          }
-          if (Object.keys(stringOnly).length > 0) {
-            const newKey = await storeSecret(stringOnly)
-            const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+        // Credential update: MERGE into the stored blob (see
+        // mergeCredentials) so editing one field cannot drop the others.
+        {
+          const oldKey = (existing as Record<string, unknown>).credentials_secret_key
+          const newKey = await mergeCredentials(oldKey, body.credentials)
+          if (newKey) {
             updates.credentials_secret_key = newKey
             if (typeof oldKey === 'string' && oldKey) await deleteSecret(oldKey).catch(() => {})
           }

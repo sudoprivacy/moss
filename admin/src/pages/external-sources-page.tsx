@@ -559,7 +559,7 @@ function SourceDialog({
                       </Badge>
                     )}
                     <span className="text-xs font-normal text-muted-foreground">
-                      (留空表示保持原凭据不变)
+                      (留空表示保持不变;可只修改其中一项)
                     </span>
                   </>
                 )}
