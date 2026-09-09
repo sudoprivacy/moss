@@ -306,10 +306,75 @@ export const serverFileConfigSchema = lazySchema(() =>
       flightStateDemoEnabled: false,
       logEnabled: true,
     }),
+    /**
+     * Public, unauthenticated client bootstrap (`GET /api/v1/system-config`).
+     *
+     * This is the seam that lets one binary serve Sudo Cloud and Sudo Private:
+     * the client asks the server how to log in and where the satellite services
+     * are, instead of hard-coding either. See `publicSystemConfig.ts` for the
+     * wire contract and for what must never be put in here.
+     *
+     * Defaults describe a self-hosted deployment: username/password login (the
+     * only method moss implements today), no billing, and every phone-home
+     * feature OFF. A public-cloud deployment turns those on explicitly.
+     */
+    systemConfig: z.object({
+      /** 0 = phone code, 1 = username/password, 2 = third-party (CAS). */
+      loginMethod: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
+      thirdPartyAuth: z.object({
+        enabled: z.boolean().default(true),
+        defaultProvider: z.string().min(1).optional(),
+        providers: z.array(z.object({
+          id: z.string().min(1),
+          name: z.string().min(1),
+          type: z.literal('cas'),
+          casUrl: z.string().min(1),
+          loginPath: z.string().optional(),
+          validatePath: z.string().optional(),
+          logoutPath: z.string().optional(),
+          logoutServiceUrl: z.string().optional(),
+          serviceParam: z.string().optional(),
+          serviceEncodeMode: z.enum(['raw', 'component']).optional(),
+          callbackMode: z.enum(['server_callback', 'direct_app']).optional(),
+          serverCallbackUrl: z.string().optional(),
+          appCallbackUrl: z.string().optional(),
+        })).default([]),
+      }).optional(),
+      /**
+       * Sudorouter ROOT url (no `/v1`) — call sites append their own path. Unset
+       * derives it from the system settings' model service url.
+       */
+      sudorouterBaseUrl: z.string().min(1).optional(),
+      skillhubBaseUrl: z.string().min(1).optional(),
+      scodeAutoModel: z.string().min(1).optional(),
+      /** `disabled` because moss holds no credit ledger; the cloud sets `pay`. */
+      rechargeMode: z.enum(['pay', 'approve', 'disabled']).default('disabled'),
+      creditApplication: z.object({
+        minPoints: z.number().int().min(0),
+        maxPoints: z.number().int().min(0),
+        allowDuplicatePending: z.boolean().default(false),
+      }).optional(),
+      logReport: z.object({
+        enabled: z.boolean().default(false),
+        baseUrl: z.string().min(1).optional(),
+      }).optional(),
+      versionUpdate: z.object({
+        enabled: z.boolean().default(false),
+        cosDomain: z.string().min(1).optional(),
+      }).optional(),
+      productImprovement: z.object({
+        enabled: z.boolean().default(false),
+        encryptionRequired: z.boolean().optional(),
+      }).optional(),
+    }).default({
+      loginMethod: 1,
+      rechargeMode: 'disabled',
+    }),
   }),
 )
 
 export type ServerFileConfig = z.infer<ReturnType<typeof serverFileConfigSchema>>
+export type SystemConfigFileSection = ServerFileConfig['systemConfig']
 
 export type ServerConfig = {
   host: string
@@ -489,6 +554,8 @@ export type ServerConfig = {
     logEnabled: boolean
     logFile?: string
   }
+  /** Public client bootstrap — see the schema section of the same name. */
+  systemConfig: SystemConfigFileSection
 }
 
 export type SessionStatus =
