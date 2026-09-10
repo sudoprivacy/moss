@@ -29,8 +29,15 @@ import { bytesLookLikeText } from './workspaceText.js'
 import {
   createSudorouterClient,
   pointsToQuota,
+  quotaToPoints,
   type SudorouterClient,
 } from './credits/sudorouter.js'
+
+/** The shape the desktop and web clients read from `/api/v1/user/dashboard`. */
+type MossUserDashboard = {
+  points: { total: number; used: number; remaining: number; bonus: number }
+  usage_today: { tokens: number; cost_points: number; requests: number }
+}
 import {
   CreditApplicationError,
   reviewApplication,
@@ -1622,6 +1629,46 @@ async function readWorkspaceTreeIn(
 }
 
 /**
+ * Make sure this person has a gateway account, and remember it.
+ *
+ * Called on sign-up and again on every phone sign-in, because the alternative
+ * to self-healing is worse than it looks: a user with no gateway key falls back
+ * to the shared server key, so a provisioning failure does not stop them — it
+ * quietly bills everyone's consumption to one account, which is exactly the
+ * behaviour the per-user key exists to end.
+ *
+ * Never throws. A gateway that is down must not stop someone signing in; they
+ * simply get another attempt next time.
+ */
+async function ensureGatewayAccount(
+  authService: AuthService,
+  config: ServerConfig,
+  input: { userId: string; username: string; displayName?: string },
+): Promise<void> {
+  if (authService.getUserModelCredential(input.userId)) return
+  const client = buildSudorouterClient(config)
+  if (!client) return
+  try {
+    const account = await client.provisionAccount({
+      username: input.username,
+      displayName: input.displayName,
+      initialPoints: config.systemConfig.initialPoints ?? 0,
+    })
+    authService.setUserModelCredential(input.userId, {
+      sudorouterUserId: account.gatewayUserId,
+      sudorouterKey: account.gatewayKey,
+    })
+  } catch (error) {
+    // Loud in the log, invisible to the user: they are signed in either way,
+    // and the next sign-in retries.
+    console.error(
+      `[credits] could not provision a gateway account for ${input.userId}:`,
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+}
+
+/**
  * A client for the model gateway that owns the credit ledger, or null when this
  * deployment has none — a private install bills nothing and has no gateway to
  * ask. The admin token is read from the vault per call, never from server.json,
@@ -1657,21 +1704,61 @@ async function readUserCredits(
   authService: AuthService,
   config: ServerConfig,
   userId: string,
-): Promise<{ remaining: number; used: number; bonus: number }> {
-  const empty = { remaining: 0, used: 0, bonus: 0 }
+): Promise<MossUserDashboard> {
+  const empty: MossUserDashboard = {
+    points: { total: 0, used: 0, remaining: 0, bonus: 0 },
+    usage_today: { tokens: 0, cost_points: 0, requests: 0 },
+  }
   const gatewayUserId = authService.getUserModelCredential(userId)?.sudorouterUserId
   if (!gatewayUserId) return empty
   const client = buildSudorouterClient(config)
   if (!client) return empty
-  try {
-    const credits = await client.getCredits(gatewayUserId)
-    // `bonus` is a separate pot on the old server that SudoRouter does not
-    // model. Reporting 0 is honest; inventing a split of the real balance
-    // would not be.
-    return { remaining: credits.remainingPoints, used: credits.usedPoints, bonus: 0 }
-  } catch {
-    return empty
+
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const fromSec = Math.floor(startOfToday.getTime() / 1000)
+  const toSec = Math.floor(Date.now() / 1000)
+
+  // Balance and today's usage are independent reads; a gateway slow on one
+  // should not blank the other, so they are settled separately.
+  const [credits, usage] = await Promise.allSettled([
+    client.getCredits(gatewayUserId),
+    client.getModelUsage(gatewayUserId, fromSec, toSec),
+  ])
+
+  const result: MossUserDashboard = {
+    points: { ...empty.points },
+    usage_today: { ...empty.usage_today },
   }
+  if (credits.status === 'fulfilled') {
+    result.points = {
+      // What they hold plus what they have spent — the lifetime figure, which
+      // is not the same as the starting balance once a top-up has happened.
+      total: credits.value.remainingPoints + credits.value.usedPoints,
+      used: credits.value.usedPoints,
+      remaining: credits.value.remainingPoints,
+      // `bonus` was a separate pot on the previous server that the gateway does
+      // not model. Reporting 0 is honest; splitting the real balance to fill
+      // the field would not be.
+      bonus: 0,
+    }
+  }
+  if (usage.status === 'fulfilled') {
+    let tokens = 0
+    let quota = 0
+    for (const row of usage.value) {
+      tokens += row.total_tokens
+      // Summed in the gateway's unit and converted once: converting each row
+      // first rounds most of them to zero.
+      quota += row.costQuota
+    }
+    result.usage_today = {
+      tokens,
+      cost_points: Math.round(quotaToPoints(quota) * 1000) / 1000,
+      requests: usage.value.length,
+    }
+  }
+  return result
 }
 
 /**
@@ -2545,10 +2632,16 @@ export function startServer(
           writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
           return
         }
+        const nickname = typeof body.nickname === 'string' ? body.nickname : undefined
         const result = authService.registerWithPhone({
           phone,
-          nickname: typeof body.nickname === 'string' ? body.nickname : undefined,
+          nickname,
           autoCreateOrg: phoneAuth.autoCreateOrg,
+        })
+        await ensureGatewayAccount(authService, config, {
+          userId: result.user.id,
+          username: phone,
+          displayName: nickname,
         })
         writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
         return
@@ -2606,6 +2699,12 @@ export function startServer(
           }
 
           const result = authService.issueTokenFromPhone(phone)
+          // Self-heal: covers accounts created before provisioning existed, and
+          // any sign-up whose provisioning attempt did not land.
+          await ensureGatewayAccount(authService, config, {
+            userId: result.user.id,
+            username: phone,
+          })
           writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
           return
         }
@@ -5928,14 +6027,173 @@ export function startServer(
         return
       }
 
+      // The consumer client posts here rather than sending a grant_type to
+      // /auth/token, so the path exists as its own entry to the same refresh.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/refresh') {
+        const body = await readJsonBody(req)
+        const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token.trim() : ''
+        if (!refreshToken) {
+          writeJson(res, 400, { success: false, msg: 'refresh_token is required' })
+          return
+        }
+        try {
+          writeJson(res, 200, {
+            success: true,
+            data: attachSudocodeFields(authService.refreshToken(refreshToken)),
+          })
+        } catch (err) {
+          // A dead refresh token is the normal end of a long absence, not a
+          // server fault; the client needs a 401 to know to show the login
+          // screen rather than an empty page.
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          writeJson(res, status, { success: false, msg: 'refresh_token is invalid or expired' })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/user/update-profile') {
+        const body = await readJsonBody(req)
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        if (!nickname) {
+          writeJson(res, 400, { success: false, msg: 'nickname is required' })
+          return
+        }
+        // The display name, not the login name: `name` holds the phone, which
+        // is the stable handle and must not move when someone renames himself.
+        authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
+        writeJson(res, 200, { success: true, msg: 'nickname updated' })
+        return
+      }
+
+      // The desktop client's visibility gate for tenant assistants.
+      //
+      // Its degradation is asymmetric, which decides how this must behave: when
+      // the call FAILS the client keeps every installed assistant, but when it
+      // SUCCEEDS every tenant-category assistant missing from the answer is
+      // hidden. So an empty-but-successful reply is worse than no reply at all
+      // — it would make every tenant assistant disappear.
+      //
+      // `enhancement` is reported disabled: it described a Dify pre-injection
+      // binding that only the previous server had. Claiming otherwise would
+      // have the client wrap chats with something that does not exist here.
+      if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
+        const filter = authService.buildVisibilityFilter(auth)
+        const installed = await getInstalledAssistants()
+        writeJson(res, 200, {
+          success: true,
+          data: installed
+            .filter(assistant => isVisibleTo(assistant.visibleTo, filter))
+            .map(assistant => ({
+              assistant_id: assistant.meta?.id ?? assistant.name,
+              tenant_id: auth.orgId,
+              prompts_i18n: assistant.promptsI18n ?? {},
+              enhancement: { enabled: false },
+            })),
+        })
+        return
+      }
+
+      // Password sign-in for a deployment running `login_method: 1`. The
+      // client posts `phone` because that is the field it collects, but the
+      // value is the username — moss stores the phone as the username for
+      // phone accounts, so the same lookup serves both.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/login-by-config') {
+        const body = await readJsonBody(req)
+        try {
+          const result = authService.issueTokenFromPassword({
+            username: typeof body.phone === 'string' ? body.phone : (typeof body.username === 'string' ? body.username : ''),
+            password: typeof body.password === 'string' ? body.password : '',
+          })
+          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+        } catch (err) {
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          // Deliberately the same message for an unknown account and a wrong
+          // password: telling them apart tells an attacker which usernames exist.
+          writeJson(res, status, { success: false, msg: 'Username or password is incorrect' })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/auth/change-password') {
+        const body = await readJsonBody(req)
+        const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword : ''
+        const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
+        if (!newPassword) {
+          writeJson(res, 400, { success: false, msg: 'newPassword is required' })
+          return
+        }
+        const actor = authService.getUserById(auth.userId)
+        if (!actor) {
+          writeJson(res, 404, { success: false, msg: 'Unknown user' })
+          return
+        }
+        // The current password is re-checked here even though the caller is
+        // already authenticated: a token left behind on a shared machine must
+        // not be enough to take the account over.
+        try {
+          authService.issueTokenFromPassword({
+            username: authService.getUserName(auth.userId) ?? '',
+            password: oldPassword,
+          })
+        } catch {
+          writeJson(res, 403, { success: false, msg: 'Current password is incorrect' })
+          return
+        }
+        authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
+        writeJson(res, 200, { success: true, msg: 'password updated' })
+        return
+      }
+
+      // Self-service sign-up for a password deployment. Same shape as the
+      // phone flow it sits beside: an invitation code gates entry, the account
+      // is provisioned at the gateway, and the caller is signed in.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/register-password') {
+        const body = await readJsonBody(req)
+        const username = typeof body.phone === 'string' ? body.phone.trim() : ''
+        const password = typeof body.password === 'string' ? body.password : ''
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        if (!username || !password || !nickname) {
+          writeJson(res, 400, { success: false, msg: 'phone, password and nickname are required' })
+          return
+        }
+        // The same gate the phone flow uses, so turning invitations on or off
+        // applies to both rather than leaving one door open.
+        if (!authService.phoneAuth.checkInvitationCode(body.invitation_code)) {
+          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+          return
+        }
+        if (authService.findUserByPhone(username)) {
+          writeJson(res, 409, { success: false, msg: 'This account already exists' })
+          return
+        }
+        const { user } = authService.provisionPhoneUser({
+          phone: username,
+          nickname,
+          autoCreateOrg: authService.phoneAuth.autoCreateOrg,
+        })
+        authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
+        await ensureGatewayAccount(authService, config, {
+          userId: user.id,
+          username,
+          displayName: nickname,
+        })
+        writeJson(res, 200, {
+          success: true,
+          data: attachSudocodeFields(authService.issueTokenFromPhone(username)),
+        })
+        return
+      }
+
       // ---- credits ----
       // The balance lives at the model gateway, so every one of these reads
       // through to it rather than reporting a number moss keeps. A user with no
       // gateway account is not an error: private deployments have no metered
       // gateway at all, and the client renders zeroes.
       if (req.method === 'GET' && pathname === '/api/v1/user/dashboard') {
-        const credits = await readUserCredits(authService, config, auth.userId)
-        writeJson(res, 200, { success: true, data: { points: credits } })
+        writeJson(res, 200, {
+          success: true,
+          data: await readUserCredits(authService, config, auth.userId),
+        })
         return
       }
 
@@ -5950,13 +6208,20 @@ export function startServer(
           writeJson(res, 200, { success: true, data: [] })
           return
         }
-        const today = new Date().toISOString().slice(0, 10)
+        // The client sends calendar dates; the gateway wants unix seconds, and
+        // the end date is inclusive of that whole day.
+        const parseDay = (value: string | null, fallback: number, endOfDay = false): number => {
+          if (!value) return fallback
+          const at = Date.parse(endOfDay ? `${value}T23:59:59` : `${value}T00:00:00`)
+          return Number.isFinite(at) ? Math.floor(at / 1000) : fallback
+        }
+        const nowSec = Math.floor(Date.now() / 1000)
         writeJson(res, 200, {
           success: true,
           data: await client.getModelUsage(
             gatewayUserId,
-            url.searchParams.get('start_date') || today,
-            url.searchParams.get('end_date') || today,
+            parseDay(url.searchParams.get('start_date'), nowSec - 86_400),
+            parseDay(url.searchParams.get('end_date'), nowSec, true),
           ),
         })
         return

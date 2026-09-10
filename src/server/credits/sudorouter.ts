@@ -50,14 +50,38 @@ export type ModelUsageRow = {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  /** Points, for display. */
   cost: number | null
+  /** The same figure in the gateway's own unit, summed before converting. */
+  costQuota: number
+}
+
+export type GatewayAccount = {
+  gatewayUserId: string
+  /** The per-user key sessions spend. Returned once, at creation. */
+  gatewayKey: string
+  /** False when an account for this username already existed and was reused. */
+  created: boolean
 }
 
 export type SudorouterClient = {
   getCredits(gatewayUserId: string): Promise<UserCredits>
+  /**
+   * Find or create this person's gateway account and issue their key.
+   *
+   * Find-or-create, not create: a username already known to the gateway keeps
+   * its balance and history. Creating a second account for the same person
+   * would strand whatever they already hold.
+   */
+  provisionAccount(input: {
+    username: string
+    displayName?: string
+    initialPoints: number
+  }): Promise<GatewayAccount>
   /** Positive credits, negative debits. `comment` lands in the gateway's audit trail. */
   addPoints(gatewayUserId: string, points: number, comment: string): Promise<void>
-  getModelUsage(gatewayUserId: string, startDate: string, endDate: string): Promise<ModelUsageRow[]>
+  /** Usage rows between two unix-second bounds, consumption only. */
+  getModelUsage(gatewayUserId: string, fromSec: number, toSec: number): Promise<ModelUsageRow[]>
 }
 
 export class SudorouterError extends Error {
@@ -124,6 +148,26 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
     return body.data
   }
 
+
+  /**
+   * Issue the per-user key. `unlimited_quota` is set on the key on purpose:
+   * the spending limit belongs to the account, and a second cap on the key
+   * would silently stop a user who still has balance.
+   */
+  async function issueKey(gatewayUserId: string, username: string): Promise<string> {
+    const token = await call('/api/token/', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `${username}-token`,
+        expired_time: -1,
+        unlimited_quota: true,
+        user_id: Number(gatewayUserId),
+      }),
+    }) as { key?: string } | undefined
+    if (!token?.key) throw new SudorouterError('Gateway issued no key')
+    return token.key
+  }
+
   return {
     async getCredits(gatewayUserId: string): Promise<UserCredits> {
       const data = await call(`/api/user/${encodeURIComponent(gatewayUserId)}`) as
@@ -132,6 +176,63 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
         remainingPoints: quotaToPoints(Number(data?.quota ?? 0)),
         usedPoints: quotaToPoints(Number(data?.used_quota ?? 0)),
       }
+    },
+
+    async provisionAccount(input): Promise<GatewayAccount> {
+      const username = input.username.trim()
+      if (!username) throw new SudorouterError('Cannot provision an account without a username')
+
+      // Reuse an existing account before creating one. The gateway holds the
+      // balance, so a duplicate would strand whatever this person already has.
+      const found = await call(
+        `/api/user/search?${new URLSearchParams({ keyword: username, page: '1', page_size: '100' }).toString()}`,
+      ) as { items?: unknown[] } | unknown[] | undefined
+      const rows = Array.isArray(found) ? found : (found?.items ?? [])
+      const existing = (rows as Array<Record<string, unknown>>).find(
+        row => String(row.username ?? '') === username,
+      )
+      if (existing?.id != null) {
+        return {
+          gatewayUserId: String(existing.id),
+          gatewayKey: await issueKey(String(existing.id), username),
+          created: false,
+        }
+      }
+
+      const created = await call('/api/user/', {
+        method: 'POST',
+        body: JSON.stringify({
+          username,
+          // The gateway requires a password it will never be asked for: moss
+          // authenticates these people, and nothing signs in to the gateway
+          // console as them. Derived rather than random so a re-provision after
+          // a lost record produces the same account.
+          password: username.length >= 8 ? username : username.padEnd(8, '1'),
+          display_name: input.displayName?.trim() || username,
+          role: 1,
+          utm_source: 'sudowork',
+        }),
+      }) as { id?: number | string } | undefined
+      if (created?.id == null) {
+        throw new SudorouterError('Gateway accepted the account but returned no id')
+      }
+      const gatewayUserId = String(created.id)
+
+      // Only a newly created account is granted the starting balance; a reused
+      // one already has its own, and topping it up again on every provision
+      // would hand out free credit per sign-in.
+      if (input.initialPoints > 0) {
+        await call('/api/user/quota', {
+          method: 'PUT',
+          body: JSON.stringify({
+            id: Number(gatewayUserId),
+            quota: pointsToQuota(input.initialPoints),
+            comment: 'initial balance on sign-up',
+          }),
+        })
+      }
+
+      return { gatewayUserId, gatewayKey: await issueKey(gatewayUserId, username), created: true }
     },
 
     async addPoints(gatewayUserId: string, points: number, comment: string): Promise<void> {
@@ -147,32 +248,50 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
 
     async getModelUsage(
       gatewayUserId: string,
-      startDate: string,
-      endDate: string,
+      fromSec: number,
+      toSec: number,
     ): Promise<ModelUsageRow[]> {
+      // `time_from` / `time_to` in unix seconds, with paging — verified against
+      // the live gateway. A `start_date` / `end_date` pair is accepted and then
+      // silently ignored, which returns an unfiltered page and looks like it
+      // worked.
       const params = new URLSearchParams({
         user_id: gatewayUserId,
-        start_date: startDate,
-        end_date: endDate,
+        time_from: String(Math.floor(fromSec)),
+        time_to: String(Math.ceil(toSec)),
+        page_num: '1',
+        page_size: '1000',
+        order_by: 'created_at',
+        desc: 'true',
       })
       const data = await call(`/api/log/query?${params.toString()}`)
-      const rows = Array.isArray(data) ? data : (data as { items?: unknown[] })?.items
+      const rows = Array.isArray(data)
+        ? data
+        : ((data as { items?: unknown[]; data?: unknown[] })?.items
+          ?? (data as { data?: unknown[] })?.data
+          ?? [])
       if (!Array.isArray(rows)) return []
-      return rows.map(raw => {
-        const row = raw as Record<string, unknown>
-        const prompt = Number(row.prompt_tokens ?? 0)
-        const completion = Number(row.completion_tokens ?? row.completion ?? 0)
-        return {
-          date: String(row.date ?? row.created_at ?? ''),
-          model: String(row.model_name ?? row.model ?? ''),
-          prompt_tokens: prompt,
-          completion_tokens: completion,
-          total_tokens: Number(row.total_tokens ?? prompt + completion),
-          // Cost is reported in quota; the client labels this column in points
-          // like every other number it shows.
-          cost: row.quota == null ? null : quotaToPoints(Number(row.quota)),
-        }
-      })
+      return (rows as Array<Record<string, unknown>>)
+        // `manage` rows are administrative quota adjustments, not consumption.
+        // Counting them would report a top-up as spending.
+        .filter(row => String(row.type ?? '') !== 'manage' && String(row.model_name ?? '') !== '')
+        .map(row => {
+          const prompt = Number(row.prompt_tokens ?? 0)
+          const completion = Number(row.completion_tokens ?? 0)
+          const seconds = Number(row.created_at ?? 0)
+          return {
+            date: seconds ? new Date(seconds * 1000).toISOString().slice(0, 10) : '',
+            model: String(row.model_name ?? ''),
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: Number(row.total_tokens ?? prompt + completion),
+            // The gateway names this `cost`, in quota. The client shows points
+            // like every other figure it renders.
+            cost: row.cost == null ? null : quotaToPoints(Number(row.cost)),
+            /** Raw quota, kept for callers that sum before converting. */
+            costQuota: Number(row.cost ?? 0),
+          }
+        })
     },
   }
 }
