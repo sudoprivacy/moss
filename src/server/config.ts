@@ -218,6 +218,20 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     runtimeDir: raw.storage.runtimeDir
       ? normalizePath(raw.storage.runtimeDir)
       : defaultStorage.runtimeDir,
+    // Shared DB backend: file config wins; else env (MOSS_DB_BACKEND=postgres or
+    // presence of MOSS_DATABASE_URL) selects postgres; default sqlite (unchanged
+    // single-host path).
+    dbBackend: raw.storage.dbBackend
+      || ((process.env.MOSS_DB_BACKEND?.trim() === 'postgres'
+        || (process.env.MOSS_DATABASE_URL?.trim() ? true : false))
+        ? 'postgres'
+        : 'sqlite'),
+    databaseUrl: process.env.MOSS_DATABASE_URL?.trim() || raw.storage.databaseUrl,
+    // Auth-proxy URL: env preferred, else file, else localhost default
+    // (behavior unchanged vs the previous inline default in runtimeService).
+    authProxyUrl: process.env.MOSS_AUTH_PROXY_URL?.trim()
+      || raw.server.authProxyUrl
+      || 'http://localhost:12013',
     dockerNetwork: raw.docker.network,
     dockerStopTimeoutSec: raw.docker.stopTimeoutSec,
     dockerLabels: raw.docker.labels,

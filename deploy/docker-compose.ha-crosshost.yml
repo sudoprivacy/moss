@@ -1,0 +1,102 @@
+# ============================================================================
+# moss LB/HA — 跨主机多实例（P3-1）：每台主机一份本文件
+# ============================================================================
+# 形态：N 台主机 ×（1 个 moss-server + 1 个 nginx），前置 keepalived VIP 或云 SLB；
+#       数据面外部化：PostgreSQL（MOSS_DATABASE_URL）+ NFS 共享 ./data 与 ./.moss；
+#       Nexus 在独立主机单实例部署（deploy/docker-compose.nexus-host.yml，单点边界）。
+#
+# 与同主机 docker-compose.ha.yml 的本质差异：
+#   1. DB 是外部 PostgreSQL：设 MOSS_DATABASE_URL 即自动切换 postgres 后端
+#      （P1：openStoreAsync → PgDriver + pg_schema，全新建库，不做 SQLite 迁移）。
+#   2. ./data 与 ./.moss 必须是【跨主机共享存储（NFS 等）且各主机挂载点路径字符串
+#      完全一致】——attemptDir/transcriptPath/manifest 等路径被固化进共享文件与 DB，
+#      挂载点不同 = 跨主机 failover 找不到文件（P2 fencing 冷恢复依赖它们）。
+#   3. moss-server 必须暴露 43127/43128 到宿主：对端主机的 nginx 要按 owner 路由到
+#      本机实例（同主机形态里这由 compose 网络内部名完成，跨主机无此网络）。
+#   4. MOSS_INSTANCE_ID 必填（按主机命名，如 host-a/host-b）：漏配实例不下发 route、
+#      其 runner 无 fencing，被接管后旧 runner 不自杀（僵尸双写），且 nginx 两级 map
+#      键值必须与之一致，否则路由静默退化为 pool。
+#
+# 前置清单（详见 deploy/nginx/README-ha.md 跨主机节）：
+#   - PG 已就绪（任何 14+ 实例；首次启动自动建全部表）；
+#   - NFS 两卷已在各主机挂到相同路径（本文示例 /data/moss/data、/data/moss/.moss）；
+#   - Nexus 独立主机已按 docker-compose.nexus-host.yml 启动并可达；
+#   - .env 提供 MOSS_IMAGE_TAG / MOSS_PUBLIC_BASE_URL（VIP 或 SLB 地址）/
+#     MOSS_DATABASE_URL / MOSS_INSTANCE_ID / MOSS_PEER_ADDRS（两台主机的
+#     “实例ID=IP” 清单，供 nginx conf 生成，见 nginx/moss-crosshost.conf 说明）。
+# ----------------------------------------------------------------------------
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: moss-nginx
+    restart: always
+    network_mode: host
+    volumes:
+      # 跨主机 conf：upstream 成员是各主机 IP/主机名（从 moss-crosshost.conf 生成，
+      # 两台主机的 nginx 挂【同一份】——每个 nginx 都要能把 owner 路由到任意主机）。
+      - ./nginx/moss-crosshost.conf:/etc/nginx/conf.d/default.conf:ro
+    # host 网络模式：nginx 直接用主机网络（VIP 由 keepalived 管理在主机侧）。
+    # 不用 depends_on：对端主机的 moss-server 不在本 compose 内，就绪由 max_fails
+    # 摘流兜底。
+
+  moss-server:
+    image: my-moss-server:${MOSS_IMAGE_TAG:-v1}
+    container_name: moss-server
+    restart: always
+    ports:
+      # 供【对端主机 nginx】与 VIP/SLB 直连（本机 nginx 走 host 网络也可用 127.0.0.1）。
+      # 回调端口 43128 同理；不启用企微回调可不暴露。
+      - "43127:43127"
+      - "43128:43128"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # NFS 卷：两台主机的挂载点路径必须一致（见文头差异 #2）。
+      - /data/moss/.moss:/root/.moss
+      - /data/moss/data:/app/data
+      - ./server.json:/app/server.json:ro
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+    # 与同主机 HA 相同：须 > shutdownGraceMs(30s) + serverCli 兜底(10s)。
+    stop_grace_period: 45s
+    environment:
+      - MOSS_SERVER_CONFIG=/app/server.json
+      - MOSS_HOME=/root/.moss
+      # 宿主路径映射：前缀 = NFS 实际挂载点（两主机一致），按部署实改。
+      - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
+      # 跨主机可达：监听全网卡（容器端口已映射到宿主）。
+      - MOSS_HOST=0.0.0.0
+      - MOSS_AUTH_PROXY_HOST=0.0.0.0
+      # auth proxy 仅被本机 runner 连接，指本机回环即可（host 网络 nginx 不经它）。
+      - MOSS_AUTH_PROXY_URL=http://moss-server:12013
+      # —— 跨主机 HA 专属 ——
+      # 【必填】按主机命名；nginx 两级 map 的键值、route cookie/query 值都等于它。
+      - MOSS_INSTANCE_ID=${MOSS_INSTANCE_ID:?set MOSS_INSTANCE_ID (e.g. host-a) in .env}
+      # 外部 PostgreSQL：设了它即自动 postgres 后端（P1）。连接串含密码，只经 .env
+      # 注入，绝不写入 server.json / 共享存储。
+      - MOSS_DATABASE_URL=${MOSS_DATABASE_URL:?set MOSS_DATABASE_URL (postgresql://user:pass@pg-host:5432/moss)}
+      # Nexus 独立主机（见 docker-compose.nexus-host.yml），external 模式只连不 spawn。
+      - MOSS_NEXUS_MODE=external
+      - MOSS_NEXUS_ENDPOINT=${MOSS_NEXUS_ENDPOINT:-http://nexus-host:2126}
+      # ws_url 指向 VIP/SLB 入口。
+      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL:?set MOSS_PUBLIC_BASE_URL (http://<VIP-or-SLB>)}
+      - MOSS_SHUTDOWN_GRACE_MS=30000
+      - MOSS_CALLBACK_PORT=43128
+
+# ----------------------------------------------------------------------------
+# 端口与路由总览（详见 README-ha 跨主机节）：
+#   VIP:80 / SLB → 各主机 nginx:80（keepalived 漂移或 SLB 后端池）
+#     → $moss_upstream（两级 map：?moss_route= > cookie moss_route > pool）
+#     → 本机或对端主机的 moss-server:43127（WS/SSE 长超时同 sticky conf）
+#   VIP:43128 → nginx 回调入口 → 两主机 moss-server:43128（least_conn，无 cookie）
+#
+# 实例级监控：/readyz 经 VIP 轮询（不带 moss_route cookie）；实例级探活登机执行
+# curl http://<host>:43127/readyz。
+#
+# 已知边界（README-ha 详述）：Nexus 单点、LB(VIP 抢主)计划内单点、NFS/PG 自身 HA
+# 属基础设施选型（推荐托管形态）；owner 主机故障的运行中 turn 走 fencing 冷恢复
+# （≈40-105s），长连接不无损迁移。
+# ----------------------------------------------------------------------------

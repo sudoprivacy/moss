@@ -31,6 +31,7 @@ import {
   getAttachPath,
   getAttemptDir,
   isNamedPipePath,
+  getLegacyAttachPath,
   getRuntimeStatusPath,
   getRuntimeStderrLogPath,
   getRuntimeStdoutLogPath,
@@ -54,11 +55,20 @@ import {
 } from './sharedAgentMemory.js'
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
+import {
+  openInternalSessionChannel,
+  type InternalSessionChannel,
+} from './internalSessionChannel.js'
 import { resolveRuntimeScodePath } from './runtimeScodePath.js'
 import { McpStore } from './mcp/db.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
 import { resolveScodeMcpSettings } from './mcp/scodeMcpInjector.js'
 import { type McpAuthSecretsApi, type ConfigItemLike } from './mcp/authResolver.js'
+
+/** Bounded wait for a protocol-shutdown collection before falling back to fencing. */
+const SHUTDOWN_COLLECT_TIMEOUT_MS = 5_000
+/** Poll granularity of the background fencing-wait task. */
+const FENCING_POLL_INTERVAL_MS = 5_000
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -104,12 +114,12 @@ function createMcpAuthSecretsApi(
   orgId: string,
 ): McpAuthSecretsApi {
   return {
-    getConfigItemByPinyin(pinyin: string): ConfigItemLike | null {
+    async getConfigItemByPinyin(pinyin: string): Promise<ConfigItemLike | null> {
       // Org-scope the lookup so a session only resolves its own org's
       // (non-user) config items; user-scope defs remain global.
-      const row = store.getConfigItemByPinyin(pinyin, orgId)
+      const row = await store.getConfigItemByPinyin(pinyin, orgId)
       if (!row) return null
-      const entries = store.getConfigEntries(row.id as number)
+      const entries = (await store.getConfigEntries(row.id as number))
         .map((e: Record<string, unknown>) => ({ config_key: e.config_key as string }))
       return {
         pinyin: row.pinyin as string,
@@ -123,6 +133,15 @@ function createMcpAuthSecretsApi(
       return all.map(({ key, value }) => ({ key, value }))
     },
   }
+}
+
+/** Copy of ServerConfig with credential-bearing fields removed, for anything
+ *  persisted to shared storage (runner manifest.json). The runner child
+ *  re-reads MOSS_DATABASE_URL from its inherited environment. */
+function sanitizeConfigForManifest(config: ServerConfig): ServerConfig {
+  const { databaseUrl: _stripped, ...rest } = config
+  void _stripped
+  return rest as ServerConfig
 }
 
 function resolveRunnerPath(): string {
@@ -343,6 +362,20 @@ type RuntimeServiceOptions = {
  * about to exit. Defined here (not server.ts) so RuntimeService can throw it
  * without a server.ts → runtimeService.ts circular import.
  */
+/**
+ * The attempt is being taken over (its previous owner died but the detached
+ * runner's heartbeat is still fresh — fencing needs up to one heartbeat
+ * interval plus the expiry window before a respawn is safe). Foreground
+ * callers fail fast with 503; a background fencing-wait task drives the
+ * respawn (see #scheduleFencingWait).
+ */
+export class AttemptTakeoverPendingError extends Error {
+  constructor(sessionId: string) {
+    super(`Session ${sessionId} is being taken over, retry shortly`)
+    this.name = 'AttemptTakeoverPendingError'
+  }
+}
+
 export class ServerDrainingError extends Error {
   constructor(message = 'server is draining, not accepting new sessions') {
     super(message)
@@ -386,6 +419,8 @@ export class RuntimeService {
   private readonly mcpStore: McpStore | null
   private readonly mcpUserConfig: McpUserConfigApi | null
   private readonly pendingEnsures = new Map<string, Promise<AttemptRecord>>()
+  /** Dedup set for in-flight background fencing-wait tasks (per sessionId). */
+  readonly #fencingWaits = new Set<string>()
   private readonly sessionTokens = new Map<string, { token: string; pid: number }>()
   /** Derived usage totals, keyed by scope; see USAGE_CACHE_TTL_MS. */
   private readonly usageCache = new Map<string, { totalTokens: number; at: number }>()
@@ -401,25 +436,33 @@ export class RuntimeService {
   draining = false
 
   constructor(private readonly options: RuntimeServiceOptions) {
+    if (!options.store && options.config.dbBackend === 'postgres') {
+      // Never silently fall back to a local sqlite file when the deployment
+      // expects the shared PG database — that split-brain would be invisible
+      // until data goes missing. The async openStoreAsync() path must be used.
+      throw new Error(
+        'postgres backend requires a store opened via openStoreAsync(); pass options.store',
+      )
+    }
     this.store = options.store ?? openDirectConnectStore(options.config)
     this.authService = options.authService
     if (options.nexusClient) {
-      this.mcpStore = new McpStore(this.store.db)
+      this.mcpStore = new McpStore(this.store.driver)
       this.mcpUserConfig = createMcpUserConfigApi({
         nexusClient: options.nexusClient,
         mcpStore: this.mcpStore,
-        getUserByIdAndOrg: (userId: string, _orgId: string) => {
+        getUserByIdAndOrg: async (userId: string, _orgId: string) => {
           try {
-            const u = this.authService.getUserById(userId)
+            const u = await this.authService.getUserById(userId)
             if (!u) return null
             return { role: 'user', departmentId: u.departmentId }
           } catch {
             return null
           }
         },
-        listDepartmentsByOrg: (orgId: string) => {
+        listDepartmentsByOrg: async (orgId: string) => {
           try {
-            return this.authService.listDepartments(orgId).departments
+            return (await this.authService.listDepartments(orgId)).departments
           } catch {
             return []
           }
@@ -431,11 +474,11 @@ export class RuntimeService {
     }
   }
 
-  listSessions(filter: {
+  async listSessions(filter: {
     orgId: string
     userId?: string
     activeOnly?: boolean
-  }): SessionSummary[] {
+  }): Promise<SessionSummary[]> {
     return this.store.listSessions({
       orgId: filter.orgId,
       userId: filter.userId,
@@ -443,11 +486,11 @@ export class RuntimeService {
     })
   }
 
-  listSessionRecords(filter: {
+  async listSessionRecords(filter: {
     orgId: string
     userId?: string
     activeOnly?: boolean
-  }): SessionRecord[] {
+  }): Promise<SessionRecord[]> {
     return this.store.listSessionRecords({
       orgId: filter.orgId,
       userId: filter.userId,
@@ -455,7 +498,7 @@ export class RuntimeService {
     })
   }
 
-  getSession(sessionId: string): SessionRecord | null {
+  async getSession(sessionId: string): Promise<SessionRecord | null> {
     return this.store.getSession(sessionId)
   }
 
@@ -464,11 +507,11 @@ export class RuntimeService {
    * Never mutates runtime state. Returns null when the session id is unknown, which
    * the caller must treat as "replace" (mint a fresh session), never "reuse".
    */
-  getSessionSnapshot(sessionId: string): SessionSnapshot | null {
-    const session = this.store.getSession(sessionId)
+  async getSessionSnapshot(sessionId: string): Promise<SessionSnapshot | null> {
+    const session = await this.store.getSession(sessionId)
     if (!session) return null
     const attempt = session.currentAttemptId
-      ? this.store.getAttempt(session.currentAttemptId)
+      ? await this.store.getAttempt(session.currentAttemptId)
       : null
     return {
       sessionId: session.sessionId,
@@ -489,19 +532,19 @@ export class RuntimeService {
     }
   }
 
-  countActiveSessions(): number {
+  async countActiveSessions(): Promise<number> {
     return this.store.countActiveSessions()
   }
 
   /** Usage for one scope, recomputed at most once per USAGE_CACHE_TTL_MS. */
   private async totalTokensUsed(
     key: string,
-    sessions: () => SessionRecord[],
+    sessions: () => SessionRecord[] | Promise<SessionRecord[]>,
   ): Promise<number> {
     const cached = this.usageCache.get(key)
     const now = Date.now()
     if (cached && now - cached.at < USAGE_CACHE_TTL_MS) return cached.totalTokens
-    const stats = await loadBudgetStats(sessions())
+    const stats = await loadBudgetStats(await sessions())
     const totalTokens = stats.summary.totalTokens
     this.usageCache.set(key, { totalTokens, at: now })
     return totalTokens
@@ -524,7 +567,7 @@ export class RuntimeService {
    * is not spending.
    */
   private async assertWithinTokenQuota(userId: string, orgId: string): Promise<void> {
-    const limits = this.authService.getTokenLimits(userId, orgId)
+    const limits = await this.authService.getTokenLimits(userId, orgId)
     if (limits.userLimit === null && limits.departmentLimit === null) return
 
     if (limits.userLimit !== null) {
@@ -539,17 +582,22 @@ export class RuntimeService {
     }
 
     if (limits.departmentLimit !== null) {
-      const user = this.authService.getUserOrNull(userId, orgId)
+      const user = await this.authService.getUserOrNull(userId, orgId)
       const departmentId = user?.departmentId
       if (!departmentId) return
-      const used = await this.totalTokensUsed(`dept:${orgId}:${departmentId}`, () =>
+      const used = await this.totalTokensUsed(`dept:${orgId}:${departmentId}`, async () => {
         // No department column on sessions and no usage aggregate anywhere, so
-        // membership is resolved per session. Both lookups are synchronous
-        // reads against the already-open database.
-        this.store
-          .listSessionRecords({ orgId })
-          .filter(s => this.authService.getUserOrNull(s.userId, orgId)?.departmentId === departmentId),
-      )
+        // membership is resolved per session. Store and auth reads are async
+        // under the pluggable DB driver; user lookups fan out in one
+        // Promise.all instead of a per-session chain.
+        const allOrgSessions = await this.store.listSessionRecords({ orgId })
+        const sessionUsers = await Promise.all(
+          allOrgSessions.map(s => this.authService.getUserOrNull(s.userId, orgId)),
+        )
+        return allOrgSessions.filter(
+          (_s, i) => sessionUsers[i]?.departmentId === departmentId,
+        )
+      })
       if (used >= limits.departmentLimit) {
         throw new TokenQuotaExceededError(
           `部门 Token 额度已用尽 (已用: ${used.toLocaleString()}, 限额: ${limits.departmentLimit.toLocaleString()})`,
@@ -563,7 +611,7 @@ export class RuntimeService {
     // status='failed' half-created record that spawnAttempt-level rejection
     // would leave behind).
     if (this.draining) throw new ServerDrainingError()
-    const active = this.store.listSessions({
+    const active = await this.store.listSessions({
       orgId: input.orgId,
       activeOnly: true,
     })
@@ -660,7 +708,7 @@ export class RuntimeService {
       sessionId,
     )
     await mkdir(dirname(transcriptPath), { recursive: true })
-    const created = this.store.createSession({
+    const created = await this.store.createSession({
       sessionId,
       transcriptSessionId: sessionId,
       transcriptPath,
@@ -695,10 +743,10 @@ export class RuntimeService {
         enabledSkills: input.enabledSkills,
       })
     } catch (error) {
-      this.store.markSessionEnded(created.sessionId, 'failed', 'active')
+      await this.store.markSessionEnded(created.sessionId, 'failed', 'active')
       throw error
     }
-    return this.store.getSession(created.sessionId) ?? created
+    return (await this.store.getSession(created.sessionId)) ?? created
   }
 
   async ensureSessionReady(
@@ -707,12 +755,12 @@ export class RuntimeService {
     session: SessionRecord
     attempt: AttemptRecord
   }> {
-    const session = this.store.getSession(sessionId)
+    const session = await this.store.getSession(sessionId)
     if (!session) {
       throw new Error('Session not found')
     }
     const attempt = await this.ensureAttempt(session)
-    return { session: this.store.getSession(sessionId) ?? session, attempt }
+    return { session: (await this.store.getSession(sessionId)) ?? session, attempt }
   }
 
   /**
@@ -732,14 +780,26 @@ export class RuntimeService {
   async ensureSessionReadyNonBlocking(
     sessionId: string,
   ): Promise<{ session: SessionRecord }> {
-    const session = this.store.getSession(sessionId)
+    const session = await this.store.getSession(sessionId)
     if (!session) {
       throw new Error('Session not found')
     }
 
     const existing = session.currentAttemptId
-      ? this.store.getAttempt(session.currentAttemptId)
+      ? await this.store.getAttempt(session.currentAttemptId)
       : null
+    if (
+      existing &&
+      !isTerminalAttemptState(existing.runtimeState) &&
+      existing.serverInstanceId !== this.options.serverInstanceId
+    ) {
+      // Owned by ANOTHER instance: never probe its (remote-host) socket and
+      // never kick a local respawn from a GET. Live owner → metadata already
+      // reflects an active session served there (ws_url carries the owner
+      // route). Dead owner → the adopt timer / foreground ensure paths own
+      // the takeover (with fencing), not this non-blocking read.
+      return { session: (await this.store.getSession(sessionId)) ?? session }
+    }
     if (existing?.attachPath && !isTerminalAttemptState(existing.runtimeState)) {
       const healthy = await probeAttachPath(
         existing.attachPath,
@@ -747,21 +807,21 @@ export class RuntimeService {
         Math.min(this.options.config.reattachProbeTimeoutMs, 500),
       )
       if (healthy) {
-        this.store.setSessionLifecycle(
+        await this.store.setSessionLifecycle(
           session.sessionId,
           'active',
           session.desiredState,
         )
-        return { session: this.store.getSession(sessionId) ?? session }
+        return { session: (await this.store.getSession(sessionId)) ?? session }
       }
     }
 
     // Runtime is missing/dead — schedule a background respawn unless one is
     // already in flight, and reflect the transitional state to the client.
     if (!this.pendingEnsures.has(session.sessionId)) {
-      this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
-      void this.ensureAttempt(session).catch(error => {
-        this.store.addEvent(
+      await this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
+      void this.ensureAttempt(session).catch(async error => {
+        await this.store.addEvent(
           session.sessionId,
           session.currentAttemptId,
           'reconcile_failed',
@@ -769,7 +829,7 @@ export class RuntimeService {
         )
       })
     }
-    return { session: this.store.getSession(sessionId) ?? session }
+    return { session: (await this.store.getSession(sessionId)) ?? session }
   }
 
   /**
@@ -788,7 +848,7 @@ export class RuntimeService {
     if (this.draining) return
     let orphans: SessionRecord[]
     try {
-      orphans = this.store.listOrphanedActiveSessions(
+      orphans = await this.store.listOrphanedActiveSessions(
         this.options.serverInstanceId,
         this.options.config.heartbeatTimeoutMs,
       )
@@ -803,21 +863,21 @@ export class RuntimeService {
       if (!attemptId) continue
       // Atomically adopt; another survivor may have claimed it first.
       if (
-        !this.store.claimAttempt(
+        !(await this.store.claimAttempt(
           attemptId,
           this.options.serverInstanceId,
           this.options.config.heartbeatTimeoutMs,
-        )
+        ))
       ) {
         continue
       }
-      this.store.addEvent(session.sessionId, attemptId, 'adopted_orphan_session', {
+      await this.store.addEvent(session.sessionId, attemptId, 'adopted_orphan_session', {
         byInstance: this.options.serverInstanceId,
       })
       try {
         await this.ensureSessionReadyNonBlocking(session.sessionId)
       } catch (err) {
-        this.store.addEvent(session.sessionId, attemptId, 'adopt_recover_failed', {
+        await this.store.addEvent(session.sessionId, attemptId, 'adopt_recover_failed', {
           error: errorMessage(err),
         })
       }
@@ -836,7 +896,7 @@ export class RuntimeService {
     if (this.options.config.defaultRuntime !== 'k8s') return
     const k8s = this.options.config.k8s
     if (!k8s) return
-    const activeIds = this.store.listSessionsToRecover().map(s => s.sessionId)
+    const activeIds = (await this.store.listSessionsToRecover()).map(s => s.sessionId)
     try {
       const { gcOrphanedPods } = await import('./backends/k8sBackend.js')
       const res = await gcOrphanedPods(activeIds, {
@@ -861,7 +921,7 @@ export class RuntimeService {
    * owns it — the WS upgrade path then rejects so the client re-routes to the
    * owner instead of this instance bridging a runner it does not hold.
    */
-  tryOwnAttempt(attemptId: string): boolean {
+  async tryOwnAttempt(attemptId: string): Promise<boolean> {
     return this.store.claimAttempt(
       attemptId,
       this.options.serverInstanceId,
@@ -875,8 +935,8 @@ export class RuntimeService {
    * connection immediately before the real client connection. Some runners may
    * still be processing that probe disconnect, which can race with the attach.
    */
-  getLocallyOwnedRunningAttempt(attemptId: string): AttemptRecord | null {
-    const attempt = this.store.getAttempt(attemptId)
+  async getLocallyOwnedRunningAttempt(attemptId: string): Promise<AttemptRecord | null> {
+    const attempt = await this.store.getAttempt(attemptId)
     if (
       attempt?.serverInstanceId === this.options.serverInstanceId
       && attempt.runtimeState === 'running'
@@ -915,7 +975,7 @@ export class RuntimeService {
     // DB write. The site repro showed `runtime_state=running, runner_pid=86`
     // surviving a terminate while host `ps -p 86` returned no such process.
     try {
-      const candidates = this.store.listAttemptsByRuntimeState(['starting', 'running', 'detached'])
+      const candidates = await this.store.listAttemptsByRuntimeState(['starting', 'running', 'detached'])
       let cleaned = 0
       for (const att of candidates) {
         // Concurrent multi-instance HA: only reap attempts we can own (already
@@ -923,25 +983,25 @@ export class RuntimeService {
         // instance whose runner_pid is simply not on THIS host must be left
         // alone — reaping it would kill a healthy session on another node.
         if (
-          !this.store.claimAttempt(
+          !(await this.store.claimAttempt(
             att.attemptId,
             this.options.serverInstanceId,
             this.options.config.heartbeatTimeoutMs,
-          )
+          ))
         ) {
           continue
         }
         // No PID at all → cannot have been running.
         // PID present but not alive → runner crashed silently.
         if (att.runnerPid !== null && safeKill0(att.runnerPid)) continue
-        this.store.markAttemptStopped(att.attemptId, {
+        await this.store.markAttemptStopped(att.attemptId, {
           runtimeState: 'stopped',
           stopReason: 'stale_on_startup',
           errorText: att.runnerPid === null
             ? 'attempt had no runner_pid recorded'
             : `runner_pid=${att.runnerPid} no longer alive`,
         })
-        this.store.addEvent(att.sessionId, att.attemptId, 'attempt_stale_marked_stopped', {
+        await this.store.addEvent(att.sessionId, att.attemptId, 'attempt_stale_marked_stopped', {
           runnerPid: att.runnerPid,
           previousState: att.runtimeState,
         })
@@ -958,7 +1018,7 @@ export class RuntimeService {
       )
     }
 
-    const sessions = this.store.listSessionsToRecover()
+    const sessions = await this.store.listSessionsToRecover()
 
     // Reap k8s pods/Secrets orphaned by a crash before recovering — anything
     // not backing a session we're about to recover is a leak. No-op unless k8s
@@ -976,18 +1036,18 @@ export class RuntimeService {
           userContainerName?: string
         }
         const attempt = session.currentAttemptId
-          ? this.store.getAttempt(session.currentAttemptId)
+          ? await this.store.getAttempt(session.currentAttemptId)
           : null
         // Concurrent multi-instance HA: skip sessions whose attempt is owned by
         // a live other instance; adopt (claim) dead-owner/self attempts before
         // recovering so at most one instance ever revives a given session.
         if (
           attempt &&
-          !this.store.claimAttempt(
+          !(await this.store.claimAttempt(
             attempt.attemptId,
             this.options.serverInstanceId,
             this.options.config.heartbeatTimeoutMs,
-          )
+          ))
         ) {
           continue
         }
@@ -1021,7 +1081,7 @@ export class RuntimeService {
                 sessionId: session.sessionId,
                 graceMs: 0,
               })
-              this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_orphan_scode', {
+              await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_orphan_scode', {
                 userContainer: runtimeAny.userContainerName,
               })
               const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
@@ -1031,7 +1091,7 @@ export class RuntimeService {
                 containerName: runtimeAny.userContainerName,
               })
             } else if (probe.kind === 'stale_pid_reuse') {
-              this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_pid_reuse', {
+              await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_pid_reuse', {
                 pid: probe.pid,
                 recordedStartTicks: probe.recordedStartTicks,
                 currentStartTicks: probe.currentStartTicks,
@@ -1044,7 +1104,7 @@ export class RuntimeService {
               })
             }
           } catch (probeErr) {
-            this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_probe_failed', {
+            await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_probe_failed', {
               error: errorMessage(probeErr),
             })
             const { logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
@@ -1062,8 +1122,8 @@ export class RuntimeService {
           // re-picked, and desired!='active' so the session-detail GET won't
           // silently auto-respawn it — yet POST /sessions/:id/resume still
           // revives it on demand (that route doesn't gate on desired_state).
-          this.store.markSessionEnded(session.sessionId, 'ended', 'ended')
-          this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_retired_unrecoverable', {
+          await this.store.markSessionEnded(session.sessionId, 'ended', 'ended')
+          await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_retired_unrecoverable', {
             runnerPid: attempt?.runnerPid ?? null,
             previousStatus: session.status,
             containerMode: runtimeAny.containerMode ?? null,
@@ -1079,7 +1139,7 @@ export class RuntimeService {
 
         await this.ensureAttempt(session)
       } catch (error) {
-        this.store.addEvent(session.sessionId, session.currentAttemptId, 'reconcile_failed', {
+        await this.store.addEvent(session.sessionId, session.currentAttemptId, 'reconcile_failed', {
           error: errorMessage(error),
         })
       }
@@ -1087,9 +1147,9 @@ export class RuntimeService {
   }
 
   async terminateSession(sessionId: string): Promise<void> {
-    const session = this.store.getSession(sessionId)
+    const session = await this.store.getSession(sessionId)
     if (!session) return
-    const attempt = this.store.getCurrentAttempt(sessionId)
+    const attempt = await this.store.getCurrentAttempt(sessionId)
     // Revoke auth proxy token
     if (this.authProxy) {
       const tokenEntry = this.sessionTokens.get(sessionId)
@@ -1098,18 +1158,27 @@ export class RuntimeService {
         this.sessionTokens.delete(sessionId)
       }
     }
-    this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
-    this.store.addEvent(sessionId, attempt?.attemptId ?? null, 'session_terminate_requested', {})
+    await this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
+    await this.store.addEvent(sessionId, attempt?.attemptId ?? null, 'session_terminate_requested', {})
 
     if (attempt?.runnerPid) {
-      try {
-        process.kill(attempt.runnerPid, 'SIGTERM')
-      } catch (err) {
-        // ESRCH = no such process; the runner already exited and our
-        // termination signal has nothing to deliver. Other codes are real
-        // failures and worth logging.
-        if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ESRCH') {
-          console.warn('[RuntimeService] Failed to terminate runner process:', err)
+      // Ownership guard: terminate is a REST op and can land on ANY instance
+      // behind an LB. The stored runnerPid is a pid on the OWNING host —
+      // killing it here would hit an unrelated local process with the same
+      // pid number. Only kill locally when this instance owns the attempt;
+      // otherwise markAttemptStopped (above/below) is the whole story: the
+      // remote runner's fenced heartbeat (runtime_state no longer 'running')
+      // makes it exit on its own.
+      if (attempt.serverInstanceId === this.options.serverInstanceId) {
+        try {
+          process.kill(attempt.runnerPid, 'SIGTERM')
+        } catch (err) {
+          // ESRCH = no such process; the runner already exited and our
+          // termination signal has nothing to deliver. Other codes are real
+          // failures and worth logging.
+          if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ESRCH') {
+            console.warn('[RuntimeService] Failed to terminate runner process:', err)
+          }
         }
       }
     }
@@ -1124,7 +1193,7 @@ export class RuntimeService {
     // Without this, DB carries stale runtime_state='running' rows pointing
     // at PIDs that no longer exist (the site repro showed exactly this).
     if (attempt && attempt.runtimeState !== 'stopped' && attempt.runtimeState !== 'failed' && attempt.runtimeState !== 'lost') {
-      this.store.markAttemptStopped(attempt.attemptId, {
+      await this.store.markAttemptStopped(attempt.attemptId, {
         runtimeState: 'stopped',
         stopReason: 'terminated',
       })
@@ -1140,6 +1209,32 @@ export class RuntimeService {
       socket.once('connect', () => resolve(socket))
       socket.once('error', reject)
     })
+  }
+
+  /**
+   * Server-internal channel to a session's runner (HA). Consumers that used
+   * to call connectToAttempt directly (channels gateway / cron / event
+   * triggers / cabin) must use this instead: the attach unix socket is only
+   * reachable on the OWNING instance, while those consumers execute on
+   * whichever instance the LB/lease picks. The channel routes to the owner
+   * like any external client (internal WS endpoint + owner route) and
+   * retries 5xx through the takeover window. The internal endpoint performs
+   * the ensure/owner checks on its side, so no ensure is done here.
+   */
+  async connectInternalChannel(
+    sessionId: string,
+  ): Promise<InternalSessionChannel> {
+    if (!this.options.authService) {
+      throw new Error('connectInternalChannel requires authService')
+    }
+    return openInternalSessionChannel(
+      {
+        authService: this.options.authService,
+        store: this.store,
+        config: this.options.config,
+      },
+      sessionId,
+    )
   }
 
   private async ensureAttempt(session: SessionRecord): Promise<AttemptRecord> {
@@ -1161,22 +1256,107 @@ export class RuntimeService {
     session: SessionRecord,
   ): Promise<AttemptRecord> {
     const existing = session.currentAttemptId
-      ? this.store.getAttempt(session.currentAttemptId)
+      ? await this.store.getAttempt(session.currentAttemptId)
       : null
     if (existing?.attachPath) {
+      // ---- Owner-aware liveness layering (multi-instance HA) ----
+      // Single-instance deployments always take the ownerIsSelf quadrants
+      // below (the resolved owner UUID is this process), keeping their
+      // current behaviour.
+      const ownerIsSelf =
+        existing.serverInstanceId === this.options.serverInstanceId
+
+      if (!ownerIsSelf) {
+        const { ownerLive } = await this.store.getAttemptOwnerStatus(
+          existing.attemptId,
+          this.options.config.heartbeatTimeoutMs,
+        )
+        if (ownerLive) {
+          // Owned by another LIVE instance: never probe/mark/spawn here.
+          // Metadata consumers (resume/GET) are redirected via the owner
+          // route in ws_url; the WS upgrade path 409s before reaching this.
+          return existing
+        }
+        // Owner is dead: try the atomic claim (CAS). A racing survivor may
+        // have won already — then behave like the live-owner case.
+        const claimed = await this.store.claimAttempt(
+          existing.attemptId,
+          this.options.serverInstanceId,
+          this.options.config.heartbeatTimeoutMs,
+        )
+        if (!claimed) return existing
+        if (this.#attemptHeartbeatFresh(existing)) {
+          // Takeover in progress: the previous owner's detached runner is
+          // still alive on its host with a fresh heartbeat. Fencing kills
+          // it within one heartbeat interval; respawning before its
+          // heartbeat expires would double-write the transcript/DB.
+          this.#scheduleFencingWait(session)
+          throw new AttemptTakeoverPendingError(session.sessionId)
+        }
+        // Claimed and the old runner is already dead — fall through to the
+        // probe/respawn path below (now as owner).
+      }
+
       const healthy = await probeAttachPath(
         existing.attachPath,
         this.options.config.reattachProbeTimeoutMs,
       )
       if (healthy) {
-        this.store.setSessionLifecycle(session.sessionId, 'active', session.desiredState)
+        await this.store.setSessionLifecycle(session.sessionId, 'active', session.desiredState)
         return existing
       }
-      this.store.markAttemptLost(existing.attemptId, 'attach socket unavailable')
-      this.store.addEvent(session.sessionId, existing.attemptId, 'attempt_lost', {
+
+      if (ownerIsSelf && this.#attemptHeartbeatFresh(existing)) {
+        // Self-owned, DB-stored attachPath unreachable, runner heartbeat
+        // still fresh. Try the legacy (pre-socket-decoupling) name
+        // defensively: a detached runner from before an upgrade still
+        // listens there. If reachable, collect it with a protocol-level
+        // shutdown — confirmed exit lets us respawn immediately (no need to
+        // wait out the heartbeat: this is direct confirmation, not
+        // inference). Never recompute the primary path live; the DB value
+        // IS the runner's listening name.
+        const legacyPath = getLegacyAttachPath(
+          this.options.config,
+          session.sessionId,
+          existing.generation,
+        )
+        if (legacyPath !== existing.attachPath) {
+          const legacyHealthy = await probeAttachPath(
+            legacyPath,
+            this.options.config.reattachProbeTimeoutMs,
+          )
+          if (legacyHealthy) {
+            const exited = await this.#shutdownRunnerViaSocket(legacyPath)
+            if (exited) {
+              await this.store.markAttemptLost(existing.attemptId, 'collected via protocol shutdown')
+              await this.store.addEvent(session.sessionId, existing.attemptId, 'attempt_lost', {
+                reason: 'collected_via_protocol_shutdown',
+              })
+              await this.store.setSessionLifecycle(session.sessionId, 'lost', 'active')
+              // fall through to respawn
+              if (!this.options.config.resumeOnMissingRuntime) {
+                throw new Error(`Runtime missing for session ${session.sessionId}`)
+              }
+              return await this.spawnAttempt(session, {
+                resumeTranscriptSessionId: session.transcriptSessionId,
+              })
+            }
+            // Shutdown timed out (runner wedged after SIGTERM) — same
+            // treatment as the unreachable case below.
+          }
+        }
+        // Nothing reachable but the heartbeat is fresh: the runner lives on
+        // another host (claim window) or is wedged. Fail fast; the
+        // background fencing-wait owns the respawn.
+        this.#scheduleFencingWait(session)
+        throw new AttemptTakeoverPendingError(session.sessionId)
+      }
+
+      await this.store.markAttemptLost(existing.attemptId, 'attach socket unavailable')
+      await this.store.addEvent(session.sessionId, existing.attemptId, 'attempt_lost', {
         reason: 'attach_socket_unavailable',
       })
-      this.store.setSessionLifecycle(session.sessionId, 'lost', 'active')
+      await this.store.setSessionLifecycle(session.sessionId, 'lost', 'active')
     }
 
     if (!this.options.config.resumeOnMissingRuntime) {
@@ -1186,6 +1366,103 @@ export class RuntimeService {
     return await this.spawnAttempt(session, {
       resumeTranscriptSessionId: session.transcriptSessionId,
     })
+  }
+
+  /**
+   * Fresh = the runner daemon's heartbeat landed within the expiry window.
+   * (NULL heartbeat counts as stale — nothing vouches for the runner.)
+   */
+  #attemptHeartbeatFresh(attempt: AttemptRecord): boolean {
+    return (
+      attempt.lastHeartbeatAt !== null &&
+      Date.now() - attempt.lastHeartbeatAt < this.options.config.heartbeatTimeoutMs
+    )
+  }
+
+  /**
+   * Collect a (locally reachable) runner via the runner protocol: send
+   * `shutdown`, wait bounded for the connection to close (= the daemon's
+   * exit chain ran). Returns false on timeout — the caller then falls back
+   * to the fencing-wait path.
+   */
+  async #shutdownRunnerViaSocket(attachPath: string): Promise<boolean> {
+    try {
+      const socket = await new Promise<net.Socket>((resolve, reject) => {
+        const s = net.createConnection(attachPath)
+        const timer = setTimeout(() => {
+          s.destroy()
+          reject(new Error('connect timeout'))
+        }, this.options.config.reattachProbeTimeoutMs)
+        s.once('connect', () => {
+          clearTimeout(timer)
+          resolve(s)
+        })
+        s.once('error', (err) => {
+          clearTimeout(timer)
+          reject(err)
+        })
+      })
+      const closed = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => {
+          socket.destroy()
+          resolve(false)
+        }, SHUTDOWN_COLLECT_TIMEOUT_MS)
+        socket.once('close', () => {
+          clearTimeout(timer)
+          resolve(true)
+        })
+        socket.once('error', () => {
+          clearTimeout(timer)
+          resolve(false)
+        })
+        socket.write(`${JSON.stringify({ type: 'shutdown' })}\n`)
+      })
+      return closed
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Background fencing-wait: after a claim, wait out the old runner's
+   * heartbeat expiry (fencing makes it exit within one heartbeat; expiry
+   * then makes the attempt eligible for respawn), then respawn via
+   * ensureAttempt — its pendingEnsures serialisation makes concurrent
+   * triggers (multiple foreground 503s, the adopt timer) collapse into one
+   * spawn. Fire-and-forget by design; deduped per session.
+   */
+  #scheduleFencingWait(session: SessionRecord): void {
+    if (this.#fencingWaits.has(session.sessionId)) return
+    this.#fencingWaits.add(session.sessionId)
+    const timeoutMs = this.options.config.heartbeatTimeoutMs * 3
+    const startedAt = Date.now()
+    const poll = async () => {
+      const current = await this.store.getSession(session.sessionId)
+      const attempt = current?.currentAttemptId
+        ? await this.store.getAttempt(current.currentAttemptId)
+        : null
+      if (
+        !current ||
+        !attempt ||
+        !this.#attemptHeartbeatFresh(attempt) ||
+        Date.now() - startedAt > timeoutMs
+      ) {
+        this.#fencingWaits.delete(session.sessionId)
+        if (current && attempt && !this.#attemptHeartbeatFresh(attempt)) {
+          void this.ensureAttempt(current).catch(async error => {
+            await this.store.addEvent(
+              current.sessionId,
+              attempt.attemptId,
+              'reconcile_failed',
+              { error: errorMessage(error) },
+            )
+          })
+        }
+        return
+      }
+      setTimeout(poll, FENCING_POLL_INTERVAL_MS).unref?.()
+    }
+    setTimeout(poll, FENCING_POLL_INTERVAL_MS).unref?.()
   }
 
   private async spawnAttempt(
@@ -1229,7 +1506,7 @@ export class RuntimeService {
       }
     }
 
-    const generation = this.store.getNextGeneration(session.sessionId)
+    const generation = await this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)
     const attachPath = getAttachPath(this.options.config, session.sessionId, generation)
     const stdoutLogPath = getRuntimeStdoutLogPath(
@@ -1248,7 +1525,7 @@ export class RuntimeService {
       generation,
     )
     await mkdir(attemptDir, { recursive: true })
-    const attempt = this.store.createAttempt({
+    const attempt = await this.store.createAttempt({
       sessionId: session.sessionId,
       generation,
       backendType: session.runtime.type,
@@ -1261,14 +1538,14 @@ export class RuntimeService {
           : undefined,
       attachPath,
     })
-    this.store.setCurrentAttempt(session.sessionId, attempt.attemptId)
+    await this.store.setCurrentAttempt(session.sessionId, attempt.attemptId)
 
     // Resume path: if the session was previously idle-killed (status=ended,
     // desired_state=active, ended_at set), clear those terminal markers so
     // the row reads as a live session again.
     if (session.endedAt !== null || session.status === 'ended' || session.status === 'failed' || session.status === 'lost') {
-      this.store.reactivateSession(session.sessionId)
-      this.store.addEvent(session.sessionId, attempt.attemptId, 'session_reactivated', {
+      await this.store.reactivateSession(session.sessionId)
+      await this.store.addEvent(session.sessionId, attempt.attemptId, 'session_reactivated', {
         previousStatus: session.status,
         previousEndedAt: session.endedAt,
       })
@@ -1287,11 +1564,11 @@ export class RuntimeService {
     ) {
       const previousDockerImage = session.runtime.dockerImage
       session.runtime.dockerImage = this.options.config.dockerImage
-      this.store.updateSessionRuntimeImage(
+      await this.store.updateSessionRuntimeImage(
         session.sessionId,
         this.options.config.dockerImage,
       )
-      this.store.addEvent(
+      await this.store.addEvent(
         session.sessionId,
         attempt.attemptId,
         'session_runtime_image_updated',
@@ -1346,7 +1623,7 @@ export class RuntimeService {
             const docStore = new DocumentStore(this.store)
             const collected: Array<{ id: string; name: string; description?: string | null }> = []
             for (const wid of ids) {
-              const wiki = docStore.getWikiById(wid)
+              const wiki = await docStore.getWikiById(wid)
               if (wiki && wiki.orgId === session.orgId) {
                 collected.push({
                   id: wiki.id,
@@ -1366,7 +1643,7 @@ export class RuntimeService {
           if (corpAppIds.length > 0) {
             const collectedApps: Array<{ id: string; name: string; type: string; key: string }> = []
             for (const appId of corpAppIds) {
-              const appRow = this.store.getCorpApp(appId, session.orgId) as Record<string, unknown> | null
+              const appRow = await this.store.getCorpApp(appId, session.orgId)
               if (appRow && Number(appRow.enabled ?? 0) === 1) {
                 collectedApps.push({
                   id: String(appRow.id),
@@ -1384,13 +1661,13 @@ export class RuntimeService {
             session.runtime.configDir &&
             session.userId
           ) {
-            const user = this.authService.getUserOrNull(
+            const user = await this.authService.getUserOrNull(
               session.userId,
               session.orgId,
             )
             const departmentName = user?.departmentId
-              ? this.authService
-                  .listDepartments(session.orgId)
+              ? (await this.authService
+                  .listDepartments(session.orgId))
                   .departments.find(d => d.id === user.departmentId)?.name ?? null
               : null
             const userProfileMemory = buildUserProfileMemory({
@@ -1452,13 +1729,13 @@ export class RuntimeService {
       if (isAdmin) {
         visibilityFilter = { isAdmin: true, userId: session.userId, departmentId: null, visibleDepartmentIds: null }
       } else {
-        const user = this.authService.getUserOrNull(session.userId, session.orgId)
+        const user = await this.authService.getUserOrNull(session.userId, session.orgId)
         const departmentId = user?.departmentId ?? null
         const visibleDepartmentIds =
-          this.authService.getUserDepartmentAncestorIds(
+          (await this.authService.getUserDepartmentAncestorIds(
             session.userId,
             session.orgId,
-          ) ?? new Set()
+          )) ?? new Set()
         visibilityFilter = { isAdmin: false, userId: session.userId, departmentId, visibleDepartmentIds }
       }
     }
@@ -1569,7 +1846,11 @@ export class RuntimeService {
     }
 
     const manifest: RunnerManifest = {
-      config: this.options.config,
+      // Strip the PG connection string before the config hits shared storage:
+      // manifest.json lives on the shared runtime dir, and the URL carries
+      // credentials. The runner child re-derives it from the inherited env
+      // (MOSS_DATABASE_URL) instead.
+      config: sanitizeConfigForManifest(this.options.config),
       session: {
         sessionId: session.sessionId,
         transcriptSessionId:
@@ -1629,7 +1910,7 @@ export class RuntimeService {
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
-    const userModelPref = session.userId ? getUserModelPreference(session.userId) : null
+    const userModelPref = session.userId ? await getUserModelPreference(session.userId) : null
     const isCabinSession = session.source === 'cabin'
     const defaultModel = isCabinSession
       ? (session.runtime.model || this.options.config.cabin.llmModel)
@@ -1659,7 +1940,7 @@ export class RuntimeService {
     // where no metered gateway exists) keep the shared key. Resolved here in the
     // main process: the runner subprocess has no database.
     const userModelKey = session.userId
-      ? this.authService.getUserModelCredential(session.userId)?.sudorouterKey
+      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
       : undefined
     const sessionApiKey = userModelKey || systemSettings.apiKey
     if (sessionApiKey) {
@@ -1701,10 +1982,13 @@ export class RuntimeService {
     // localhost for the non-Docker path.
     if (this.authProxy) {
       const authToken = randomUUID()
-      // Derived from the listener rather than repeating its port as a literal:
-      // the two used to be separate constants in separate files, so changing one
-      // silently mis-wired every session's credential fetch.
-      const proxyUrl = process.env.MOSS_AUTH_PROXY_URL?.trim() || `http://localhost:${this.authProxy.port}`
+      // Session credential-fetch URL. config.authProxyUrl resolves as: env
+      // MOSS_AUTH_PROXY_URL → server.json authProxyUrl → http://localhost:12013.
+      // HA/Docker/K8s MUST point this at a container-reachable address (localhost
+      // is not reachable from a session container/pod), so moving
+      // MOSS_AUTH_PROXY_PORT off its default also requires setting
+      // MOSS_AUTH_PROXY_URL to match — avoids the port literal drifting apart.
+      const proxyUrl = this.options.config.authProxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_BASE_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_TOKEN = authToken
@@ -1767,7 +2051,7 @@ export class RuntimeService {
       const entry = this.sessionTokens.get(session.sessionId)
       if (entry) {
         entry.pid = child.pid
-        const tokenUser = this.authService.getUserById(session.userId)
+        const tokenUser = await this.authService.getUserById(session.userId)
         const deptId = tokenUser?.departmentId ?? null
         // Admins/super_admins bypass the department-credential policy gate in
         // the auth proxy (full privileges within org / across orgs).
@@ -1776,7 +2060,7 @@ export class RuntimeService {
       }
     }
 
-    this.store.updateAttemptRunner(attempt.attemptId, child.pid)
+    await this.store.updateAttemptRunner(attempt.attemptId, child.pid)
 
     // Release the per-user container session refcount when the runner exits.
     // Only applies in containerMode='user' — session mode never acquired one.
@@ -1796,13 +2080,13 @@ export class RuntimeService {
       // propagate the error.
       throw err
     }
-    this.store.setSessionLifecycle(session.sessionId, 'active', 'active')
-    this.store.addEvent(session.sessionId, attempt.attemptId, 'attempt_spawned', {
+    await this.store.setSessionLifecycle(session.sessionId, 'active', 'active')
+    await this.store.addEvent(session.sessionId, attempt.attemptId, 'attempt_spawned', {
       runnerPid: child.pid,
       generation,
       attachPath,
     })
-    return this.store.getAttempt(attempt.attemptId) ?? attempt
+    return (await this.store.getAttempt(attempt.attemptId)) ?? attempt
   }
 }
 

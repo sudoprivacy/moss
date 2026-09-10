@@ -60,7 +60,7 @@ export interface ConfigItemLike {
  * 命名为 McpAuthSecretsApi 避免与 createSecretsApi（src/server/api/secrets.ts）混淆。
  */
 export interface McpAuthSecretsApi {
-  getConfigItemByPinyin(pinyin: string): ConfigItemLike | null
+  getConfigItemByPinyin(pinyin: string): Promise<ConfigItemLike | null>
   listSecrets(namespace: string, subject: string): Promise<{ key: string; value: string | null }[]>
 }
 
@@ -157,7 +157,7 @@ export function resolveAuthHeaders(
  */
 export async function resolveSecretRefHeaders(
   secretRef: string,
-  getConfigItemByPinyin: (pinyin: string) => ConfigItemLike | null,
+  getConfigItemByPinyin: (pinyin: string) => Promise<ConfigItemLike | null>,
   listSecrets: (namespace: string, subject: string) => Promise<{ key: string; value: string | null }[]>,
   orgId?: string,
 ): Promise<Record<string, string>> {
@@ -165,7 +165,7 @@ export async function resolveSecretRefHeaders(
 
   // 兼容旧格式 system:xxx 和新格式纯 pinyin
   const pinyin = secretRef.includes(':') ? secretRef.split(':').slice(-1)[0] : secretRef
-  const configItem = getConfigItemByPinyin(pinyin)
+  const configItem = await getConfigItemByPinyin(pinyin)
   if (!configItem) return {}
 
   // Org-scope the enterprise namespace + subject so a session only reads its

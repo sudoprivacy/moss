@@ -1,0 +1,175 @@
+# ============================================================================
+# moss HA — K8s StatefulSet + headless service（P3-2，源设计文档 12.2）
+# ============================================================================
+# 形态：StatefulSet（稳定 pod DNS moss-server-{0..N-1}.moss-server-headless）+
+#       外部 PG（MOSS_DATABASE_URL）+ RWX PVC（runtime/transcript + MOSS_HOME）+
+#       外部 Nexus + 前置 moss-nginx-route.yaml（owner 精确路由，两级 map）。
+#
+# 为什么不用 Ingress 直连 Service：ingress-nginx 不支持按 query 参数路由到特定
+# pod，而 moss 的 owner 路由依赖 ?moss_route=<MOSS_INSTANCE_ID> 精确命中 owner
+# pod（WS 长连接语义）。因此入口层是独立 nginx Deployment（moss-nginx-route.yaml），
+# 其 upstream 直接指向本 headless service 的各 pod DNS；Ingress 仅作为可选 TLS
+# 前置（见 moss-ingress.yaml 更新后的说明）。
+#
+# 前置：
+#   1. StorageClass 提供 RWX（NFS/NAS 类；示例名 moss-nfs-sc）。runtimeDir 与
+#      MOSS_HOME 都必须跨 pod 共享：failover 后接管 pod 要读原 owner 的
+#      transcript/manifest；corp-app 凭证（secrets/、.master_key）在任何 pod 都
+#      要能读到（回调可能落到任意 pod）。
+#   2. Secret moss-pg：MOSS_DATABASE_URL=postgresql://user:pass@pg:5432/moss
+#      （P1 后端：设了它自动 postgres；首次启动自动建全量表）。
+#   3. Secret moss-k8s-kubeconfig（仅 k8s runtime 会话需要）：key=kubeconfig，
+#      值为可达本集群的 kubeconfig 文本。moss 当前经 kubectl --kubeconfig 访问
+#      集群（backends/k8sBackend.ts），尚无 in-cluster ServiceAccount 直连支持；
+#      后续版本计划改为 SA 直连以消除该共享文件依赖（届时本挂载可移除）。
+#   4. Nexus 以独立 Deployment 部署（单写者，单点边界声明见其清单/README-ha），
+#      endpoint 经下方 MOSS_NEXUS_ENDPOINT 指向。
+#
+# 实例扩缩容：replicas 变化后【必须同步】moss-nginx-route.yaml 的 upstream/map
+# 条目（新 pod 的 DNS 与 MOSS_INSTANCE_ID=pod name），再滚动重启 nginx——见
+# README-ha K8s 节 SOP。
+# ----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: moss-server-headless
+  namespace: moss-control
+spec:
+  clusterIP: None
+  selector:
+    app: moss-server
+  ports:
+    - name: http
+      port: 43127
+    - name: callback
+      port: 43128
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: moss-server
+  namespace: moss-control
+spec:
+  serviceName: moss-server-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: moss-server
+  template:
+    metadata:
+      labels:
+        app: moss-server
+    spec:
+      # docker runtime 不适用于 K8s 形态（无宿主 docker.sock）；会话 runtime 用
+      # host/k8s。scode 镜像等经 server.json/storage 配置指向共享卷。
+      containers:
+        - name: moss-server
+          image: my-moss-server:v1
+          ports:
+            - containerPort: 43127
+              name: http
+            - containerPort: 43128
+              name: callback
+          env:
+            - name: MOSS_SERVER_CONFIG
+              value: /app/server.json
+            - name: MOSS_HOME
+              value: /root/.moss
+            # 实例 id = pod name（moss-server-0/1/...，字符集满足 MOSS_INSTANCE_ID
+            # 约束）。nginx 两级 map 的键、route cookie/query 值都等于它。
+            - name: MOSS_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # ws_url 指向 moss-nginx Service（跨实例 owner 路由经它完成）。
+            - name: MOSS_PUBLIC_BASE_URL
+              value: http://moss-nginx.moss-control.svc:80
+            - name: MOSS_AUTH_PROXY_HOST
+              value: 0.0.0.0
+            # auth proxy 仅被同 pod 的 runner 使用（headless 内稳定 pod DNS）。
+            - name: MOSS_AUTH_PROXY_URL
+              value: http://$(POD_NAME).moss-server-headless:12013
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MOSS_NEXUS_MODE
+              value: external
+            - name: MOSS_NEXUS_ENDPOINT
+              value: http://moss-nexus.moss-control.svc:2126
+            - name: MOSS_SHUTDOWN_GRACE_MS
+              value: "30000"
+            - name: MOSS_CALLBACK_PORT
+              value: "43128"
+            # PG 连接串（含密码）只经 Secret 注入。
+            - name: MOSS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moss-pg
+                  key: url
+          envFrom:
+            # MOSS_HOST_PATH_MAP 等 storage 映射按需经 ConfigMap 注入（值指向
+            # 下方两个 PVC 挂载点；pod 内路径两实例天然一致）。
+            - configMapRef:
+                name: moss-server-config
+                optional: true
+          volumeMounts:
+            - name: moss-data
+              mountPath: /app/data
+            - name: moss-home
+              mountPath: /root/.moss
+            - name: server-json
+              mountPath: /app/server.json
+              subPath: server.json
+              readOnly: true
+            - name: kubeconfig
+              mountPath: /root/.moss/server/kubeconfig
+              readOnly: true
+          readinessProbe:
+            # 含 DB/存储真实检查的实例级就绪（drain 时 503 → nginx 摘流）。
+            httpGet:
+              path: /readyz
+              port: 43127
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # 终止宽限 > drain 30s + 兜底 10s（同 compose 形态）。
+          terminationGracePeriodSeconds: 45
+      volumes:
+        - name: moss-data
+          persistentVolumeClaim:
+            claimName: moss-data
+        - name: moss-home
+          persistentVolumeClaim:
+            claimName: moss-home
+        - name: server-json
+          configMap:
+            name: moss-server-json
+        - name: kubeconfig
+          secret:
+            secretName: moss-k8s-kubeconfig
+            optional: true
+---
+# RWX 共享卷（runtimeDir/transcript 与 MOSS_HOME）。StorageClass 指向 NFS/NAS。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moss-data
+  namespace: moss-control
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: moss-nfs-sc
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moss-home
+  namespace: moss-control
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: moss-nfs-sc
+  resources:
+    requests:
+      storage: 10Gi

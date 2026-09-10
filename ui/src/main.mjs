@@ -761,6 +761,8 @@ async function resolveRemoteDirectConnection() {
   };
 }
 
+// Returns an Error carrying `.status` (HTTP response status) so callers can
+// distinguish retryable 5xx / network failures from permanent 4xx ones.
 async function parseRemoteDirectError(prefix, response) {
   let detail = '';
   try {
@@ -779,9 +781,13 @@ async function parseRemoteDirectError(prefix, response) {
     }
   } catch {}
 
-  return detail
-    ? `${prefix}: ${response.status} ${response.statusText}: ${detail}`
-    : `${prefix}: ${response.status} ${response.statusText}`;
+  const error = new Error(
+    detail
+      ? `${prefix}: ${response.status} ${response.statusText}: ${detail}`
+      : `${prefix}: ${response.status} ${response.statusText}`,
+  );
+  error.status = response.status;
+  return error;
 }
 
 async function fetchRemoteDirectSessionInfo({ serverUrl, authToken, sessionId }) {
@@ -802,9 +808,7 @@ async function fetchRemoteDirectSessionInfo({ serverUrl, authToken, sessionId })
   }
 
   if (!response.ok) {
-    throw new Error(
-      await parseRemoteDirectError(`Failed to query remote session ${sessionId}`, response),
-    );
+    throw await parseRemoteDirectError(`Failed to query remote session ${sessionId}`, response);
   }
 
   return response.json();
@@ -828,9 +832,7 @@ async function fetchRemoteDirectSessionContext({ serverUrl, authToken, sessionId
   }
 
   if (!response.ok) {
-    throw new Error(
-      await parseRemoteDirectError(`Failed to query remote session context ${sessionId}`, response),
-    );
+    throw await parseRemoteDirectError(`Failed to query remote session context ${sessionId}`, response);
   }
 
   return response.json();
@@ -854,9 +856,7 @@ async function resumeRemoteDirectSession({ serverUrl, authToken, sessionId }) {
   }
 
   if (!response.ok) {
-    throw new Error(
-      await parseRemoteDirectError(`Failed to resume remote session ${sessionId}`, response),
-    );
+    throw await parseRemoteDirectError(`Failed to resume remote session ${sessionId}`, response);
   }
 
   const data = await response.json();
@@ -877,6 +877,31 @@ async function resumeRemoteDirectSession({ serverUrl, authToken, sessionId }) {
     },
     workDir: typeof data?.session?.workDir === 'string' ? data.session.workDir : undefined,
   };
+}
+
+// Bounded reconnect budget for remote-direct sends. One initial attempt plus
+// 8 retries with exponential backoff (1/2/4/8/16/30/30/30s, 121s of backoff
+// alone) covers the worst LB failover timeline: instance-death detection
+// (heartbeatTimeoutMs, default 30s) + runner fencing suicide (≤10s) +
+// attempt-heartbeat expiry (30s), plus retry phase offsets ≈70-105s.
+const REMOTE_DIRECT_MAX_ATTEMPTS = 9;
+const REMOTE_DIRECT_RETRY_BASE_MS = 1000;
+const REMOTE_DIRECT_RETRY_MAX_MS = 30000;
+
+function remoteDirectRetryDelayMs(retryIndex) {
+  return Math.min(
+    REMOTE_DIRECT_RETRY_BASE_MS * 2 ** (retryIndex - 1),
+    REMOTE_DIRECT_RETRY_MAX_MS,
+  );
+}
+
+// 4xx (auth / not-found class) is permanent — surface it immediately. 5xx
+// (e.g. the 503 a taking-over instance returns while fencing completes) and
+// network errors (no .status) are retryable.
+function isRetryableRemoteDirectError(error) {
+  const status = error?.status;
+  if (typeof status === 'number') return status >= 500;
+  return true;
 }
 
 function createRemoteDirectRuntime({
@@ -984,7 +1009,6 @@ function createRemoteDirectRuntime({
         throw new Error('Remote runtime is already processing a request.');
       }
 
-      const { mod, config } = await ensureSessionConfig();
       const queue = [];
       let pendingResolve = null;
       let pendingReject = null;
@@ -1030,6 +1054,7 @@ function createRemoteDirectRuntime({
 
       currentTurn = {
         finished: false,
+        aborted: false,
         flushMessage,
         fail,
       };
@@ -1046,6 +1071,11 @@ function createRemoteDirectRuntime({
           }
           return activeManager;
         }
+
+        // Resolve the session config on every connection attempt: after a
+        // failover the re-fetched metadata carries the new owner route in
+        // ws_url, which a cached config would never see.
+        const { mod, config } = await ensureSessionConfig();
 
         managerConnectPromise = new Promise((resolve, reject) => {
           const manager = new mod.DirectConnectSessionManager(config, {
@@ -1111,27 +1141,75 @@ function createRemoteDirectRuntime({
       };
 
       try {
-        const manager = await ensureManager();
-        const sent = manager.sendMessage(prompt);
-        if (!sent) {
-          throw new Error('Failed to send prompt to remote session.');
-        }
-
-        while (true) {
-          const message = await nextMessage();
-          yield message;
-          if (message?.type === 'result') {
-            break;
+        let lastError = null;
+        for (let attempt = 1; attempt <= REMOTE_DIRECT_MAX_ATTEMPTS; attempt += 1) {
+          if (attempt > 1) {
+            await new Promise((resolve) => setTimeout(resolve, remoteDirectRetryDelayMs(attempt - 1)));
           }
+          if (disposed || currentTurn?.aborted) {
+            throw new Error('Remote session request was aborted.');
+          }
+
+          let manager = null;
+          try {
+            manager = await ensureManager();
+            lastError = null;
+          } catch (error) {
+            if (!isRetryableRemoteDirectError(error)) throw error;
+            lastError = error;
+            sessionPromise = null;
+            activeManager = null;
+            managerConnectPromise = null;
+            continue;
+          }
+
+          const sent = manager.sendMessage(prompt);
+          if (!sent) {
+            throw new Error('Failed to send prompt to remote session.');
+          }
+
+          while (true) {
+            const message = await nextMessage();
+            yield message;
+            if (message?.type === 'result') {
+              break;
+            }
+          }
+          if (pendingError) {
+            // Turn failed mid-flight. Our own onDisconnected callback fails
+            // the turn with this fixed message once the SDK exhausts its
+            // reconnect budget (~50-60s) — shorter than the worst failover
+            // window (~70-105s), so most takeovers outlast it. Clear the
+            // cached config and retry within the same budget: the re-fetch
+            // picks up the new owner route from ws_url.
+            if (
+              pendingError instanceof Error
+              && pendingError.message.includes('disconnected before completion')
+              && !currentTurn?.aborted
+              && !disposed
+            ) {
+              lastError = pendingError;
+              pendingError = null;
+              settled = false;
+              queue.length = 0;
+              sessionPromise = null;
+              activeManager = null;
+              managerConnectPromise = null;
+              continue;
+            }
+            throw pendingError;
+          }
+          return;
         }
-        if (pendingError) {
-          throw pendingError;
-        }
+        throw lastError ?? new Error('Remote session failed to connect.');
       } finally {
         currentTurn = null;
       }
     },
     abort() {
+      if (currentTurn) {
+        currentTurn.aborted = true;
+      }
       activeManager?.sendInterrupt?.();
     },
     dispose() {

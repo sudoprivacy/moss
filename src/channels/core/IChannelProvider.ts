@@ -44,18 +44,18 @@ export class LocalChannelProvider implements IChannelProvider {
   constructor(private db: DirectConnectStore) {}
 
   async getPlugins(userId?: string): Promise<IChannelPluginConfig[]> {
-    const rows = this.db.listChannelPlugins(userId);
+    const rows = await this.db.listChannelPlugins(userId);
     return rows.map((row) => this.mapPluginRow(row));
   }
 
   async getPlugin(pluginId: string, userId?: string): Promise<IChannelPluginConfig | null> {
-    const row = this.db.getChannelPlugin(pluginId, userId);
+    const row = await this.db.getChannelPlugin(pluginId, userId);
     return row ? this.mapPluginRow(row) : null;
   }
 
   async upsertPlugin(plugin: IChannelPluginConfig, userId: string, orgId?: string | null): Promise<boolean> {
     try {
-      this.db.upsertChannelPlugin({
+      await this.db.upsertChannelPlugin({
         id: plugin.id,
         type: plugin.type,
         name: plugin.name,
@@ -76,7 +76,7 @@ export class LocalChannelProvider implements IChannelProvider {
 
   async updatePluginStatus(pluginId: string, status: PluginStatus, lastConnected?: number): Promise<boolean> {
     try {
-      this.db.updateChannelPluginStatus(pluginId, status, lastConnected);
+      await this.db.updateChannelPluginStatus(pluginId, status, lastConnected);
       return true;
     } catch {
       return false;
@@ -86,9 +86,9 @@ export class LocalChannelProvider implements IChannelProvider {
   async updatePluginEnabled(pluginId: string, enabled: boolean, status: PluginStatus, userId?: string): Promise<boolean> {
     try {
       // Update the plugin with enabled status
-      const existing = this.db.getChannelPlugin(pluginId, userId);
+      const existing = await this.db.getChannelPlugin(pluginId, userId);
       if (existing?.user_id) {
-        this.db.upsertChannelPlugin({
+        await this.db.upsertChannelPlugin({
           id: pluginId,
           type: String(existing.type),
           name: String(existing.name),
@@ -112,9 +112,9 @@ export class LocalChannelProvider implements IChannelProvider {
   async deletePlugin(pluginId: string, userId?: string): Promise<boolean> {
     try {
       // Disable the plugin first (mark as disabled)
-      const existing = this.db.getChannelPlugin(pluginId, userId);
+      const existing = await this.db.getChannelPlugin(pluginId, userId);
       if (existing?.user_id) {
-        this.db.upsertChannelPlugin({
+        await this.db.upsertChannelPlugin({
           id: pluginId,
           type: String(existing.type),
           name: String(existing.name),
@@ -134,7 +134,7 @@ export class LocalChannelProvider implements IChannelProvider {
   }
 
   async getUsers(): Promise<IChannelUser[]> {
-    const rows = this.db.listChannelUsers();
+    const rows = await this.db.listChannelUsers();
     return rows.map((row) => this.mapUserRow(row));
   }
 
@@ -144,13 +144,13 @@ export class LocalChannelProvider implements IChannelProvider {
    * connection should pass its scope so siblings stay isolated.
    */
   async getUserByPlatform(platformUserId: string, platformType: PluginType): Promise<IChannelUser | null> {
-    const row = this.db.getChannelUserByPlatform(platformUserId, platformType);
+    const row = await this.db.getChannelUserByPlatform(platformUserId, platformType);
     return row ? this.mapUserRow(row) : null;
   }
 
   async deleteUser(userId: string): Promise<boolean> {
     try {
-      this.db.deleteChannelUser(userId);
+      await this.db.deleteChannelUser(userId);
       return true;
     } catch {
       return false;
@@ -159,19 +159,19 @@ export class LocalChannelProvider implements IChannelProvider {
 
   async deleteUsersByPlatform(platformType: string): Promise<number> {
     try {
-      return this.db.deleteChannelUsersByPlatform(platformType);
+      return await this.db.deleteChannelUsersByPlatform(platformType);
     } catch {
       return 0;
     }
   }
 
   async getPendingPairingRequests(): Promise<IChannelPairingRequest[]> {
-    const rows = this.db.listPendingPairingRequests();
+    const rows = await this.db.listPendingPairingRequests();
     return rows.map((row) => this.mapPairingRow(row));
   }
 
   async approvePairing(code: string): Promise<{ success: boolean; error?: string; user?: IChannelUser }> {
-    const row = this.db.getPairingRequest(code);
+    const row = await this.db.getPairingRequest(code);
     if (!row) {
       return { success: false, error: 'Invalid pairing code' };
     }
@@ -194,7 +194,7 @@ export class LocalChannelProvider implements IChannelProvider {
       authorizedAt: Date.now(),
     };
 
-    this.db.upsertChannelUser({
+    await this.db.upsertChannelUser({
       id: user.id,
       platform_user_id: user.platformUserId,
       platform_type: user.platformType,
@@ -207,18 +207,18 @@ export class LocalChannelProvider implements IChannelProvider {
     });
 
     // Update pairing status
-    this.db.updatePairingRequestStatus(code, 'approved');
+    await this.db.updatePairingRequestStatus(code, 'approved');
 
     return { success: true, user };
   }
 
   async rejectPairing(code: string): Promise<{ success: boolean; error?: string }> {
-    const row = this.db.getPairingRequest(code);
+    const row = await this.db.getPairingRequest(code);
     if (!row) {
       return { success: false, error: 'Invalid pairing code' };
     }
 
-    this.db.updatePairingRequestStatus(code, 'rejected');
+    await this.db.updatePairingRequestStatus(code, 'rejected');
     return { success: true };
   }
 

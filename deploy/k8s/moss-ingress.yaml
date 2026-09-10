@@ -1,21 +1,25 @@
 # ============================================================================
-# moss LB — K8s Ingress 示例（sticky session via cookie affinity）
+# moss LB — K8s Ingress（可选 TLS 前置；cookie affinity 为简化备选形态）
 # ============================================================================
-# 说明（务必先读）：
-#   1. 这是 Ingress 示例（源设计文档任务 8 仅要求 K8s Ingress 示例）。仅演示
-#      ingress-nginx 的 cookie affinity + WS/SSE/大 body 相关 annotation。
-#   2. moss 默认 storage 为本地 SQLite + 本地目录，多副本无法共享写。因此“完整
-#      K8s 多副本部署”不在本期范围——本文件是入口层 sticky 的示例，不是可直接多副本
-#      拉起的完整清单（无 Deployment/Service/PVC）。
-#   3. affinity cookie 与 moss route cookie 同名互斥：ingress-nginx 的
-#      session-cookie-name: moss_route 与 moss 自设的 route cookie（当配置
-#      MOSS_INSTANCE_ID 时，见 setRouteCookieHeader）同名——两者相互覆盖、affinity
-#      失效。因此本示例的适用前提是 moss【不配】MOSS_INSTANCE_ID，把 moss_route
-#      cookie 完全交给 ingress-nginx 管理。
+# 【HA 首选方案已迁移】完整的 K8s 多副本 HA 不走本 Ingress 直连 Service 的形态：
+#   部署 moss-server-statefulset.yaml + moss-nginx-route.yaml + moss-nexus.yaml。
+#   原因：ingress-nginx 不支持按 query 参数路由到特定 pod，而 moss 的 WS owner
+#   精确路由依赖 ?moss_route=<MOSS_INSTANCE_ID>（StatefulSet pod name）。入口层
+#   由独立 nginx Deployment（两级 map，upstream 指向 headless pod DNS）承担。
 #
-# Deployment vs StatefulSet（源文档 12.2）：Phase A/B 可用 Deployment（instance id
-# 经 pod name/env 注入）；Phase C owner-aware 推荐 StatefulSet + headless service。
-# 本期不涉及 Phase C。
+# 本文件的两个用途：
+#   1. 【首选形态的可选 TLS 前置】：backend 改指 moss-nginx Service（80），本
+#      Ingress 只做 TLS 终止与域名收敛（annotation 保留 WS/SSE/body-size）。
+#      此时【删除】affinity 相关 annotation——路由粘滞由 moss-nginx 的两级 map
+#      完成，ingress 再做 affinity 会与之互斥（同名 cookie 互相覆盖）。
+#   2. 【简化备选（非完整 HA）】：单副本或允许 WS 409 重连风暴的场景，可保留
+#      下方 cookie affinity 直连 moss-server-headless。适用前提仍是 moss 【不配】
+#      MOSS_INSTANCE_ID（affinity cookie 与 moss 自设 route cookie 同名互斥，
+#      见 setRouteCookieHeader），因此该备选没有 owner 路由/fencing 语义，
+#      不作为 HA 交付形态。
+#
+# Deployment vs StatefulSet（源文档 12.2）：HA（owner-aware + fencing）必须
+# StatefulSet + headless service（实例 id 稳定 = pod name）。
 # ----------------------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress

@@ -280,30 +280,30 @@ export class DocumentStore {
 
   // ---------- Tree ----------
 
-  listTree(orgId: string): DocumentTreeNode[] {
-    return this.store.listDocumentTreeNodes(orgId).map(mapTreeNode)
+  async listTree(orgId: string): Promise<DocumentTreeNode[]> {
+    return (await this.store.listDocumentTreeNodes(orgId)).map(mapTreeNode)
   }
 
-  getNode(id: string, orgId: string): DocumentTreeNode | null {
-    const row = this.store.getDocumentTreeNode(id, orgId)
+  async getNode(id: string, orgId: string): Promise<DocumentTreeNode | null> {
+    const row = await this.store.getDocumentTreeNode(id, orgId)
     return row ? mapTreeNode(row) : null
   }
 
-  createNode(input: {
+  async createNode(input: {
     orgId: string
     parentId: string | null
     name: string
     description?: string
     sortOrder?: number
-  }): DocumentTreeNode {
+  }): Promise<DocumentTreeNode> {
     if (input.parentId) {
-      const parent = this.getNode(input.parentId, input.orgId)
+      const parent = await this.getNode(input.parentId, input.orgId)
       if (!parent) {
         throw new Error(`parent node not found: ${input.parentId}`)
       }
     }
     const id = randomUUID()
-    this.store.createDocumentTreeNode({
+    await this.store.createDocumentTreeNode({
       id,
       org_id: input.orgId,
       parent_id: input.parentId,
@@ -311,31 +311,31 @@ export class DocumentStore {
       description: input.description ?? null,
       sort_order: input.sortOrder ?? 0,
     })
-    return this.getNode(id, input.orgId)!
+    return (await this.getNode(id, input.orgId))!
   }
 
-  updateNode(id: string, orgId: string, updates: {
+  async updateNode(id: string, orgId: string, updates: {
     parentId?: string | null
     name?: string
     description?: string | null
     sortOrder?: number
-  }): DocumentTreeNode {
+  }): Promise<DocumentTreeNode> {
     // Move guard: do not allow moving under a descendant (cycle).
     if (updates.parentId !== undefined && updates.parentId !== null) {
       if (updates.parentId === id) {
         throw new Error('cannot set node as its own parent')
       }
-      if (this.isDescendant(updates.parentId, id, orgId)) {
+      if (await this.isDescendant(updates.parentId, id, orgId)) {
         throw new Error('cannot move node under its own descendant')
       }
     }
-    this.store.updateDocumentTreeNode(id, orgId, {
+    await this.store.updateDocumentTreeNode(id, orgId, {
       parent_id: updates.parentId,
       name: updates.name,
       description: updates.description,
       sort_order: updates.sortOrder,
     })
-    const updated = this.getNode(id, orgId)
+    const updated = await this.getNode(id, orgId)
     if (!updated) throw new Error(`node ${id} disappeared after update`)
     return updated
   }
@@ -345,16 +345,16 @@ export class DocumentStore {
    * We also remove the on-disk files for all those documents.
    */
   async deleteNode(id: string, orgId: string): Promise<void> {
-    const descendantIds = this.collectDescendantNodeIds(id, orgId)
+    const descendantIds = await this.collectDescendantNodeIds(id, orgId)
     descendantIds.add(id)
     // Gather all document storage paths before cascade deletes them
     const docPaths: string[] = []
     for (const nid of descendantIds) {
-      for (const doc of this.listDocumentsForNode(nid, orgId)) {
+      for (const doc of await this.listDocumentsForNode(nid, orgId)) {
         docPaths.push(doc.storagePath)
       }
     }
-    this.store.deleteDocumentTreeNode(id, orgId)
+    await this.store.deleteDocumentTreeNode(id, orgId)
     // Clean up on-disk files (best effort)
     for (const p of docPaths) {
       try {
@@ -369,8 +369,8 @@ export class DocumentStore {
   }
 
   /** True if `candidate` is a descendant of `root` (inclusive root → false). */
-  private isDescendant(candidate: string, root: string, orgId: string): boolean {
-    const all = this.listTree(orgId)
+  private async isDescendant(candidate: string, root: string, orgId: string): Promise<boolean> {
+    const all = await this.listTree(orgId)
     const byId = new Map(all.map(n => [n.id, n]))
     let cur: DocumentTreeNode | undefined = byId.get(candidate)
     while (cur) {
@@ -380,8 +380,8 @@ export class DocumentStore {
     return false
   }
 
-  private collectDescendantNodeIds(rootId: string, orgId: string): Set<string> {
-    const all = this.listTree(orgId)
+  private async collectDescendantNodeIds(rootId: string, orgId: string): Promise<Set<string>> {
+    const all = await this.listTree(orgId)
     const childrenByParent = new Map<string, DocumentTreeNode[]>()
     for (const n of all) {
       if (n.parentId) {
@@ -405,24 +405,24 @@ export class DocumentStore {
 
   // ---------- Documents ----------
 
-  listDocumentsForNode(nodeId: string, orgId: string): DocumentRecord[] {
-    return this.store.listDocumentsByNode(nodeId, orgId).map(mapDocument)
+  async listDocumentsForNode(nodeId: string, orgId: string): Promise<DocumentRecord[]> {
+    return (await this.store.listDocumentsByNode(nodeId, orgId)).map(mapDocument)
   }
 
   /** All non-deleted documents under a node's whole subtree (recursive). Used by
    *  the wiki 'external-source files' picker to list files across subfolders. */
-  listDocumentsUnderNode(nodeId: string, orgId: string): DocumentRecord[] {
-    return this.store.listDocumentsUnderNode(nodeId, orgId).map(mapDocument)
+  async listDocumentsUnderNode(nodeId: string, orgId: string): Promise<DocumentRecord[]> {
+    return (await this.store.listDocumentsUnderNode(nodeId, orgId)).map(mapDocument)
   }
 
   /** Documents under any of `includeIds`' subtrees minus `excludeIds`' subtrees.
    *  Materializes a multi-dir dir-mode wiki's inputs at build time. */
-  listDocumentsUnderNodes(includeIds: string[], excludeIds: string[], orgId: string): DocumentRecord[] {
-    return this.store.listDocumentsUnderNodes(includeIds, excludeIds, orgId).map(mapDocument)
+  async listDocumentsUnderNodes(includeIds: string[], excludeIds: string[], orgId: string): Promise<DocumentRecord[]> {
+    return (await this.store.listDocumentsUnderNodes(includeIds, excludeIds, orgId)).map(mapDocument)
   }
 
-  getDocument(id: string, orgId: string): DocumentRecord | null {
-    const row = this.store.getDocument(id, orgId)
+  async getDocument(id: string, orgId: string): Promise<DocumentRecord | null> {
+    const row = await this.store.getDocument(id, orgId)
     return row ? mapDocument(row) : null
   }
 
@@ -439,7 +439,7 @@ export class DocumentStore {
     uploadedBy: string
   }): Promise<DocumentRecord> {
     // Validate node exists
-    const node = this.getNode(input.nodeId, input.orgId)
+    const node = await this.getNode(input.nodeId, input.orgId)
     if (!node) {
       throw new Error(`node not found: ${input.nodeId}`)
     }
@@ -451,7 +451,7 @@ export class DocumentStore {
     await mkdir(getDocumentDir(id), { recursive: true })
     await writeFile(storagePath, input.content)
 
-    this.store.createDocument({
+    await this.store.createDocument({
       id,
       org_id: input.orgId,
       node_id: input.nodeId,
@@ -462,13 +462,13 @@ export class DocumentStore {
       uploaded_by: input.uploadedBy,
     })
 
-    return this.getDocument(id, input.orgId)!
+    return (await this.getDocument(id, input.orgId))!
   }
 
   async deleteDocument(id: string, orgId: string): Promise<void> {
-    const doc = this.getDocument(id, orgId)
+    const doc = await this.getDocument(id, orgId)
     if (!doc) return
-    this.store.deleteDocument(id, orgId)
+    await this.store.deleteDocument(id, orgId)
     // Best-effort on-disk cleanup
     try {
       const dir = path.dirname(doc.storagePath)
@@ -482,8 +482,8 @@ export class DocumentStore {
 
   // ---------- Wikis ----------
 
-  listWikis(orgId: string, filter?: { nodeId?: string; buildStatus?: WikiRecord['buildStatus'] }): WikiRecord[] {
-    return this.store.listWikis(orgId, filter).map(mapWiki)
+  async listWikis(orgId: string, filter?: { nodeId?: string; buildStatus?: WikiRecord['buildStatus'] }): Promise<WikiRecord[]> {
+    return (await this.store.listWikis(orgId, filter)).map(mapWiki)
   }
 
   /**
@@ -495,24 +495,24 @@ export class DocumentStore {
     orgId: string,
     filter?: { nodeId?: string; buildStatus?: WikiRecord['buildStatus'] },
   ): Promise<WikiRecord[]> {
-    const wikis = this.listWikis(orgId, filter)
+    const wikis = await this.listWikis(orgId, filter)
     return Promise.all(wikis.map(enrichWikiStaleness))
   }
 
-  getWiki(id: string, orgId: string): WikiRecord | null {
-    const row = this.store.getWiki(id, orgId)
+  async getWiki(id: string, orgId: string): Promise<WikiRecord | null> {
+    const row = await this.store.getWiki(id, orgId)
     return row ? mapWiki(row) : null
   }
 
   /** Like `getWiki` but with Track 2 staleness recomputed (for API/display). */
   async getWikiEnriched(id: string, orgId: string): Promise<WikiRecord | null> {
-    const wiki = this.getWiki(id, orgId)
+    const wiki = await this.getWiki(id, orgId)
     return wiki ? enrichWikiStaleness(wiki) : null
   }
 
   /** Cross-org getter for runtime / build worker. Caller is responsible for auth. */
-  getWikiById(id: string): WikiRecord | null {
-    const row = this.store.getWikiById(id)
+  async getWikiById(id: string): Promise<WikiRecord | null> {
+    const row = await this.store.getWikiById(id)
     return row ? mapWiki(row) : null
   }
 
@@ -529,7 +529,7 @@ export class DocumentStore {
     createdBy: string
   }): Promise<WikiRecord> {
     if (input.nodeId) {
-      const node = this.getNode(input.nodeId, input.orgId)
+      const node = await this.getNode(input.nodeId, input.orgId)
       if (!node) {
         throw new Error(`node not found: ${input.nodeId}`)
       }
@@ -539,7 +539,7 @@ export class DocumentStore {
     if (sourceMode === 'dir') {
       if (includeIds.length === 0) throw new Error('dir-mode wiki requires at least one source node')
       for (const nid of includeIds) {
-        if (!this.getNode(nid, input.orgId)) throw new Error(`source node not found: ${nid}`)
+        if (!(await this.getNode(nid, input.orgId))) throw new Error(`source node not found: ${nid}`)
       }
     } else if (input.sourceDocumentIds.length === 0) {
       throw new Error('files-mode wiki requires at least one document')
@@ -548,7 +548,7 @@ export class DocumentStore {
     const storagePath = getWikiDir(id)
     await mkdir(storagePath, { recursive: true })
 
-    this.store.createWiki({
+    await this.store.createWiki({
       id,
       org_id: input.orgId,
       node_id: input.nodeId ?? null,
@@ -565,10 +565,10 @@ export class DocumentStore {
       created_by: input.createdBy,
     })
 
-    return this.getWiki(id, input.orgId)!
+    return (await this.getWiki(id, input.orgId))!
   }
 
-  updateWiki(id: string, orgId: string, updates: {
+  async updateWiki(id: string, orgId: string, updates: {
     name?: string
     description?: string | null
     nodeId?: string | null
@@ -577,8 +577,8 @@ export class DocumentStore {
     sourceNodeIds?: string[]
     sourceExcludeNodeIds?: string[]
     autoRebuild?: boolean
-  }): WikiRecord {
-    const existing = this.getWiki(id, orgId)
+  }): Promise<WikiRecord> {
+    const existing = await this.getWiki(id, orgId)
     if (!existing) throw new Error(`wiki not found: ${id}`)
     const nextMode = updates.sourceMode ?? existing.sourceMode
     const nextIncludes =
@@ -586,10 +586,10 @@ export class DocumentStore {
     if (nextMode === 'dir') {
       if (nextIncludes.length === 0) throw new Error('dir-mode wiki requires at least one source node')
       for (const nid of nextIncludes) {
-        if (!this.getNode(nid, orgId)) throw new Error(`source node not found: ${nid}`)
+        if (!(await this.getNode(nid, orgId))) throw new Error(`source node not found: ${nid}`)
       }
     }
-    this.store.updateWiki(id, orgId, {
+    await this.store.updateWiki(id, orgId, {
       name: updates.name,
       description: updates.description,
       node_id: updates.nodeId,
@@ -606,15 +606,15 @@ export class DocumentStore {
       auto_rebuild:
         updates.autoRebuild !== undefined ? updates.autoRebuild : existing.autoRebuild,
     })
-    const wiki = this.getWiki(id, orgId)
+    const wiki = await this.getWiki(id, orgId)
     if (!wiki) throw new Error(`wiki ${id} disappeared after update`)
     return wiki
   }
 
   async deleteWiki(id: string, orgId: string): Promise<void> {
-    const wiki = this.getWiki(id, orgId)
+    const wiki = await this.getWiki(id, orgId)
     if (!wiki) return
-    this.store.deleteWiki(id, orgId)
+    await this.store.deleteWiki(id, orgId)
     try {
       if (wiki.storagePath.startsWith(MOSS_WIKIS_DIR)) {
         await rm(wiki.storagePath, { recursive: true, force: true })
@@ -624,12 +624,12 @@ export class DocumentStore {
     }
   }
 
-  setWikiBuildResult(id: string, result: {
+  async setWikiBuildResult(id: string, result: {
     status: WikiRecord['buildStatus']
     lastBuiltAt?: number
     lastBuildError?: string | null
-  }): void {
-    this.store.updateWikiBuildResult(id, {
+  }): Promise<void> {
+    await this.store.updateWikiBuildResult(id, {
       build_status: result.status,
       last_built_at: result.lastBuiltAt,
       last_build_error: result.lastBuildError,
@@ -638,59 +638,59 @@ export class DocumentStore {
 
   // ---------- Build Jobs ----------
 
-  listBuildJobs(wikiId: string, limit?: number): WikiBuildJob[] {
-    return this.store.listWikiBuildJobs(wikiId, limit).map(mapBuildJob)
+  async listBuildJobs(wikiId: string, limit?: number): Promise<WikiBuildJob[]> {
+    return (await this.store.listWikiBuildJobs(wikiId, limit)).map(mapBuildJob)
   }
 
-  listBuildJobsForOrg(orgId: string, filter?: {
+  async listBuildJobsForOrg(orgId: string, filter?: {
     status?: WikiBuildJob['status']
     wikiId?: string
     limit?: number
     offset?: number
-  }): { items: WikiBuildJobListItem[]; total: number } {
-    const result = this.store.listWikiBuildJobsForOrg(orgId, filter)
+  }): Promise<{ items: WikiBuildJobListItem[]; total: number }> {
+    const result = await this.store.listWikiBuildJobsForOrg(orgId, filter)
     return {
       items: result.items.map(mapBuildJobListItem),
       total: result.total,
     }
   }
 
-  getBuildJobForOrg(id: string, orgId: string): WikiBuildJobListItem | null {
-    const row = this.store.getWikiBuildJobForOrg(id, orgId)
+  async getBuildJobForOrg(id: string, orgId: string): Promise<WikiBuildJobListItem | null> {
+    const row = await this.store.getWikiBuildJobForOrg(id, orgId)
     return row ? mapBuildJobListItem(row) : null
   }
 
-  getBuildJob(id: string): WikiBuildJob | null {
-    const row = this.store.getWikiBuildJob(id)
+  async getBuildJob(id: string): Promise<WikiBuildJob | null> {
+    const row = await this.store.getWikiBuildJob(id)
     return row ? mapBuildJob(row) : null
   }
 
-  getLatestBuildJob(wikiId: string): WikiBuildJob | null {
-    const row = this.store.getLatestWikiBuildJob(wikiId)
+  async getLatestBuildJob(wikiId: string): Promise<WikiBuildJob | null> {
+    const row = await this.store.getLatestWikiBuildJob(wikiId)
     return row ? mapBuildJob(row) : null
   }
 
-  countActiveBuildJobs(): number {
+  async countActiveBuildJobs(): Promise<number> {
     return this.store.countRunningWikiBuildJobs()
   }
 
-  listQueuedBuildJobs(limit?: number): WikiBuildJob[] {
-    return this.store.listQueuedWikiBuildJobs(limit).map(mapBuildJob)
+  async listQueuedBuildJobs(limit?: number): Promise<WikiBuildJob[]> {
+    return (await this.store.listQueuedWikiBuildJobs(limit)).map(mapBuildJob)
   }
 
-  createBuildJob(input: { wikiId: string; triggeredBy: string }): WikiBuildJob {
+  async createBuildJob(input: { wikiId: string; triggeredBy: string }): Promise<WikiBuildJob> {
     const id = randomUUID()
-    this.store.createWikiBuildJob({
+    await this.store.createWikiBuildJob({
       id,
       wiki_id: input.wikiId,
       triggered_by: input.triggeredBy,
     })
-    const job = this.getBuildJob(id)
+    const job = await this.getBuildJob(id)
     if (!job) throw new Error(`build job ${id} not found after create`)
     return job
   }
 
-  updateBuildJob(id: string, updates: Partial<{
+  async updateBuildJob(id: string, updates: Partial<{
     status: WikiBuildJob['status']
     progress: number
     currentStep: string | null
@@ -698,8 +698,8 @@ export class DocumentStore {
     sessionId: string | null
     startedAt: number
     finishedAt: number
-  }>): void {
-    this.store.updateWikiBuildJob(id, {
+  }>): Promise<void> {
+    await this.store.updateWikiBuildJob(id, {
       status: updates.status,
       progress: updates.progress,
       current_step: updates.currentStep,

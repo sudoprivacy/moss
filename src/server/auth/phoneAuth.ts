@@ -134,9 +134,9 @@ export class PhoneAuthService {
    * provider is wired) spends money per call.
    */
   async sendCode(phone: string, now = Date.now()): Promise<{ nextSendIn: number; delivery: PhoneCodeDelivery }> {
-    this.db.prunePhoneLoginCodes(now)
+    await this.db.prunePhoneLoginCodes(now)
 
-    const existing = this.db.getPhoneLoginCode(phone)
+    const existing = await this.db.getPhoneLoginCode(phone)
     if (existing) {
       const elapsedSec = Math.floor((now - existing.createdAt) / 1000)
       const remaining = this.config.resendCooldownSec - elapsedSec
@@ -145,20 +145,20 @@ export class PhoneAuthService {
       }
     }
 
-    const sentLastHour = this.db.countPhoneLoginSends(phone, now - 60 * 60 * 1000)
+    const sentLastHour = await this.db.countPhoneLoginSends(phone, now - 60 * 60 * 1000)
     if (sentLastHour >= this.config.maxSendsPerHour) {
       throw new PhoneAuthError(429, 'Too many codes requested for this number, try again later')
     }
 
     const code = generateCode()
-    this.db.upsertPhoneLoginCode({
+    await this.db.upsertPhoneLoginCode({
       phone,
       codeHash: hashCode(code, this.secret),
       createdAt: now,
       expiresAt: now + this.config.codeTtlSec * 1000,
       attempts: 0,
     })
-    this.db.recordPhoneLoginSend(phone, now)
+    await this.db.recordPhoneLoginSend(phone, now)
 
     // Deliver BEFORE returning success: a provider refusal (bad credentials,
     // template not approved, quota exhausted) must surface as a failed send
@@ -167,7 +167,7 @@ export class PhoneAuthService {
     try {
       await this.deliverCode(phone, code)
     } catch (error) {
-      this.db.deletePhoneLoginCode(phone)
+      await this.db.deletePhoneLoginCode(phone)
       throw new PhoneAuthError(
         502,
         error instanceof Error ? error.message : 'Failed to deliver verification code',
@@ -204,25 +204,25 @@ export class PhoneAuthService {
    * attempt budget is not exhausted; the record is deleted on success so a code
    * cannot be reused.
    */
-  verifyCode(phone: string, code: unknown, now = Date.now()): boolean {
+  async verifyCode(phone: string, code: unknown, now = Date.now()): Promise<boolean> {
     if (typeof code !== 'string' || !/^\d{4,8}$/.test(code.trim())) return false
-    const record = this.db.getPhoneLoginCode(phone)
+    const record = await this.db.getPhoneLoginCode(phone)
     if (!record) return false
 
     if (record.expiresAt <= now) {
-      this.db.deletePhoneLoginCode(phone)
+      await this.db.deletePhoneLoginCode(phone)
       return false
     }
     if (record.attempts >= this.config.maxVerifyAttempts) {
       // Burn the code rather than leaving an exhausted record around: a fresh
       // send is the only way forward, which is also the rate-limited path.
-      this.db.deletePhoneLoginCode(phone)
+      await this.db.deletePhoneLoginCode(phone)
       throw new PhoneAuthError(429, 'Too many incorrect attempts, request a new code')
     }
 
     const matches = constantTimeEquals(hashCode(code.trim(), this.secret), record.codeHash)
     if (!matches) {
-      this.db.bumpPhoneLoginCodeAttempts(phone)
+      await this.db.bumpPhoneLoginCodeAttempts(phone)
       return false
     }
     this.db.deletePhoneLoginCode(phone)

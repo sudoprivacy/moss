@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto'
-import type { DatabaseSync } from 'node:sqlite'
+import { isUniqueViolation, type DbDriver } from '../../db/driver.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -168,7 +168,7 @@ function mapRun(row: SqlRow): EventTriggerRun {
 }
 
 export class EventTriggerStore {
-  constructor(private db: DatabaseSync) {}
+  constructor(private driver: DbDriver) {}
 
   // ==================== Trigger CRUD ====================
 
@@ -177,12 +177,12 @@ export class EventTriggerStore {
    * The caller must surface `secret` to the client immediately — it is
    * unrecoverable afterwards.
    */
-  insert(input: CreateEventTriggerInput): { trigger: EventTrigger; secret: string } {
+  async insert(input: CreateEventTriggerInput): Promise<{ trigger: EventTrigger; secret: string }> {
     const id = randomUUID()
     const ts = now()
     const { secret, secretHash, secretPrefix } = generateSecret()
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO event_triggers (
         id, org_id, user_id, name, enabled, deleted_at,
         secret_hash, secret_prefix, prompt_template,
@@ -190,7 +190,7 @@ export class EventTriggerStore {
         workspace, timeout_ms, rate_limit_per_min,
         last_used_at, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?)
-    `).run(
+    `, [
       id,
       input.orgId,
       input.userId,
@@ -207,23 +207,23 @@ export class EventTriggerStore {
       input.rateLimitPerMin ?? null,
       ts,
       ts,
-    )
+    ])
 
-    return { trigger: this.getById(id)!, secret }
+    return { trigger: (await this.getById(id))!, secret }
   }
 
-  update(triggerId: string, input: UpdateEventTriggerInput): EventTrigger | null {
-    const existing = this.getById(triggerId)
+  async update(triggerId: string, input: UpdateEventTriggerInput): Promise<EventTrigger | null> {
+    const existing = await this.getById(triggerId)
     if (!existing) return null
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE event_triggers
       SET name = ?, enabled = ?, prompt_template = ?,
           assistant_name = ?, conversation_mode = ?, bound_session_id = ?,
           workspace = ?, timeout_ms = ?, rate_limit_per_min = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       input.name ?? existing.name,
       input.enabled !== undefined ? (input.enabled ? 1 : 0) : (existing.enabled ? 1 : 0),
       input.promptTemplate ?? existing.promptTemplate,
@@ -235,50 +235,50 @@ export class EventTriggerStore {
       input.rateLimitPerMin !== undefined ? input.rateLimitPerMin : existing.rateLimitPerMin,
       now(),
       triggerId,
-    )
+    ])
 
     return this.getById(triggerId)
   }
 
   /** Mint a fresh secret, invalidating the old one immediately. */
-  rotateSecret(triggerId: string): { trigger: EventTrigger; secret: string } | null {
-    const existing = this.getById(triggerId)
+  async rotateSecret(triggerId: string): Promise<{ trigger: EventTrigger; secret: string } | null> {
+    const existing = await this.getById(triggerId)
     if (!existing) return null
     const { secret, secretHash, secretPrefix } = generateSecret()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE event_triggers SET secret_hash = ?, secret_prefix = ?, updated_at = ? WHERE id = ?
-    `).run(secretHash, secretPrefix, now(), triggerId)
-    return { trigger: this.getById(triggerId)!, secret }
+    `, [secretHash, secretPrefix, now(), triggerId])
+    return { trigger: (await this.getById(triggerId))!, secret }
   }
 
-  softDelete(triggerId: string): void {
-    this.db.prepare(`UPDATE event_triggers SET deleted_at = ? WHERE id = ?`).run(now(), triggerId)
+  async softDelete(triggerId: string): Promise<void> {
+    await this.driver.run(`UPDATE event_triggers SET deleted_at = ? WHERE id = ?`, [now(), triggerId])
   }
 
-  getById(triggerId: string): EventTrigger | null {
-    const row = this.db.prepare(`
+  async getById(triggerId: string): Promise<EventTrigger | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM event_triggers WHERE id = ? AND deleted_at IS NULL LIMIT 1
-    `).get(triggerId) as SqlRow | undefined
+    `, [triggerId])
     return row ? mapTrigger(row) : null
   }
 
-  listByOrg(orgId: string): EventTrigger[] {
-    const rows = this.db.prepare(`
+  async listByOrg(orgId: string): Promise<EventTrigger[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM event_triggers
       WHERE org_id = ? AND deleted_at IS NULL
       ORDER BY created_at DESC
-    `).all(orgId) as SqlRow[]
+    `, [orgId])
     return rows.map(mapTrigger)
   }
 
-  markUsed(triggerId: string): void {
-    this.db.prepare(`UPDATE event_triggers SET last_used_at = ? WHERE id = ?`).run(now(), triggerId)
+  async markUsed(triggerId: string): Promise<void> {
+    await this.driver.run(`UPDATE event_triggers SET last_used_at = ? WHERE id = ?`, [now(), triggerId])
   }
 
-  updateLastSession(triggerId: string, sessionId: string): void {
-    this.db.prepare(`
+  async updateLastSession(triggerId: string, sessionId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE event_triggers SET last_session_id = ?, updated_at = ? WHERE id = ?
-    `).run(sessionId, now(), triggerId)
+    `, [sessionId, now(), triggerId])
   }
 
   // ==================== Runs ====================
@@ -289,22 +289,22 @@ export class EventTriggerStore {
    * authority, so two concurrent requests with the same key can never both
    * insert. Callers should re-read via findRunByIdempotencyKey on null.
    */
-  createRun(input: {
+  async createRun(input: {
     triggerId: string
     orgId: string
     userId: string
     payloadJson: string | null
     idempotencyKey?: string | null
-  }): EventTriggerRun | null {
+  }): Promise<EventTriggerRun | null> {
     const id = randomUUID()
     try {
-      this.db.prepare(`
+      await this.driver.run(`
         INSERT INTO event_trigger_runs (
           id, trigger_id, org_id, user_id, session_id, status,
           payload_json, idempotency_key,
           started_at, finished_at, error, summary, created_at
         ) VALUES (?, ?, ?, ?, NULL, 'queued', ?, ?, NULL, NULL, NULL, NULL, ?)
-      `).run(
+      `, [
         id,
         input.triggerId,
         input.orgId,
@@ -312,20 +312,20 @@ export class EventTriggerStore {
         input.payloadJson,
         input.idempotencyKey ?? null,
         now(),
-      )
+      ])
     } catch (err) {
       // UNIQUE violation on (trigger_id, idempotency_key) => duplicate event.
-      if (String(err).includes('UNIQUE')) return null
+      if (isUniqueViolation(err)) return null
       throw err
     }
     return this.getRunById(id)
   }
 
-  findRunByIdempotencyKey(triggerId: string, key: string): EventTriggerRun | null {
-    const row = this.db.prepare(`
+  async findRunByIdempotencyKey(triggerId: string, key: string): Promise<EventTriggerRun | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM event_trigger_runs
       WHERE trigger_id = ? AND idempotency_key = ? LIMIT 1
-    `).get(triggerId, key) as SqlRow | undefined
+    `, [triggerId, key])
     return row ? mapRun(row) : null
   }
 
@@ -339,10 +339,10 @@ export class EventTriggerStore {
    * for the next. Selecting first and updating after would leave a window in
    * which two ticks both see the same queued row and double-run the event.
    */
-  claimQueuedRuns(limit: number): EventTriggerRun[] {
+  async claimQueuedRuns(limit: number): Promise<EventTriggerRun[]> {
     if (limit <= 0) return []
     const ts = now()
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       UPDATE event_trigger_runs
       SET status = 'running', started_at = ?
       WHERE id IN (
@@ -352,31 +352,31 @@ export class EventTriggerStore {
         LIMIT ?
       )
       RETURNING *
-    `).all(ts, limit) as SqlRow[]
+    `, [ts, limit])
     return rows.map(mapRun)
   }
 
-  getRunById(runId: string): EventTriggerRun | null {
-    const row = this.db.prepare(`
+  async getRunById(runId: string): Promise<EventTriggerRun | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM event_trigger_runs WHERE id = ? LIMIT 1
-    `).get(runId) as SqlRow | undefined
+    `, [runId])
     return row ? mapRun(row) : null
   }
 
-  listRunsByTrigger(triggerId: string, limit = 50): EventTriggerRun[] {
-    const rows = this.db.prepare(`
+  async listRunsByTrigger(triggerId: string, limit = 50): Promise<EventTriggerRun[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM event_trigger_runs
       WHERE trigger_id = ?
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(triggerId, limit) as SqlRow[]
+    `, [triggerId, limit])
     return rows.map(mapRun)
   }
 
-  countActiveRuns(): number {
-    const row = this.db.prepare(`
+  async countActiveRuns(): Promise<number> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM event_trigger_runs WHERE status = 'running'
-    `).get() as SqlRow | undefined
+    `)
     return Number(row?.n ?? 0)
   }
 
@@ -385,12 +385,12 @@ export class EventTriggerStore {
    * statuses. sessionId uses COALESCE so a null never clobbers an id already
    * recorded; error/summary are written as given.
    */
-  updateRunStatus(
+  async updateRunStatus(
     runId: string,
     updates: { status: EventRunStatus; sessionId?: string | null; error?: string | null; summary?: string | null },
-  ): void {
+  ): Promise<void> {
     const isTerminal = TERMINAL_STATUSES.includes(updates.status)
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE event_trigger_runs
       SET status = ?,
           session_id = COALESCE(?, session_id),
@@ -398,14 +398,14 @@ export class EventTriggerStore {
           summary = ?,
           finished_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       updates.status,
       updates.sessionId ?? null,
       updates.error ?? null,
       updates.summary ?? null,
       isTerminal ? now() : null,
       runId,
-    )
+    ])
   }
 
   /**
@@ -413,13 +413,13 @@ export class EventTriggerStore {
    * Without this a run orphaned by a server restart stays 'running' forever
    * and permanently consumes a concurrency slot.
    */
-  reapStaleRuns(startedBefore: number, error: string): number {
-    const result = this.db.prepare(`
+  async reapStaleRuns(startedBefore: number, error: string): Promise<number> {
+    const changes = await this.driver.run(`
       UPDATE event_trigger_runs
       SET status = 'error', error = ?, finished_at = ?
       WHERE status IN ('queued', 'running')
         AND COALESCE(started_at, created_at) < ?
-    `).run(error, now(), startedBefore)
-    return Number(result.changes ?? 0)
+    `, [error, now(), startedBefore])
+    return changes
   }
 }

@@ -6,7 +6,7 @@
 
 import { Cron } from 'croner'
 import path from 'path'
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../../db/driver.js'
 import { CronStore, resolveExecutorId, type CronJob, type CronJobRun, type CronJobSchedule } from './CronStore.js'
 import type { RuntimeService } from '../runtimeService.js'
 import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
@@ -138,11 +138,11 @@ export class CronService {
   private store: CronStore
   private timers: Map<string, Cron> = new Map()
   private config: CronServiceConfig
-  private db: DatabaseSync
+  private driver: DbDriver
   private running = false
   private checkInterval?: ReturnType<typeof setInterval>
 
-  constructor(db: DatabaseSync, config: CronServiceConfig) {
+  constructor(driver: DbDriver, config: CronServiceConfig) {
     // Fail loud if required config is missing. The project has no type-check
     // step (build only strips types), so an omitted required field at the
     // construction site compiles fine and only surfaces later as a cryptic
@@ -150,8 +150,8 @@ export class CronService {
     if (!config.runtimeDir) {
       throw new Error('CronService misconfigured: runtimeDir is required')
     }
-    this.db = db
-    this.store = new CronStore(db)
+    this.driver = driver
+    this.store = new CronStore(driver)
     this.config = config
   }
 
@@ -162,48 +162,48 @@ export class CronService {
     if (this.running) return
     this.running = true
 
-    this.markMissedJobsOnStartup()
+    await this.markMissedJobsOnStartup()
     // Reap runs orphaned by a crash/restart (status stuck at running/queued
     // with their socket long gone) before scheduling anything.
-    this.reapStaleRuns()
+    await this.reapStaleRuns()
 
     // Load all enabled jobs and start their timers
-    const jobs = this.store.listEnabled()
+    const jobs = await this.store.listEnabled()
     for (const job of jobs) {
-      this.scheduleNextRun(job)
+      await this.scheduleNextRun(job)
     }
 
     // Also start periodic check for missed/due jobs (every 60s). Reap stale
     // runs on the same cadence so a run whose promise never settled doesn't
     // block the concurrency guard forever.
     this.checkInterval = setInterval(() => {
-      this.reapStaleRuns()
-      this.checkDueJobs()
+      void this.reapStaleRuns()
+      void this.checkDueJobs()
     }, 60000)
     this.checkInterval.unref()
 
     // Initial check immediately
-    this.checkDueJobs()
+    void this.checkDueJobs()
 
     console.log(`[CronService] Started with ${jobs.length} jobs`)
   }
 
-  private markMissedJobsOnStartup(): void {
+  private async markMissedJobsOnStartup(): Promise<void> {
     const now = Date.now()
-    const missedJobs = this.store.listOverdueJobs(now)
+    const missedJobs = await this.store.listOverdueJobs(now)
     for (const job of missedJobs) {
-      const run = this.store.createRun(job.id, job.orgId, job.userId)
-      this.store.updateRunStatus(run.id, {
+      const run = await this.store.createRun(job.id, job.orgId, job.userId)
+      await this.store.updateRunStatus(run.id, {
         status: 'missed',
         error: 'Missed while Moss server was offline; waiting for the next scheduled run.',
         summary: `Cron job "${job.name}" missed while server was offline`,
       })
-      this.store.updateRunResult(job.id, {
+      await this.store.updateRunResult(job.id, {
         lastStatus: 'missed',
         lastError: 'Missed while Moss server was offline; waiting for the next scheduled run.',
         runCountIncrement: 0,
       })
-      this.calculateNextRun(job)
+      await this.calculateNextRun(job)
       console.warn(`[CronService] Marked missed job ${job.id} (name: ${job.name})`)
     }
   }
@@ -215,9 +215,9 @@ export class CronService {
    * in-flight run is never reaped. Frees the concurrency guard for the next
    * scheduled fire.
    */
-  private reapStaleRuns(): void {
+  private async reapStaleRuns(): Promise<void> {
     const staleBefore = Date.now() - (CRON_RUN_TIMEOUT_MS + 60_000)
-    const reaped = this.store.reapStaleRuns(
+    const reaped = await this.store.reapStaleRuns(
       staleBefore,
       'Run did not complete within the timeout (reaped as stale)',
     )
@@ -248,7 +248,7 @@ export class CronService {
   /**
    * Start a timer for a specific job
    */
-  private startTimer(job: CronJob): void {
+  private async startTimer(job: CronJob): Promise<void> {
     // Only handle 'cron' schedule kind with timers
     if (job.schedule.kind !== 'cron') return
 
@@ -266,7 +266,7 @@ export class CronService {
       // Update next_run_at
       const nextRun = timer.nextRun()
       if (nextRun) {
-        this.store.updateNextRunAt(job.id, nextRun.getTime())
+        await this.store.updateNextRunAt(job.id, nextRun.getTime())
       }
     } catch (error) {
       console.error(`[CronService] Failed to start timer for job ${job.id}:`, error)
@@ -287,21 +287,21 @@ export class CronService {
   /**
    * Add a new job and start its timer
    */
-  addJob(job: CronJob): void {
+  async addJob(job: CronJob): Promise<void> {
     if (job.enabled && !job.deletedAt) {
-      this.scheduleNextRun(job)
+      await this.scheduleNextRun(job)
     }
   }
 
   /**
    * Update a job's timer
    */
-  updateJob(job: CronJob): void {
+  async updateJob(job: CronJob): Promise<void> {
     this.stopTimer(job.id)
     if (job.enabled && !job.deletedAt) {
-      this.scheduleNextRun(job)
+      await this.scheduleNextRun(job)
     } else {
-      this.store.updateNextRunAt(job.id, null)
+      await this.store.updateNextRunAt(job.id, null)
     }
   }
 
@@ -315,11 +315,11 @@ export class CronService {
   /**
    * Check for due jobs (for 'at' and 'every' kinds, or missed cron jobs)
    */
-  private checkDueJobs(): void {
+  private async checkDueJobs(): Promise<void> {
     if (!this.running) return
 
     const now = Date.now()
-    const dueJobs = this.store.listDueJobs(now)
+    const dueJobs = await this.store.listDueJobs(now)
 
     for (const job of dueJobs) {
       // Try to acquire lease before executing
@@ -336,16 +336,16 @@ export class CronService {
    * than a flat 30s — the next_run_at advance is the real dedup guard, but
    * sizing the lease to the run keeps the lock meaningful for its duration.
    */
-  private acquireLease(job: CronJob, nowTs: number): boolean {
+  private async acquireLease(job: CronJob, nowTs: number): Promise<boolean> {
     const leaseUntil = nowTs + CRON_RUN_TIMEOUT_MS + 60_000 // cover the run + margin
     const nextRunAt = computeNextRunAt(job.schedule, nowTs)
     return this.store.acquireLease(job.id, nowTs, leaseUntil, nextRunAt)
   }
 
   private async executeDueJob(jobId: string, nowTs = Date.now()): Promise<void> {
-    const job = this.store.getById(jobId)
+    const job = await this.store.getById(jobId)
     if (!job) return
-    if (!this.acquireLease(job, nowTs)) return
+    if (!(await this.acquireLease(job, nowTs))) return
     await this.executeJob(jobId)
   }
 
@@ -353,7 +353,7 @@ export class CronService {
    * Execute a job
    */
   private async executeJob(jobId: string): Promise<void> {
-    const job = this.store.getById(jobId)
+    const job = await this.store.getById(jobId)
     if (!job || !job.enabled || job.deletedAt) {
       console.log(`[CronService] Job ${jobId} not found, disabled, or deleted`)
       return
@@ -364,7 +364,7 @@ export class CronService {
     // session and block until the timeout; this keeps a stuck/long run from
     // snowballing into a pile-up. The schedule already advanced at lease time,
     // so the job resumes cleanly on the next slot.
-    if (this.store.hasActiveRun(job.id)) {
+    if (await this.store.hasActiveRun(job.id)) {
       console.warn(`[CronService] Job ${job.id} (name: ${job.name}) skipped: previous run still in progress`)
       return
     }
@@ -375,11 +375,11 @@ export class CronService {
     const executorId = resolveExecutorId(job)
 
     // Create run record (attributed to the executor — the identity that runs)
-    const run = this.store.createRun(job.id, job.orgId, executorId)
+    const run = await this.store.createRun(job.id, job.orgId, executorId)
     console.log(`[CronService] Starting job ${job.id} (name: ${job.name}), run ${run.id}`)
 
     // Mark run as running
-    this.store.startRun(run.id)
+    await this.store.startRun(run.id)
 
     try {
       // Get the EXECUTOR's auth context — this is what the session runs as.
@@ -399,30 +399,30 @@ export class CronService {
       const creatorAuth =
         executorId === job.userId ? userAuth : await this.config.getUserAuth(job.userId, job.orgId)
       if (!getSystemSettings().clientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
-        this.store.updateRunStatus(run.id, {
+        await this.store.updateRunStatus(run.id, {
           status: 'skipped',
           summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',
         })
-        this.store.updateRunResult(job.id, { lastStatus: 'skipped' })
+        await this.store.updateRunResult(job.id, { lastStatus: 'skipped' })
         console.log(`[CronService] Job ${job.id} skipped: clientCronEnabled=false and owner lacks admin capability`)
-        this.calculateNextRun(this.store.getById(job.id) ?? job)
+        await this.calculateNextRun((await this.store.getById(job.id)) ?? job)
         return
       }
 
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `job ${job.id}`)
-      this.markRunSessionStarted(job, run, sessionId)
+      await this.markRunSessionStarted(job, run, sessionId)
 
       await this.sendCronMessage(sessionId, job.payloadMessage)
 
       // Update run status with session
-      this.store.updateRunStatus(run.id, {
+      await this.store.updateRunStatus(run.id, {
         status: 'ok',
         sessionId,
         summary: `Cron job "${job.name}" executed successfully`,
       })
 
       // Update job status
-      this.store.updateRunResult(job.id, {
+      await this.store.updateRunResult(job.id, {
         lastSessionId: sessionId,
         lastStatus: 'ok',
       })
@@ -432,13 +432,13 @@ export class CronService {
       const errorMsg = error instanceof Error ? error.message : String(error)
 
       // Update run status
-      this.store.updateRunStatus(run.id, {
+      await this.store.updateRunStatus(run.id, {
         status: 'error',
         error: errorMsg,
       })
 
       // Update job status
-      this.store.updateRunResult(job.id, {
+      await this.store.updateRunResult(job.id, {
         lastStatus: 'error',
         lastError: errorMsg,
       })
@@ -447,7 +447,7 @@ export class CronService {
     }
 
     // Calculate next run time
-    this.calculateNextRun(this.store.getById(job.id) ?? job)
+    await this.calculateNextRun((await this.store.getById(job.id)) ?? job)
   }
 
   /**
@@ -527,7 +527,7 @@ export class CronService {
         // it out from under the job (that would silently break the binding).
         // Warn once it crosses the cap so the growth is visible in logs — the
         // owner can re-bind or switch to auto-chained reuse to get rotation.
-        if (this.reuseCapExceeded(job, job.boundSessionId)) {
+        if (await this.reuseCapExceeded(job, job.boundSessionId)) {
           console.warn(
             `[CronService] Bound session ${job.boundSessionId} for ${logContext} has served ` +
             `>= ${this.reuseMaxRuns()} runs; its transcript may overflow the model context. ` +
@@ -548,7 +548,7 @@ export class CronService {
         // has served enough runs that its runtime transcript is at risk of
         // overflowing the model context. The fresh session becomes the new
         // lastSessionId once this run records its result.
-        if (this.reuseCapExceeded(job, job.lastSessionId)) {
+        if (await this.reuseCapExceeded(job, job.lastSessionId)) {
           console.warn(
             `[CronService] Session ${job.lastSessionId} for ${logContext} reached the reuse cap ` +
             `(${this.reuseMaxRuns()} runs); retiring it and starting a fresh session.`,
@@ -581,10 +581,10 @@ export class CronService {
    * Whether a reused session has served enough runs of `job` to hit the rotation
    * cap. Disabled when the cap is <= 0.
    */
-  private reuseCapExceeded(job: CronJob, sessionId: string): boolean {
+  private async reuseCapExceeded(job: CronJob, sessionId: string): Promise<boolean> {
     const cap = this.reuseMaxRuns()
     if (cap <= 0) return false
-    return this.store.countRunsForSession(job.id, sessionId) >= cap
+    return (await this.store.countRunsForSession(job.id, sessionId)) >= cap
   }
 
   /**
@@ -601,8 +601,9 @@ export class CronService {
   }
 
   private async sendCronMessage(sessionId: string, message: string): Promise<void> {
-    const ready = await this.config.runtimeService.ensureSessionReady(sessionId)
-    const runnerSocket = await this.config.runtimeService.connectToAttempt(ready.attempt)
+    // Internal channel (HA): the attach socket lives on the owning instance;
+    // cron executes wherever the DB lease lands, so route like a client.
+    const runnerSocket = await this.config.runtimeService.connectInternalChannel(sessionId)
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         runnerSocket.destroy()
@@ -690,14 +691,14 @@ export class CronService {
    * only writes a strictly-later time. The one-shot 'at' path still disables
    * the job here.
    */
-  private calculateNextRun(job: CronJob): void {
+  private async calculateNextRun(job: CronJob): Promise<void> {
     const now = Date.now()
 
     if (job.schedule.kind === 'at') {
       // 'at' jobs are one-time, disable after execution.
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE cron_jobs SET enabled = 0, next_run_at = NULL, lease_until = NULL WHERE id = ?
-      `).run(job.id)
+      `, [job.id])
       this.stopTimer(job.id)
       return
     }
@@ -707,33 +708,33 @@ export class CronService {
 
     // Only advance — never rewind into a slot the fire-time advance already
     // moved us past.
-    const current = this.store.getById(job.id)?.nextRunAt ?? null
+    const current = (await this.store.getById(job.id))?.nextRunAt ?? null
     if (current == null || next > current) {
-      this.store.updateNextRunAt(job.id, next)
+      await this.store.updateNextRunAt(job.id, next)
     }
   }
 
-  private scheduleNextRun(job: CronJob): void {
+  private async scheduleNextRun(job: CronJob): Promise<void> {
     this.stopTimer(job.id)
     if (!job.enabled || job.deletedAt) {
-      this.store.updateNextRunAt(job.id, null)
+      await this.store.updateNextRunAt(job.id, null)
       return
     }
 
     if (job.schedule.kind === 'cron') {
-      this.startTimer(job)
+      await this.startTimer(job)
       return
     }
 
     const now = Date.now()
     if (job.schedule.kind === 'at') {
       const atMs = Date.parse(job.schedule.value)
-      this.store.updateNextRunAt(job.id, Number.isFinite(atMs) && atMs > now ? atMs : now)
+      await this.store.updateNextRunAt(job.id, Number.isFinite(atMs) && atMs > now ? atMs : now)
       return
     }
 
     if (job.schedule.kind === 'every') {
-      this.calculateNextRun(job)
+      await this.calculateNextRun(job)
     }
   }
 
@@ -746,7 +747,7 @@ export class CronService {
    * callers/tests that have no human triggerer).
    */
   async triggerJob(jobId: string, actor?: { userId: string; orgId: string }): Promise<CronJobRun> {
-    const job = this.store.getById(jobId)
+    const job = await this.store.getById(jobId)
     if (!job) {
       throw new Error(`Job ${jobId} not found`)
     }
@@ -754,7 +755,7 @@ export class CronService {
     // Same concurrency guard as scheduled fires, but surface it to the caller
     // so the manual trigger reports a clear error instead of silently stacking
     // a run that would collide with the in-flight one.
-    if (this.store.hasActiveRun(job.id)) {
+    if (await this.store.hasActiveRun(job.id)) {
       throw new Error('A run for this job is already in progress')
     }
 
@@ -762,10 +763,10 @@ export class CronService {
     const runUserId = actor?.userId ?? resolveExecutorId(job)
 
     // Create run record (attributed to whoever triggered it)
-    const run = this.store.createRun(job.id, job.orgId, runUserId)
+    const run = await this.store.createRun(job.id, job.orgId, runUserId)
 
     // Mark run as running
-    this.store.startRun(run.id)
+    await this.store.startRun(run.id)
 
     try {
       // Get the triggering user's auth context — this is what the session runs as.
@@ -775,13 +776,13 @@ export class CronService {
       }
 
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `manual trigger of job ${job.id}`)
-      this.markRunSessionStarted(job, run, sessionId)
+      await this.markRunSessionStarted(job, run, sessionId)
 
       void this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`)
 
-      return this.store.getRunById(run.id)!
+      return (await this.store.getRunById(run.id))!
     } catch (error) {
-      this.markRunFailed(job, run, error)
+      await this.markRunFailed(job, run, error)
       throw error
     }
   }
@@ -793,13 +794,13 @@ export class CronService {
     return this.store
   }
 
-  private markRunSessionStarted(job: CronJob, run: CronJobRun, sessionId: string): void {
-    this.store.updateRunStatus(run.id, {
+  private async markRunSessionStarted(job: CronJob, run: CronJobRun, sessionId: string): Promise<void> {
+    await this.store.updateRunStatus(run.id, {
       status: 'running',
       sessionId,
     })
 
-    this.store.updateRunResult(job.id, {
+    await this.store.updateRunResult(job.id, {
       lastSessionId: sessionId,
       lastStatus: 'running',
       runCountIncrement: 0,
@@ -810,30 +811,30 @@ export class CronService {
     try {
       await this.sendCronMessage(sessionId, job.payloadMessage)
 
-      this.store.updateRunStatus(run.id, {
+      await this.store.updateRunStatus(run.id, {
         status: 'ok',
         sessionId,
         summary,
       })
 
-      this.store.updateRunResult(job.id, {
+      await this.store.updateRunResult(job.id, {
         lastSessionId: sessionId,
         lastStatus: 'ok',
       })
     } catch (error) {
-      this.markRunFailed(job, run, error)
+      await this.markRunFailed(job, run, error)
     }
   }
 
-  private markRunFailed(job: CronJob, run: CronJobRun, error: unknown): void {
+  private async markRunFailed(job: CronJob, run: CronJobRun, error: unknown): Promise<void> {
     const errorMsg = error instanceof Error ? error.message : String(error)
 
-    this.store.updateRunStatus(run.id, {
+    await this.store.updateRunStatus(run.id, {
       status: 'error',
       error: errorMsg,
     })
 
-    this.store.updateRunResult(job.id, {
+    await this.store.updateRunResult(job.id, {
       lastStatus: 'error',
       lastError: errorMsg,
     })

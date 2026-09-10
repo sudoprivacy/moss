@@ -148,7 +148,7 @@ export class CabinFlightAutomation {
       this.log({ event: 'automation.disabled', ok: true })
       return
     }
-    this.seedConfiguredSeats()
+    void this.seedConfiguredSeats()
     this.connect()
   }
 
@@ -403,7 +403,7 @@ export class CabinFlightAutomation {
       return
     }
 
-    const seats = this.resolveSeats()
+    const seats = await this.resolveSeats()
     const flightId = seats[0]?.flightId || 'AUTO'
     const flightDate = seats[0]?.flightDate || today()
     const aircraftNo = seats[0]?.aircraftNo || this.config.cabin.aircraftNo || null
@@ -477,7 +477,7 @@ export class CabinFlightAutomation {
       summary.statusFailures += checks.statusFailures
       for (const problem of checks.problems) {
         summary.alerts += 1
-        this.store.createAlert({
+        await this.store.createAlert({
           aircraftNo: seat.aircraftNo,
           flightId: seat.flightId,
           flightDate: seat.flightDate,
@@ -534,12 +534,12 @@ export class CabinFlightAutomation {
     })
   }
 
-  private resolveSeats(): CabinManagedSeat[] {
-    const managed = this.store.listManagedSeats({ activeOnly: true })
+  private async resolveSeats(): Promise<CabinManagedSeat[]> {
+    const managed = await this.store.listManagedSeats({ activeOnly: true })
     if (managed.length) return dedupeSeats(managed)
     const configured = parseManagedSeats(this.config.cabin.managedSeats)
     for (const seatNo of configured) {
-        this.store.upsertManagedSeat({
+        await this.store.upsertManagedSeat({
           aircraftNo: this.config.cabin.aircraftNo,
           flightId: 'AUTO',
           flightDate: today(),
@@ -550,9 +550,9 @@ export class CabinFlightAutomation {
     return this.store.listManagedSeats({ flightId: 'AUTO', flightDate: today(), activeOnly: true })
   }
 
-  private seedConfiguredSeats(): void {
+  private async seedConfiguredSeats(): Promise<void> {
     for (const seatNo of parseManagedSeats(this.config.cabin.managedSeats)) {
-      this.store.upsertManagedSeat({
+      await this.store.upsertManagedSeat({
         aircraftNo: this.config.cabin.aircraftNo,
         flightId: 'AUTO',
         flightDate: today(),
@@ -752,7 +752,7 @@ export class CabinFlightAutomation {
         details: { command: control.command, payload },
       })
       if (!ok) {
-        this.store.createAlert({
+        await this.store.createAlert({
           aircraftNo: seat.aircraftNo,
           flightId: seat.flightId,
           flightDate: seat.flightDate,
@@ -768,7 +768,7 @@ export class CabinFlightAutomation {
       }
       return ok
     } catch (error) {
-      this.store.createAlert({
+      await this.store.createAlert({
         aircraftNo: seat.aircraftNo,
         flightId: seat.flightId,
         flightDate: seat.flightDate,

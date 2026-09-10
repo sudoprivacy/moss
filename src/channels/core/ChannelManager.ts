@@ -156,11 +156,9 @@ class ChannelManager {
   private startStaleSessionSweep(): void {
     if (this.staleSweepTimer) return;
     this.staleSweepTimer = setInterval(() => {
-      try {
-        this.cleanupStaleSessions();
-      } catch (error) {
+      this.cleanupStaleSessions().catch((error) => {
         console.warn('[ChannelManager] stale session sweep failed:', error);
-      }
+      });
     }, ChannelManager.STALE_SWEEP_INTERVAL_MS);
     // Never hold the process open just for the sweep.
     this.staleSweepTimer.unref?.();
@@ -179,7 +177,7 @@ class ChannelManager {
 
     try {
       // Get existing plugin config or create new one (scoped by userId)
-      const existing = userId ? this.db.getChannelPlugin(pluginId, userId) : this.db.getChannelPlugin(pluginId);
+      const existing = userId ? await this.db.getChannelPlugin(pluginId, userId) : await this.db.getChannelPlugin(pluginId);
 
       const pluginType = this.extractPluginType(pluginId);
 
@@ -206,7 +204,7 @@ class ChannelManager {
       if (identity) {
         // Same user, two connections, one bot: also a duplicate-delivery source now that a
         // user can hold several connections of a type.
-        const ownDuplicate = this.db.findOwnChannelPluginWithIdentity({
+        const ownDuplicate = await this.db.findOwnChannelPluginWithIdentity({
           type: pluginType,
           identity,
           userId: effectiveUserId,
@@ -221,7 +219,7 @@ class ChannelManager {
         }
 
         const effectiveOrgId = orgId || (existing?.org_id ? String(existing.org_id) : null);
-        const conflict = this.db.findChannelPluginCredentialOwner({
+        const conflict = await this.db.findChannelPluginCredentialOwner({
           type: pluginType,
           identity,
           orgId: effectiveOrgId,
@@ -253,7 +251,7 @@ class ChannelManager {
         updatedAt: Date.now(),
       };
 
-      this.db.upsertChannelPlugin({
+      await this.db.upsertChannelPlugin({
         id: pluginConfig.id,
         type: pluginConfig.type,
         name: pluginConfig.name,
@@ -293,9 +291,9 @@ class ChannelManager {
       await this.pluginManager.stopPlugin(instanceKey);
 
       // Update database
-      const existing = userId ? this.db.getChannelPlugin(pluginId, userId) : this.db.getChannelPlugin(pluginId);
+      const existing = userId ? await this.db.getChannelPlugin(pluginId, userId) : await this.db.getChannelPlugin(pluginId);
       if (existing) {
-        this.db.upsertChannelPlugin({
+        await this.db.upsertChannelPlugin({
           id: pluginId,
           type: String(existing.type),
           name: String(existing.name),
@@ -329,7 +327,7 @@ class ChannelManager {
    */
   async getHydratedCredentials(pluginId: string, userId: string): Promise<Record<string, any>> {
     if (!this.db || !this.nexus) return {};
-    const row = this.db.getChannelPlugin(pluginId, userId);
+    const row = await this.db.getChannelPlugin(pluginId, userId);
     if (!row) return {};
     const type = pluginTypeFromId(pluginId);
     const base = row.credentials_json ? JSON.parse(String(row.credentials_json)) : {};
@@ -346,7 +344,7 @@ class ChannelManager {
   /**
    * Get all plugin statuses
    */
-  getPluginStatuses(userId?: string): IChannelPluginStatus[] {
+  async getPluginStatuses(userId?: string): Promise<IChannelPluginStatus[]> {
     if (!this.pluginManager) {
       return [];
     }
@@ -363,7 +361,7 @@ class ChannelManager {
   /**
    * Cleanup stale sessions
    */
-  cleanupStaleSessions(maxAgeMs?: number): number {
+  async cleanupStaleSessions(maxAgeMs?: number): Promise<number> {
     if (!this.sessionManager) {
       return 0;
     }

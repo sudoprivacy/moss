@@ -184,7 +184,7 @@ export class PluginManager {
       console.error(`[PluginManager] ${errorMsg}`, error);
       this.pluginErrors.set(key, errorMsg);
 
-      this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
+      await this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
       throw error;
     }
@@ -204,14 +204,14 @@ export class PluginManager {
       console.error(`[PluginManager] ${errorMsg}`, error);
       this.pluginErrors.set(key, errorMsg);
 
-      this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
+      await this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
       throw error;
     }
 
     this.plugins.set(key, plugin);
 
-    this.db.updateChannelPluginStatus(config.id, 'running', Date.now(), userId);
+    await this.db.updateChannelPluginStatus(config.id, 'running', Date.now(), userId);
 
     console.log(`[PluginManager] Plugin ${key} started successfully`);
   }
@@ -233,7 +233,7 @@ export class PluginManager {
     const userId = pluginId.includes(':') ? pluginId.split(':').pop() : undefined;
     // Extract bare pluginId from composite key
     const barePluginId = pluginId.includes(':') ? pluginId.split(':')[0] : pluginId;
-    this.db.updateChannelPluginStatus(barePluginId, 'stopped', undefined, userId);
+    await this.db.updateChannelPluginStatus(barePluginId, 'stopped', undefined, userId);
 
     console.log(`[PluginManager] Plugin ${pluginId} stopped`);
   }
@@ -250,8 +250,8 @@ export class PluginManager {
   /**
    * Get status for all plugins
    */
-  getPluginStatuses(userId?: string): IChannelPluginStatus[] {
-    const rows = this.db.listChannelPlugins(userId);
+  async getPluginStatuses(userId?: string): Promise<IChannelPluginStatus[]> {
+    const rows = await this.db.listChannelPlugins(userId);
 
     return rows.map((row) => this.buildPluginStatus({
       id: String(row.id),
@@ -347,7 +347,7 @@ export class PluginManager {
    * Start all enabled plugins from database
    */
   async startEnabledPlugins(): Promise<void> {
-    const rows = this.db.listChannelPlugins();
+    const rows = await this.db.listChannelPlugins();
     console.log(`[PluginManager] Starting enabled plugins, found ${rows.length} rows`);
 
     for (const row of rows) {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver, SqlParam } from '../db/driver.js'
 import type { McpServer, McpPolicy, McpAuditLog, McpApprovalRequest, McpTemplate, McpServerInput, McpPolicyInput, McpTemplateInput, McpServerListFilter, McpAuditLogFilter, McpTemplateListFilter } from './types.js'
 import type { VisibleTo } from '../visibilityFilter.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
@@ -163,15 +164,17 @@ function mapMcpTemplate(row: SqlRow): McpTemplate {
 }
 
 export class McpStore {
-  constructor(private db: DatabaseSync) {}
+  // Queries go through the async driver (shared with DirectConnectStore for pg
+  // pooling). Table DDL stays a synchronous sqlite-only path (pg builds its
+  // schema via pg_schema.ts), so ensureTables still takes a DatabaseSync.
+  constructor(private driver: DbDriver) {}
 
   static ensureTables(db: DatabaseSync): void {
-    const store = new McpStore(db)
-    store.createTables()
+    McpStore.createTables(db)
   }
 
-  private createTables(): void {
-    this.db.exec(`
+  private static createTables(db: DatabaseSync): void {
+    db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_servers (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL,
@@ -225,7 +228,7 @@ export class McpStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_org_name ON mcp_servers(org_id, name);
     `)
 
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_policies (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL UNIQUE,
@@ -253,7 +256,7 @@ export class McpStore {
       );
     `)
 
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_audit_log (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL,
@@ -278,7 +281,7 @@ export class McpStore {
       CREATE INDEX IF NOT EXISTS idx_mcp_audit_action ON mcp_audit_log(action, created_at DESC);
     `)
 
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_approval_requests (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL,
@@ -297,7 +300,7 @@ export class McpStore {
       CREATE INDEX IF NOT EXISTS idx_mcp_approval_user ON mcp_approval_requests(user_id);
     `)
 
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_templates (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL,
@@ -329,21 +332,21 @@ export class McpStore {
     `)
 
     // Migration: add template_id column to mcp_servers
-    try { this.db.exec('ALTER TABLE mcp_servers ADD COLUMN template_id TEXT') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_servers ADD COLUMN template_id TEXT') } catch { /* column already exists */ }
 
     // Migration: add mcp_server_snapshot column to mcp_approval_requests
-    try { this.db.exec('ALTER TABLE mcp_approval_requests ADD COLUMN mcp_server_snapshot TEXT') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_approval_requests ADD COLUMN mcp_server_snapshot TEXT') } catch { /* column already exists */ }
 
     // Migration: add new columns for template market overhaul
-    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN responsible_person TEXT DEFAULT NULL') } catch { /* column already exists */ }
-    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN visible_to_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
-    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_assistants_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
-    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_skills_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
-    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN auth_config_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
-    try { this.db.exec('ALTER TABLE mcp_templates ADD COLUMN security_policy_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_templates ADD COLUMN responsible_person TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_templates ADD COLUMN visible_to_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_assistants_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_templates ADD COLUMN bound_skills_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_templates ADD COLUMN auth_config_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
+    try { db.exec('ALTER TABLE mcp_templates ADD COLUMN security_policy_json TEXT DEFAULT NULL') } catch { /* column already exists */ }
 
     // Per-user disable records — tracks which MCP servers each user has disabled for themselves.
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_user_disabled (
         org_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
@@ -356,9 +359,9 @@ export class McpStore {
 
   // ==================== MCP Server CRUD ====================
 
-  listMcpServers(orgId: string, filter?: McpServerListFilter): { items: McpServer[]; total: number } {
+  async listMcpServers(orgId: string, filter?: McpServerListFilter): Promise<{ items: McpServer[]; total: number }> {
     const conditions: string[] = ['org_id = ?']
-    const params: unknown[] = [orgId]
+    const params: SqlParam[] = [orgId]
 
     if (filter?.scope) {
       conditions.push('scope = ?')
@@ -420,45 +423,49 @@ export class McpStore {
     }
 
     const where = `WHERE ${conditions.join(' AND ')}`
-    const countRow = this.db.prepare(
-      `SELECT COUNT(*) AS c FROM mcp_servers ${where}`
-    ).get(...params) as { c: number }
-    const total = countRow.c
+    const countRow = await this.driver.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM mcp_servers ${where}`,
+      params,
+    )
+    const total = countRow?.c ?? 0
 
     const page = filter?.page ?? 1
     const pageSize = filter?.page_size ?? 20
     const offset = (page - 1) * pageSize
 
-    const rows = this.db.prepare(
-      `SELECT * FROM mcp_servers ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
-    ).all(...params, pageSize, offset) as SqlRow[]
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT * FROM mcp_servers ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset],
+    )
 
     return { items: rows.map(mapMcpServer), total }
   }
 
-  getMcpServer(orgId: string, id: string): McpServer | null {
-    const row = this.db.prepare(
-      "SELECT * FROM mcp_servers WHERE org_id = ? AND id = ? AND status != 'deleted'"
-    ).get(orgId, id) as SqlRow | undefined
+  async getMcpServer(orgId: string, id: string): Promise<McpServer | null> {
+    const row = await this.driver.get<SqlRow>(
+      "SELECT * FROM mcp_servers WHERE org_id = ? AND id = ? AND status != 'deleted'",
+      [orgId, id],
+    )
     return row ? mapMcpServer(row) : null
   }
 
-  getMcpServerByName(orgId: string, name: string): McpServer | null {
-    const row = this.db.prepare(
-      "SELECT * FROM mcp_servers WHERE org_id = ? AND name = ? AND status != 'deleted'"
-    ).get(orgId, name) as SqlRow | undefined
+  async getMcpServerByName(orgId: string, name: string): Promise<McpServer | null> {
+    const row = await this.driver.get<SqlRow>(
+      "SELECT * FROM mcp_servers WHERE org_id = ? AND name = ? AND status != 'deleted'",
+      [orgId, name],
+    )
     return row ? mapMcpServer(row) : null
   }
 
-  getTemplateByName(orgId: string, name: string): McpTemplate | null {
-    const row = this.db.prepare('SELECT * FROM mcp_templates WHERE org_id = ? AND name = ?').get(orgId, name) as SqlRow | undefined
+  async getTemplateByName(orgId: string, name: string): Promise<McpTemplate | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM mcp_templates WHERE org_id = ? AND name = ?', [orgId, name])
     return row ? mapMcpTemplate(row) : null
   }
 
-  createMcpServer(orgId: string, input: McpServerInput, createdBy: string): McpServer {
+  async createMcpServer(orgId: string, input: McpServerInput, createdBy: string): Promise<McpServer> {
     const ts = now()
     const id = randomUUID()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO mcp_servers (
         id, org_id, name, display_name, description, icon, category, risk_level, responsible_person,
         scope, owner_type, owner_id,
@@ -484,7 +491,7 @@ export class McpStore {
         ?,
         ?, NULL, ?, ?
       )
-    `).run(
+    `, [
       id, orgId, input.name, input.display_name ?? null, input.description ?? null,
       input.icon ?? null, input.category ?? null, input.risk_level ?? 'low', input.responsible_person ?? null,
       input.scope, input.owner_type, input.owner_id,
@@ -508,12 +515,12 @@ export class McpStore {
       'pending',
       input.template_id ?? null,
       createdBy, ts, ts,
-    )
-    return this.getMcpServer(orgId, id)!
+    ])
+    return (await this.getMcpServer(orgId, id))!
   }
 
-  updateMcpServer(orgId: string, id: string, input: Partial<McpServerInput>, updatedBy: string): McpServer {
-    const existing = this.getMcpServer(orgId, id)
+  async updateMcpServer(orgId: string, id: string, input: Partial<McpServerInput>, updatedBy: string): Promise<McpServer> {
+    const existing = await this.getMcpServer(orgId, id)
     if (!existing) throw new Error('MCP server not found')
 
     const sets: string[] = []
@@ -565,47 +572,52 @@ export class McpStore {
 
     params.push(orgId, id)
 
-    this.db.prepare(
-      `UPDATE mcp_servers SET ${sets.join(', ')} WHERE org_id = ? AND id = ?`
-    ).run(...params)
+    await this.driver.run(
+      `UPDATE mcp_servers SET ${sets.join(', ')} WHERE org_id = ? AND id = ?`,
+      params as SqlParam[],
+    )
 
-    return this.getMcpServer(orgId, id)!
+    return (await this.getMcpServer(orgId, id))!
   }
 
-  deleteMcpServer(orgId: string, id: string): boolean {
+  async deleteMcpServer(orgId: string, id: string): Promise<boolean> {
     const ts = now()
-    const result = this.db.prepare(
-      "UPDATE mcp_servers SET status = 'deleted', name = name || '__deleted_' || ?, enabled = 0, updated_at = ? WHERE org_id = ? AND id = ? AND status != 'deleted'"
-    ).run(String(ts), ts, orgId, id)
-    return result.changes > 0
+    const changes = await this.driver.run(
+      "UPDATE mcp_servers SET status = 'deleted', name = name || '__deleted_' || ?, enabled = 0, updated_at = ? WHERE org_id = ? AND id = ? AND status != 'deleted'",
+      [String(ts), ts, orgId, id],
+    )
+    return changes > 0
   }
 
-  restoreMcpServer(orgId: string, id: string, newName: string): McpServer | null {
+  async restoreMcpServer(orgId: string, id: string, newName: string): Promise<McpServer | null> {
     const ts = now()
-    const result = this.db.prepare(
-      "UPDATE mcp_servers SET status = 'pending', name = ?, enabled = 1, updated_at = ? WHERE org_id = ? AND id = ? AND status = 'deleted'"
-    ).run(newName, ts, orgId, id)
-    if (result.changes === 0) return null
+    const changes = await this.driver.run(
+      "UPDATE mcp_servers SET status = 'pending', name = ?, enabled = 1, updated_at = ? WHERE org_id = ? AND id = ? AND status = 'deleted'",
+      [newName, ts, orgId, id],
+    )
+    if (changes === 0) return null
     return this.getMcpServer(orgId, id)
   }
 
-  setMcpServerEnabled(orgId: string, id: string, enabled: boolean, updatedBy: string): McpServer | null {
+  async setMcpServerEnabled(orgId: string, id: string, enabled: boolean, updatedBy: string): Promise<McpServer | null> {
     const ts = now()
-    this.db.prepare(
-      'UPDATE mcp_servers SET enabled = ?, updated_by = ?, updated_at = ? WHERE org_id = ? AND id = ?'
-    ).run(enabled ? 1 : 0, updatedBy, ts, orgId, id)
+    await this.driver.run(
+      'UPDATE mcp_servers SET enabled = ?, updated_by = ?, updated_at = ? WHERE org_id = ? AND id = ?',
+      [enabled ? 1 : 0, updatedBy, ts, orgId, id],
+    )
     return this.getMcpServer(orgId, id)
   }
 
-  setMcpServerStatus(orgId: string, id: string, status: string, updatedBy: string | null): void {
+  async setMcpServerStatus(orgId: string, id: string, status: string, updatedBy: string | null): Promise<void> {
     const ts = now()
     const sets = ['status = ?', 'updated_at = ?']
     const params: unknown[] = [status, ts]
     if (updatedBy) { sets.push('updated_by = ?'); params.push(updatedBy) }
     params.push(orgId, id)
-    this.db.prepare(
-      `UPDATE mcp_servers SET ${sets.join(', ')} WHERE org_id = ? AND id = ?`
-    ).run(...params)
+    await this.driver.run(
+      `UPDATE mcp_servers SET ${sets.join(', ')} WHERE org_id = ? AND id = ?`,
+      params as SqlParam[],
+    )
   }
 
   /**
@@ -615,9 +627,9 @@ export class McpStore {
    *   - scope='department': all enabled (further filtered by isVisibleTo at caller)
    *   - scope='user': only those whose owner_id = userId
    */
-  listVisibleMcpServers(orgId: string, userId: string, userDepartmentId: string | null, scope?: 'org' | 'department' | 'user'): McpServer[] {
+  async listVisibleMcpServers(orgId: string, userId: string, userDepartmentId: string | null, scope?: 'org' | 'department' | 'user'): Promise<McpServer[]> {
     const conditions: string[] = ['org_id = ?', 'enabled = 1']
-    const params: unknown[] = [orgId]
+    const params: SqlParam[] = [orgId]
 
     if (scope) {
       conditions.push('scope = ?')
@@ -633,26 +645,29 @@ export class McpStore {
     }
 
     const where = `WHERE ${conditions.join(' AND ')}`
-    const rows = this.db.prepare(
-      `SELECT * FROM mcp_servers ${where} ORDER BY created_at DESC`
-    ).all(...params) as SqlRow[]
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT * FROM mcp_servers ${where} ORDER BY created_at DESC`,
+      params,
+    )
 
     return rows.map(mapMcpServer)
   }
 
-  hasUserInstalledTemplate(orgId: string, userId: string, templateId: string): boolean {
-    const row = this.db.prepare(
-      "SELECT 1 FROM mcp_servers WHERE org_id = ? AND template_id = ? AND owner_id = ? AND scope = 'user' AND status != 'deleted' LIMIT 1"
-    ).get(orgId, templateId, userId) as SqlRow | undefined
+  async hasUserInstalledTemplate(orgId: string, userId: string, templateId: string): Promise<boolean> {
+    const row = await this.driver.get<SqlRow>(
+      "SELECT 1 FROM mcp_servers WHERE org_id = ? AND template_id = ? AND owner_id = ? AND scope = 'user' AND status != 'deleted' LIMIT 1",
+      [orgId, templateId, userId],
+    )
     return !!row
   }
 
   // ==================== MCP Policy CRUD ====================
 
-  getMcpPolicy(orgId: string): McpPolicy {
-    const row = this.db.prepare(
-      'SELECT * FROM mcp_policies WHERE org_id = ?'
-    ).get(orgId) as SqlRow | undefined
+  async getMcpPolicy(orgId: string): Promise<McpPolicy> {
+    const row = await this.driver.get<SqlRow>(
+      'SELECT * FROM mcp_policies WHERE org_id = ?',
+      [orgId],
+    )
 
     if (row) return mapMcpPolicy(row)
 
@@ -684,10 +699,11 @@ export class McpStore {
     }
   }
 
-  upsertMcpPolicy(orgId: string, input: McpPolicyInput, updatedBy: string): McpPolicy {
-    const existing = this.db.prepare(
-      'SELECT id FROM mcp_policies WHERE org_id = ?'
-    ).get(orgId) as SqlRow | undefined
+  async upsertMcpPolicy(orgId: string, input: McpPolicyInput, updatedBy: string): Promise<McpPolicy> {
+    const existing = await this.driver.get<SqlRow>(
+      'SELECT id FROM mcp_policies WHERE org_id = ?',
+      [orgId],
+    )
 
     const ts = now()
 
@@ -723,13 +739,14 @@ export class McpStore {
       params.push(ts)
       params.push(orgId)
 
-      this.db.prepare(
-        `UPDATE mcp_policies SET ${sets.join(', ')} WHERE org_id = ?`
-      ).run(...params)
+      await this.driver.run(
+        `UPDATE mcp_policies SET ${sets.join(', ')} WHERE org_id = ?`,
+        params as SqlParam[],
+      )
     } else {
       const id = randomUUID()
-      const defaults = this.getMcpPolicy(orgId)
-      this.db.prepare(`
+      const defaults = await this.getMcpPolicy(orgId)
+      await this.driver.run(`
         INSERT INTO mcp_policies (
           id, org_id,
           allow_personal_mcp, allow_stdio_mcp, allow_http_sse_mcp, allow_local_file_access,
@@ -751,7 +768,7 @@ export class McpStore {
           ?, ?,
           ?, ?, ?, ?
         )
-      `).run(
+      `, [
         id, orgId,
         (input.allow_personal_mcp ?? defaults.allow_personal_mcp) ? 1 : 0,
         (input.allow_stdio_mcp ?? defaults.allow_stdio_mcp) ? 1 : 0,
@@ -773,7 +790,7 @@ export class McpStore {
         (input.limit_concurrency_and_rate ?? defaults.limit_concurrency_and_rate) ? 1 : 0,
         (input.restrict_callable_models ?? defaults.restrict_callable_models) ? 1 : 0,
         updatedBy, updatedBy, ts, ts,
-      )
+      ])
     }
 
     return this.getMcpPolicy(orgId)
@@ -781,7 +798,7 @@ export class McpStore {
 
   // ==================== MCP Audit Log ====================
 
-  insertAuditLog(entry: {
+  async insertAuditLog(entry: {
     org_id: string
     mcp_server_id: string | null
     mcp_server_name: string | null
@@ -795,27 +812,27 @@ export class McpStore {
     status?: string | null
     error_message?: string | null
     ip_address?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO mcp_audit_log (
         id, org_id, mcp_server_id, mcp_server_name, session_id,
         user_id, user_name, action, tool_name,
         request_params_json, response_summary, status, error_message,
         ip_address, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       randomUUID(), entry.org_id, entry.mcp_server_id, entry.mcp_server_name,
       entry.session_id ?? null, entry.user_id, entry.user_name ?? null,
       entry.action, entry.tool_name ?? null, entry.request_params_json ?? null,
       entry.response_summary ?? null, entry.status ?? null, entry.error_message ?? null,
       entry.ip_address ?? null, ts,
-    )
+    ])
   }
 
-  queryAuditLog(orgId: string, filter?: McpAuditLogFilter): { items: McpAuditLog[]; total: number } {
+  async queryAuditLog(orgId: string, filter?: McpAuditLogFilter): Promise<{ items: McpAuditLog[]; total: number }> {
     const conditions: string[] = ['org_id = ?']
-    const params: unknown[] = [orgId]
+    const params: SqlParam[] = [orgId]
 
     if (filter?.mcp_server_id) {
       conditions.push('mcp_server_id = ?')
@@ -847,79 +864,84 @@ export class McpStore {
     }
 
     const where = `WHERE ${conditions.join(' AND ')}`
-    const countRow = this.db.prepare(
-      `SELECT COUNT(*) AS c FROM mcp_audit_log ${where}`
-    ).get(...params) as { c: number }
-    const total = countRow.c
+    const countRow = await this.driver.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM mcp_audit_log ${where}`,
+      params,
+    )
+    const total = countRow?.c ?? 0
 
     const page = filter?.page ?? 1
     const pageSize = filter?.page_size ?? 20
     const offset = (page - 1) * pageSize
 
-    const rows = this.db.prepare(
-      `SELECT * FROM mcp_audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
-    ).all(...params, pageSize, offset) as SqlRow[]
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT * FROM mcp_audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset],
+    )
 
     return { items: rows.map(mapMcpAuditLog), total }
   }
 
   // ==================== MCP Approval Requests (Phase 2) ====================
 
-  createApprovalRequest(entry: {
+  async createApprovalRequest(entry: {
     org_id: string
     user_id: string
     user_name?: string | null
     mcp_server_id: string
     mcp_server_snapshot?: string | null
-  }): McpApprovalRequest {
+  }): Promise<McpApprovalRequest> {
     const ts = now()
     const id = randomUUID()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO mcp_approval_requests (id, org_id, user_id, user_name, mcp_server_id, mcp_server_snapshot, status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-    `).run(id, entry.org_id, entry.user_id, entry.user_name ?? null, entry.mcp_server_id, entry.mcp_server_snapshot ?? null, ts)
-    return this.getMcpApprovalRequest(id)!
+    `, [id, entry.org_id, entry.user_id, entry.user_name ?? null, entry.mcp_server_id, entry.mcp_server_snapshot ?? null, ts])
+    return (await this.getMcpApprovalRequest(id))!
   }
 
-  getMcpApprovalRequest(id: string): McpApprovalRequest | null {
-    const row = this.db.prepare(
-      'SELECT * FROM mcp_approval_requests WHERE id = ?'
-    ).get(id) as SqlRow | undefined
+  async getMcpApprovalRequest(id: string): Promise<McpApprovalRequest | null> {
+    const row = await this.driver.get<SqlRow>(
+      'SELECT * FROM mcp_approval_requests WHERE id = ?',
+      [id],
+    )
     return row ? mapMcpApprovalRequest(row) : null
   }
 
-  listApprovalRequests(orgId: string, status?: string): McpApprovalRequest[] {
+  async listApprovalRequests(orgId: string, status?: string): Promise<McpApprovalRequest[]> {
     if (status) {
-      const rows = this.db.prepare(
-        'SELECT * FROM mcp_approval_requests WHERE org_id = ? AND status = ? ORDER BY created_at DESC'
-      ).all(orgId, status) as SqlRow[]
+      const rows = await this.driver.all<SqlRow>(
+        'SELECT * FROM mcp_approval_requests WHERE org_id = ? AND status = ? ORDER BY created_at DESC',
+        [orgId, status],
+      )
       return rows.map(mapMcpApprovalRequest)
     }
-    const rows = this.db.prepare(
-      'SELECT * FROM mcp_approval_requests WHERE org_id = ? ORDER BY created_at DESC'
-    ).all(orgId) as SqlRow[]
+    const rows = await this.driver.all<SqlRow>(
+      'SELECT * FROM mcp_approval_requests WHERE org_id = ? ORDER BY created_at DESC',
+      [orgId],
+    )
     return rows.map(mapMcpApprovalRequest)
   }
 
-  updateApprovalRequest(id: string, update: {
+  async updateApprovalRequest(id: string, update: {
     status: 'approved' | 'rejected'
     reviewed_by: string
     reviewer_name?: string | null
     review_note?: string | null
-  }): McpApprovalRequest | null {
-    this.db.prepare(`
+  }): Promise<McpApprovalRequest | null> {
+    await this.driver.run(`
       UPDATE mcp_approval_requests
       SET status = ?, reviewed_by = ?, reviewer_name = ?, review_note = ?, reviewed_at = ?
       WHERE id = ?
-    `).run(update.status, update.reviewed_by, update.reviewer_name ?? null, update.review_note ?? null, now(), id)
+    `, [update.status, update.reviewed_by, update.reviewer_name ?? null, update.review_note ?? null, now(), id])
     return this.getMcpApprovalRequest(id)
   }
 
   // ==================== MCP Templates (Phase 2, §4.6 模板市场) ====================
 
-  listTemplates(orgId: string, filter?: McpTemplateListFilter): { items: McpTemplate[]; total: number } {
+  async listTemplates(orgId: string, filter?: McpTemplateListFilter): Promise<{ items: McpTemplate[]; total: number }> {
     const conditions: string[] = ['org_id = ?']
-    const params: unknown[] = [orgId]
+    const params: SqlParam[] = [orgId]
 
     if (filter?.category) {
       conditions.push('category = ?')
@@ -932,33 +954,36 @@ export class McpStore {
     }
 
     const where = `WHERE ${conditions.join(' AND ')}`
-    const countRow = this.db.prepare(
-      `SELECT COUNT(*) AS c FROM mcp_templates ${where}`
-    ).get(...params) as { c: number }
-    const total = countRow.c
+    const countRow = await this.driver.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM mcp_templates ${where}`,
+      params,
+    )
+    const total = countRow?.c ?? 0
 
     const page = filter?.page ?? 1
     const pageSize = filter?.page_size ?? 20
     const offset = (page - 1) * pageSize
 
-    const rows = this.db.prepare(
-      `SELECT * FROM mcp_templates ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
-    ).all(...params, pageSize, offset) as SqlRow[]
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT * FROM mcp_templates ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset],
+    )
 
     return { items: rows.map(mapMcpTemplate), total }
   }
 
-  getTemplate(orgId: string, id: string): McpTemplate | null {
-    const row = this.db.prepare(
-      'SELECT * FROM mcp_templates WHERE org_id = ? AND id = ?'
-    ).get(orgId, id) as SqlRow | undefined
+  async getTemplate(orgId: string, id: string): Promise<McpTemplate | null> {
+    const row = await this.driver.get<SqlRow>(
+      'SELECT * FROM mcp_templates WHERE org_id = ? AND id = ?',
+      [orgId, id],
+    )
     return row ? mapMcpTemplate(row) : null
   }
 
-  createTemplate(orgId: string, input: McpTemplateInput, createdBy: string): McpTemplate {
+  async createTemplate(orgId: string, input: McpTemplateInput, createdBy: string): Promise<McpTemplate> {
     const ts = now()
     const id = randomUUID()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO mcp_templates (
         id, org_id, name, description, icon, category, tags_json,
         mcp_type, url, command, args_json, env_json, timeout_ms, auth_type,
@@ -973,7 +998,7 @@ export class McpStore {
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?
       )
-    `).run(
+    `, [
       id, orgId, input.name, input.description ?? null,
       input.icon ?? null, input.category ?? null,
       input.tags_json ? JSON.stringify(input.tags_json) : null,
@@ -989,19 +1014,20 @@ export class McpStore {
       input.auth_config_json ?? null,
       input.security_policy_json ?? null,
       createdBy, ts, ts,
+    ])
+    return (await this.getTemplate(orgId, id))!
+  }
+
+  async deleteTemplate(orgId: string, id: string): Promise<boolean> {
+    const changes = await this.driver.run(
+      'DELETE FROM mcp_templates WHERE org_id = ? AND id = ?',
+      [orgId, id],
     )
-    return this.getTemplate(orgId, id)!
+    return changes > 0
   }
 
-  deleteTemplate(orgId: string, id: string): boolean {
-    const result = this.db.prepare(
-      'DELETE FROM mcp_templates WHERE org_id = ? AND id = ?'
-    ).run(orgId, id)
-    return result.changes > 0
-  }
-
-  updateTemplate(orgId: string, id: string, input: Partial<McpTemplateInput>): McpTemplate {
-    const existing = this.getTemplate(orgId, id)
+  async updateTemplate(orgId: string, id: string, input: Partial<McpTemplateInput>): Promise<McpTemplate> {
+    const existing = await this.getTemplate(orgId, id)
     if (!existing) throw new Error('Template not found')
 
     const sets: string[] = []
@@ -1038,48 +1064,83 @@ export class McpStore {
 
     params.push(orgId, id)
 
-    this.db.prepare(
-      `UPDATE mcp_templates SET ${sets.join(', ')} WHERE org_id = ? AND id = ?`
-    ).run(...params)
+    await this.driver.run(
+      `UPDATE mcp_templates SET ${sets.join(', ')} WHERE org_id = ? AND id = ?`,
+      params as SqlParam[],
+    )
 
-    return this.getTemplate(orgId, id)!
+    return (await this.getTemplate(orgId, id))!
   }
 
-  incrementDownloads(orgId: string, id: string): void {
-    this.db.prepare(
-      'UPDATE mcp_templates SET downloads = downloads + 1 WHERE org_id = ? AND id = ?'
-    ).run(orgId, id)
+  async incrementDownloads(orgId: string, id: string): Promise<void> {
+    await this.driver.run(
+      'UPDATE mcp_templates SET downloads = downloads + 1 WHERE org_id = ? AND id = ?',
+      [orgId, id],
+    )
   }
 
   // ==================== Per-User Disable ====================
 
-  /** User disables an MCP for themselves (idempotent, INSERT OR IGNORE). */
-  addUserDisabledMcp(orgId: string, userId: string, mcpServerId: string): void {
-    this.db.prepare(
-      `INSERT OR IGNORE INTO mcp_user_disabled (org_id, user_id, mcp_server_id, created_at)
-       VALUES (?, ?, ?, ?)`,
-    ).run(orgId, userId, mcpServerId, Date.now())
+  /** User disables an MCP for themselves (idempotent, ON CONFLICT DO NOTHING). */
+  async addUserDisabledMcp(orgId: string, userId: string, mcpServerId: string): Promise<void> {
+    await this.driver.run(
+      `INSERT INTO mcp_user_disabled (org_id, user_id, mcp_server_id, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(org_id, user_id, mcp_server_id) DO NOTHING`,
+      [orgId, userId, mcpServerId, Date.now()],
+    )
   }
 
   /** User re-enables an MCP for themselves (deletes the disable record). */
-  removeUserDisabledMcp(orgId: string, userId: string, mcpServerId: string): void {
-    this.db.prepare(
+  async removeUserDisabledMcp(orgId: string, userId: string, mcpServerId: string): Promise<void> {
+    await this.driver.run(
       `DELETE FROM mcp_user_disabled WHERE org_id = ? AND user_id = ? AND mcp_server_id = ?`,
-    ).run(orgId, userId, mcpServerId)
+      [orgId, userId, mcpServerId],
+    )
   }
 
   /** Get all MCP server IDs that the user has disabled. */
-  getUserDisabledMcpIds(orgId: string, userId: string): string[] {
-    const rows = this.db.prepare(
+  async getUserDisabledMcpIds(orgId: string, userId: string): Promise<string[]> {
+    const rows = await this.driver.all<SqlRow>(
       `SELECT mcp_server_id FROM mcp_user_disabled WHERE org_id = ? AND user_id = ?`,
-    ).all(orgId, userId) as SqlRow[]
+      [orgId, userId],
+    )
     return rows.map(r => r.mcp_server_id as string)
   }
 
   /** Clear all user-disabled records for a specific MCP server (used when admin toggles allow_user_disable). */
-  clearUserDisabledForMcpServer(orgId: string, mcpServerId: string): void {
-    this.db.prepare(
+  async clearUserDisabledForMcpServer(orgId: string, mcpServerId: string): Promise<void> {
+    await this.driver.run(
       `DELETE FROM mcp_user_disabled WHERE org_id = ? AND mcp_server_id = ?`,
-    ).run(orgId, mcpServerId)
+      [orgId, mcpServerId],
+    )
+  }
+
+  /**
+   * Cross-instance mcp/events (HA): cheap per-org change fingerprint polled by
+   * the SSE broadcaster as a fallback for changes made on OTHER instances —
+   * the DB is shared but broadcastMcpEvent only reaches SSE clients connected
+   * to the instance that made the change. `servers` covers every surface that
+   * fires mcp.changed (mcp_servers CRUD/enable/status, mcp_user_disabled
+   * toggles, mcp_templates CRUD/apply — the latter two feed admin listings);
+   * `policy` covers mcp.policy.changed (mcp_policies upsert). Known limit:
+   * COUNT+MAX misses two changes landing within the same millisecond —
+   * acceptable for a notification-only fallback (manual refresh still shows
+   * the latest data).
+   */
+  async getOrgChangeFingerprints(orgId: string): Promise<{ servers: string; policy: string }> {
+    const servers = await this.driver.get<SqlRow>(`
+      SELECT
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), 0) FROM mcp_servers WHERE org_id = ?) || '|' ||
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(created_at), 0) FROM mcp_user_disabled WHERE org_id = ?) || '|' ||
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), 0) FROM mcp_templates WHERE org_id = ?) AS fp
+    `, [orgId, orgId, orgId])
+    const policy = await this.driver.get<SqlRow>(`
+      SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), 0) AS fp FROM mcp_policies WHERE org_id = ?
+    `, [orgId])
+    return {
+      servers: String(servers?.fp ?? ''),
+      policy: String(policy?.fp ?? ''),
+    }
   }
 }
