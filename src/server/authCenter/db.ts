@@ -54,6 +54,22 @@ export type UserModelCredential = {
   sudorouterKey: string
 }
 
+/** A credit application row, as stored. Points, never gateway quota. */
+export type CreditApplicationRow = {
+  id: number
+  applicationNo: string
+  userId: string
+  orgId: string
+  requestedPoints: number
+  approvedPoints: number | null
+  reason: string | null
+  status: string
+  adminComment: string | null
+  createdAt: number
+  reviewedAt: number | null
+  sudorouterError: string | null
+}
+
 /** A pending phone verification code. Only the HMAC of the code is stored. */
 export type PhoneLoginCode = {
   phone: string
@@ -171,6 +187,23 @@ function mapUser(row: SqlRow): AuthCenterUser {
     lastLoginAt: row.last_login_at == null ? null : Number(row.last_login_at),
     extUserId: row.ext_user_id == null ? null : String(row.ext_user_id),
     phone: row.phone == null ? null : String(row.phone),
+  }
+}
+
+function mapCreditApplication(row: SqlRow): CreditApplicationRow {
+  return {
+    id: Number(row.id),
+    applicationNo: String(row.application_no),
+    userId: String(row.user_id),
+    orgId: String(row.org_id),
+    requestedPoints: Number(row.requested_points),
+    approvedPoints: row.approved_points == null ? null : Number(row.approved_points),
+    reason: row.reason == null ? null : String(row.reason),
+    status: String(row.status),
+    adminComment: row.admin_comment == null ? null : String(row.admin_comment),
+    createdAt: Number(row.created_at),
+    reviewedAt: row.reviewed_at == null ? null : Number(row.reviewed_at),
+    sudorouterError: row.sudorouter_error == null ? null : String(row.sudorouter_error),
   }
 }
 
@@ -434,6 +467,27 @@ export class AuthCenterDb {
     // anything mapped there reaches API responses. Keeping the token off the
     // mapped type makes leaking it impossible by construction rather than by
     // remembering to omit it. Reads go through `getUserModelCredential`.
+    // Credit applications (`approve` recharge mode). The balance itself lives at
+    // the model gateway; this table holds only the request and the outcome of
+    // trying to credit it, which is why it carries a sync-error column.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS credit_applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_no TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        org_id TEXT NOT NULL,
+        requested_points INTEGER NOT NULL,
+        approved_points INTEGER,
+        reason TEXT,
+        status TEXT NOT NULL,
+        admin_comment TEXT,
+        created_at INTEGER NOT NULL,
+        reviewed_at INTEGER,
+        sudorouter_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS credit_applications_user_idx
+        ON credit_applications (user_id, created_at DESC);
+    `)
     this.ensureColumn(
       'users',
       'sudorouter_user_id',
@@ -743,6 +797,86 @@ export class AuthCenterDb {
     this.db.prepare(`
       UPDATE users SET sudorouter_user_id = ?, sudorouter_key = ? WHERE id = ?
     `).run(credential.sudorouterUserId, credential.sudorouterKey, userId)
+  }
+
+  // ---- credit applications (`approve` recharge mode) ----
+
+  createCreditApplication(input: {
+    applicationNo: string
+    userId: string
+    orgId: string
+    requestedPoints: number
+    reason: string | null
+    createdAt: number
+  }): CreditApplicationRow {
+    this.db.prepare(`
+      INSERT INTO credit_applications
+        (application_no, user_id, org_id, requested_points, reason, status, created_at)
+      VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+    `).run(
+      input.applicationNo,
+      input.userId,
+      input.orgId,
+      input.requestedPoints,
+      input.reason,
+      input.createdAt,
+    )
+    const row = this.db.prepare(`
+      SELECT * FROM credit_applications WHERE application_no = ?
+    `).get(input.applicationNo) as SqlRow
+    return mapCreditApplication(row)
+  }
+
+  getCreditApplication(id: number): CreditApplicationRow | null {
+    const row = this.db.prepare(`
+      SELECT * FROM credit_applications WHERE id = ?
+    `).get(id) as SqlRow | undefined
+    return row ? mapCreditApplication(row) : null
+  }
+
+  listCreditApplicationsForUser(
+    userId: string,
+    limit: number,
+    offset: number,
+  ): { list: CreditApplicationRow[]; total: number } {
+    const rows = this.db.prepare(`
+      SELECT * FROM credit_applications
+      WHERE user_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(userId, limit, offset) as SqlRow[]
+    const counted = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM credit_applications WHERE user_id = ?
+    `).get(userId) as SqlRow | undefined
+    return { list: rows.map(mapCreditApplication), total: Number(counted?.n ?? 0) }
+  }
+
+  /** PROCESSING counts as pending: it is a decision in flight, not a finished one. */
+  hasPendingCreditApplication(userId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM credit_applications
+      WHERE user_id = ? AND status IN ('PENDING', 'PROCESSING')
+    `).get(userId) as SqlRow | undefined
+    return Number(row?.n ?? 0) > 0
+  }
+
+  updateCreditApplicationStatus(id: number, patch: {
+    status: string
+    approvedPoints?: number | null
+    adminComment?: string | null
+    reviewedAt?: number | null
+    sudorouterError?: string | null
+  }): void {
+    const sets = ['status = ?']
+    const values: unknown[] = [patch.status]
+    // Only the fields the caller named are written; a status move that carries
+    // no new comment must not blank the one already recorded.
+    if ('approvedPoints' in patch) { sets.push('approved_points = ?'); values.push(patch.approvedPoints ?? null) }
+    if ('adminComment' in patch) { sets.push('admin_comment = ?'); values.push(patch.adminComment ?? null) }
+    if ('reviewedAt' in patch) { sets.push('reviewed_at = ?'); values.push(patch.reviewedAt ?? null) }
+    if ('sudorouterError' in patch) { sets.push('sudorouter_error = ?'); values.push(patch.sudorouterError ?? null) }
+    values.push(id)
+    this.db.prepare(`UPDATE credit_applications SET ${sets.join(', ')} WHERE id = ?`).run(...values as never[])
   }
 
   // ---- phone verification codes (login_method: 0) ----
