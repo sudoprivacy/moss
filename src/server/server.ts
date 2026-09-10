@@ -24,6 +24,12 @@ import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
 import { buildPublicSystemConfig } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
+import { buildKubectlBaseArgs, buildResourceNames } from './backends/k8sBackend.js'
+import {
+  buildRemoteWorkspaceTree,
+  createPodWorkspaceAccess,
+  type WorkspaceFileAccess,
+} from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
 import { initHubConfig } from './hubConfig.js'
@@ -1599,12 +1605,41 @@ async function readWorkspaceTreeIn(
   }
 }
 
+/**
+ * Workspace access for a session whose files do not live on moss's filesystem.
+ *
+ * Null when they do — host and docker sessions write straight to `session.cwd`,
+ * docker by bind-mounting it — and the direct-fs path applies unchanged.
+ *
+ * Derived from the session id rather than read off a backend handle: the handle
+ * lives in the runner process, and the HTTP server answering these requests is
+ * a different process, so it can only re-derive the pod's name.
+ */
+function resolveSessionWorkspaceAccess(
+  session: SessionRecord,
+  config: ServerConfig,
+): WorkspaceFileAccess | null {
+  if (session.runtime?.type !== 'k8s') return null
+  return createPodWorkspaceAccess({
+    kubectlBase: buildKubectlBaseArgs(
+      config.k8s?.namespace || 'moss-sessions',
+      config.k8s?.kubeconfig,
+    ),
+    podName: buildResourceNames(session.sessionId).podName,
+    cwd: session.cwd,
+  })
+}
+
 async function readWorkspaceFilePreview(
   session: SessionRecord,
   pathParam: string | null,
+  remote: WorkspaceFileAccess | null,
 ): Promise<MossWorkspaceFilePreview> {
   const relativePath = normalizeWorkspaceRelativePath(pathParam)
   if (!relativePath) throw new HttpError(400, 'Missing path')
+
+  if (remote) return readRemoteWorkspaceFilePreview(remote, session.cwd, relativePath)
+
   const { rootRealPath, fullPath } = await resolveWorkspaceEntry(session.cwd, relativePath)
   const info = await lstat(fullPath)
   if (!info.isFile()) throw new HttpError(400, 'Path is not a file')
@@ -1641,11 +1676,68 @@ async function readWorkspaceFilePreview(
   }
 }
 
-function readWorkspaceTree(
+/**
+ * Preview a file that lives in the agent's filesystem rather than moss's.
+ *
+ * The size limits are enforced from the listing before the file is fetched: the
+ * point of a limit is to avoid moving the bytes, so discovering the size by
+ * reading it would defeat it.
+ */
+async function readRemoteWorkspaceFilePreview(
+  remote: WorkspaceFileAccess,
+  root: string,
+  relativePath: string,
+): Promise<MossWorkspaceFilePreview> {
+  const entries = await remote.listTree(WORKSPACE_TREE_MAX_DEPTH)
+  const entry = entries.find(e => e.relativePath === relativePath)
+  if (!entry) throw new HttpError(404, 'File not found')
+  if (entry.isDir) throw new HttpError(400, 'Path is not a file')
+
+  const name = relativePath.slice(relativePath.lastIndexOf('/') + 1)
+  const mime = workspacePreviewMime(relativePath)
+  if (isWorkspaceTextFile(relativePath, mime)) {
+    if (entry.size > WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES) {
+      throw new HttpError(413, 'Text file exceeds preview limit')
+    }
+    return {
+      kind: 'text',
+      name,
+      relativePath,
+      mime,
+      encoding: 'utf8',
+      content: (await remote.readFile(relativePath)).toString('utf8'),
+      size: entry.size,
+      truncated: false,
+    }
+  }
+
+  if (entry.size > WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES) {
+    throw new HttpError(413, 'Binary file exceeds preview limit')
+  }
+  return {
+    kind: 'base64',
+    name,
+    relativePath,
+    mime,
+    contentBase64: (await remote.readFile(relativePath)).toString('base64'),
+    size: entry.size,
+  }
+}
+
+async function readWorkspaceTree(
   session: SessionRecord,
   params: { path?: string | null; search?: string | null },
+  remote: WorkspaceFileAccess | null,
 ): Promise<MossWorkspaceNode> {
-  return readWorkspaceTreeIn(session.cwd, params)
+  if (!remote) return readWorkspaceTreeIn(session.cwd, params)
+  const entries = await remote.listTree(WORKSPACE_TREE_MAX_DEPTH)
+  return buildRemoteWorkspaceTree(
+    entries,
+    session.cwd,
+    normalizeWorkspaceRelativePath(params.path ?? '') ?? '',
+    (params.search ?? '').trim().toLowerCase(),
+    { skipDirs: WORKSPACE_TREE_SKIP_DIRS, maxEntriesPerDir: WORKSPACE_TREE_MAX_ENTRIES_PER_DIR },
+  )
 }
 
 /**
@@ -1706,11 +1798,39 @@ async function writeWorkspaceFileTo(
   }
 }
 
-function writeWorkspaceFile(
+async function writeWorkspaceFile(
   session: SessionRecord,
   params: { path: string | null; contentBase64: string | null },
+  remote: WorkspaceFileAccess | null,
 ): Promise<{ relativePath: string; size: number }> {
-  return writeWorkspaceFileTo(session.cwd, params)
+  if (!remote) return writeWorkspaceFileTo(session.cwd, params)
+
+  // Same validation as the direct-fs path, applied before the upload leaves
+  // moss: an oversized or malformed body should be rejected here rather than
+  // after being streamed into a pod.
+  const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
+  if (!relativePath) throw new HttpError(400, 'Missing path')
+  if (typeof params.contentBase64 !== 'string') {
+    throw new HttpError(400, 'Missing content_base64')
+  }
+  let buffer: Buffer
+  try {
+    buffer = Buffer.from(params.contentBase64, 'base64')
+  } catch {
+    throw new HttpError(400, 'Invalid base64 content')
+  }
+  const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+  const uploadLimit =
+    Number.isFinite(configuredLimit) && configuredLimit > 0
+      ? configuredLimit
+      : 20 * 1024 * 1024
+  if (buffer.length > uploadLimit) {
+    const limitMb = Math.round(uploadLimit / (1024 * 1024))
+    throw new HttpError(413, `Uploaded file exceeds size limit (${limitMb}MB)`)
+  }
+
+  await remote.writeFile(relativePath, buffer)
+  return { relativePath, size: buffer.length }
 }
 
 function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
@@ -9095,7 +9215,7 @@ export function startServer(
         const root = await readWorkspaceTree(session, {
           path: url.searchParams.get('path'),
           search: url.searchParams.get('search'),
-        })
+        }, resolveSessionWorkspaceAccess(session, config))
         writeJson(res, 200, { root })
         return
       }
@@ -9108,7 +9228,11 @@ export function startServer(
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
-        writeJson(res, 200, await readWorkspaceFilePreview(session, url.searchParams.get('path')))
+        writeJson(res, 200, await readWorkspaceFilePreview(
+          session,
+          url.searchParams.get('path'),
+          resolveSessionWorkspaceAccess(session, config),
+        ))
         return
       }
 
@@ -9123,7 +9247,7 @@ export function startServer(
         const result = await writeWorkspaceFile(session, {
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-        })
+        }, resolveSessionWorkspaceAccess(session, config))
         writeJson(res, 200, result)
         return
       }
