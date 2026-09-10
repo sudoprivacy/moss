@@ -6,6 +6,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import type { ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { McpStore } from "../mcp/db.js";
 import { SqliteDriver } from "../db/driver.js";
@@ -19,7 +20,11 @@ import {
 
 type Captured = { events: string[]; ended: boolean };
 
-function makeFakeRes(): { res: EventEmitter; captured: Captured } {
+// handleMcpSseConnection expects a ServerResponse. We keep the loose
+// EventEmitter shape while attaching the stub methods (assigning simplified
+// lambdas to ServerResponse's strict write/end signatures would not typecheck),
+// and cast to ServerResponse only at the return boundary.
+function makeFakeRes(): { res: ServerResponse; captured: Captured } {
   const captured: Captured = { events: [], ended: false };
   const res = new EventEmitter() as EventEmitter & {
     writeHead: (status: number, headers: Record<string, string>) => void;
@@ -36,7 +41,7 @@ function makeFakeRes(): { res: EventEmitter; captured: Captured } {
   res.end = () => {
     captured.ended = true;
   };
-  return { res, captured };
+  return { res: res as unknown as ServerResponse, captured };
 }
 
 // The store queries go through the async driver; the test keeps its own db
