@@ -20,6 +20,22 @@ import { appendRecords, readCursor, updateRooms, writeCursor, type ChatRecord } 
 /** WeCom caps a single GetChatData page at 1000. */
 const PAGE_LIMIT = 1000
 
+/**
+ * Parse the admin's room filter into a lookup set.
+ *
+ * Accepts commas, spaces and newlines in any mix, so a list pasted from a
+ * spreadsheet or typed by hand both work. Returns null for "no filter" —
+ * distinct from an empty set, which would archive nothing.
+ */
+export function parseRoomFilter(raw: string | undefined): Set<string> | null {
+  if (!raw) return null
+  const ids = raw
+    .split(/[\s,，]+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0)
+  return ids.length > 0 ? new Set(ids) : null
+}
+
 export type PullConfig = {
   corpAppId: string
   corpId: string
@@ -28,11 +44,18 @@ export type PullConfig = {
   privateKeysRaw: string
   /** Stop after this many pages in one run; 0 = drain fully. */
   maxPages?: number
+  /**
+   * Raw room filter as typed by the admin: room ids separated by commas
+   * and/or whitespace. Empty (or absent) archives every conversation.
+   */
+  roomFilterRaw?: string
 }
 
 export type PullResult = {
   fetched: number
   written: number
+  /** Decrypted but dropped by the room filter. */
+  filtered: number
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -83,7 +106,9 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let fetched = 0
   let written = 0
   let failed = 0
+  let filtered = 0
   let pages = 0
+  const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
 
   const sdk = openSdk(cfg.corpId, cfg.secret)
   try {
@@ -92,8 +117,19 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
       if (page.length === 0) break
       fetched += page.length
 
-      const { records, failed: pageFailed, firstError } = decryptPage(sdk, privateKeys, page)
+      const { records: decrypted, failed: pageFailed, firstError } = decryptPage(sdk, privateKeys, page)
       failed += pageFailed
+
+      // Filtering happens AFTER decryption because WeCom's envelope carries
+      // only seq/msgid/publickey_ver — roomid exists solely inside the
+      // encrypted body, so there is no way to skip a room before decrypting.
+      // The cursor still advances over filtered records: they were fetched
+      // and are not coming back, and holding the cursor for them would
+      // re-pull the same traffic forever.
+      const records = roomFilter
+        ? decrypted.filter((r) => roomFilter.has(r.roomid || ''))
+        : decrypted
+      filtered += decrypted.length - records.length
       if (firstError) {
         console.error(
           `[msgaudit] ${pageFailed}/${page.length} records failed to decrypt in page at seq ${cursor}: ${firstError}`,
@@ -126,5 +162,5 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     }
   }
 
-  return { fetched, written, failed, cursor, pages }
+  return { fetched, written, failed, filtered, cursor, pages }
 }

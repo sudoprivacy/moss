@@ -126,6 +126,18 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       hint: '同上,与自建应用的 EncodingAESKey 不通用。',
     },
     {
+      key: 'roomFilter',
+      label: '群聊过滤(可选,留空=归档全部会话)',
+      bucket: 'config',
+      optional: true,
+      placeholder: 'wr_xxx, wr_yyy',
+      hint:
+        '只归档这些群的聊天记录,用逗号、空格或换行分隔均可。留空表示不过滤、归档全部会话' +
+        '(含单聊)。注意:企微按会话推送,roomid 只有解密后才可见,因此过滤发生在解密之后 ——' +
+        '它减少落盘量与存储面,但不会减少拉取量。修改后下一轮拉取(默认 5 分钟)生效,' +
+        '不影响已归档的记录。',
+    },
+    {
       key: 'secret',
       label: '会话存档 Secret(拉取聊天记录时必填)',
       type: 'password',
