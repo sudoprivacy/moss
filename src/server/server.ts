@@ -26,6 +26,17 @@ import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
 import { buildKubectlBaseArgs, buildResourceNames } from './backends/k8sBackend.js'
 import {
+  createSudorouterClient,
+  pointsToQuota,
+  type SudorouterClient,
+} from './credits/sudorouter.js'
+import {
+  CreditApplicationError,
+  reviewApplication,
+  submitApplication,
+  toPayload,
+} from './credits/creditApplications.js'
+import {
   buildRemoteWorkspaceTree,
   createPodWorkspaceAccess,
   type WorkspaceFileAccess,
@@ -1602,6 +1613,63 @@ async function readWorkspaceTreeIn(
     isFile: false,
     isDir: true,
     children: [],
+  }
+}
+
+/**
+ * A client for the model gateway that owns the credit ledger, or null when this
+ * deployment has none — a private install bills nothing and has no gateway to
+ * ask. The admin token is read from the vault per call, never from server.json,
+ * so a leaked config file cannot move anyone's balance.
+ */
+function buildSudorouterClient(
+  config: ServerConfig,
+  nexus: { getSecret(ns: string, key: string): Promise<{ value?: string } | null> } | undefined,
+): SudorouterClient | null {
+  const admin = config.systemConfig.sudorouterAdmin
+  const baseUrl = config.systemConfig.sudorouterBaseUrl
+  if (!admin || !baseUrl || !nexus) return null
+  return createSudorouterClient({
+    baseUrl,
+    getAdminToken: async () => {
+      const secret = await nexus.getSecret(admin.vaultNamespace, admin.tokenKey)
+      if (!secret?.value) {
+        throw new Error(
+          `SudoRouter admin token missing from the vault (${admin.vaultNamespace}: ${admin.tokenKey})`,
+        )
+      }
+      return secret.value
+    },
+  })
+}
+
+/**
+ * The points a user has left and has spent.
+ *
+ * Zeroes when there is no gateway account or no gateway at all, rather than an
+ * error: the client shows this panel in every recharge mode, including the
+ * `disabled` one that private deployments run, and a failure there would be a
+ * broken settings page rather than useful information.
+ */
+async function readUserCredits(
+  authService: AuthService,
+  config: ServerConfig,
+  nexus: Parameters<typeof buildSudorouterClient>[1],
+  userId: string,
+): Promise<{ remaining: number; used: number; bonus: number }> {
+  const empty = { remaining: 0, used: 0, bonus: 0 }
+  const gatewayUserId = authService.getUserModelCredential(userId)?.sudorouterUserId
+  if (!gatewayUserId) return empty
+  const client = buildSudorouterClient(config, nexus)
+  if (!client) return empty
+  try {
+    const credits = await client.getCredits(gatewayUserId)
+    // `bonus` is a separate pot on the old server that SudoRouter does not
+    // model. Reporting 0 is honest; inventing a split of the real balance
+    // would not be.
+    return { remaining: credits.remainingPoints, used: credits.usedPoints, bonus: 0 }
+  } catch {
+    return empty
   }
 }
 
@@ -5832,6 +5900,110 @@ export function startServer(
                 : undefined,
           }, auth),
         )
+        return
+      }
+
+      // ---- credits ----
+      // The balance lives at the model gateway, so every one of these reads
+      // through to it rather than reporting a number moss keeps. A user with no
+      // gateway account is not an error: private deployments have no metered
+      // gateway at all, and the client renders zeroes.
+      if (req.method === 'GET' && pathname === '/api/v1/user/dashboard') {
+        const credits = await readUserCredits(authService, config, nexusClient, auth.userId)
+        writeJson(res, 200, { success: true, data: { points: credits } })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/user/model-usage-stats') {
+        const gatewayUserId = authService.getUserModelCredential(auth.userId)?.sudorouterUserId
+        if (!gatewayUserId) {
+          writeJson(res, 200, { success: true, data: [] })
+          return
+        }
+        const client = buildSudorouterClient(config, nexusClient)
+        if (!client) {
+          writeJson(res, 200, { success: true, data: [] })
+          return
+        }
+        const today = new Date().toISOString().slice(0, 10)
+        writeJson(res, 200, {
+          success: true,
+          data: await client.getModelUsage(
+            gatewayUserId,
+            url.searchParams.get('start_date') || today,
+            url.searchParams.get('end_date') || today,
+          ),
+        })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/credit-applications') {
+        const page = Math.max(1, Number(url.searchParams.get('page') || 1))
+        const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || 20)))
+        const result = authService.creditApplications.listForUser(auth.userId, page, pageSize)
+        writeJson(res, 200, {
+          success: true,
+          data: { list: result.list.map(app => toPayload(app, pointsToQuota)), total: result.total },
+        })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/credit-applications') {
+        const body = await readJsonBody(req)
+        try {
+          const app = submitApplication(
+            authService.creditApplications,
+            config.systemConfig.creditApplication,
+            {
+              userId: auth.userId,
+              orgId: auth.orgId,
+              requestedPoints: body.requested_points,
+              reason: body.reason,
+            },
+          )
+          writeJson(res, 200, { success: true, data: toPayload(app, pointsToQuota) })
+        } catch (err) {
+          if (err instanceof CreditApplicationError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      const creditReviewMatch = pathname.match(/^\/api\/v1\/credit-applications\/(\d+)\/review$/)
+      if (req.method === 'POST' && creditReviewMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const body = await readJsonBody(req)
+        const client = buildSudorouterClient(config, nexusClient)
+        if (!client) {
+          writeJson(res, 503, { success: false, msg: 'Model gateway is not configured' })
+          return
+        }
+        const application = authService.creditApplications.getById(Number(creditReviewMatch[1]))
+        if (!application) {
+          writeJson(res, 404, { success: false, msg: 'Application not found' })
+          return
+        }
+        try {
+          const reviewed = await reviewApplication(authService.creditApplications, client, {
+            id: application.id,
+            approve: body.approve === true,
+            approvedPoints:
+              typeof body.approved_points === 'number' ? body.approved_points : undefined,
+            adminComment: typeof body.admin_comment === 'string' ? body.admin_comment : undefined,
+            gatewayUserId:
+              authService.getUserModelCredential(application.userId)?.sudorouterUserId ?? null,
+          })
+          writeJson(res, 200, { success: true, data: toPayload(reviewed, pointsToQuota) })
+        } catch (err) {
+          if (err instanceof CreditApplicationError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
         return
       }
 
