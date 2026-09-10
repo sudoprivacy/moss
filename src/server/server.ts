@@ -6093,6 +6093,97 @@ export function startServer(
         return
       }
 
+      // Password sign-in for a deployment running `login_method: 1`. The
+      // client posts `phone` because that is the field it collects, but the
+      // value is the username — moss stores the phone as the username for
+      // phone accounts, so the same lookup serves both.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/login-by-config') {
+        const body = await readJsonBody(req)
+        try {
+          const result = authService.issueTokenFromPassword({
+            username: typeof body.phone === 'string' ? body.phone : (typeof body.username === 'string' ? body.username : ''),
+            password: typeof body.password === 'string' ? body.password : '',
+          })
+          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+        } catch (err) {
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          // Deliberately the same message for an unknown account and a wrong
+          // password: telling them apart tells an attacker which usernames exist.
+          writeJson(res, status, { success: false, msg: 'Username or password is incorrect' })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/auth/change-password') {
+        const body = await readJsonBody(req)
+        const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword : ''
+        const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
+        if (!newPassword) {
+          writeJson(res, 400, { success: false, msg: 'newPassword is required' })
+          return
+        }
+        const actor = authService.getUserById(auth.userId)
+        if (!actor) {
+          writeJson(res, 404, { success: false, msg: 'Unknown user' })
+          return
+        }
+        // The current password is re-checked here even though the caller is
+        // already authenticated: a token left behind on a shared machine must
+        // not be enough to take the account over.
+        try {
+          authService.issueTokenFromPassword({
+            username: authService.getUserName(auth.userId) ?? '',
+            password: oldPassword,
+          })
+        } catch {
+          writeJson(res, 403, { success: false, msg: 'Current password is incorrect' })
+          return
+        }
+        authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
+        writeJson(res, 200, { success: true, msg: 'password updated' })
+        return
+      }
+
+      // Self-service sign-up for a password deployment. Same shape as the
+      // phone flow it sits beside: an invitation code gates entry, the account
+      // is provisioned at the gateway, and the caller is signed in.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/register-password') {
+        const body = await readJsonBody(req)
+        const username = typeof body.phone === 'string' ? body.phone.trim() : ''
+        const password = typeof body.password === 'string' ? body.password : ''
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        if (!username || !password || !nickname) {
+          writeJson(res, 400, { success: false, msg: 'phone, password and nickname are required' })
+          return
+        }
+        // The same gate the phone flow uses, so turning invitations on or off
+        // applies to both rather than leaving one door open.
+        if (!authService.phoneAuth.checkInvitationCode(body.invitation_code)) {
+          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+          return
+        }
+        if (authService.findUserByPhone(username)) {
+          writeJson(res, 409, { success: false, msg: 'This account already exists' })
+          return
+        }
+        const { user } = authService.provisionPhoneUser({
+          phone: username,
+          nickname,
+          autoCreateOrg: authService.phoneAuth.autoCreateOrg,
+        })
+        authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
+        await ensureGatewayAccount(authService, config, {
+          userId: user.id,
+          username,
+          displayName: nickname,
+        })
+        writeJson(res, 200, {
+          success: true,
+          data: attachSudocodeFields(authService.issueTokenFromPhone(username)),
+        })
+        return
+      }
+
       // ---- credits ----
       // The balance lives at the model gateway, so every one of these reads
       // through to it rather than reporting a number moss keeps. A user with no
