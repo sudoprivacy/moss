@@ -14,15 +14,15 @@ export interface UserConfigItem {
 interface McpUserConfigDeps {
   nexusClient: NexusClient
   mcpStore: McpStore
-  getUserByIdAndOrg: (userId: string, orgId: string) => { role: string; departmentId: string | null } | null
-  listDepartmentsByOrg: (orgId: string) => Array<{ id: string; parentId: string | null }>
+  getUserByIdAndOrg: (userId: string, orgId: string) => Promise<{ role: string; departmentId: string | null } | null>
+  listDepartmentsByOrg: (orgId: string) => Promise<Array<{ id: string; parentId: string | null }>>
 }
 
 export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
   const { nexusClient, mcpStore, getUserByIdAndOrg, listDepartmentsByOrg } = deps
 
-  function checkVisibility(auth: AuthContext, server: { visible_to: unknown }) {
-    const filter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+  async function checkVisibility(auth: AuthContext, server: { visible_to: unknown }) {
+    const filter = await buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
     if (!isVisibleTo(server.visible_to, filter)) {
       const err = new Error('无权访问此 MCP 服务')
       Object.assign(err, { statusCode: 403 })
@@ -30,9 +30,9 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
     }
   }
 
-  function getSchemaForServer(server: { template_id: string | null; org_id: string }): UserConfigItem[] {
+  async function getSchemaForServer(server: { template_id: string | null; org_id: string }): Promise<UserConfigItem[]> {
     if (!server.template_id) return []
-    const template = mcpStore.getTemplate(server.org_id, server.template_id)
+    const template = await mcpStore.getTemplate(server.org_id, server.template_id)
     if (!template?.config_json) return []
     try {
       const parsed = JSON.parse(template.config_json)
@@ -51,15 +51,15 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
 
   const api = {
     async listForServer(auth: AuthContext, mcpServerId: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, mcpServerId)
+      const server = await mcpStore.getMcpServer(auth.orgId, mcpServerId)
       if (!server) {
         const err = new Error('MCP 服务不存在')
         Object.assign(err, { statusCode: 404 })
         throw err
       }
-      checkVisibility(auth, server)
+      await checkVisibility(auth, server)
 
-      const schema = getSchemaForServer(server)
+      const schema = await getSchemaForServer(server)
       if (schema.length === 0) return { success: true, data: { schema: [], values: {} } }
 
       const secrets = await nexusClient.listSecrets(namespace(auth.userId, mcpServerId), auth.userId)
@@ -73,15 +73,15 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
     },
 
     async setValue(auth: AuthContext, mcpServerId: string, key: string, value: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, mcpServerId)
+      const server = await mcpStore.getMcpServer(auth.orgId, mcpServerId)
       if (!server) {
         const err = new Error('MCP 服务不存在')
         Object.assign(err, { statusCode: 404 })
         throw err
       }
-      checkVisibility(auth, server)
+      await checkVisibility(auth, server)
 
-      const schema = getSchemaForServer(server)
+      const schema = await getSchemaForServer(server)
       if (schema.length === 0) {
         return { success: false, error: { code: 'template_not_found', message: '该服务关联的模板不存在或无配置项' } }
       }
@@ -96,15 +96,15 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
     },
 
     async deleteValue(auth: AuthContext, mcpServerId: string, key: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, mcpServerId)
+      const server = await mcpStore.getMcpServer(auth.orgId, mcpServerId)
       if (!server) {
         const err = new Error('MCP 服务不存在')
         Object.assign(err, { statusCode: 404 })
         throw err
       }
-      checkVisibility(auth, server)
+      await checkVisibility(auth, server)
 
-      const schema = getSchemaForServer(server)
+      const schema = await getSchemaForServer(server)
       if (!schema.some(item => item.key === key)) {
         const err = new Error(`配置项 ${key} 未在模板 schema 中声明`)
         Object.assign(err, { statusCode: 400 })
@@ -116,7 +116,7 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
     },
 
     async batchUpdate(auth: AuthContext, mcpServerId: string, configValues: Record<string, string>) {
-      const server = mcpStore.getMcpServer(auth.orgId, mcpServerId)
+      const server = await mcpStore.getMcpServer(auth.orgId, mcpServerId)
       if (!server) {
         return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
       }
@@ -124,7 +124,7 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
         return { success: false, error: { code: 'forbidden', message: '只能修改自己的个人 MCP 配置' } }
       }
 
-      const schema = getSchemaForServer(server)
+      const schema = await getSchemaForServer(server)
       if (schema.length === 0) {
         return { success: false, error: { code: 'template_not_found', message: '该服务关联的模板不存在或无配置项' } }
       }
@@ -173,7 +173,7 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
     },
 
     async getResolvedEnvAndHeaders(server: { template_id: string | null; org_id: string }, userId: string): Promise<{ env: Record<string, string>; headers: Record<string, string> }> {
-      const schema = getSchemaForServer(server)
+      const schema = await getSchemaForServer(server)
       if (schema.length === 0) return { env: {}, headers: {} }
 
       const ns = namespace(userId, server.id ?? '')

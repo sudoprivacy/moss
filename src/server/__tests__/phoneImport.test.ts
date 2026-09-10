@@ -27,8 +27,8 @@ const BOB = { phone: '13800138002', nickname: 'Bob', group: '9', sudorouterKey: 
 const SOLO = { phone: '13800138003', nickname: 'Solo', group: '21', sudorouterKey: 'sk-solo' }
 
 describe('phone import', () => {
-  it('groups users by their source grouping key, and a group of one is just an org of one', () => {
-    const result = importPhoneUsers(auth, {
+  it('groups users by their source grouping key, and a group of one is just an org of one', async () => {
+    const result = await importPhoneUsers(auth, {
       users: [ALICE, BOB, SOLO],
       groupNames: { '9': 'Acme', '21': 'Solo Consulting' },
     })
@@ -43,39 +43,39 @@ describe('phone import', () => {
     // The one-person case needs no special handling: it is an ordinary org that
     // happens to hold one member, so merging or splitting later is a membership
     // change rather than another migration.
-    assert.equal(db.listUsersByOrg(solo!.orgId!).length, 1)
-    assert.equal(auth.findOrganizationByName('Solo Consulting')?.id, solo?.orgId)
+    assert.equal((await db.listUsersByOrg(solo!.orgId!)).length, 1)
+    assert.equal((await auth.findOrganizationByName('Solo Consulting'))?.id, solo?.orgId)
   })
 
-  it('rehearses without writing: a dry run reports what the real run then does', () => {
+  it('rehearses without writing: a dry run reports what the real run then does', async () => {
     const request = { users: [ALICE, BOB], groupNames: { '9': 'Acme' } }
 
-    const rehearsal = importPhoneUsers(auth, { ...request, dryRun: true })
+    const rehearsal = await importPhoneUsers(auth, { ...request, dryRun: true })
     assert.equal(rehearsal.dryRun, true)
     assert.equal(rehearsal.summary.created, 2)
     assert.equal(rehearsal.summary.organizationsCreated, 1)
 
     // Nothing survived the rehearsal — neither the users nor the org it created.
-    assert.equal(db.getUserByPhone(ALICE.phone), null)
-    assert.equal(auth.findOrganizationByName('Acme'), null)
+    assert.equal(await db.getUserByPhone(ALICE.phone), null)
+    assert.equal(await auth.findOrganizationByName('Acme'), null)
 
-    const real = importPhoneUsers(auth, request)
+    const real = await importPhoneUsers(auth, request)
     assert.deepEqual(real.summary, { ...rehearsal.summary })
-    assert.notEqual(db.getUserByPhone(ALICE.phone), null)
+    assert.notEqual(await db.getUserByPhone(ALICE.phone), null)
   })
 
-  it('is re-runnable: a second pass creates nothing and reports the accounts as already present', () => {
-    importPhoneUsers(auth, { users: [ALICE, BOB], groupNames: { '9': 'Acme' } })
-    const second = importPhoneUsers(auth, { users: [ALICE, BOB], groupNames: { '9': 'Acme' } })
+  it('is re-runnable: a second pass creates nothing and reports the accounts as already present', async () => {
+    await importPhoneUsers(auth, { users: [ALICE, BOB], groupNames: { '9': 'Acme' } })
+    const second = await importPhoneUsers(auth, { users: [ALICE, BOB], groupNames: { '9': 'Acme' } })
 
     assert.equal(second.summary.created, 0)
     assert.equal(second.summary.existing, 2)
     assert.equal(second.summary.organizationsCreated, 0, 'the org must be reused, not duplicated')
-    assert.equal(db.listOrganizations().filter(o => o.name === 'Acme').length, 1)
+    assert.equal((await db.listOrganizations()).filter(o => o.name === 'Acme').length, 1)
   })
 
-  it('fails a bad row on its own without taking the batch down with it', () => {
-    const result = importPhoneUsers(auth, {
+  it('fails a bad row on its own without taking the batch down with it', async () => {
+    const result = await importPhoneUsers(auth, {
       users: [ALICE, { phone: 'sudo', nickname: 'not a phone' }, BOB],
       groupNames: { '9': 'Acme' },
     })
@@ -85,28 +85,28 @@ describe('phone import', () => {
     // Echoed as supplied, so the operator can find the offending line in the source.
     const failed = result.rows.find(r => r.outcome === 'error')
     assert.equal(failed?.phone, 'sudo')
-    assert.notEqual(db.getUserByPhone(BOB.phone), null, 'rows after the bad one still import')
+    assert.notEqual(await db.getUserByPhone(BOB.phone), null, 'rows after the bad one still import')
   })
 
-  it('attaches a gateway token to someone who signed up before migration reached them', () => {
+  it('attaches a gateway token to someone who signed up before migration reached them', async () => {
     // They registered themselves in the meantime, so they exist but are still
     // spending the shared server key — their carried-over balance would never move.
-    auth.provisionPhoneUser({ phone: ALICE.phone, nickname: 'Alice', autoCreateOrg: true })
-    assert.equal(auth.getUserModelCredential(db.getUserByPhone(ALICE.phone)!.id), null)
+    await auth.provisionPhoneUser({ phone: ALICE.phone, nickname: 'Alice', autoCreateOrg: true })
+    assert.equal(await auth.getUserModelCredential((await db.getUserByPhone(ALICE.phone))!.id), null)
 
-    const result = importPhoneUsers(auth, { users: [ALICE], groupNames: { '9': 'Acme' } })
+    const result = await importPhoneUsers(auth, { users: [ALICE], groupNames: { '9': 'Acme' } })
 
     assert.equal(result.summary.linked, 1)
     assert.equal(result.summary.created, 0)
-    const user = db.getUserByPhone(ALICE.phone)!
-    assert.equal(auth.getUserModelCredential(user.id)?.sudorouterKey, 'sk-alice')
+    const user = (await db.getUserByPhone(ALICE.phone))!
+    assert.equal((await auth.getUserModelCredential(user.id))?.sudorouterKey, 'sk-alice')
   })
 
-  it('never lets a gateway token reach a user-facing payload', () => {
-    importPhoneUsers(auth, { users: [ALICE], groupNames: { '9': 'Acme' } })
-    const user = db.getUserByPhone(ALICE.phone)!
+  it('never lets a gateway token reach a user-facing payload', async () => {
+    await importPhoneUsers(auth, { users: [ALICE], groupNames: { '9': 'Acme' } })
+    const user = (await db.getUserByPhone(ALICE.phone))!
 
-    const listed = auth.listUsers(user.orgId)
+    const listed = await auth.listUsers(user.orgId)
 
     assert.match(JSON.stringify(listed), /Alice/, 'sanity: this payload does describe the user')
     assert.doesNotMatch(

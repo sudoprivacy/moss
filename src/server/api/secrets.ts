@@ -45,51 +45,52 @@ function buildNamespace(scope: string, pinyin: string, orgId?: string): string {
 }
 
 export function createSecretsApi(db: {
-  getConfigItem: (id: number, orgId?: string) => SqlRow | null
-  getConfigItemByPinyin: (pinyin: string, orgId?: string) => SqlRow | null
-  getConfigEntries: (configItemId: number) => SqlRow[]
-  upsertSecretMetadata: (configItemId: number, expiresAt: number | null, orgId?: string | null) => void
-  getSecretMetadata: (configItemId: number) => SqlRow | null
-  getAllSecretMetadata: (orgId?: string) => SqlRow[]
-  getExpiringSecretMetadata: (beforeTs: number, orgId?: string) => SqlRow[]
-  insertAuditLog: (row: { id: string; actor_id: string; actor_name?: string; action: string; config_item_id?: number; org_id?: string | null; namespace: string; key: string; detail?: string; ip_address?: string }) => void
-  queryAuditLog: (opts: { actor_id?: string; actorIds?: string[]; config_item_id?: number; scopes?: string[]; action?: string; since?: number; until?: number; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
-  getDepartmentPolicies: (departmentId: string, orgId?: string) => SqlRow[]
-  replaceDepartmentPolicies: (departmentId: string, configItemIds: number[], orgId?: string | null) => void
-}, nexus: NexusClient, getUserName: (userId: string) => string | undefined) {
+  getConfigItem: (id: number, orgId?: string) => Promise<SqlRow | null>
+  getConfigItemByPinyin: (pinyin: string, orgId?: string) => Promise<SqlRow | null>
+  getConfigEntries: (configItemId: number) => Promise<SqlRow[]>
+  upsertSecretMetadata: (configItemId: number, expiresAt: number | null, orgId?: string | null) => Promise<void>
+  getSecretMetadata: (configItemId: number) => Promise<SqlRow | null>
+  getAllSecretMetadata: (orgId?: string) => Promise<SqlRow[]>
+  getExpiringSecretMetadata: (beforeTs: number, orgId?: string) => Promise<SqlRow[]>
+  insertAuditLog: (row: { id: string; actor_id: string; actor_name?: string; action: string; config_item_id?: number; org_id?: string | null; namespace: string; key: string; detail?: string; ip_address?: string }) => Promise<void>
+  queryAuditLog: (opts: { actor_id?: string; actorIds?: string[]; config_item_id?: number; scopes?: string[]; action?: string; since?: number; until?: number; page?: number; pageSize?: number; orgId?: string }) => Promise<{ items: SqlRow[]; total: number }>
+  getDepartmentPolicies: (departmentId: string, orgId?: string) => Promise<SqlRow[]>
+  replaceDepartmentPolicies: (departmentId: string, configItemIds: number[], orgId?: string | null) => Promise<void>
+}, nexus: NexusClient, getUserName: (userId: string) => Promise<string | undefined>) {
 
   // Resolve a config item id from a (possibly org-prefixed) namespace, scoping
   // the pinyin lookup to the namespace's org so two orgs' same-pinyin items
   // don't collide.
-  const resolveConfigItemId = (namespace: string, orgId?: string): number | undefined => {
+  const resolveConfigItemId = async (namespace: string, orgId?: string): Promise<number | undefined> => {
     const base = stripOrgPrefix(namespace)
     const parts = base.split(':')
     if (parts[0] === 'system') {
-      const item = db.getConfigItemByPinyin(parts.slice(1).join(':'), orgId)
+      const item = await db.getConfigItemByPinyin(parts.slice(1).join(':'), orgId)
       return item ? (item.id as number) : undefined
     }
     if (parts[0] === 'role') {
       // Handles both legacy `role:{pinyin}` and per-dept `role:@{deptId}:{pinyin}`.
       const pinyin = deptNamespacePinyin(base)
       if (!pinyin) return undefined
-      const item = db.getConfigItemByPinyin(pinyin, orgId)
+      const item = await db.getConfigItemByPinyin(pinyin, orgId)
       return item ? (item.id as number) : undefined
     }
     if (parts[0] === 'user' && parts.length >= 3) {
-      const item = db.getConfigItemByPinyin(parts.slice(2).join(':'), orgId)
+      const item = await db.getConfigItemByPinyin(parts.slice(2).join(':'), orgId)
       return item ? (item.id as number) : undefined
     }
     return undefined
   }
 
-  const writeAudit = (actorId: string, actorName: string | undefined, action: string, configItemId: number | undefined, namespace: string, key: string, detail?: Record<string, unknown>, ip?: string, orgId?: string) => {
+  const writeAudit = async (actorId: string, actorName: string | undefined, action: string, configItemId: number | undefined, namespace: string, key: string, detail?: Record<string, unknown>, ip?: string, orgId?: string) => {
     try {
-      db.insertAuditLog({
+      const auditItemId = configItemId ?? (await resolveConfigItemId(namespace, orgId))
+      await db.insertAuditLog({
         id: randomUUID(),
         actor_id: actorId,
-        actor_name: actorName ?? getUserName(actorId),
+        actor_name: actorName ?? await getUserName(actorId),
         action,
-        config_item_id: configItemId ?? resolveConfigItemId(namespace, orgId),
+        config_item_id: auditItemId,
         org_id: orgId ?? null,
         namespace,
         key,
@@ -182,7 +183,8 @@ export function createSecretsApi(db: {
           const found = await nexus.getSecret(ns, key, secretSubject(ns, userId)).catch(() => null)
           if (found) {
             if (chainDeptId === deptId) {
-              writeAudit(userId, undefined, 'read', resolveConfigItemId(ns, orgId), ns, key, undefined, ip, orgId)
+              const readItemId = await resolveConfigItemId(ns, orgId)
+              writeAudit(userId, undefined, 'read', readItemId, ns, key, undefined, ip, orgId)
               return { success: true, data: { ...found, source: 'own' as const } }
             }
             // Inherited from an ancestor department.
@@ -228,9 +230,9 @@ export function createSecretsApi(db: {
     async putSecret(orgId: string, userId: string, namespace: string, key: string, value: string, metadata?: { expires_at?: number | null }, ip?: string) {
       try {
         const ns = orgScopedNamespace(namespace, orgId)
-        const configItemId = resolveConfigItemId(ns, orgId)
+        const configItemId = await resolveConfigItemId(ns, orgId)
         if (configItemId) {
-          const entries = db.getConfigEntries(configItemId)
+          const entries = await db.getConfigEntries(configItemId)
           const matched = entries.find(e => (e.config_key as string) === key)
           if (matched && (matched.required as number) === 1 && (!value || !value.trim())) {
             return { success: false, error: { code: 'validation_error', message: `必填项"${matched.name as string}"不能为空` } }
@@ -281,8 +283,8 @@ export function createSecretsApi(db: {
 
     // --- Secret Metadata (expiry) ---
 
-    listMetadata(orgId: string, userId: string) {
-      const rows = db.getAllSecretMetadata(orgId)
+    async listMetadata(orgId: string, userId: string) {
+      const rows = await db.getAllSecretMetadata(orgId)
       const data = rows.map(r => ({
         config_item_id: r.config_item_id as number,
         expires_at: r.expires_at as number | null,
@@ -290,30 +292,30 @@ export function createSecretsApi(db: {
       return { success: true, data }
     },
 
-    updateMetadata(orgId: string, userId: string, configItemId: number, expiresAt: number | null) {
+    async updateMetadata(orgId: string, userId: string, configItemId: number, expiresAt: number | null) {
       // Org guard: only touch metadata for a config item the caller's org owns.
-      const item = db.getConfigItem(configItemId, orgId)
+      const item = await db.getConfigItem(configItemId, orgId)
       if (!item) return { success: false, error: { code: 'not_found', message: '配置项不存在' } }
-      db.upsertSecretMetadata(configItemId, expiresAt, orgId)
+      await db.upsertSecretMetadata(configItemId, expiresAt, orgId)
       return { success: true }
     },
 
     // --- Department Policies ---
 
-    getDepartmentPolicies(orgId: string, userId: string, departmentId: string) {
-      const rows = db.getDepartmentPolicies(departmentId, orgId)
+    async getDepartmentPolicies(orgId: string, userId: string, departmentId: string) {
+      const rows = await db.getDepartmentPolicies(departmentId, orgId)
       const configItemIds = rows.map(r => r.config_item_id as number)
       return { success: true, data: { department_id: departmentId, config_item_ids: configItemIds } }
     },
 
-    updateDepartmentPolicies(orgId: string, userId: string, departmentId: string, configItemIds: number[]) {
-      db.replaceDepartmentPolicies(departmentId, configItemIds, orgId)
+    async updateDepartmentPolicies(orgId: string, userId: string, departmentId: string, configItemIds: number[]) {
+      await db.replaceDepartmentPolicies(departmentId, configItemIds, orgId)
       return { success: true }
     },
 
     // --- Audit Log ---
 
-    listAuditLog(orgId: string, userId: string, params: {
+    async listAuditLog(orgId: string, userId: string, params: {
       actor_id?: string
       /** When set, restrict the log to actions performed by these user ids
        *  (dept subtree for a dept_admin, or [self] for a normal user). Undefined
@@ -331,7 +333,7 @@ export function createSecretsApi(db: {
       page?: number
       page_size?: number
     }) {
-      const { items, total } = db.queryAuditLog({
+      const { items, total } = await db.queryAuditLog({
         actor_id: params.actor_id,
         actorIds: params.actorIds,
         config_item_id: params.config_item_id,
@@ -360,20 +362,21 @@ export function createSecretsApi(db: {
 
     // --- Rotation Alerts ---
 
-    listRotationAlerts(orgId: string, userId: string, scopeFilter?: Set<'system' | 'department' | 'user'>) {
+    async listRotationAlerts(orgId: string, userId: string, scopeFilter?: Set<'system' | 'department' | 'user'>) {
       const oneDayFromNow = Date.now() + 86400000
-      const rows = db.getExpiringSecretMetadata(oneDayFromNow, orgId)
-      const data = rows.map(r => {
+      const rows = await db.getExpiringSecretMetadata(oneDayFromNow, orgId)
+      const data = []
+      for (const r of rows) {
         const itemId = r.config_item_id as number
-        const item = db.getConfigItem(itemId, orgId)
+        const item = await db.getConfigItem(itemId, orgId)
         // Scope narrowing: rotation metadata is keyed by config item, so a
         // non-admin only sees alerts for credential scopes they manage
         // (dept_admin: department + user; user: user only). Undefined = admin.
         if (item && scopeFilter && !scopeFilter.has(item.scope as 'system' | 'department' | 'user')) {
-          return { config_item_id: itemId, expires_at: r.expires_at as number, config_item: null }
+          continue
         }
-        const entries = item ? db.getConfigEntries(itemId) : []
-        return {
+        const entries = item ? await db.getConfigEntries(itemId) : []
+        data.push({
           config_item_id: itemId,
           expires_at: r.expires_at as number,
           config_item: item ? {
@@ -392,9 +395,10 @@ export function createSecretsApi(db: {
             created_at: item.created_at as number,
             updated_at: item.updated_at as number,
           } : null,
-        }
-      }).filter(r => r.config_item !== null)
-      return { success: true, data }
+        })
+      }
+      const filtered = data.filter(r => r.config_item !== null)
+      return { success: true, data: filtered }
     },
 
     // --- User Secrets (me endpoints) ---

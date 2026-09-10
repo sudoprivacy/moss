@@ -138,11 +138,11 @@ export class SourceSyncWorker {
     this.timer = setTimeout(tick, 1_000)
     this.timer.unref()
 
-    const cleanupTick = () => {
+    const cleanupTick = async () => {
       if (this.stopped) return
       try {
         const cutoff = Date.now() - SOFT_DELETE_RETENTION_MS
-        const purged = this.db.purgeOldSoftDeletes(cutoff)
+        const purged = await this.db.purgeOldSoftDeletes(cutoff)
         if (purged.documents > 0 || purged.nodes > 0) {
           console.log(
             `[SourceSyncWorker] purged ${purged.documents} documents + ${purged.nodes} nodes older than 30d`,
@@ -163,7 +163,7 @@ export class SourceSyncWorker {
 
     // Start inflight cleanup timer (every 5 minutes)
     this.inflightCleanupTimer = setInterval(() => {
-      this.cleanupStaleInflight()
+      void this.cleanupStaleInflight()
     }, 5 * 60 * 1000)
     this.inflightCleanupTimer.unref()
 
@@ -202,7 +202,7 @@ export class SourceSyncWorker {
    * Used by the AdminHub "Sync now" button. Returns the stats.
    */
   async syncSourceNow(sourceId: string): Promise<SyncRunStats> {
-    const row = this.db.getExternalSourceById(sourceId)
+    const row = await this.db.getExternalSourceById(sourceId)
     if (!row) throw new Error(`external_source not found: ${sourceId}`)
     const source = rowToSource(row)
     if (source.enabled !== 1) {
@@ -213,7 +213,7 @@ export class SourceSyncWorker {
 
   /** Run one polling tick: pick all due sources and sync them sequentially. */
   private async tickOnce(): Promise<void> {
-    const rows = this.db.listAllEnabledExternalSources()
+    const rows = await this.db.listAllEnabledExternalSources()
     const now = Date.now()
     for (const r of rows) {
       const src = rowToSource(r)
@@ -239,18 +239,18 @@ export class SourceSyncWorker {
    * is named after the source. All synced content mounts under it. Returns the
    * root node's DB id.
    */
-  private ensureSourceRootNode(source: ExternalSourceRow): string {
-    const existing = this.db.findSourceRootNode(source.id) as Record<string, unknown> | null
+  private async ensureSourceRootNode(source: ExternalSourceRow): Promise<string> {
+    const existing = await this.db.findSourceRootNode(source.id) as Record<string, unknown> | null
     if (existing) {
       const id = String(existing.id)
       // Keep the root named after the source (rename-follow).
       if (existing.name !== source.name) {
-        this.db.renameTreeNode(id, source.name)
+        await this.db.renameTreeNode(id, source.name)
       }
       return id
     }
     const id = randomUUID()
-    this.db.createDocumentTreeNode({
+    await this.db.createDocumentTreeNode({
       id,
       org_id: source.org_id,
       parent_id: null,
@@ -269,9 +269,31 @@ export class SourceSyncWorker {
 
   private async runSync(source: ExternalSourceRow): Promise<SyncRunStats> {
     this.inflight.set(source.id, Date.now())
+    // P1-3 mutual exclusion: the inflight Map above only dedups within THIS
+    // process. Behind an LB two instances can start the same source
+    // concurrently, and the sync write path is check-then-insert without
+    // unique constraints — parallel runs create duplicate root/folder/
+    // document rows that survive every later sweep, and one instance's
+    // reverse-sweep can soft-delete rows the other just upserted (its `seen`
+    // set predates them). The tx-scoped advisory lock makes one runner win
+    // per source; the loser skips this tick. Sqlite deployments are a no-op
+    // passthrough (single process — inflight already covers them).
+    const result = await this.db.driver.tryRunExclusive(
+      `source-sync:${source.id}`,
+      () => this.runSyncLocked(source),
+    )
+    if (result) return result
+    const skipped = emptyStats()
+    console.log(
+      `[SourceSyncWorker] sync of ${source.name} (${source.id}) skipped: another instance holds the lock`,
+    )
+    return skipped
+  }
+
+  private async runSyncLocked(source: ExternalSourceRow): Promise<SyncRunStats> {
     const stats = emptyStats()
 
-    this.db.updateExternalSourceSyncStatus(source.id, {
+    await this.db.updateExternalSourceSyncStatus(source.id, {
       last_sync_status: 'running',
       last_sync_error: null,
     })
@@ -295,7 +317,7 @@ export class SourceSyncWorker {
       const folderExternalIdToDbId = new Map<string, string>()
       // Every source gets its own auto-created, locked, source-named root node.
       // All synced content mounts under it (no separate mount node).
-      const rootParentDbId = this.ensureSourceRootNode(source)
+      const rootParentDbId = await this.ensureSourceRootNode(source)
       seenNodeIds.add(rootParentDbId)
 
       for await (const node of connector.walkTree('')) {
@@ -317,12 +339,12 @@ export class SourceSyncWorker {
       }
 
       // Reverse sweep: soft-delete anything for this source not seen this run.
-      this.reverseSweep(source, seenNodeIds, seenDocIds, stats, dirtyNodeIds)
+      await this.reverseSweep(source, seenNodeIds, seenDocIds, stats, dirtyNodeIds)
 
       // Flush dir-mode wiki rebuilds once for all nodes touched this run.
-      this.flushDirtyWikis(source, dirtyNodeIds, stats)
+      await this.flushDirtyWikis(source, dirtyNodeIds, stats)
 
-      this.db.updateExternalSourceSyncStatus(source.id, {
+      await this.db.updateExternalSourceSyncStatus(source.id, {
         last_sync_at: Date.now(),
         last_sync_status: 'success',
         last_sync_error: null,
@@ -336,7 +358,7 @@ export class SourceSyncWorker {
     } catch (err) {
       stats.errors++
       const msg = err instanceof Error ? err.message : String(err)
-      this.db.updateExternalSourceSyncStatus(source.id, {
+      await this.db.updateExternalSourceSyncStatus(source.id, {
         last_sync_at: Date.now(),
         last_sync_status: 'failed',
         last_sync_error: msg,
@@ -358,20 +380,20 @@ export class SourceSyncWorker {
     parentDbId: string | null,
     stats: SyncRunStats,
   ): Promise<string | null> {
-    const existing = this.db.findTreeNodeBySource(source.id, node.relativePath)
+    const existing = await this.db.findTreeNodeBySource(source.id, node.relativePath)
 
     if (existing) {
       const existingRow = existing as Record<string, unknown>
       const existingId = String(existingRow.id)
       // Restore from soft-delete if needed
       if (existingRow.deleted_at != null) {
-        this.db.undeleteTreeNode(existingId)
+        await this.db.undeleteTreeNode(existingId)
       }
       // Update name / parent / last_synced_at — handles rename/move
       const nameChanged = (existingRow.name as string) !== node.name
       const parentChanged = (existingRow.parent_id as string | null | undefined) !== parentDbId
       if (nameChanged || parentChanged) {
-        this.db.updateTreeNodeSourceLocation(existingId, {
+        await this.db.updateTreeNodeSourceLocation(existingId, {
           parent_id: parentDbId,
           name: node.name,
           source_path: node.relativePath,
@@ -380,7 +402,7 @@ export class SourceSyncWorker {
         stats.foldersUpdated++
       } else {
         // touch last_synced_at so reverse-sweep can tell apart "seen this run"
-        this.db.updateTreeNodeSourceLocation(existingId, {
+        await this.db.updateTreeNodeSourceLocation(existingId, {
           last_synced_at: Date.now(),
         })
       }
@@ -390,7 +412,7 @@ export class SourceSyncWorker {
     // Create new auto-managed folder
     const id = randomUUID()
     try {
-      this.db.createDocumentTreeNode({
+      await this.db.createDocumentTreeNode({
         id,
         org_id: source.org_id,
         parent_id: parentDbId,
@@ -424,7 +446,7 @@ export class SourceSyncWorker {
     stats: SyncRunStats,
     dirtyNodeIds: Set<string>,
   ): Promise<string | null> {
-    const existing = this.db.findDocumentBySource(source.id, node.externalId)
+    const existing = await this.db.findDocumentBySource(source.id, node.externalId)
 
     if (existing) {
       const existingRow = existing as Record<string, unknown>
@@ -433,7 +455,7 @@ export class SourceSyncWorker {
       const existingSha = (existingRow.content_sha256 as string | null) ?? ''
 
       if (existingRow.deleted_at != null) {
-        this.db.undeleteDocument(existingId)
+        await this.db.undeleteDocument(existingId)
       }
 
       if (existingEtag === node.etag) {
@@ -483,7 +505,7 @@ export class SourceSyncWorker {
         return existingId
       }
 
-      this.db.updateDocumentContent(existingId, {
+      await this.db.updateDocumentContent(existingId, {
         external_etag: node.etag,
         content_sha256: sha,
         storage_path: storagePath,
@@ -494,9 +516,9 @@ export class SourceSyncWorker {
       // and record this doc's node as dirty so dir-mode wikis get flagged in
       // the post-run flush.
       if (sha !== existingSha) {
-        const wikis = this.db.findWikisReferencingDocument(existingId)
+        const wikis = await this.db.findWikisReferencingDocument(existingId)
         for (const w of wikis) {
-          this.markAndMaybeEnqueue(String(w.id), source, stats)
+          await this.markAndMaybeEnqueue(String(w.id), source, stats)
         }
         dirtyNodeIds.add(parentDbId)
       }
@@ -525,7 +547,7 @@ export class SourceSyncWorker {
     // disk on duplicate bytes. Wiki references are doc-id based so this
     // doesn't affect wiki dedup.
     let storagePath: string
-    const dedup = this.db.findDocumentByHash(source.org_id, sha)
+    const dedup = await this.db.findDocumentByHash(source.org_id, sha)
     const id = randomUUID()
     if (dedup && typeof (dedup as Record<string, unknown>).storage_path === 'string') {
       storagePath = String((dedup as Record<string, unknown>).storage_path)
@@ -546,7 +568,7 @@ export class SourceSyncWorker {
     }
 
     try {
-      this.db.createDocument({
+      await this.db.createDocument({
         id,
         org_id: source.org_id,
         node_id: parentDbId,
@@ -578,30 +600,30 @@ export class SourceSyncWorker {
   // Reverse sweep
   // ============================================================
 
-  private reverseSweep(
+  private async reverseSweep(
     source: ExternalSourceRow,
     seenNodeIds: Set<string>,
     seenDocIds: Set<string>,
     stats: SyncRunStats,
     dirtyNodeIds: Set<string>,
-  ): void {
+  ): Promise<void> {
     // Documents
-    const existingDocs = this.db.listDocumentsBySource(source.id)
+    const existingDocs = await this.db.listDocumentsBySource(source.id)
     for (const d of existingDocs) {
       const id = String(d.id)
       if (seenDocIds.has(id)) continue
-      this.db.softDeleteDocument(id)
+      await this.db.softDeleteDocument(id)
       stats.filesDeleted++
       // Deleted file → its containing node is dirty for dir-mode wikis.
       const nodeId = typeof d.node_id === 'string' ? d.node_id : null
       if (nodeId) dirtyNodeIds.add(nodeId)
     }
     // Folders
-    const existingNodes = this.db.listTreeNodesBySource(source.id)
+    const existingNodes = await this.db.listTreeNodesBySource(source.id)
     for (const n of existingNodes) {
       const id = String(n.id)
       if (seenNodeIds.has(id)) continue
-      this.db.softDeleteTreeNode(id)
+      await this.db.softDeleteTreeNode(id)
       stats.foldersDeleted++
       // Deleted folder → mark the folder itself and its parent dirty so a
       // dir-mode wiki tracking either (or an ancestor) rebuilds.
@@ -620,14 +642,14 @@ export class SourceSyncWorker {
    * on — enqueue a build via the onWikiNeedsRebuild hook. Rebuild policy is now
    * per-wiki, not per-source.
    */
-  private markAndMaybeEnqueue(
+  private async markAndMaybeEnqueue(
     wikiId: string,
     source: ExternalSourceRow,
     stats: SyncRunStats,
-  ): void {
-    this.db.markWikiNeedsRebuild(wikiId, true)
+  ): Promise<void> {
+    await this.db.markWikiNeedsRebuild(wikiId, true)
     stats.wikisMarked++
-    const wikiRow = this.db.getWikiById(wikiId) as Record<string, unknown> | null
+    const wikiRow = await this.db.getWikiById(wikiId) as Record<string, unknown> | null
     const autoRebuild = wikiRow ? Number(wikiRow.auto_rebuild ?? 0) === 1 : false
     if (autoRebuild && this.onWikiNeedsRebuild) {
       this.onWikiNeedsRebuild(wikiId, source.org_id, source.id)
@@ -638,15 +660,15 @@ export class SourceSyncWorker {
    * After a sync run, flag every dir-mode wiki that tracks any touched node or
    * an ancestor of one. Deduped so each wiki is marked/enqueued at most once.
    */
-  private flushDirtyWikis(
+  private async flushDirtyWikis(
     source: ExternalSourceRow,
     dirtyNodeIds: Set<string>,
     stats: SyncRunStats,
-  ): void {
+  ): Promise<void> {
     if (dirtyNodeIds.size === 0) return
     // Build a child→parent map once from the org's node list so we can expand
     // each dirty node to its full ancestor chain (root-ward).
-    const nodes = this.db.listDocumentTreeNodes(source.org_id)
+    const nodes = await this.db.listDocumentTreeNodes(source.org_id)
     const parentOf = new Map<string, string | null>()
     for (const n of nodes) {
       parentOf.set(String(n.id), (n.parent_id as string | null) ?? null)
@@ -661,13 +683,13 @@ export class SourceSyncWorker {
         cur = parentOf.get(cur) ?? null
       }
     }
-    const wikis = this.db.findDirWikisForNode([...chain])
+    const wikis = await this.db.findDirWikisForNode([...chain])
     const marked = new Set<string>()
     for (const w of wikis) {
       const wikiId = String(w.id)
       if (marked.has(wikiId)) continue
       marked.add(wikiId)
-      this.markAndMaybeEnqueue(wikiId, source, stats)
+      await this.markAndMaybeEnqueue(wikiId, source, stats)
     }
   }
 

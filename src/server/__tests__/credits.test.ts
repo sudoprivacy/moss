@@ -83,7 +83,7 @@ function makeStore(): CreditApplicationStore & { rows: CreditApplication[] } {
   let nextId = 1
   return {
     rows,
-    create(input) {
+    async create(input) {
       const app: CreditApplication = {
         id: nextId++,
         applicationNo: `CA${nextId}`,
@@ -101,14 +101,14 @@ function makeStore(): CreditApplicationStore & { rows: CreditApplication[] } {
       rows.push(app)
       return app
     },
-    listForUser(userId, page, pageSize) {
+    async listForUser(userId, page, pageSize) {
       const mine = rows.filter(r => r.userId === userId)
       return { list: mine.slice((page - 1) * pageSize, page * pageSize), total: mine.length }
     },
-    getById: id => rows.find(r => r.id === id) ?? null,
-    hasPending: userId =>
+    getById: async id => rows.find(r => r.id === id) ?? null,
+    hasPending: async userId =>
       rows.some(r => r.userId === userId && (r.status === 'PENDING' || r.status === 'PROCESSING')),
-    updateStatus(id, patch) {
+    async updateStatus(id, patch) {
       const row = rows.find(r => r.id === id)
       if (!row) return
       Object.assign(row, patch)
@@ -119,9 +119,9 @@ function makeStore(): CreditApplicationStore & { rows: CreditApplication[] } {
 const POLICY = { minPoints: 100, maxPoints: 10_000, allowDuplicatePending: false }
 
 describe('submitting an application', () => {
-  it('accepts a request inside the configured range', () => {
+  it('accepts a request inside the configured range', async () => {
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: '  need credits  ',
     })
     expect(app.status).toBe('PENDING')
@@ -129,30 +129,30 @@ describe('submitting an application', () => {
     expect(app.reason).toBe('need credits')
   })
 
-  it('rejects amounts outside the range and non-integers', () => {
+  it('rejects amounts outside the range and non-integers', async () => {
     const store = makeStore()
     const bad = [50, 20_000, 0, -1, 1.5, 'many']
     for (const requestedPoints of bad) {
-      expect(() => submitApplication(store, POLICY, {
+      await expect(submitApplication(store, POLICY, {
         userId: 'u1', orgId: 'o1', requestedPoints, reason: null,
-      })).toThrow(CreditApplicationError)
+      })).rejects.toThrow(CreditApplicationError)
     }
     expect(store.rows).toHaveLength(0)
   })
 
-  it('refuses a second open request from the same person', () => {
+  it('refuses a second open request from the same person', async () => {
     // Two open asks give the reviewer no way to tell a correction from a
     // duplicate, and approving both would grant twice.
     const store = makeStore()
-    submitApplication(store, POLICY, { userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null })
-    expect(() => submitApplication(store, POLICY, {
+    await submitApplication(store, POLICY, { userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null })
+    await expect(submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
-    })).toThrow(/still awaiting review/)
+    })).rejects.toThrow(/still awaiting review/)
 
     // Someone else is unaffected.
-    expect(submitApplication(store, POLICY, {
+    expect((await submitApplication(store, POLICY, {
       userId: 'u2', orgId: 'o1', requestedPoints: 500, reason: null,
-    }).status).toBe('PENDING')
+    })).status).toBe('PENDING')
   })
 })
 
@@ -167,7 +167,7 @@ describe('reviewing an application', () => {
 
   it('credits the gateway on approval', async () => {
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     let credited = 0
@@ -186,7 +186,7 @@ describe('reviewing an application', () => {
 
   it('grants a different amount when the reviewer sets one', async () => {
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 5000, reason: null,
     })
     let credited = 0
@@ -201,7 +201,7 @@ describe('reviewing an application', () => {
 
   it('never touches the gateway on rejection', async () => {
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     const reviewed = await reviewApplication(store, gateway(() => {
@@ -218,7 +218,7 @@ describe('reviewing an application', () => {
     // is fine. No status means the answer never arrived and the credit may or
     // may not have landed — retrying could grant it twice.
     const refused = makeStore()
-    const a = submitApplication(refused, POLICY, {
+    const a = await submitApplication(refused, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     const afterRefusal = await reviewApplication(refused, gateway(() => {
@@ -228,7 +228,7 @@ describe('reviewing an application', () => {
     expect(afterRefusal.sudorouterError).toMatch(/quota limit/)
 
     const lost = makeStore()
-    const b = submitApplication(lost, POLICY, {
+    const b = await submitApplication(lost, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     const afterTimeout = await reviewApplication(lost, gateway(() => {
@@ -239,13 +239,13 @@ describe('reviewing an application', () => {
 
   it('lets a refused approval be retried, but not a settled one', async () => {
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     await reviewApplication(store, gateway(() => {
       throw new SudorouterError('temporary', 500)
     }), { id: app.id, approve: true, gatewayUserId: '42' })
-    expect(store.getById(app.id)!.status).toBe('SYNC_FAILED')
+    expect((await store.getById(app.id))!.status).toBe('SYNC_FAILED')
 
     const retried = await reviewApplication(store, gateway(() => {}), {
       id: app.id, approve: true, gatewayUserId: '42',
@@ -281,13 +281,13 @@ describe('reviewing an application', () => {
   it('refuses to approve someone with no gateway account', async () => {
     // Otherwise the application reads APPROVED while no credits ever moved.
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     await expect(reviewApplication(store, gateway(() => {}), {
       id: app.id, approve: true, gatewayUserId: null,
     })).rejects.toThrow(/no model gateway account/)
-    expect(store.getById(app.id)!.status).toBe('PENDING')
+    expect((await store.getById(app.id))!.status).toBe('PENDING')
   })
 })
 

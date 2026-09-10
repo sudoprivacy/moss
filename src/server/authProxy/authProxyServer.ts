@@ -209,7 +209,7 @@ interface TokenEntry {
 }
 
 interface DepartmentPolicyProvider {
-  getAuthorizedConfigItemIds(departmentId: string): number[]
+  getAuthorizedConfigItemIds(departmentId: string): Promise<number[]>
 }
 
 /**
@@ -230,15 +230,15 @@ interface DepartmentPolicyProvider {
  * Extracted as a pure function so the decision is unit-testable without
  * standing up the HTTP proxy, nexus, and token minting.
  */
-export function isDepartmentCredentialAllowed(
+export async function isDepartmentCredentialAllowed(
   match: { scope: string; configItemId: number },
   actor: { isAdmin: boolean; departmentId: string | null },
-  getAuthorizedConfigItemIds: (departmentId: string) => number[],
-): boolean {
+  getAuthorizedConfigItemIds: (departmentId: string) => Promise<number[]>,
+): Promise<boolean> {
   if (match.scope !== 'department') return true
   if (actor.isAdmin) return true
   if (!actor.departmentId) return true
-  return getAuthorizedConfigItemIds(actor.departmentId).includes(match.configItemId)
+  return (await getAuthorizedConfigItemIds(actor.departmentId)).includes(match.configItemId)
 }
 
 const CONTROL_HEADERS = new Set([
@@ -300,12 +300,14 @@ export class AuthProxyServer {
   private boundPort: number = AUTH_PROXY_PORT
   private readonly tokenRegistry = new Map<string, TokenEntry>()
   private rules = new Map<number, AuthProxyRule>()
+  private rulesPollTimer: ReturnType<typeof setInterval> | null = null
+  private lastRulesFingerprint = ''
   private nexusClient: NexusClient | null = null
   private policyProvider: DepartmentPolicyProvider | null = null
   // Resolves a department's ordered ancestor chain `[deptId, parent, ...]` for
   // hierarchical department-credential value inheritance. Null → no inheritance
   // (value resolution stays own-dept-then-org-default).
-  private deptAncestorProvider: ((orgId: string, deptId: string) => string[]) | null = null
+  private deptAncestorProvider: ((orgId: string, deptId: string) => Promise<string[]>) | null = null
   private tokenMinter: TokenMinter | null = null
   private tokenCleanupTimer: ReturnType<typeof setInterval> | null = null
 
@@ -323,7 +325,7 @@ export class AuthProxyServer {
     this.policyProvider = provider
   }
 
-  setDeptAncestorProvider(provider: (orgId: string, deptId: string) => string[]): void {
+  setDeptAncestorProvider(provider: (orgId: string, deptId: string) => Promise<string[]>): void {
     this.deptAncestorProvider = provider
   }
 
@@ -331,6 +333,44 @@ export class AuthProxyServer {
     this.rules.clear()
     for (const rule of rules) {
       this.rules.set(rule.configItemId, rule)
+    }
+  }
+
+  /**
+   * Cross-instance rules refresh (HA): `rules` is process-local memory and the
+   * only refresh path today is the config-items API callback on the instance
+   * that handled the change — other instances keep stale rules until restart.
+   * This poll is deliberately ALWAYS-ON and unconditional: its consumers are
+   * this instance's runners' outbound requests, unrelated to any SSE/admin
+   * connection lifecycle (do NOT gate it on "has connected clients").
+   */
+  startRulesChangePolling(getFingerprint: () => string | Promise<string>, reload: () => void | Promise<void>, intervalMs = 5_000): void {
+    if (this.rulesPollTimer) return
+    void this.safeFingerprint(getFingerprint).then(fp => { this.lastRulesFingerprint = fp })
+    this.rulesPollTimer = setInterval(() => {
+      void (async () => {
+        const fp = await this.safeFingerprint(getFingerprint)
+        if (fp !== this.lastRulesFingerprint) {
+          this.lastRulesFingerprint = fp
+          try {
+            await reload()
+            // reload() rebuilt the rules; adopt whatever fingerprint reflects it
+            // (handles a change landing between reload and re-read).
+            this.lastRulesFingerprint = await this.safeFingerprint(getFingerprint)
+          } catch (err) {
+            console.error('[AuthProxy] rules reload failed:', err instanceof Error ? err.message : err)
+          }
+        }
+      })()
+    }, intervalMs)
+    this.rulesPollTimer.unref?.()
+  }
+
+  private async safeFingerprint(getFingerprint: () => string | Promise<string>): Promise<string> {
+    try {
+      return await getFingerprint()
+    } catch {
+      return this.lastRulesFingerprint
     }
   }
 
@@ -416,6 +456,10 @@ export class AuthProxyServer {
     if (this.tokenCleanupTimer) {
       clearInterval(this.tokenCleanupTimer)
       this.tokenCleanupTimer = null
+    }
+    if (this.rulesPollTimer) {
+      clearInterval(this.rulesPollTimer)
+      this.rulesPollTimer = null
     }
     if (!this.server) return
     return new Promise(resolve => {
@@ -559,11 +603,11 @@ export class AuthProxyServer {
       // so a misconfigured proxy (no provider) fails open exactly as before.
       if (
         this.policyProvider &&
-        !isDepartmentCredentialAllowed(
+        !(await isDepartmentCredentialAllowed(
           match,
           { isAdmin: tokenEntry.isAdmin, departmentId: tokenEntry.departmentId },
           deptId => this.policyProvider!.getAuthorizedConfigItemIds(deptId),
-        )
+        ))
       ) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'rejected_no_policy', message: 'Department not authorized for this resource' }))
@@ -587,7 +631,7 @@ export class AuthProxyServer {
         // (Access is already gated by the exact-department policy above; this
         // only chooses which value an authorized consumer receives.)
         const chain = this.deptAncestorProvider
-          ? this.deptAncestorProvider(match.orgId, tokenEntry.departmentId)
+          ? await this.deptAncestorProvider(match.orgId, tokenEntry.departmentId)
           : [tokenEntry.departmentId]
         for (const deptId of chain) {
           namespaceCandidates.push(

@@ -1,0 +1,50 @@
+# ============================================================================
+# moss HA — Nexus 独立主机部署（P3-1）
+# ============================================================================
+# Nexus 是 secrets vault 的单写者：HA 集群（无论同主机还是跨主机形态）只能有
+# 【一个】nexus 实例持有 vault 数据目录的写权。把它从应用主机剥离到独立主机，
+# 应用主机全部以 external 模式连接（MOSS_NEXUS_MODE=external + endpoint 指本机）。
+#
+# 【单点边界声明】：本形态下 Nexus 主机是计划内单点——它故障时新建/轮换 secret
+# 与 runner 凭据解析不可用（存量已缓存的凭据不受影响）。moss 交付边界是“正确消费
+# 单写者 Nexus”，Nexus 自身高可用（主备/托管）不在本次范围；对可用性敏感的部署
+# 可将本容器连同数据卷迁移至受控托管主机，配合主机级 HA。
+#
+# 数据目录 ./.moss/nexus/data 若在 NFS 上：Nexus 主机必须是唯一写者（其他主机
+# 的 ./.moss 挂载包含同一路径时，moss 实例不会写 nexus/data——只有 embedded 模式
+# 才写，external 模式只读连接）。
+# ----------------------------------------------------------------------------
+version: '3.8'
+
+services:
+  nexus:
+    # 复用 moss-server 镜像（仅 local 构建产物含 nexusd 二进制与 vault 插件，
+    # 与 docker-compose.ha.yml 的 nexus 服务同款说明）。
+    image: my-moss-server:${MOSS_IMAGE_TAG:-v1}
+    container_name: moss-nexus
+    restart: always
+    ports:
+      # 供全部 moss 主机跨网络连接（endpoint 形如 http://<本机>:2126）。
+      - "2126:2126"
+    command:
+      - /app/bin/nexus/nexusd
+      - --advertise-addr
+      - ${MOSS_NEXUS_ADVERTISE_ADDR:?set MOSS_NEXUS_ADVERTISE_ADDR (e.g. nexus-host:2126)}
+      - --no-tls
+      - --insecure-no-auth
+      - --data-dir
+      - /root/.moss/nexus/data
+      - --plugin-dir
+      - /app/bin/nexus/plugins
+    environment:
+      # vault 插件读 NEXUS_DATA_DIR；必须与 --data-dir 一致（同 ha.yml 说明）。
+      - NEXUS_DATA_DIR=/root/.moss/nexus/data
+    volumes:
+      # vault 数据唯一写权在本容器。建议本地盘（NFS 非必需）；换机迁移时整目录搬移
+      # 且保证迁移窗口内旧实例已停（单写者语义）。
+      - ./.moss:/root/.moss
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(2126,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12

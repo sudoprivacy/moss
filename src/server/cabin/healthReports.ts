@@ -82,7 +82,7 @@ export class CabinHealthReportService {
     this.scheduleFinalize = options.scheduleFinalize !== false
   }
 
-  startReport(context: CabinPassengerContext, input: HealthReportLogContext & { language?: string } = {}): HealthReportApiResponse {
+  async startReport(context: CabinPassengerContext, input: HealthReportLogContext & { language?: string } = {}): Promise<HealthReportApiResponse> {
     const seatNo = context.seatId
     if (!seatNo) throw new Error('MISSING_SEAT_CONTEXT')
     const now = Date.now()
@@ -95,7 +95,7 @@ export class CabinHealthReportService {
       seatNo,
     })
     const existing = this.activeReportsByKey.get(reportKey)
-    const cancelled = this.options.store.cancelUnfinishedHealthReports({
+    const cancelled = await this.options.store.cancelUnfinishedHealthReports({
       flightId: context.flightId,
       flightDate: context.flightDate,
       seatNo,
@@ -105,7 +105,7 @@ export class CabinHealthReportService {
       this.activeReportsByKey.delete(reportKey)
     }
 
-    const report = this.options.store.createHealthReport({
+    const report = await this.options.store.createHealthReport({
       aircraftNo: context.aircraftNo,
       flightId: context.flightId,
       flightDate: context.flightDate,
@@ -163,15 +163,15 @@ export class CabinHealthReportService {
     return this.toApiResponse(report)
   }
 
-  getReport(reportId: string, context: CabinPassengerContext): HealthReportApiResponse {
-    this.flushActiveReportById(reportId)
-    const report = this.options.store.getHealthReport(reportId)
+  async getReport(reportId: string, context: CabinPassengerContext): Promise<HealthReportApiResponse> {
+    await this.flushActiveReportById(reportId)
+    const report = await this.options.store.getHealthReport(reportId)
     if (!report) throw new Error('HEALTH_REPORT_NOT_FOUND')
     if (context.seatId && report.seatNo !== context.seatId) throw new Error('HEALTH_REPORT_FORBIDDEN')
     return this.toApiResponse(report)
   }
 
-  handleWsEnvelope(envelope: unknown): void {
+  async handleWsEnvelope(envelope: unknown): Promise<void> {
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return
     const record = envelope as Record<string, unknown>
     if (record.type !== 'telemetry') return
@@ -184,7 +184,7 @@ export class CabinHealthReportService {
       this.log('health_report.sample.ignored', { seat_no: seatNo, ignored_reason: 'no_active_report' })
       return
     }
-    const report = this.options.store.getHealthReport(active.reportId)
+    const report = await this.options.store.getHealthReport(active.reportId)
     if (!report || report.status !== 'collecting') {
       this.log('health_report.sample.ignored', {
         report_id: active.reportId,
@@ -206,7 +206,7 @@ export class CabinHealthReportService {
     active.samples.push(sample)
     this.scheduleSampleFlush(active)
     if (active.samples.length - active.lastFlushedCount >= SAMPLE_FLUSH_BATCH_SIZE) {
-      this.flushActiveReport(active)
+      await this.flushActiveReport(active)
     }
     if (active.samples.length === 1 || active.samples.length % 10 === 0) {
       this.log('health_report.sample.accepted', {
@@ -246,19 +246,19 @@ export class CabinHealthReportService {
     if (active.flushTimer) return
     active.flushTimer = setTimeout(() => {
       active.flushTimer = undefined
-      this.flushActiveReport(active)
+      void this.flushActiveReport(active)
     }, SAMPLE_FLUSH_INTERVAL_MS)
     active.flushTimer.unref?.()
   }
 
-  private flushActiveReportById(reportId: string): void {
+  private async flushActiveReportById(reportId: string): Promise<void> {
     const active = Array.from(this.activeReportsByKey.values()).find(item => item.reportId === reportId)
-    if (active) this.flushActiveReport(active)
+    if (active) await this.flushActiveReport(active)
   }
 
-  private flushActiveReport(active: ActiveReport): void {
+  private async flushActiveReport(active: ActiveReport): Promise<void> {
     if (active.samples.length === active.lastFlushedCount) return
-    const updated = this.options.store.updateHealthReportSamples(active.reportId, active.samples)
+    const updated = await this.options.store.updateHealthReportSamples(active.reportId, active.samples)
     if (updated) active.lastFlushedCount = active.samples.length
   }
 
@@ -270,11 +270,11 @@ export class CabinHealthReportService {
   }
 
   async finalizeReport(reportId: string, input: HealthReportLogContext = {}): Promise<HealthReportApiResponse> {
-    this.flushActiveReportById(reportId)
-    const report = this.options.store.getHealthReport(reportId)
+    await this.flushActiveReportById(reportId)
+    const report = await this.options.store.getHealthReport(reportId)
     if (!report) throw new Error('HEALTH_REPORT_NOT_FOUND')
     if (report.status !== 'collecting') return this.toApiResponse(report)
-    this.options.store.markHealthReportGenerating(reportId)
+    await this.options.store.markHealthReportGenerating(reportId)
     this.removeActiveReport(report)
     this.log('health_report.finalize.start', {
       request_id: input.requestId,
@@ -287,7 +287,7 @@ export class CabinHealthReportService {
     const samples = report.samples || []
     const minSamples = this.options.config.healthReportMinSamples ?? 1
     if (samples.length < minSamples) {
-      const failed = this.options.store.failHealthReport({
+      const failed = await this.options.store.failHealthReport({
         reportId,
         errorCode: 'INSUFFICIENT_SAMPLES',
         errorMessage: '未采集到足够的有效生理检测数据，请重新检测。',
@@ -299,7 +299,7 @@ export class CabinHealthReportService {
         sample_count: samples.length,
         error_code: 'INSUFFICIENT_SAMPLES',
       })
-      return this.toApiResponse(failed || this.options.store.getHealthReport(reportId)!)
+      return this.toApiResponse(failed || (await this.options.store.getHealthReport(reportId))!)
     }
 
     const metrics = computeMetrics(samples)
@@ -309,7 +309,7 @@ export class CabinHealthReportService {
       ...deterministicSummary,
       ...text,
     }
-    const completed = this.options.store.completeHealthReport({ reportId, metrics, summary })
+    const completed = await this.options.store.completeHealthReport({ reportId, metrics, summary })
     this.log('health_report.finalize.completed', {
       request_id: input.requestId,
       report_id: reportId,
@@ -319,7 +319,7 @@ export class CabinHealthReportService {
       metric_levels: summary.metricLevels,
       report_status: 'completed',
     })
-    return this.toApiResponse(completed || this.options.store.getHealthReport(reportId)!)
+    return this.toApiResponse(completed || (await this.options.store.getHealthReport(reportId))!)
   }
 
   private removeActiveReport(report: CabinHealthReport): void {

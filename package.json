@@ -80,6 +80,7 @@
     "marked": "^18.0.0",
     "p-map": "^7.0.4",
     "pdf-parse": "^2.4.5",
+    "pg": "^8.23.0",
     "picomatch": "^4.0.4",
     "pinyin": "4.0.0",
     "proper-lockfile": "^4.1.2",
@@ -116,5 +117,11 @@
     "@img/sharp-linux-x64": "*",
     "@img/sharp-win32-arm64": "*",
     "@img/sharp-win32-x64": "*"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.1",
+    "bun-types": "^1.4.2",
+    "tsx": "^4.23.13"
   }
 }

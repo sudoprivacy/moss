@@ -16,10 +16,10 @@ const DEFAULT_MCP_ICON = 'data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBz
 interface McpUserDeps {
   mcpStore: McpStore
   authService: AuthService
-  getUserName: (userId: string) => string | undefined
-  getUserDepartmentId: (userId: string) => string | null
-  getUserByIdAndOrg: (userId: string, orgId: string) => { role: string; departmentId: string | null } | null
-  listDepartmentsByOrg: (orgId: string) => { id: string; parentId: string | null }[]
+  getUserName: (userId: string) => Promise<string | undefined>
+  getUserDepartmentId: (userId: string) => Promise<string | null>
+  getUserByIdAndOrg: (userId: string, orgId: string) => Promise<{ role: string; departmentId: string | null } | null>
+  listDepartmentsByOrg: (orgId: string) => Promise<{ id: string; parentId: string | null }[]>
   nexusClient?: NexusClient
 }
 
@@ -115,21 +115,21 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * Returns all MCP servers visible to the current user.
      */
     async listMyMcpServers(auth: AuthContext) {
-      const userDeptId = getUserDepartmentId(auth.userId)
-      const filter = buildVisibilityFilter(
+      const userDeptId = await getUserDepartmentId(auth.userId)
+      const filter = await buildVisibilityFilter(
         auth,
         getUserByIdAndOrg,
         listDepartmentsByOrg,
       )
 
       // Get all enabled MCP servers for this org
-      const allServers = mcpStore.listVisibleMcpServers(auth.orgId, auth.userId, userDeptId)
+      const allServers = await mcpStore.listVisibleMcpServers(auth.orgId, auth.userId, userDeptId)
 
       // Filter by visibility and status (only connection-verified MCPs)
       const visibleServers = allServers.filter(server => isVisibleTo(server.visible_to, filter) && server.status === 'enabled')
 
       // Attach per-user disabled state
-      const userDisabledIds = new Set(mcpStore.getUserDisabledMcpIds(auth.orgId, auth.userId))
+      const userDisabledIds = new Set(await mcpStore.getUserDisabledMcpIds(auth.orgId, auth.userId))
 
       // Sanitize sensitive fields
       const sanitized = visibleServers.map(s => {
@@ -148,16 +148,16 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * Returns a sanitized DTO; user_config_items is always present (the data
      * third parties need to render a config form).
      */
-    listAvailableTemplates(auth: AuthContext, filter?: McpTemplateListFilter) {
-      const policy = mcpStore.getMcpPolicy(auth.orgId)
+    async listAvailableTemplates(auth: AuthContext, filter?: McpTemplateListFilter) {
+      const policy = await mcpStore.getMcpPolicy(auth.orgId)
       if (!policy.allow_personal_mcp) {
         return { success: true, data: [], total: 0, page: filter?.page ?? 1, page_size: filter?.page_size ?? 20 }
       }
       // Fetch all templates without pagination for visibility filtering
-      const result = mcpStore.listTemplates(auth.orgId, { ...filter, page: 1, page_size: 9999 })
+      const result = await mcpStore.listTemplates(auth.orgId, { ...filter, page: 1, page_size: 9999 })
 
       // Build visibility filter
-      const visFilter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+      const visFilter = await buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
 
       // Filter by visibility
       const visibleItems = result.items.filter(template => {
@@ -196,7 +196,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
       ip?: string,
     ) {
       // Step 1: Get policy
-      const policy = mcpStore.getMcpPolicy(auth.orgId)
+      const policy = await mcpStore.getMcpPolicy(auth.orgId)
 
       // Step 2: Policy check - allow_personal_mcp
       if (!policy.allow_personal_mcp) {
@@ -227,7 +227,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
       let serverName: string | null = null
       for (let attempt = 0; attempt < 5; attempt++) {
         const candidate = `${displayName}-${randomBytes(4).toString('hex')}`
-        if (!mcpStore.getMcpServerByName(auth.orgId, candidate)) {
+        if (!await mcpStore.getMcpServerByName(auth.orgId, candidate)) {
           serverName = candidate
           break
         }
@@ -318,7 +318,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
      */
     async createPersonalMcp(auth: AuthContext, input: McpServerInput, ip?: string) {
       // Check policy: is personal MCP allowed?
-      const policy = mcpStore.getMcpPolicy(auth.orgId)
+      const policy = await mcpStore.getMcpPolicy(auth.orgId)
       if (!policy.allow_personal_mcp) {
         return { success: false, error: { code: 'forbidden', message: '企业策略不允许创建个人 MCP' } }
       }
@@ -342,21 +342,21 @@ export function createMcpUserApi(deps: McpUserDeps) {
       }
 
       // Check name uniqueness
-      const existing = mcpStore.getMcpServerByName(auth.orgId, input.name)
+      const existing = await mcpStore.getMcpServerByName(auth.orgId, input.name)
       if (existing) {
         return { success: false, error: { code: 'conflict', message: 'MCP 名称已存在' } }
       }
 
-      const server = mcpStore.createMcpServer(auth.orgId, personalInput, auth.userId)
+      const server = await mcpStore.createMcpServer(auth.orgId, personalInput, auth.userId)
 
       // Write audit log
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: server.id,
           mcp_server_name: server.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'create_personal',
           ip_address: ip,
         })
@@ -364,11 +364,11 @@ export function createMcpUserApi(deps: McpUserDeps) {
 
       // If policy requires approval, create approval request and set status to pending
       if (policy.require_approval) {
-        mcpStore.setMcpServerStatus(auth.orgId, server.id, 'pending', null)
-        mcpStore.createApprovalRequest({
+        await mcpStore.setMcpServerStatus(auth.orgId, server.id, 'pending', null)
+        await mcpStore.createApprovalRequest({
           org_id: auth.orgId,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           mcp_server_id: server.id,
           mcp_server_snapshot: JSON.stringify(sanitizeForUser(server as unknown as Record<string, unknown>)),
         })
@@ -377,7 +377,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
       }
 
       // No approval required — activate immediately
-      mcpStore.setMcpServerStatus(auth.orgId, server.id, 'enabled', null)
+      await mcpStore.setMcpServerStatus(auth.orgId, server.id, 'enabled', null)
       return { success: true, data: sanitizeForUser({ ...server, status: 'enabled' } as unknown as Record<string, unknown>) }
     },
 
@@ -386,7 +386,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * Update a personal MCP server.
      */
     async updatePersonalMcp(auth: AuthContext, id: string, input: Partial<McpServerInput>, ip?: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       // Can only update own personal MCPs
@@ -399,15 +399,15 @@ export function createMcpUserApi(deps: McpUserDeps) {
         return { success: false, error: { code: 'forbidden', message: '个人 MCP 作用域不可更改' } }
       }
 
-      const updated = mcpStore.updateMcpServer(auth.orgId, id, input, auth.userId)
+      const updated = await mcpStore.updateMcpServer(auth.orgId, id, input, auth.userId)
 
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: id,
           mcp_server_name: updated.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'update_personal',
           request_params_json: JSON.stringify({ updated_fields: Object.keys(input) }),
           ip_address: ip,
@@ -422,22 +422,22 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * Delete a personal MCP server.
      */
     async deletePersonalMcp(auth: AuthContext, id: string, ip?: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       if (server.scope !== 'user' || server.owner_id !== auth.userId) {
         return { success: false, error: { code: 'forbidden', message: '只能删除自己的个人 MCP' } }
       }
 
-      const deleted = mcpStore.deleteMcpServer(auth.orgId, id)
+      const deleted = await mcpStore.deleteMcpServer(auth.orgId, id)
 
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: null,
           mcp_server_name: server.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'delete_personal',
           ip_address: ip,
         })
@@ -451,7 +451,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * Test personal MCP connection.
      */
     async testPersonalMcpConnection(auth: AuthContext, id: string, ip?: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       if (server.scope !== 'user' || server.owner_id !== auth.userId) {
@@ -462,18 +462,18 @@ export function createMcpUserApi(deps: McpUserDeps) {
 
       // Update status
       if (result.ok) {
-        mcpStore.setMcpServerStatus(auth.orgId, id, 'enabled', auth.userId)
+        await mcpStore.setMcpServerStatus(auth.orgId, id, 'enabled', auth.userId)
       } else {
-        mcpStore.setMcpServerStatus(auth.orgId, id, 'error', auth.userId)
+        await mcpStore.setMcpServerStatus(auth.orgId, id, 'error', auth.userId)
       }
 
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: id,
           mcp_server_name: server.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'test_connection',
           request_params_json: JSON.stringify({ ok: result.ok, latency_ms: result.latency_ms }),
           ip_address: ip,
@@ -496,18 +496,18 @@ export function createMcpUserApi(deps: McpUserDeps) {
       body: { config_values?: Record<string, string>; auth_credentials?: Record<string, string>; display_name?: string },
       ip?: string,
     ) {
-      const policy = mcpStore.getMcpPolicy(auth.orgId)
+      const policy = await mcpStore.getMcpPolicy(auth.orgId)
       if (!policy.allow_personal_mcp) {
         return { success: false, error: { code: 'forbidden', message: '企业策略不允许创建个人 MCP' } }
       }
 
-      const template = mcpStore.getTemplate(auth.orgId, templateId)
+      const template = await mcpStore.getTemplate(auth.orgId, templateId)
       if (!template) {
         return { success: false, error: { code: 'not_found', message: '模板不存在' } }
       }
 
       // Visibility check
-      const visFilter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+      const visFilter = await buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
       let templateVisibleTo: Parameters<typeof isVisibleTo>[0] = null
       if (template.visible_to_json) {
         try { templateVisibleTo = JSON.parse(template.visible_to_json) } catch { /* treat as null */ }
@@ -523,7 +523,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
         return { success: false, error: { code: 'forbidden', message: '企业策略不允许使用 HTTP/SSE 类型 MCP' } }
       }
 
-      if (mcpStore.hasUserInstalledTemplate(auth.orgId, auth.userId, templateId)) {
+      if (await mcpStore.hasUserInstalledTemplate(auth.orgId, auth.userId, templateId)) {
         return { success: false, error: { code: 'already_installed', message: '你已经安装了此模板' } }
       }
 
@@ -582,7 +582,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
       let serverName: string | null = null
       for (let attempt = 0; attempt < 5; attempt++) {
         const candidate = `${template.name}-${randomBytes(4).toString('hex')}`
-        if (!mcpStore.getMcpServerByName(auth.orgId, candidate)) {
+        if (!await mcpStore.getMcpServerByName(auth.orgId, candidate)) {
           serverName = candidate
           break
         }
@@ -643,14 +643,14 @@ export function createMcpUserApi(deps: McpUserDeps) {
         ...(sp.redact_sensitive_fields !== undefined ? { redact_sensitive_fields: sp.redact_sensitive_fields } : {}),
       }
 
-      const server = mcpStore.createMcpServer(auth.orgId, serverInput, auth.userId)
+      const server = await mcpStore.createMcpServer(auth.orgId, serverInput, auth.userId)
 
       // Write user-config secrets; on any failure, roll back the server
       for (const { key, value } of valuesToWrite) {
         try {
           await nexusClient!.putSecret(`mcp:user:${auth.userId}:${server.id}`, key, value, auth.userId)
         } catch (err) {
-          try { mcpStore.deleteMcpServer(auth.orgId, server.id) } catch { /* best effort */ }
+          try { await mcpStore.deleteMcpServer(auth.orgId, server.id) } catch { /* best effort */ }
           return {
             success: false,
             error: {
@@ -661,23 +661,23 @@ export function createMcpUserApi(deps: McpUserDeps) {
         }
       }
 
-      mcpStore.setMcpServerStatus(auth.orgId, server.id, 'enabled', auth.userId)
-      mcpStore.incrementDownloads(auth.orgId, templateId)
+      await mcpStore.setMcpServerStatus(auth.orgId, server.id, 'enabled', auth.userId)
+      await mcpStore.incrementDownloads(auth.orgId, templateId)
 
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: server.id,
           mcp_server_name: server.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'install_template',
           request_params_json: JSON.stringify({ template_id: templateId, template_name: template.name }),
           ip_address: ip,
         })
       } catch { /* ignore */ }
 
-      const fresh = mcpStore.getMcpServer(auth.orgId, server.id) ?? server
+      const fresh = await mcpStore.getMcpServer(auth.orgId, server.id) ?? server
       return { success: true, data: sanitizeForUser(fresh as unknown as Record<string, unknown>) }
     },
 
@@ -686,7 +686,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * User disables an MCP for themselves.
      */
     async disableUserMcp(auth: AuthContext, id: string, ip?: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       if (!server.enabled) {
@@ -699,7 +699,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
           return { success: false, error: { code: 'forbidden', message: '只能操作自己的个人 MCP' } }
         }
       } else {
-        const filter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+        const filter = await buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
         if (!isVisibleTo(server.visible_to, filter)) {
           return { success: false, error: { code: 'forbidden', message: '无权操作该 MCP' } }
         }
@@ -709,15 +709,15 @@ export function createMcpUserApi(deps: McpUserDeps) {
         }
       }
 
-      mcpStore.addUserDisabledMcp(auth.orgId, auth.userId, id)
+      await mcpStore.addUserDisabledMcp(auth.orgId, auth.userId, id)
 
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: id,
           mcp_server_name: server.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'user_disable_mcp',
           ip_address: ip,
         })
@@ -732,7 +732,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
      * User re-enables an MCP for themselves.
      */
     async enableUserMcp(auth: AuthContext, id: string, ip?: string) {
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       if (!server.enabled) {
@@ -745,7 +745,7 @@ export function createMcpUserApi(deps: McpUserDeps) {
           return { success: false, error: { code: 'forbidden', message: '只能操作自己的个人 MCP' } }
         }
       } else {
-        const filter = buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
+        const filter = await buildVisibilityFilter(auth, getUserByIdAndOrg, listDepartmentsByOrg)
         if (!isVisibleTo(server.visible_to, filter)) {
           return { success: false, error: { code: 'forbidden', message: '无权操作该 MCP' } }
         }
@@ -755,15 +755,15 @@ export function createMcpUserApi(deps: McpUserDeps) {
         }
       }
 
-      mcpStore.removeUserDisabledMcp(auth.orgId, auth.userId, id)
+      await mcpStore.removeUserDisabledMcp(auth.orgId, auth.userId, id)
 
       try {
-        mcpStore.insertAuditLog({
+        await mcpStore.insertAuditLog({
           org_id: auth.orgId,
           mcp_server_id: id,
           mcp_server_name: server.name,
           user_id: auth.userId,
-          user_name: getUserName(auth.userId),
+          user_name: await getUserName(auth.userId),
           action: 'user_enable_mcp',
           ip_address: ip,
         })

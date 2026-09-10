@@ -17,7 +17,7 @@ export function createEnterpriseApi(
      */
     getConfig: async () => {
       try {
-        const enterprise = db.getEnterprise()
+        const enterprise = await db.getEnterprise()
         let logoBase64: string | null = null
 
         if (enterprise.logo) {
@@ -97,10 +97,10 @@ export function createEnterpriseApi(
             if (patch[col] !== undefined) dbPatch[col] = patch[col]
           }
           if (Object.keys(dbPatch).length > 0) {
-            db.updateEnterprise(dbPatch)
+            await db.updateEnterprise(dbPatch)
           }
         } else {
-          db.updateEnterprise(patch)
+          await db.updateEnterprise(patch)
         }
         return await api.getConfig()
       } catch (err) {

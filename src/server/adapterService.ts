@@ -5,7 +5,7 @@
  * 配置存储在 SQLite DB 中，敏感字段读取时脱敏。
  */
 
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from './db/driver.js'
 
 export type PairedUser = {
   userId: string | number
@@ -74,8 +74,10 @@ function deepMerge(current: Record<string, unknown>, patch: Record<string, unkno
 }
 
 export class AdapterService {
-  constructor(private readonly db: DatabaseSync) {
-    this.db.exec(`
+  constructor(private readonly driver: DbDriver) {
+    // sqlite exec runs synchronously under the hood, so fire-and-forget keeps
+    // the constructor synchronous (pg builds its schema via pg_schema.ts).
+    if (this.driver.kind === 'sqlite') void this.driver.exec(`
       CREATE TABLE IF NOT EXISTS adapter_configs (
         id TEXT PRIMARY KEY,
         org_id TEXT NOT NULL,
@@ -92,42 +94,43 @@ export class AdapterService {
   }
 
   /** Get config for a specific user+platform, returns null if not found */
-  get(orgId: string, userId: string, platform: 'telegram' | 'feishu'): PlatformConfig | null {
-    const row = this.db.prepare(
-      'SELECT config_json FROM adapter_configs WHERE org_id = ? AND user_id = ? AND platform = ?'
-    ).get(orgId, userId, platform) as { config_json: string } | undefined
+  async get(orgId: string, userId: string, platform: 'telegram' | 'feishu'): Promise<PlatformConfig | null> {
+    const row = await this.driver.get<{ config_json: string }>(
+      'SELECT config_json FROM adapter_configs WHERE org_id = ? AND user_id = ? AND platform = ?',
+      [orgId, userId, platform],
+    )
 
     if (!row) return null
     return JSON.parse(row.config_json) as PlatformConfig
   }
 
   /** Get masked config for API responses (secrets hidden) */
-  getMasked(orgId: string, userId: string, platform: 'telegram' | 'feishu'): PlatformConfig | null {
-    const config = this.get(orgId, userId, platform)
+  async getMasked(orgId: string, userId: string, platform: 'telegram' | 'feishu'): Promise<PlatformConfig | null> {
+    const config = await this.get(orgId, userId, platform)
     if (!config) return null
     return this.maskConfig(config, platform)
   }
 
   /** Get all adapter configs for an org */
-  listByOrg(orgId: string): AdapterConfigRow[] {
-    const rows = this.db.prepare(
-      'SELECT id, org_id, user_id, platform, config_json, enabled, created_at, updated_at FROM adapter_configs WHERE org_id = ? ORDER BY user_id, platform'
-    ).all(orgId) as AdapterConfigRow[]
-    return rows
+  async listByOrg(orgId: string): Promise<AdapterConfigRow[]> {
+    return this.driver.all<AdapterConfigRow>(
+      'SELECT id, org_id, user_id, platform, config_json, enabled, created_at, updated_at FROM adapter_configs WHERE org_id = ? ORDER BY user_id, platform',
+      [orgId],
+    )
   }
 
   /** Get all adapter configs for a user */
-  listByUser(orgId: string, userId: string): AdapterConfigRow[] {
-    const rows = this.db.prepare(
-      'SELECT id, org_id, user_id, platform, config_json, enabled, created_at, updated_at FROM adapter_configs WHERE org_id = ? AND user_id = ? ORDER BY platform'
-    ).all(orgId, userId) as AdapterConfigRow[]
-    return rows
+  async listByUser(orgId: string, userId: string): Promise<AdapterConfigRow[]> {
+    return this.driver.all<AdapterConfigRow>(
+      'SELECT id, org_id, user_id, platform, config_json, enabled, created_at, updated_at FROM adapter_configs WHERE org_id = ? AND user_id = ? ORDER BY platform',
+      [orgId, userId],
+    )
   }
 
   /** Upsert config for a user+platform */
-  upsert(orgId: string, userId: string, platform: 'telegram' | 'feishu', patch: PlatformConfig): PlatformConfig {
+  async upsert(orgId: string, userId: string, platform: 'telegram' | 'feishu', patch: PlatformConfig): Promise<PlatformConfig> {
     const now = Date.now()
-    const existing = this.get(orgId, userId, platform)
+    const existing = await this.get(orgId, userId, platform)
     const current = existing ?? {}
     const rawCurrent = current as Record<string, unknown>
 
@@ -154,31 +157,33 @@ export class AdapterService {
     const merged = deepMerge(rawCurrent, rawPatch) as PlatformConfig
     const configJson = JSON.stringify(merged)
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO adapter_configs (id, org_id, user_id, platform, config_json, enabled, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 1, ?, ?)
       ON CONFLICT(org_id, user_id, platform) DO UPDATE SET
         config_json = excluded.config_json,
         updated_at = excluded.updated_at
-    `).run(`${orgId}_${userId}_${platform}`, orgId, userId, platform, configJson, now, now)
+    `, [`${orgId}_${userId}_${platform}`, orgId, userId, platform, configJson, now, now])
 
     return merged
   }
 
   /** Delete config for a user+platform */
-  delete(orgId: string, userId: string, platform: 'telegram' | 'feishu'): boolean {
-    const result = this.db.prepare(
-      'DELETE FROM adapter_configs WHERE org_id = ? AND user_id = ? AND platform = ?'
-    ).run(orgId, userId, platform)
-    return result.changes > 0
+  async delete(orgId: string, userId: string, platform: 'telegram' | 'feishu'): Promise<boolean> {
+    const changes = await this.driver.run(
+      'DELETE FROM adapter_configs WHERE org_id = ? AND user_id = ? AND platform = ?',
+      [orgId, userId, platform],
+    )
+    return changes > 0
   }
 
   /** Set enabled status */
-  setEnabled(orgId: string, userId: string, platform: 'telegram' | 'feishu', enabled: boolean): boolean {
-    const result = this.db.prepare(
-      'UPDATE adapter_configs SET enabled = ?, updated_at = ? WHERE org_id = ? AND user_id = ? AND platform = ?'
-    ).run(enabled ? 1 : 0, Date.now(), orgId, userId, platform)
-    return result.changes > 0
+  async setEnabled(orgId: string, userId: string, platform: 'telegram' | 'feishu', enabled: boolean): Promise<boolean> {
+    const changes = await this.driver.run(
+      'UPDATE adapter_configs SET enabled = ?, updated_at = ? WHERE org_id = ? AND user_id = ? AND platform = ?',
+      [enabled ? 1 : 0, Date.now(), orgId, userId, platform],
+    )
+    return changes > 0
   }
 
   private maskConfig(config: PlatformConfig, platform: 'telegram' | 'feishu'): PlatformConfig {

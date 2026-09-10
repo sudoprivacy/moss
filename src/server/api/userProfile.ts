@@ -8,18 +8,18 @@ export async function getUserProfile(
   authService: AuthService,
   db: DirectConnectStore,
 ) {
-  const me = authService.getMe(auth)
+  const me = await authService.getMe(auth)
   const user = me.user
 
   let departmentName = 'Unknown'
   if (user && user.departmentId) {
-    departmentName = (authService as any).db.getDepartmentName(user.departmentId) || 'Unknown'
+    departmentName = (await (authService as any).db.getDepartmentName(user.departmentId)) || 'Unknown'
   }
 
   const roles = authService.listRoles().roles
   const roleName = roles.find(r => r.id === me.role)?.name || me.role
 
-  const sessions = db.listUserSessions(auth.orgId, auth.userId)
+  const sessions = await db.listUserSessions(auth.orgId, auth.userId)
   const stats = await loadBudgetStats(sessions)
 
   return {

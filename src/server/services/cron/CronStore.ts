@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'crypto'
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../../db/driver.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -201,11 +201,11 @@ function mapCronJobRunWithSession(row: SqlRow): CronJobRunWithSession {
 }
 
 export class CronStore {
-  constructor(private db: DatabaseSync) {}
+  constructor(private driver: DbDriver) {}
 
   // ==================== CRUD Operations ====================
 
-  insert(input: CreateCronJobInput): CronJob {
+  async insert(input: CreateCronJobInput): Promise<CronJob> {
     const id = randomUUID()
     const ts = now()
     const schedule = input.schedule
@@ -215,7 +215,7 @@ export class CronStore {
     const executorUserId = input.executorUserId ?? input.userId
     const coOwnerIds = input.coOwnerIds ?? []
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO cron_jobs (
         id, org_id, user_id, co_owner_ids, executor_user_id, name, enabled, deleted_at,
         schedule_kind, schedule_value, schedule_tz, schedule_description,
@@ -225,7 +225,7 @@ export class CronStore {
         run_count, retry_count, max_retries,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 0, 0, ?, ?, ?)
-    `).run(
+    `, [
       id,
       input.orgId,
       input.userId,
@@ -247,13 +247,13 @@ export class CronStore {
       input.maxRetries ?? 3,
       ts,
       ts,
-    )
+    ])
 
-    return this.getById(id)!
+    return (await this.getById(id))!
   }
 
-  update(jobId: string, input: UpdateCronJobInput): CronJob | null {
-    const existing = this.getById(jobId)
+  async update(jobId: string, input: UpdateCronJobInput): Promise<CronJob | null> {
+    const existing = await this.getById(jobId)
     if (!existing) return null
 
     const ts = now()
@@ -263,7 +263,7 @@ export class CronStore {
     const executorUserId =
       input.executorUserId !== undefined ? input.executorUserId : existing.executorUserId
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cron_jobs
       SET name = ?, enabled = ?,
           co_owner_ids = ?, executor_user_id = ?,
@@ -272,7 +272,7 @@ export class CronStore {
           assistant_id = ?, assistant_name = ?, workspace = ?, runtime_json = ?,
           max_retries = ?, lease_until = NULL, updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       input.name ?? existing.name,
       input.enabled !== undefined ? (input.enabled ? 1 : 0) : (existing.enabled ? 1 : 0),
       JSON.stringify(coOwnerIds ?? []),
@@ -291,23 +291,23 @@ export class CronStore {
       input.maxRetries ?? existing.maxRetries,
       ts,
       jobId,
-    )
+    ])
 
     return this.getById(jobId)
   }
 
-  softDelete(jobId: string): void {
-    this.db.prepare(`
+  async softDelete(jobId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE cron_jobs SET deleted_at = ? WHERE id = ?
-    `).run(now(), jobId)
+    `, [now(), jobId])
   }
 
   // ==================== Query Operations ====================
 
-  getById(jobId: string): CronJob | null {
-    const row = this.db.prepare(`
+  async getById(jobId: string): Promise<CronJob | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM cron_jobs WHERE id = ? AND deleted_at IS NULL LIMIT 1
-    `).get(jobId) as SqlRow | undefined
+    `, [jobId])
     return row ? mapCronJob(row) : null
   }
 
@@ -316,19 +316,29 @@ export class CronStore {
    * json_each over the co_owner_ids JSON array (JSON1 ships with node:sqlite);
    * the id is bound as a parameter so it is injection-safe.
    */
-  listByUser(orgId: string, userId: string): CronJob[] {
-    const rows = this.db.prepare(`
+  async listByUser(orgId: string, userId: string): Promise<CronJob[]> {
+    // Co-owner membership over the co_owner_ids JSON array. The unnest
+    // function is dialect-specific and NOT drop-in equivalent: SQLite's
+    // json_each.value yields the scalar unquoted, PG's json_array_elements
+    // yields a json value that must be unquoted via #>> '{}' before compare.
+    const coOwnerExists = this.driver.kind === 'postgres'
+      ? `EXISTS (
+            SELECT 1 FROM json_array_elements(COALESCE(cron_jobs.co_owner_ids, '[]')::json) AS je
+            WHERE je.value #>> '{}' = ?
+          )`
+      : `EXISTS (
+            SELECT 1 FROM json_each(COALESCE(cron_jobs.co_owner_ids, '[]'))
+            WHERE json_each.value = ?
+          )`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_jobs
       WHERE org_id = ? AND deleted_at IS NULL
         AND (
           user_id = ?
-          OR EXISTS (
-            SELECT 1 FROM json_each(COALESCE(cron_jobs.co_owner_ids, '[]'))
-            WHERE json_each.value = ?
-          )
+          OR ${coOwnerExists}
         )
       ORDER BY created_at DESC
-    `).all(orgId, userId, userId) as SqlRow[]
+    `, [orgId, userId, userId])
     return rows.map(mapCronJob)
   }
 
@@ -337,62 +347,70 @@ export class CronStore {
    * Used for a dept_admin's subtree view. An empty id set returns nothing
    * (fail-closed); ids are bound as parameters so the IN list is injection-safe.
    */
-  listBySubtree(orgId: string, userIds: string[]): CronJob[] {
+  async listBySubtree(orgId: string, userIds: string[]): Promise<CronJob[]> {
     if (userIds.length === 0) return []
     const placeholders = userIds.map(() => '?').join(', ')
-    const rows = this.db.prepare(`
+    // Dialect-specific unnest — see listByUser for the semantic gap that makes
+    // this a branch rather than a rewrite (PG json values need #>> '{}').
+    const coOwnerExists = this.driver.kind === 'postgres'
+      ? `EXISTS (
+            SELECT 1 FROM json_array_elements(COALESCE(cron_jobs.co_owner_ids, '[]')::json) AS je
+            WHERE je.value #>> '{}' IN (${placeholders})
+          )`
+      : `EXISTS (
+            SELECT 1 FROM json_each(COALESCE(cron_jobs.co_owner_ids, '[]'))
+            WHERE json_each.value IN (${placeholders})
+          )`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_jobs
       WHERE org_id = ? AND deleted_at IS NULL
         AND (
           user_id IN (${placeholders})
-          OR EXISTS (
-            SELECT 1 FROM json_each(COALESCE(cron_jobs.co_owner_ids, '[]'))
-            WHERE json_each.value IN (${placeholders})
-          )
+          OR ${coOwnerExists}
         )
       ORDER BY created_at DESC
-    `).all(orgId, ...userIds, ...userIds) as SqlRow[]
+    `, [orgId, ...userIds, ...userIds])
     return rows.map(mapCronJob)
   }
 
-  listEnabled(): CronJob[] {
-    const rows = this.db.prepare(`
+  async listEnabled(): Promise<CronJob[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_jobs
       WHERE enabled = 1 AND deleted_at IS NULL
       ORDER BY next_run_at ASC
-    `).all() as SqlRow[]
+    `)
     return rows.map(mapCronJob)
   }
 
-  listDueJobs(nowTs: number): CronJob[] {
-    const rows = this.db.prepare(`
+  async listDueJobs(nowTs: number): Promise<CronJob[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_jobs
       WHERE enabled = 1 AND deleted_at IS NULL
         AND next_run_at IS NOT NULL AND next_run_at <= ?
       ORDER BY next_run_at ASC
-    `).all(nowTs) as SqlRow[]
+    `, [nowTs])
     return rows.map(mapCronJob)
   }
 
-  listOverdueJobs(nowTs: number): CronJob[] {
-    const rows = this.db.prepare(`
+  async listOverdueJobs(nowTs: number): Promise<CronJob[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_jobs
       WHERE enabled = 1 AND deleted_at IS NULL
         AND next_run_at IS NOT NULL AND next_run_at < ?
       ORDER BY next_run_at ASC
-    `).all(nowTs) as SqlRow[]
+    `, [nowTs])
     return rows.map(mapCronJob)
   }
 
   // ==================== Status Updates ====================
 
-  updateNextRunAt(jobId: string, nextRunAt: number | null): void {
-    this.db.prepare(`
+  async updateNextRunAt(jobId: string, nextRunAt: number | null): Promise<void> {
+    await this.driver.run(`
       UPDATE cron_jobs SET next_run_at = ?, lease_until = NULL, updated_at = ? WHERE id = ?
-    `).run(nextRunAt, now(), jobId)
+    `, [nextRunAt, now(), jobId])
   }
 
-  updateRunResult(
+  async updateRunResult(
     jobId: string,
     result: {
       lastSessionId?: string
@@ -400,9 +418,9 @@ export class CronStore {
       lastError?: string
       runCountIncrement?: number
     },
-  ): void {
+  ): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cron_jobs
       SET last_session_id = COALESCE(?, last_session_id),
           last_run_at = ?,
@@ -411,7 +429,7 @@ export class CronStore {
           run_count = run_count + ?,
           updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       result.lastSessionId ?? null,
       ts,
       result.lastStatus,
@@ -419,7 +437,7 @@ export class CronStore {
       result.runCountIncrement ?? 1,
       ts,
       jobId,
-    )
+    ])
   }
 
   /**
@@ -436,8 +454,8 @@ export class CronStore {
    * nextRunAt is the next occurrence computed by the caller (null for
    * one-shot 'at' jobs, which must never re-fire).
    */
-  acquireLease(jobId: string, nowTs: number, leaseUntil: number, nextRunAt: number | null): boolean {
-    const result = this.db.prepare(`
+  async acquireLease(jobId: string, nowTs: number, leaseUntil: number, nextRunAt: number | null): Promise<boolean> {
+    const changes = await this.driver.run(`
       UPDATE cron_jobs
       SET lease_until = ?, next_run_at = ?, updated_at = ?
       WHERE id = ?
@@ -446,40 +464,40 @@ export class CronStore {
         AND next_run_at IS NOT NULL
         AND next_run_at <= ?
         AND (lease_until IS NULL OR lease_until < ?)
-    `).run(leaseUntil, nextRunAt, nowTs, jobId, nowTs, nowTs)
-    return result.changes > 0
+    `, [leaseUntil, nextRunAt, nowTs, jobId, nowTs, nowTs])
+    return changes > 0
   }
 
   // ==================== Job Runs ====================
 
-  createRun(jobId: string, orgId: string, userId: string): CronJobRun {
+  async createRun(jobId: string, orgId: string, userId: string): Promise<CronJobRun> {
     const id = randomUUID()
     const ts = now()
 
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO cron_job_runs (id, job_id, org_id, user_id, session_id, status, started_at, finished_at, error, summary, created_at)
       VALUES (?, ?, ?, ?, NULL, 'queued', NULL, NULL, NULL, NULL, ?)
-    `).run(id, jobId, orgId, userId, ts)
+    `, [id, jobId, orgId, userId, ts])
 
-    return this.getRunById(id)!
+    return (await this.getRunById(id))!
   }
 
-  getRunById(runId: string): CronJobRun | null {
-    const row = this.db.prepare(`
+  async getRunById(runId: string): Promise<CronJobRun | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM cron_job_runs WHERE id = ? LIMIT 1
-    `).get(runId) as SqlRow | undefined
+    `, [runId])
     return row ? mapCronJobRun(row) : null
   }
 
-  listRunsByJob(jobId: string, limit = 50): CronJobRun[] {
-    const rows = this.db.prepare(`
+  async listRunsByJob(jobId: string, limit = 50): Promise<CronJobRun[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_job_runs WHERE job_id = ? ORDER BY created_at DESC LIMIT ?
-    `).all(jobId, limit) as SqlRow[]
+    `, [jobId, limit])
     return rows.map(mapCronJobRun)
   }
 
-  listRunsWithSessionByJob(jobId: string, limit = 50): CronJobRunWithSession[] {
-    const rows = this.db.prepare(`
+  async listRunsWithSessionByJob(jobId: string, limit = 50): Promise<CronJobRunWithSession[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT
         r.*,
         s.status AS session_status,
@@ -492,11 +510,11 @@ export class CronStore {
       WHERE r.job_id = ?
       ORDER BY r.created_at DESC
       LIMIT ?
-    `).all(jobId, limit) as SqlRow[]
+    `, [jobId, limit])
     return rows.map(mapCronJobRunWithSession)
   }
 
-  updateRunStatus(
+  async updateRunStatus(
     runId: string,
     update: {
       status: RunStatus
@@ -504,29 +522,29 @@ export class CronStore {
       error?: string
       summary?: string
     },
-  ): void {
+  ): Promise<void> {
     const ts = now()
     const finishedAt = ['ok', 'error', 'skipped', 'missed'].includes(update.status) ? ts : null
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cron_job_runs
       SET status = ?, session_id = COALESCE(?, session_id), finished_at = ?, error = ?, summary = ?
       WHERE id = ?
-    `).run(
+    `, [
       update.status,
       update.sessionId ?? null,
       finishedAt,
       update.error ?? null,
       update.summary ?? null,
       runId,
-    )
+    ])
   }
 
-  startRun(runId: string): void {
+  async startRun(runId: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cron_job_runs SET status = 'running', started_at = ? WHERE id = ?
-    `).run(ts, runId)
+    `, [ts, runId])
   }
 
   /**
@@ -535,12 +553,12 @@ export class CronStore {
    * not stack another run on top — in reuse mode the stacked runs collide on
    * the same single-turn session and each blocks until the timeout.
    */
-  hasActiveRun(jobId: string): boolean {
-    const row = this.db.prepare(`
+  async hasActiveRun(jobId: string): Promise<boolean> {
+    const row = await this.driver.get(`
       SELECT 1 FROM cron_job_runs
       WHERE job_id = ? AND status IN ('queued', 'running')
       LIMIT 1
-    `).get(jobId)
+    `, [jobId])
     return row != null
   }
 
@@ -554,11 +572,11 @@ export class CronStore {
    * cheap moss-side proxy for that depth (the runtime's internal session store is
    * not visible here). Excludes 'skipped' — those never sent a turn.
    */
-  countRunsForSession(jobId: string, sessionId: string): number {
-    const row = this.db.prepare(`
+  async countRunsForSession(jobId: string, sessionId: string): Promise<number> {
+    const row = await this.driver.get<{ n: number }>(`
       SELECT COUNT(*) AS n FROM cron_job_runs
       WHERE job_id = ? AND session_id = ? AND status != 'skipped'
-    `).get(jobId, sessionId) as { n: number } | undefined
+    `, [jobId, sessionId])
     return row?.n ?? 0
   }
 
@@ -569,14 +587,14 @@ export class CronStore {
    * blew past the run timeout without their promise settling. Returns the
    * number of runs reaped.
    */
-  reapStaleRuns(startedBefore: number, error: string): number {
+  async reapStaleRuns(startedBefore: number, error: string): Promise<number> {
     const ts = now()
-    const result = this.db.prepare(`
+    const changes = await this.driver.run(`
       UPDATE cron_job_runs
       SET status = 'error', finished_at = ?, error = ?
       WHERE status IN ('queued', 'running')
         AND COALESCE(started_at, created_at) < ?
-    `).run(ts, error, startedBefore)
-    return result.changes
+    `, [ts, error, startedBefore])
+    return changes
   }
 }

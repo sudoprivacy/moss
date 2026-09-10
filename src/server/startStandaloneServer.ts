@@ -3,7 +3,7 @@ import { startServer } from './server.js'
 import { printBanner } from './serverBanner.js'
 import { createServerLogger } from './serverLog.js'
 import { ensureServerDirectories } from './config.js'
-import { openDirectConnectStore } from './db.js'
+import { openStoreAsync } from './db.js'
 import { RuntimeService } from './runtimeService.js'
 import { createAuthService } from './auth/service.js'
 import { enableConfigs } from '../utils/config.js'
@@ -104,8 +104,8 @@ async function finishStandaloneServerStartup(
   })
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
-  const store = openDirectConnectStore(config)
-  store.ensureDefaultConfigItems()
+  const store = await openStoreAsync(config)
+  await store.ensureDefaultConfigItems()
 
   // Start Auth Proxy (create instance, will load rules after DB is ready)
   const authProxy = new AuthProxyServer()
@@ -125,7 +125,7 @@ async function finishStandaloneServerStartup(
   const smsSender = buildSmsSender(config, nexusClient)
 
   const { service: authService, bootstrap } = await createAuthService({
-    db: store.db,
+    db: store,
     dbPath: config.dbPath,
     tokenTtlSec: config.tokenTtlSec,
     bootstrapAdmin: config.bootstrapAdmin,
@@ -142,14 +142,14 @@ async function finishStandaloneServerStartup(
       'Development and single-operator use only.',
     )
   }
-  const instance = store.registerServerInstance(config.host, undefined, config.instanceId)
+  const instance = await store.registerServerInstance(config.host, undefined, config.instanceId)
 
   // Multi-org backfill: now that organizations exist (auth bootstrap ran), assign
   // a default org to any pre-existing credential/secret/channel rows so they
   // aren't stranded global. Idempotent (only NULL org_id rows are touched).
-  const defaultOrgId = authService.listAllOrganizations().organizations[0]?.id
+  const defaultOrgId = (await authService.listAllOrganizations()).organizations[0]?.id
   if (defaultOrgId) {
-    store.backfillOrgScoping(defaultOrgId)
+    await store.backfillOrgScoping(defaultOrgId)
   }
 
   // Token minter for login-type 凭据 (mints + caches a per-user access_token
@@ -158,13 +158,33 @@ async function finishStandaloneServerStartup(
   authProxy.setTokenMinter(new TokenMinter(authService.getMintedTokenStore()))
 
   // Load config item rules into Auth Proxy now that DB is available
-  const activeItems = store.getAllActiveConfigItems()
-  authProxy.updateRules(
-    activeItems.map(item => configItemToRule(item, id => store.getConfigEntries(id))),
+  const activeItems = await store.getAllActiveConfigItems()
+  const reloadAuthProxyRules = async () => {
+    const items = await store.getAllActiveConfigItems()
+    const rules = []
+    for (const item of items) {
+      const entries = await store.getConfigEntries(item.id as number)
+      rules.push(configItemToRule(item, () => entries))
+    }
+    authProxy.updateRules(rules)
+  }
+  {
+    const startupRules = []
+    for (const item of activeItems) {
+      const entries = await store.getConfigEntries(item.id as number)
+      startupRules.push(configItemToRule(item, () => entries))
+    }
+    authProxy.updateRules(startupRules)
+  }
+  // HA: pick up config-items changes made on OTHER instances (this instance's
+  // rules are process-local memory; the API callback only fires locally).
+  authProxy.startRulesChangePolling(
+    () => store.getConfigRulesFingerprint(),
+    reloadAuthProxyRules,
   )
   const policyProvider = {
-    getAuthorizedConfigItemIds(departmentId: string): number[] {
-      return store.getDepartmentPolicies(departmentId).map(r => r.config_item_id as number)
+    async getAuthorizedConfigItemIds(departmentId: string): Promise<number[]> {
+      return (await store.getDepartmentPolicies(departmentId)).map(r => r.config_item_id as number)
     },
   }
   authProxy.setPolicyProvider(policyProvider)
@@ -177,7 +197,7 @@ async function finishStandaloneServerStartup(
   setSecretsApiDependencies(
     nexusClient,
     policyProvider,
-    () => store.getAllActiveConfigItems() as unknown as Array<{ id: number; scope: string; pinyin: string }>,
+    async () => (await store.getAllActiveConfigItems()) as unknown as Array<{ id: number; scope: string; pinyin: string }>,
     (orgId, departmentId) => authService.getDepartmentAncestorChain(orgId, departmentId),
   )
   const runtime = new RuntimeService({
@@ -206,7 +226,7 @@ async function finishStandaloneServerStartup(
   )
 
   const heartbeatTimer = setInterval(() => {
-    store.heartbeatServerInstance(instance.instanceId)
+    void store.heartbeatServerInstance(instance.instanceId)
   }, Math.max(5_000, Math.floor(config.heartbeatTimeoutMs / 2)))
   heartbeatTimer.unref?.()
 
@@ -263,7 +283,7 @@ async function finishStandaloneServerStartup(
     await server.stop()
     await authProxy.stop()
     await nexusManager.stop()
-    store.stopServerInstance(instance.instanceId)
+    await store.stopServerInstance(instance.instanceId)
     store.close()
   }
 

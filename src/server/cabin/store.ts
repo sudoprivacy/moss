@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver, SqlParam } from '../db/driver.js'
 import type {
   CabinConversation,
   CabinAlert,
@@ -306,30 +307,35 @@ export function ensureCabinTables(db: DatabaseSync): void {
 }
 
 export class CabinStore {
-  constructor(private readonly db: DatabaseSync) {
-    ensureCabinTables(db)
+  // Queries go through the async driver (shared with DirectConnectStore for pg
+  // pooling); the DatabaseSync handle is used only for synchronous sqlite table
+  // creation (pg builds its schema via pg_schema.ts).
+  constructor(private readonly driver: DbDriver, db?: DatabaseSync) {
+    // sqlite builds its tables here; the postgres backend gets them from
+    // pg_schema.ts (openStoreAsync), where no sqlite handle exists.
+    if (db) ensureCabinTables(db)
   }
 
-  getConversationByKey(conversationKey: string, options: { includeReset?: boolean } = {}): CabinConversation | null {
+  async getConversationByKey(conversationKey: string, options: { includeReset?: boolean } = {}): Promise<CabinConversation | null> {
     const row = options.includeReset
-      ? this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ?').get(conversationKey) as Row | undefined
-      : this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ? AND status = ?').get(conversationKey, 'active') as Row | undefined
+      ? await this.driver.get<Row>('SELECT * FROM cabin_conversations WHERE conversation_key = ?', [conversationKey])
+      : await this.driver.get<Row>('SELECT * FROM cabin_conversations WHERE conversation_key = ? AND status = ?', [conversationKey, 'active'])
     return row ? mapConversation(row) : null
   }
 
-  createConversation(input: CabinPassengerContext & { mossSessionId: string }): CabinConversation {
+  async createConversation(input: CabinPassengerContext & { mossSessionId: string }): Promise<CabinConversation> {
     const timestamp = now()
     const conversationKey = buildConversationKey(input)
     const id = randomUUID()
-    const existing = this.getConversationByKey(conversationKey, { includeReset: true })
+    const existing = await this.getConversationByKey(conversationKey, { includeReset: true })
     if (existing) {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE cabin_conversations
         SET passenger_id = ?, passenger_ref = ?, passenger_name = ?,
             flight_id = ?, flight_date = ?, seat_id = ?, tablet_id = ?,
             moss_session_id = ?, status = 'active', updated_at = ?
         WHERE id = ?
-      `).run(
+      `, [
         input.passengerId ?? null,
         input.passengerRef ?? null,
         input.passengerName ?? null,
@@ -340,15 +346,15 @@ export class CabinStore {
         input.mossSessionId,
         timestamp,
         existing.id,
-      )
+      ])
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         INSERT INTO cabin_conversations (
           id, conversation_key, passenger_id, passenger_ref, passenger_name,
           flight_id, flight_date, seat_id, tablet_id, moss_session_id,
           status, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-      `).run(
+      `, [
         id,
         conversationKey,
         input.passengerId ?? null,
@@ -361,15 +367,15 @@ export class CabinStore {
         input.mossSessionId,
         timestamp,
         timestamp,
-      )
+      ])
     }
-    const created = this.getConversationByKey(conversationKey)
+    const created = await this.getConversationByKey(conversationKey)
     if (!created) throw new Error('Failed to create cabin conversation')
-    this.upsertManagedSeatFromContext(input)
+    await this.upsertManagedSeatFromContext(input)
     return created
   }
 
-  upsertManagedSeatFromContext(input: CabinPassengerContext): CabinManagedSeat | null {
+  async upsertManagedSeatFromContext(input: CabinPassengerContext): Promise<CabinManagedSeat | null> {
     if (!input.flightId || !input.flightDate || !input.seatId) return null
     return this.upsertManagedSeat({
       aircraftNo: input.aircraftNo,
@@ -384,7 +390,7 @@ export class CabinStore {
     })
   }
 
-  upsertManagedSeat(input: {
+  async upsertManagedSeat(input: {
     aircraftNo?: string | null
     flightId: string
     flightDate: string
@@ -394,14 +400,14 @@ export class CabinStore {
     aircraftSeatId?: string | null
     tabletId?: string | null
     tabletType?: string | null
-  }): CabinManagedSeat {
+  }): Promise<CabinManagedSeat> {
     const timestamp = now()
-    const existing = this.db.prepare(`
+    const existing = await this.driver.get<Row>(`
       SELECT * FROM cabin_managed_seats
       WHERE flight_id = ? AND flight_date = ? AND seat_no = ?
-    `).get(input.flightId, input.flightDate, input.seatNo) as Row | undefined
+    `, [input.flightId, input.flightDate, input.seatNo])
     if (existing) {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE cabin_managed_seats
         SET aircraft_no = COALESCE(?, aircraft_no),
             column_no = COALESCE(?, column_no),
@@ -413,7 +419,7 @@ export class CabinStore {
             last_seen_at = ?,
             updated_at = ?
         WHERE id = ?
-      `).run(
+      `, [
         input.aircraftNo ?? null,
         input.columnNo ?? null,
         input.flightSeatId ?? null,
@@ -423,19 +429,19 @@ export class CabinStore {
         timestamp,
         timestamp,
         String(existing.id),
-      )
-      const row = this.db.prepare('SELECT * FROM cabin_managed_seats WHERE id = ?').get(String(existing.id)) as Row | undefined
+      ])
+      const row = await this.driver.get<Row>('SELECT * FROM cabin_managed_seats WHERE id = ?', [String(existing.id)])
       if (!row) throw new Error('Failed to update cabin managed seat')
       return mapManagedSeat(row)
     }
     const id = randomUUID()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO cabin_managed_seats (
         id, aircraft_no, flight_id, flight_date, seat_no, column_no,
         flight_seat_id, aircraft_seat_id, tablet_id, tablet_type,
         status, last_seen_at, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-    `).run(
+    `, [
       id,
       input.aircraftNo ?? null,
       input.flightId,
@@ -449,20 +455,20 @@ export class CabinStore {
       timestamp,
       timestamp,
       timestamp,
-    )
-    const row = this.db.prepare('SELECT * FROM cabin_managed_seats WHERE id = ?').get(id) as Row | undefined
+    ])
+    const row = await this.driver.get<Row>('SELECT * FROM cabin_managed_seats WHERE id = ?', [id])
     if (!row) throw new Error('Failed to create cabin managed seat')
     return mapManagedSeat(row)
   }
 
-  listManagedSeats(input: {
+  async listManagedSeats(input: {
     aircraftNo?: string
     flightId?: string
     flightDate?: string
     activeOnly?: boolean
-  } = {}): CabinManagedSeat[] {
+  } = {}): Promise<CabinManagedSeat[]> {
     const clauses: string[] = []
-    const params: unknown[] = []
+    const params: SqlParam[] = []
     if (input.aircraftNo) {
       clauses.push('(aircraft_no = ? OR aircraft_no IS NULL)')
       params.push(input.aircraftNo)
@@ -480,15 +486,15 @@ export class CabinStore {
       params.push('active')
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<Row>(`
       SELECT * FROM cabin_managed_seats
       ${where}
       ORDER BY seat_no ASC
-    `).all(...params) as Row[]
+    `, params)
     return rows.map(mapManagedSeat)
   }
 
-  createAlert(input: {
+  async createAlert(input: {
     aircraftNo?: string | null
     flightId: string
     flightDate?: string | null
@@ -500,16 +506,16 @@ export class CabinStore {
     message: string
     sourceEventId?: string | null
     details?: Record<string, unknown> | null
-  }): CabinAlert {
+  }): Promise<CabinAlert> {
     const id = randomUUID()
     const timestamp = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO cabin_alerts (
         id, aircraft_no, flight_id, flight_date, phase_code, phase_name,
         seat_no, alert_type, severity, message, status, source_event_id,
         details_json, created_at, resolved_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, NULL)
-    `).run(
+    `, [
       id,
       input.aircraftNo ?? null,
       input.flightId,
@@ -523,22 +529,22 @@ export class CabinStore {
       input.sourceEventId ?? null,
       input.details ? JSON.stringify(input.details) : null,
       timestamp,
-    )
-    const row = this.db.prepare('SELECT * FROM cabin_alerts WHERE id = ?').get(id) as Row | undefined
+    ])
+    const row = await this.driver.get<Row>('SELECT * FROM cabin_alerts WHERE id = ?', [id])
     if (!row) throw new Error('Failed to create cabin alert')
     return mapAlert(row)
   }
 
-  listAlerts(input: {
+  async listAlerts(input: {
     flightId?: string
     flightDate?: string
     seatNo?: string
     status?: 'active' | 'resolved'
     limit?: number
     offset?: number
-  } = {}): { alerts: CabinAlert[]; total: number } {
+  } = {}): Promise<{ alerts: CabinAlert[]; total: number }> {
     const clauses: string[] = []
-    const params: unknown[] = []
+    const params: SqlParam[] = []
     if (input.flightId) {
       clauses.push('flight_id LIKE ?')
       params.push(`%${input.flightId}%`)
@@ -556,23 +562,22 @@ export class CabinStore {
       params.push(input.status)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const totalRow = this.db.prepare(`SELECT COUNT(*) AS total FROM cabin_alerts ${where}`)
-      .get(...params) as Row | undefined
+    const totalRow = await this.driver.get<Row>(`SELECT COUNT(*) AS total FROM cabin_alerts ${where}`, params)
     const limit = Math.max(1, Math.min(input.limit ?? 50, 200))
     const offset = Math.max(0, input.offset ?? 0)
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<Row>(`
       SELECT * FROM cabin_alerts
       ${where}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
-    `).all(...params, limit, offset) as Row[]
+    `, [...params, limit, offset])
     return {
       alerts: rows.map(mapAlert),
       total: Number(totalRow?.total ?? 0),
     }
   }
 
-  createHealthReport(input: {
+  async createHealthReport(input: {
     aircraftNo?: string | null
     flightId: string
     flightDate: string
@@ -583,17 +588,17 @@ export class CabinStore {
     language?: string | null
     startedAt: number
     collectUntil: number
-  }): CabinHealthReport {
+  }): Promise<CabinHealthReport> {
     const id = `hr_${randomUUID().replace(/-/g, '').slice(0, 16)}`
     const timestamp = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO cabin_health_reports (
         id, aircraft_no, flight_id, flight_date, seat_no, tablet_id,
         passenger_id, passenger_ref, status, language, sample_count,
         samples_json, metrics_json, summary_json, error_code, error_message,
         cancelled_at, started_at, collect_until, generated_at, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, ?, ?)
-    `).run(
+    `, [
       id,
       input.aircraftNo ?? null,
       input.flightId,
@@ -607,33 +612,33 @@ export class CabinStore {
       input.collectUntil,
       timestamp,
       timestamp,
-    )
-    const report = this.getHealthReport(id)
+    ])
+    const report = await this.getHealthReport(id)
     if (!report) throw new Error('Failed to create cabin health report')
     return report
   }
 
-  getHealthReport(reportId: string): CabinHealthReport | null {
-    const row = this.db.prepare('SELECT * FROM cabin_health_reports WHERE id = ?').get(reportId) as Row | undefined
+  async getHealthReport(reportId: string): Promise<CabinHealthReport | null> {
+    const row = await this.driver.get<Row>('SELECT * FROM cabin_health_reports WHERE id = ?', [reportId])
     return row ? mapHealthReport(row) : null
   }
 
-  cancelUnfinishedHealthReports(input: {
+  async cancelUnfinishedHealthReports(input: {
     flightId: string
     flightDate: string
     seatNo: string
     newReportId?: string
-  }): CabinHealthReport[] {
-    const rows = this.db.prepare(`
+  }): Promise<CabinHealthReport[]> {
+    const rows = await this.driver.all<Row>(`
       SELECT * FROM cabin_health_reports
       WHERE flight_id = ? AND flight_date = ? AND seat_no = ?
         AND status IN ('collecting', 'generating')
       ORDER BY created_at ASC
-    `).all(input.flightId, input.flightDate, input.seatNo) as Row[]
+    `, [input.flightId, input.flightDate, input.seatNo])
     if (!rows.length) return []
     const timestamp = now()
     const cancelled = rows.map(mapHealthReport)
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cabin_health_reports
       SET status = 'cancelled',
           error_code = 'SUPERSEDED_BY_NEW_REPORT',
@@ -642,35 +647,35 @@ export class CabinStore {
           updated_at = ?
       WHERE flight_id = ? AND flight_date = ? AND seat_no = ?
         AND status IN ('collecting', 'generating')
-    `).run(timestamp, timestamp, input.flightId, input.flightDate, input.seatNo)
+    `, [timestamp, timestamp, input.flightId, input.flightDate, input.seatNo])
     return cancelled
   }
 
-  updateHealthReportSamples(reportId: string, samples: Record<string, unknown>[]): CabinHealthReport | null {
-    this.db.prepare(`
+  async updateHealthReportSamples(reportId: string, samples: Record<string, unknown>[]): Promise<CabinHealthReport | null> {
+    await this.driver.run(`
       UPDATE cabin_health_reports
       SET sample_count = ?, samples_json = ?, updated_at = ?
       WHERE id = ? AND status = 'collecting'
-    `).run(samples.length, samples.length ? JSON.stringify(samples) : null, now(), reportId)
+    `, [samples.length, samples.length ? JSON.stringify(samples) : null, now(), reportId])
     return this.getHealthReport(reportId)
   }
 
-  markHealthReportGenerating(reportId: string): CabinHealthReport | null {
-    this.db.prepare(`
+  async markHealthReportGenerating(reportId: string): Promise<CabinHealthReport | null> {
+    await this.driver.run(`
       UPDATE cabin_health_reports
       SET status = 'generating', updated_at = ?
       WHERE id = ? AND status = 'collecting'
-    `).run(now(), reportId)
+    `, [now(), reportId])
     return this.getHealthReport(reportId)
   }
 
-  completeHealthReport(input: {
+  async completeHealthReport(input: {
     reportId: string
     metrics: Record<CabinHealthMetricKey, CabinHealthMetricResult>
     summary: CabinHealthReportSummary
-  }): CabinHealthReport | null {
+  }): Promise<CabinHealthReport | null> {
     const timestamp = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cabin_health_reports
       SET status = 'completed',
           metrics_json = ?,
@@ -678,23 +683,23 @@ export class CabinStore {
           generated_at = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       JSON.stringify(input.metrics),
       JSON.stringify(input.summary),
       timestamp,
       timestamp,
       input.reportId,
-    )
+    ])
     return this.getHealthReport(input.reportId)
   }
 
-  failHealthReport(input: {
+  async failHealthReport(input: {
     reportId: string
     errorCode: string
     errorMessage: string
-  }): CabinHealthReport | null {
+  }): Promise<CabinHealthReport | null> {
     const timestamp = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE cabin_health_reports
       SET status = 'failed',
           error_code = ?,
@@ -702,16 +707,15 @@ export class CabinStore {
           generated_at = ?,
           updated_at = ?
       WHERE id = ? AND status IN ('collecting', 'generating')
-    `).run(input.errorCode, input.errorMessage, timestamp, timestamp, input.reportId)
+    `, [input.errorCode, input.errorMessage, timestamp, timestamp, input.reportId])
     return this.getHealthReport(input.reportId)
   }
 
-  touchConversation(conversationId: string): void {
-    this.db.prepare('UPDATE cabin_conversations SET updated_at = ?, status = ? WHERE id = ?')
-      .run(now(), 'active', conversationId)
+  async touchConversation(conversationId: string): Promise<void> {
+    await this.driver.run('UPDATE cabin_conversations SET updated_at = ?, status = ? WHERE id = ?', [now(), 'active', conversationId])
   }
 
-  appendMessage(input: {
+  async appendMessage(input: {
     conversationId: string
     role: CabinMessageRole
     source: CabinMessageSource
@@ -719,14 +723,14 @@ export class CabinStore {
     intent?: string | null
     slots?: Record<string, unknown> | null
     toolCalls?: CabinToolCall[] | null
-  }): CabinMessage {
+  }): Promise<CabinMessage> {
     const id = randomUUID()
     const createdAt = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO cabin_messages (
         id, conversation_id, role, source, content, intent, slots_json, tool_calls_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       id,
       input.conversationId,
       input.role,
@@ -736,43 +740,41 @@ export class CabinStore {
       input.slots ? JSON.stringify(input.slots) : null,
       input.toolCalls?.length ? JSON.stringify(input.toolCalls) : null,
       createdAt,
-    )
-    this.touchConversation(input.conversationId)
-    const row = this.db.prepare('SELECT * FROM cabin_messages WHERE id = ?').get(id) as Row | undefined
+    ])
+    await this.touchConversation(input.conversationId)
+    const row = await this.driver.get<Row>('SELECT * FROM cabin_messages WHERE id = ?', [id])
     if (!row) throw new Error('Failed to create cabin message')
     return mapMessage(row)
   }
 
-  listMessages(conversationId: string, limit: number, options: { beforeId?: string; afterId?: string } = {}): CabinMessage[] {
-    const params: unknown[] = [conversationId]
+  async listMessages(conversationId: string, limit: number, options: { beforeId?: string; afterId?: string } = {}): Promise<CabinMessage[]> {
+    const params: SqlParam[] = [conversationId]
     let cursorClause = ''
     if (options.beforeId) {
-      const cursor = this.db.prepare('SELECT created_at FROM cabin_messages WHERE id = ? AND conversation_id = ?')
-        .get(options.beforeId, conversationId) as Row | undefined
+      const cursor = await this.driver.get<Row>('SELECT created_at FROM cabin_messages WHERE id = ? AND conversation_id = ?', [options.beforeId, conversationId])
       if (cursor) {
         cursorClause = 'AND created_at < ?'
         params.push(Number(cursor.created_at))
       }
     } else if (options.afterId) {
-      const cursor = this.db.prepare('SELECT created_at FROM cabin_messages WHERE id = ? AND conversation_id = ?')
-        .get(options.afterId, conversationId) as Row | undefined
+      const cursor = await this.driver.get<Row>('SELECT created_at FROM cabin_messages WHERE id = ? AND conversation_id = ?', [options.afterId, conversationId])
       if (cursor) {
         cursorClause = 'AND created_at > ?'
         params.push(Number(cursor.created_at))
       }
     }
     params.push(Math.max(1, Math.min(limit, 200)))
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<Row>(`
       SELECT * FROM cabin_messages
       WHERE conversation_id = ?
       ${cursorClause}
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(...params) as Row[]
+    `, params)
     return rows.reverse().map(mapMessage)
   }
 
-  listConversations(input: {
+  async listConversations(input: {
     flightId?: string
     flightDate?: string
     seatId?: string
@@ -780,9 +782,9 @@ export class CabinStore {
     status?: 'active' | 'reset'
     limit?: number
     offset?: number
-  } = {}): { conversations: CabinConversation[]; total: number } {
+  } = {}): Promise<{ conversations: CabinConversation[]; total: number }> {
     const clauses: string[] = []
-    const params: unknown[] = []
+    const params: SqlParam[] = []
     if (input.flightId) {
       clauses.push('flight_id LIKE ?')
       params.push(`%${input.flightId}%`)
@@ -805,50 +807,48 @@ export class CabinStore {
       params.push(input.status)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const totalRow = this.db.prepare(`SELECT COUNT(*) AS total FROM cabin_conversations ${where}`)
-      .get(...params) as Row | undefined
+    const totalRow = await this.driver.get<Row>(`SELECT COUNT(*) AS total FROM cabin_conversations ${where}`, params)
     const limit = Math.max(1, Math.min(input.limit ?? 50, 200))
     const offset = Math.max(0, input.offset ?? 0)
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<Row>(`
       SELECT * FROM cabin_conversations
       ${where}
       ORDER BY updated_at DESC
       LIMIT ? OFFSET ?
-    `).all(...params, limit, offset) as Row[]
+    `, [...params, limit, offset])
     return {
       conversations: rows.map(mapConversation),
       total: Number(totalRow?.total ?? 0),
     }
   }
 
-  getConversationById(conversationId: string): CabinConversation | null {
-    const row = this.db.prepare('SELECT * FROM cabin_conversations WHERE id = ?').get(conversationId) as Row | undefined
+  async getConversationById(conversationId: string): Promise<CabinConversation | null> {
+    const row = await this.driver.get<Row>('SELECT * FROM cabin_conversations WHERE id = ?', [conversationId])
     return row ? mapConversation(row) : null
   }
 
-  resetConversation(conversationId: string): void {
+  async resetConversation(conversationId: string): Promise<void> {
     const timestamp = now()
-    this.db.prepare('UPDATE cabin_conversations SET status = ?, updated_at = ? WHERE id = ?')
-      .run('reset', timestamp, conversationId)
-    this.db.prepare(`
+    await this.driver.run('UPDATE cabin_conversations SET status = ?, updated_at = ? WHERE id = ?', ['reset', timestamp, conversationId])
+    await this.driver.run(`
       INSERT INTO cabin_messages (id, conversation_id, role, source, content, created_at)
       VALUES (?, ?, 'system', 'agent', ?, ?)
-    `).run(randomUUID(), conversationId, 'conversation reset', timestamp)
+    `, [randomUUID(), conversationId, 'conversation reset', timestamp])
   }
 
   // Point a conversation at a freshly-minted MOSS session in place, keeping the same
   // conversation row so cabin_messages (keyed by conversation_id) stay fully intact.
   // Unlike resetConversation this inserts NO 'conversation reset' marker — session
   // recovery must be continuous and passenger-invisible.
-  rebindMossSession(conversationId: string, newSessionId: string): void {
-    this.db.prepare(`
+  async rebindMossSession(conversationId: string, newSessionId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE cabin_conversations
       SET moss_session_id = ?, status = 'active', updated_at = ?
       WHERE id = ?
-    `).run(newSessionId, now(), conversationId)
+    `, [newSessionId, now(), conversationId])
   }
 
-  insertVoiceLog(input: {
+  async insertVoiceLog(input: {
     conversationId?: string | null
     messageId?: string | null
     type: 'asr' | 'tts'
@@ -856,12 +856,12 @@ export class CabinStore {
     status: 'ok' | 'error'
     errorMessage?: string | null
     elapsedMs?: number | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    await this.driver.run(`
       INSERT INTO cabin_voice_logs (
         id, conversation_id, message_id, type, text, status, error_message, elapsed_ms, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       randomUUID(),
       input.conversationId ?? null,
       input.messageId ?? null,
@@ -871,6 +871,6 @@ export class CabinStore {
       input.errorMessage ?? null,
       input.elapsedMs ?? null,
       now(),
-    )
+    ])
   }
 }

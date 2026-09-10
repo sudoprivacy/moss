@@ -36,6 +36,13 @@ export type RunnerServerMessage =
       ts: number
     }
   | {
+      // Acknowledgement of a 'stdin' message, sent by the daemon right after
+      // dispatching the payload (sessionRunnerDaemon #handleClientMessage).
+      // Internal consumers (CronService/EventTriggerService) treat a missing
+      // ack as "closed before acknowledging".
+      type: 'stdin_ack'
+    }
+  | {
       type: 'exit'
       code: number | null
       signal: string | null

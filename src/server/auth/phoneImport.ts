@@ -112,10 +112,10 @@ function fallbackOrgName(group: string): string {
   return `Imported group ${group}`
 }
 
-export function importPhoneUsers(
+export async function importPhoneUsers(
   authService: AuthService,
   request: PhoneImportRequest,
-): PhoneImportResult {
+): Promise<PhoneImportResult> {
   const dryRun = request.dryRun === true
   const rows: PhoneImportRowResult[] = []
   const summary = {
@@ -131,22 +131,22 @@ export function importPhoneUsers(
   // race itself into duplicate organizations within a single import.
   const orgIdByGroup = new Map<string, string>()
 
-  const resolveOrgId = (group: string): string => {
+  const resolveOrgId = async (group: string): Promise<string> => {
     const cached = orgIdByGroup.get(group)
     if (cached) return cached
     const name = request.groupNames?.[group]?.trim() || fallbackOrgName(group)
-    const existing = authService.findOrganizationByName(name)
+    const existing = await authService.findOrganizationByName(name)
     if (existing) {
       orgIdByGroup.set(group, existing.id)
       return existing.id
     }
-    const created = authService.createOrganization({ name }).organization
+    const created = (await authService.createOrganization({ name })).organization
     summary.organizationsCreated += 1
     orgIdByGroup.set(group, created.id)
     return created.id
   }
 
-  authService.runInTransaction(() => {
+  await authService.runInTransaction(async () => {
     for (const row of request.users) {
       const phone = normalizePhone(row.phone)
       if (!phone) {
@@ -160,11 +160,11 @@ export function importPhoneUsers(
         : undefined
 
       try {
-        const { user, created } = authService.provisionPhoneUser({
+        const { user, created } = await authService.provisionPhoneUser({
           phone,
           nickname: row.nickname,
           autoCreateOrg: true,
-          orgId: row.group ? resolveOrgId(row.group) : undefined,
+          orgId: row.group ? await resolveOrgId(row.group) : undefined,
           status: row.status,
           createdAt: row.createdAt,
           modelCredential: credential,
@@ -181,8 +181,8 @@ export function importPhoneUsers(
         // identity is left as it is, but a missing gateway token is still worth
         // attaching: without it the account would silently spend the shared
         // server key instead of their own balance.
-        if (credential && !authService.getUserModelCredential(user.id)) {
-          authService.setUserModelCredential(user.id, credential)
+        if (credential && !(await authService.getUserModelCredential(user.id))) {
+          await authService.setUserModelCredential(user.id, credential)
           rows.push({ phone: row.phone, outcome: 'linked', orgId: user.orgId, userId: user.id })
           summary.linked += 1
           continue

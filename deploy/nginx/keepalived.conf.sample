@@ -1,0 +1,49 @@
+# ============================================================================
+# moss 跨主机 LB — keepalived VIP 示例（P3-1，双 nginx 主备方案）
+# ============================================================================
+# 两台主机各跑一份 keepalived（主机网络），VIP 漂移提供 LB 层冗余。
+# host-a 为 MASTER、host-b 为 BACKUP；MASTER 故障时 BACKUP 秒级接管 VIP。
+# nginx 自身健康检查用 chk_nginx（nginx 挂了主动降权让 VIP 漂走）。
+#
+# 放置路径：/etc/keepalived/keepalived.conf（两台主机各一份，仅标注处不同）。
+# 需要：apt install keepalived nginx（nginx 配置挂 moss-crosshost.conf）。
+# ----------------------------------------------------------------------------
+
+global_defs {
+    # 两台主机的标识（host-b 上改为 moss-ha-b）。
+    router_id moss-ha-a
+}
+
+# nginx 进程存活检查：任意脚本退出码非 0 = 本机失格，VIP 让出。
+vrrp_script chk_nginx {
+    script "/usr/bin/pgrep nginx"
+    interval 2
+    fall 2
+    rise 2
+}
+
+vrrp_instance MOSS_VIP {
+    # host-a: MASTER / host-b: BACKUP（BACKUP 的 priority 改 100）。
+    state MASTER
+    interface eth0
+    virtual_router_id 51
+    priority 150
+    advert_int 1
+
+    track_script {
+        chk_nginx
+    }
+
+    virtual_ipaddress {
+        # <VIP> 替换为规划的对外虚拟 IP；掩码按网段调整。
+        <VIP>/24 dev eth0
+    }
+}
+
+# ----------------------------------------------------------------------------
+# 云 SLB 替代方案（推荐，免运维 VIP）：
+#   后端池 = 两台主机 80（HTTP）+ 43128（回调，独立监听/转发规则）；
+#   健康检查 = GET /healthz（nginx 存活即健康——实例级摘流由 nginx max_fails 完成）；
+#   会话保持 = 不需要（粘滞由 moss_route 两级 map 在 nginx 层完成）。
+# MOSS_PUBLIC_BASE_URL 填 VIP 或 SLB 地址（ws_url 会带上它 + ?moss_route=owner）。
+# ----------------------------------------------------------------------------

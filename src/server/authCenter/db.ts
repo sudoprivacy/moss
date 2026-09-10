@@ -2,6 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, ra
 import { mkdirSync } from 'fs'
 import { dirname, join } from 'path'
 import { DatabaseSync } from 'node:sqlite'
+import { SqliteDriver, type DbDriver, type SqlParam } from '../db/driver.js'
+import type { DirectConnectStore } from '../db.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 export type AuthCenterOrganization = {
@@ -232,10 +234,40 @@ export function getDefaultAuthCenterJsonPath(): string {
 
 export class AuthCenterDb {
   readonly db: DatabaseSync
+  // Async DB seam (HA PostgreSQL support). In the shared-store construction
+  // form this is the DirectConnectStore's driver, so every store shares one
+  // sqlite connection / one PG Pool and transactions can span stores. In the
+  // standalone (path/handle) construction forms it stays a private
+  // SqliteDriver over `db` — zero behaviour change. Schema init stays sqlite
+  // ad-hoc on the raw `db`; the postgres path gets its schema from pg_schema.ts.
+  readonly driver: DbDriver
   readonly dbPath: string
   readonly #ownsConnection: boolean
+  // jwt_secret and issuer are written exactly once (bootstrap / migrateFromJson)
+  // and never rotated at runtime, so they are cached in memory. This keeps
+  // getJwtSecret()/getIssuer() synchronous — they sit on the per-request token
+  // verification hot path, which must not become async just to read an
+  // immutable value. Populated by loadSecretCache() and kept fresh by setConfig.
+  #jwtSecret: string | null = null
+  #issuer: string | null = null
 
-  constructor(dbOrPath: string | DatabaseSync, dbPath?: string) {
+  constructor(dbOrPath: string | DatabaseSync | DirectConnectStore, dbPath?: string) {
+    // Shared-store form (the production path): shares the store's driver so
+    // every store funnels through one connection/Pool — sqlite keeps its own
+    // SqliteDriver over the same DatabaseSync handle (zero behaviour change),
+    // postgres shares the PgDriver Pool and skips the sqlite-only schema init
+    // (tables come from pg_schema.ts, applied by openStoreAsync).
+    if (typeof dbOrPath !== 'string' && !(dbOrPath instanceof DatabaseSync)) {
+      const store = dbOrPath as DirectConnectStore
+      this.dbPath = store.dbPath
+      this.db = store.db ?? (undefined as unknown as DatabaseSync)
+      this.#ownsConnection = false
+      this.driver = store.driver
+      if (store.db) {
+        this.initTables()
+      }
+      return
+    }
     if (typeof dbOrPath === 'string') {
       this.dbPath = dbOrPath
       mkdirSync(dirname(dbOrPath), { recursive: true })
@@ -252,7 +284,19 @@ export class AuthCenterDb {
       PRAGMA foreign_keys=ON;
       PRAGMA busy_timeout=5000;
     `)
+    this.driver = new SqliteDriver(this.db)
     this.initTables()
+  }
+
+  /**
+   * Load the immutable jwt_secret / issuer into the in-memory cache. Call once
+   * after construction (and after bootstrap) before the token-verification hot
+   * path runs. Safe to call repeatedly; a fresh DB with no secret yet leaves the
+   * cache null until bootstrap writes it (setConfig updates the cache directly).
+   */
+  async loadSecretCache(): Promise<void> {
+    this.#jwtSecret = await this.getConfig('jwt_secret')
+    this.#issuer = await this.getConfig('issuer')
   }
 
   private initTables(): void {
@@ -533,9 +577,11 @@ export class AuthCenterDb {
 
     if (legacyConfigTable) {
       this.db.exec(`
-        INSERT OR IGNORE INTO server_config (key, value)
+        INSERT INTO server_config (key, value)
         SELECT key, value
         FROM app_config
+        WHERE true
+        ON CONFLICT(key) DO NOTHING
       `)
     }
   }
@@ -567,58 +613,58 @@ export class AuthCenterDb {
   }
 
   // Organization operations
-  createOrganization(
+  async createOrganization(
     id: string,
     name: string,
     createdAt: number,
     extOrgId: string | null = null,
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    await this.driver.run(`
       INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
-    `).run(id, name, extOrgId, createdAt)
+    `, [id, name, extOrgId, createdAt])
   }
 
-  getOrganization(id: string): AuthCenterOrganization | null {
-    const row = this.db.prepare(`
+  async getOrganization(id: string): Promise<AuthCenterOrganization | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM organizations WHERE id = ? LIMIT 1
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapOrganization(row) : null
   }
 
-  listOrganizations(): AuthCenterOrganization[] {
-    const rows = this.db.prepare(`
+  async listOrganizations(): Promise<AuthCenterOrganization[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM organizations ORDER BY created_at ASC
-    `).all() as SqlRow[]
+    `)
     return rows.map(mapOrganization)
   }
 
-  getOrganizationByName(name: string): AuthCenterOrganization | null {
-    const row = this.db.prepare(`
+  async getOrganizationByName(name: string): Promise<AuthCenterOrganization | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM organizations WHERE name = ? ORDER BY created_at ASC LIMIT 1
-    `).get(name) as SqlRow | undefined
+    `, [name])
     return row ? mapOrganization(row) : null
   }
 
-  getOrganizationByExtId(extOrgId: string): AuthCenterOrganization | null {
-    const row = this.db.prepare(`
+  async getOrganizationByExtId(extOrgId: string): Promise<AuthCenterOrganization | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM organizations WHERE ext_org_id = ? LIMIT 1
-    `).get(extOrgId) as SqlRow | undefined
+    `, [extOrgId])
     return row ? mapOrganization(row) : null
   }
 
-  updateOrganization(
+  async updateOrganization(
     id: string,
     patch: { name?: string; extOrgId?: string | null },
-  ): void {
-    const org = this.getOrganization(id)
+  ): Promise<void> {
+    const org = await this.getOrganization(id)
     if (!org) {
       return
     }
     const nextName = patch.name === undefined ? org.name : patch.name
     const nextExtOrgId = patch.extOrgId === undefined ? org.extOrgId : patch.extOrgId
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE organizations SET name = ?, ext_org_id = ? WHERE id = ?
-    `).run(nextName, nextExtOrgId, id)
+    `, [nextName, nextExtOrgId, id])
   }
 
   /**
@@ -629,30 +675,30 @@ export class AuthCenterDb {
    * application-level 409. The last-remaining-org case is also covered
    * by the FK (the bootstrap admin row pins it).
    */
-  deleteOrganization(id: string): void {
-    this.db.prepare(`DELETE FROM organizations WHERE id = ?`).run(id)
+  async deleteOrganization(id: string): Promise<void> {
+    await this.driver.run(`DELETE FROM organizations WHERE id = ?`, [id])
   }
 
-  countUsersByOrg(orgId: string): number {
-    const row = this.db.prepare(`
+  async countUsersByOrg(orgId: string): Promise<number> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS c FROM users WHERE org_id = ?
-    `).get(orgId) as SqlRow | undefined
+    `, [orgId])
     return row ? Number(row.c) : 0
   }
 
-  countDepartmentsByOrg(orgId: string): number {
-    const row = this.db.prepare(`
+  async countDepartmentsByOrg(orgId: string): Promise<number> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS c FROM departments WHERE org_id = ?
-    `).get(orgId) as SqlRow | undefined
+    `, [orgId])
     return row ? Number(row.c) : 0
   }
 
   // Department operations
-  createDepartment(department: AuthCenterDepartment): void {
-    this.db.prepare(`
+  async createDepartment(department: AuthCenterDepartment): Promise<void> {
+    await this.driver.run(`
       INSERT INTO departments (id, org_id, parent_id, name, ext_dept_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       department.id,
       department.orgId,
       department.parentId,
@@ -660,90 +706,90 @@ export class AuthCenterDb {
       department.extDeptId,
       department.createdAt,
       department.updatedAt,
-    )
+    ])
   }
 
-  getDepartmentByExtId(orgId: string, extDeptId: string): AuthCenterDepartment | null {
-    const row = this.db.prepare(`
+  async getDepartmentByExtId(orgId: string, extDeptId: string): Promise<AuthCenterDepartment | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM departments WHERE org_id = ? AND ext_dept_id = ? LIMIT 1
-    `).get(orgId, extDeptId) as SqlRow | undefined
+    `, [orgId, extDeptId])
     return row ? mapDepartment(row) : null
   }
 
-  getDepartmentById(id: string): AuthCenterDepartment | null {
-    const row = this.db.prepare(`
+  async getDepartmentById(id: string): Promise<AuthCenterDepartment | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM departments WHERE id = ? LIMIT 1
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapDepartment(row) : null
   }
 
-  getDepartmentName(id: string | null): string | null {
+  async getDepartmentName(id: string | null): Promise<string | null> {
     if (!id) {
       return null
     }
-    const department = this.getDepartmentById(id)
+    const department = await this.getDepartmentById(id)
     return department ? department.name : null
   }
 
-  getDepartmentByIdAndOrg(
+  async getDepartmentByIdAndOrg(
     id: string,
     orgId: string,
-  ): AuthCenterDepartment | null {
-    const row = this.db.prepare(`
+  ): Promise<AuthCenterDepartment | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM departments WHERE id = ? AND org_id = ? LIMIT 1
-    `).get(id, orgId) as SqlRow | undefined
+    `, [id, orgId])
     return row ? mapDepartment(row) : null
   }
 
-  listDepartmentsByOrg(orgId: string): AuthCenterDepartment[] {
-    const rows = this.db.prepare(`
+  async listDepartmentsByOrg(orgId: string): Promise<AuthCenterDepartment[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM departments WHERE org_id = ? ORDER BY created_at ASC
-    `).all(orgId) as SqlRow[]
+    `, [orgId])
     return rows.map(mapDepartment)
   }
 
-  updateDepartment(
+  async updateDepartment(
     id: string,
     patch: {
       name?: string
       parentId?: string | null
       extDeptId?: string | null
     },
-  ): void {
-    const department = this.getDepartmentById(id)
+  ): Promise<void> {
+    const department = await this.getDepartmentById(id)
     if (!department) {
       return
     }
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE departments
       SET name = ?,
           parent_id = ?,
           ext_dept_id = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       patch.name ?? department.name,
       patch.parentId === undefined ? department.parentId : patch.parentId,
       patch.extDeptId === undefined ? department.extDeptId : patch.extDeptId,
       now(),
       id,
-    )
+    ])
   }
 
-  deleteDepartment(id: string): void {
-    this.db.prepare(`
+  async deleteDepartment(id: string): Promise<void> {
+    await this.driver.run(`
       DELETE FROM departments WHERE id = ?
-    `).run(id)
+    `, [id])
   }
 
   // User operations
-  createUser(user: AuthCenterUser): void {
-    this.db.prepare(`
+  async createUser(user: AuthCenterUser): Promise<void> {
+    await this.driver.run(`
       INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, password_hash,
                          password_updated_at, last_login_at, created_at, ext_user_id, phone)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       user.id,
       user.orgId,
       user.email,
@@ -758,20 +804,20 @@ export class AuthCenterDb {
       user.createdAt,
       user.extUserId ?? null,
       user.phone ?? null,
-    )
+    ])
   }
 
-  getUserById(id: string): AuthCenterUser | null {
-    const row = this.db.prepare(`
+  async getUserById(id: string): Promise<AuthCenterUser | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM users WHERE id = ? LIMIT 1
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapUser(row) : null
   }
 
-  getUserByPhone(phone: string): AuthCenterUser | null {
-    const row = this.db.prepare(`
+  async getUserByPhone(phone: string): Promise<AuthCenterUser | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM users WHERE phone = ? LIMIT 1
-    `).get(phone) as SqlRow | undefined
+    `, [phone])
     return row ? mapUser(row) : null
   }
 
@@ -781,10 +827,10 @@ export class AuthCenterDb {
    * The user's own token for the metered model gateway, or null when they have
    * none and the shared server key applies.
    */
-  getUserModelCredential(userId: string): UserModelCredential | null {
-    const row = this.db.prepare(`
+  async getUserModelCredential(userId: string): Promise<UserModelCredential | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT sudorouter_user_id, sudorouter_key FROM users WHERE id = ? LIMIT 1
-    `).get(userId) as SqlRow | undefined
+    `, [userId])
     const key = row?.sudorouter_key
     if (key == null || String(key) === '') return null
     return {
@@ -793,82 +839,82 @@ export class AuthCenterDb {
     }
   }
 
-  setUserModelCredential(userId: string, credential: UserModelCredential): void {
-    this.db.prepare(`
+  async setUserModelCredential(userId: string, credential: UserModelCredential): Promise<void> {
+    await this.driver.run(`
       UPDATE users SET sudorouter_user_id = ?, sudorouter_key = ? WHERE id = ?
-    `).run(credential.sudorouterUserId, credential.sudorouterKey, userId)
+    `, [credential.sudorouterUserId, credential.sudorouterKey, userId])
   }
 
   // ---- credit applications (`approve` recharge mode) ----
 
-  createCreditApplication(input: {
+  async createCreditApplication(input: {
     applicationNo: string
     userId: string
     orgId: string
     requestedPoints: number
     reason: string | null
     createdAt: number
-  }): CreditApplicationRow {
-    this.db.prepare(`
+  }): Promise<CreditApplicationRow> {
+    await this.driver.run(`
       INSERT INTO credit_applications
         (application_no, user_id, org_id, requested_points, reason, status, created_at)
       VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-    `).run(
+    `, [
       input.applicationNo,
       input.userId,
       input.orgId,
       input.requestedPoints,
       input.reason,
       input.createdAt,
-    )
-    const row = this.db.prepare(`
+    ])
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM credit_applications WHERE application_no = ?
-    `).get(input.applicationNo) as SqlRow
+    `, [input.applicationNo]) as SqlRow
     return mapCreditApplication(row)
   }
 
-  getCreditApplication(id: number): CreditApplicationRow | null {
-    const row = this.db.prepare(`
+  async getCreditApplication(id: number): Promise<CreditApplicationRow | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM credit_applications WHERE id = ?
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapCreditApplication(row) : null
   }
 
-  listCreditApplicationsForUser(
+  async listCreditApplicationsForUser(
     userId: string,
     limit: number,
     offset: number,
-  ): { list: CreditApplicationRow[]; total: number } {
-    const rows = this.db.prepare(`
+  ): Promise<{ list: CreditApplicationRow[]; total: number }> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM credit_applications
       WHERE user_id = ?
       ORDER BY created_at DESC, id DESC
       LIMIT ? OFFSET ?
-    `).all(userId, limit, offset) as SqlRow[]
-    const counted = this.db.prepare(`
+    `, [userId, limit, offset])
+    const counted = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM credit_applications WHERE user_id = ?
-    `).get(userId) as SqlRow | undefined
+    `, [userId])
     return { list: rows.map(mapCreditApplication), total: Number(counted?.n ?? 0) }
   }
 
   /** PROCESSING counts as pending: it is a decision in flight, not a finished one. */
-  hasPendingCreditApplication(userId: string): boolean {
-    const row = this.db.prepare(`
+  async hasPendingCreditApplication(userId: string): Promise<boolean> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM credit_applications
       WHERE user_id = ? AND status IN ('PENDING', 'PROCESSING')
-    `).get(userId) as SqlRow | undefined
+    `, [userId])
     return Number(row?.n ?? 0) > 0
   }
 
-  updateCreditApplicationStatus(id: number, patch: {
+  async updateCreditApplicationStatus(id: number, patch: {
     status: string
     approvedPoints?: number | null
     adminComment?: string | null
     reviewedAt?: number | null
     sudorouterError?: string | null
-  }): void {
+  }): Promise<void> {
     const sets = ['status = ?']
-    const values: unknown[] = [patch.status]
+    const values: SqlParam[] = [patch.status]
     // Only the fields the caller named are written; a status move that carries
     // no new comment must not blank the one already recorded.
     if ('approvedPoints' in patch) { sets.push('approved_points = ?'); values.push(patch.approvedPoints ?? null) }
@@ -876,15 +922,15 @@ export class AuthCenterDb {
     if ('reviewedAt' in patch) { sets.push('reviewed_at = ?'); values.push(patch.reviewedAt ?? null) }
     if ('sudorouterError' in patch) { sets.push('sudorouter_error = ?'); values.push(patch.sudorouterError ?? null) }
     values.push(id)
-    this.db.prepare(`UPDATE credit_applications SET ${sets.join(', ')} WHERE id = ?`).run(...values as never[])
+    await this.driver.run(`UPDATE credit_applications SET ${sets.join(', ')} WHERE id = ?`, values)
   }
 
   // ---- phone verification codes (login_method: 0) ----
 
-  getPhoneLoginCode(phone: string): PhoneLoginCode | null {
-    const row = this.db.prepare(`
+  async getPhoneLoginCode(phone: string): Promise<PhoneLoginCode | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM phone_login_codes WHERE phone = ? LIMIT 1
-    `).get(phone) as SqlRow | undefined
+    `, [phone])
     if (!row) return null
     return {
       phone: String(row.phone),
@@ -896,8 +942,8 @@ export class AuthCenterDb {
   }
 
   /** One pending code per number: a resend replaces the previous one. */
-  upsertPhoneLoginCode(code: PhoneLoginCode): void {
-    this.db.prepare(`
+  async upsertPhoneLoginCode(code: PhoneLoginCode): Promise<void> {
+    await this.driver.run(`
       INSERT INTO phone_login_codes (phone, code_hash, created_at, expires_at, attempts)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(phone) DO UPDATE SET
@@ -905,85 +951,85 @@ export class AuthCenterDb {
         created_at = excluded.created_at,
         expires_at = excluded.expires_at,
         attempts = excluded.attempts
-    `).run(code.phone, code.codeHash, code.createdAt, code.expiresAt, code.attempts)
+    `, [code.phone, code.codeHash, code.createdAt, code.expiresAt, code.attempts])
   }
 
-  bumpPhoneLoginCodeAttempts(phone: string): void {
-    this.db.prepare(`
+  async bumpPhoneLoginCodeAttempts(phone: string): Promise<void> {
+    await this.driver.run(`
       UPDATE phone_login_codes SET attempts = attempts + 1 WHERE phone = ?
-    `).run(phone)
+    `, [phone])
   }
 
-  deletePhoneLoginCode(phone: string): void {
-    this.db.prepare('DELETE FROM phone_login_codes WHERE phone = ?').run(phone)
+  async deletePhoneLoginCode(phone: string): Promise<void> {
+    await this.driver.run('DELETE FROM phone_login_codes WHERE phone = ?', [phone])
   }
 
   /** Drop expired codes and send-log rows older than the rate-limit window. */
-  prunePhoneLoginCodes(now: number): void {
-    this.db.prepare('DELETE FROM phone_login_codes WHERE expires_at <= ?').run(now)
-    this.db.prepare('DELETE FROM phone_login_sends WHERE sent_at < ?').run(now - 24 * 60 * 60 * 1000)
+  async prunePhoneLoginCodes(now: number): Promise<void> {
+    await this.driver.run('DELETE FROM phone_login_codes WHERE expires_at <= ?', [now])
+    await this.driver.run('DELETE FROM phone_login_sends WHERE sent_at < ?', [now - 24 * 60 * 60 * 1000])
   }
 
-  recordPhoneLoginSend(phone: string, sentAt: number): void {
-    this.db.prepare('INSERT INTO phone_login_sends (phone, sent_at) VALUES (?, ?)').run(phone, sentAt)
+  async recordPhoneLoginSend(phone: string, sentAt: number): Promise<void> {
+    await this.driver.run('INSERT INTO phone_login_sends (phone, sent_at) VALUES (?, ?)', [phone, sentAt])
   }
 
-  countPhoneLoginSends(phone: string, since: number): number {
-    const row = this.db.prepare(`
+  async countPhoneLoginSends(phone: string, since: number): Promise<number> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM phone_login_sends WHERE phone = ? AND sent_at >= ?
-    `).get(phone, since) as SqlRow | undefined
+    `, [phone, since])
     return row ? Number(row.n) : 0
   }
 
-  getUserByEmail(email: string): AuthCenterUser | null {
-    const row = this.db.prepare(`
+  async getUserByEmail(email: string): Promise<AuthCenterUser | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM users WHERE email = ? LIMIT 1
-    `).get(email) as SqlRow | undefined
+    `, [email])
     return row ? mapUser(row) : null
   }
 
-  getUserByExtId(orgId: string, extUserId: string): AuthCenterUser | null {
-    const row = this.db.prepare(`
+  async getUserByExtId(orgId: string, extUserId: string): Promise<AuthCenterUser | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM users WHERE org_id = ? AND ext_user_id = ? LIMIT 1
-    `).get(orgId, extUserId) as SqlRow | undefined
+    `, [orgId, extUserId])
     return row ? mapUser(row) : null
   }
 
-  listUsersByName(name: string): AuthCenterUser[] {
-    const rows = this.db.prepare(`
+  async listUsersByName(name: string): Promise<AuthCenterUser[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM users WHERE name = ? ORDER BY created_at ASC
-    `).all(name) as SqlRow[]
+    `, [name])
     return rows.map(mapUser)
   }
 
-  getUserByIdAndOrg(id: string, orgId: string): AuthCenterUser | null {
-    const row = this.db.prepare(`
+  async getUserByIdAndOrg(id: string, orgId: string): Promise<AuthCenterUser | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM users WHERE id = ? AND org_id = ? LIMIT 1
-    `).get(id, orgId) as SqlRow | undefined
+    `, [id, orgId])
     return row ? mapUser(row) : null
   }
 
-  listUsersByOrg(orgId: string): AuthCenterUser[] {
-    const rows = this.db.prepare(`
+  async listUsersByOrg(orgId: string): Promise<AuthCenterUser[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM users WHERE org_id = ? ORDER BY created_at ASC
-    `).all(orgId) as SqlRow[]
+    `, [orgId])
     return rows.map(mapUser)
   }
 
-  listUsersByRole(role: string): AuthCenterUser[] {
-    const rows = this.db.prepare(`
+  async listUsersByRole(role: string): Promise<AuthCenterUser[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM users WHERE role = ? ORDER BY created_at ASC
-    `).all(role) as SqlRow[]
+    `, [role])
     return rows.map(mapUser)
   }
 
-  updateUserPassword(id: string, passwordHash: string, updatedAt: number): void {
-    this.db.prepare(`
+  async updateUserPassword(id: string, passwordHash: string, updatedAt: number): Promise<void> {
+    await this.driver.run(`
       UPDATE users SET password_hash = ?, password_updated_at = ? WHERE id = ?
-    `).run(passwordHash, updatedAt, id)
+    `, [passwordHash, updatedAt, id])
   }
 
-  updateUser(
+  async updateUser(
     id: string,
     patch: {
       name?: string
@@ -995,13 +1041,13 @@ export class AuthCenterDb {
       status?: 'active' | 'disabled'
       extUserId?: string | null
     },
-  ): void {
-    const user = this.getUserById(id)
+  ): Promise<void> {
+    const user = await this.getUserById(id)
     if (!user) {
       return
     }
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE users
       SET name = ?,
           display_name = ?,
@@ -1012,7 +1058,7 @@ export class AuthCenterDb {
           status = ?,
           ext_user_id = ?
       WHERE id = ?
-    `).run(
+    `, [
       patch.name ?? user.name,
       patch.displayName === undefined ? user.displayName : patch.displayName,
       patch.email ?? user.email,
@@ -1022,46 +1068,46 @@ export class AuthCenterDb {
       patch.status ?? user.status,
       patch.extUserId === undefined ? user.extUserId : patch.extUserId,
       id,
-    )
+    ])
   }
 
-  updateUserLastLogin(id: string): void {
-    this.db.prepare(`
+  async updateUserLastLogin(id: string): Promise<void> {
+    await this.driver.run(`
       UPDATE users SET last_login_at = ? WHERE id = ?
-    `).run(now(), id)
+    `, [now(), id])
   }
 
-  updateUserOrg(id: string, orgId: string): void {
-    this.db.prepare(`
+  async updateUserOrg(id: string, orgId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE users SET org_id = ? WHERE id = ?
-    `).run(orgId, id)
+    `, [orgId, id])
   }
 
-  setUserTokenLimit(id: string, tokenLimit: number | null): void {
-    this.db.prepare(`
+  async setUserTokenLimit(id: string, tokenLimit: number | null): Promise<void> {
+    await this.driver.run(`
       UPDATE users SET token_limit = ? WHERE id = ?
-    `).run(tokenLimit, id)
+    `, [tokenLimit, id])
   }
 
-  setLocalAuth(id: string, localAuth: boolean): void {
-    this.db.prepare(`
+  async setLocalAuth(id: string, localAuth: boolean): Promise<void> {
+    await this.driver.run(`
       UPDATE users SET local_auth = ? WHERE id = ?
-    `).run(localAuth ? 1 : 0, id)
+    `, [localAuth ? 1 : 0, id])
   }
 
-  setDepartmentTokenLimit(id: string, tokenLimit: number | null): void {
-    this.db.prepare(`
+  async setDepartmentTokenLimit(id: string, tokenLimit: number | null): Promise<void> {
+    await this.driver.run(`
       UPDATE departments SET token_limit = ? WHERE id = ?
-    `).run(tokenLimit, id)
+    `, [tokenLimit, id])
   }
 
   // API Key operations
-  createApiKey(apiKey: AuthCenterApiKey): void {
-    this.db.prepare(`
+  async createApiKey(apiKey: AuthCenterApiKey): Promise<void> {
+    await this.driver.run(`
       INSERT INTO api_keys (id, org_id, user_id, name, prefix, secret_hash,
                             scopes_json, status, created_at, last_used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       apiKey.id,
       apiKey.orgId,
       apiKey.userId,
@@ -1072,74 +1118,74 @@ export class AuthCenterDb {
       apiKey.status,
       apiKey.createdAt,
       apiKey.lastUsedAt,
-    )
+    ])
   }
 
-  getApiKeyById(id: string): AuthCenterApiKey | null {
-    const row = this.db.prepare(`
+  async getApiKeyById(id: string): Promise<AuthCenterApiKey | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM api_keys WHERE id = ? LIMIT 1
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapApiKey(row) : null
   }
 
-  findActiveApiKey(plainTextKey: string): AuthCenterApiKey | null {
+  async findActiveApiKey(plainTextKey: string): Promise<AuthCenterApiKey | null> {
     const match = plainTextKey.match(/^moss_sk_([^\.]+)\.(.+)$/)
     if (!match) {
       return null
     }
     const [, id, secret] = match
-    const apiKey = this.getApiKeyById(id)
+    const apiKey = await this.getApiKeyById(id)
     if (!apiKey || apiKey.status !== 'active') {
       return null
     }
     return apiKey.secretHash === sha256(secret) ? apiKey : null
   }
 
-  listApiKeysByOrg(orgId: string): AuthCenterApiKey[] {
-    const rows = this.db.prepare(`
+  async listApiKeysByOrg(orgId: string): Promise<AuthCenterApiKey[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM api_keys WHERE org_id = ? ORDER BY created_at ASC
-    `).all(orgId) as SqlRow[]
+    `, [orgId])
     return rows.map(mapApiKey)
   }
 
-  updateApiKeyLastUsed(id: string): void {
-    this.db.prepare(`
+  async updateApiKeyLastUsed(id: string): Promise<void> {
+    await this.driver.run(`
       UPDATE api_keys SET last_used_at = ? WHERE id = ?
-    `).run(now(), id)
+    `, [now(), id])
   }
 
-  revokeApiKey(id: string): void {
-    this.db.prepare(`
+  async revokeApiKey(id: string): Promise<void> {
+    await this.driver.run(`
       UPDATE api_keys SET status = 'revoked' WHERE id = ?
-    `).run(id)
+    `, [id])
   }
 
   // Token revocation operations
-  revokeToken(jti: string, expiresAt: number): void {
-    this.db.prepare(`
+  async revokeToken(jti: string, expiresAt: number): Promise<void> {
+    await this.driver.run(`
       INSERT INTO revoked_tokens (jti, expires_at) VALUES (?, ?)
       ON CONFLICT(jti) DO UPDATE SET expires_at = excluded.expires_at
-    `).run(jti, expiresAt)
+    `, [jti, expiresAt])
   }
 
-  isTokenRevoked(jti: string): boolean {
-    const row = this.db.prepare(`
+  async isTokenRevoked(jti: string): Promise<boolean> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT jti FROM revoked_tokens WHERE jti = ? LIMIT 1
-    `).get(jti) as SqlRow | undefined
+    `, [jti])
     return row !== undefined
   }
 
-  cleanupExpiredRevokedTokens(): void {
+  async cleanupExpiredRevokedTokens(): Promise<void> {
     const nowSec = Math.floor(Date.now() / 1000)
-    this.db.prepare(`
+    await this.driver.run(`
       DELETE FROM revoked_tokens WHERE expires_at < ?
-    `).run(nowSec)
-    this.db.prepare(`
+    `, [nowSec])
+    await this.driver.run(`
       DELETE FROM oauth_provider_tokens WHERE expires_at < ?
-    `).run(nowSec)
-    this.db.prepare(`
+    `, [nowSec])
+    await this.driver.run(`
       DELETE FROM minted_service_tokens WHERE expires_at < ?
-    `).run(nowSec)
+    `, [nowSec])
   }
 
   // OAuth2 provider-token store: holds the provider access_token encrypted,
@@ -1147,25 +1193,25 @@ export class AuthCenterDb {
   // container's SESSION_TOKEN) can resolve it and refreshes overwrite the same
   // row. expires_at == the provider token's lifetime. The token never enters
   // the moss JWT or reaches the client.
-  putProviderToken(userId: string, token: string, expiresAt: number): void {
+  async putProviderToken(userId: string, token: string, expiresAt: number): Promise<void> {
     const { enc, iv } = this.#encryptProviderToken(token)
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO oauth_provider_tokens (user_id, token_enc, token_iv, expires_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
         token_enc = excluded.token_enc,
         token_iv = excluded.token_iv,
         expires_at = excluded.expires_at
-    `).run(userId, enc, iv, expiresAt)
+    `, [userId, enc, iv, expiresAt])
   }
 
-  getProviderToken(userId: string): { token: string; expiresAt: number } | null {
-    const row = this.db.prepare(`
+  async getProviderToken(userId: string): Promise<{ token: string; expiresAt: number } | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT token_enc, token_iv, expires_at FROM oauth_provider_tokens WHERE user_id = ? LIMIT 1
-    `).get(userId) as SqlRow | undefined
+    `, [userId])
     if (!row) return null
     if (Number(row.expires_at) < Math.floor(Date.now() / 1000)) {
-      this.deleteProviderToken(userId)
+      await this.deleteProviderToken(userId)
       return null
     }
     try {
@@ -1178,36 +1224,36 @@ export class AuthCenterDb {
     }
   }
 
-  deleteProviderToken(userId: string): void {
-    this.db.prepare(`
+  async deleteProviderToken(userId: string): Promise<void> {
+    await this.driver.run(`
       DELETE FROM oauth_provider_tokens WHERE user_id = ?
-    `).run(userId)
+    `, [userId])
   }
 
   // Per-(user, service) minted access tokens. Same AES-256-GCM encryption as
   // oauth_provider_tokens (reuses #encrypt/#decryptProviderToken), but keyed by
   // (user_id, config_item_id) so each third-party service has its own cached
   // token with its own expiry.
-  putMintedToken(userId: string, configItemId: number, token: string, expiresAt: number): void {
+  async putMintedToken(userId: string, configItemId: number, token: string, expiresAt: number): Promise<void> {
     const { enc, iv } = this.#encryptProviderToken(token)
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO minted_service_tokens (user_id, config_item_id, token_enc, token_iv, expires_at)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(user_id, config_item_id) DO UPDATE SET
         token_enc = excluded.token_enc,
         token_iv = excluded.token_iv,
         expires_at = excluded.expires_at
-    `).run(userId, configItemId, enc, iv, expiresAt)
+    `, [userId, configItemId, enc, iv, expiresAt])
   }
 
-  getMintedToken(userId: string, configItemId: number): { token: string; expiresAt: number } | null {
-    const row = this.db.prepare(`
+  async getMintedToken(userId: string, configItemId: number): Promise<{ token: string; expiresAt: number } | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT token_enc, token_iv, expires_at FROM minted_service_tokens
       WHERE user_id = ? AND config_item_id = ? LIMIT 1
-    `).get(userId, configItemId) as SqlRow | undefined
+    `, [userId, configItemId])
     if (!row) return null
     if (Number(row.expires_at) < Math.floor(Date.now() / 1000)) {
-      this.deleteMintedToken(userId, configItemId)
+      await this.deleteMintedToken(userId, configItemId)
       return null
     }
     try {
@@ -1220,10 +1266,10 @@ export class AuthCenterDb {
     }
   }
 
-  deleteMintedToken(userId: string, configItemId: number): void {
-    this.db.prepare(`
+  async deleteMintedToken(userId: string, configItemId: number): Promise<void> {
+    await this.driver.run(`
       DELETE FROM minted_service_tokens WHERE user_id = ? AND config_item_id = ?
-    `).run(userId, configItemId)
+    `, [userId, configItemId])
   }
 
   // AES-256-GCM. The key is derived from the existing jwt_secret via HKDF, so
@@ -1262,30 +1308,33 @@ export class AuthCenterDb {
   }
 
   // Config operations
-  getConfig(key: string): string | null {
-    const row = this.db.prepare(`
+  async getConfig(key: string): Promise<string | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT value FROM server_config WHERE key = ? LIMIT 1
-    `).get(key) as SqlRow | undefined
+    `, [key])
     return row ? String(row.value) : null
   }
 
-  setConfig(key: string, value: string): void {
-    this.db.prepare(`
+  async setConfig(key: string, value: string): Promise<void> {
+    await this.driver.run(`
       INSERT INTO server_config (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value)
+    `, [key, value])
+    // Keep the in-memory cache coherent for the immutable hot-path values.
+    if (key === 'jwt_secret') this.#jwtSecret = value
+    else if (key === 'issuer') this.#issuer = value
   }
 
   getIssuer(): string {
-    return this.getConfig('issuer') ?? 'moss-server'
+    return this.#issuer ?? 'moss-server'
   }
 
   getJwtSecret(): string {
-    return this.getConfig('jwt_secret') ?? ''
+    return this.#jwtSecret ?? ''
   }
 
   // Bootstrap - create initial admin user and org
-  bootstrap(config: BootstrapAdminConfig = { username: 'admin' }): AuthCenterBootstrap {
+  async bootstrap(config: BootstrapAdminConfig = { username: 'admin' }): Promise<AuthCenterBootstrap> {
     const orgId = randomUUID()
     const adminUserId = randomUUID()
     const resolvedAdmin = resolveBootstrapAdminConfig(config)
@@ -1296,10 +1345,9 @@ export class AuthCenterDb {
       scopes: ['*'],
     })
 
-    this.db.exec('BEGIN TRANSACTION')
-    try {
-      this.createOrganization(orgId, 'Default Organization', now())
-      this.createUser({
+    await this.driver.transaction(async () => {
+      await this.createOrganization(orgId, 'Default Organization', now())
+      await this.createUser({
         id: adminUserId,
         orgId,
         email: resolvedAdmin.email,
@@ -1320,14 +1368,10 @@ export class AuthCenterDb {
         extUserId: null,
         phone: null,
       })
-      this.createApiKey(apiKey)
-      this.setConfig('issuer', 'moss-server')
-      this.setConfig('jwt_secret', randomBytes(32).toString('base64url'))
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
+      await this.createApiKey(apiKey)
+      await this.setConfig('issuer', 'moss-server')
+      await this.setConfig('jwt_secret', randomBytes(32).toString('base64url'))
+    })
 
     return {
       created: true,
@@ -1338,9 +1382,9 @@ export class AuthCenterDb {
     }
   }
 
-  ensureBootstrapAdmin(config: BootstrapAdminConfig = { username: 'admin' }): AuthCenterBootstrap {
+  async ensureBootstrapAdmin(config: BootstrapAdminConfig = { username: 'admin' }): Promise<AuthCenterBootstrap> {
     // A super_admin already exists → nothing to do.
-    if (this.listUsersByRole('super_admin').length > 0) {
+    if ((await this.listUsersByRole('super_admin')).length > 0) {
       return { created: false }
     }
 
@@ -1349,30 +1393,30 @@ export class AuthCenterDb {
     // admin (the original bootstrap root-of-trust) to super_admin so org
     // switching and super_admin management work after upgrade. listUsersByRole
     // orders by created_at ASC, so [0] is that original account.
-    const admins = this.listUsersByRole('admin')
+    const admins = await this.listUsersByRole('admin')
     if (admins.length > 0) {
       const root = admins[0]
-      this.updateUser(root.id, { role: 'super_admin' })
+      await this.updateUser(root.id, { role: 'super_admin' })
       console.log(`[DB] Promoted existing bootstrap admin "${root.name}" to super_admin`)
       return { created: false }
     }
 
     const resolvedAdmin = resolveBootstrapAdminConfig(config)
-    const existingNameUser = this.listUsersByName(resolvedAdmin.username)[0]
+    const existingNameUser = (await this.listUsersByName(resolvedAdmin.username))[0]
     if (existingNameUser) {
       throw new Error(
         `Cannot create bootstrap admin: username already exists (${resolvedAdmin.username})`,
       )
     }
 
-    const existingEmailUser = this.getUserByEmail(resolvedAdmin.email)
+    const existingEmailUser = await this.getUserByEmail(resolvedAdmin.email)
     if (existingEmailUser) {
       throw new Error(
         `Cannot create bootstrap admin: email already exists (${resolvedAdmin.email})`,
       )
     }
 
-    const org = this.listOrganizations()[0]
+    const org = (await this.listOrganizations())[0]
     const orgId = org?.id ?? randomUUID()
     const adminUserId = randomUUID()
     const { apiKey, plainTextKey } = createApiKeyRecord({
@@ -1382,12 +1426,11 @@ export class AuthCenterDb {
       scopes: ['*'],
     })
 
-    this.db.exec('BEGIN TRANSACTION')
-    try {
+    await this.driver.transaction(async () => {
       if (!org) {
-        this.createOrganization(orgId, 'Default Organization', now())
+        await this.createOrganization(orgId, 'Default Organization', now())
       }
-      this.createUser({
+      await this.createUser({
         id: adminUserId,
         orgId,
         email: resolvedAdmin.email,
@@ -1406,12 +1449,8 @@ export class AuthCenterDb {
         extUserId: null,
         phone: null,
       })
-      this.createApiKey(apiKey)
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
+      await this.createApiKey(apiKey)
+    })
 
     return {
       created: true,
@@ -1422,46 +1461,40 @@ export class AuthCenterDb {
     }
   }
 
-  isInitialized(): boolean {
-    const row = this.db.prepare(`
+  async isInitialized(): Promise<boolean> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS count FROM server_config WHERE key = 'jwt_secret'
-    `).get() as SqlRow | undefined
+    `)
     return Number(row?.count ?? 0) > 0
   }
 
   // Migration from JSON store
-  migrateFromJson(jsonStore: AuthCenterStore): void {
-    this.db.exec('BEGIN TRANSACTION')
-    try {
+  async migrateFromJson(jsonStore: AuthCenterStore): Promise<void> {
+    await this.driver.transaction(async () => {
       // Migrate organizations
       for (const org of jsonStore.organizations) {
-        this.createOrganization(org.id, org.name, org.createdAt)
+        await this.createOrganization(org.id, org.name, org.createdAt)
       }
 
       // Migrate departments
       for (const department of jsonStore.departments ?? []) {
-        this.createDepartment(department)
+        await this.createDepartment(department)
       }
 
       // Migrate users
       for (const user of jsonStore.users) {
-        this.createUser(user)
+        await this.createUser(user)
       }
 
       // Migrate api keys
       for (const apiKey of jsonStore.apiKeys) {
-        this.createApiKey(apiKey)
+        await this.createApiKey(apiKey)
       }
 
       // Migrate config
-      this.setConfig('issuer', jsonStore.issuer)
-      this.setConfig('jwt_secret', jsonStore.jwtSecret)
-
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
+      await this.setConfig('issuer', jsonStore.issuer)
+      await this.setConfig('jwt_secret', jsonStore.jwtSecret)
+    })
   }
 }
 

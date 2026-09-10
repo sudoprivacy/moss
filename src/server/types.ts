@@ -75,6 +75,11 @@ export const serverFileConfigSchema = lazySchema(() =>
       // Grace period after SIGTERM: keep serving existing WS/SSE before forced
       // exit (0 = disabled, current behavior). Env: MOSS_SHUTDOWN_GRACE_MS.
       shutdownGraceMs: z.number().int().min(0).optional(),
+      // Auth-proxy base URL injected into runner env for outbound credential
+      // proxying. Env: MOSS_AUTH_PROXY_URL (preferred). Default
+      // http://localhost:12013. In multi-instance HA it must point at THIS
+      // instance's container by name (not a fixed single container).
+      authProxyUrl: z.string().min(1).optional(),
     }).default({
       host: '0.0.0.0',
       port: 43127,
@@ -99,6 +104,13 @@ export const serverFileConfigSchema = lazySchema(() =>
       dbPath: z.string().min(1).optional(),
       transcriptDir: z.string().min(1).optional(),
       runtimeDir: z.string().min(1).optional(),
+      // Shared DB backend for cross-host HA. 'sqlite' (default) = single-file /
+      // single-host; 'postgres' = shared PG. Env: MOSS_DB_BACKEND, or inferred
+      // 'postgres' when MOSS_DATABASE_URL is set.
+      dbBackend: z.enum(['sqlite', 'postgres']).optional(),
+      // PG connection string (postgres backend only). NEVER persisted to
+      // manifest.json (shared storage) — passed to runners via env only.
+      databaseUrl: z.string().min(1).optional(),
     }).default({}),
     runtimeDefaults: z.object({
       type: z.enum(['host', 'docker', 'k8s']).default('host'),
@@ -499,6 +511,18 @@ export type ServerConfig = {
   dbPath: string
   transcriptDir: string
   runtimeDir: string
+  /**
+   * Shared DB backend. 'sqlite' (default) keeps the single-file, single-host
+   * path unchanged. 'postgres' routes stores through PgDriver for cross-host HA.
+   */
+  dbBackend: 'sqlite' | 'postgres'
+  /** PG connection string (postgres only). Never persisted to manifest.json. */
+  databaseUrl?: string
+  /**
+   * Auth-proxy base URL injected into runner env. Env MOSS_AUTH_PROXY_URL
+   * (preferred), else file config, else http://localhost:12013.
+   */
+  authProxyUrl: string
   dockerNetwork?: string
   dockerStopTimeoutSec: number
   dockerLabels: Record<string, string>

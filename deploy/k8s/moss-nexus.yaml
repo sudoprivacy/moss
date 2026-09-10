@@ -1,0 +1,86 @@
+# ============================================================================
+# moss HA — K8s Nexus 单实例（P3-2）
+# ============================================================================
+# Nexus 是 secrets vault 单写者：全集群只能有【一个】实例持有 vault 数据目录写权。
+# 独立 Deployment + 独占 PVC（单写者语义；多副本/漂移到同卷双写会损坏 vault）。
+#
+# 【单点边界声明】：本 Deployment 副本数必须为 1——它故障期间新建/轮换 secret 与
+# runner 凭据解析不可用（存量缓存不受影响）。Nexus 自身多副本不在 moss 交付范围；
+# 对可用性敏感的部署可将 vault 数据外置到受管服务形态。
+#
+# 镜像同 moss-server（仅 local 构建产物含 nexusd + vault 插件，说明同
+# docker-compose.ha.yml 的 nexus 服务）。
+# ----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moss-nexus
+  namespace: moss-control
+spec:
+  # 必须为 1（vault 单写者）。可用性诉求见文件头声明。
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: moss-nexus
+  template:
+    metadata:
+      labels:
+        app: moss-nexus
+    spec:
+      containers:
+        - name: nexus
+          image: my-moss-server:v1
+          args:
+            - /app/bin/nexus/nexusd
+            - --advertise-addr
+            - moss-nexus.moss-control.svc:2126
+            - --no-tls
+            - --insecure-no-auth
+            - --data-dir
+            - /root/.moss/nexus/data
+            - --plugin-dir
+            - /app/bin/nexus/plugins
+          env:
+            # vault 插件读 NEXUS_DATA_DIR；必须与 --data-dir 一致。
+            - name: NEXUS_DATA_DIR
+              value: /root/.moss/nexus/data
+          ports:
+            - containerPort: 2126
+          volumeMounts:
+            - name: nexus-data
+              mountPath: /root/.moss
+          # 单写者数据建议 RWO 即可（不需要 RWX——其他 pod 不挂它）。
+          readinessProbe:
+            tcpSocket:
+              port: 2126
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: nexus-data
+          persistentVolumeClaim:
+            claimName: moss-nexus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: moss-nexus
+  namespace: moss-control
+spec:
+  selector:
+    app: moss-nexus
+  ports:
+    - port: 2126
+      targetPort: 2126
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moss-nexus-data
+  namespace: moss-control
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi

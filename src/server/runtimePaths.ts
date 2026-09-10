@@ -1,4 +1,5 @@
 import { createHash } from 'crypto'
+import { tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import type { ServerConfig } from './types.js'
 
@@ -26,7 +27,48 @@ export function getSessionWorkspaceDir(
   return join(config.runtimeDir, 'sessions', sessionId, 'workspace')
 }
 
+/**
+ * Instance-local directory for attach sockets. MUST NOT live under
+ * `runtimeDir` or `~/.moss` — in HA deployments both are shared mounts
+ * (NFS / bind mounts), and a unix socket bound on one host is unreachable
+ * through a shared file anyway; keeping it on the shared tree only invites
+ * misjudgment. `os.tmpdir()` is container-local fs (or host-local /tmp for
+ * bare metal). Residual socket files after a crash are cleaned by OS tmp
+ * policy / container recreation — respawn uses a new generation (new name),
+ * so stale files never conflict.
+ */
+export function getInstanceSocketDir(config: ServerConfig): string {
+  const instance = config.instanceId || 'default'
+  return join(tmpdir(), `moss-sock-${instance}`)
+}
+
 export function getAttachPath(
+  config: ServerConfig,
+  sessionId: string,
+  generation: number,
+): string {
+  // The hash deliberately excludes config.runtimeDir: with it, two instances
+  // mounting the shared runtimeDir at different path strings would compute
+  // different socket names for the same attempt. Only session identity keys
+  // the name now.
+  const name = createHash('sha1')
+    .update(`${sessionId}:${generation}`)
+    .digest('hex')
+    .slice(0, 16)
+  if (process.platform === 'win32') {
+    return `\\\\.\\pipe\\moss-session-${name}`
+  }
+  return join(getInstanceSocketDir(config), `${name}.sock`)
+}
+
+/**
+ * Pre-P2 legacy attach path (hash included config.runtimeDir, socket lived
+ * under runtimeDir/sock). Kept ONLY for defensive dual-name probing when a
+ * locally-owned attempt's DB-stored attachPath is unreachable but a runner
+ * from before an upgrade may still listen on the old name. Never used to
+ * compute paths for new attempts.
+ */
+export function getLegacyAttachPath(
   config: ServerConfig,
   sessionId: string,
   generation: number,

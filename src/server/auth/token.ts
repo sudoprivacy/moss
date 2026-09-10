@@ -292,18 +292,18 @@ export function isStoreAdmin(auth: { role: string; scopes?: string[] }): boolean
  * isolation. Mirrors the requireAuthUser pattern. Lives here (not service.ts)
  * so it is unit-testable under bun:test, which cannot load node:sqlite.
  */
-export function resolveUserPinnedOrSuperAdmin<U extends { role: string }>(
+export async function resolveUserPinnedOrSuperAdmin<U extends { role: string }>(
   userId: string,
   orgId: string,
   db: {
-    getUserByIdAndOrg(id: string, orgId: string): U | null
-    getUserById(id: string): U | null
+    getUserByIdAndOrg(id: string, orgId: string): Promise<U | null>
+    getUserById(id: string): Promise<U | null>
   },
-): U | null {
-  const user = db.getUserByIdAndOrg(userId, orgId)
+): Promise<U | null> {
+  const user = await db.getUserByIdAndOrg(userId, orgId)
   if (user) {
     return user
   }
-  const byId = db.getUserById(userId)
+  const byId = await db.getUserById(userId)
   return byId && byId.role === 'super_admin' ? byId : null
 }

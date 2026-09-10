@@ -170,7 +170,7 @@ export class WikiJobExecutor {
     const slotsAvailable = MAX_CONCURRENT_BUILDS - this.running.size
     if (slotsAvailable <= 0) return
 
-    const queued = this.docStore.listQueuedBuildJobs(slotsAvailable)
+    const queued = await this.docStore.listQueuedBuildJobs(slotsAvailable)
     for (const job of queued) {
       // Fire-and-forget — runJob handles its own state updates.
       this.running.set(job.id, { jobId: job.id, wikiId: job.wikiId, startedAt: Date.now() })
@@ -190,13 +190,13 @@ export class WikiJobExecutor {
     const startedAt = this.running.get(job.id)?.startedAt ?? Date.now()
 
     // Mark job + wiki as running
-    this.docStore.updateBuildJob(job.id, {
+    await this.docStore.updateBuildJob(job.id, {
       status: 'running',
       progress: 5,
       currentStep: '准备工作目录',
       startedAt: Date.now(),
     })
-    this.docStore.setWikiBuildResult(job.wikiId, { status: 'running' })
+    await this.docStore.setWikiBuildResult(job.wikiId, { status: 'running' })
 
     let wiki: WikiRecord | null = null
     // The document IDs actually staged for this build. For 'files' mode this
@@ -209,7 +209,7 @@ export class WikiJobExecutor {
     // every exit path (success swap consumes it; failure rm -rf's it).
     const stageDir = path.join(STAGE_DIR, `${job.wikiId}.${job.id}`)
     try {
-      wiki = this.docStore.getWikiById(job.wikiId)
+      wiki = await this.docStore.getWikiById(job.wikiId)
       if (!wiki) throw new Error(`wiki ${job.wikiId} not found`)
 
       // Stage 1: prepare cwd/input with predigested markdown. Capture the
@@ -217,7 +217,7 @@ export class WikiJobExecutor {
       // exactly what was built.
       await mkdir(stageDir, { recursive: true })
       builtDocIds = await this.prepareInputs(wiki, stageDir)
-      this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
+      await this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
 
       // Stage 2: spawn agent session
       const created = await this.runtime.createSession({
@@ -241,7 +241,7 @@ export class WikiJobExecutor {
       const state = this.running.get(job.id)
       if (state) state.sessionId = created.sessionId
 
-      this.docStore.updateBuildJob(job.id, {
+      await this.docStore.updateBuildJob(job.id, {
         sessionId: created.sessionId,
         progress: 40,
         currentStep: 'Agent 正在阅读文档',
@@ -268,10 +268,10 @@ export class WikiJobExecutor {
         let reason = result.error ?? 'build session failed'
         try {
           const attemptId = created.sessionId
-            ? this.db.getSession(created.sessionId)?.currentAttemptId ?? null
+            ? ((await this.db.getSession(created.sessionId))?.currentAttemptId ?? null)
             : null
           const errorText = attemptId
-            ? this.db.getAttempt(attemptId)?.errorText ?? null
+            ? ((await this.db.getAttempt(attemptId))?.errorText ?? null)
             : null
           if (errorText) reason = `${reason}: ${errorText}`
         } catch {
@@ -302,7 +302,7 @@ export class WikiJobExecutor {
             `[WikiJobExecutor] job ${job.id}: ${uncaptioned.length} image(s) ` +
               `referenced without a caption entry in _moss_images.md: ${uncaptioned.join(', ')}`,
           )
-          this.docStore.updateBuildJob(job.id, {
+          await this.docStore.updateBuildJob(job.id, {
             currentStep: `构建完成(${uncaptioned.length} 张图片未配文)`,
           })
         }
@@ -327,14 +327,14 @@ export class WikiJobExecutor {
             console.warn(
               `[WikiJobExecutor] vector index skipped for wiki=${wiki.id}: ${result.reason}`,
             )
-            this.docStore.updateBuildJob(job.id, {
+            await this.docStore.updateBuildJob(job.id, {
               currentStep: '向量索引降级（grep-only）',
             })
           } else {
             console.log(
               `[WikiJobExecutor] vector index built for wiki=${wiki.id}: ${result.count} passages`,
             )
-            this.docStore.updateBuildJob(job.id, {
+            await this.docStore.updateBuildJob(job.id, {
               currentStep: `向量索引已建（${result.count} 段）`,
             })
           }
@@ -356,19 +356,19 @@ export class WikiJobExecutor {
       // Fail-safe against concurrent same-wiki swaps (see publishStaged).
       await this.publishStaged(wiki, stageDir, startedAt)
 
-      this.docStore.updateBuildJob(job.id, {
+      await this.docStore.updateBuildJob(job.id, {
         status: 'succeeded',
         progress: 100,
         currentStep: '构建完成',
         finishedAt: Date.now(),
       })
-      this.docStore.setWikiBuildResult(job.wikiId, {
+      await this.docStore.setWikiBuildResult(job.wikiId, {
         status: 'succeeded',
         lastBuiltAt: Date.now(),
         lastBuildError: null,
       })
       // Document Center v2: clear needs_rebuild on successful build.
-      this.db.markWikiNeedsRebuild(job.wikiId, false)
+      await this.db.markWikiNeedsRebuild(job.wikiId, false)
       console.log(`[WikiJobExecutor] job ${job.id} succeeded`)
     } catch (err) {
       if (err instanceof BuildCancelledError || this.cancelRequested.has(job.id)) {
@@ -694,7 +694,7 @@ export class WikiJobExecutor {
     if (wiki.sourceMode === 'dir' && wiki.sourceNodeIds.length > 0) {
       // Multi-dir with persistent exclusions: union of included subtrees minus
       // excluded subtrees, resolved live so new files auto-join / deleted drop.
-      const rows = this.db.listDocumentsUnderNodes(
+      const rows = await this.db.listDocumentsUnderNodes(
         wiki.sourceNodeIds,
         wiki.sourceExcludeNodeIds,
         wiki.orgId,
@@ -707,7 +707,7 @@ export class WikiJobExecutor {
     const staged: string[] = []
     for (const docId of docIds) {
       // Cross-org lookup: build runs as system, document still has org_id
-      const docRow = this.db.getDocument(docId, wiki.orgId)
+      const docRow = await this.db.getDocument(docId, wiki.orgId)
       if (!docRow) {
         console.warn(`[WikiJobExecutor] source doc ${docId} not found, skipping`)
         continue
@@ -846,7 +846,7 @@ export class WikiJobExecutor {
               markProgress()
               this.handleAgentLine(parsed.line, jobId, (step) => {
                 lastProgress = Math.min(lastProgress + 5, 90)
-                this.docStore.updateBuildJob(jobId, {
+                void this.docStore.updateBuildJob(jobId, {
                   progress: lastProgress,
                   currentStep: step,
                 })
@@ -953,7 +953,7 @@ export class WikiJobExecutor {
     this.cancelRequested.add(jobId)
     // Best-effort progress hint; the terminal `cancelled` status is written
     // when runJob unwinds.
-    this.docStore.updateBuildJob(jobId, { currentStep: '正在终止…' })
+    await this.docStore.updateBuildJob(jobId, { currentStep: '正在终止…' })
     if (state.sessionId) {
       try {
         await this.runtime.terminateSession(state.sessionId)
@@ -964,8 +964,8 @@ export class WikiJobExecutor {
     return true
   }
 
-  private cancelJobRecord(jobId: string, wikiId: string): void {
-    this.docStore.updateBuildJob(jobId, {
+  private async cancelJobRecord(jobId: string, wikiId: string): Promise<void> {
+    await this.docStore.updateBuildJob(jobId, {
       status: 'cancelled',
       currentStep: '已终止',
       finishedAt: Date.now(),
@@ -975,21 +975,21 @@ export class WikiJobExecutor {
     // the previously published build (if any) is still intact and serving.
     // Restore 'succeeded' when a prior good build exists, else 'pending' —
     // never leave it stuck on 'running' or imply an error.
-    const wiki = this.docStore.getWikiById(wikiId)
-    this.docStore.setWikiBuildResult(wikiId, {
+    const wiki = await this.docStore.getWikiById(wikiId)
+    await this.docStore.setWikiBuildResult(wikiId, {
       status: wiki?.lastBuiltAt != null ? 'succeeded' : 'pending',
       lastBuildError: null,
     })
   }
 
-  private failJob(jobId: string, wikiId: string, message: string): void {
-    this.docStore.updateBuildJob(jobId, {
+  private async failJob(jobId: string, wikiId: string, message: string): Promise<void> {
+    await this.docStore.updateBuildJob(jobId, {
       status: 'failed',
       currentStep: '构建失败',
       errorMessage: message,
       finishedAt: Date.now(),
     })
-    this.docStore.setWikiBuildResult(wikiId, {
+    await this.docStore.setWikiBuildResult(wikiId, {
       status: 'failed',
       lastBuildError: message,
     })

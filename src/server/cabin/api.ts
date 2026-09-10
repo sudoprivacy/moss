@@ -482,7 +482,7 @@ export function createCabinApi(options: {
   handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
 } {
   const cabinConfig = options.config.cabin
-  const store = new CabinStore(options.runtime.store.db)
+  const store = new CabinStore(options.runtime.store.driver, options.runtime.store.db)
   const cabinLogger = new CabinLogger(options.config)
   const healthReports = options.healthReports ?? new CabinHealthReportService({
     config: cabinConfig,
@@ -496,7 +496,7 @@ export function createCabinApi(options: {
     logger: cabinLogger,
     createMossSession: async (context) => {
       if (!cabinConfig.createMossSession) return `cabin-${randomUUID()}`
-      const orgId = options.runtime.authService.listAllOrganizations().organizations[0]?.id
+      const orgId = (await options.runtime.authService.listAllOrganizations()).organizations[0]?.id
       if (!orgId) throw new Error('No organization available for cabin moss session')
       const created = await options.runtime.createSession({
         cwd: options.config.workspace,
@@ -521,14 +521,14 @@ export function createCabinApi(options: {
   })
   const demoState = new CabinDemoState(options.config, services, cabinLogger)
 
-  function registerManagedSeatFromToken(
+  async function registerManagedSeatFromToken(
     body: JsonBody,
     tablet: { tabletToken: string; tabletId: string },
     tokenContext: Omit<CabinTokenPayload, 'tabletToken' | 'tabletId' | 'issuedAt' | 'expiresAt'>,
     requestId: string,
-  ): void {
+  ): Promise<void> {
     try {
-      const seat = store.upsertManagedSeat({
+      const seat = await store.upsertManagedSeat({
         aircraftNo: tokenContext.aircraftNo,
         flightId: stringBodyField(body, 'flightId') || stringBodyField(body, 'flight_id') || 'AUTO',
         flightDate: stringBodyField(body, 'flightDate') || stringBodyField(body, 'flight_date') || todayFlightDate(),
@@ -579,7 +579,7 @@ export function createCabinApi(options: {
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
     const tokenContext = optionalCabinTokenFields(body)
-    registerManagedSeatFromToken(body, tablet, tokenContext, requestId)
+    await registerManagedSeatFromToken(body, tablet, tokenContext, requestId)
     const token = issueCabinToken({
       ...tablet,
       ...tokenContext,
@@ -636,13 +636,13 @@ export function createCabinApi(options: {
     } catch (error) {
       throw mapServiceError(error)
     }
-    const message = store.appendMessage({
+    const message = await store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
       source: 'voice',
       content: result.text,
     })
-    store.insertVoiceLog({
+    await store.insertVoiceLog({
       conversationId: conversation.id,
       messageId: message.id,
       type: 'asr',
@@ -674,7 +674,7 @@ export function createCabinApi(options: {
       flightId: context.flightId,
       conversationId: conversation.id,
     }
-    const userMessage = store.appendMessage({
+    const userMessage = await store.appendMessage({
       conversationId: conversation.id,
       role: 'user',
       source,
@@ -688,7 +688,7 @@ export function createCabinApi(options: {
         logContext,
       })
       const reply = normalizeCabinPassengerReply({ userText: text, reply: result.reply, context })
-      const assistantMessage = store.appendMessage({
+      const assistantMessage = await store.appendMessage({
         conversationId: conversation.id,
         role: 'assistant',
         source: 'agent',
@@ -728,7 +728,7 @@ export function createCabinApi(options: {
     // between Path A and Path B and only fires for a bare affirmation following an offer, so no
     // existing input path changes behavior.
     if (isAffirmationReply(text)) {
-      const lastAssistant = [...store.listMessages(conversation.id, 6)]
+      const lastAssistant = [...(await store.listMessages(conversation.id, 6))]
         .reverse()
         .find(message => message.role === 'assistant')
       if (lastAssistant && looksLikeHardwareOffer(lastAssistant.content)) {
@@ -737,7 +737,7 @@ export function createCabinApi(options: {
           writeSse(res, 'tool_call', confirmedRoute.toolCall)
           const result = await services.executeHardwareControl({ route: confirmedRoute, logContext })
           const reply = normalizeCabinPassengerReply({ userText: lastAssistant.content, reply: result.reply, context })
-          const assistantMessage = store.appendMessage({
+          const assistantMessage = await store.appendMessage({
             conversationId: conversation.id,
             role: 'assistant',
             source: 'agent',
@@ -816,7 +816,7 @@ export function createCabinApi(options: {
       } else {
         reply = await services.generateReply({
           context,
-          messages: store.listMessages(conversation.id, 30),
+          messages: await store.listMessages(conversation.id, 30),
           text,
           logContext,
         })
@@ -832,7 +832,7 @@ export function createCabinApi(options: {
       return
     }
     reply = normalizeCabinPassengerReply({ userText: text, reply, context })
-    const assistantMessage = store.appendMessage({
+    const assistantMessage = await store.appendMessage({
       conversationId: conversation.id,
       role: 'assistant',
       source: 'agent',
@@ -934,7 +934,7 @@ export function createCabinApi(options: {
       })
     } catch (error) {
       const mapped = mapServiceError(error)
-      store.insertVoiceLog({
+      await store.insertVoiceLog({
         conversationId: conversation.id,
         type: 'asr',
         status: 'error',
@@ -949,7 +949,7 @@ export function createCabinApi(options: {
       return
     }
 
-    store.insertVoiceLog({
+    await store.insertVoiceLog({
       conversationId: conversation.id,
       type: 'asr',
       text: result.text,
@@ -980,7 +980,7 @@ export function createCabinApi(options: {
     const conversation = await services.ensureConversation(context)
     const limit = Number.parseInt(url.searchParams.get('limit') || '20', 10)
     const normalizedLimit = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 20, 100))
-    const messages = store.listMessages(conversation.id, normalizedLimit, {
+    const messages = await store.listMessages(conversation.id, normalizedLimit, {
       beforeId: url.searchParams.get('before_id') || undefined,
       afterId: url.searchParams.get('after_id') || undefined,
     })
@@ -1010,7 +1010,7 @@ export function createCabinApi(options: {
     const tablet = requireTabletHeaders(req)
     const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
     const conversation = await services.ensureConversation(context)
-    store.resetConversation(conversation.id)
+    await store.resetConversation(conversation.id)
     writeJson(res, 200, { status: 'ok', cleared: true })
   }
 
@@ -1030,7 +1030,7 @@ export function createCabinApi(options: {
       conversationId: conversation.id,
     }
     const result = await services.speech(text, logContext)
-    store.insertVoiceLog({
+    await store.insertVoiceLog({
       conversationId: conversation.id,
       type: 'tts',
       text,

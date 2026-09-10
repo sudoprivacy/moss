@@ -27,6 +27,9 @@ services:
     restart: always
     ports:
       - "${MOSS_PUBLIC_PORT:-80}:80"
+      # 企微回调专用入口（回调 server 监听独立端口 43128，不经主端口路由）。
+      # 回调域名须指向 LB 的该端口；不启用企微回调可不暴露。
+      - "${MOSS_CALLBACK_PUBLIC_PORT:-43128}:43128"
     volumes:
       # 默认 active/passive；Phase B 改挂 moss-sticky-active-active.conf。
       - ./nginx/moss-active-passive.conf:/etc/nginx/conf.d/default.conf:ro
@@ -123,6 +126,8 @@ services:
       - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL}
       # 显式开启 drain（默认 0=现状行为不 drain）。
       - MOSS_SHUTDOWN_GRACE_MS=30000
+      # 企微回调监听器（独立端口 43128；无状态，经 nginx 双入口轮询安全）。
+      - MOSS_CALLBACK_PORT=43128
     networks:
       - moss-network
 
@@ -154,6 +159,7 @@ services:
       - MOSS_NEXUS_ENDPOINT=http://nexus:2126
       - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL}
       - MOSS_SHUTDOWN_GRACE_MS=30000
+      - MOSS_CALLBACK_PORT=43128
     networks:
       - moss-network
 

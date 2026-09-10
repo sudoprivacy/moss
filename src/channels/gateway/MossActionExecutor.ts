@@ -6,6 +6,7 @@
 
 import net from 'net';
 import type { RuntimeService } from '../../server/runtimeService.js';
+import type { InternalSessionChannel } from '../../server/internalSessionChannel.js';
 import type { DirectConnectStore } from '../../server/db.js';
 import type { ChannelAgentResolver, IChannelAgentOption } from './ChannelAgentResolver.js';
 import type { PluginManager } from './PluginManager.js';
@@ -23,7 +24,7 @@ type Platform = 'telegram' | 'lark' | 'dingtalk' | 'wechat' | 'wecom';
 
 interface ChannelSessionState {
   sessionId: string;
-  socket: net.Socket | null;
+  socket: InternalSessionChannel | null;
   buffer: string;
   responseText: string;
   lastMsgId: string | null;
@@ -111,7 +112,7 @@ export class MossActionExecutor {
 
     try {
       // 1. Check authorization
-      const isAuthorized = this.pairingService.isUserAuthorized(user.id, pluginScope(pluginId, platform), mossUserId);
+      const isAuthorized = await this.pairingService.isUserAuthorized(user.id, pluginScope(pluginId, platform), mossUserId);
 
       // Handle /start command
       if (content.type === 'command' && content.text === '/start') {
@@ -127,7 +128,7 @@ export class MossActionExecutor {
       if (!isAuthorized) {
         if (platform === 'wechat' || platform === 'wecom') {
           // Auto-authorize WeChat/WeCom users
-          this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
+          await this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
         } else {
           // Show pairing flow for other platforms
           await this.handlePairingFlow(platform, pluginId, user, sendFn, mossUserId);
@@ -224,10 +225,10 @@ export class MossActionExecutor {
     const channelUserKey = `${scope}:${user.id}:${chatId}`;
 
     // Get/create channel user
-    let channelUser = this.getChannelUser(user.id, scope, mossUserId);
+    let channelUser = await this.getChannelUser(user.id, scope, mossUserId);
     if (!channelUser) {
       // Should have been created by auto-authorize or pairing, but create as fallback
-      channelUser = this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
+      channelUser = await this.autoAuthorizeUser(user, platform, pluginId, mossUserId);
       if (!channelUser) {
         await sendFn({ type: 'text', text: '❌ Authorization failed. Please try again.', parseMode: 'HTML' });
         return;
@@ -238,7 +239,7 @@ export class MossActionExecutor {
     let session = this.sessionManager.getSession(channelUser.id, sChatId);
     if (!session || !session.conversationId) {
       // Create a new channel session with conversationId = channelUserKey (used as Moss session ID)
-      session = this.sessionManager.createSession(
+      session = await this.sessionManager.createSession(
         channelUser,
         'acp',
         undefined,
@@ -250,7 +251,7 @@ export class MossActionExecutor {
     // channel_sessions row), so it accumulates across idle revives and survives
     // rotation — counting per runtime session would reset on every idle recycle,
     // which is the most common IM path, and the cap would never fire.
-    const turnCount = this.db.incrementChannelSessionTurnCount(channelUser.id, sChatId);
+    const turnCount = await this.db.incrementChannelSessionTurnCount(channelUser.id, sChatId);
     const rotation = await this.planRotation(turnCount, mossUserId, platform, pluginId, chatId);
 
     // Get or create Moss runtime session
@@ -276,7 +277,7 @@ export class MossActionExecutor {
         );
         if (rotation.rotate) {
           // Only after a rotation actually produced a new runtime session.
-          this.db.resetChannelSessionTurnCount(channelUser.id, sChatId);
+          await this.db.resetChannelSessionTurnCount(channelUser.id, sChatId);
         }
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to create runtime session:`, error);
@@ -315,7 +316,7 @@ export class MossActionExecutor {
     channelState.socket!.write(`${payload}\n`);
 
     // Update session activity timestamp
-    this.db.touchSessionActivity(channelState.sessionId);
+    await this.db.touchSessionActivity(channelState.sessionId);
 
     console.log(`[MossActionExecutor] Sent message to runner for ${channelUserKey}`);
 
@@ -418,7 +419,7 @@ export class MossActionExecutor {
     // 0 or negative disables rotation (reuse forever), same as cronReuseMaxRuns.
     if (!Number.isFinite(cap) || cap <= 0 || turnCount <= cap) return { rotate: false };
 
-    const previous = mossUserId ? this.db.findChannelSession(platform, sChatId, mossUserId) : null;
+    const previous = mossUserId ? await this.db.findChannelSession(platform, sChatId, mossUserId) : null;
     const seedText = await this.buildSeedForSession(previous?.sessionId);
 
     console.log(
@@ -456,7 +457,7 @@ export class MossActionExecutor {
   private async buildSeedForSession(sessionId?: string): Promise<string | undefined> {
     if (!sessionId) return undefined;
     try {
-      const snapshot = this.runtime.getSession(sessionId);
+      const snapshot = await this.runtime.getSession(sessionId);
       const transcriptPath = snapshot?.transcriptPath;
       if (!transcriptPath) return undefined;
       const seed = await buildTranscriptSeed(transcriptPath);
@@ -501,12 +502,12 @@ export class MossActionExecutor {
     // keyed (id, user_id), so looking up an id without a user_id returns an arbitrary row
     // and would attribute the session to the wrong user whenever more than one user has
     // connected this platform.
-    const plugin = ownerUserId ? this.db.getChannelPlugin(pluginId, ownerUserId) : null;
+    const plugin = ownerUserId ? await this.db.getChannelPlugin(pluginId, ownerUserId) : null;
     const mossUserId = ownerUserId || (plugin ? String(plugin.user_id) : 'channel');
     // org_id from plugin, fall back to users table lookup
     let mossOrgId: string | null = plugin?.org_id ? String(plugin.org_id) : null;
     if (!mossOrgId && mossUserId !== 'channel') {
-      mossOrgId = this.db.getUserOrgId(mossUserId);
+      mossOrgId = await this.db.getUserOrgId(mossUserId);
     }
     if (!mossOrgId) {
       mossOrgId = 'channel';
@@ -514,7 +515,7 @@ export class MossActionExecutor {
     }
 
     // Try to reuse an existing DB session for this channel user
-    const existingSession = this.db.findChannelSession(platform, sChatId, mossUserId);
+    const existingSession = await this.db.findChannelSession(platform, sChatId, mossUserId);
     const displayName = channelUser.displayName || chatId;
 
     // Recovery classification is shared with cabin/cron (see sessionRecovery.ts).
@@ -529,7 +530,7 @@ export class MossActionExecutor {
     // live attach socket or respawns a dead one. 'replace' falls through to a
     // fresh session below, seeded from the old transcript when possible.
     const recovery = existingSession && !options.forceReplace
-      ? classifyMossSession(this.runtime.getSessionSnapshot(existingSession.sessionId))
+      ? classifyMossSession(await this.runtime.getSessionSnapshot(existingSession.sessionId))
       : 'replace';
 
     // A session that died on its own (crashed runtime, lost container) still has its
@@ -548,7 +549,7 @@ export class MossActionExecutor {
       !options.forceReplace &&
       !seedText
     ) {
-      const status = this.runtime.getSessionSnapshot(existingSession.sessionId)?.status;
+      const status = (await this.runtime.getSessionSnapshot(existingSession.sessionId))?.status;
       if (status === 'lost' || status === 'failed') {
         recoveredSeed = await this.buildSeedForSession(existingSession.sessionId);
         console.log(
@@ -566,8 +567,9 @@ export class MossActionExecutor {
         `(status=${existingSession.status}) for ${channelUserKey}`,
       );
       try {
-        const ready = await this.runtime.ensureSessionReady(existingSession.sessionId);
-        const socket = await this.runtime.connectToAttempt(ready.attempt);
+        // Internal channel (HA): routes to the owning instance like any
+        // external client — the attach socket itself is only reachable there.
+        const socket = await this.runtime.connectInternalChannel(existingSession.sessionId);
 
         const state: ChannelSessionState = {
           sessionId: existingSession.sessionId,
@@ -594,7 +596,7 @@ export class MossActionExecutor {
         });
 
         this.channelSessions.set(channelUserKey, state);
-        this.db.touchSessionActivity(existingSession.sessionId);
+        await this.db.touchSessionActivity(existingSession.sessionId);
         return state;
       } catch (error) {
         console.log(`[MossActionExecutor] Failed to reconnect session ${existingSession.sessionId}, creating new one:`, error);
@@ -640,9 +642,8 @@ export class MossActionExecutor {
     const sessionId = created.sessionId;
     console.log(`[MossActionExecutor] Created runtime session ${sessionId} for ${channelUserKey}`);
 
-    // Connect to the runner's attach socket
-    const ready = await this.runtime.ensureSessionReady(sessionId);
-    const socket = await this.runtime.connectToAttempt(ready.attempt);
+    // Internal channel (HA): unified path regardless of owning instance.
+    const socket = await this.runtime.connectInternalChannel(sessionId);
 
     // Set up response listener
     const state: ChannelSessionState = {
@@ -706,8 +707,7 @@ export class MossActionExecutor {
   ): Promise<ChannelSessionState> {
     console.log(`[MossActionExecutor] Reconnecting to runtime session ${sessionId}`);
 
-    const ready = await this.runtime.ensureSessionReady(sessionId);
-    const socket = await this.runtime.connectToAttempt(ready.attempt);
+    const socket = await this.runtime.connectInternalChannel(sessionId);
 
     const state: ChannelSessionState = {
       sessionId,
@@ -814,8 +814,8 @@ export class MossActionExecutor {
   /**
    * Get channel user from database
    */
-  private getChannelUser(platformUserId: string, scope: string, mossUserId?: string): IChannelUser | null {
-    const row = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
+  private async getChannelUser(platformUserId: string, scope: string, mossUserId?: string): Promise<IChannelUser | null> {
+    const row = await this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
     if (!row) return null;
     return {
       id: String(row.id),
@@ -831,14 +831,14 @@ export class MossActionExecutor {
   /**
    * Auto-authorize a user (for WeChat/WeCom)
    */
-  private autoAuthorizeUser(
+  private async autoAuthorizeUser(
     user: { id: string; displayName?: string },
     platform: string,
     pluginId: string,
     mossUserId?: string,
-  ): IChannelUser | null {
+  ): Promise<IChannelUser | null> {
     const scope = pluginScope(pluginId, platform);
-    const existing = this.getChannelUser(user.id, scope, mossUserId);
+    const existing = await this.getChannelUser(user.id, scope, mossUserId);
     if (existing) return existing;
 
     const now = Date.now();
@@ -851,7 +851,7 @@ export class MossActionExecutor {
       authorizedAt: now,
     };
 
-    this.db.upsertChannelUser({
+    await this.db.upsertChannelUser({
       id: channelUser.id,
       platform_user_id: channelUser.platformUserId,
       platform_type: channelUser.platformType,
@@ -974,7 +974,7 @@ export class MossActionExecutor {
     // makes the session unrecoverable, and the transcript is the only record.
     // Stashed for the next createRuntimeSession call on this chat.
     if (options.preserveHistory) {
-      const existing = this.db.findChannelSession(platform, sChatId, mossUserId);
+      const existing = await this.db.findChannelSession(platform, sChatId, mossUserId);
       const seed = await this.buildSeedForSession(existing?.sessionId);
       if (seed) {
         this.pendingSeeds.set(`${platform}:${sChatId}`, seed);
@@ -1002,7 +1002,7 @@ export class MossActionExecutor {
     // Also end any DB session recorded for this chat, so createRuntimeSession does not
     // resume it instead of creating one under the new agent.
     try {
-      const existing = this.db.findChannelSession(platform, sChatId, mossUserId);
+      const existing = await this.db.findChannelSession(platform, sChatId, mossUserId);
       // Terminate anything not already terminated. The old allowlist stopped at
       // 'detached', which was harmless while 'ended' sessions were never revived
       // — now that they are, leaving one alive would let the next message resume

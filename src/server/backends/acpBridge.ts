@@ -282,11 +282,22 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       pendingStdout.push(line)
       return
     }
+    // No listener yet (daemon registers after `await spawn` resolves): buffer
+    // instead of dropping — flushStdout() drains on registration.
+    if (stdoutListeners.size === 0) {
+      pendingStdout.push(line)
+      return
+    }
     for (const l of stdoutListeners) l(line)
   }
 
   const flushStdout = () => {
-    while (pendingStdout.length > 0) {
+    // Keep pending lines buffered while nobody listens: the daemon registers
+    // its onStdoutLine listener AFTER `await spawn(...)` returns, but a fast
+    // scode can complete the ACP handshake (and emit the hello line) before
+    // that — flushing into zero listeners would silently drop the very first
+    // line the client protocol expects. Registration re-invokes this flush.
+    while (pendingStdout.length > 0 && stdoutListeners.size > 0) {
       const line = pendingStdout.shift()!
       for (const l of stdoutListeners) l(line)
     }
@@ -1199,7 +1210,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       process.stderr.write(`[AcpBridge] Calling processUserMessage...\n`)
       processUserMessage(data)
     },
-    onStdoutLine(l) { stdoutListeners.add(l); return () => stdoutListeners.delete(l) },
+    onStdoutLine(l) { stdoutListeners.add(l); flushStdout(); return () => stdoutListeners.delete(l) },
     onStderrLine(l) { stderrListeners.add(l); return () => stderrListeners.delete(l) },
     onExit(l) {
       exitListeners.add(l)

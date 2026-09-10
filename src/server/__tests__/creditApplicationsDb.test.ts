@@ -26,11 +26,11 @@ const noopGateway: SudorouterClient = {
   addPoints: async () => {},
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   raw = new DatabaseSync(':memory:')
   db = new AuthCenterDb(raw, ':memory:')
   auth = new AuthService(db, 3600)
-  const { user } = auth.provisionPhoneUser({
+  const { user } = await auth.provisionPhoneUser({
     phone: '13800138000', nickname: 'Tester', autoCreateOrg: true,
   })
   userId = user.id
@@ -42,14 +42,14 @@ afterEach(() => {
 })
 
 describe('credit applications on the real table', () => {
-  it('stores and reads back an application', () => {
-    const app = submitApplication(auth.creditApplications, POLICY, {
+  it('stores and reads back an application', async () => {
+    const app = await submitApplication(auth.creditApplications, POLICY, {
       userId, orgId: 'org-1', requestedPoints: 500, reason: 'need credits',
     })
     assert.ok(app.id > 0)
     assert.match(app.applicationNo, /^CA\d{14}[0-9A-F]{6}$/)
 
-    const listed = auth.creditApplications.listForUser(userId, 1, 20)
+    const listed = await auth.creditApplications.listForUser(userId, 1, 20)
     assert.equal(listed.total, 1)
     assert.equal(listed.list[0]?.requestedPoints, 500)
     assert.equal(listed.list[0]?.reason, 'need credits')
@@ -57,14 +57,14 @@ describe('credit applications on the real table', () => {
     assert.equal(listed.list[0]?.approvedPoints, null)
   })
 
-  it('pages, newest first', () => {
+  it('pages, newest first', async () => {
     for (let i = 0; i < 5; i++) {
-      auth.creditApplications.create({ userId, orgId: 'org-1', requestedPoints: 100 + i, reason: null })
+      await auth.creditApplications.create({ userId, orgId: 'org-1', requestedPoints: 100 + i, reason: null })
     }
-    const first = auth.creditApplications.listForUser(userId, 1, 2)
+    const first = await auth.creditApplications.listForUser(userId, 1, 2)
     assert.equal(first.total, 5)
     assert.equal(first.list.length, 2)
-    const second = auth.creditApplications.listForUser(userId, 2, 2)
+    const second = await auth.creditApplications.listForUser(userId, 2, 2)
     assert.equal(second.list.length, 2)
     assert.notEqual(first.list[0]?.id, second.list[0]?.id)
   })
@@ -72,7 +72,7 @@ describe('credit applications on the real table', () => {
   it('keeps a comment that a later status move does not mention', async () => {
     // The gateway call happens after the comment is written; a status-only
     // update must not blank it, which a naive full-row UPDATE would.
-    const app = submitApplication(auth.creditApplications, POLICY, {
+    const app = await submitApplication(auth.creditApplications, POLICY, {
       userId, orgId: 'org-1', requestedPoints: 500, reason: null,
     })
     const reviewed = await reviewApplication(auth.creditApplications, noopGateway, {
@@ -87,18 +87,18 @@ describe('credit applications on the real table', () => {
   it('sees an in-flight review as still pending', async () => {
     // PROCESSING is a decision mid-flight; letting a second request through
     // while one is in the air is how a person gets granted twice.
-    const app = submitApplication(auth.creditApplications, POLICY, {
+    const app = await submitApplication(auth.creditApplications, POLICY, {
       userId, orgId: 'org-1', requestedPoints: 500, reason: null,
     })
-    auth.creditApplications.updateStatus(app.id, { status: 'PROCESSING' })
-    assert.equal(auth.creditApplications.hasPending(userId), true)
+    await auth.creditApplications.updateStatus(app.id, { status: 'PROCESSING' })
+    assert.equal(await auth.creditApplications.hasPending(userId), true)
 
-    auth.creditApplications.updateStatus(app.id, { status: 'APPROVED' })
-    assert.equal(auth.creditApplications.hasPending(userId), false)
+    await auth.creditApplications.updateStatus(app.id, { status: 'APPROVED' })
+    assert.equal(await auth.creditApplications.hasPending(userId), false)
   })
 
   it('records why a gateway refusal failed', async () => {
-    const app = submitApplication(auth.creditApplications, POLICY, {
+    const app = await submitApplication(auth.creditApplications, POLICY, {
       userId, orgId: 'org-1', requestedPoints: 500, reason: null,
     })
     const failing: SudorouterClient = {
@@ -112,18 +112,18 @@ describe('credit applications on the real table', () => {
     assert.equal(reviewed.status, 'SYNC_UNKNOWN')
     assert.match(reviewed.sudorouterError ?? '', /gateway said no/)
 
-    const reloaded = auth.creditApplications.getById(app.id)
+    const reloaded = await auth.creditApplications.getById(app.id)
     assert.equal(reloaded?.status, 'SYNC_UNKNOWN')
     assert.match(reloaded?.sudorouterError ?? '', /gateway said no/)
   })
 
-  it('scopes the list to its own user', () => {
-    const other = auth.provisionPhoneUser({
+  it('scopes the list to its own user', async () => {
+    const other = (await auth.provisionPhoneUser({
       phone: '13800138001', nickname: 'Other', autoCreateOrg: true,
-    }).user
-    submitApplication(auth.creditApplications, POLICY, {
+    })).user
+    await submitApplication(auth.creditApplications, POLICY, {
       userId, orgId: 'org-1', requestedPoints: 500, reason: null,
     })
-    assert.equal(auth.creditApplications.listForUser(other.id, 1, 20).total, 0)
+    assert.equal((await auth.creditApplications.listForUser(other.id, 1, 20)).total, 0)
   })
 })

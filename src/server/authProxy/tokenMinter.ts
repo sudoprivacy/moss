@@ -31,8 +31,8 @@ const SCRIPT_TIMEOUT_MS = 10_000
 
 /** Minimal token store the minter caches into (the authCenter db). */
 export interface MintedTokenStore {
-  getMintedToken(userId: string, configItemId: number): { token: string; expiresAt: number } | null
-  putMintedToken(userId: string, configItemId: number, token: string, expiresAt: number): void
+  getMintedToken(userId: string, configItemId: number): Promise<{ token: string; expiresAt: number } | null>
+  putMintedToken(userId: string, configItemId: number, token: string, expiresAt: number): Promise<void>
 }
 
 /** The login-type config needed to mint, projected from a config_items row. */
@@ -79,7 +79,7 @@ export class TokenMinter {
     cfg: MintConfig,
     creds: Record<string, string>,
   ): Promise<{ token: string; expiresAt: number } | null> {
-    const cached = this.store.getMintedToken(userId, cfg.configItemId)
+    const cached = await this.store.getMintedToken(userId, cfg.configItemId)
     const nowSec = Math.floor(Date.now() / 1000)
     if (cached && cached.expiresAt - nowSec >= MINT_SKEW_SEC) {
       return cached
@@ -119,7 +119,7 @@ export class TokenMinter {
     }
     if (!minted || !minted.token) return null
     const expiresAt = Math.floor(Date.now() / 1000) + Math.max(1, minted.expiresIn) - MINT_SAFETY_SEC
-    this.store.putMintedToken(userId, cfg.configItemId, minted.token, expiresAt)
+    await this.store.putMintedToken(userId, cfg.configItemId, minted.token, expiresAt)
     return { token: minted.token, expiresAt }
   }
 

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import type { DirectConnectStore } from '../db.js'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
 import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
@@ -55,7 +56,9 @@ function isSuperAdmin(role: string): boolean {
 }
 
 export type AuthServiceOptions = {
-  db: DatabaseSync
+  /** DirectConnectStore shares its driver (one sqlite connection / one PG Pool); a raw
+   *  DatabaseSync keeps the legacy standalone construction (own SqliteDriver). */
+  db: DatabaseSync | DirectConnectStore
   dbPath: string
   tokenTtlSec: number
   bootstrapAdmin: BootstrapAdminConfig
@@ -92,9 +95,9 @@ function toAuthServiceError(error: unknown): AuthServiceError {
  * departments_ext_uniq, organizations_ext_uniq) are the authoritative
  * source of truth for ext-id uniqueness.
  */
-function withExtIdConflict<T>(fn: () => T): T {
+async function withExtIdConflict<T>(fn: () => Promise<T>): Promise<T> {
   try {
-    return fn()
+    return await fn()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/UNIQUE constraint failed: users\.org_id, users\.ext_user_id/i.test(msg)) {
@@ -167,7 +170,7 @@ async function initializeStore(
   db: AuthCenterDb,
   bootstrapAdmin: BootstrapAdminConfig,
 ): Promise<AuthCenterBootstrap> {
-  if (!db.isInitialized()) {
+  if (!(await db.isInitialized())) {
     return db.bootstrap(bootstrapAdmin)
   }
 
@@ -194,6 +197,10 @@ export async function createAuthService(
   bootstrap: AuthCenterBootstrap
 }> {
   const db = new AuthCenterDb(options.db, options.dbPath)
+  // Prime the immutable jwt_secret / issuer cache from an already-initialized
+  // DB before bootstrap (a fresh DB has none yet; bootstrap's setConfig fills
+  // the cache in that case). Keeps getJwtSecret()/getIssuer() synchronous.
+  await db.loadSecretCache()
   const bootstrap = await initializeStore(
     db,
     options.bootstrapAdmin,
@@ -224,7 +231,7 @@ export class AuthService {
     smsSender?: SmsSender,
   ) {
     this.cleanupTimer = setInterval(() => {
-      this.db.cleanupExpiredRevokedTokens()
+      void this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
     this.cleanupTimer.unref?.()
     this.oauth2Bridge = new OAuth2Bridge(() => getSystemSettings().oauth2.scriptPath || null)
@@ -251,37 +258,37 @@ export class AuthService {
     clearInterval(this.cleanupTimer)
   }
 
-  verifyAccessToken(token: string): AuthContext | null {
+  async verifyAccessToken(token: string): Promise<AuthContext | null> {
     const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer())
     if (!auth) {
       return null
     }
-    if (this.db.isTokenRevoked(auth.jti)) {
+    if (await this.db.isTokenRevoked(auth.jti)) {
       return null
     }
     return auth
   }
 
-  logout(accessToken: string, refreshToken?: string): void {
+  async logout(accessToken: string, refreshToken?: string): Promise<void> {
     const access = verifyAccessToken(accessToken, this.db.getJwtSecret(), this.db.getIssuer(), 'access')
     if (access) {
-      this.db.revokeToken(access.jti, access.exp)
+      await this.db.revokeToken(access.jti, access.exp)
       // Drop the user's stored provider token. Provider tokens are now keyed by
       // user_id (one per user), so this clears it for all of the user's sessions.
-      this.db.deleteProviderToken(access.userId)
+      await this.db.deleteProviderToken(access.userId)
     }
 
     if (refreshToken) {
       const refresh = verifyAccessToken(refreshToken, this.db.getJwtSecret(), this.db.getIssuer(), 'refresh')
       if (refresh) {
-        this.db.revokeToken(refresh.jti, refresh.exp)
+        await this.db.revokeToken(refresh.jti, refresh.exp)
       }
     }
 
-    this.db.cleanupExpiredRevokedTokens()
+    await this.db.cleanupExpiredRevokedTokens()
   }
 
-  refreshToken(token: string): {
+  async refreshToken(token: string): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -289,16 +296,16 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
-    
+  }> {
+
     const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer(), 'refresh')
-    if (!auth || this.db.isTokenRevoked(auth.jti)) {
+    if (!auth || (await this.db.isTokenRevoked(auth.jti))) {
       throw new AuthServiceError(401, 'Invalid refresh token')
     }
 
     // A super_admin may hold a refresh token scoped to a foreign org (via
     // switchOrg); resolve them by id and keep the token pinned to that org.
-    const user = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+    const user = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(401, 'User is invalid')
     }
@@ -311,15 +318,15 @@ export class AuthService {
     })
   }
 
-  introspect(token: string): {
+  async introspect(token: string): Promise<{
     active: boolean
     sub?: string
     org_id?: string
     role?: string
     scopes?: string[]
     key_id?: string
-  } {
-    const auth = this.verifyAccessToken(token)
+  }> {
+    const auth = await this.verifyAccessToken(token)
     if (!auth) {
       return { active: false }
     }
@@ -333,11 +340,11 @@ export class AuthService {
     }
   }
 
-  issueTokenFromPassword(input: {
+  async issueTokenFromPassword(input: {
     username?: string
     email?: string
     password: string
-  }): {
+  }): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -345,7 +352,7 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
+  }> {
     const username = input.username?.trim() || ''
     const email = input.email?.trim() || ''
     if ((!username && !email) || !input.password) {
@@ -353,8 +360,8 @@ export class AuthService {
     }
 
     const user = username
-      ? this.getUniqueUserByName(username)
-      : this.db.getUserByEmail(email)
+      ? await this.getUniqueUserByName(username)
+      : await this.db.getUserByEmail(email)
     if (
       !user ||
       user.status !== 'active' ||
@@ -363,7 +370,7 @@ export class AuthService {
       throw new AuthServiceError(401, 'Invalid username/email or password')
     }
 
-    this.db.updateUserLastLogin(user.id)
+    await this.db.updateUserLastLogin(user.id)
     return this.issueToken({
       user,
       scopes: defaultScopesForRole(user.role),
@@ -378,7 +385,7 @@ export class AuthService {
    * into the `need_register` response rather than an error, because "no account
    * yet" is the normal first step of self-service signup, not a failure.
    */
-  findUserByPhone(phone: string): AuthCenterUser | null {
+  async findUserByPhone(phone: string): Promise<AuthCenterUser | null> {
     return this.db.getUserByPhone(phone)
   }
 
@@ -387,7 +394,7 @@ export class AuthService {
    * have been verified by the caller; this method trusts that and only enforces
    * account state.
    */
-  issueTokenFromPhone(phone: string): {
+  async issueTokenFromPhone(phone: string): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -395,15 +402,15 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
-    const user = this.db.getUserByPhone(phone)
+  }> {
+    const user = await this.db.getUserByPhone(phone)
     if (!user) {
       throw new AuthServiceError(404, 'No account for this phone number')
     }
     if (user.status !== 'active') {
       throw new AuthServiceError(403, 'Account is disabled')
     }
-    this.db.updateUserLastLogin(user.id)
+    await this.db.updateUserLastLogin(user.id)
     return this.issueToken({
       user,
       scopes: defaultScopesForRole(user.role),
@@ -423,11 +430,11 @@ export class AuthService {
    * Without it, the person joins the single existing organisation as a plain
    * user, which is what a self-hosted deployment with one company wants.
    */
-  registerWithPhone(input: {
+  async registerWithPhone(input: {
     phone: string
     nickname?: string
     autoCreateOrg: boolean
-  }): {
+  }): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -435,15 +442,15 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
-    const existing = this.db.getUserByPhone(input.phone)
+  }> {
+    const existing = await this.db.getUserByPhone(input.phone)
     if (existing) {
       // Racing double-submit, or a client that kept a stale register token.
       // Logging them in is both correct and kinder than a 409.
       return this.issueTokenFromPhone(input.phone)
     }
 
-    this.provisionPhoneUser(input)
+    await this.provisionPhoneUser(input)
     return this.issueTokenFromPhone(input.phone)
   }
 
@@ -456,7 +463,7 @@ export class AuthService {
    * untouched rather than duplicated or rejected — the property the importer
    * relies on to be safely re-runnable.
    */
-  provisionPhoneUser(input: {
+  async provisionPhoneUser(input: {
     phone: string
     nickname?: string
     autoCreateOrg: boolean
@@ -467,8 +474,8 @@ export class AuthService {
     /** Preserve the original signup time when importing; defaults to now. */
     createdAt?: number
     modelCredential?: UserModelCredential
-  }): { user: AuthCenterUser; created: boolean } {
-    const existing = this.db.getUserByPhone(input.phone)
+  }): Promise<{ user: AuthCenterUser; created: boolean }> {
+    const existing = await this.db.getUserByPhone(input.phone)
     if (existing) return { user: existing, created: false }
 
     const displayName = input.nickname?.trim() || ''
@@ -478,7 +485,7 @@ export class AuthService {
     let orgId: string
     let role: string
     if (input.orgId) {
-      const target = this.db.getOrganization(input.orgId)
+      const target = await this.db.getOrganization(input.orgId)
       if (!target) {
         throw new AuthServiceError(400, `Organization not found: ${input.orgId}`)
       }
@@ -490,10 +497,10 @@ export class AuthService {
       // uniqueness constraint but createOrganization() rejects duplicates, and
       // two people may well pick the same nickname.
       const orgName = `${displayName || input.phone}'s workspace (${userId.slice(0, 8)})`
-      this.db.createOrganization(orgId, orgName, createdAt, null)
+      await this.db.createOrganization(orgId, orgName, createdAt, null)
       role = 'admin'
     } else {
-      const orgs = this.db.listOrganizations()
+      const orgs = await this.db.listOrganizations()
       const target = orgs[0]
       if (!target) {
         throw new AuthServiceError(500, 'No organization exists to join')
@@ -502,7 +509,7 @@ export class AuthService {
       role = 'user'
     }
 
-    this.db.createUser({
+    await this.db.createUser({
       id: userId,
       orgId,
       // The users table needs a non-null unique email; a phone-only account has
@@ -527,17 +534,17 @@ export class AuthService {
     })
 
     if (input.modelCredential) {
-      this.db.setUserModelCredential(userId, input.modelCredential)
+      await this.db.setUserModelCredential(userId, input.modelCredential)
     }
 
-    const created = this.db.getUserById(userId)
+    const created = await this.db.getUserById(userId)
     if (!created) {
       throw new AuthServiceError(500, 'User creation failed')
     }
     return { user: created, created: true }
   }
 
-  issueTokenFromApiKey(apiKeyValue: string): {
+  async issueTokenFromApiKey(apiKeyValue: string): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -545,24 +552,24 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
+  }> {
     const value = apiKeyValue.trim()
     if (!value) {
       throw new AuthServiceError(400, 'Missing api_key')
     }
 
-    const apiKey = this.db.findActiveApiKey(value)
+    const apiKey = await this.db.findActiveApiKey(value)
     if (!apiKey) {
       throw new AuthServiceError(401, 'Invalid API key')
     }
 
-    const user = this.db.getUserById(apiKey.userId)
-    const organization = this.db.getOrganization(apiKey.orgId)
+    const user = await this.db.getUserById(apiKey.userId)
+    const organization = await this.db.getOrganization(apiKey.orgId)
     if (!user || user.status !== 'active' || !organization) {
       throw new AuthServiceError(401, 'API key owner is invalid')
     }
 
-    this.db.updateApiKeyLastUsed(apiKey.id)
+    await this.db.updateApiKeyLastUsed(apiKey.id)
     return this.issueToken({
       user,
       scopes: apiKey.scopes,
@@ -591,9 +598,9 @@ export class AuthService {
     } catch (error) {
       throw toAuthServiceError(error)
     }
-    const { user, scopes } = this.applyScriptIdentity(identity)
-    this.db.updateUserLastLogin(user.id)
-    const issued = this.issueToken({
+    const { user, scopes } = await this.applyScriptIdentity(identity)
+    await this.db.updateUserLastLogin(user.id)
+    const issued = await this.issueToken({
       user,
       scopes,
       keyId: 'oauth2-login',
@@ -604,7 +611,7 @@ export class AuthService {
     // later. expiry == the provider token's own lifetime. The provider
     // refresh_token is NOT stored here — the client holds it (symmetric with
     // other login types).
-    this.storeProviderToken(
+    await this.storeProviderToken(
       user.id,
       identity.accessToken,
       Math.floor(Date.now() / 1000) + identity.expiresIn,
@@ -639,16 +646,16 @@ export class AuthService {
     if (!result) {
       throw new AuthServiceError(401, 'OAuth2 session cannot be refreshed; please sign in again')
     }
-    const { user, scopes } = this.applyScriptIdentity(result)
-    this.db.updateUserLastLogin(user.id)
-    const issued = this.issueToken({
+    const { user, scopes } = await this.applyScriptIdentity(result)
+    await this.db.updateUserLastLogin(user.id)
+    const issued = await this.issueToken({
       user,
       scopes,
       keyId: 'oauth2-login',
       accessTtlSec: result.expiresIn,
     })
     // Store the rotated provider access_token (overwrites the user's row).
-    this.storeProviderToken(
+    await this.storeProviderToken(
       user.id,
       result.accessToken,
       Math.floor(Date.now() / 1000) + result.expiresIn,
@@ -665,12 +672,12 @@ export class AuthService {
    * container's SESSION_TOKEN — resolve it, and makes a mid-session refresh
    * overwrite the same row. `expiresAt` is an absolute Unix-seconds timestamp.
    */
-  private storeProviderToken(userId: string, providerAccessToken: string, expiresAt: number): void {
-    this.db.putProviderToken(userId, providerAccessToken, expiresAt)
+  private async storeProviderToken(userId: string, providerAccessToken: string, expiresAt: number): Promise<void> {
+    await this.db.putProviderToken(userId, providerAccessToken, expiresAt)
   }
 
   /** Recover the provider access_token for a user, or null if absent/expired. */
-  getProviderTokenForUser(userId: string): { token: string; expiresAt: number } | null {
+  getProviderTokenForUser(userId: string): Promise<{ token: string; expiresAt: number } | null> {
     return this.db.getProviderToken(userId)
   }
 
@@ -680,8 +687,8 @@ export class AuthService {
    * minted_service_tokens table without leaking the AuthCenterDb handle.
    */
   getMintedTokenStore(): {
-    getMintedToken(userId: string, configItemId: number): { token: string; expiresAt: number } | null
-    putMintedToken(userId: string, configItemId: number, token: string, expiresAt: number): void
+    getMintedToken(userId: string, configItemId: number): Promise<{ token: string; expiresAt: number } | null>
+    putMintedToken(userId: string, configItemId: number, token: string, expiresAt: number): Promise<void>
   } {
     return {
       getMintedToken: (userId, configItemId) => this.db.getMintedToken(userId, configItemId),
@@ -704,21 +711,21 @@ export class AuthService {
    *      legacy by-name resolve-or-create.
    * Org, dept name, and dept membership are re-synced on every login.
    */
-  private applyScriptIdentity(identity: OAuth2Identity): {
+  private async applyScriptIdentity(identity: OAuth2Identity): Promise<{
     user: AuthCenterUser
     scopes: string[]
-  } {
+  }> {
     // ── 1. Org resolution ─────────────────────────────────────────────────
     let targetOrg: AuthCenterOrganization | null = null
     if (identity.extOrgId) {
-      targetOrg = this.db.getOrganizationByExtId(identity.extOrgId)
+      targetOrg = await this.db.getOrganizationByExtId(identity.extOrgId)
       const incomingOrgName = identity.extOrgName?.trim() || ''
       if (!targetOrg) {
         const orgId = randomUUID()
         const orgName = incomingOrgName || `org-${identity.extOrgId}`
         const createdAt = Date.now()
         try {
-          this.db.createOrganization(orgId, orgName, createdAt, identity.extOrgId)
+          await this.db.createOrganization(orgId, orgName, createdAt, identity.extOrgId)
           targetOrg = {
             id: orgId,
             name: orgName,
@@ -730,7 +737,7 @@ export class AuthService {
           // Re-read and continue with whichever row won.
           const msg = err instanceof Error ? err.message : String(err)
           if (/UNIQUE constraint failed: organizations\.ext_org_id/i.test(msg)) {
-            targetOrg = this.db.getOrganizationByExtId(identity.extOrgId)
+            targetOrg = await this.db.getOrganizationByExtId(identity.extOrgId)
           }
           if (!targetOrg) throw err
         }
@@ -738,7 +745,7 @@ export class AuthService {
         // IdP-authoritative rename. Empty incoming value preserves the moss
         // row's name so a momentarily-missing IdP field doesn't clobber.
         try {
-          this.db.updateOrganization(targetOrg.id, { name: incomingOrgName })
+          await this.db.updateOrganization(targetOrg.id, { name: incomingOrgName })
           targetOrg = { ...targetOrg, name: incomingOrgName }
         } catch {
           // A naming collision with another moss org is non-fatal here —
@@ -749,7 +756,7 @@ export class AuthService {
     if (!targetOrg) {
       // Legacy fallback for IdPs that don't send extOrgId: use the existing
       // user's org if we can find one later, otherwise the first org.
-      targetOrg = this.db.listOrganizations()[0] ?? null
+      targetOrg = (await this.db.listOrganizations())[0] ?? null
     }
     if (!targetOrg) {
       throw new AuthServiceError(500, 'No organization available for OAuth2 user')
@@ -760,7 +767,7 @@ export class AuthService {
     const isSynthetic = realEmail.length === 0
     const email = realEmail || createSyntheticUserEmail(`oauth2-${identity.extUserId}`)
 
-    let user = this.db.getUserByExtId(targetOrg.id, identity.extUserId)
+    let user = await this.db.getUserByExtId(targetOrg.id, identity.extUserId)
 
     if (!user && !isSynthetic) {
       // Email-link guard: only link when the existing row has never been
@@ -768,14 +775,14 @@ export class AuthService {
       // the bootstrap admin@local from being pulled into an IdP org by an
       // accidental email collision, and protects manually-created password
       // users from silent IdP-takeover.
-      const byEmail = this.db.getUserByEmail(email)
+      const byEmail = await this.db.getUserByEmail(email)
       if (byEmail && byEmail.extUserId == null && !byEmail.localAuth) {
         const patch: { extUserId: string; orgId?: string } = {
           extUserId: identity.extUserId,
         }
         if (byEmail.orgId !== targetOrg.id) patch.orgId = targetOrg.id
-        this.db.updateUser(byEmail.id, patch)
-        user = this.db.getUserById(byEmail.id)
+        await this.db.updateUser(byEmail.id, patch)
+        user = await this.db.getUserById(byEmail.id)
       }
     }
 
@@ -804,13 +811,13 @@ export class AuthService {
         phone: null,
       }
       try {
-        this.db.createUser(newUser)
+        await this.db.createUser(newUser)
         user = newUser
       } catch (err) {
         // Race: concurrent login created the same user. Re-read.
         const msg = err instanceof Error ? err.message : String(err)
         if (/UNIQUE constraint failed: users\.org_id, users\.ext_user_id/i.test(msg)) {
-          user = this.db.getUserByExtId(targetOrg.id, identity.extUserId)
+          user = await this.db.getUserByExtId(targetOrg.id, identity.extUserId)
         }
         if (!user) throw err
       }
@@ -838,7 +845,7 @@ export class AuthService {
       // desired behaviour. Catches collisions with the global email UNIQUE.
       if (!isSynthetic && email !== user.email) {
         try {
-          this.db.updateUser(user.id, { ...profilePatch, email })
+          await this.db.updateUser(user.id, { ...profilePatch, email })
           user = { ...user, ...profilePatch, email }
         } catch (err) {
           // Email collision with another moss user: log-and-continue rather
@@ -846,7 +853,7 @@ export class AuthService {
           const msg = err instanceof Error ? err.message : String(err)
           if (/UNIQUE constraint failed: users\.email/i.test(msg)) {
             if (Object.keys(profilePatch).length > 0) {
-              this.db.updateUser(user.id, profilePatch)
+              await this.db.updateUser(user.id, profilePatch)
               user = { ...user, ...profilePatch }
             }
           } else {
@@ -854,7 +861,7 @@ export class AuthService {
           }
         }
       } else if (Object.keys(profilePatch).length > 0) {
-        this.db.updateUser(user.id, profilePatch)
+        await this.db.updateUser(user.id, profilePatch)
         user = { ...user, ...profilePatch }
       }
     }
@@ -862,14 +869,14 @@ export class AuthService {
     // ── 3. Department resolution ──────────────────────────────────────────
     let departmentId: string | null = null
     if (identity.extDeptId) {
-      const existingDept = this.db.getDepartmentByExtId(targetOrg.id, identity.extDeptId)
+      const existingDept = await this.db.getDepartmentByExtId(targetOrg.id, identity.extDeptId)
       const intendedName = identity.department?.trim() || `dept-${identity.extDeptId}`
       if (existingDept) {
         // IdP-authoritative rename. Don't renest (IdP path stays flat —
         // parent_id NULL). May create same-named siblings; acceptable since
         // by-extDeptId lookup runs first for IdP-managed depts.
         if (existingDept.name !== intendedName) {
-          this.db.updateDepartment(existingDept.id, { name: intendedName })
+          await this.db.updateDepartment(existingDept.id, { name: intendedName })
         }
         departmentId = existingDept.id
       } else {
@@ -885,13 +892,13 @@ export class AuthService {
           updatedAt: timestamp,
         }
         try {
-          this.db.createDepartment(dept)
+          await this.db.createDepartment(dept)
           departmentId = dept.id
         } catch (err) {
           // Race: concurrent login created the same dept. Re-read.
           const msg = err instanceof Error ? err.message : String(err)
           if (/UNIQUE constraint failed: departments\.org_id, departments\.ext_dept_id/i.test(msg)) {
-            const existing = this.db.getDepartmentByExtId(targetOrg.id, identity.extDeptId)
+            const existing = await this.db.getDepartmentByExtId(targetOrg.id, identity.extDeptId)
             if (existing) departmentId = existing.id
             else throw err
           } else {
@@ -900,11 +907,11 @@ export class AuthService {
         }
       }
     } else if (identity.department) {
-      departmentId = this.resolveOrCreateDepartment(targetOrg.id, identity.department).id
+      departmentId = (await this.resolveOrCreateDepartment(targetOrg.id, identity.department)).id
     }
 
     if (user.departmentId !== departmentId) {
-      this.db.updateUser(user.id, { departmentId })
+      await this.db.updateUser(user.id, { departmentId })
       user = { ...user, departmentId }
     }
 
@@ -926,9 +933,9 @@ export class AuthService {
    * admin createDepartment write path but is idempotent (no 409), since
    * OAuth2 login re-runs on every authentication.
    */
-  private resolveOrCreateDepartment(orgId: string, name: string): AuthCenterDepartment {
+  private async resolveOrCreateDepartment(orgId: string, name: string): Promise<AuthCenterDepartment> {
     const trimmed = name.trim()
-    const existing = this.findSiblingDepartment(orgId, null, trimmed)
+    const existing = await this.findSiblingDepartment(orgId, null, trimmed)
     if (existing) {
       return existing
     }
@@ -943,25 +950,25 @@ export class AuthService {
       createdAt: timestamp,
       updatedAt: timestamp,
     }
-    this.db.createDepartment(department)
+    await this.db.createDepartment(department)
     return department
   }
 
-  getMe(auth: AuthContext): {
+  async getMe(auth: AuthContext): Promise<{
     user: SanitizedAuthCenterUser | null
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
     role: string
     key_id: string
     isSuperAdmin: boolean
-  } {
+  }> {
     // Resolve the actor by id so a super_admin who has switched into a foreign
     // org still returns their own profile. `organization` reflects the
     // currently-selected org (auth.orgId), which is what the UI should show.
-    const actor = this.db.getUserById(auth.userId)
+    const actor = await this.db.getUserById(auth.userId)
     return {
       user: actor ? sanitizeUser(actor) : null,
-      organization: this.db.getOrganization(auth.orgId),
+      organization: await this.db.getOrganization(auth.orgId),
       scopes: auth.scopes,
       role: auth.role,
       key_id: auth.keyId,
@@ -975,7 +982,7 @@ export class AuthService {
    * org's resources. The actor identity (sub) and role/scopes are unchanged;
    * only org_id moves. Returns the same shape as a login response.
    */
-  switchOrg(auth: AuthContext, targetOrgId: string): {
+  async switchOrg(auth: AuthContext, targetOrgId: string): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -983,13 +990,13 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
-    const actor = this.requireAuthUser(auth)
+  }> {
+    const actor = await this.requireAuthUser(auth)
     if (!isSuperAdmin(actor.role)) {
       throw new AuthServiceError(403, 'Only a super admin can switch organization')
     }
     const orgId = targetOrgId.trim()
-    if (!orgId || !this.db.getOrganization(orgId)) {
+    if (!orgId || !(await this.db.getOrganization(orgId))) {
       throw new AuthServiceError(400, 'Unknown target organization')
     }
     return this.issueToken({
@@ -1000,24 +1007,24 @@ export class AuthService {
     })
   }
 
-  listUsers(
+  async listUsers(
     orgId: string,
     auth?: AuthContext,
-  ): {
+  ): Promise<{
     users: SanitizedAuthCenterUser[]
-  } {
+  }> {
     return {
-      users: this.listVisibleUsers(orgId, auth).map(user => sanitizeUser(user)),
+      users: (await this.listVisibleUsers(orgId, auth)).map(user => sanitizeUser(user)),
     }
   }
 
-  listDepartments(
+  async listDepartments(
     orgId: string,
     auth?: AuthContext,
-  ): {
+  ): Promise<{
     departments: SanitizedAuthCenterDepartment[]
-  } {
-    const userCountByDepartment = this.listVisibleUsers(orgId, auth).reduce(
+  }> {
+    const userCountByDepartment = (await this.listVisibleUsers(orgId, auth)).reduce(
       (counts, user) => {
         if (user.departmentId) {
           counts.set(user.departmentId, (counts.get(user.departmentId) ?? 0) + 1)
@@ -1027,8 +1034,8 @@ export class AuthService {
       new Map<string, number>(),
     )
 
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
-    const visibleDepartments = this.db.listDepartmentsByOrg(orgId).filter(department =>
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(orgId, auth)
+    const visibleDepartments = (await this.db.listDepartmentsByOrg(orgId)).filter(department =>
       visibleDepartmentIds === null ? true : visibleDepartmentIds.has(department.id),
     )
 
@@ -1046,27 +1053,28 @@ export class AuthService {
   // constraint to reject non-empty orgs (PRAGMA foreign_keys=ON in db.ts);
   // we translate that SQLite error into a clean 409 here.
 
-  listAllOrganizations(): {
+  async listAllOrganizations(): Promise<{
     organizations: Array<AuthCenterOrganization & {
       userCount: number
       departmentCount: number
     }>
-  } {
+  }> {
+    const orgs = await this.db.listOrganizations()
     return {
-      organizations: this.db.listOrganizations().map(org => ({
+      organizations: await Promise.all(orgs.map(async org => ({
         ...org,
-        userCount: this.db.countUsersByOrg(org.id),
-        departmentCount: this.db.countDepartmentsByOrg(org.id),
-      })),
+        userCount: await this.db.countUsersByOrg(org.id),
+        departmentCount: await this.db.countDepartmentsByOrg(org.id),
+      }))),
     }
   }
 
-  createOrganization(input: {
+  async createOrganization(input: {
     name: string
     extOrgId?: string | null
-  }): {
+  }): Promise<{
     organization: AuthCenterOrganization & { userCount: number; departmentCount: number }
-  } {
+  }> {
     const name = input.name.trim()
     const extOrgId = input.extOrgId?.trim() || null
     if (!name) {
@@ -1075,25 +1083,25 @@ export class AuthService {
     // Org name uniqueness has no SQL constraint (the column isn't unique),
     // so this check is the source of truth. extOrgId uniqueness is enforced
     // by the SQL partial UNIQUE (organizations_ext_uniq) — caught below.
-    if (this.db.getOrganizationByName(name)) {
+    if (await this.db.getOrganizationByName(name)) {
       throw new AuthServiceError(409, 'Organization name already exists')
     }
     const id = randomUUID()
     const createdAt = Date.now()
-    withExtIdConflict(() => this.db.createOrganization(id, name, createdAt, extOrgId))
+    await withExtIdConflict(() => this.db.createOrganization(id, name, createdAt, extOrgId))
     return {
       organization: { id, name, extOrgId, createdAt, userCount: 0, departmentCount: 0 },
     }
   }
 
-  updateOrganization(input: {
+  async updateOrganization(input: {
     orgId: string
     name?: string
     extOrgId?: string | null
-  }): {
+  }): Promise<{
     organization: AuthCenterOrganization & { userCount: number; departmentCount: number }
-  } {
-    const org = this.db.getOrganization(input.orgId)
+  }> {
+    const org = await this.db.getOrganization(input.orgId)
     if (!org) {
       throw new AuthServiceError(404, 'Unknown organization')
     }
@@ -1104,7 +1112,7 @@ export class AuthService {
         throw new AuthServiceError(400, 'Organization name cannot be empty')
       }
       if (name !== org.name) {
-        const conflict = this.db.getOrganizationByName(name)
+        const conflict = await this.db.getOrganizationByName(name)
         if (conflict && conflict.id !== org.id) {
           throw new AuthServiceError(409, 'Organization name already exists')
         }
@@ -1121,24 +1129,24 @@ export class AuthService {
     if (patch.name === undefined && patch.extOrgId === undefined) {
       throw new AuthServiceError(400, 'Missing organization update fields')
     }
-    withExtIdConflict(() => this.db.updateOrganization(org.id, patch))
-    const updated = this.db.getOrganization(org.id) ?? org
+    await withExtIdConflict(() => this.db.updateOrganization(org.id, patch))
+    const updated = (await this.db.getOrganization(org.id)) ?? org
     return {
       organization: {
         ...updated,
-        userCount: this.db.countUsersByOrg(updated.id),
-        departmentCount: this.db.countDepartmentsByOrg(updated.id),
+        userCount: await this.db.countUsersByOrg(updated.id),
+        departmentCount: await this.db.countDepartmentsByOrg(updated.id),
       },
     }
   }
 
-  deleteOrganization(input: { orgId: string }): { ok: true } {
-    const org = this.db.getOrganization(input.orgId)
+  async deleteOrganization(input: { orgId: string }): Promise<{ ok: true }> {
+    const org = await this.db.getOrganization(input.orgId)
     if (!org) {
       throw new AuthServiceError(404, 'Unknown organization')
     }
     try {
-      this.db.deleteOrganization(org.id)
+      await this.db.deleteOrganization(org.id)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (/FOREIGN KEY constraint failed/i.test(msg)) {
@@ -1190,12 +1198,12 @@ export class AuthService {
     }
   }
 
-  getUserOrNull(
+  async getUserOrNull(
     userId: string,
     orgId: string,
     auth?: AuthContext,
-  ): SanitizedAuthCenterUser | null {
-    const user = this.getUserPinnedOrSuperAdmin(userId, orgId)
+  ): Promise<SanitizedAuthCenterUser | null> {
+    const user = await this.getUserPinnedOrSuperAdmin(userId, orgId)
     if (!user) {
       return null
     }
@@ -1205,23 +1213,43 @@ export class AuthService {
     return sanitizeUser(user)
   }
 
-  private getUserPinnedOrSuperAdmin(userId: string, orgId: string): AuthCenterUser | null {
+  private getUserPinnedOrSuperAdmin(userId: string, orgId: string): Promise<AuthCenterUser | null> {
     return resolveUserPinnedOrSuperAdmin(userId, orgId, this.db)
   }
 
   /** Get user status by userId only (no orgId or permission check). Used by userStatusCache. */
-  getUserById(userId: string): { status: string; departmentId: string | null; role: string } | null {
-    const user = this.db.getUserById(userId)
+  async getUserById(userId: string): Promise<{ status: string; departmentId: string | null; role: string } | null> {
+    const user = await this.db.getUserById(userId)
     if (!user) return null
     return { status: user.status || 'active', departmentId: user.departmentId ?? null, role: user.role }
   }
 
-  getUserName(userId: string): string | undefined {
-    const user = this.db.getUserById(userId)
+  /**
+   * Short-lived token for server-internal session channels (HA): minted for
+   * the session's OWN user/org so the regular upgrade auth chain applies
+   * unchanged (verifyAccessToken + isUserActive + canAccessSession — the
+   * "self" branch). No new auth surface, no standing privileged identity; the
+   * attach scope is belt-and-braces on top of the self-ownership check.
+   */
+  async issueInternalChannelToken(userId: string, orgId: string): Promise<{ access_token: string } | null> {
+    const user = await this.db.getUserById(userId)
+    if (!user || user.status !== 'active') return null
+    const issued = await this.issueToken({
+      user,
+      scopes: ['sessions:attach:any'],
+      keyId: 'internal-channel',
+      accessTtlSec: 120,
+      orgIdOverride: orgId,
+    })
+    return issued ? { access_token: issued.access_token } : null
+  }
+
+  async getUserName(userId: string): Promise<string | undefined> {
+    const user = await this.db.getUserById(userId)
     return user ? resolveDisplayName(user) : undefined
   }
 
-  findOrganizationByName(name: string): AuthCenterOrganization | null {
+  async findOrganizationByName(name: string): Promise<AuthCenterOrganization | null> {
     return this.db.getOrganizationByName(name)
   }
 
@@ -1232,28 +1260,28 @@ export class AuthService {
   get creditApplications(): CreditApplicationStore {
     const db = this.db
     return {
-      create(input) {
-        return db.createCreditApplication({
+      async create(input) {
+        return (await db.createCreditApplication({
           applicationNo: newApplicationNo(),
           userId: input.userId,
           orgId: input.orgId,
           requestedPoints: input.requestedPoints,
           reason: input.reason,
           createdAt: Date.now(),
-        }) as CreditApplication
+        })) as CreditApplication
       },
-      listForUser(userId, page, pageSize) {
-        const result = db.listCreditApplicationsForUser(userId, pageSize, (page - 1) * pageSize)
+      async listForUser(userId, page, pageSize) {
+        const result = await db.listCreditApplicationsForUser(userId, pageSize, (page - 1) * pageSize)
         return { list: result.list as CreditApplication[], total: result.total }
       },
-      getById(id) {
-        return db.getCreditApplication(id) as CreditApplication | null
+      async getById(id) {
+        return (await db.getCreditApplication(id)) as CreditApplication | null
       },
-      hasPending(userId) {
+      async hasPending(userId) {
         return db.hasPendingCreditApplication(userId)
       },
-      updateStatus(id, patch) {
-        db.updateCreditApplicationStatus(id, patch)
+      async updateStatus(id, patch) {
+        await db.updateCreditApplicationStatus(id, patch)
       },
     }
   }
@@ -1267,30 +1295,36 @@ export class AuthService {
    * no nesting here, so an active transaction means the caller is already inside
    * one and owns the outcome.
    */
-  runInTransaction(work: () => void, options: { rollback?: boolean } = {}): void {
-    this.db.db.exec('BEGIN TRANSACTION')
+  async runInTransaction(work: () => Promise<void>, options: { rollback?: boolean } = {}): Promise<void> {
+    // Rollback-on-success (import rehearsal) is expressed by throwing a private
+    // sentinel after `work()`: the driver's transaction commits on normal return
+    // and rolls back on throw, so the sentinel forces the rollback we then
+    // swallow. Any real error propagates unchanged (and also rolls back).
+    const rollbackSentinel = Symbol('runInTransaction.rollback')
     try {
-      work()
+      await this.db.driver.transaction(async () => {
+        await work()
+        if (options.rollback) throw rollbackSentinel
+      })
     } catch (error) {
-      this.db.db.exec('ROLLBACK')
+      if (error === rollbackSentinel) return
       throw error
     }
-    this.db.db.exec(options.rollback ? 'ROLLBACK' : 'COMMIT')
   }
 
   /**
    * The user's own model-gateway token, or null when the shared server key
    * applies. Returns the secret, so it has exactly one caller: session spawn.
    */
-  getUserModelCredential(userId: string): UserModelCredential | null {
+  async getUserModelCredential(userId: string): Promise<UserModelCredential | null> {
     return this.db.getUserModelCredential(userId)
   }
 
-  setUserModelCredential(userId: string, credential: UserModelCredential): void {
-    this.db.setUserModelCredential(userId, credential)
+  async setUserModelCredential(userId: string, credential: UserModelCredential): Promise<void> {
+    await this.db.setUserModelCredential(userId, credential)
   }
 
-  createUser(input: {
+  async createUser(input: {
     orgId: string
     email?: string
     name: string
@@ -1299,9 +1333,9 @@ export class AuthService {
     role: string
     password: string
     extUserId?: string | null
-  }, auth?: AuthContext): {
+  }, auth?: AuthContext): Promise<{
     user: SanitizedAuthCenterUser
-  } {
+  }> {
     const email = input.email?.trim() || ''
     const name = input.name.trim()
     const displayName = input.displayName?.trim() || null
@@ -1317,12 +1351,12 @@ export class AuthService {
     if (role === 'dept_admin' && !departmentId) {
       throw new AuthServiceError(400, 'Department admin must be assigned to a department')
     }
-    if (departmentId && !this.db.getDepartmentByIdAndOrg(departmentId, input.orgId)) {
+    if (departmentId && !(await this.db.getDepartmentByIdAndOrg(departmentId, input.orgId))) {
       throw new AuthServiceError(400, 'Unknown department_id')
     }
     // Only a super_admin may create a super_admin (req 5).
-    this.assertCanManageSuperAdminTarget(null, role, auth)
-    this.assertCanManageUserMutation(
+    await this.assertCanManageSuperAdminTarget(null, role, auth)
+    await this.assertCanManageUserMutation(
       input.orgId,
       {
         role,
@@ -1332,12 +1366,12 @@ export class AuthService {
     )
 
     if (email) {
-      const existingUser = this.db.getUserByEmail(email)
+      const existingUser = await this.db.getUserByEmail(email)
       if (existingUser) {
         throw new AuthServiceError(409, 'User email already exists')
       }
     }
-    if (this.db.listUsersByName(name).length > 0) {
+    if ((await this.db.listUsersByName(name)).length > 0) {
       throw new AuthServiceError(409, 'Username already exists')
     }
     // extUserId uniqueness is enforced by the partial UNIQUE
@@ -1363,11 +1397,11 @@ export class AuthService {
       extUserId,
       phone: null,
     }
-    withExtIdConflict(() => this.db.createUser(user))
+    await withExtIdConflict(() => this.db.createUser(user))
     return { user: sanitizeUser(user) }
   }
 
-  updateUser(input: {
+  async updateUser(input: {
     orgId: string
     userId: string
     name?: string
@@ -1377,10 +1411,10 @@ export class AuthService {
     status?: string
     targetOrgId?: string
     extUserId?: string | null
-  }, auth?: AuthContext): {
+  }, auth?: AuthContext): Promise<{
     user: SanitizedAuthCenterUser
-  } {
-    const user = this.db.getUserByIdAndOrg(input.userId, input.orgId)
+  }> {
+    const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
@@ -1399,8 +1433,8 @@ export class AuthService {
       if (!name) {
         throw new AuthServiceError(400, 'Name cannot be empty')
       }
-      const conflictingUsers = this.db
-        .listUsersByName(name)
+      const conflictingUsers = (await this.db
+        .listUsersByName(name))
         .filter(existingUser => existingUser.id !== user.id)
       if (conflictingUsers.length > 0) {
         throw new AuthServiceError(409, 'Username already exists')
@@ -1434,7 +1468,7 @@ export class AuthService {
       const departmentId = input.departmentId?.trim() || null
       if (
         departmentId &&
-        !this.db.getDepartmentByIdAndOrg(departmentId, nextOrgId)
+        !(await this.db.getDepartmentByIdAndOrg(departmentId, nextOrgId))
       ) {
         throw new AuthServiceError(400, 'Unknown department_id for target organization')
       }
@@ -1461,9 +1495,9 @@ export class AuthService {
     // Only a super_admin may edit an existing super_admin or set a target's
     // role to super_admin (req 5). Runs before the generic mutation check so a
     // normal admin can't promote/demote/alter super admins.
-    this.assertCanManageSuperAdminTarget(user.role, nextRole, auth)
-    this.assertCanManageExistingUser(user, auth)
-    this.assertCanManageUserMutation(
+    await this.assertCanManageSuperAdminTarget(user.role, nextRole, auth)
+    await this.assertCanManageExistingUser(user, auth)
+    await this.assertCanManageUserMutation(
       nextOrgId,
       {
         role: nextRole,
@@ -1483,69 +1517,69 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing user update fields')
     }
 
-    withExtIdConflict(() => this.db.updateUser(user.id, patch))
+    await withExtIdConflict(() => this.db.updateUser(user.id, patch))
     return {
-      user: sanitizeUser(this.db.getUserByIdAndOrg(user.id, nextOrgId) ?? user),
+      user: sanitizeUser((await this.db.getUserByIdAndOrg(user.id, nextOrgId)) ?? user),
     }
   }
 
-  setUserTokenLimit(input: {
+  async setUserTokenLimit(input: {
     orgId: string
     userId: string
     tokenLimit: number | null
-  }, auth?: AuthContext): { ok: true } {
-    const user = this.db.getUserByIdAndOrg(input.userId, input.orgId)
+  }, auth?: AuthContext): Promise<{ ok: true }> {
+    const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
-    this.assertCanManageExistingUser(user, auth)
-    this.db.setUserTokenLimit(input.userId, input.tokenLimit)
+    await this.assertCanManageExistingUser(user, auth)
+    await this.db.setUserTokenLimit(input.userId, input.tokenLimit)
     return { ok: true }
   }
 
-  setLocalAuth(input: {
+  async setLocalAuth(input: {
     orgId: string
     userId: string
     localAuth: boolean
-  }, auth: AuthContext): { ok: true; local_auth: boolean } {
-    const user = this.db.getUserByIdAndOrg(input.userId, input.orgId)
+  }, auth: AuthContext): Promise<{ ok: true; local_auth: boolean }> {
+    const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
-    this.assertCanManageExistingUser(user, auth)
-    this.db.setLocalAuth(input.userId, input.localAuth)
+    await this.assertCanManageExistingUser(user, auth)
+    await this.db.setLocalAuth(input.userId, input.localAuth)
     return { ok: true, local_auth: input.localAuth }
   }
 
-  setDepartmentTokenLimit(input: {
+  async setDepartmentTokenLimit(input: {
     orgId: string
     departmentId: string
     tokenLimit: number | null
-  }, auth?: AuthContext): { ok: true } {
-    const department = this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
+  }, auth?: AuthContext): Promise<{ ok: true }> {
+    const department = await this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
-    this.assertCanManageDepartment(input.orgId, department.id, auth)
-    this.db.setDepartmentTokenLimit(input.departmentId, input.tokenLimit)
+    await this.assertCanManageDepartment(input.orgId, department.id, auth)
+    await this.db.setDepartmentTokenLimit(input.departmentId, input.tokenLimit)
     return { ok: true }
   }
 
-  setUserPassword(input: {
+  async setUserPassword(input: {
     orgId: string
     userId: string
     password: string
-  }, auth?: AuthContext): { ok: true } {
-    const user = this.db.getUserByIdAndOrg(input.userId, input.orgId)
+  }, auth?: AuthContext): Promise<{ ok: true }> {
+    const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
     if (!input.password) {
       throw new AuthServiceError(400, 'Missing password')
     }
-    this.assertCanManageExistingUser(user, auth)
+    await this.assertCanManageExistingUser(user, auth)
 
-    this.db.updateUserPassword(
+    await this.db.updateUserPassword(
       input.userId,
       hashPassword(input.password),
       Date.now(),
@@ -1553,35 +1587,35 @@ export class AuthService {
     return { ok: true }
   }
 
-  listApiKeys(
+  async listApiKeys(
     orgId: string,
     auth?: AuthContext,
-  ): {
+  ): Promise<{
     api_keys: Array<Omit<AuthCenterApiKey, 'secretHash'>>
-  } {
-    const visibleUserIds = new Set(this.listVisibleUsers(orgId, auth).map(user => user.id))
+  }> {
+    const visibleUserIds = new Set((await this.listVisibleUsers(orgId, auth)).map(user => user.id))
     return {
-      api_keys: this.db
-        .listApiKeysByOrg(orgId)
+      api_keys: (await this.db
+        .listApiKeysByOrg(orgId))
         .filter(apiKey => visibleUserIds.has(apiKey.userId))
         .map(apiKey => sanitizeApiKey(apiKey)),
     }
   }
 
-  createApiKey(input: {
+  async createApiKey(input: {
     orgId: string
     userId: string
     name: string
     scopes: string[]
-  }, auth?: AuthContext): {
+  }, auth?: AuthContext): Promise<{
     api_key: Omit<AuthCenterApiKey, 'secretHash'>
     plain_text_key: string
-  } {
-    const user = this.db.getUserByIdAndOrg(input.userId, input.orgId)
+  }> {
+    const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
-    this.assertCanManageExistingUser(user, auth)
+    await this.assertCanManageExistingUser(user, auth)
 
     const name = input.name.trim()
     const scopes = input.scopes
@@ -1591,7 +1625,7 @@ export class AuthService {
     if (!name || scopes.length === 0) {
       throw new AuthServiceError(400, 'Missing name or scopes')
     }
-    this.assertCanManageApiKeyScopes(scopes, auth)
+    await this.assertCanManageApiKeyScopes(scopes, auth)
 
     const created = createApiKeyRecord({
       orgId: input.orgId,
@@ -1599,39 +1633,39 @@ export class AuthService {
       name,
       scopes,
     })
-    this.db.createApiKey(created.apiKey)
+    await this.db.createApiKey(created.apiKey)
     return {
       api_key: sanitizeApiKey(created.apiKey),
       plain_text_key: created.plainTextKey,
     }
   }
 
-  revokeApiKey(input: {
+  async revokeApiKey(input: {
     orgId: string
     keyId: string
-  }, auth?: AuthContext): { ok: true } {
-    const apiKey = this.db.getApiKeyById(input.keyId)
+  }, auth?: AuthContext): Promise<{ ok: true }> {
+    const apiKey = await this.db.getApiKeyById(input.keyId)
     if (!apiKey || apiKey.orgId !== input.orgId) {
       throw new AuthServiceError(404, 'Unknown key_id')
     }
-    const user = this.db.getUserByIdAndOrg(apiKey.userId, input.orgId)
+    const user = await this.db.getUserByIdAndOrg(apiKey.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
-    this.assertCanManageExistingUser(user, auth)
+    await this.assertCanManageExistingUser(user, auth)
 
-    this.db.revokeApiKey(apiKey.id)
+    await this.db.revokeApiKey(apiKey.id)
     return { ok: true }
   }
 
-  createDepartment(input: {
+  async createDepartment(input: {
     orgId: string
     name: string
     parentId?: string | null
     extDeptId?: string | null
-  }, auth?: AuthContext): {
+  }, auth?: AuthContext): Promise<{
     department: SanitizedAuthCenterDepartment
-  } {
+  }> {
     const name = input.name.trim()
     const parentId = input.parentId?.trim() || null
     const extDeptId = input.extDeptId?.trim() || null
@@ -1639,14 +1673,14 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing department name')
     }
 
-    if (parentId && !this.db.getDepartmentByIdAndOrg(parentId, input.orgId)) {
+    if (parentId && !(await this.db.getDepartmentByIdAndOrg(parentId, input.orgId))) {
       throw new AuthServiceError(400, 'Unknown parent department')
     }
     // A dept_admin may only create sub-departments under a department they
     // manage; creating a top-level department (parentId null) is admin-only.
-    this.assertCanManageDepartment(input.orgId, parentId, auth)
+    await this.assertCanManageDepartment(input.orgId, parentId, auth)
 
-    const existingSibling = this.findSiblingDepartment(input.orgId, parentId, name)
+    const existingSibling = await this.findSiblingDepartment(input.orgId, parentId, name)
     if (existingSibling) {
       throw new AuthServiceError(409, 'Department name already exists under the same parent')
     }
@@ -1664,7 +1698,7 @@ export class AuthService {
       updatedAt: timestamp,
     }
 
-    withExtIdConflict(() => this.db.createDepartment(department))
+    await withExtIdConflict(() => this.db.createDepartment(department))
     return {
       department: {
         ...department,
@@ -1673,21 +1707,21 @@ export class AuthService {
     }
   }
 
-  updateDepartment(input: {
+  async updateDepartment(input: {
     orgId: string
     departmentId: string
     name?: string
     parentId?: string | null
     extDeptId?: string | null
-  }, auth?: AuthContext): {
+  }, auth?: AuthContext): Promise<{
     department: SanitizedAuthCenterDepartment
-  } {
-    const department = this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
+  }> {
+    const department = await this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
     // Must manage the target department...
-    this.assertCanManageDepartment(input.orgId, department.id, auth)
+    await this.assertCanManageDepartment(input.orgId, department.id, auth)
 
     const patch: {
       name?: string
@@ -1708,15 +1742,15 @@ export class AuthService {
       if (parentId === department.id) {
         throw new AuthServiceError(400, 'Department cannot be its own parent')
       }
-      if (parentId && !this.db.getDepartmentByIdAndOrg(parentId, input.orgId)) {
+      if (parentId && !(await this.db.getDepartmentByIdAndOrg(parentId, input.orgId))) {
         throw new AuthServiceError(400, 'Unknown parent department')
       }
-      if (parentId && this.isDepartmentDescendant(input.orgId, department.id, parentId)) {
+      if (parentId && (await this.isDepartmentDescendant(input.orgId, department.id, parentId))) {
         throw new AuthServiceError(400, 'Department cannot be moved under its descendant')
       }
       // ...and the new parent must also be within the actor's managed scope
       // (moving to org-root, parentId null, is admin-only).
-      this.assertCanManageDepartment(input.orgId, parentId, auth)
+      await this.assertCanManageDepartment(input.orgId, parentId, auth)
       patch.parentId = parentId
     }
 
@@ -1728,7 +1762,7 @@ export class AuthService {
     const nextName = patch.name ?? department.name
     const nextParentId =
       patch.parentId === undefined ? department.parentId : patch.parentId
-    const sibling = this.findSiblingDepartment(input.orgId, nextParentId, nextName)
+    const sibling = await this.findSiblingDepartment(input.orgId, nextParentId, nextName)
     if (sibling && sibling.id !== department.id) {
       throw new AuthServiceError(409, 'Department name already exists under the same parent')
     }
@@ -1737,41 +1771,41 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing department update fields')
     }
 
-    withExtIdConflict(() => this.db.updateDepartment(department.id, patch))
-    const updatedDepartment = this.db.getDepartmentByIdAndOrg(department.id, input.orgId) ?? department
+    await withExtIdConflict(() => this.db.updateDepartment(department.id, patch))
+    const updatedDepartment = (await this.db.getDepartmentByIdAndOrg(department.id, input.orgId)) ?? department
     return {
       department: {
         ...updatedDepartment,
-        userCount: this.countUsersForDepartment(input.orgId, updatedDepartment.id),
+        userCount: await this.countUsersForDepartment(input.orgId, updatedDepartment.id),
       },
     }
   }
 
-  deleteDepartment(input: {
+  async deleteDepartment(input: {
     orgId: string
     departmentId: string
-  }, auth?: AuthContext): { ok: true } {
-    const department = this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
+  }, auth?: AuthContext): Promise<{ ok: true }> {
+    const department = await this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
-    this.assertCanManageDepartment(input.orgId, department.id, auth)
+    await this.assertCanManageDepartment(input.orgId, department.id, auth)
 
-    const hasChildren = this.db
-      .listDepartmentsByOrg(input.orgId)
+    const hasChildren = (await this.db
+      .listDepartmentsByOrg(input.orgId))
       .some(item => item.parentId === department.id)
     if (hasChildren) {
       throw new AuthServiceError(409, 'Department has child departments')
     }
 
-    const hasUsers = this.db
-      .listUsersByOrg(input.orgId)
+    const hasUsers = (await this.db
+      .listUsersByOrg(input.orgId))
       .some(user => user.departmentId === department.id)
     if (hasUsers) {
       throw new AuthServiceError(409, 'Department still has assigned users')
     }
 
-    this.db.deleteDepartment(department.id)
+    await this.db.deleteDepartment(department.id)
     return { ok: true }
   }
 
@@ -1800,8 +1834,8 @@ export class AuthService {
    * organization-management endpoints (list/create/update/delete orgs), which
    * are inherently cross-org and must not be reachable by a normal admin.
    */
-  requireSuperAdmin(auth: AuthContext): void {
-    const actor = this.requireAuthUser(auth)
+  async requireSuperAdmin(auth: AuthContext): Promise<void> {
+    const actor = await this.requireAuthUser(auth)
     if (!isSuperAdmin(actor.role)) {
       throw new AuthServiceError(403, 'Only a super admin can manage organizations')
     }
@@ -1812,11 +1846,11 @@ export class AuthService {
    * (e.g. secret-policy routes in server.ts). admin/super_admin: unrestricted
    * in-org; dept_admin: only their subtree; throws otherwise.
    */
-  requireDepartmentInScope(orgId: string, departmentId: string, auth: AuthContext): void {
-    this.assertCanManageDepartment(orgId, departmentId, auth)
+  async requireDepartmentInScope(orgId: string, departmentId: string, auth: AuthContext): Promise<void> {
+    await this.assertCanManageDepartment(orgId, departmentId, auth)
   }
 
-  private issueToken(input: {
+  private async issueToken(input: {
     user: AuthCenterUser
     scopes: string[]
     keyId: string
@@ -1827,7 +1861,7 @@ export class AuthService {
      *  Used by switchOrg so a super_admin can scope every org-scoped endpoint
      *  to a different org while remaining themselves. */
     orgIdOverride?: string
-  }): {
+  }): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -1835,7 +1869,7 @@ export class AuthService {
     user: SanitizedAuthCenterUser
     organization: { id: string; name: string; createdAt: number } | null
     scopes: string[]
-  } {
+  }> {
     const orgId = input.orgIdOverride ?? input.user.orgId
     const access = issueAccessToken(
       {
@@ -1879,7 +1913,7 @@ export class AuthService {
         name: resolveDisplayName(input.user),
         displayName: input.user.displayName ?? null,
       },
-      organization: this.db.getOrganization(orgId),
+      organization: await this.db.getOrganization(orgId),
       scopes: input.scopes,
     }
   }
@@ -1916,8 +1950,8 @@ export class AuthService {
     })
   }
 
-  private getUniqueUserByName(name: string): AuthCenterUser | null {
-    const users = this.db.listUsersByName(name)
+  private async getUniqueUserByName(name: string): Promise<AuthCenterUser | null> {
+    const users = await this.db.listUsersByName(name)
     if (users.length > 1) {
       throw new AuthServiceError(
         409,
@@ -1927,32 +1961,32 @@ export class AuthService {
     return users[0] ?? null
   }
 
-  private countUsersForDepartment(orgId: string, departmentId: string): number {
-    return this.db
-      .listUsersByOrg(orgId)
+  private async countUsersForDepartment(orgId: string, departmentId: string): Promise<number> {
+    return (await this.db
+      .listUsersByOrg(orgId))
       .filter(user => user.departmentId === departmentId)
       .length
   }
 
-  private findSiblingDepartment(
+  private async findSiblingDepartment(
     orgId: string,
     parentId: string | null,
     name: string,
-  ): AuthCenterDepartment | null {
+  ): Promise<AuthCenterDepartment | null> {
     return (
-      this.db
-        .listDepartmentsByOrg(orgId)
+      (await this.db
+        .listDepartmentsByOrg(orgId))
         .find(department => department.parentId === parentId && department.name === name) ??
       null
     )
   }
 
-  private isDepartmentDescendant(
+  private async isDepartmentDescendant(
     orgId: string,
     departmentId: string,
     candidateParentId: string,
-  ): boolean {
-    const departments = this.db.listDepartmentsByOrg(orgId)
+  ): Promise<boolean> {
+    const departments = await this.db.listDepartmentsByOrg(orgId)
     const byId = new Map(departments.map(department => [department.id, department]))
     let current = byId.get(candidateParentId) ?? null
 
@@ -1966,16 +2000,16 @@ export class AuthService {
     return false
   }
 
-  private listVisibleUsers(
+  private async listVisibleUsers(
     orgId: string,
     auth?: AuthContext,
-  ): AuthCenterUser[] {
-    const users = this.db.listUsersByOrg(orgId)
+  ): Promise<AuthCenterUser[]> {
+    const users = await this.db.listUsersByOrg(orgId)
     if (!auth) {
       return users
     }
 
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(orgId, auth)
     if (visibleDepartmentIds === null) {
       return users
     }
@@ -1990,15 +2024,15 @@ export class AuthService {
     )
   }
 
-  private getVisibleDepartmentIds(
+  private async getVisibleDepartmentIds(
     orgId: string,
     auth?: AuthContext,
-  ): Set<string> | null {
+  ): Promise<Set<string> | null> {
     if (!auth) {
       return null
     }
 
-    const actor = this.requireAuthUser(auth)
+    const actor = await this.requireAuthUser(auth)
     if (ADMIN_ROLES.has(actor.role)) {
       return null
     }
@@ -2007,7 +2041,7 @@ export class AuthService {
     }
 
     const childrenByParent = new Map<string | null, AuthCenterDepartment[]>()
-    for (const department of this.db.listDepartmentsByOrg(orgId)) {
+    for (const department of await this.db.listDepartmentsByOrg(orgId)) {
       const bucket = childrenByParent.get(department.parentId) ?? []
       bucket.push(department)
       childrenByParent.set(department.parentId, bucket)
@@ -2042,13 +2076,13 @@ export class AuthService {
    * (Phase D). The actor's own id is always included so a dept_admin sees their
    * own actions even though they are not a `user`-role account.
    */
-  listSubtreeUserIds(orgId: string, auth: AuthContext): Set<string> | null {
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+  async listSubtreeUserIds(orgId: string, auth: AuthContext): Promise<Set<string> | null> {
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(orgId, auth)
     if (visibleDepartmentIds === null) {
       return null // admin / super_admin: unrestricted
     }
     const ids = new Set<string>([auth.userId])
-    for (const user of this.db.listUsersByOrg(orgId)) {
+    for (const user of await this.db.listUsersByOrg(orgId)) {
       if (
         (user.role === 'user' || user.role === 'dept_admin') &&
         user.departmentId !== null &&
@@ -2069,19 +2103,19 @@ export class AuthService {
    * - dept_admin → the creator's current department is in the actor's subtree.
    * - user (or any other non-admin) → only their own resources.
    */
-  isCreatorInScope(orgId: string, creatorUserId: string, auth: AuthContext): boolean {
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+  async isCreatorInScope(orgId: string, creatorUserId: string, auth: AuthContext): Promise<boolean> {
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(orgId, auth)
     if (visibleDepartmentIds === null) {
       return true // admin / super_admin
     }
     if (creatorUserId === auth.userId) {
       return true // own resource — always manageable
     }
-    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, orgId)
+    const actor = await this.getUserPinnedOrSuperAdmin(auth.userId, orgId)
     if (actor?.role !== 'dept_admin') {
       return false // plain user: self only (handled above)
     }
-    const creator = this.db.getUserByIdAndOrg(creatorUserId, orgId)
+    const creator = await this.db.getUserByIdAndOrg(creatorUserId, orgId)
     return !!creator?.departmentId && visibleDepartmentIds.has(creator.departmentId)
   }
 
@@ -2092,8 +2126,8 @@ export class AuthService {
    * caller applies this at publish time so the value survives approval instead
    * of being reset to global.
    */
-  defaultTenantVisibility(auth: AuthContext): VisibleTo {
-    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+  async defaultTenantVisibility(auth: AuthContext): Promise<VisibleTo> {
+    const actor = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!actor || ADMIN_ROLES.has(actor.role)) {
       return null
     }
@@ -2116,8 +2150,8 @@ export class AuthService {
    * out-of-scope entries it can't see; this is the server-side guard so a
    * hand-crafted request can't widen visibility beyond the caller's scope.
    */
-  clampVisibleToScope(auth: AuthContext, requested: VisibleTo): VisibleTo {
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(auth.orgId, auth)
+  async clampVisibleToScope(auth: AuthContext, requested: VisibleTo): Promise<VisibleTo> {
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(auth.orgId, auth)
     if (visibleDepartmentIds === null) {
       return requested // admin / super_admin: unrestricted
     }
@@ -2137,7 +2171,7 @@ export class AuthService {
       return { department_ids: inScope, user_ids: null }
     }
     if (requested.user_ids?.length) {
-      const subtreeUserIds = this.listSubtreeUserIds(auth.orgId, auth) ?? new Set<string>([auth.userId])
+      const subtreeUserIds = (await this.listSubtreeUserIds(auth.orgId, auth)) ?? new Set<string>([auth.userId])
       const inScope = requested.user_ids.filter(id => subtreeUserIds.has(id))
       if (inScope.length === 0) {
         return this.defaultTenantVisibility(auth)
@@ -2148,33 +2182,33 @@ export class AuthService {
   }
 
   /** True when the actor is a dept_admin (not a full admin, not a plain user). */
-  isDeptAdmin(auth: AuthContext): boolean {
-    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+  async isDeptAdmin(auth: AuthContext): Promise<boolean> {
+    const actor = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     return actor?.role === 'dept_admin'
   }
 
-  private requireAuthUser(auth: AuthContext): AuthCenterUser {
+  private async requireAuthUser(auth: AuthContext): Promise<AuthCenterUser> {
     // Resolve the actor with the shared rule: pinned to their org, except a
     // super_admin who has switched their effective org resolves regardless of
     // org (auth.orgId points at a foreign org, so their record won't be found
     // via getUserByIdAndOrg). A null result means either no such user in this
     // org or a non-super_admin acting cross-org — both barred here.
-    const user = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+    const user = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(403, 'Current user is not allowed to manage users')
     }
     return user
   }
 
-  private canViewUser(
+  private async canViewUser(
     user: AuthCenterUser,
     auth?: AuthContext,
-  ): boolean {
+  ): Promise<boolean> {
     if (!auth) {
       return true
     }
 
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(user.orgId, auth)
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(user.orgId, auth)
     if (visibleDepartmentIds === null) {
       return true
     }
@@ -2186,11 +2220,11 @@ export class AuthService {
     )
   }
 
-  private assertCanManageExistingUser(
+  private async assertCanManageExistingUser(
     user: AuthCenterUser,
     auth?: AuthContext,
-  ): void {
-    if (!this.canViewUser(user, auth)) {
+  ): Promise<void> {
+    if (!(await this.canViewUser(user, auth))) {
       throw new AuthServiceError(403, 'You cannot manage this user')
     }
   }
@@ -2203,15 +2237,15 @@ export class AuthService {
    * `departmentId` null means "no specific department" (e.g. creating a
    * top-level department) — only admins may target the org root.
    */
-  private assertCanManageDepartment(
+  private async assertCanManageDepartment(
     orgId: string,
     departmentId: string | null,
     auth?: AuthContext,
-  ): void {
+  ): Promise<void> {
     if (!auth) {
       return
     }
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(orgId, auth)
     if (visibleDepartmentIds === null) {
       return // admin / super_admin
     }
@@ -2222,24 +2256,24 @@ export class AuthService {
     }
   }
 
-  private assertCanManageUserMutation(
+  private async assertCanManageUserMutation(
     orgId: string,
     input: {
       role: string
       departmentId: string | null
     },
     auth?: AuthContext,
-  ): void {
+  ): Promise<void> {
     if (!auth) {
       return
     }
 
-    const actor = this.requireAuthUser(auth)
+    const actor = await this.requireAuthUser(auth)
     if (ADMIN_ROLES.has(actor.role)) {
       return
     }
 
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(orgId, auth)
+    const visibleDepartmentIds = await this.getVisibleDepartmentIds(orgId, auth)
     if (input.role !== 'user') {
       throw new AuthServiceError(403, 'Department admin can only manage user role accounts')
     }
@@ -2260,32 +2294,32 @@ export class AuthService {
    * normal admin from promoting anyone (including themselves) to super_admin,
    * and from demoting/altering an existing super_admin.
    */
-  private assertCanManageSuperAdminTarget(
+  private async assertCanManageSuperAdminTarget(
     currentRole: string | null,
     nextRole: string,
     auth?: AuthContext,
-  ): void {
+  ): Promise<void> {
     if (!auth) {
       return
     }
     if (currentRole !== 'super_admin' && nextRole !== 'super_admin') {
       return
     }
-    const actor = this.requireAuthUser(auth)
+    const actor = await this.requireAuthUser(auth)
     if (!isSuperAdmin(actor.role)) {
       throw new AuthServiceError(403, 'Only a super admin can manage super admin accounts')
     }
   }
 
-  private assertCanManageApiKeyScopes(
+  private async assertCanManageApiKeyScopes(
     scopes: string[],
     auth?: AuthContext,
-  ): void {
+  ): Promise<void> {
     if (!auth) {
       return
     }
 
-    const actor = this.requireAuthUser(auth)
+    const actor = await this.requireAuthUser(auth)
     if (ADMIN_ROLES.has(actor.role)) {
       return
     }
@@ -2299,15 +2333,15 @@ export class AuthService {
     }
   }
 
-  getTokenLimits(userId: string, orgId: string): { userLimit: number | null; departmentLimit: number | null } {
-    const user = this.db.getUserByIdAndOrg(userId, orgId)
+  async getTokenLimits(userId: string, orgId: string): Promise<{ userLimit: number | null; departmentLimit: number | null }> {
+    const user = await this.db.getUserByIdAndOrg(userId, orgId)
     if (!user) {
       return { userLimit: null, departmentLimit: null }
     }
 
     let departmentLimit: number | null = null
     if (user.departmentId) {
-      const dept = this.db.getDepartmentByIdAndOrg(user.departmentId, orgId)
+      const dept = await this.db.getDepartmentByIdAndOrg(user.departmentId, orgId)
       departmentLimit = dept?.tokenLimit ?? null
     }
 
@@ -2317,7 +2351,7 @@ export class AuthService {
     }
   }
 
-  buildVisibilityFilter(auth: AuthContext): import('../visibilityFilter.js').VisibilityFilter {
+  buildVisibilityFilter(auth: AuthContext): Promise<import('../visibilityFilter.js').VisibilityFilter> {
     return buildVisibilityFilter(
       auth,
       (userId, orgId) => this.db.getUserByIdAndOrg(userId, orgId),
@@ -2325,8 +2359,8 @@ export class AuthService {
     )
   }
 
-  getUserDepartmentAncestorIds(userId: string, orgId: string): Set<string> | null {
-    const user = this.db.getUserByIdAndOrg(userId, orgId)
+  async getUserDepartmentAncestorIds(userId: string, orgId: string): Promise<Set<string> | null> {
+    const user = await this.db.getUserByIdAndOrg(userId, orgId)
     if (!user || ADMIN_ROLES.has(user.role)) return null
     return getUserAncestorIds(
       userId,
@@ -2341,7 +2375,7 @@ export class AuthService {
    * org root. Used for hierarchical department-credential value inheritance: a
    * consumer resolves the nearest department in this chain that has a value.
    */
-  getDepartmentAncestorChain(orgId: string, deptId: string | null): string[] {
+  getDepartmentAncestorChain(orgId: string, deptId: string | null): Promise<string[]> {
     return getDepartmentAncestorChain(
       orgId,
       deptId,

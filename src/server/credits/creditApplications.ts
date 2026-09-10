@@ -61,17 +61,17 @@ export type CreditApplicationPayload = {
 
 export type CreditApplicationStore = {
   create(input: Omit<CreditApplication, 'id' | 'applicationNo' | 'createdAt' | 'status'
-    | 'approvedPoints' | 'adminComment' | 'reviewedAt' | 'sudorouterError'>): CreditApplication
-  listForUser(userId: string, page: number, pageSize: number): { list: CreditApplication[]; total: number }
-  getById(id: number): CreditApplication | null
-  hasPending(userId: string): boolean
+    | 'approvedPoints' | 'adminComment' | 'reviewedAt' | 'sudorouterError'>): Promise<CreditApplication>
+  listForUser(userId: string, page: number, pageSize: number): Promise<{ list: CreditApplication[]; total: number }>
+  getById(id: number): Promise<CreditApplication | null>
+  hasPending(userId: string): Promise<boolean>
   updateStatus(id: number, patch: {
     status: CreditApplicationStatus
     approvedPoints?: number | null
     adminComment?: string | null
     reviewedAt?: number | null
     sudorouterError?: string | null
-  }): void
+  }): Promise<void>
 }
 
 export class CreditApplicationError extends Error {
@@ -108,11 +108,11 @@ export function newApplicationNo(now: Date = new Date()): string {
   return `CA${stamp}${randomUUID().slice(0, 6).toUpperCase()}`
 }
 
-export function submitApplication(
+export async function submitApplication(
   store: CreditApplicationStore,
   policy: CreditApplicationPolicy,
   input: { userId: string; orgId: string; requestedPoints: unknown; reason: unknown },
-): CreditApplication {
+): Promise<CreditApplication> {
   const points = Number(input.requestedPoints)
   if (!Number.isInteger(points) || points <= 0) {
     throw new CreditApplicationError(400, 'requested_points must be a positive integer')
@@ -125,7 +125,7 @@ export function submitApplication(
   }
   // A second pending request is refused rather than queued: two open asks from
   // one person give the reviewer no way to tell a correction from a duplicate.
-  if (!policy.allowDuplicatePending && store.hasPending(input.userId)) {
+  if (!policy.allowDuplicatePending && await store.hasPending(input.userId)) {
     throw new CreditApplicationError(409, 'A previous application is still awaiting review')
   }
   const reason = typeof input.reason === 'string' ? input.reason.trim().slice(0, 2000) : null
@@ -156,7 +156,7 @@ export async function reviewApplication(
     gatewayUserId: string | null
   },
 ): Promise<CreditApplication> {
-  const app = store.getById(input.id)
+  const app = await store.getById(input.id)
   if (!app) throw new CreditApplicationError(404, 'Application not found')
   if (app.status !== 'PENDING' && app.status !== 'SYNC_FAILED') {
     throw new CreditApplicationError(409, `Application is ${app.status} and cannot be reviewed`)
@@ -166,14 +166,14 @@ export async function reviewApplication(
   const comment = input.adminComment?.trim() || null
 
   if (!input.approve) {
-    store.updateStatus(app.id, {
+    await store.updateStatus(app.id, {
       status: 'REJECTED',
       approvedPoints: 0,
       adminComment: comment,
       reviewedAt: now,
       sudorouterError: null,
     })
-    return store.getById(app.id)!
+    return (await store.getById(app.id))!
   }
 
   const points = input.approvedPoints ?? app.requestedPoints
@@ -191,7 +191,7 @@ export async function reviewApplication(
     throw new CreditApplicationError(503, 'Model gateway is not configured')
   }
 
-  store.updateStatus(app.id, {
+  await store.updateStatus(app.id, {
     status: 'PROCESSING',
     approvedPoints: points,
     adminComment: comment,
@@ -206,13 +206,13 @@ export async function reviewApplication(
     // A refusal carries a status: the gateway decided, so nothing was applied.
     // No status means the answer never arrived and the outcome is unknown.
     const refused = error instanceof SudorouterError && error.status !== undefined
-    store.updateStatus(app.id, {
+    await store.updateStatus(app.id, {
       status: refused ? 'SYNC_FAILED' : 'SYNC_UNKNOWN',
       sudorouterError: message.slice(0, 500),
     })
-    return store.getById(app.id)!
+    return (await store.getById(app.id))!
   }
 
-  store.updateStatus(app.id, { status: 'APPROVED', sudorouterError: null })
-  return store.getById(app.id)!
+  await store.updateStatus(app.id, { status: 'APPROVED', sudorouterError: null })
+  return (await store.getById(app.id))!
 }

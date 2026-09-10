@@ -36,7 +36,7 @@ describe("RuntimeService graceful-drain guards", () => {
       (e: unknown) => e instanceof ServerDrainingError,
     );
     // The guard is above store.createSession, so no half-created row is left.
-    assert.equal(store.listSessions({ orgId: "o" }).length, 0);
+    assert.equal((await store.listSessions({ orgId: "o" })).length, 0);
   });
 
   it("draining=true → spawnAttempt (private choke point) rejects with ServerDrainingError", async () => {

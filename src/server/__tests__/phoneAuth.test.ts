@@ -75,17 +75,17 @@ describe('verification codes', () => {
     const service = new PhoneAuthService(db, makeConfig(), SECRET)
     const code = await sendAndCaptureCode(service, PHONE)
 
-    assert.equal(service.verifyCode(PHONE, code), true)
+    assert.equal(await service.verifyCode(PHONE, code), true)
     // Consumed: replaying the same code must not log anyone in again.
-    assert.equal(service.verifyCode(PHONE, code), false)
+    assert.equal(await service.verifyCode(PHONE, code), false)
   })
 
   it('rejects a wrong code without consuming the real one', async () => {
     const service = new PhoneAuthService(db, makeConfig(), SECRET)
     const code = await sendAndCaptureCode(service, PHONE)
 
-    assert.equal(service.verifyCode(PHONE, '000000' === code ? '111111' : '000000'), false)
-    assert.equal(service.verifyCode(PHONE, code), true)
+    assert.equal(await service.verifyCode(PHONE, '000000' === code ? '111111' : '000000'), false)
+    assert.equal(await service.verifyCode(PHONE, code), true)
   })
 
   it('rejects an expired code and clears it', async () => {
@@ -93,8 +93,8 @@ describe('verification codes', () => {
     const t0 = Date.now()
     const code = await sendAndCaptureCode(service, PHONE, t0)
 
-    assert.equal(service.verifyCode(PHONE, code, t0 + 61_000), false)
-    assert.equal(db.getPhoneLoginCode(PHONE), null)
+    assert.equal(await service.verifyCode(PHONE, code, t0 + 61_000), false)
+    assert.equal(await db.getPhoneLoginCode(PHONE), null)
   })
 
   it('burns the code after too many wrong attempts, so brute force costs a resend', async () => {
@@ -102,30 +102,30 @@ describe('verification codes', () => {
     const code = await sendAndCaptureCode(service, PHONE)
     const wrong = code === '000000' ? '111111' : '000000'
 
-    assert.equal(service.verifyCode(PHONE, wrong), false)
-    assert.equal(service.verifyCode(PHONE, wrong), false)
-    assert.equal(service.verifyCode(PHONE, wrong), false)
+    assert.equal(await service.verifyCode(PHONE, wrong), false)
+    assert.equal(await service.verifyCode(PHONE, wrong), false)
+    assert.equal(await service.verifyCode(PHONE, wrong), false)
     // Budget exhausted: even the correct code is now refused, and the record is gone.
-    assert.throws(() => service.verifyCode(PHONE, code), PhoneAuthError)
-    assert.equal(db.getPhoneLoginCode(PHONE), null)
+    await assert.rejects(() => service.verifyCode(PHONE, code), PhoneAuthError)
+    assert.equal(await db.getPhoneLoginCode(PHONE), null)
   })
 
   it('rejects malformed input without touching the stored code', async () => {
     const service = new PhoneAuthService(db, makeConfig(), SECRET)
     const code = await sendAndCaptureCode(service, PHONE)
 
-    assert.equal(service.verifyCode(PHONE, ''), false)
-    assert.equal(service.verifyCode(PHONE, 'abcdef'), false)
-    assert.equal(service.verifyCode(PHONE, 123456), false)
+    assert.equal(await service.verifyCode(PHONE, ''), false)
+    assert.equal(await service.verifyCode(PHONE, 'abcdef'), false)
+    assert.equal(await service.verifyCode(PHONE, 123456), false)
     // None of those counted as an attempt against the real code.
-    assert.equal(service.verifyCode(PHONE, code), true)
+    assert.equal(await service.verifyCode(PHONE, code), true)
   })
 
   it('stores only a hash, so reading the table does not yield a usable code', async () => {
     const service = new PhoneAuthService(db, makeConfig(), SECRET)
     const code = await sendAndCaptureCode(service, PHONE)
 
-    const stored = db.getPhoneLoginCode(PHONE)
+    const stored = await db.getPhoneLoginCode(PHONE)
     assert.notEqual(stored, null)
     assert.ok(!(stored!.codeHash).includes(code))
     assert.equal((stored!.codeHash).length, 64)
@@ -181,7 +181,7 @@ describe('rate limiting', () => {
     const service = new PhoneAuthService(db, makeConfig({ resendCooldownSec: 0, maxSendsPerHour: 2 }), SECRET)
     const t0 = Date.now()
     const code = await sendAndCaptureCode(service, PHONE, t0)
-    assert.equal(service.verifyCode(PHONE, code, t0 + 500), true)
+    assert.equal(await service.verifyCode(PHONE, code, t0 + 500), true)
 
     await sendAndCaptureCode(service, PHONE, t0 + 1_000)
     // The send log survives code deletion; without that, verifying would be a

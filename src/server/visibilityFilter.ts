@@ -53,16 +53,16 @@ export function isVisibleTo(
   return false
 }
 
-export function buildVisibilityFilter(
+export async function buildVisibilityFilter(
   auth: AuthContext,
   getUserByIdAndOrg: (
     userId: string,
     orgId: string,
-  ) => { role: string; departmentId: string | null } | null,
+  ) => Promise<{ role: string; departmentId: string | null } | null>,
   listDepartmentsByOrg: (
     orgId: string,
-  ) => Array<{ id: string; parentId: string | null }>,
-): VisibilityFilter {
+  ) => Promise<Array<{ id: string; parentId: string | null }>>,
+): Promise<VisibilityFilter> {
   const isAdmin =
     auth.role === 'admin' ||
     auth.role === 'super_admin' ||
@@ -71,9 +71,9 @@ export function buildVisibilityFilter(
     return { isAdmin: true, userId: auth.userId, departmentId: null, visibleDepartmentIds: null }
   }
 
-  const user = getUserByIdAndOrg(auth.userId, auth.orgId)
+  const user = await getUserByIdAndOrg(auth.userId, auth.orgId)
   const departmentId = user?.departmentId ?? null
-  const visibleDepartmentIds = getUserAncestorIds(
+  const visibleDepartmentIds = await getUserAncestorIds(
     auth.userId,
     auth.orgId,
     getUserByIdAndOrg,
@@ -89,15 +89,15 @@ export function buildVisibilityFilter(
  * "the nearest department with a value" (e.g. hierarchical credential
  * inheritance) can walk the array in order. Cycles are guarded against.
  */
-export function getDepartmentAncestorChain(
+export async function getDepartmentAncestorChain(
   orgId: string,
   deptId: string | null,
   listDepartmentsByOrg: (
     orgId: string,
-  ) => Array<{ id: string; parentId: string | null }>,
-): string[] {
+  ) => Promise<Array<{ id: string; parentId: string | null }>>,
+): Promise<string[]> {
   if (!deptId) return []
-  const byId = new Map(listDepartmentsByOrg(orgId).map(d => [d.id, d]))
+  const byId = new Map((await listDepartmentsByOrg(orgId)).map(d => [d.id, d]))
   const chain: string[] = []
   const seen = new Set<string>()
   let current = byId.get(deptId) ?? null
@@ -109,21 +109,21 @@ export function getDepartmentAncestorChain(
   return chain
 }
 
-export function getUserAncestorIds(
+export async function getUserAncestorIds(
   userId: string,
   orgId: string,
   getUserByIdAndOrg: (
     userId: string,
     orgId: string,
-  ) => { role: string; departmentId: string | null } | null,
+  ) => Promise<{ role: string; departmentId: string | null } | null>,
   listDepartmentsByOrg: (
     orgId: string,
-  ) => Array<{ id: string; parentId: string | null }>,
-): Set<string> {
-  const user = getUserByIdAndOrg(userId, orgId)
+  ) => Promise<Array<{ id: string; parentId: string | null }>>,
+): Promise<Set<string>> {
+  const user = await getUserByIdAndOrg(userId, orgId)
   if (!user?.departmentId) return new Set()
 
-  const departments = listDepartmentsByOrg(orgId)
+  const departments = await listDepartmentsByOrg(orgId)
   const byId = new Map(departments.map(d => [d.id, d]))
   const ancestorIds = new Set<string>()
   let current = byId.get(user.departmentId) ?? null

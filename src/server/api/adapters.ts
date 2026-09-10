@@ -10,12 +10,12 @@
  */
 
 import { AdapterService } from '../adapterService.js'
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../db/driver.js'
 
 const ALLOWED_PLATFORMS = new Set(['telegram', 'feishu'])
 
-export function createAdaptersApi(db: DatabaseSync) {
-  const adapterService = new AdapterService(db)
+export function createAdaptersApi(driver: DbDriver) {
+  const adapterService = new AdapterService(driver)
 
   return {
     /**
@@ -23,8 +23,8 @@ export function createAdaptersApi(db: DatabaseSync) {
      * Query params: userId (optional, admin only - defaults to auth user)
      * Returns masked config for the user's telegram and feishu adapters
      */
-    list: (orgId: string, userId: string): object => {
-      const rows = adapterService.listByUser(orgId, userId)
+    list: async (orgId: string, userId: string): Promise<object> => {
+      const rows = await adapterService.listByUser(orgId, userId)
       const result: Record<string, unknown> = {}
       for (const row of rows) {
         const config = JSON.parse(row.config_json) as Record<string, unknown>
@@ -50,8 +50,8 @@ export function createAdaptersApi(db: DatabaseSync) {
     /**
      * List all adapter configs across all users (admin only)
      */
-    listAll: (orgId: string): object[] => {
-      const rows = adapterService.listByOrg(orgId)
+    listAll: async (orgId: string): Promise<object[]> => {
+      const rows = await adapterService.listByOrg(orgId)
       return rows.map((row) => ({
         id: row.id,
         orgId: row.orgId,
@@ -68,24 +68,24 @@ export function createAdaptersApi(db: DatabaseSync) {
      * PUT /api/v1/adapters/:platform
      * Upsert config for a specific platform
      */
-    upsert: (orgId: string, userId: string, platform: string, patch: Record<string, unknown>): object => {
+    upsert: async (orgId: string, userId: string, platform: string, patch: Record<string, unknown>): Promise<object> => {
       if (!ALLOWED_PLATFORMS.has(platform)) {
         return { error: 'BAD_REQUEST', message: `Invalid platform: ${platform}. Must be "telegram" or "feishu"` }
       }
-      const config = adapterService.upsert(orgId, userId, platform as 'telegram' | 'feishu', patch as any)
+      await adapterService.upsert(orgId, userId, platform as 'telegram' | 'feishu', patch as any)
       // Return masked version
-      const masked = adapterService.getMasked(orgId, userId, platform as 'telegram' | 'feishu')
+      const masked = await adapterService.getMasked(orgId, userId, platform as 'telegram' | 'feishu')
       return { platform, config: masked }
     },
 
     /**
      * DELETE /api/v1/adapters/:platform
      */
-    remove: (orgId: string, userId: string, platform: string): { ok: boolean } | { error: string; message: string } => {
+    remove: async (orgId: string, userId: string, platform: string): Promise<{ ok: boolean } | { error: string; message: string }> => {
       if (!ALLOWED_PLATFORMS.has(platform)) {
         return { error: 'BAD_REQUEST', message: `Invalid platform: ${platform}` }
       }
-      const deleted = adapterService.delete(orgId, userId, platform as 'telegram' | 'feishu')
+      const deleted = await adapterService.delete(orgId, userId, platform as 'telegram' | 'feishu')
       return { ok: deleted }
     },
   }

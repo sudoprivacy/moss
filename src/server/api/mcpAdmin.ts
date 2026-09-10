@@ -11,8 +11,8 @@ import { broadcastMcpEvent } from './mcpEvents.js'
 interface McpAdminDeps {
   mcpStore: McpStore
   authService: AuthService
-  getUserName: (userId: string) => string | undefined
-  getUserDepartmentId: (userId: string) => string | null
+  getUserName: (userId: string) => Promise<string | undefined>
+  getUserDepartmentId: (userId: string) => Promise<string | null>
 }
 
 export function createMcpAdminApi(deps: McpAdminDeps) {
@@ -24,11 +24,11 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
    * - owner_id must be their own department
    * - Can only modify/delete MCPs where owner_type=department and owner_id is their department
    */
-  function assertCanManageMcp(auth: AuthContext, input: { scope: string; owner_type: string; owner_id: string }, operation: string): void {
+  async function assertCanManageMcp(auth: AuthContext, input: { scope: string; owner_type: string; owner_id: string }, operation: string): Promise<void> {
     if (auth.role === 'admin' || auth.role === 'super_admin') return // admin has * scope, no restriction
 
     if (auth.role === 'dept_admin') {
-      const deptId = getUserDepartmentId(auth.userId)
+      const deptId = await getUserDepartmentId(auth.userId)
       if (input.scope === 'org') {
         throw Object.assign(new Error('部门管理员不能创建企业级 MCP'), { statusCode: 403 })
       }
@@ -43,11 +43,11 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     throw Object.assign(new Error('权限不足'), { statusCode: 403 })
   }
 
-  function assertCanManageExistingMcp(auth: AuthContext, server: { scope: string; owner_type: string; owner_id: string }): void {
+  async function assertCanManageExistingMcp(auth: AuthContext, server: { scope: string; owner_type: string; owner_id: string }): Promise<void> {
     if (auth.role === 'admin' || auth.role === 'super_admin') return
 
     if (auth.role === 'dept_admin') {
-      const deptId = getUserDepartmentId(auth.userId)
+      const deptId = await getUserDepartmentId(auth.userId)
       if (server.owner_type === 'department' && server.owner_id === deptId) return
       throw Object.assign(new Error('权限不足，只能管理本部门的 MCP'), { statusCode: 403 })
     }
@@ -55,7 +55,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     throw Object.assign(new Error('权限不足'), { statusCode: 403 })
   }
 
-  const writeAudit = (
+  const writeAudit = async (
     orgId: string,
     userId: string,
     action: string,
@@ -66,12 +66,12 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     status?: 'success' | 'error',
   ) => {
     try {
-      mcpStore.insertAuditLog({
+      await mcpStore.insertAuditLog({
         org_id: orgId,
         mcp_server_id: mcpServerId,
         mcp_server_name: mcpServerName,
         user_id: userId,
-        user_name: getUserName(userId),
+        user_name: await getUserName(userId),
         action,
         request_params_json: detail ? JSON.stringify(detail) : null,
         status: status ?? null,
@@ -183,34 +183,34 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
   const api = {
     // ==================== MCP Server CRUD ====================
 
-    listMcpServers(auth: AuthContext, filter?: McpServerListFilter, ip?: string) {
+    async listMcpServers(auth: AuthContext, filter?: McpServerListFilter, ip?: string) {
       authService.requireScope(auth, 'admin:mcp')
       // For dept_admin, push the visibility restriction into the SQL layer so that
       // `total` reflects the post-filter count and pagination remains correct.
       const effectiveFilter: McpServerListFilter = { ...(filter ?? {}) }
       if (auth.role === 'dept_admin') {
-        const deptId = getUserDepartmentId(auth.userId) ?? ''
+        const deptId = await getUserDepartmentId(auth.userId) ?? ''
         effectiveFilter.dept_admin_department_id = deptId
       }
-      const result = mcpStore.listMcpServers(auth.orgId, effectiveFilter)
+      const result = await mcpStore.listMcpServers(auth.orgId, effectiveFilter)
       return { success: true, data: result.items, total: result.total, page: filter?.page ?? 1, page_size: filter?.page_size ?? 20 }
     },
 
-    getMcpServer(auth: AuthContext, id: string) {
+    async getMcpServer(auth: AuthContext, id: string) {
       authService.requireScope(auth, 'admin:mcp')
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       if (auth.role === 'dept_admin') {
-        assertCanManageExistingMcp(auth, server)
+        await assertCanManageExistingMcp(auth, server)
       }
 
       return { success: true, data: server }
     },
 
-    createMcpServer(auth: AuthContext, input: McpServerInput, ip?: string) {
+    async createMcpServer(auth: AuthContext, input: McpServerInput, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      assertCanManageMcp(auth, input, 'create')
+      await assertCanManageMcp(auth, input, 'create')
 
       // 必填字段校验
       if (!input.name || typeof input.name !== 'string' || !input.name.trim()) {
@@ -225,7 +225,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       }
 
       // Check name uniqueness
-      const existing = mcpStore.getMcpServerByName(auth.orgId, input.name)
+      const existing = await mcpStore.getMcpServerByName(auth.orgId, input.name)
       if (existing) {
         const err = new Error('MCP 名称已存在')
         Object.assign(err, { statusCode: 409 })
@@ -248,7 +248,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         resolvedInput.owner_id = auth.orgId
       }
       if (resolvedInput.scope === 'department' && resolvedInput.owner_type === 'department' && !resolvedInput.owner_id) {
-        resolvedInput.owner_id = getUserDepartmentId(auth.userId) ?? ''
+        resolvedInput.owner_id = await getUserDepartmentId(auth.userId) ?? ''
       }
       // Plan §2.2 step 5: scope=department MCPs default visible_to to {department_ids: [owner_id]}
       // so that without explicit visibility config they are scoped to their own department only.
@@ -264,18 +264,18 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       const authError = validateAuthConfig(resolvedInput.auth_type ?? 'none', resolvedInput.auth_config_json ?? null, resolvedInput.secret_ref ?? null)
       if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
 
-      const server = mcpStore.createMcpServer(auth.orgId, resolvedInput, auth.userId)
+      const server = await mcpStore.createMcpServer(auth.orgId, resolvedInput, auth.userId)
       writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { name: input.name }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: server }
     },
 
-    updateMcpServer(auth: AuthContext, id: string, input: Partial<McpServerInput>, ip?: string) {
+    async updateMcpServer(auth: AuthContext, id: string, input: Partial<McpServerInput>, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const existing = mcpStore.getMcpServer(auth.orgId, id)
+      const existing = await mcpStore.getMcpServer(auth.orgId, id)
       if (!existing) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
-      assertCanManageExistingMcp(auth, existing)
+      await assertCanManageExistingMcp(auth, existing)
 
       // 部门级 MCP 更新时如果 owner_id 被清空则拒绝
       const effectiveScope = input.scope ?? existing.scope
@@ -288,7 +288,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
       // If name is being changed, check uniqueness
       if (input.name && input.name !== existing.name) {
-        const nameConflict = mcpStore.getMcpServerByName(auth.orgId, input.name)
+        const nameConflict = await mcpStore.getMcpServerByName(auth.orgId, input.name)
         if (nameConflict) {
           const err = new Error('MCP 名称已存在')
           Object.assign(err, { statusCode: 409 })
@@ -303,11 +303,11 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       const authError = validateAuthConfig(effectiveAuthType, effectiveAuthConfigJson ?? null, effectiveSecretRef ?? null)
       if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
 
-      const server = mcpStore.updateMcpServer(auth.orgId, id, input, auth.userId)
+      const server = await mcpStore.updateMcpServer(auth.orgId, id, input, auth.userId)
 
       // If allow_user_disable changed from true to false, clear all user-disabled records
       if (existing.allow_user_disable === true && input.allow_user_disable === false) {
-        mcpStore.clearUserDisabledForMcpServer(auth.orgId, id)
+        await mcpStore.clearUserDisabledForMcpServer(auth.orgId, id)
       }
 
       writeAudit(auth.orgId, auth.userId, 'update', server.id, server.name, { updated_fields: Object.keys(input) }, ip)
@@ -315,14 +315,14 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       return { success: true, data: server }
     },
 
-    deleteMcpServer(auth: AuthContext, id: string, ip?: string) {
+    async deleteMcpServer(auth: AuthContext, id: string, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const existing = mcpStore.getMcpServer(auth.orgId, id)
+      const existing = await mcpStore.getMcpServer(auth.orgId, id)
       if (!existing) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
-      assertCanManageExistingMcp(auth, existing)
+      await assertCanManageExistingMcp(auth, existing)
 
-      const deleted = mcpStore.deleteMcpServer(auth.orgId, id)
+      const deleted = await mcpStore.deleteMcpServer(auth.orgId, id)
       if (deleted) {
         writeAudit(auth.orgId, auth.userId, 'delete', null, existing.name, { id }, ip)
         broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
@@ -330,14 +330,14 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       return { success: true }
     },
 
-    setMcpServerEnabled(auth: AuthContext, id: string, enabled: boolean, ip?: string) {
+    async setMcpServerEnabled(auth: AuthContext, id: string, enabled: boolean, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const existing = mcpStore.getMcpServer(auth.orgId, id)
+      const existing = await mcpStore.getMcpServer(auth.orgId, id)
       if (!existing) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
-      assertCanManageExistingMcp(auth, existing)
+      await assertCanManageExistingMcp(auth, existing)
 
-      const server = mcpStore.setMcpServerEnabled(auth.orgId, id, enabled, auth.userId)
+      const server = await mcpStore.setMcpServerEnabled(auth.orgId, id, enabled, auth.userId)
       writeAudit(auth.orgId, auth.userId, enabled ? 'enable' : 'disable', id, existing.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: server }
@@ -345,16 +345,16 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
     async testConnection(auth: AuthContext, id: string, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const server = mcpStore.getMcpServer(auth.orgId, id)
+      const server = await mcpStore.getMcpServer(auth.orgId, id)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
       const result = await testMcpConnection(server)
 
       // Update status based on test result
       if (result.ok) {
-        mcpStore.setMcpServerStatus(auth.orgId, id, 'enabled', auth.userId)
+        await mcpStore.setMcpServerStatus(auth.orgId, id, 'enabled', auth.userId)
       } else {
-        mcpStore.setMcpServerStatus(auth.orgId, id, 'error', auth.userId)
+        await mcpStore.setMcpServerStatus(auth.orgId, id, 'error', auth.userId)
       }
 
       writeAudit(
@@ -369,32 +369,32 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
     // ==================== Audit Logs ====================
 
-    getAuditLogs(auth: AuthContext, filter?: McpAuditLogFilter) {
+    async getAuditLogs(auth: AuthContext, filter?: McpAuditLogFilter) {
       authService.requireScope(auth, 'admin:mcp:audit')
-      const result = mcpStore.queryAuditLog(auth.orgId, filter)
+      const result = await mcpStore.queryAuditLog(auth.orgId, filter)
       return { success: true, data: result.items, total: result.total, page: filter?.page ?? 1, page_size: filter?.page_size ?? 20 }
     },
 
-    getServerAuditLogs(auth: AuthContext, serverId: string, filter?: Omit<McpAuditLogFilter, 'mcp_server_id'>) {
+    async getServerAuditLogs(auth: AuthContext, serverId: string, filter?: Omit<McpAuditLogFilter, 'mcp_server_id'>) {
       authService.requireScope(auth, 'admin:mcp:audit')
-      const server = mcpStore.getMcpServer(auth.orgId, serverId)
+      const server = await mcpStore.getMcpServer(auth.orgId, serverId)
       if (!server) return { success: false, error: { code: 'not_found', message: 'MCP 服务不存在' } }
 
-      const result = mcpStore.queryAuditLog(auth.orgId, { ...filter, mcp_server_id: serverId })
+      const result = await mcpStore.queryAuditLog(auth.orgId, { ...filter, mcp_server_id: serverId })
       return { success: true, data: result.items, total: result.total, page: filter?.page ?? 1, page_size: filter?.page_size ?? 20 }
     },
 
     // ==================== Policy ====================
 
-    getMcpPolicy(auth: AuthContext) {
-      const policy = mcpStore.getMcpPolicy(auth.orgId)
+    async getMcpPolicy(auth: AuthContext) {
+      const policy = await mcpStore.getMcpPolicy(auth.orgId)
       const { id, org_id, created_by, updated_by, created_at, updated_at, ...rest } = policy
       return { success: true, data: rest }
     },
 
-    updateMcpPolicy(auth: AuthContext, input: McpPolicyInput, ip?: string) {
+    async updateMcpPolicy(auth: AuthContext, input: McpPolicyInput, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const policy = mcpStore.upsertMcpPolicy(auth.orgId, input, auth.userId)
+      const policy = await mcpStore.upsertMcpPolicy(auth.orgId, input, auth.userId)
       writeAudit(auth.orgId, auth.userId, 'update_policy', null, null, { updated_fields: Object.keys(input) }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.policy.changed' })
       return { success: true, data: policy }
@@ -402,45 +402,45 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
     // ==================== Approval Requests (Phase 2) ====================
 
-    listApprovalRequests(auth: AuthContext, status?: string) {
+    async listApprovalRequests(auth: AuthContext, status?: string) {
       authService.requireScope(auth, 'admin:mcp')
-      const requests = mcpStore.listApprovalRequests(auth.orgId, status)
+      const requests = await mcpStore.listApprovalRequests(auth.orgId, status)
       return { success: true, data: requests }
     },
 
-    approveRequest(auth: AuthContext, requestId: string, ip?: string) {
+    async approveRequest(auth: AuthContext, requestId: string, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const request = mcpStore.getMcpApprovalRequest(requestId)
+      const request = await mcpStore.getMcpApprovalRequest(requestId)
       if (!request) return { success: false, error: { code: 'not_found', message: '审批请求不存在' } }
       if (request.org_id !== auth.orgId) return { success: false, error: { code: 'forbidden', message: '无权操作' } }
       if (request.status !== 'pending') return { success: false, error: { code: 'invalid_status', message: '该请求已处理' } }
 
-      const updated = mcpStore.updateApprovalRequest(requestId, {
+      const updated = await mcpStore.updateApprovalRequest(requestId, {
         status: 'approved',
         reviewed_by: auth.userId,
-        reviewer_name: getUserName(auth.userId),
+        reviewer_name: await getUserName(auth.userId),
       })
 
       // Update the MCP server status to enabled
       if (updated) {
-        mcpStore.setMcpServerStatus(auth.orgId, updated.mcp_server_id, 'enabled', auth.userId)
+        await mcpStore.setMcpServerStatus(auth.orgId, updated.mcp_server_id, 'enabled', auth.userId)
       }
 
       writeAudit(auth.orgId, auth.userId, 'approve_request', request.mcp_server_id, null, { request_id: requestId }, ip)
       return { success: true, data: updated }
     },
 
-    rejectRequest(auth: AuthContext, requestId: string, reviewNote: string, ip?: string) {
+    async rejectRequest(auth: AuthContext, requestId: string, reviewNote: string, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const request = mcpStore.getMcpApprovalRequest(requestId)
+      const request = await mcpStore.getMcpApprovalRequest(requestId)
       if (!request) return { success: false, error: { code: 'not_found', message: '审批请求不存在' } }
       if (request.org_id !== auth.orgId) return { success: false, error: { code: 'forbidden', message: '无权操作' } }
       if (request.status !== 'pending') return { success: false, error: { code: 'invalid_status', message: '该请求已处理' } }
 
-      const updated = mcpStore.updateApprovalRequest(requestId, {
+      const updated = await mcpStore.updateApprovalRequest(requestId, {
         status: 'rejected',
         reviewed_by: auth.userId,
-        reviewer_name: getUserName(auth.userId),
+        reviewer_name: await getUserName(auth.userId),
         review_note: reviewNote,
       })
 
@@ -450,20 +450,20 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
     // ==================== Templates (Phase 2, §4.6 模板市场) ====================
 
-    listTemplates(auth: AuthContext, filter?: McpTemplateListFilter) {
+    async listTemplates(auth: AuthContext, filter?: McpTemplateListFilter) {
       authService.requireScope(auth, 'admin:mcp')
-      const result = mcpStore.listTemplates(auth.orgId, filter)
+      const result = await mcpStore.listTemplates(auth.orgId, filter)
       return { success: true, data: result.items, total: result.total, page: filter?.page ?? 1, page_size: filter?.page_size ?? 20 }
     },
 
-    getTemplate(auth: AuthContext, id: string) {
+    async getTemplate(auth: AuthContext, id: string) {
       authService.requireScope(auth, 'admin:mcp')
-      const template = mcpStore.getTemplate(auth.orgId, id)
+      const template = await mcpStore.getTemplate(auth.orgId, id)
       if (!template) return { success: false, error: { code: 'not_found', message: '模板不存在' } }
       return { success: true, data: template }
     },
 
-    createTemplate(auth: AuthContext, input: McpTemplateInput, ip?: string) {
+    async createTemplate(auth: AuthContext, input: McpTemplateInput, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
       if (!input.name?.trim()) {
         const err = new Error('模板名称不能为空')
@@ -475,7 +475,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         Object.assign(err, { statusCode: 400 })
         throw err
       }
-      const existing = mcpStore.getTemplateByName(auth.orgId, input.name)
+      const existing = await mcpStore.getTemplateByName(auth.orgId, input.name)
       if (existing) {
         const err = new Error('模板名称已存在')
         Object.assign(err, { statusCode: 409 })
@@ -527,22 +527,22 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
           if (parsed.auth_type) input.auth_type = parsed.auth_type
         } catch { /* ignore parse errors, already validated */ }
       }
-      const template = mcpStore.createTemplate(auth.orgId, input, auth.userId)
+      const template = await mcpStore.createTemplate(auth.orgId, input, auth.userId)
       writeAudit(auth.orgId, auth.userId, 'create_template', template.id, template.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: template }
     },
 
-    updateTemplate(auth: AuthContext, id: string, input: Partial<McpTemplateInput>, ip?: string) {
+    async updateTemplate(auth: AuthContext, id: string, input: Partial<McpTemplateInput>, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const existing = mcpStore.getTemplate(auth.orgId, id)
+      const existing = await mcpStore.getTemplate(auth.orgId, id)
       if (!existing) {
         const err = new Error('模板不存在')
         Object.assign(err, { statusCode: 404 })
         throw err
       }
       if (input.name !== undefined && input.name !== existing.name) {
-        const nameConflict = mcpStore.getTemplateByName(auth.orgId, input.name)
+        const nameConflict = await mcpStore.getTemplateByName(auth.orgId, input.name)
         if (nameConflict) {
           const err = new Error('模板名称已存在')
           Object.assign(err, { statusCode: 409 })
@@ -585,29 +585,29 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
           if (parsed.auth_type) input.auth_type = parsed.auth_type
         } catch { /* ignore parse errors, already validated */ }
       }
-      const template = mcpStore.updateTemplate(auth.orgId, id, input)
+      const template = await mcpStore.updateTemplate(auth.orgId, id, input)
       writeAudit(auth.orgId, auth.userId, 'update_template', template.id, template.name, { updated_fields: Object.keys(input).filter(k => (input as Record<string, unknown>)[k] !== undefined) }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: template }
     },
 
-    deleteTemplate(auth: AuthContext, id: string, ip?: string) {
+    async deleteTemplate(auth: AuthContext, id: string, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const existing = mcpStore.getTemplate(auth.orgId, id)
+      const existing = await mcpStore.getTemplate(auth.orgId, id)
       if (!existing) {
         const err = new Error('模板不存在')
         Object.assign(err, { statusCode: 404 })
         throw err
       }
-      mcpStore.deleteTemplate(auth.orgId, id)
+      await mcpStore.deleteTemplate(auth.orgId, id)
       writeAudit(auth.orgId, auth.userId, 'delete_template', id, existing.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true }
     },
 
-    installTemplate(auth: AuthContext, templateId: string, overrides?: Partial<McpServerInput> & { auth_credentials?: Record<string, string> }, ip?: string) {
+    async installTemplate(auth: AuthContext, templateId: string, overrides?: Partial<McpServerInput> & { auth_credentials?: Record<string, string> }, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
-      const template = mcpStore.getTemplate(auth.orgId, templateId)
+      const template = await mcpStore.getTemplate(auth.orgId, templateId)
       if (!template) return { success: false, error: { code: 'not_found', message: '模板不存在' } }
 
       // Auth config format conversion: template layered → McpServer flat
@@ -658,7 +658,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         responsible_person: template.responsible_person ?? null,
         scope: overrides?.scope ?? template.scope,
         owner_type: overrides?.owner_type ?? (template.scope === 'org' ? 'system' : 'department'),
-        owner_id: overrides?.owner_id ?? (template.scope === 'org' ? auth.orgId : getUserDepartmentId(auth.userId) ?? ''),
+        owner_id: overrides?.owner_id ?? (template.scope === 'org' ? auth.orgId : await getUserDepartmentId(auth.userId) ?? ''),
         mcp_type: overrides?.mcp_type ?? template.mcp_type,
         url: overrides?.url ?? template.url,
         command: overrides?.command ?? template.command,
@@ -686,24 +686,24 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       }
 
       // Check name uniqueness
-      const existing = mcpStore.getMcpServerByName(auth.orgId, serverInput.name)
+      const existing = await mcpStore.getMcpServerByName(auth.orgId, serverInput.name)
       if (existing) {
         const err = new Error('MCP 名称已存在')
         Object.assign(err, { statusCode: 409 })
         throw err
       }
 
-      assertCanManageMcp(auth, serverInput, 'install_template')
+      await assertCanManageMcp(auth, serverInput, 'install_template')
 
       // Auto-fill owner_id if still missing
       if (serverInput.scope === 'org' && serverInput.owner_type === 'system' && !serverInput.owner_id) {
         serverInput.owner_id = auth.orgId
       }
 
-      const server = mcpStore.createMcpServer(auth.orgId, serverInput, auth.userId)
+      const server = await mcpStore.createMcpServer(auth.orgId, serverInput, auth.userId)
 
       // Increment template downloads
-      mcpStore.incrementDownloads(auth.orgId, templateId)
+      await mcpStore.incrementDownloads(auth.orgId, templateId)
 
       writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { template_id: templateId, template_name: template.name }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })

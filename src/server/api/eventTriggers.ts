@@ -194,7 +194,7 @@ export function createEventTriggerIngest(service: EventTriggerService) {
           throw new IngestError(401, 'MISSING_SECRET', 'A trigger secret is required')
         }
 
-        const trigger = store.getById(triggerId)
+        const trigger = await store.getById(triggerId)
         // Same opaque 401 whether the trigger is missing, deleted, or the
         // secret is wrong: a caller holding no valid secret must not be able
         // to probe which trigger ids exist.
@@ -233,7 +233,7 @@ export function createEventTriggerIngest(service: EventTriggerService) {
 
         // The run identity comes from the TRIGGER record, never the request.
         // This is the org-isolation boundary for an externally-started run.
-        let run = store.createRun({
+        let run = await store.createRun({
           triggerId: trigger.id,
           orgId: trigger.orgId,
           userId: trigger.userId,
@@ -244,7 +244,7 @@ export function createEventTriggerIngest(service: EventTriggerService) {
         if (!run && idempotencyKey) {
           // Unique-index collision: this event was already accepted. Return
           // the original run so a client retry is a no-op, not a duplicate.
-          const existing = store.findRunByIdempotencyKey(trigger.id, idempotencyKey)
+          const existing = await store.findRunByIdempotencyKey(trigger.id, idempotencyKey)
           if (existing) {
             writeJson(res, 200, {
               run_id: existing.id,
@@ -258,7 +258,7 @@ export function createEventTriggerIngest(service: EventTriggerService) {
           throw new IngestError(500, 'ENQUEUE_FAILED', 'Failed to enqueue the event')
         }
 
-        store.markUsed(trigger.id)
+        await store.markUsed(trigger.id)
 
         // 202 immediately — the agent runs out of band. Blocking here would
         // tie the client's request to a multi-minute agent run.
@@ -290,34 +290,34 @@ export function createEventTriggerIngest(service: EventTriggerService) {
  */
 export function createEventTriggerApi(options: {
   store: EventTriggerStore
-  getUserName?: (userId: string) => string | undefined
+  getUserName?: (userId: string) => Promise<string | undefined>
 }) {
   const { store, getUserName } = options
 
   /** Fetch org-scoped; null for missing OR cross-org (caller returns 404). */
-  function getOwned(auth: AuthLike, triggerId: string): EventTrigger | null {
-    const trigger = store.getById(triggerId)
+  async function getOwned(auth: AuthLike, triggerId: string): Promise<EventTrigger | null> {
+    const trigger = await store.getById(triggerId)
     if (!trigger || trigger.orgId !== auth.orgId) return null
     return trigger
   }
 
   return {
-    listTriggers(auth: AuthLike) {
+    async listTriggers(auth: AuthLike) {
       return {
-        triggers: store.listByOrg(auth.orgId).map(t => ({
+        triggers: await Promise.all((await store.listByOrg(auth.orgId)).map(async t => ({
           ...mapTrigger(t),
-          user_name: getUserName?.(t.userId),
-        })),
+          user_name: await getUserName?.(t.userId),
+        }))),
       }
     },
 
-    getTrigger(auth: AuthLike, triggerId: string) {
-      const trigger = getOwned(auth, triggerId)
+    async getTrigger(auth: AuthLike, triggerId: string) {
+      const trigger = await getOwned(auth, triggerId)
       if (!trigger) return null
-      return { trigger: { ...mapTrigger(trigger), user_name: getUserName?.(trigger.userId) } }
+      return { trigger: { ...mapTrigger(trigger), user_name: await getUserName?.(trigger.userId) } }
     },
 
-    createTrigger(
+    async createTrigger(
       auth: AuthLike,
       input: {
         name?: unknown
@@ -336,7 +336,7 @@ export function createEventTriggerApi(options: {
       if (!name) return { success: false as const, message: 'name is required' }
       if (!promptTemplate) return { success: false as const, message: 'prompt_template is required' }
 
-      const { trigger, secret } = store.insert({
+      const { trigger, secret } = await store.insert({
         orgId: auth.orgId,
         userId: auth.userId,
         name,
@@ -357,11 +357,11 @@ export function createEventTriggerApi(options: {
       }
     },
 
-    updateTrigger(auth: AuthLike, triggerId: string, updates: Record<string, unknown>) {
-      const existing = getOwned(auth, triggerId)
+    async updateTrigger(auth: AuthLike, triggerId: string, updates: Record<string, unknown>) {
+      const existing = await getOwned(auth, triggerId)
       if (!existing) return null
 
-      const updated = store.update(triggerId, {
+      const updated = await store.update(triggerId, {
         name: typeof updates.name === 'string' ? updates.name.trim() : undefined,
         enabled: updates.enabled === undefined ? undefined : Boolean(updates.enabled),
         promptTemplate:
@@ -395,31 +395,31 @@ export function createEventTriggerApi(options: {
       return updated ? { success: true as const, trigger: mapTrigger(updated) } : null
     },
 
-    deleteTrigger(auth: AuthLike, triggerId: string) {
-      const existing = getOwned(auth, triggerId)
+    async deleteTrigger(auth: AuthLike, triggerId: string) {
+      const existing = await getOwned(auth, triggerId)
       if (!existing) return null
-      store.softDelete(triggerId)
+      await store.softDelete(triggerId)
       return { success: true as const }
     },
 
-    rotateSecret(auth: AuthLike, triggerId: string) {
-      const existing = getOwned(auth, triggerId)
+    async rotateSecret(auth: AuthLike, triggerId: string) {
+      const existing = await getOwned(auth, triggerId)
       if (!existing) return null
-      const rotated = store.rotateSecret(triggerId)
+      const rotated = await store.rotateSecret(triggerId)
       if (!rotated) return null
       return { success: true as const, trigger: mapTrigger(rotated.trigger), secret: rotated.secret }
     },
 
-    listRuns(auth: AuthLike, triggerId: string, limit = 50) {
-      const existing = getOwned(auth, triggerId)
+    async listRuns(auth: AuthLike, triggerId: string, limit = 50) {
+      const existing = await getOwned(auth, triggerId)
       if (!existing) return null
-      return { runs: store.listRunsByTrigger(triggerId, limit).map(mapRun) }
+      return { runs: (await store.listRunsByTrigger(triggerId, limit)).map(mapRun) }
     },
 
-    getRun(auth: AuthLike, triggerId: string, runId: string) {
-      const existing = getOwned(auth, triggerId)
+    async getRun(auth: AuthLike, triggerId: string, runId: string) {
+      const existing = await getOwned(auth, triggerId)
       if (!existing) return null
-      const run = store.getRunById(runId)
+      const run = await store.getRunById(runId)
       // Guard against reading a run id belonging to another trigger.
       if (!run || run.triggerId !== triggerId) return null
       return { run: mapRun(run) }

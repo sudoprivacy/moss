@@ -15,6 +15,9 @@ const ENV_KEYS = [
   "MOSS_ROUTE_COOKIE_NAME",
   "MOSS_ROUTE_COOKIE_SECURE",
   "MOSS_SHUTDOWN_GRACE_MS",
+  "MOSS_AUTH_PROXY_URL",
+  "MOSS_DB_BACKEND",
+  "MOSS_DATABASE_URL",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -112,5 +115,42 @@ describe("LB HA config resolution (readServerConfig)", () => {
     process.env.MOSS_ROUTE_COOKIE_SECURE = "false";
     const second = await readServerConfig(path);
     assert.equal(second.config.routeCookieSecure, false);
+  });
+
+  // P1-2a: storage backend + auth-proxy URL resolution (HA PG groundwork).
+  it("authProxyUrl defaults to http://localhost:12013 (unchanged behavior)", async () => {
+    const path = await writeConfig({});
+    const { config } = await readServerConfig(path);
+    assert.equal(config.authProxyUrl, "http://localhost:12013");
+  });
+
+  it("authProxyUrl honors server.json, and ENV takes precedence", async () => {
+    const path = await writeConfig({ server: { authProxyUrl: "http://moss-server-a:12013" } });
+    const fromFile = await readServerConfig(path);
+    assert.equal(fromFile.config.authProxyUrl, "http://moss-server-a:12013");
+    process.env.MOSS_AUTH_PROXY_URL = "http://env-host:12013";
+    const fromEnv = await readServerConfig(path);
+    assert.equal(fromEnv.config.authProxyUrl, "http://env-host:12013");
+  });
+
+  it("dbBackend defaults to sqlite with no databaseUrl (single-host path)", async () => {
+    const path = await writeConfig({});
+    const { config } = await readServerConfig(path);
+    assert.equal(config.dbBackend, "sqlite");
+    assert.equal(config.databaseUrl, undefined);
+  });
+
+  it("MOSS_DATABASE_URL infers the postgres backend and is honored", async () => {
+    process.env.MOSS_DATABASE_URL = "postgres://u:p@h:5432/moss";
+    const path = await writeConfig({});
+    const { config } = await readServerConfig(path);
+    assert.equal(config.dbBackend, "postgres");
+    assert.equal(config.databaseUrl, "postgres://u:p@h:5432/moss");
+  });
+
+  it("server.json storage.dbBackend=postgres is honored", async () => {
+    const path = await writeConfig({ storage: { dbBackend: "postgres" } });
+    const { config } = await readServerConfig(path);
+    assert.equal(config.dbBackend, "postgres");
   });
 });

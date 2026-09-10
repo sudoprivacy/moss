@@ -82,7 +82,7 @@ export class ChannelAgentResolver {
     const { platform, pluginId, chatId, ownerUserId } = params;
     if (!ownerUserId) return null;
 
-    const config = this.readConfig(platform, pluginId, ownerUserId);
+    const config = await this.readConfig(platform, pluginId, ownerUserId);
     const chatAgents = this.readChatAgents(config);
     const candidate =
       chatAgents[chatId] ||
@@ -118,12 +118,12 @@ export class ChannelAgentResolver {
       if (!resolved) return { ok: false, error: `agent not found: ${agentName}` };
     }
 
-    const config = this.readConfig(platform, pluginId, ownerUserId);
+    const config = await this.readConfig(platform, pluginId, ownerUserId);
     const chatAgents = { ...this.readChatAgents(config) };
     if (resolved) chatAgents[chatId] = resolved.name;
     else delete chatAgents[chatId];
 
-    this.writeConfig(platform, pluginId, ownerUserId, { ...config, chatAgents });
+    await this.writeConfig(platform, pluginId, ownerUserId, { ...config, chatAgents });
     return { ok: true, agent: resolved };
   }
 
@@ -145,8 +145,8 @@ export class ChannelAgentResolver {
     );
   }
 
-  private readConfig(platform: string, pluginId: string | undefined, ownerUserId: string): Record<string, unknown> {
-    const row = this.db.getChannelPlugin(pluginId || `${platform}_default`, ownerUserId);
+  private async readConfig(platform: string, pluginId: string | undefined, ownerUserId: string): Promise<Record<string, unknown>> {
+    const row = await this.db.getChannelPlugin(pluginId || `${platform}_default`, ownerUserId);
     if (!row?.config_json) return {};
     try {
       const parsed = JSON.parse(String(row.config_json));
@@ -166,16 +166,16 @@ export class ChannelAgentResolver {
     return out;
   }
 
-  private writeConfig(
+  private async writeConfig(
     platform: string,
     pluginIdIn: string | undefined,
     ownerUserId: string,
     config: Record<string, unknown>,
-  ): void {
+  ): Promise<void> {
     const pluginId = pluginIdIn || `${platform}_default`;
-    const row = this.db.getChannelPlugin(pluginId, ownerUserId);
+    const row = await this.db.getChannelPlugin(pluginId, ownerUserId);
     if (!row) return;
-    this.db.upsertChannelPlugin({
+    await this.db.upsertChannelPlugin({
       id: pluginId,
       type: String(row.type),
       name: String(row.name),
