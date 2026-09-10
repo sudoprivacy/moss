@@ -29,8 +29,15 @@ import { bytesLookLikeText } from './workspaceText.js'
 import {
   createSudorouterClient,
   pointsToQuota,
+  quotaToPoints,
   type SudorouterClient,
 } from './credits/sudorouter.js'
+
+/** The shape the desktop and web clients read from `/api/v1/user/dashboard`. */
+type MossUserDashboard = {
+  points: { total: number; used: number; remaining: number; bonus: number }
+  usage_today: { tokens: number; cost_points: number; requests: number }
+}
 import {
   CreditApplicationError,
   reviewApplication,
@@ -1697,21 +1704,61 @@ async function readUserCredits(
   authService: AuthService,
   config: ServerConfig,
   userId: string,
-): Promise<{ remaining: number; used: number; bonus: number }> {
-  const empty = { remaining: 0, used: 0, bonus: 0 }
+): Promise<MossUserDashboard> {
+  const empty: MossUserDashboard = {
+    points: { total: 0, used: 0, remaining: 0, bonus: 0 },
+    usage_today: { tokens: 0, cost_points: 0, requests: 0 },
+  }
   const gatewayUserId = authService.getUserModelCredential(userId)?.sudorouterUserId
   if (!gatewayUserId) return empty
   const client = buildSudorouterClient(config)
   if (!client) return empty
-  try {
-    const credits = await client.getCredits(gatewayUserId)
-    // `bonus` is a separate pot on the old server that SudoRouter does not
-    // model. Reporting 0 is honest; inventing a split of the real balance
-    // would not be.
-    return { remaining: credits.remainingPoints, used: credits.usedPoints, bonus: 0 }
-  } catch {
-    return empty
+
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const fromSec = Math.floor(startOfToday.getTime() / 1000)
+  const toSec = Math.floor(Date.now() / 1000)
+
+  // Balance and today's usage are independent reads; a gateway slow on one
+  // should not blank the other, so they are settled separately.
+  const [credits, usage] = await Promise.allSettled([
+    client.getCredits(gatewayUserId),
+    client.getModelUsage(gatewayUserId, fromSec, toSec),
+  ])
+
+  const result: MossUserDashboard = {
+    points: { ...empty.points },
+    usage_today: { ...empty.usage_today },
   }
+  if (credits.status === 'fulfilled') {
+    result.points = {
+      // What they hold plus what they have spent — the lifetime figure, which
+      // is not the same as the starting balance once a top-up has happened.
+      total: credits.value.remainingPoints + credits.value.usedPoints,
+      used: credits.value.usedPoints,
+      remaining: credits.value.remainingPoints,
+      // `bonus` was a separate pot on the previous server that the gateway does
+      // not model. Reporting 0 is honest; splitting the real balance to fill
+      // the field would not be.
+      bonus: 0,
+    }
+  }
+  if (usage.status === 'fulfilled') {
+    let tokens = 0
+    let quota = 0
+    for (const row of usage.value) {
+      tokens += row.total_tokens
+      // Summed in the gateway's unit and converted once: converting each row
+      // first rounds most of them to zero.
+      quota += row.costQuota
+    }
+    result.usage_today = {
+      tokens,
+      cost_points: Math.round(quotaToPoints(quota) * 1000) / 1000,
+      requests: usage.value.length,
+    }
+  }
+  return result
 }
 
 /**
@@ -5986,8 +6033,10 @@ export function startServer(
       // gateway account is not an error: private deployments have no metered
       // gateway at all, and the client renders zeroes.
       if (req.method === 'GET' && pathname === '/api/v1/user/dashboard') {
-        const credits = await readUserCredits(authService, config, auth.userId)
-        writeJson(res, 200, { success: true, data: { points: credits } })
+        writeJson(res, 200, {
+          success: true,
+          data: await readUserCredits(authService, config, auth.userId),
+        })
         return
       }
 
@@ -6002,13 +6051,20 @@ export function startServer(
           writeJson(res, 200, { success: true, data: [] })
           return
         }
-        const today = new Date().toISOString().slice(0, 10)
+        // The client sends calendar dates; the gateway wants unix seconds, and
+        // the end date is inclusive of that whole day.
+        const parseDay = (value: string | null, fallback: number, endOfDay = false): number => {
+          if (!value) return fallback
+          const at = Date.parse(endOfDay ? `${value}T23:59:59` : `${value}T00:00:00`)
+          return Number.isFinite(at) ? Math.floor(at / 1000) : fallback
+        }
+        const nowSec = Math.floor(Date.now() / 1000)
         writeJson(res, 200, {
           success: true,
           data: await client.getModelUsage(
             gatewayUserId,
-            url.searchParams.get('start_date') || today,
-            url.searchParams.get('end_date') || today,
+            parseDay(url.searchParams.get('start_date'), nowSec - 86_400),
+            parseDay(url.searchParams.get('end_date'), nowSec, true),
           ),
         })
         return

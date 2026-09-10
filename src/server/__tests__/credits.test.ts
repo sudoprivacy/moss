@@ -377,3 +377,56 @@ describe('provisioning a gateway account', () => {
     expect(account.created).toBe(true)
   })
 })
+
+describe('usage log reading', () => {
+  function clientReturning(rows: unknown[], seen: { url?: string } = {}): SudorouterClient {
+    return createSudorouterClient({
+      baseUrl: 'https://gateway.example',
+      getAdminToken: async () => 't',
+      fetchImpl: (async (url: string | URL | Request) => {
+        seen.url = String(url)
+        return new Response(JSON.stringify({ success: true, data: rows }))
+      }) as unknown as typeof fetch,
+    })
+  }
+
+  it('queries the window the gateway actually honours', async () => {
+    // Verified against the live gateway: start_date/end_date are accepted and
+    // then ignored, which returns an unfiltered page and looks like it worked.
+    const seen: { url?: string } = {}
+    await clientReturning([], seen).getModelUsage('42', 1_757_000_000, 1_757_086_400)
+    expect(seen.url).toContain('time_from=1757000000')
+    expect(seen.url).toContain('time_to=1757086400')
+    expect(seen.url).not.toContain('start_date')
+  })
+
+  it('drops administrative rows, which are top-ups and not spending', async () => {
+    const rows = [
+      { type: 'manage', model_name: '', cost: 0, created_at: 1_757_000_000 },
+      { type: 'consumption', model_name: 'gpt-5.5', prompt_tokens: 10, completion_tokens: 5, cost: 21667, created_at: 1_757_000_000 },
+    ]
+    const usage = await clientReturning(rows).getModelUsage('42', 0, 1)
+    expect(usage).toHaveLength(1)
+    expect(usage[0]?.model).toBe('gpt-5.5')
+  })
+
+  it('reads cost from the field the gateway uses, and reports it in points', async () => {
+    const rows = [{ type: 'consumption', model_name: 'm', prompt_tokens: 1, completion_tokens: 1, cost: 500, created_at: 1_757_000_000 }]
+    const [row] = await clientReturning(rows).getModelUsage('42', 0, 1)
+    expect(row?.cost).toBe(1)
+    // Kept raw as well, so a caller summing many rows converts once instead of
+    // rounding each one to zero first.
+    expect(row?.costQuota).toBe(500)
+  })
+
+  it('sums small rows without rounding each to nothing', async () => {
+    // Ten rows of 50 quota are 500 quota = 1 point. Converted per row they are
+    // ten zeroes.
+    const rows = Array.from({ length: 10 }, () => ({
+      type: 'consumption', model_name: 'm', prompt_tokens: 1, completion_tokens: 0, cost: 50, created_at: 1_757_000_000,
+    }))
+    const usage = await clientReturning(rows).getModelUsage('42', 0, 1)
+    expect(usage.every(r => r.cost === 0)).toBe(true)
+    expect(quotaToPoints(usage.reduce((n, r) => n + r.costQuota, 0))).toBe(1)
+  })
+})
