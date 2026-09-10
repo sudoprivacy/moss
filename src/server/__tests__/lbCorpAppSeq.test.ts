@@ -1,8 +1,14 @@
-// Runs under Node: `tsx --test`. Covers the corp-app inbound seq hardening
-// (HA dual callback entry): the single-statement atomic increment must keep
-// per-corp-app seq unique+monotonic across two store instances sharing one DB
-// file (the WAL multi-writer shape behind an LB), and the unique index must
-// reject duplicate (corp_app_id, seq) outright.
+// Runs under Node: `tsx --test`. Correctness regression anchor for the
+// corp-app inbound seq (HA dual callback entry): the single-statement atomic
+// increment keeps per-corp-app seq unique+monotonic, and the unique index
+// rejects duplicate (corp_app_id, seq) outright.
+//
+// NOTE ON CONCURRENCY: SQLite is a single writer — a read-modify-write seq race
+// is structurally impossible here, and the async driver's synchronous SQLite
+// path does not interleave, so this file does NOT and CANNOT detect a real
+// concurrency race. The genuine race (PostgreSQL READ COMMITTED, two pools
+// behind an LB) and its unique-index + 23505-retry resolution are covered in
+// pgBackend.test.ts. This file only anchors single-writer correctness.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -11,8 +17,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DirectConnectStore } from "../db.js";
 
-describe("appendCorpAppInbound — seq atomicity behind dual LB entries (HA)", () => {
-  it("alternating inserts from two store instances stay unique and monotonic", async () => {
+describe("appendCorpAppInbound — single-writer seq correctness (HA anchor)", () => {
+  it("sequential inserts from two store instances stay unique and monotonic", async () => {
     const dir = mkdtempSync(join(tmpdir(), "moss-seq-"));
     const dbPath = join(dir, "seq.db");
     try {
@@ -28,9 +34,10 @@ describe("appendCorpAppInbound — seq atomicity behind dual LB entries (HA)", (
         text: `m${seq}`,
       });
 
-      // Interleave: a, b, a, b, a — the old two-step (SELECT MAX → INSERT)
-      // could collide when two inserts land between the same read and write;
-      // the single-statement form serialises under the WAL write lock.
+      // Sequential a, b, a, b, a on a shared DB file. Asserts single-writer
+      // correctness (unique + monotonic), NOT concurrency: SQLite serialises
+      // writes and the async driver's SQLite path does not interleave, so this
+      // cannot reproduce the old two-step race. Real race coverage: pgBackend.test.ts.
       const seqs = [
         await storeA.appendCorpAppInbound(msg(1)),
         await storeB.appendCorpAppInbound(msg(2)),

@@ -102,7 +102,7 @@ a/b 均配置 `MOSS_INSTANCE_ID`。
 | create 直连路由 | `POST /api/v1/sessions` 后立即按 `ws_url` 建 WS | 直达创建实例，无 409（create 时 attempt 已同步拉起） |
 | map 优先级 | 带 `Cookie: moss_route=b` 请求 URL 附 `?moss_route=a` | 落实例 a（query 优先）；仅 cookie 时落 b；两者皆无落 pool |
 | failover 全链路 | 桌面端开会话发消息 → `docker kill` owner 容器 | WS 断 → 客户端重拉 metadata（接管完成前 owner_live=false、无 route → pool → CAS 接管）→ 恢复，无 409 死循环 |
-| 首连自愈 | kill owner 后立即从桌面端发起新消息 | 最多 9 次退避（1/2/4/8/16/30/30/30s）内自动恢复 |
+| 首连自愈 | kill owner 后立即从桌面端发起新消息 | 最多 9 次尝试、8 次退避间隔（1/2/4/8/16/30/30/30s）内自动恢复 |
 | 单实例回归 | 不设 `MOSS_INSTANCE_ID` 启动 | 响应无 route cookie、`ws_url` 无 query、行为不变 |
 
 **双侧一致性约束（部署必查）**：nginx map 的键/值（`a`→`moss_a` 等）必须与各实例
@@ -185,6 +185,8 @@ docker exec moss-server-a node -e "fetch('http://127.0.0.1:43127/readyz').then(r
 9. **failover 后存量 runner 的 auth proxy 指向已死实例**：runner fencing 已交付——
    接管时旧 runner ≤10s 心跳失配自杀、新 owner respawn 注入新地址，该限制已按设计
    收敛为「fencing 后自愈」（时间线见第 5.4 节）。
+10. **实例本地 attach socket 残留（P2-1）**：socket 落实例本地 `os.tmpdir()/moss-sock-<instanceId>/`（非共享卷）。实例异常退出后残留的 socket 文件由容器重建 / OS tmp 策略回收；respawn 用新 generation（新文件名），残留文件不同名、不冲突、无正确性影响。
+11. **被禁用用户的存量周期任务停止执行（P2-5，行为变化）**：内部通道经 WS upgrade 的 `isUserActive` 关卡鉴权，用户被禁用后（`status != 'active'`）其名下 session 的 cron / event / 企微消息经内部通道执行时将 401、停止执行（此前直连 socket 无鉴权、会继续执行）。方向合理（禁用用户不应继续消耗资源），但属未显式声明过的行为变化（如离职员工挂着的定时任务会静默停摆）。
 
 ---
 
@@ -236,7 +238,7 @@ docker exec moss-server-a node -e "fetch('http://127.0.0.1:43127/readyz').then(r
 
 ### 5.4 fencing 时间线与冷恢复预期
 
-owner 主机故障的完整恢复链（默认 `MOSS_HEARTBEAT_TIMEOUT_MS=30000`）：
+owner 主机故障的完整恢复链（默认 `heartbeatTimeoutMs=30000`，配于 `server.json` 的 `recovery.heartbeatTimeoutMs`；无对应环境变量）：
 
 ```
 owner 主机死 ──► 存量 runner 心跳失配（≤10s，fencing 自杀）──► 实例心跳过期
@@ -245,7 +247,10 @@ owner 主机死 ──► 存量 runner 心跳失配（≤10s，fencing 自杀�
 
 - 运行中 turn **中断后冷恢复**（总窗口 ≈40-105s），长连接不无损迁移（与源设计
   文档 20 节一致）；客户端由首连/turn 兜底重试自愈（退避预算 121s 覆盖窗口）。
-- 部署调大 `MOSS_HEARTBEAT_TIMEOUT_MS` 时上述时间线**等比拉长**。
+  turn 中途自愈为**重连+重发**，服务端据此**重做 turn**（生成新消息、内容可能与
+  中断前重复，等价于用户手动重发；已验证栈实测为此形态）——重复属冷恢复固有边界，
+  不做客户端去重（有意取舍：重做本质无法靠隐藏 UI 重复消除）。
+- 在 `server.json` 的 `recovery.heartbeatTimeoutMs` 调大时上述时间线**等比拉长**（该配置项无对应环境变量）。
 - 源设计文档 6 节“明确提示用户 session 需恢复/重启”在本方案中被自动 fencing +
   冷恢复 + 客户端重试**自愈替代**（有意偏离，验收按 E2E 无 409 死循环为准）。
 

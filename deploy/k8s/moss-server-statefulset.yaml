@@ -86,13 +86,15 @@ spec:
               value: http://moss-nginx.moss-control.svc:80
             - name: MOSS_AUTH_PROXY_HOST
               value: 0.0.0.0
-            # auth proxy 仅被同 pod 的 runner 使用（headless 内稳定 pod DNS）。
-            - name: MOSS_AUTH_PROXY_URL
-              value: http://$(POD_NAME).moss-server-headless:12013
+            # POD_NAME 必须先于 MOSS_AUTH_PROXY_URL 定义：K8s 依赖变量 $(VAR)
+            # 只展开在其之前定义的 env，否则保持字面 $(POD_NAME) 坏 URL。
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # auth proxy 仅被同 pod 的 runner 使用（headless 内稳定 pod DNS）。
+            - name: MOSS_AUTH_PROXY_URL
+              value: http://$(POD_NAME).moss-server-headless:12013
             - name: MOSS_NEXUS_MODE
               value: external
             - name: MOSS_NEXUS_ENDPOINT

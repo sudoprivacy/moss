@@ -22,8 +22,10 @@
 #   - NFS 两卷已在各主机挂到相同路径（本文示例 /data/moss/data、/data/moss/.moss）；
 #   - Nexus 独立主机已按 docker-compose.nexus-host.yml 启动并可达；
 #   - .env 提供 MOSS_IMAGE_TAG / MOSS_PUBLIC_BASE_URL（VIP 或 SLB 地址）/
-#     MOSS_DATABASE_URL / MOSS_INSTANCE_ID / MOSS_PEER_ADDRS（两台主机的
-#     “实例ID=IP” 清单，供 nginx conf 生成，见 nginx/moss-crosshost.conf 说明）。
+#     MOSS_DATABASE_URL / MOSS_INSTANCE_ID。
+#   - 注：MOSS_PEER_ADDRS（两台主机“实例ID=IP”清单）无任何代码/compose 消费点，
+#     仅作运维备忘；跨主机路由由【手工替换】nginx/moss-crosshost.conf 中的
+#     <HOST_A>/<HOST_B> 占位符完成，不由本变量自动生成。
 # ----------------------------------------------------------------------------
 version: '3.8'
 

@@ -1084,6 +1084,10 @@ function createRemoteDirectRuntime({
               resolve();
             },
             onMessage: (message) => {
+              // Ignore residual events from a superseded manager after a
+              // reconnect (activeManager now points at the new one); otherwise
+              // an old connection's late messages pollute the new attempt.
+              if (manager !== activeManager) return;
               if (!currentTurn) {
                 return;
               }
@@ -1106,6 +1110,9 @@ function createRemoteDirectRuntime({
               }
             },
             onDisconnected: () => {
+              // A superseded manager's late disconnect must not null out the
+              // new activeManager or fail the new turn (see onMessage note).
+              if (manager !== activeManager) return;
               const turn = currentTurn;
               activeManager = null;
               managerConnectPromise = null;
@@ -1114,6 +1121,10 @@ function createRemoteDirectRuntime({
               }
             },
             onError: (error) => {
+              // Same isolation as onMessage/onDisconnected. Safe for the
+              // connect path: activeManager = manager (line above `connect()`)
+              // is set before connect() can fire onError.
+              if (manager !== activeManager) return;
               const turn = currentTurn;
               if (managerConnectPromise) {
                 managerConnectPromise = null;
@@ -1145,6 +1156,14 @@ function createRemoteDirectRuntime({
         for (let attempt = 1; attempt <= REMOTE_DIRECT_MAX_ATTEMPTS; attempt += 1) {
           if (attempt > 1) {
             await new Promise((resolve) => setTimeout(resolve, remoteDirectRetryDelayMs(attempt - 1)));
+            // Uniformly reset turn-level state before every retry: a prior
+            // attempt's onError/onDisconnected may have called fail() (setting
+            // pendingError/settled). Left over, the next attempt's first
+            // nextMessage would hit the stale pendingError and reject. The queue
+            // is dropped too — its residual messages belong to the dead connection.
+            pendingError = null;
+            settled = false;
+            queue.length = 0;
           }
           if (disposed || currentTurn?.aborted) {
             throw new Error('Remote session request was aborted.');
@@ -1168,36 +1187,35 @@ function createRemoteDirectRuntime({
             throw new Error('Failed to send prompt to remote session.');
           }
 
-          while (true) {
-            const message = await nextMessage();
-            yield message;
-            if (message?.type === 'result') {
-              break;
+          try {
+            while (true) {
+              const message = await nextMessage();
+              yield message;
+              if (message?.type === 'result') {
+                break;
+              }
             }
-          }
-          if (pendingError) {
-            // Turn failed mid-flight. Our own onDisconnected callback fails
-            // the turn with this fixed message once the SDK exhausts its
-            // reconnect budget (~50-60s) — shorter than the worst failover
-            // window (~70-105s), so most takeovers outlast it. Clear the
-            // cached config and retry within the same budget: the re-fetch
-            // picks up the new owner route from ws_url.
+          } catch (err) {
+            // Turn failed mid-flight: onDisconnected fails the turn with this
+            // fixed message once the SDK exhausts its reconnect budget (~50-60s),
+            // shorter than the worst failover window, so the rejection surfaces
+            // here (the while loop no longer lets it escape the generator).
+            // Clear the cache and retry within the same budget — the re-fetch
+            // picks up the new owner route from ws_url. Non-disconnect errors
+            // (and abort/dispose) rethrow unchanged.
             if (
-              pendingError instanceof Error
-              && pendingError.message.includes('disconnected before completion')
+              err instanceof Error
+              && err.message.includes('disconnected before completion')
               && !currentTurn?.aborted
               && !disposed
             ) {
-              lastError = pendingError;
-              pendingError = null;
-              settled = false;
-              queue.length = 0;
+              lastError = err;
               sessionPromise = null;
               activeManager = null;
               managerConnectPromise = null;
               continue;
             }
-            throw pendingError;
+            throw err;
           }
           return;
         }
