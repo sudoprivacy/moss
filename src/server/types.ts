@@ -402,12 +402,28 @@ export const serverFileConfigSchema = lazySchema(() =>
       sudorouterBaseUrl: z.string().min(1).optional(),
       skillhubBaseUrl: z.string().min(1).optional(),
       scodeAutoModel: z.string().min(1).optional(),
-      /** `disabled` because moss holds no credit ledger; the cloud sets `pay`. */
+      /**
+       * `disabled` because moss holds no credit ledger of its own. `approve`
+       * turns on credit applications, where an administrator grants points and
+       * moss credits them at the gateway. `pay` additionally needs a payment
+       * provider (the client expects an Alipay / WeChat QR), which moss does
+       * not implement — setting it without one leaves the purchase flow dead.
+       */
       rechargeMode: z.enum(['pay', 'approve', 'disabled']).default('disabled'),
       creditApplication: z.object({
         minPoints: z.number().int().min(0),
         maxPoints: z.number().int().min(0),
         allowDuplicatePending: z.boolean().default(false),
+      }).default({ minPoints: 100, maxPoints: 1000000, allowDuplicatePending: false }),
+      /**
+       * Admin access to the model gateway, needed to read a balance and to
+       * credit an approved application. Coordinates only — the token itself
+       * lives in the Nexus vault, like every other secret here, so a leaked
+       * config file cannot move anyone's balance.
+       */
+      sudorouterAdmin: z.object({
+        vaultNamespace: z.string().min(1).default('system:sudorouter'),
+        tokenKey: z.string().min(1).default('admin-token'),
       }).optional(),
       logReport: z.object({
         enabled: z.boolean().default(false),
