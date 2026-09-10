@@ -1622,6 +1622,46 @@ async function readWorkspaceTreeIn(
 }
 
 /**
+ * Make sure this person has a gateway account, and remember it.
+ *
+ * Called on sign-up and again on every phone sign-in, because the alternative
+ * to self-healing is worse than it looks: a user with no gateway key falls back
+ * to the shared server key, so a provisioning failure does not stop them — it
+ * quietly bills everyone's consumption to one account, which is exactly the
+ * behaviour the per-user key exists to end.
+ *
+ * Never throws. A gateway that is down must not stop someone signing in; they
+ * simply get another attempt next time.
+ */
+async function ensureGatewayAccount(
+  authService: AuthService,
+  config: ServerConfig,
+  input: { userId: string; username: string; displayName?: string },
+): Promise<void> {
+  if (authService.getUserModelCredential(input.userId)) return
+  const client = buildSudorouterClient(config)
+  if (!client) return
+  try {
+    const account = await client.provisionAccount({
+      username: input.username,
+      displayName: input.displayName,
+      initialPoints: config.systemConfig.initialPoints ?? 0,
+    })
+    authService.setUserModelCredential(input.userId, {
+      sudorouterUserId: account.gatewayUserId,
+      sudorouterKey: account.gatewayKey,
+    })
+  } catch (error) {
+    // Loud in the log, invisible to the user: they are signed in either way,
+    // and the next sign-in retries.
+    console.error(
+      `[credits] could not provision a gateway account for ${input.userId}:`,
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+}
+
+/**
  * A client for the model gateway that owns the credit ledger, or null when this
  * deployment has none — a private install bills nothing and has no gateway to
  * ask. The admin token is read from the vault per call, never from server.json,
@@ -2545,10 +2585,16 @@ export function startServer(
           writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
           return
         }
+        const nickname = typeof body.nickname === 'string' ? body.nickname : undefined
         const result = authService.registerWithPhone({
           phone,
-          nickname: typeof body.nickname === 'string' ? body.nickname : undefined,
+          nickname,
           autoCreateOrg: phoneAuth.autoCreateOrg,
+        })
+        await ensureGatewayAccount(authService, config, {
+          userId: result.user.id,
+          username: phone,
+          displayName: nickname,
         })
         writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
         return
@@ -2606,6 +2652,12 @@ export function startServer(
           }
 
           const result = authService.issueTokenFromPhone(phone)
+          // Self-heal: covers accounts created before provisioning existed, and
+          // any sign-up whose provisioning attempt did not land.
+          await ensureGatewayAccount(authService, config, {
+            userId: result.user.id,
+            username: phone,
+          })
           writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
           return
         }

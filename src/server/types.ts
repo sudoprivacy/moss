@@ -410,6 +410,12 @@ export const serverFileConfigSchema = lazySchema(() =>
        * not implement — setting it without one leaves the purchase flow dead.
        */
       rechargeMode: z.enum(['pay', 'approve', 'disabled']).default('disabled'),
+      /**
+       * Points granted to a newly provisioned gateway account. 0 means the
+       * account is created with nothing, which is the right default for a
+       * deployment that has not decided to give anything away.
+       */
+      initialPoints: z.number().int().min(0).default(0),
       creditApplication: z.object({
         minPoints: z.number().int().min(0),
         maxPoints: z.number().int().min(0),

@@ -290,3 +290,90 @@ describe('reviewing an application', () => {
     expect(store.getById(app.id)!.status).toBe('PENDING')
   })
 })
+
+describe('provisioning a gateway account', () => {
+  type Call = { path: string; method: string; body: unknown }
+
+  function clientRecording(calls: Call[], responses: Record<string, unknown>): SudorouterClient {
+    return createSudorouterClient({
+      baseUrl: 'https://gateway.example',
+      getAdminToken: async () => 'admin-token',
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url).replace('https://gateway.example', '')
+        calls.push({
+          path,
+          method: init?.method ?? 'GET',
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        const key = Object.keys(responses).find(k => path.startsWith(k))
+        return new Response(JSON.stringify({ success: true, data: key ? responses[key] : null }))
+      }) as unknown as typeof fetch,
+    })
+  }
+
+  it('reuses an account the gateway already knows', async () => {
+    // Creating a second account for the same person would strand the balance
+    // the first one holds.
+    const calls: Call[] = []
+    const client = clientRecording(calls, {
+      '/api/user/search': [{ id: 77, username: '13800138000' }],
+      '/api/token/': { key: 'sk-reused' },
+    })
+    const account = await client.provisionAccount({
+      username: '13800138000', initialPoints: 1000,
+    })
+    expect(account).toEqual({ gatewayUserId: '77', gatewayKey: 'sk-reused', created: false })
+
+    // No account created, and — crucially — no starting balance granted again.
+    expect(calls.some(c => c.path === '/api/user/' && c.method === 'POST')).toBe(false)
+    expect(calls.some(c => c.path === '/api/user/quota')).toBe(false)
+  })
+
+  it('creates an account and grants the starting balance once', async () => {
+    const calls: Call[] = []
+    const client = clientRecording(calls, {
+      '/api/user/search': [],
+      '/api/user/': { id: 91 },
+      '/api/token/': { key: 'sk-new' },
+    })
+    const account = await client.provisionAccount({
+      username: '13800138001', displayName: 'Newcomer', initialPoints: 1000,
+    })
+    expect(account).toEqual({ gatewayUserId: '91', gatewayKey: 'sk-new', created: true })
+
+    const created = calls.find(c => c.path === '/api/user/' && c.method === 'POST')
+    expect(created?.body).toMatchObject({ username: '13800138001', display_name: 'Newcomer', role: 1 })
+
+    // Points in, quota out: the grant is sent in the gateway's own unit.
+    const quota = calls.find(c => c.path === '/api/user/quota')
+    expect(quota?.body).toMatchObject({ id: 91, quota: 500_000 })
+
+    // The cap belongs to the account, not the key.
+    const token = calls.find(c => c.path === '/api/token/')
+    expect(token?.body).toMatchObject({ user_id: 91, unlimited_quota: true, expired_time: -1 })
+  })
+
+  it('pads a short username into a password the gateway will accept', async () => {
+    const calls: Call[] = []
+    const client = clientRecording(calls, {
+      '/api/user/search': [], '/api/user/': { id: 5 }, '/api/token/': { key: 'k' },
+    })
+    await client.provisionAccount({ username: 'sudo', initialPoints: 0 })
+    expect((calls.find(c => c.path === '/api/user/')?.body as { password: string }).password)
+      .toBe('sudo1111')
+  })
+
+  it('ignores a search hit that is not an exact username match', async () => {
+    // The gateway's search is a keyword scan, so a substring match is not this
+    // person — provisioning onto it would hand them someone else's account.
+    const calls: Call[] = []
+    const client = clientRecording(calls, {
+      '/api/user/search': [{ id: 3, username: '13800138000-old' }],
+      '/api/user/': { id: 12 },
+      '/api/token/': { key: 'k' },
+    })
+    const account = await client.provisionAccount({ username: '13800138000', initialPoints: 0 })
+    expect(account.gatewayUserId).toBe('12')
+    expect(account.created).toBe(true)
+  })
+})
