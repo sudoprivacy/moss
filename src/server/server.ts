@@ -23,6 +23,7 @@ import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
 import { buildPublicSystemConfig } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
+import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
 import { initHubConfig } from './hubConfig.js'
@@ -5711,6 +5712,27 @@ export function startServer(
                 : undefined,
           }, auth),
         )
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/users/import-phone') {
+        // Deliberately super_admin, not `admin:users` like the routes around it.
+        // Those pin every write to the caller's own org precisely so an org admin
+        // cannot reach into another org; a migration import creates orgs and
+        // places users across them, so it is exactly the cross-org write that
+        // guard exists to stop. Only a deployment-wide role may perform it.
+        authService.requireSuperAdmin(auth)
+        const body = await readJsonBody(req)
+        try {
+          writeJson(res, 200, importPhoneUsers(authService, parsePhoneImportRequest(body)))
+        } catch (err) {
+          writeJson(res, 400, {
+            error: {
+              code: 'import_failed',
+              message: err instanceof Error ? err.message : String(err),
+            },
+          })
+        }
         return
       }
 

@@ -15,6 +15,7 @@ import {
   type AuthCenterUser,
   type SanitizedAuthCenterDepartment,
   type SanitizedAuthCenterUser,
+  type UserModelCredential,
   createApiKeyRecord,
   createSyntheticUserEmail,
   hashPassword,
@@ -437,13 +438,48 @@ export class AuthService {
       return this.issueTokenFromPhone(input.phone)
     }
 
+    this.provisionPhoneUser(input)
+    return this.issueTokenFromPhone(input.phone)
+  }
+
+  /**
+   * Create the account behind a phone identity.
+   *
+   * Shared by self-service signup and by the admin importer that carries users
+   * over from the previous server, so the two cannot drift into different
+   * notions of what a phone account is. A phone already on file is returned
+   * untouched rather than duplicated or rejected — the property the importer
+   * relies on to be safely re-runnable.
+   */
+  provisionPhoneUser(input: {
+    phone: string
+    nickname?: string
+    autoCreateOrg: boolean
+    /** Join this org instead of creating or picking one. Used by the importer to preserve existing grouping. */
+    orgId?: string
+    role?: string
+    status?: 'active' | 'disabled'
+    /** Preserve the original signup time when importing; defaults to now. */
+    createdAt?: number
+    modelCredential?: UserModelCredential
+  }): { user: AuthCenterUser; created: boolean } {
+    const existing = this.db.getUserByPhone(input.phone)
+    if (existing) return { user: existing, created: false }
+
     const displayName = input.nickname?.trim() || ''
-    const createdAt = Date.now()
+    const createdAt = input.createdAt ?? Date.now()
     const userId = randomUUID()
 
     let orgId: string
     let role: string
-    if (input.autoCreateOrg) {
+    if (input.orgId) {
+      const target = this.db.getOrganization(input.orgId)
+      if (!target) {
+        throw new AuthServiceError(400, `Organization not found: ${input.orgId}`)
+      }
+      orgId = target.id
+      role = 'user'
+    } else if (input.autoCreateOrg) {
       orgId = randomUUID()
       // Named after the person, disambiguated by user id: org names have no SQL
       // uniqueness constraint but createOrganization() rejects duplicates, and
@@ -473,8 +509,8 @@ export class AuthService {
       name: input.phone,
       displayName: displayName || null,
       departmentId: null,
-      role,
-      status: 'active',
+      role: input.role ?? role,
+      status: input.status ?? 'active',
       localAuth: true,
       tokenLimit: null,
       passwordHash: null,
@@ -485,7 +521,15 @@ export class AuthService {
       phone: input.phone,
     })
 
-    return this.issueTokenFromPhone(input.phone)
+    if (input.modelCredential) {
+      this.db.setUserModelCredential(userId, input.modelCredential)
+    }
+
+    const created = this.db.getUserById(userId)
+    if (!created) {
+      throw new AuthServiceError(500, 'User creation failed')
+    }
+    return { user: created, created: true }
   }
 
   issueTokenFromApiKey(apiKeyValue: string): {
@@ -1170,6 +1214,42 @@ export class AuthService {
   getUserName(userId: string): string | undefined {
     const user = this.db.getUserById(userId)
     return user ? resolveDisplayName(user) : undefined
+  }
+
+  findOrganizationByName(name: string): AuthCenterOrganization | null {
+    return this.db.getOrganizationByName(name)
+  }
+
+  /**
+   * Run `work` in a single SQLite transaction, optionally discarding it.
+   *
+   * `rollback` exists for rehearsing a bulk import: the caller executes the real
+   * code path and throws the writes away, so the rehearsal cannot disagree with
+   * the run it is rehearsing. A nested transaction is not attempted — SQLite has
+   * no nesting here, so an active transaction means the caller is already inside
+   * one and owns the outcome.
+   */
+  runInTransaction(work: () => void, options: { rollback?: boolean } = {}): void {
+    this.db.db.exec('BEGIN TRANSACTION')
+    try {
+      work()
+    } catch (error) {
+      this.db.db.exec('ROLLBACK')
+      throw error
+    }
+    this.db.db.exec(options.rollback ? 'ROLLBACK' : 'COMMIT')
+  }
+
+  /**
+   * The user's own model-gateway token, or null when the shared server key
+   * applies. Returns the secret, so it has exactly one caller: session spawn.
+   */
+  getUserModelCredential(userId: string): UserModelCredential | null {
+    return this.db.getUserModelCredential(userId)
+  }
+
+  setUserModelCredential(userId: string, credential: UserModelCredential): void {
+    this.db.setUserModelCredential(userId, credential)
   }
 
   createUser(input: {
