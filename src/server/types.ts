@@ -415,16 +415,6 @@ export const serverFileConfigSchema = lazySchema(() =>
         maxPoints: z.number().int().min(0),
         allowDuplicatePending: z.boolean().default(false),
       }).default({ minPoints: 100, maxPoints: 1000000, allowDuplicatePending: false }),
-      /**
-       * Admin access to the model gateway, needed to read a balance and to
-       * credit an approved application. Coordinates only — the token itself
-       * lives in the Nexus vault, like every other secret here, so a leaked
-       * config file cannot move anyone's balance.
-       */
-      sudorouterAdmin: z.object({
-        vaultNamespace: z.string().min(1).default('system:sudorouter'),
-        tokenKey: z.string().min(1).default('admin-token'),
-      }).optional(),
       logReport: z.object({
         enabled: z.boolean().default(false),
         baseUrl: z.string().min(1).optional(),
