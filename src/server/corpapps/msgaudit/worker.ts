@@ -179,11 +179,13 @@ export class MsgAuditWorker {
       this.inflight.add(cfg.corpAppId)
       try {
         const r = await pullInChild({ ...cfg, maxPages: this.maxPagesPerTick })
-        if (r.written > 0 || r.failed > 0) {
+        if (r.written > 0 || r.failed > 0 || r.filtered > 0) {
           const capped = this.maxPagesPerTick > 0 && r.pages >= this.maxPagesPerTick
           console.log(
             `[msgaudit] ${cfg.corpAppId}: fetched=${r.fetched} written=${r.written} ` +
-              `failed=${r.failed} cursor=${r.cursor}` +
+              `failed=${r.failed}` +
+              (r.filtered > 0 ? ` filtered=${r.filtered}` : '') +
+              ` cursor=${r.cursor}` +
               (capped ? ` (page cap reached; resuming next tick)` : ''),
           )
         }

@@ -54,6 +54,8 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
   private secret = ''
   /** publickey_ver -> PEM, JSON-encoded (secret store holds strings only). */
   private privateKeysRaw = ''
+  /** Optional room allowlist (comma/space separated); empty = archive all. */
+  private roomFilterRaw = ''
 
   /**
    * 会话存档 has no AgentId, so the instance key is the corpId alone. The
@@ -75,6 +77,8 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     this.encodingAesKey = credentials.encodingAesKey ?? ''
     this.secret = credentials.secret ?? ''
     this.privateKeysRaw = credentials.privateKeys ?? ''
+    // Non-secret, so it lives in config rather than the credential blob.
+    this.roomFilterRaw = String(config.roomFilter ?? '')
     if (!this.corpId) throw new Error('wecommsgaudit: missing corpId')
   }
 
@@ -113,6 +117,7 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
       corpId: this.corpId,
       secret: this.secret,
       privateKeysRaw: this.privateKeysRaw,
+      roomFilterRaw: this.roomFilterRaw,
     }
   }
 
