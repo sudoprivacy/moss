@@ -6027,6 +6027,72 @@ export function startServer(
         return
       }
 
+      // The consumer client posts here rather than sending a grant_type to
+      // /auth/token, so the path exists as its own entry to the same refresh.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/refresh') {
+        const body = await readJsonBody(req)
+        const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token.trim() : ''
+        if (!refreshToken) {
+          writeJson(res, 400, { success: false, msg: 'refresh_token is required' })
+          return
+        }
+        try {
+          writeJson(res, 200, {
+            success: true,
+            data: attachSudocodeFields(authService.refreshToken(refreshToken)),
+          })
+        } catch (err) {
+          // A dead refresh token is the normal end of a long absence, not a
+          // server fault; the client needs a 401 to know to show the login
+          // screen rather than an empty page.
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          writeJson(res, status, { success: false, msg: 'refresh_token is invalid or expired' })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/user/update-profile') {
+        const body = await readJsonBody(req)
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        if (!nickname) {
+          writeJson(res, 400, { success: false, msg: 'nickname is required' })
+          return
+        }
+        // The display name, not the login name: `name` holds the phone, which
+        // is the stable handle and must not move when someone renames himself.
+        authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
+        writeJson(res, 200, { success: true, msg: 'nickname updated' })
+        return
+      }
+
+      // The desktop client's visibility gate for tenant assistants.
+      //
+      // Its degradation is asymmetric, which decides how this must behave: when
+      // the call FAILS the client keeps every installed assistant, but when it
+      // SUCCEEDS every tenant-category assistant missing from the answer is
+      // hidden. So an empty-but-successful reply is worse than no reply at all
+      // — it would make every tenant assistant disappear.
+      //
+      // `enhancement` is reported disabled: it described a Dify pre-injection
+      // binding that only the previous server had. Claiming otherwise would
+      // have the client wrap chats with something that does not exist here.
+      if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
+        const filter = authService.buildVisibilityFilter(auth)
+        const installed = await getInstalledAssistants()
+        writeJson(res, 200, {
+          success: true,
+          data: installed
+            .filter(assistant => isVisibleTo(assistant.visibleTo, filter))
+            .map(assistant => ({
+              assistant_id: assistant.meta?.id ?? assistant.name,
+              tenant_id: auth.orgId,
+              prompts_i18n: assistant.promptsI18n ?? {},
+              enhancement: { enabled: false },
+            })),
+        })
+        return
+      }
+
       // ---- credits ----
       // The balance lives at the model gateway, so every one of these reads
       // through to it rather than reporting a number moss keeps. A user with no
