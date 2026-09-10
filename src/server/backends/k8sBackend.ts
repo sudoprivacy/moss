@@ -426,7 +426,7 @@ export class K8sBackend implements SessionBackend {
   }
 }
 
-function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
+export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
   const args: string[] = []
   if (kubeconfig) {
     args.push('--kubeconfig', kubeconfig)
@@ -435,8 +435,16 @@ function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] 
   return args
 }
 
-/** Deterministic, DNS-1123 pod + Secret names derived from the session id. */
-function buildResourceNames(sessionId: string): { podName: string; secretName: string } {
+/**
+ * Deterministic, DNS-1123 pod + Secret names derived from the session id.
+ *
+ * Exported because the pod's name is the only handle moss has on a running
+ * session's filesystem from outside the runner process. The HTTP server serves
+ * workspace reads and writes and never holds the backend handle — the runner
+ * does, in a different process — so it re-derives the name from the session id.
+ * Keep this a pure function of the session id for that reason.
+ */
+export function buildResourceNames(sessionId: string): { podName: string; secretName: string } {
   const suffix = sessionId
     .slice(0, 12)
     .toLowerCase()
