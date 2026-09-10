@@ -43,6 +43,7 @@ import {
   type WorkspaceFileAccess,
 } from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
+import { buildClientCredentials, sealCredentials } from './credentialsEnvelope.js'
 import type { ConfigKey } from './configStore/configStore.js'
 
 const SUDOROUTER_ADMIN_TOKEN_KEY: ConfigKey = 'server.sudorouter-admin-token'
@@ -5904,6 +5905,19 @@ export function startServer(
                 : undefined,
           }, auth),
         )
+        return
+      }
+
+      // The client fetches this right after signing in, to pick up the tokens
+      // it needs for the services moss points it at. Auth is the real gate here
+      // — see the module comment on why the envelope is not one.
+      if (req.method === 'GET' && pathname === '/api/v1/system-config/credentials') {
+        writeJson(res, 200, {
+          success: true,
+          ...sealCredentials(
+            buildClientCredentials(getConfigStore().get('server.hub-authorization')),
+          ),
+        })
         return
       }
 
