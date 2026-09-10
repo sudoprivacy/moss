@@ -9,6 +9,15 @@
  *
  * Two admin endpoints are all this needs, both already present in SudoRouter:
  * `GET /api/user/:id` to read, `PUT /api/user/quota` to credit.
+ *
+ * Why an admin token rather than each user's own key, which moss already
+ * stores and which would be least privilege: the stored key is a `Token.Key`,
+ * and SudoRouter accepts those only on `/v1/*`, its model API. The `/api/*`
+ * console routes authenticate against a dashboard session or a personal access
+ * token, which is a different column and a different format — 48 alphanumeric
+ * characters for the former against base64 for the latter, which is how the
+ * two are told apart. So reading a balance with the user's own credential is
+ * not available, however much it ought to be.
  */
 
 /**
