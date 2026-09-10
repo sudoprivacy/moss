@@ -146,7 +146,8 @@ export function submitApplication(
  */
 export async function reviewApplication(
   store: CreditApplicationStore,
-  sudorouter: SudorouterClient,
+  /** Null is allowed: a rejection never reaches the gateway. */
+  sudorouter: SudorouterClient | null,
   input: {
     id: number
     approve: boolean
@@ -185,6 +186,9 @@ export async function reviewApplication(
       409,
       'User has no model gateway account; credits cannot be applied',
     )
+  }
+  if (!sudorouter) {
+    throw new CreditApplicationError(503, 'Model gateway is not configured')
   }
 
   store.updateStatus(app.id, {

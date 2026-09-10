@@ -5976,20 +5976,20 @@ export function startServer(
       if (req.method === 'POST' && creditReviewMatch) {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
-        const client = buildSudorouterClient(config, nexusClient)
-        if (!client) {
-          writeJson(res, 503, { success: false, msg: 'Model gateway is not configured' })
-          return
-        }
         const application = authService.creditApplications.getById(Number(creditReviewMatch[1]))
         if (!application) {
           writeJson(res, 404, { success: false, msg: 'Application not found' })
           return
         }
+        // Only an approval needs the gateway; reviewApplication enforces that.
+        // Requiring it for a rejection too would leave a deployment with no
+        // gateway unable to close a request it never intended to grant.
+        const approving = body.approve === true
+        const client = buildSudorouterClient(config, nexusClient)
         try {
           const reviewed = await reviewApplication(authService.creditApplications, client, {
             id: application.id,
-            approve: body.approve === true,
+            approve: approving,
             approvedPoints:
               typeof body.approved_points === 'number' ? body.approved_points : undefined,
             adminComment: typeof body.admin_comment === 'string' ? body.admin_comment : undefined,

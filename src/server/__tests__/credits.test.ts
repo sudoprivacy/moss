@@ -258,6 +258,26 @@ describe('reviewing an application', () => {
     })).rejects.toThrow(/cannot be reviewed/)
   })
 
+  it('closes a rejection with no gateway at all', async () => {
+    // A deployment without a metered gateway must still be able to decline a
+    // request it never intended to grant; the gateway is only needed to pay one.
+    const store = makeStore()
+    const app = submitApplication(store, POLICY, {
+      userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
+    })
+    const reviewed = await reviewApplication(store, null, {
+      id: app.id, approve: false, gatewayUserId: null, adminComment: 'declined',
+    })
+    expect(reviewed.status).toBe('REJECTED')
+
+    const second = submitApplication(store, POLICY, {
+      userId: 'u2', orgId: 'o1', requestedPoints: 500, reason: null,
+    })
+    await expect(reviewApplication(store, null, {
+      id: second.id, approve: true, gatewayUserId: '42',
+    })).rejects.toThrow(/gateway is not configured/)
+  })
+
   it('refuses to approve someone with no gateway account', async () => {
     // Otherwise the application reads APPROVED while no credits ever moved.
     const store = makeStore()
