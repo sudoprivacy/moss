@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { buildRemoteWorkspaceTree, joinInPod, parseStatLines } from '../backends/podWorkspace.js'
+import { bytesLookLikeText } from '../workspaceText.js'
 
 const POLICY = { skipDirs: new Set(['.git', 'node_modules']), maxEntriesPerDir: 500 }
 
@@ -110,5 +111,26 @@ describe('remote workspace tree', () => {
     const src = root.children?.find(c => c.name === 'src')
     expect(root.children?.length).toBe(1)
     expect((src?.children ?? []).map(c => c.name)).toEqual(['util.ts'])
+  })
+})
+
+describe('text detection by content', () => {
+  it('reads extensionless text as text', () => {
+    // What agents write most: a report with no extension. Deciding by name
+    // alone returned base64 and the client rendered the encoding.
+    expect(bytesLookLikeText(Buffer.from('# @final\n为什么程序员总分不清万圣节和圣诞节', 'utf8'))).toBe(true)
+    expect(bytesLookLikeText(Buffer.from('', 'utf8'))).toBe(true)
+  })
+
+  it('still calls real binaries binary', () => {
+    // A NUL byte is the conventional signal, and PNG opens with one in its header.
+    expect(bytesLookLikeText(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]))).toBe(false)
+    // Bytes that are not valid UTF-8 are not text either.
+    expect(bytesLookLikeText(Buffer.from([0xff, 0xfe, 0xfd, 0xfc]))).toBe(false)
+  })
+
+  it('judges only the head, so a large file stays cheap', () => {
+    const big = Buffer.concat([Buffer.alloc(8192, 0x41), Buffer.from([0x00])])
+    expect(bytesLookLikeText(big)).toBe(true)
   })
 })

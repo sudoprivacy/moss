@@ -25,6 +25,7 @@ import { buildPublicSystemConfig } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
 import { buildKubectlBaseArgs, buildResourceNames } from './backends/k8sBackend.js'
+import { bytesLookLikeText } from './workspaceText.js'
 import {
   createSudorouterClient,
   pointsToQuota,
@@ -1712,35 +1713,66 @@ async function readWorkspaceFilePreview(
   const info = await lstat(fullPath)
   if (!info.isFile()) throw new HttpError(400, 'Path is not a file')
 
-  const mime = workspacePreviewMime(fullPath)
-  const name = basename(fullPath)
-  const responseRelativePath = toWorkspaceRelativePath(rootRealPath, fullPath)
-  if (isWorkspaceTextFile(fullPath, mime)) {
-    if (info.size > WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES) {
+  return buildFilePreview({
+    name: basename(fullPath),
+    relativePath: toWorkspaceRelativePath(rootRealPath, fullPath),
+    mime: workspacePreviewMime(fullPath),
+    knownText: isWorkspaceTextFile(fullPath, workspacePreviewMime(fullPath)),
+    size: info.size,
+    read: () => readFile(fullPath),
+  })
+}
+
+/**
+ * Shape a preview from a file's name, size and bytes.
+ *
+ * Shared by the direct-fs and pod paths so the two cannot disagree about what
+ * counts as text — the difference between them is only where the bytes come
+ * from, and that is the argument.
+ */
+async function buildFilePreview(file: {
+  name: string
+  relativePath: string
+  mime: string
+  knownText: boolean
+  size: number
+  read: () => Promise<Buffer>
+}): Promise<MossWorkspaceFilePreview> {
+  const asText = (content: string, mime: string): MossWorkspaceFilePreview => ({
+    kind: 'text',
+    name: file.name,
+    relativePath: file.relativePath,
+    mime,
+    encoding: 'utf8',
+    content,
+    size: file.size,
+    truncated: false,
+  })
+
+  if (file.knownText) {
+    if (file.size > WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES) {
       throw new HttpError(413, 'Text file exceeds preview limit')
     }
-    return {
-      kind: 'text',
-      name,
-      relativePath: responseRelativePath,
-      mime,
-      encoding: 'utf8',
-      content: await readFile(fullPath, 'utf8'),
-      size: info.size,
-      truncated: false,
-    }
+    return asText((await file.read()).toString('utf8'), file.mime)
   }
 
-  if (info.size > WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES) {
+  if (file.size > WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES) {
     throw new HttpError(413, 'Binary file exceeds preview limit')
+  }
+  const bytes = await file.read()
+  // The name said nothing useful, so ask the bytes. Files an agent writes
+  // frequently have no extension, and showing base64 of a plain-text report is
+  // worse than useless.
+  if (file.size <= WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES && bytesLookLikeText(bytes)) {
+    return asText(bytes.toString('utf8'), 'text/plain; charset=utf-8')
   }
   return {
     kind: 'base64',
-    name,
-    relativePath: responseRelativePath,
-    mime,
-    contentBase64: (await readFile(fullPath)).toString('base64'),
-    size: info.size,
+    name: file.name,
+    relativePath: file.relativePath,
+    mime: file.mime,
+    contentBase64: bytes.toString('base64'),
+    size: file.size,
   }
 }
 
@@ -1761,35 +1793,15 @@ async function readRemoteWorkspaceFilePreview(
   if (!entry) throw new HttpError(404, 'File not found')
   if (entry.isDir) throw new HttpError(400, 'Path is not a file')
 
-  const name = relativePath.slice(relativePath.lastIndexOf('/') + 1)
   const mime = workspacePreviewMime(relativePath)
-  if (isWorkspaceTextFile(relativePath, mime)) {
-    if (entry.size > WORKSPACE_TEXT_PREVIEW_LIMIT_BYTES) {
-      throw new HttpError(413, 'Text file exceeds preview limit')
-    }
-    return {
-      kind: 'text',
-      name,
-      relativePath,
-      mime,
-      encoding: 'utf8',
-      content: (await remote.readFile(relativePath)).toString('utf8'),
-      size: entry.size,
-      truncated: false,
-    }
-  }
-
-  if (entry.size > WORKSPACE_BINARY_PREVIEW_LIMIT_BYTES) {
-    throw new HttpError(413, 'Binary file exceeds preview limit')
-  }
-  return {
-    kind: 'base64',
-    name,
+  return buildFilePreview({
+    name: relativePath.slice(relativePath.lastIndexOf('/') + 1),
     relativePath,
     mime,
-    contentBase64: (await remote.readFile(relativePath)).toString('base64'),
+    knownText: isWorkspaceTextFile(relativePath, mime),
     size: entry.size,
-  }
+    read: () => remote.readFile(relativePath),
+  })
 }
 
 async function readWorkspaceTree(
@@ -5976,20 +5988,20 @@ export function startServer(
       if (req.method === 'POST' && creditReviewMatch) {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
-        const client = buildSudorouterClient(config, nexusClient)
-        if (!client) {
-          writeJson(res, 503, { success: false, msg: 'Model gateway is not configured' })
-          return
-        }
         const application = authService.creditApplications.getById(Number(creditReviewMatch[1]))
         if (!application) {
           writeJson(res, 404, { success: false, msg: 'Application not found' })
           return
         }
+        // Only an approval needs the gateway; reviewApplication enforces that.
+        // Requiring it for a rejection too would leave a deployment with no
+        // gateway unable to close a request it never intended to grant.
+        const approving = body.approve === true
+        const client = buildSudorouterClient(config, nexusClient)
         try {
           const reviewed = await reviewApplication(authService.creditApplications, client, {
             id: application.id,
-            approve: body.approve === true,
+            approve: approving,
             approvedPoints:
               typeof body.approved_points === 'number' ? body.approved_points : undefined,
             adminComment: typeof body.admin_comment === 'string' ? body.admin_comment : undefined,
