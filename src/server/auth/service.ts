@@ -6,6 +6,11 @@ import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneA
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
+  newApplicationNo,
+  type CreditApplication,
+  type CreditApplicationStore,
+} from '../credits/creditApplications.js'
+import {
   AuthCenterDb,
   type AuthCenterApiKey,
   type AuthCenterBootstrap,
@@ -1218,6 +1223,39 @@ export class AuthService {
 
   findOrganizationByName(name: string): AuthCenterOrganization | null {
     return this.db.getOrganizationByName(name)
+  }
+
+  /**
+   * The credit-application store, exposed as one accessor rather than a dozen
+   * delegating methods — the credits module owns that vocabulary, not this one.
+   */
+  get creditApplications(): CreditApplicationStore {
+    const db = this.db
+    return {
+      create(input) {
+        return db.createCreditApplication({
+          applicationNo: newApplicationNo(),
+          userId: input.userId,
+          orgId: input.orgId,
+          requestedPoints: input.requestedPoints,
+          reason: input.reason,
+          createdAt: Date.now(),
+        }) as CreditApplication
+      },
+      listForUser(userId, page, pageSize) {
+        const result = db.listCreditApplicationsForUser(userId, pageSize, (page - 1) * pageSize)
+        return { list: result.list as CreditApplication[], total: result.total }
+      },
+      getById(id) {
+        return db.getCreditApplication(id) as CreditApplication | null
+      },
+      hasPending(userId) {
+        return db.hasPendingCreditApplication(userId)
+      },
+      updateStatus(id, patch) {
+        db.updateCreditApplicationStatus(id, patch)
+      },
+    }
   }
 
   /**
