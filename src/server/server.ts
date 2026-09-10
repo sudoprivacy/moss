@@ -43,13 +43,16 @@ import {
   type WorkspaceFileAccess,
 } from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
+import { buildClientCredentials, sealCredentials } from './credentialsEnvelope.js'
 import type { ConfigKey } from './configStore/configStore.js'
+
+const SUDOROUTER_ADMIN_TOKEN_KEY: ConfigKey = 'server.sudorouter-admin-token'
 import { initHubConfig } from './hubConfig.js'
 
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter'
   path: string
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
@@ -62,6 +65,7 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.cabin-control-auth', group: 'cabin', path: 'cabin.controlAuth' },
   { key: 'server.cabin-broadcast-api-key', group: 'cabin', path: 'cabin.broadcastApiKey' },
   { key: 'server.cabin-broadcast-auth', group: 'cabin', path: 'cabin.broadcastAuth' },
+  { key: 'server.sudorouter-admin-token', group: 'sudorouter', path: 'systemConfig.sudorouterAdminToken' },
 ]
 import {
   createCustomAssistant,
@@ -1623,24 +1627,14 @@ async function readWorkspaceTreeIn(
  * ask. The admin token is read from the vault per call, never from server.json,
  * so a leaked config file cannot move anyone's balance.
  */
-function buildSudorouterClient(
-  config: ServerConfig,
-  nexus: { getSecret(ns: string, key: string): Promise<{ value?: string } | null> } | undefined,
-): SudorouterClient | null {
-  const admin = config.systemConfig.sudorouterAdmin
+function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
   const baseUrl = config.systemConfig.sudorouterBaseUrl
-  if (!admin || !baseUrl || !nexus) return null
+  // Read per call, not captured: an operator who sets the token from the
+  // credentials page must not have to restart the server for it to take effect.
+  if (!baseUrl || !getConfigStore().get(SUDOROUTER_ADMIN_TOKEN_KEY)) return null
   return createSudorouterClient({
     baseUrl,
-    getAdminToken: async () => {
-      const secret = await nexus.getSecret(admin.vaultNamespace, admin.tokenKey)
-      if (!secret?.value) {
-        throw new Error(
-          `SudoRouter admin token missing from the vault (${admin.vaultNamespace}: ${admin.tokenKey})`,
-        )
-      }
-      return secret.value
-    },
+    getAdminToken: async () => getConfigStore().get(SUDOROUTER_ADMIN_TOKEN_KEY) ?? '',
   })
 }
 
@@ -1655,13 +1649,12 @@ function buildSudorouterClient(
 async function readUserCredits(
   authService: AuthService,
   config: ServerConfig,
-  nexus: Parameters<typeof buildSudorouterClient>[1],
   userId: string,
 ): Promise<{ remaining: number; used: number; bonus: number }> {
   const empty = { remaining: 0, used: 0, bonus: 0 }
   const gatewayUserId = authService.getUserModelCredential(userId)?.sudorouterUserId
   if (!gatewayUserId) return empty
-  const client = buildSudorouterClient(config, nexus)
+  const client = buildSudorouterClient(config)
   if (!client) return empty
   try {
     const credits = await client.getCredits(gatewayUserId)
@@ -5915,13 +5908,26 @@ export function startServer(
         return
       }
 
+      // The client fetches this right after signing in, to pick up the tokens
+      // it needs for the services moss points it at. Auth is the real gate here
+      // — see the module comment on why the envelope is not one.
+      if (req.method === 'GET' && pathname === '/api/v1/system-config/credentials') {
+        writeJson(res, 200, {
+          success: true,
+          ...sealCredentials(
+            buildClientCredentials(getConfigStore().get('server.hub-authorization')),
+          ),
+        })
+        return
+      }
+
       // ---- credits ----
       // The balance lives at the model gateway, so every one of these reads
       // through to it rather than reporting a number moss keeps. A user with no
       // gateway account is not an error: private deployments have no metered
       // gateway at all, and the client renders zeroes.
       if (req.method === 'GET' && pathname === '/api/v1/user/dashboard') {
-        const credits = await readUserCredits(authService, config, nexusClient, auth.userId)
+        const credits = await readUserCredits(authService, config, auth.userId)
         writeJson(res, 200, { success: true, data: { points: credits } })
         return
       }
@@ -5932,7 +5938,7 @@ export function startServer(
           writeJson(res, 200, { success: true, data: [] })
           return
         }
-        const client = buildSudorouterClient(config, nexusClient)
+        const client = buildSudorouterClient(config)
         if (!client) {
           writeJson(res, 200, { success: true, data: [] })
           return
@@ -5997,7 +6003,7 @@ export function startServer(
         // Requiring it for a rejection too would leave a deployment with no
         // gateway unable to close a request it never intended to grant.
         const approving = body.approve === true
-        const client = buildSudorouterClient(config, nexusClient)
+        const client = buildSudorouterClient(config)
         try {
           const reviewed = await reviewApplication(authService.creditApplications, client, {
             id: application.id,

@@ -34,6 +34,7 @@ export const CONFIG_KEYS = [
   'server.cabin-control-auth',
   'server.cabin-broadcast-api-key',
   'server.cabin-broadcast-auth',
+  'server.sudorouter-admin-token',
 ] as const
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number]
