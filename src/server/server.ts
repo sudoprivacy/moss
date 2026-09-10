@@ -21,7 +21,7 @@ import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.
 import { RuntimeService, ServerDrainingError } from './runtimeService.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
-import { buildPublicSystemConfig } from './publicSystemConfig.js'
+import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
 import { buildKubectlBaseArgs, buildResourceNames } from './backends/k8sBackend.js'
@@ -1628,7 +1628,14 @@ async function readWorkspaceTreeIn(
  * so a leaked config file cannot move anyone's balance.
  */
 function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
-  const baseUrl = config.systemConfig.sudorouterBaseUrl
+  // Resolved exactly as the public system-config resolves it — explicit
+  // override first, otherwise derived from the model service URL the
+  // deployment already uses. Requiring a separate setting here would have made
+  // the credits path inert on any deployment that never set one, while the
+  // config endpoint happily reported a working address: the same value
+  // resolved two ways, disagreeing silently.
+  const baseUrl =
+    config.systemConfig.sudorouterBaseUrl?.trim() || toSudorouterRoot(getSystemSettings().url)
   // Read per call, not captured: an operator who sets the token from the
   // credentials page must not have to restart the server for it to take effect.
   if (!baseUrl || !getConfigStore().get(SUDOROUTER_ADMIN_TOKEN_KEY)) return null
