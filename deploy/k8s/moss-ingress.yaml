@@ -7,16 +7,18 @@
 #   精确路由依赖 ?moss_route=<MOSS_INSTANCE_ID>（StatefulSet pod name）。入口层
 #   由独立 nginx Deployment（两级 map，upstream 指向 headless pod DNS）承担。
 #
-# 本文件的两个用途：
-#   1. 【首选形态的可选 TLS 前置】：backend 改指 moss-nginx Service（80），本
-#      Ingress 只做 TLS 终止与域名收敛（annotation 保留 WS/SSE/body-size）。
-#      此时【删除】affinity 相关 annotation——路由粘滞由 moss-nginx 的两级 map
-#      完成，ingress 再做 affinity 会与之互斥（同名 cookie 互相覆盖）。
-#   2. 【简化备选（非完整 HA）】：单副本或允许 WS 409 重连风暴的场景，可保留
-#      下方 cookie affinity 直连 moss-server-headless。适用前提仍是 moss 【不配】
-#      MOSS_INSTANCE_ID（affinity cookie 与 moss 自设 route cookie 同名互斥，
-#      见 setRouteCookieHeader），因此该备选没有 owner 路由/fencing 语义，
-#      不作为 HA 交付形态。
+# 本文件的形态（下方 spec 实现【用途 1】）：
+#   1. 【首选形态的可选 TLS 前置，本 spec 采用】：backend 指 moss-nginx Service
+#      （80），本 Ingress 只做 TLS 终止与域名收敛（annotation 保留 WS/SSE/
+#      body-size）。affinity 相关 annotation 已【删除】——路由粘滞由 moss-nginx 的
+#      两级 map 完成，ingress 再做 affinity 会与之互斥（同名 cookie 互相覆盖）。
+#      注意：原先 backend 指向的 `moss-server` Service 并不存在（本目录只定义
+#      moss-server-headless），是一处断链，故改指 moss-nginx。
+#   2. 【简化备选（非完整 HA），需手工改 spec】：单副本或允许 WS 409 重连风暴的
+#      场景，可把 backend 改回 moss-server-headless 并加回 cookie affinity
+#      annotation 直连。适用前提是 moss 【不配】MOSS_INSTANCE_ID（affinity cookie
+#      与 moss 自设 route cookie 同名互斥，见 setRouteCookieHeader），因此该备选没有
+#      owner 路由/fencing 语义，不作为 HA 交付形态。
 #
 # Deployment vs StatefulSet（源文档 12.2）：HA（owner-aware + fencing）必须
 # StatefulSet + headless service（实例 id 稳定 = pod name）。
@@ -27,12 +29,10 @@ metadata:
   name: moss-server
   namespace: moss-control
   annotations:
-    # cookie affinity：同一浏览器固定到同一后端 pod。
-    nginx.ingress.kubernetes.io/affinity: "cookie"
-    # 该 cookie 名与 moss route cookie 同名互斥（见文件头第 3 点）。
-    nginx.ingress.kubernetes.io/session-cookie-name: "moss_route"
-    nginx.ingress.kubernetes.io/session-cookie-path: "/"
-    nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"
+    # NOTE: cookie affinity annotations intentionally removed — route stickiness
+    # is owned by moss-nginx's two-level map; an ingress affinity cookie of the
+    # same name (moss_route) would mutually clobber it. Re-add only for the
+    # 用途 2 alternative (see file header).
     # WS/SSE 长连接超时。
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
@@ -50,6 +50,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: moss-server
+                name: moss-nginx
                 port:
-                  number: 43127
+                  number: 80

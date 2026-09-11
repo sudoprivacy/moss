@@ -102,6 +102,19 @@ async function finishStandaloneServerStartup(
   // peer's new sessions use the new value instead of staying stale until
   // restart. Stopped in server.stop.
   configStore.startRefreshPolling(config)
+  // HA misconfig guard (R8): with a multi-instance id but no public base URL,
+  // the internal channel loops back to itself and owner routing loses its route
+  // params — cron/events/channels to non-local sessions fail 100%. ha.yml's
+  // `:?` already refuses to start on a missing value; this is the belt for a
+  // hand-set instanceId that bypassed compose. Not fail-fast: a single instance
+  // legitimately setting instanceId must not be blocked.
+  if (config.instanceId && !config.publicBaseUrl) {
+    console.warn(
+      '[Startup] MOSS_INSTANCE_ID is set but MOSS_PUBLIC_BASE_URL is not — under HA the ' +
+      'internal channel loops back to this instance and owner routing fails for sessions ' +
+      'owned by other instances. Set MOSS_PUBLIC_BASE_URL to the LB entry (http://<LB-VIP>).',
+    )
+  }
   initHubConfig({
     hubApiBaseUrl: config.hubApiBaseUrl,
     hubAuthorization: config.hubAuthorization,

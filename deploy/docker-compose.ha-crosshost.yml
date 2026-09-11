@@ -74,6 +74,8 @@ services:
       - MOSS_AUTH_PROXY_HOST=0.0.0.0
       # auth proxy 仅被本机 runner 连接，指本机回环即可（host 网络 nginx 不经它）。
       - MOSS_AUTH_PROXY_URL=http://moss-server:12013
+      # runtime 回连本实例 server_url。该 compose 容器名固定 moss-server（端口已映射）。
+      - MOSS_SERVER_URL=http://moss-server:43127
       # —— 跨主机 HA 专属 ——
       # 【必填】按主机命名；nginx 两级 map 的键值、route cookie/query 值都等于它。
       - MOSS_INSTANCE_ID=${MOSS_INSTANCE_ID:?set MOSS_INSTANCE_ID (e.g. host-a) in .env}
