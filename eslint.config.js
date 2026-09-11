@@ -11,7 +11,7 @@
 import ts from 'typescript-eslint'
 
 export default ts.config({
-  files: ['src/server/**/*.ts'],
+  files: ['src/{server,channels}/**/*.ts'],
   languageOptions: {
     parser: ts.parser,
     parserOptions: {
@@ -32,7 +32,7 @@ export default ts.config({
   // code; turning it off here keeps 162 mechanical `void` wrappers out of
   // the test suite with zero change to the gate's coverage of src/server
   // production files.
-  files: ['src/server/**/*.test.ts'],
+  files: ['src/{server,channels}/**/*.test.ts'],
   rules: {
     '@typescript-eslint/no-floating-promises': 'off',
   },

@@ -509,7 +509,7 @@ export function createChannelsApi(db: DirectConnectStore) {
 
       const sessionManager = manager.getSessionManager()
       if (sessionManager) {
-        const cleared = sessionManager.clearAllSessions()
+        const cleared = await sessionManager.clearAllSessions()
         console.log(`[ChannelsAPI] Cleared ${cleared} sessions for settings sync`)
       }
 

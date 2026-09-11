@@ -11,7 +11,7 @@
     "postinstall": "bun run scripts/copy-vendor.js",
     "test": "node scripts/test-server.js",
     "typecheck": "node scripts/typecheck-ratchet.js",
-    "lint": "eslint src/server"
+    "lint": "eslint src/server src/channels"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",
