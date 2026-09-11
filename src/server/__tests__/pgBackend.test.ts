@@ -17,6 +17,7 @@ import { applyPgSchema } from "../db/pg_schema.js";
 import { DirectConnectStore, forPostgresDirectConnectStore } from "../db.js";
 import { CronStore } from "../services/cron/CronStore.js";
 import { AuthCenterDb } from "../authCenter/db.js";
+import { isUniqueViolationOn } from "../auth/service.js";
 
 const PG_URL = process.env.MOSS_PG_TEST_URL ?? "";
 
@@ -113,7 +114,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)), [1]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -298,6 +299,135 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       assert.ok(!before, "fresh DB has no jwt secret (empty or null)");
       await authDb.setConfig("jwt_secret", "test-secret-value");
       assert.equal(await authDb.getConfig("jwt_secret"), "test-secret-value");
+    });
+  });
+
+  describe("HA fixes: SQL dialect (A1-A5)", () => {
+    it("A2: LIKE search matches across case via ILIKE rewrite", async () => {
+      await fix.store.createConfigItem({ name: "GitHubProbe", pinyin: "github", scope: "user" });
+      const res = await fix.store.listConfigItems({ name: "githubprobe" });
+      assert.ok(
+        res.items.some(r => r.name === "GitHubProbe"),
+        "lowercase search must match TitleCase name under PG via ILIKE",
+      );
+    });
+
+    it("A3: string/negative page inputs are clamped, not sent to PG as OFFSET -N", async () => {
+      await fix.store.createConfigItem({ name: "PageProbe", pinyin: "pageprobe", scope: "user" });
+      const byString = await fix.store.listConfigItems({
+        name: "pageprobe",
+        page: "abc" as unknown as number,
+        pageSize: "abc" as unknown as number,
+      });
+      assert.equal(byString.items.length, 1);
+      const byNeg = await fix.store.listConfigItems({ name: "pageprobe", page: -5, pageSize: -5 });
+      assert.equal(byNeg.items.length, 1);
+    });
+
+    it("A1: PG names the email UNIQUE constraint users_email_key (matches translator)", async () => {
+      const orgId = `o_${Math.random().toString(36).slice(2)}`;
+      await fix.driver.run(
+        "INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)",
+        [orgId, "org", Date.now()],
+      );
+      const email = `dup_${Math.random().toString(36).slice(2)}@x.com`;
+      const mkUser = (id: string) =>
+        fix.driver.run(
+          "INSERT INTO users (id, org_id, email, name, local_auth, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+          [id, orgId, email, "n", Date.now()],
+        );
+      await mkUser("u_a");
+      let caught: unknown;
+      try { await mkUser("u_b"); } catch (e) { caught = e; }
+      assert.ok(caught, "duplicate email must throw under PG");
+      assert.equal(isUniqueViolationOn(caught, "users_email_key", "users.email"), true);
+    });
+
+    it("A1: PG names the ext-org constraint organizations_ext_uniq", async () => {
+      const ext = `ext_${Math.random().toString(36).slice(2)}`;
+      const mkOrg = () =>
+        fix.driver.run(
+          "INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)",
+          [`o_${Math.random().toString(36).slice(2)}`, "o", ext, Date.now()],
+        );
+      await mkOrg();
+      let caught: unknown;
+      try { await mkOrg(); } catch (e) { caught = e; }
+      assert.equal(isUniqueViolationOn(caught, "organizations_ext_uniq", "organizations.ext_org_id"), true);
+    });
+
+    it("A5: two concurrent phone-code consumes succeed exactly once (two pool connections)", async () => {
+      const authDb = new AuthCenterDb(fix.store);
+      const phone = `139${Math.floor(Math.random() * 1e8).toString().padStart(8, "0")}`;
+      const hash = "hash-value";
+      await authDb.upsertPhoneLoginCode({ phone, codeHash: hash, createdAt: Date.now(), expiresAt: Date.now() + 60_000, attempts: 0 });
+      const results = await Promise.all([
+        authDb.consumePhoneLoginCode(phone, hash),
+        authDb.consumePhoneLoginCode(phone, hash),
+      ]);
+      assert.equal(results.filter(Boolean).length, 1, "only one concurrent consume may win");
+    });
+  });
+
+  describe("A4: old-database v2 convergence + idempotent re-run", () => {
+    it("converges a pre-a18659f v1 database and is a no-op on re-run", async () => {
+      const oldDbName = await createFreshDatabase(admin);
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${oldDbName}$1`);
+      const pool = new Pool({ connectionString: url, max: 2 });
+      const driver = new PgDriver(pool as unknown as PgPoolLike);
+      try {
+        // Hand-rolled pre-a18659f v1 shape: bare nullable wikis columns (with a
+        // NULL row), users without phone columns, no phone/msgaudit tables,
+        // wiki_build_jobs without claim columns, channel_plugins without lease.
+        await driver.exec(`
+          CREATE TABLE _migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at BIGINT NOT NULL);
+          INSERT INTO _migrations (version, name, applied_at) VALUES (1, 'initial-schema', 0);
+          CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, ext_org_id TEXT, created_at BIGINT NOT NULL);
+          CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, local_auth BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL);
+          CREATE TABLE wikis (id TEXT PRIMARY KEY, source_mode TEXT, source_node_ids TEXT, source_exclude_node_ids TEXT, auto_rebuild BIGINT DEFAULT 0, needs_rebuild BIGINT DEFAULT 0, created_by TEXT NOT NULL, created_at BIGINT NOT NULL);
+          INSERT INTO wikis (id, created_by, created_at) VALUES ('w1', 'u1', 0);
+          CREATE TABLE wiki_build_jobs (id TEXT PRIMARY KEY, wiki_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', queued_at BIGINT NOT NULL, triggered_by TEXT NOT NULL);
+          CREATE TABLE channel_plugins (id TEXT NOT NULL, type TEXT NOT NULL, name TEXT NOT NULL, enabled BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL, user_id TEXT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (id, user_id));
+        `);
+        // v1 recorded as applied → applyPgSchema runs only v2.
+        await applyPgSchema(driver);
+
+        // wikis columns are backfilled and now NOT NULL.
+        const w = await driver.get<{ source_mode: string; source_node_ids: string; auto_rebuild: number }>(
+          "SELECT source_mode, source_node_ids, auto_rebuild FROM wikis WHERE id = 'w1'",
+        );
+        assert.equal(w!.source_mode, "files");
+        assert.equal(w!.source_node_ids, "[]");
+        assert.equal(Number(w!.auto_rebuild), 0);
+        const notNull = await driver.get<{ n: number }>(
+          "SELECT count(*) AS n FROM information_schema.columns WHERE table_name = 'wikis' AND column_name = 'source_mode' AND is_nullable = 'NO'",
+        );
+        assert.equal(Number(notNull!.n), 1, "source_mode must be NOT NULL after v2");
+
+        // a18659f + HA-fix objects now exist.
+        for (const t of ["phone_login_codes", "phone_login_sends", "credit_applications", "msgaudit_leases"]) {
+          const r = await driver.get<{ n: number }>(
+            "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = ?",
+            [t],
+          );
+          assert.equal(Number(r!.n), 1, `${t} must exist after v2`);
+        }
+        for (const [tbl, col] of [["users", "phone"], ["wiki_build_jobs", "claimed_by"], ["channel_plugins", "lease_owner"]] as [string, string][]) {
+          const r = await driver.get<{ n: number }>(
+            "SELECT count(*) AS n FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+            [tbl, col],
+          );
+          assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
+        }
+
+        // Re-run is a no-op: still exactly [1, 2].
+        await applyPgSchema(driver);
+        const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2]);
+      } finally {
+        await pool.end();
+        await dropDatabase(admin, oldDbName);
+      }
     });
   });
 });

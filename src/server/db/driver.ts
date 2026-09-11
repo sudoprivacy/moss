@@ -181,6 +181,54 @@ export class PgDriver implements DbDriver {
     return out
   }
 
+  /**
+   * Rewrite bare `LIKE` operators to `ILIKE` outside string/identifier
+   * literals. SQLite's LIKE is ASCII-case-insensitive; PG's LIKE is
+   * case-sensitive, so a straight port of the SQLite SQL splits behaviour
+   * across backends. ILIKE restores the SQLite semantics on PG. The keyword
+   * match is case-insensitive (so a lowercase `like` is caught too) and
+   * word-bounded (so an identifier like `like_count` is never touched). Every
+   * LIKE call site uses `%..%` containment, which does not use a btree index
+   * in either operator, so ILIKE introduces no index regression.
+   */
+  static rewriteLikeToILike(sql: string): string {
+    let out = ''
+    let quote: '"' | "'" | null = null
+    let i = 0
+    while (i < sql.length) {
+      const ch = sql[i] as string
+      if (quote) {
+        out += ch
+        if (ch === quote) quote = null
+        i += 1
+        continue
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch
+        out += ch
+        i += 1
+        continue
+      }
+      if ((ch === 'l' || ch === 'L') && sql.slice(i, i + 4).toLowerCase() === 'like') {
+        const before = i === 0 ? '' : (sql[i - 1] as string)
+        const after = sql[i + 4] ?? ''
+        if (!/[A-Za-z0-9_]/.test(before) && !/[A-Za-z0-9_]/.test(after)) {
+          out += 'ILIKE'
+          i += 4
+          continue
+        }
+      }
+      out += ch
+      i += 1
+    }
+    return out
+  }
+
+  /** Full SQLite→PG statement rewrite: LIKE→ILIKE then `?`→`$n`. */
+  private static prepare(sql: string): string {
+    return PgDriver.convertPlaceholders(PgDriver.rewriteLikeToILike(sql))
+  }
+
   private route(): { query: PgClientLike['query'] } {
     const ctx = this.txStorage.getStore()
     if (ctx) return { query: (sql, params) => ctx.client.query(sql, params) }
@@ -189,19 +237,19 @@ export class PgDriver implements DbDriver {
 
   async get<T extends SqlRow = SqlRow>(sql: string, params?: SqlParam[]): Promise<T | undefined> {
     const { query } = this.route()
-    const res = await query(PgDriver.convertPlaceholders(sql), params)
+    const res = await query(PgDriver.prepare(sql), params)
     return (res.rows[0] ?? undefined) as T | undefined
   }
 
   async all<T extends SqlRow = SqlRow>(sql: string, params?: SqlParam[]): Promise<T[]> {
     const { query } = this.route()
-    const res = await query(PgDriver.convertPlaceholders(sql), params)
+    const res = await query(PgDriver.prepare(sql), params)
     return res.rows as T[]
   }
 
   async run(sql: string, params?: SqlParam[]): Promise<number> {
     const { query } = this.route()
-    const res = await query(PgDriver.convertPlaceholders(sql), params)
+    const res = await query(PgDriver.prepare(sql), params)
     return res.rowCount ?? 0
   }
 

@@ -964,6 +964,23 @@ export class AuthCenterDb {
     await this.driver.run('DELETE FROM phone_login_codes WHERE phone = ?', [phone])
   }
 
+  /**
+   * Atomically consume one specific code: delete only the row that still holds
+   * this exact hash and report whether this call is the one that removed it.
+   * Two concurrent verifies of the same code both pass the compare, but the
+   * single-statement DELETE only reports changes > 0 for one of them, so only
+   * one issues a token (fixes the read-then-delete TOCTOU under PG). Kept
+   * separate from deletePhoneLoginCode, which stays the expiry/over-limit
+   * cleanup path.
+   */
+  async consumePhoneLoginCode(phone: string, codeHash: string): Promise<boolean> {
+    const changes = await this.driver.run(
+      'DELETE FROM phone_login_codes WHERE phone = ? AND code_hash = ?',
+      [phone, codeHash],
+    )
+    return changes > 0
+  }
+
   /** Drop expired codes and send-log rows older than the rate-limit window. */
   async prunePhoneLoginCodes(now: number): Promise<void> {
     await this.driver.run('DELETE FROM phone_login_codes WHERE expires_at <= ?', [now])

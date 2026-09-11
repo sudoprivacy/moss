@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { DirectConnectStore } from '../db.js'
+import { isUniqueViolation } from '../db/driver.js'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
 import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
@@ -89,24 +90,41 @@ function toAuthServiceError(error: unknown): AuthServiceError {
 }
 
 /**
- * Run a DAO write and translate the SQLite partial-UNIQUE constraint
- * violation for one of the ext_* columns into a clean 409. Used by the
- * org/user/dept mutators since the partial UNIQUEs (users_ext_uniq,
- * departments_ext_uniq, organizations_ext_uniq) are the authoritative
- * source of truth for ext-id uniqueness.
+ * Match a UNIQUE-constraint violation against one specific index, in either
+ * dialect. `isUniqueViolation` (driver.ts) does the dual-dialect gate (PG
+ * SQLSTATE 23505 / SQLite text); this then narrows to a named constraint by
+ * matching PG's `... unique constraint "<name>"` or SQLite's
+ * `UNIQUE constraint failed: <cols>`. Under PG the SQLite column text never
+ * appears, so pre-PG call sites that only checked the SQLite text stopped
+ * translating conflicts once migrated — this restores the translation.
+ */
+export function isUniqueViolationOn(err: unknown, pgConstraint: string, sqliteColumns: string): boolean {
+  if (!isUniqueViolation(err)) return false
+  const msg = err instanceof Error ? err.message : String(err)
+  return (
+    msg.includes(`unique constraint "${pgConstraint}"`) ||
+    msg.includes(`UNIQUE constraint failed: ${sqliteColumns}`)
+  )
+}
+
+/**
+ * Run a DAO write and translate the partial-UNIQUE constraint violation for
+ * one of the ext_* columns into a clean 409. Used by the org/user/dept
+ * mutators since the partial UNIQUEs (users_ext_uniq, departments_ext_uniq,
+ * organizations_ext_uniq) are the authoritative source of truth for ext-id
+ * uniqueness. Dual-dialect via isUniqueViolationOn.
  */
 async function withExtIdConflict<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn()
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    if (/UNIQUE constraint failed: users\.org_id, users\.ext_user_id/i.test(msg)) {
+    if (isUniqueViolationOn(err, 'users_ext_uniq', 'users.org_id, users.ext_user_id')) {
       throw new AuthServiceError(409, 'External user id already exists in this organization')
     }
-    if (/UNIQUE constraint failed: departments\.org_id, departments\.ext_dept_id/i.test(msg)) {
+    if (isUniqueViolationOn(err, 'departments_ext_uniq', 'departments.org_id, departments.ext_dept_id')) {
       throw new AuthServiceError(409, 'External department id already exists in this organization')
     }
-    if (/UNIQUE constraint failed: organizations\.ext_org_id/i.test(msg)) {
+    if (isUniqueViolationOn(err, 'organizations_ext_uniq', 'organizations.ext_org_id')) {
       throw new AuthServiceError(409, 'External organization id already exists')
     }
     throw err
@@ -735,8 +753,7 @@ export class AuthService {
         } catch (err) {
           // Race: another concurrent OAuth2 login created the same org first.
           // Re-read and continue with whichever row won.
-          const msg = err instanceof Error ? err.message : String(err)
-          if (/UNIQUE constraint failed: organizations\.ext_org_id/i.test(msg)) {
+          if (isUniqueViolationOn(err, 'organizations_ext_uniq', 'organizations.ext_org_id')) {
             targetOrg = await this.db.getOrganizationByExtId(identity.extOrgId)
           }
           if (!targetOrg) throw err
@@ -815,8 +832,7 @@ export class AuthService {
         user = newUser
       } catch (err) {
         // Race: concurrent login created the same user. Re-read.
-        const msg = err instanceof Error ? err.message : String(err)
-        if (/UNIQUE constraint failed: users\.org_id, users\.ext_user_id/i.test(msg)) {
+        if (isUniqueViolationOn(err, 'users_ext_uniq', 'users.org_id, users.ext_user_id')) {
           user = await this.db.getUserByExtId(targetOrg.id, identity.extUserId)
         }
         if (!user) throw err
@@ -850,8 +866,8 @@ export class AuthService {
         } catch (err) {
           // Email collision with another moss user: log-and-continue rather
           // than fail the login. Profile patch (name / orgId) still applies.
-          const msg = err instanceof Error ? err.message : String(err)
-          if (/UNIQUE constraint failed: users\.email/i.test(msg)) {
+          // PG auto-names the inline `email ... UNIQUE` constraint users_email_key.
+          if (isUniqueViolationOn(err, 'users_email_key', 'users.email')) {
             if (Object.keys(profilePatch).length > 0) {
               await this.db.updateUser(user.id, profilePatch)
               user = { ...user, ...profilePatch }
@@ -896,8 +912,7 @@ export class AuthService {
           departmentId = dept.id
         } catch (err) {
           // Race: concurrent login created the same dept. Re-read.
-          const msg = err instanceof Error ? err.message : String(err)
-          if (/UNIQUE constraint failed: departments\.org_id, departments\.ext_dept_id/i.test(msg)) {
+          if (isUniqueViolationOn(err, 'departments_ext_uniq', 'departments.org_id, departments.ext_dept_id')) {
             const existing = await this.db.getDepartmentByExtId(targetOrg.id, identity.extDeptId)
             if (existing) departmentId = existing.id
             else throw err
