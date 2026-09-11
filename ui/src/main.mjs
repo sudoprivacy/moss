@@ -1196,24 +1196,22 @@ function createRemoteDirectRuntime({
               }
             }
           } catch (err) {
-            // Turn failed mid-flight: onDisconnected fails the turn with this
-            // fixed message once the SDK exhausts its reconnect budget (~50-60s),
-            // shorter than the worst failover window, so the rejection surfaces
-            // here (the while loop no longer lets it escape the generator).
-            // Clear the cache and retry within the same budget — the re-fetch
-            // picks up the new owner route from ws_url. Non-disconnect errors
-            // (and abort/dispose) rethrow unchanged.
+            // Turn failed mid-flight after the SDK exhausted its reconnect
+            // budget (~50-60s). The request may have PARTIALLY executed before
+            // the disconnect, so silently re-running it would double-execute the
+            // agent and show the consumer two message streams for one turn.
+            // Fail loudly instead and let the user review and resend.
+            // Non-disconnect errors (and abort/dispose) rethrow unchanged.
             if (
               err instanceof Error
               && err.message.includes('disconnected before completion')
               && !currentTurn?.aborted
               && !disposed
             ) {
-              lastError = err;
-              sessionPromise = null;
-              activeManager = null;
-              managerConnectPromise = null;
-              continue;
+              throw new Error(
+                'Remote session disconnected mid-turn. The session may have partially '
+                + 'executed your request before the disconnect — please review and resend.',
+              );
             }
             throw err;
           }
