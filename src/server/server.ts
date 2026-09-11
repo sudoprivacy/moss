@@ -2485,7 +2485,7 @@ export function startServer(
   // Initialize ChannelManager and PairingService with database
   // 初始化 ChannelManager 和 PairingService
   const channelManager = getChannelManager()
-  channelManager.initialize(runtime.store, nexusClient)
+  channelManager.initialize(runtime.store, nexusClient, config.instanceId)
   getPairingService().initialize(runtime.store)
 
   // Agents an IM chat may switch to = those visible to the moss user who owns the
@@ -10397,6 +10397,11 @@ export function startServer(
       wss.close()
       msgAuditWorker.stop()
       getConfigStore().stopRefreshPolling()
+      // Stop channel plugins (and release their HA leases) on graceful shutdown
+      // so a peer can take them over immediately instead of waiting the TTL.
+      await channelManager.stopAllPlugins().catch(err =>
+        console.error('[server] stopAllPlugins failed:', err),
+      )
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())

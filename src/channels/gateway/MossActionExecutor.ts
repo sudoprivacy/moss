@@ -218,6 +218,12 @@ export class MossActionExecutor {
     editFn: (msgId: string, msg: any) => Promise<boolean>,
     mossUserId: string | undefined,
   ): Promise<void> {
+    // Wait for the session cache to finish loading before any getSession read.
+    // Under PG the initial load is a network round-trip; a message racing that
+    // window would otherwise miss and create a duplicate channel_sessions row.
+    // Resolved after the first load → effectively zero cost thereafter.
+    await this.sessionManager.whenReady();
+
     // Scope every key below to the receiving connection: two bots of one type must not
     // share a session, a turn counter or an agent binding.
     const scope = pluginScope(pluginId, platform);

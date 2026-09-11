@@ -910,7 +910,7 @@ export class RuntimeService {
     // process and that's fine for non-docker sessions.
     try {
       const reg = await import('./runtime/userContainerRegistry.js')
-      await reg.reconcile()
+      await reg.reconcile(this.options.config)
 
       // Optional rollback hatch: force-drain all user containers on startup.
       if (process.env.MOSS_FORCE_DRAIN_USER_CONTAINERS === 'true') {
@@ -1823,7 +1823,9 @@ export class RuntimeService {
     if (session.runtime.type === 'docker' && containerMode === 'user') {
       const { ensureUserContainer, acquireSession, buildUserContainerName } =
         await import('./runtime/userContainerRegistry.js')
-      userContainerName = buildUserContainerName(session.orgId, session.userId)
+      // Must match the name ensureUserContainer computes (same instanceId), or
+      // the spawned runner's container name would diverge from the registry's.
+      userContainerName = buildUserContainerName(session.orgId, session.userId, this.options.config.instanceId)
       inContainerPidFile = getInContainerPidFile(
         this.options.config.runtimeDir,
         session.sessionId,

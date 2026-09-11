@@ -345,6 +345,16 @@ export class DirectConnectStore {
       this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN org_id TEXT`)
       console.log('[DB] Added org_id column to channel_plugins')
     }
+    // Migration: per-(id,user_id) plugin lease (HA). One instance holds a
+    // plugin row's lease while it runs, so two instances sharing the DB never
+    // both start the same plugin (e.g. double Telegram polling on one token).
+    // PG side is v2.
+    if (!channelPluginsColumns.some(col => col.name === 'lease_owner')) {
+      this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN lease_owner TEXT`)
+    }
+    if (!channelPluginsColumns.some(col => col.name === 'lease_until')) {
+      this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN lease_until INTEGER`)
+    }
 
     // Migration: add client_cron_enabled to enterprises (null = enabled by default)
     const enterprisesColumns = this.db.prepare(`PRAGMA table_info(enterprises)`).all() as { name: string }[]
@@ -2111,6 +2121,31 @@ export class DirectConnectStore {
       return this.driver.all<SqlRow>(`SELECT * FROM channel_plugins WHERE user_id = ? ORDER BY created_at DESC`, [userId])
     }
     return this.driver.all<SqlRow>(`SELECT * FROM channel_plugins ORDER BY created_at DESC`)
+  }
+
+  /**
+   * Claim (or renew) the lease on one plugin row for `owner` (HA). Takes the
+   * lease when it is unheld, already ours, or expired; renews lease_until when
+   * already ours. A peer's fresh lease is left untouched. changes > 0 iff this
+   * instance now holds it. Per (id, user_id) so multi-user rows of one plugin
+   * id lease independently.
+   */
+  async claimChannelPluginLease(id: string, userId: string, owner: string, leaseUntil: number, now: number): Promise<boolean> {
+    const changes = await this.driver.run(`
+      UPDATE channel_plugins
+      SET lease_owner = ?, lease_until = ?
+      WHERE id = ? AND user_id = ? AND enabled = 1
+        AND (lease_owner IS NULL OR lease_owner = ? OR lease_until < ?)
+    `, [owner, leaseUntil, id, userId, owner, now])
+    return changes > 0
+  }
+
+  /** Release every plugin lease this instance holds (graceful shutdown). */
+  async releaseAllChannelPluginLeases(owner: string): Promise<void> {
+    await this.driver.run(
+      `UPDATE channel_plugins SET lease_owner = NULL WHERE lease_owner = ?`,
+      [owner],
+    )
   }
 
   /**

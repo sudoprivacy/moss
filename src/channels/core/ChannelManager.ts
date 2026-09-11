@@ -64,7 +64,7 @@ class ChannelManager {
   /**
    * Initialize with database reference
    */
-  initialize(db: DirectConnectStore, nexus?: NexusClient | null): void {
+  initialize(db: DirectConnectStore, nexus?: NexusClient | null, instanceId?: string): void {
     if (this.initialized) {
       console.log('[ChannelManager] Already initialized');
       return;
@@ -74,7 +74,7 @@ class ChannelManager {
     this.nexus = nexus ?? null;
     this.provider = new LocalChannelProvider(db);
     this.sessionManager = new SessionManager(db);
-    this.pluginManager = new PluginManager(this.sessionManager, db, this.nexus);
+    this.pluginManager = new PluginManager(this.sessionManager, db, this.nexus, instanceId);
 
     this.initialized = true;
     console.log('[ChannelManager] Initialized');
