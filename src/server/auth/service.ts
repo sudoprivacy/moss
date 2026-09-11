@@ -1236,7 +1236,7 @@ export class AuthService {
     if (!user || user.status !== 'active') return null
     const issued = await this.issueToken({
       user,
-      scopes: ['sessions:attach:any'],
+      scopes: ['sessions:attach:any', 'internal:channel'],
       keyId: 'internal-channel',
       accessTtlSec: 120,
       orgIdOverride: orgId,

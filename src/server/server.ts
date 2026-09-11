@@ -3547,7 +3547,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createDepartment({
+          await authService.createDepartment({
             orgId: auth.orgId,
             name: typeof body.name === 'string' ? body.name : '',
             parentId:
@@ -3571,7 +3571,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.updateDepartment({
+          await authService.updateDepartment({
             orgId: auth.orgId,
             departmentId,
             name: typeof body.name === 'string' ? body.name : undefined,
@@ -3594,7 +3594,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.deleteDepartment({
+          await authService.deleteDepartment({
             orgId: auth.orgId,
             departmentId,
           }, auth),
@@ -3612,18 +3612,18 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/organizations') {
         // Cross-org: only super_admin may enumerate all organizations (powers
         // the org switcher). A normal admin is confined to its own org.
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         writeJson(res, 200, await authService.listAllOrganizations())
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/organizations') {
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         writeJson(
           res,
           200,
-          authService.createOrganization({
+          await authService.createOrganization({
             name: typeof body.name === 'string' ? body.name : '',
             extOrgId:
               body.ext_org_id === null || typeof body.ext_org_id === 'string'
@@ -3636,13 +3636,13 @@ export function startServer(
 
       const organizationMatch = pathname.match(/^\/api\/v1\/organizations\/([^/]+)$/)
       if (req.method === 'PATCH' && organizationMatch) {
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const orgId = organizationMatch[1] || ''
         const body = await readJsonBody(req)
         writeJson(
           res,
           200,
-          authService.updateOrganization({
+          await authService.updateOrganization({
             orgId,
             name: typeof body.name === 'string' ? body.name : undefined,
             extOrgId:
@@ -3655,7 +3655,7 @@ export function startServer(
       }
 
       if (req.method === 'DELETE' && organizationMatch) {
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const orgId = organizationMatch[1] || ''
         writeJson(res, 200, await authService.deleteOrganization({ orgId }))
         return
@@ -6115,7 +6115,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createUser({
+          await authService.createUser({
             orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6366,7 +6366,7 @@ export function startServer(
         // cannot reach into another org; a migration import creates orgs and
         // places users across them, so it is exactly the cross-org write that
         // guard exists to stop. Only a deployment-wide role may perform it.
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         try {
           writeJson(res, 200, await importPhoneUsers(authService, parsePhoneImportRequest(body)))
@@ -6445,7 +6445,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setUserPassword({
+          await authService.setUserPassword({
             orgId: auth.orgId,
             userId,
             password: typeof body.password === 'string' ? body.password : '',
@@ -6463,7 +6463,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setUserTokenLimit({
+          await authService.setUserTokenLimit({
             orgId: auth.orgId,
             userId,
             tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
@@ -6481,7 +6481,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setLocalAuth({
+          await authService.setLocalAuth({
             orgId: auth.orgId,
             userId,
             localAuth,
@@ -6499,7 +6499,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setDepartmentTokenLimit({
+          await authService.setDepartmentTokenLimit({
             orgId: auth.orgId,
             departmentId,
             tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
@@ -6512,7 +6512,7 @@ export function startServer(
       if (req.method === 'GET' && userSessionsMatch) {
         authService.requireScope(auth, 'admin:users')
         const userId = userSessionsMatch[1] || ''
-        const user = authService.getUserOrNull(userId, auth.orgId, auth)
+        const user = await authService.getUserOrNull(userId, auth.orgId, auth)
         if (!user) {
           throw new HttpError(404, 'Unknown user_id')
         }
@@ -6611,7 +6611,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createApiKey({
+          await authService.createApiKey({
             orgId: auth.orgId,
             userId: typeof body.user_id === 'string' ? body.user_id : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6761,7 +6761,7 @@ export function startServer(
             authService.requireScope(auth, 'admin:secrets')
           }
           const deptId = decodeURIComponent(deptSecretListMatch[1] || '')
-          authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+          await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
           writeJson(res, 200, await secretsApi.listDepartmentSecretsForDept(auth.orgId, auth.userId, deptId))
           return
         }
@@ -6825,13 +6825,13 @@ export function startServer(
             authService.requireScope(auth, 'admin:secrets')
             // A dept_admin may only read policies for departments in their
             // subtree; admins are unrestricted within the org.
-            authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+            await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
             writeJson(res, 200, await secretsApi.getDepartmentPolicies(auth.orgId, auth.userId, deptId))
             return
           }
           if (req.method === 'PUT') {
             authService.requireScope(auth, 'admin:secrets:write')
-            authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+            await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
             const body = await readJsonBody(req)
             writeJson(res, 200, await secretsApi.updateDepartmentPolicies(auth.orgId, auth.userId, deptId, body.config_item_ids ?? []))
             return
@@ -8473,7 +8473,7 @@ export function startServer(
 
         // Stamp the publisher's default visibility (dept_admin → own department,
         // user → self) so it survives approval instead of defaulting to global.
-        const publishVisibility = authService.defaultTenantVisibility(auth)
+        const publishVisibility = await authService.defaultTenantVisibility(auth)
         // Create tenant agent record with UUID as id
         await runtime.store.createTenantAssistant({
           id: assistantId, // Use UUID as id
@@ -8602,7 +8602,7 @@ export function startServer(
         // admin set are dropped — the client warns before this happens). This
         // no longer overwrites a legitimate in-scope choice with their default.
         if (!agentStoreAdmin && body.visible_to !== undefined) {
-          body.visible_to = authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+          body.visible_to = await authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
         }
 
         const updates: Record<string, unknown> = {}
@@ -9226,7 +9226,7 @@ export function startServer(
         // publisher's default visibility (dept_admin → own department, user →
         // self) at publish time so it survives approval instead of defaulting to
         // global. Admins get null (global), unchanged.
-        const publishVisibility = authService.defaultTenantVisibility(auth)
+        const publishVisibility = await authService.defaultTenantVisibility(auth)
         const id = `tenant-skill-${Date.now()}`
         await runtime.store.createTenantSkill({
           id,
@@ -9338,7 +9338,7 @@ export function startServer(
           // longer overwrites a legitimate in-scope choice with their default.
           const clamped = skillStoreAdmin
             ? (body.visible_to as VisibleTo)
-            : authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+            : await authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
           updates.visible_to = clamped ? JSON.stringify(clamped) : null
         }
 
@@ -9989,6 +9989,17 @@ export function startServer(
             return
           }
           if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          // Server-side consumers only (CronService/EventTrigger/channels):
+          // their short-lived tokens carry the 'internal:channel' scope from
+          // issueInternalChannelToken. A regular user/admin token — which
+          // passes canAccessSession via the self/attach-any branch — must not
+          // reach the raw runner-protocol passthrough below (arbitrary
+          // protocol frames both ways, e.g. shutdown).
+          if (!hasScope(auth.scopes, 'internal:channel')) {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
             socket.destroy()
             return
