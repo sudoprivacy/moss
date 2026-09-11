@@ -291,7 +291,7 @@ export class CabinFlightAutomation {
       return
     }
     this.logWsMessage(envelope, raw, requestId)
-    this.healthReports?.handleWsEnvelope(envelope)
+    void this.healthReports?.handleWsEnvelope(envelope)
     const type = String((envelope as Record<string, unknown>).type || '')
     if (type !== 'flight_data') {
       this.log({ event: 'ws.message.ignored', requestId, ok: true, details: { type } })

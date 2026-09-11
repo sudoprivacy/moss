@@ -4927,7 +4927,7 @@ export function startServer(
             config.publicKeys = publicKeys
           }
 
-          runtime.store.updateCorpApp(id, auth.orgId, {
+          await runtime.store.updateCorpApp(id, auth.orgId, {
             config_json: JSON.stringify(config),
             credentials_secret_key: newSecretKey,
           })

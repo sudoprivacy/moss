@@ -8,7 +8,8 @@
   "scripts": {
     "build": "bun run scripts/build.js",
     "build:node": "bun run scripts/build.js --target=node",
-    "postinstall": "bun run scripts/copy-vendor.js"
+    "postinstall": "bun run scripts/copy-vendor.js",
+    "lint": "eslint src/server"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",
@@ -122,6 +123,9 @@
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.1",
     "bun-types": "^1.4.2",
-    "tsx": "^4.23.13"
+    "eslint": "^10.10.0",
+    "tsx": "^4.23.13",
+    "typescript": "6",
+    "typescript-eslint": "^8.70.0"
   }
 }

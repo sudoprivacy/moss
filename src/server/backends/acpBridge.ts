@@ -539,7 +539,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         const data = pendingStdin.shift()!
         try {
           process.stderr.write(`[AcpBridge] Flushing message: ${data.slice(0, 50)}...\n`)
-          processUserMessage(data)
+          processUserMessage(data).catch(e => {
+            process.stderr.write(`[AcpBridge] Error flushing message: ${e instanceof Error ? e.message : String(e)}\n`)
+          })
         } catch (e: any) {
           process.stderr.write(`[AcpBridge] Error flushing message: ${e.message}\n`)
         }
@@ -1208,7 +1210,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
 
       process.stderr.write(`[AcpBridge] Calling processUserMessage...\n`)
-      processUserMessage(data)
+      processUserMessage(data).catch(e => {
+        process.stderr.write(`[AcpBridge] Error processing message: ${e instanceof Error ? e.message : String(e)}\n`)
+      })
     },
     onStdoutLine(l) { stdoutListeners.add(l); flushStdout(); return () => stdoutListeners.delete(l) },
     onStderrLine(l) { stderrListeners.add(l); return () => stderrListeners.delete(l) },

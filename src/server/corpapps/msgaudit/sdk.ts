@@ -54,7 +54,7 @@ let koffiCache: Koffi | null = null
 function loadKoffi(): Koffi {
   if (koffiCache) return koffiCache
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+     
     koffiCache = require('koffi') as Koffi
     return koffiCache
   } catch {
