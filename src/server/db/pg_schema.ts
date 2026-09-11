@@ -1069,24 +1069,53 @@ CREATE TABLE IF NOT EXISTS _migrations (
 )
 `
 
+const SCHEMA_MIGRATE_LOCK_KEY = 'moss:pg-schema-migrate'
+const SCHEMA_MIGRATE_LOCK_RETRY_MS = 1_000
+const SCHEMA_MIGRATE_LOCK_TIMEOUT_MS = 60_000
+
 /**
  * Bring the PG database up to the latest schema version. Safe to call on
  * every boot: applied versions are skipped, and every statement inside a
  * migration is idempotent (IF NOT EXISTS), so a crash mid-migration heals on
  * the next run by re-applying the remainder.
+ *
+ * Cross-instance serialization for simultaneous first boots (ha-crosshost:
+ * two instances against one empty PG). tryRunExclusive is try-semantics —
+ * it resolves null instead of queueing — so the loser retries on a short
+ * interval; once the winner commits, `_migrations` is populated and the
+ * loser's locked section reads it and skips. Concurrent bare
+ * CREATE TABLE IF NOT EXISTS can hit pg_type_typname_nsp_index and the
+ * INSERT can hit the _migrations PK; running one migration at a time avoids
+ * both. The advisory lock is tx-scoped and releases only after fn resolves,
+ * so even though `exec` rides a dedicated connection (not the locked tx),
+ * the two instances' migration executions stay serialized in time.
  */
 export async function applyPgSchema(driver: DbDriver): Promise<void> {
-  await driver.exec(MIGRATIONS_TABLE_SQL)
-  const appliedRows = await driver.all<{ version: number | string }>(
-    'SELECT version FROM _migrations',
-  )
-  const applied = new Set(appliedRows.map(r => Number(r.version)))
-  for (const migration of MIGRATIONS) {
-    if (applied.has(migration.version)) continue
-    await driver.exec(migration.sql)
-    await driver.run(
-      'INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)',
-      [migration.version, migration.name, Date.now()],
-    )
+  const deadline = Date.now() + SCHEMA_MIGRATE_LOCK_TIMEOUT_MS
+  for (;;) {
+    const done = await driver.tryRunExclusive(SCHEMA_MIGRATE_LOCK_KEY, async () => {
+      await driver.exec(MIGRATIONS_TABLE_SQL)
+      const appliedRows = await driver.all<{ version: number | string }>(
+        'SELECT version FROM _migrations',
+      )
+      const applied = new Set(appliedRows.map(r => Number(r.version)))
+      for (const migration of MIGRATIONS) {
+        if (applied.has(migration.version)) continue
+        await driver.exec(migration.sql)
+        await driver.run(
+          'INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)',
+          [migration.version, migration.name, Date.now()],
+        )
+      }
+    })
+    // void fn: success resolves undefined, lock-not-acquired resolves null —
+    // `if (!done)` would misread success as failure.
+    if (done !== null) return
+    if (Date.now() > deadline) {
+      throw new Error(
+        'pg schema migration lock timeout (another instance held the lock too long)',
+      )
+    }
+    await new Promise(resolve => setTimeout(resolve, SCHEMA_MIGRATE_LOCK_RETRY_MS))
   }
 }

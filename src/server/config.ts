@@ -227,11 +227,14 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? 'postgres'
         : 'sqlite'),
     databaseUrl: process.env.MOSS_DATABASE_URL?.trim() || raw.storage.databaseUrl,
-    // Auth-proxy URL: env preferred, else file, else localhost default
-    // (behavior unchanged vs the previous inline default in runtimeService).
+    // Auth-proxy URL: env preferred, else file, else null (= not explicitly
+    // set). The consumer (runtimeService spawnAttempt) derives the URL from
+    // the proxy's actually-bound port at runtime, so changing
+    // MOSS_AUTH_PROXY_PORT alone can never leave runners pointed at a stale
+    // localhost:12013 literal.
     authProxyUrl: process.env.MOSS_AUTH_PROXY_URL?.trim()
       || raw.server.authProxyUrl
-      || 'http://localhost:12013',
+      || null,
     dockerNetwork: raw.docker.network,
     dockerStopTimeoutSec: raw.docker.stopTimeoutSec,
     dockerLabels: raw.docker.labels,

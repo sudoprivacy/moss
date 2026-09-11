@@ -119,15 +119,64 @@ export async function openInternalSessionChannel(
       return await connectOnce(url, token)
     } catch (error) {
       lastError = error
-      // 4xx from the handshake (auth / not-found) is permanent; network and
-      // 5xx (takeover in progress) retry within the budget.
+      // Permanent handshake failures only: 401/403 (auth) and 404
+      // (not-found). 409 means a LIVE other instance currently owns the
+      // attempt — an owner-contention instant that resolves within the
+      // retry budget — and must retry like 5xx (takeover in progress) and
+      // network errors, not abort it.
       const status = (error as { status?: number })?.status
-      if (typeof status === 'number' && status >= 400 && status < 500) throw error
+      if (status === 401 || status === 403 || status === 404) throw error
     }
   }
   throw lastError instanceof Error
     ? lastError
     : new Error(`Internal channel to session ${sessionId} failed to connect`)
+}
+
+/**
+ * Ask the OWNING instance to revoke a session's auth-proxy token (HA).
+ * Terminate is a REST op and can land on any instance behind the LB, but
+ * the token registry lives in the owner's process — so the non-owner
+ * forwards the revoke through the same owner-aware route the WS channel
+ * uses (`?moss_route=<owner>`). Failure is logged and swallowed: a dead
+ * owner's registry died with its process (nothing left to revoke), so the
+ * only real loss is the token's natural TTL on a live-but-unreachable
+ * owner.
+ */
+export async function revokeInternalSessionToken(
+  deps: ChannelDeps,
+  session: { sessionId: string; userId: string; orgId: string },
+  ownerInstanceId: string,
+): Promise<void> {
+  const { base } = internalBaseWsUrl(deps.config)
+  const httpBase = base.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
+  const url =
+    `${httpBase}/api/v1/internal/sessions/${encodeURIComponent(session.sessionId)}` +
+    `/revoke-token?${deps.config.routeCookieName}=${encodeURIComponent(ownerInstanceId)}`
+  const token = await mintInternalToken(deps, session.userId, session.orgId)
+  if (!token) {
+    process.stderr.write(
+      `[InternalChannel] cannot mint token to forward token-revoke for session ${session.sessionId}\n`,
+    )
+    return
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) {
+      process.stderr.write(
+        `[InternalChannel] token-revoke forward for session ${session.sessionId} ` +
+          `returned ${res.status}\n`,
+      )
+    }
+  } catch (error) {
+    process.stderr.write(
+      `[InternalChannel] token-revoke forward for session ${session.sessionId} failed: ` +
+        `${error instanceof Error ? error.message : String(error)}\n`,
+    )
+  }
 }
 
 function connectOnce(url: string, token: string): Promise<InternalSessionChannel> {
