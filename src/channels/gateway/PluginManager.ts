@@ -250,6 +250,16 @@ export class PluginManager {
     console.log(`[PluginManager] Plugin ${pluginId} stopped`);
   }
 
+  /** Stop a plugin whose lease row is now owned by a peer. Local-process only:
+   *  plugin.stop() + map removal, deliberately NO DB status write — the row's
+   *  lease owner (the peer now running it) owns its status. */
+  private async stopPluginLocally(instanceKey: string): Promise<void> {
+    const plugin = this.plugins.get(instanceKey);
+    if (!plugin) return;
+    await plugin.stop();
+    this.plugins.delete(instanceKey);
+  }
+
   /**
    * Stop all plugins
    */
@@ -449,7 +459,17 @@ export class PluginManager {
       if (!userId) continue; // enterprise rows are always keyed by user_id
       const id = String(row.id);
       const claimed = await this.db.claimChannelPluginLease(id, userId, this.instanceId, leaseUntil, now);
-      if (!claimed) continue; // a live peer holds this row
+      if (!claimed) {
+        // Lease lost to a peer (or never held): stop any local plugin for this
+        // row so two instances never poll the same bot concurrently.
+        const lostKey = `${id}:${userId}`;
+        if (this.plugins.has(lostKey)) {
+          await this.stopPluginLocally(lostKey).catch(err =>
+            console.error(`[PluginManager] failed to stop lost-lease plugin ${lostKey}:`, err),
+          );
+        }
+        continue; // a live peer holds this row
+      }
       const instanceKey = `${id}:${userId}`;
       // Not currently running here → new acquire / takeover / self error-retry.
       // (A failed start is never added to this.plugins, so it retries here.)
