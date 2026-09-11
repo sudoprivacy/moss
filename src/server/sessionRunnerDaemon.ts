@@ -71,6 +71,7 @@ export class SessionRunnerDaemon {
   readonly #heartbeatTimer: NodeJS.Timeout
   #server: net.Server | null = null
   #handle: BackendHandle | null = null
+  #lastOutputTouchAt = 0
   #state: 'starting' | 'running' | 'stopped' | 'failed' = 'starting'
   #stopping = false
   #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' | 'fenced' = 'runtime_exit'
@@ -264,8 +265,7 @@ export class SessionRunnerDaemon {
       handle.onStdoutLine(line => {
         process.stderr.write(`[SessionRunnerDaemon] ON STDOUT: ${line}`)
         this.#maybeUpdateTranscriptSession(line)
-        void this.#heartbeat()
-        void this.#store.touchSessionActivity(this.manifest.session.sessionId)
+        this.#touchFromOutput()
         void appendFile(this.manifest.attempt.stdoutLogPath, line, 'utf8').catch(() => {})
         this.#applicationHello.forward(line, message => this.#broadcast(message))
       })
@@ -508,6 +508,22 @@ export class SessionRunnerDaemon {
       )
       process.kill(process.pid, 'SIGTERM')
     }
+  }
+
+  /**
+   * Coalesce the per-stdout-line DB touches (heartbeat + session activity):
+   * at most once per second. The liveness signal the server consumes runs on
+   * the heartbeatTimeoutMs timescale and the interval timer (≥5s, set in the
+   * constructor) keeps it fresh between output bursts, so 1s throttling does
+   * not change fencing/liveness semantics — it only stops one DB round-trip
+   * per output line (a network RTT on the postgres backend).
+   */
+  #touchFromOutput(): void {
+    const now = Date.now()
+    if (now - this.#lastOutputTouchAt < 1_000) return
+    this.#lastOutputTouchAt = now
+    void this.#heartbeat()
+    void this.#store.touchSessionActivity(this.manifest.session.sessionId)
   }
 
   #broadcast(message: RunnerServerMessage): void {

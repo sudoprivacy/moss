@@ -589,14 +589,21 @@ export class RuntimeService {
       const used = await this.totalTokensUsed(`dept:${orgId}:${departmentId}`, async () => {
         // No department column on sessions and no usage aggregate anywhere, so
         // membership is resolved per session. Store and auth reads are async
-        // under the pluggable DB driver; user lookups fan out in one
-        // Promise.all instead of a per-session chain.
+        // under the pluggable DB driver.
         const allOrgSessions = await this.store.listSessionRecords({ orgId })
-        const sessionUsers = await Promise.all(
-          allOrgSessions.map(s => this.authService.getUserOrNull(s.userId, orgId)),
+        // Resolve each DISTINCT user once: active orgs routinely have many
+        // sessions per user, and a per-session getUserOrNull multiplies the
+        // lookups (a network round-trip each on the postgres backend).
+        const uniqueUserIds = [...new Set(allOrgSessions.map(s => s.userId))]
+        const usersById = new Map(
+          await Promise.all(
+            uniqueUserIds.map(id =>
+              this.authService.getUserOrNull(id, orgId).then(u => [id, u] as const),
+            ),
+          ),
         )
         return allOrgSessions.filter(
-          (_s, i) => sessionUsers[i]?.departmentId === departmentId,
+          s => usersById.get(s.userId)?.departmentId === departmentId,
         )
       })
       if (used >= limits.departmentLimit) {
