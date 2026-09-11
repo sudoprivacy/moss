@@ -52,6 +52,22 @@ describe('routeHardwareControl ceiling vs reading light', () => {
     expect(result?.command).toBe('cabin.ceiling.color')
     expect(result?.params).toMatchObject({ r: 255, g: 255, b: 255, brightness: 50 })
   })
+
+  it('routes ceiling explicit brightness number without falling back to the default', () => {
+    const result = route('把顶灯调亮到70')
+    expect(result?.command).toBe('cabin.ceiling.color')
+    expect(result?.params).toMatchObject({ r: 255, g: 255, b: 255, brightness: 70 })
+  })
+
+  it('routes ceiling color with explicit numeric brightness', () => {
+    const result = route('把顶灯调成蓝色亮度80')
+    expect(result?.command).toBe('cabin.ceiling.color')
+    expect(result?.params).toMatchObject({ r: 0, g: 0, b: 255, brightness: 80 })
+  })
+
+  it('does not ignore an unparsed ceiling numeric parameter by treating it as a switch', () => {
+    expect(route('打开顶灯80')).toBeNull()
+  })
 })
 
 describe('routeHardwareControl seat recline defaults', () => {
@@ -65,6 +81,14 @@ describe('routeHardwareControl seat recline defaults', () => {
 
   it('honors an explicit percentage', () => {
     expect(route('座椅调到 45%')?.params.position).toBe(45)
+  })
+
+  it('honors an explicit position number without a percent sign', () => {
+    expect(route('座椅后仰到40')?.params.position).toBe(40)
+  })
+
+  it('honors an explicit Chinese position number', () => {
+    expect(route('靠背后仰到四十')?.params.position).toBe(40)
   })
 
   it('does not route seat state questions as seat control', () => {
@@ -105,5 +129,61 @@ describe('routeHardwareControl newly covered endpoints', () => {
 
   it('falls through to the LLM path for an unknown scene word', () => {
     expect(route('切换到某个奇怪场景')).toBeNull()
+  })
+})
+
+describe('routeHardwareControl parameter extraction guardrails', () => {
+  it('routes reading light 调亮到800 as pwm 800 instead of the brighter default', () => {
+    const result = route('灯光调亮到800')
+    expect(result?.command).toBe('seat.light.brightness')
+    expect(result?.params.pwm).toBe(800)
+  })
+
+  it('routes reading light Chinese-number brightness values from field ASR text', () => {
+    expect(route('把阅读灯亮度调到八百。')?.params.pwm).toBe(800)
+    expect(route('把阅读灯亮度调到两百。')?.params.pwm).toBe(200)
+    expect(route('把阅读灯亮度调到五百。')?.params.pwm).toBe(500)
+    expect(route('阅读灯亮度调到一千。')?.params.pwm).toBe(1000)
+    expect(route('把阅读灯调到两百。')?.params.pwm).toBe(200)
+    expect(route('阅读灯亮度调至五十。')?.params.pwm).toBe(50)
+    expect(route('调节阅读灯五百亮度。')?.params.pwm).toBe(500)
+    expect(route('调节阅读灯亮度为零。')?.params.pwm).toBe(0)
+    expect(route('阅读灯亮度为一千。')?.params.pwm).toBe(1000)
+    expect(route('阅读灯亮度调节到三百。')?.params.pwm).toBe(300)
+  })
+
+  it('keeps the reading light default only when no explicit parameter is present', () => {
+    expect(route('灯光调亮一点')?.params.pwm).toBe(700)
+  })
+
+  it('does not ignore an unparsed reading light numeric parameter by treating it as a switch', () => {
+    expect(route('打开阅读灯800')).toBeNull()
+  })
+
+  it('routes ventilation level from directional numeric wording', () => {
+    const result = route('通风开大到3')
+    expect(result?.command).toBe('seat.ventilation')
+    expect(result?.params.level).toBe(3)
+  })
+
+  it('routes heating level before the generic seat position branch', () => {
+    const result = route('座椅加热到3')
+    expect(result?.command).toBe('seat.heating')
+    expect(result?.params.level).toBe(3)
+  })
+
+  it('routes massage Chinese level wording', () => {
+    const result = route('按摩二档')
+    expect(result?.command).toBe('seat.massage')
+    expect(result?.params.level).toBe(2)
+  })
+
+  it('keeps the comfort default only when no explicit parameter is present', () => {
+    expect(route('打开通风')?.params.level).toBe(2)
+  })
+
+  it('does not default comfort level when a numeric signal cannot be parsed as a level', () => {
+    expect(route('打开通风300')).toBeNull()
+    expect(route('通风开大到300')).toBeNull()
   })
 })

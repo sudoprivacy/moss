@@ -1600,6 +1600,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
         slots: { target: 'ceiling_light', action: 'brightness', r: 255, g: 255, b: 255, brightness },
       })
     }
+    if (hasExplicitParameterSignal(text)) return null
     if (hasAnyText(text, ['关闭', '关掉', '关上', '熄灭', 'off'])) {
       return route({
         intent: 'ceiling_light_off',
@@ -1625,6 +1626,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
   if (!mentionsCeiling && (hasAnyText(text, ['阅读灯', '读书灯', 'reading light']) || hasAnyText(text, ['灯', 'light']))) {
     const pwm = extractPwmValue(userText)
     if (pwm !== null || hasAnyText(text, ['亮度', '调亮', '调暗', '亮一点', '暗一点', 'brightness'])) {
+      if (pwm === null && hasExplicitParameterSignal(text)) return null
       const normalizedPwm = pwm ?? (hasAnyText(text, ['调暗', '暗一点', 'dimmer']) ? 300 : 700)
       return route({
         intent: 'reading_light_brightness',
@@ -1635,6 +1637,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
         slots: { target: 'reading_light', action: 'brightness', pwm: normalizedPwm },
       })
     }
+    if (hasExplicitParameterSignal(text)) return null
     if (hasAnyText(text, ['关闭', '关掉', '关上', '熄灭', 'off'])) {
       return route({
         intent: 'reading_light_off',
@@ -1657,25 +1660,9 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     }
   }
 
-  if (hasAnyText(text, ['座椅', '靠背', '坐垫', 'seat'])) {
-    const position = extractPercentValue(userText)
-      ?? (hasAnyText(text, ['调直', '归位', '直立', '收起', 'upright']) ? 0 : null)
-      ?? (hasAnyText(text, ['后仰一点', '放倒一点', '往后一点', '往后调一点', '稍微后仰', '稍微放倒']) ? 30 : null)
-      ?? (hasAnyText(text, ['放倒', '后仰', '躺', '休息', '舒服', 'recline']) ? 60 : null)
-    if (position !== null) {
-      return route({
-        intent: 'seat_position',
-        command: 'seat.cushion',
-        label: `座椅位置调整到 ${position}%`,
-        path: '/admin-api/tcp-client/cmd/seat/cushion',
-        params: { position },
-        slots: { target: 'seat', action: 'position', position },
-      })
-    }
-  }
-
   const level = extractLevelValue(userText)
   if (hasAnyText(text, ['通风', 'ventilation'])) {
+    if (level === null && hasExplicitParameterSignal(text)) return null
     const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 2)
     return route({
       intent: 'seat_ventilation',
@@ -1687,6 +1674,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     })
   }
   if (hasAnyText(text, ['加热', '热一点', '暖一点', 'heating'])) {
+    if (level === null && hasExplicitParameterSignal(text)) return null
     const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 2)
     return route({
       intent: 'seat_heating',
@@ -1698,6 +1686,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
     })
   }
   if (hasAnyText(text, ['按摩', 'massage'])) {
+    if (level === null && hasExplicitParameterSignal(text)) return null
     const normalizedLevel = level ?? (hasAnyText(text, ['关闭', '关掉', 'off']) ? 0 : 2)
     return route({
       intent: 'seat_massage',
@@ -1707,6 +1696,24 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
       params: { level: normalizedLevel },
       slots: { target: 'seat', action: 'massage', level: normalizedLevel },
     })
+  }
+
+  if (hasAnyText(text, ['座椅', '靠背', '坐垫', 'seat'])) {
+    const position = extractSeatPositionValue(userText)
+      ?? (hasAnyText(text, ['调直', '归位', '直立', '收起', 'upright']) ? 0 : null)
+      ?? (hasAnyText(text, ['后仰一点', '放倒一点', '往后一点', '往后调一点', '稍微后仰', '稍微放倒']) ? 30 : null)
+      ?? (hasAnyText(text, ['放倒', '后仰', '躺', '休息', '舒服', 'recline']) ? 60 : null)
+    if (position === null && hasSeatPositionText(text) && hasExplicitParameterSignal(text)) return null
+    if (position !== null) {
+      return route({
+        intent: 'seat_position',
+        command: 'seat.cushion',
+        label: `座椅位置调整到 ${position}%`,
+        path: '/admin-api/tcp-client/cmd/seat/cushion',
+        params: { position },
+        slots: { target: 'seat', action: 'position', position },
+      })
+    }
   }
 
   if (hasAnyText(text, ['生理检测', '健康检测', '健康监测', '生理采集', '体征采集', '体征监测', 'health'])) {
@@ -1797,18 +1804,68 @@ function extractPercentValue(text: string): number | null {
   return null
 }
 
+function extractControlNumber(text: string, maxDigits = 4): number | null {
+  const valuePattern = `([0-9]{1,${maxDigits}}|[一二三四五六七八九十百千万零〇两]{1,6})(?![0-9一二三四五六七八九十百千万零〇两])`
+  const patterns = [
+    new RegExp(`(?:到|为|成|=|：|:)\\s*${valuePattern}`, 'i'),
+    new RegExp(`(?:调到|调至|调为|开到|开至|升到|降到|增加到|降低到|设为|设置为)\\s*${valuePattern}`, 'i'),
+  ]
+  for (const pattern of patterns) {
+    const match = text.match(pattern)
+    if (!match) continue
+    const value = parseLooseNumber(match[1])
+    if (value !== null) return value
+  }
+  return null
+}
+
 function extractPwmValue(text: string): number | null {
   const percent = extractPercentValue(text)
   if (percent !== null) return clampInt(percent * 10, 0, 1000)
   const explicitPwm = text.match(/(?:pwm|亮度)\s*(?:调)?(?:到|为|=|：|:)?\s*(\d{1,4})/i)
   if (explicitPwm) return clampInt(Number.parseInt(explicitPwm[1], 10), 0, 1000)
+  const leadingPwm = text.match(/([0-9]{1,4}|[一二三四五六七八九十百千万零〇两]{1,6})\s*(?:pwm|亮度)/i)
+  if (leadingPwm) {
+    const value = parseLooseNumber(leadingPwm[1])
+    if (value !== null) return clampInt(value, 0, 1000)
+  }
+  const controlNumber = extractControlNumber(text)
+  if (controlNumber !== null) return clampInt(controlNumber, 0, 1000)
   return null
 }
 
 function extractLevelValue(text: string): number | null {
   const levelMatch = text.match(/(\d{1,2})\s*(?:档|级|level)/i)
   if (levelMatch) return clampInt(Number.parseInt(levelMatch[1], 10), 0, 3)
+  const chineseLevelMatch = text.match(/([零〇一二两三])\s*(?:档|级)/)
+  if (chineseLevelMatch) {
+    const value = parseLooseNumber(chineseLevelMatch[1])
+    if (value !== null) return clampInt(value, 0, 3)
+  }
+  const controlNumber = extractControlNumber(text, 1)
+  if (controlNumber !== null) return clampInt(controlNumber, 0, 3)
   return null
+}
+
+function extractSeatPositionValue(text: string): number | null {
+  const percent = extractPercentValue(text)
+  if (percent !== null) return percent
+  const lowered = text.toLowerCase()
+  if (!hasSeatPositionText(lowered)) return null
+  const controlNumber = extractControlNumber(text, 3)
+  return controlNumber === null ? null : clampInt(controlNumber, 0, 100)
+}
+
+function hasExplicitParameterSignal(text: string): boolean {
+  return /(?:\d{1,4}\s*(?:%|％|档|级|level)?|百分之\s*[一二三四五六七八九十百千万零〇两\d]+|(?:到|为|成|=|：|:)\s*[一二三四五六七八九十百千万零〇两\d]{1,6}|rgb|r\s*=|g\s*=|b\s*=)/i.test(text)
+}
+
+function hasCeilingBrightnessIntent(text: string): boolean {
+  return hasAnyText(text, ['亮度', '调亮', '调暗', '亮一点', '暗一点', 'brightness'])
+}
+
+function hasSeatPositionText(text: string): boolean {
+  return hasAnyText(text, ['靠背', '坐垫', '座椅角度', '角度', '位置', '姿态', '放倒', '后仰', '躺', '调直', '归位', '直立', 'recline', 'position', 'upright'])
 }
 
 // RGB values mirror cabin-control.mjs COLOR_ALIASES so both paths dispatch identical colors.
@@ -1833,17 +1890,30 @@ const CEILING_COLORS: Record<string, { r: number; g: number; b: number }> = {
 function extractCeilingColor(text: string): { r: number; g: number; b: number; brightness: number } | null {
   for (const [word, rgb] of Object.entries(CEILING_COLORS)) {
     if (text.includes(word)) {
-      const percent = extractPercentValue(text)
-      return { ...rgb, brightness: percent ?? 100 }
+      const brightness = extractCeilingBrightnessValue(text)
+      if (brightness === null && hasCeilingBrightnessIntent(text) && hasExplicitParameterSignal(text)) return null
+      return { ...rgb, brightness: brightness ?? 100 }
     }
   }
   return null
 }
 
-function extractCeilingBrightness(text: string): number | null {
+function extractCeilingBrightnessValue(text: string): number | null {
   const percent = extractPercentValue(text)
   if (percent !== null) return percent
-  if (hasAnyText(text, ['亮度', '调亮', '调暗', '亮一点', '暗一点', 'brightness'])) {
+  const explicitBrightness = text.match(/(?:brightness|亮度)\s*(?:调)?(?:到|为|=|：|:)?\s*(\d{1,3})/i)
+  if (explicitBrightness) return clampInt(Number.parseInt(explicitBrightness[1], 10), 0, 100)
+  if (hasCeilingBrightnessIntent(text)) {
+    const controlNumber = extractControlNumber(text, 3)
+    if (controlNumber !== null) return clampInt(controlNumber, 0, 100)
+  }
+  return null
+}
+
+function extractCeilingBrightness(text: string): number | null {
+  const explicit = extractCeilingBrightnessValue(text)
+  if (explicit !== null) return explicit
+  if (hasCeilingBrightnessIntent(text) && !hasExplicitParameterSignal(text)) {
     return hasAnyText(text, ['调暗', '暗一点', 'dimmer']) ? 30 : 80
   }
   return null
@@ -1906,12 +1976,15 @@ function parseLooseNumber(value: string): number | null {
     九: 9,
   }
   if (value === '十') return 10
+  if (value in digits) return digits[value]
   const tenMatch = value.match(/^([一二两三四五六七八九])?十([一二三四五六七八九])?$/)
   if (tenMatch) {
     return (tenMatch[1] ? digits[tenMatch[1]] : 1) * 10 + (tenMatch[2] ? digits[tenMatch[2]] : 0)
   }
   const hundredMatch = value.match(/^([一二两三四五六七八九])?百$/)
   if (hundredMatch) return (hundredMatch[1] ? digits[hundredMatch[1]] : 1) * 100
+  const thousandMatch = value.match(/^([一二两三四五六七八九])?千$/)
+  if (thousandMatch) return (thousandMatch[1] ? digits[thousandMatch[1]] : 1) * 1000
   return null
 }
 
