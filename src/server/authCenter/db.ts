@@ -3,6 +3,7 @@ import { mkdirSync } from 'fs'
 import { dirname, join } from 'path'
 import { DatabaseSync } from 'node:sqlite'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import type { RechargeOrder, RechargeSyncStatus, RefundRecord } from '../credits/recharge.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -69,6 +70,9 @@ export type CreditApplicationRow = {
   reviewedAt: number | null
   sudorouterError: string | null
 }
+
+export type RechargeOrderRow = RechargeOrder
+export type RefundRecordRow = RefundRecord
 
 /** A pending phone verification code. Only the HMAC of the code is stored. */
 export type PhoneLoginCode = {
@@ -204,6 +208,59 @@ function mapCreditApplication(row: SqlRow): CreditApplicationRow {
     createdAt: Number(row.created_at),
     reviewedAt: row.reviewed_at == null ? null : Number(row.reviewed_at),
     sudorouterError: row.sudorouter_error == null ? null : String(row.sudorouter_error),
+  }
+}
+
+function mapRechargeOrder(row: SqlRow): RechargeOrderRow {
+  return {
+    id: Number(row.id),
+    orderNo: String(row.order_no),
+    userId: String(row.user_id),
+    userPhone: row.user_phone == null ? null : String(row.user_phone),
+    orgId: String(row.org_id),
+    amountUsd: Number(row.amount_usd),
+    amountYuan: Number(row.amount_yuan),
+    amountCents: Number(row.amount_cents),
+    exchangeRate: Number(row.exchange_rate),
+    quotaAmount: Number(row.quota_amount),
+    pointsAmount: Number(row.points_amount),
+    bonusPoints: Number(row.bonus_points ?? 0),
+    paymentMethod: String(row.payment_method) as RechargeOrderRow['paymentMethod'],
+    orderDate: String(row.order_date),
+    fuiouOrderInfo: row.fuiou_order_info == null ? null : String(row.fuiou_order_info),
+    status: Number(row.status) as RechargeOrderRow['status'],
+    syncStatus: String(row.sync_status ?? 'NONE') as RechargeSyncStatus,
+    syncError: row.sync_error == null ? null : String(row.sync_error),
+    callbackData: row.callback_data == null ? null : String(row.callback_data),
+    callbackTime: row.callback_time == null ? null : Number(row.callback_time),
+    callbackAmountCents: row.callback_amount_cents == null ? null : Number(row.callback_amount_cents),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    expiredAt: Number(row.expired_at),
+    remark: row.remark == null ? null : String(row.remark),
+  }
+}
+
+function mapRefundRecord(row: SqlRow): RefundRecordRow {
+  return {
+    id: Number(row.id),
+    refundNo: String(row.refund_no),
+    orderId: Number(row.order_id),
+    orderNo: String(row.order_no),
+    userId: String(row.user_id),
+    orgId: String(row.org_id),
+    refundAmountYuan: Number(row.refund_amount_yuan),
+    refundQuota: Number(row.refund_quota),
+    refundPoints: Number(row.refund_points),
+    refundReason: row.refund_reason == null ? null : String(row.refund_reason),
+    refundType: String(row.refund_type),
+    status: Number(row.status),
+    syncStatus: String(row.sync_status ?? 'NONE') as RechargeSyncStatus,
+    syncError: row.sync_error == null ? null : String(row.sync_error),
+    fuiouRefundNo: row.fuiou_refund_no == null ? null : String(row.fuiou_refund_no),
+    fuiouResponse: row.fuiou_response == null ? null : String(row.fuiou_response),
+    createdAt: Number(row.created_at),
+    processedAt: row.processed_at == null ? null : Number(row.processed_at),
   }
 }
 
@@ -487,6 +544,65 @@ export class AuthCenterDb {
       );
       CREATE INDEX IF NOT EXISTS credit_applications_user_idx
         ON credit_applications (user_id, created_at DESC);
+    `)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS recharge_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        user_phone TEXT,
+        org_id TEXT NOT NULL,
+        amount_usd REAL NOT NULL,
+        amount_yuan REAL NOT NULL,
+        amount_cents INTEGER NOT NULL,
+        exchange_rate REAL NOT NULL,
+        quota_amount INTEGER NOT NULL,
+        points_amount INTEGER NOT NULL,
+        bonus_points INTEGER NOT NULL DEFAULT 0,
+        payment_method TEXT NOT NULL,
+        order_date TEXT NOT NULL,
+        fuiou_order_info TEXT,
+        status INTEGER NOT NULL DEFAULT 0,
+        sync_status TEXT NOT NULL DEFAULT 'NONE',
+        sync_error TEXT,
+        callback_data TEXT,
+        callback_time INTEGER,
+        callback_amount_cents INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expired_at INTEGER NOT NULL,
+        remark TEXT
+      );
+      CREATE INDEX IF NOT EXISTS recharge_orders_user_idx
+        ON recharge_orders (user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS recharge_orders_org_idx
+        ON recharge_orders (org_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS recharge_orders_status_idx
+        ON recharge_orders (status, created_at DESC);
+      CREATE TABLE IF NOT EXISTS refund_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        refund_no TEXT NOT NULL UNIQUE,
+        order_id INTEGER NOT NULL REFERENCES recharge_orders(id),
+        order_no TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        org_id TEXT NOT NULL,
+        refund_amount_yuan REAL NOT NULL,
+        refund_quota INTEGER NOT NULL,
+        refund_points INTEGER NOT NULL,
+        refund_reason TEXT,
+        refund_type TEXT NOT NULL,
+        status INTEGER NOT NULL DEFAULT 0,
+        sync_status TEXT NOT NULL DEFAULT 'NONE',
+        sync_error TEXT,
+        fuiou_refund_no TEXT,
+        fuiou_response TEXT,
+        created_at INTEGER NOT NULL,
+        processed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS refund_records_order_idx
+        ON refund_records (order_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS refund_records_user_idx
+        ON refund_records (user_id, created_at DESC);
     `)
     this.ensureColumn(
       'users',
@@ -877,6 +993,189 @@ export class AuthCenterDb {
     if ('sudorouterError' in patch) { sets.push('sudorouter_error = ?'); values.push(patch.sudorouterError ?? null) }
     values.push(id)
     this.db.prepare(`UPDATE credit_applications SET ${sets.join(', ')} WHERE id = ?`).run(...values as never[])
+  }
+
+  // ---- paid recharge orders (`pay` recharge mode) ----
+
+  createRechargeOrder(input: Omit<RechargeOrderRow, 'id' | 'createdAt' | 'updatedAt' | 'fuiouOrderInfo'
+    | 'status' | 'syncStatus' | 'syncError' | 'callbackData' | 'callbackTime'
+    | 'callbackAmountCents' | 'remark'>): RechargeOrderRow {
+    const ts = now()
+    this.db.prepare(`
+      INSERT INTO recharge_orders (
+        order_no, user_id, user_phone, org_id,
+        amount_usd, amount_yuan, amount_cents, exchange_rate,
+        quota_amount, points_amount, bonus_points,
+        payment_method, order_date, status, sync_status,
+        created_at, updated_at, expired_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'NONE', ?, ?, ?)
+    `).run(
+      input.orderNo,
+      input.userId,
+      input.userPhone,
+      input.orgId,
+      input.amountUsd,
+      input.amountYuan,
+      input.amountCents,
+      input.exchangeRate,
+      input.quotaAmount,
+      input.pointsAmount,
+      input.bonusPoints,
+      input.paymentMethod,
+      input.orderDate,
+      ts,
+      ts,
+      input.expiredAt,
+    )
+    const row = this.db.prepare(`
+      SELECT * FROM recharge_orders WHERE order_no = ?
+    `).get(input.orderNo) as SqlRow
+    return mapRechargeOrder(row)
+  }
+
+  getRechargeOrderByNo(orderNo: string): RechargeOrderRow | null {
+    const row = this.db.prepare(`
+      SELECT * FROM recharge_orders WHERE order_no = ? LIMIT 1
+    `).get(orderNo) as SqlRow | undefined
+    return row ? mapRechargeOrder(row) : null
+  }
+
+  getRechargeOrderById(id: number): RechargeOrderRow | null {
+    const row = this.db.prepare(`
+      SELECT * FROM recharge_orders WHERE id = ? LIMIT 1
+    `).get(id) as SqlRow | undefined
+    return row ? mapRechargeOrder(row) : null
+  }
+
+  listRechargeOrdersForUser(
+    userId: string,
+    limit: number,
+    offset: number,
+  ): { list: RechargeOrderRow[]; total: number } {
+    const rows = this.db.prepare(`
+      SELECT * FROM recharge_orders
+      WHERE user_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(userId, limit, offset) as SqlRow[]
+    const counted = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM recharge_orders WHERE user_id = ?
+    `).get(userId) as SqlRow | undefined
+    return { list: rows.map(mapRechargeOrder), total: Number(counted?.n ?? 0) }
+  }
+
+  listRechargeOrdersForAdmin(input: {
+    orgId?: string
+    status?: number
+    orderNo?: string
+    userPhone?: string
+    startDate?: string
+    endDate?: string
+    limit: number
+    offset: number
+  }): { list: RechargeOrderRow[]; total: number } {
+    const where: string[] = []
+    const params: unknown[] = []
+    if (input.orgId) {
+      where.push('org_id = ?')
+      params.push(input.orgId)
+    }
+    if (input.status !== undefined) {
+      where.push('status = ?')
+      params.push(input.status)
+    }
+    if (input.orderNo) {
+      where.push('order_no LIKE ?')
+      params.push(`%${input.orderNo}%`)
+    }
+    if (input.userPhone) {
+      where.push('user_phone LIKE ?')
+      params.push(`%${input.userPhone}%`)
+    }
+    if (input.startDate) {
+      const start = Date.parse(`${input.startDate}T00:00:00`)
+      if (Number.isFinite(start)) {
+        where.push('created_at >= ?')
+        params.push(start)
+      }
+    }
+    if (input.endDate) {
+      const end = Date.parse(`${input.endDate}T23:59:59`)
+      if (Number.isFinite(end)) {
+        where.push('created_at <= ?')
+        params.push(end)
+      }
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+    const rows = this.db.prepare(`
+      SELECT * FROM recharge_orders
+      ${whereSql}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, input.limit, input.offset) as SqlRow[]
+    const counted = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM recharge_orders ${whereSql}
+    `).get(...params) as SqlRow | undefined
+    return { list: rows.map(mapRechargeOrder), total: Number(counted?.n ?? 0) }
+  }
+
+  updateRechargeOrder(id: number, patch: Partial<Pick<RechargeOrderRow,
+    'status' | 'syncStatus' | 'syncError' | 'fuiouOrderInfo' | 'callbackData'
+    | 'callbackTime' | 'callbackAmountCents' | 'remark'>>): void {
+    const columns: string[] = []
+    const values: unknown[] = []
+    const add = (column: string, value: unknown): void => {
+      columns.push(`${column} = ?`)
+      values.push(value)
+    }
+    if ('status' in patch) add('status', patch.status)
+    if ('syncStatus' in patch) add('sync_status', patch.syncStatus)
+    if ('syncError' in patch) add('sync_error', patch.syncError ?? null)
+    if ('fuiouOrderInfo' in patch) add('fuiou_order_info', patch.fuiouOrderInfo ?? null)
+    if ('callbackData' in patch) add('callback_data', patch.callbackData ?? null)
+    if ('callbackTime' in patch) add('callback_time', patch.callbackTime ?? null)
+    if ('callbackAmountCents' in patch) add('callback_amount_cents', patch.callbackAmountCents ?? null)
+    if ('remark' in patch) add('remark', patch.remark ?? null)
+    if (!columns.length) return
+    add('updated_at', now())
+    values.push(id)
+    this.db.prepare(`
+      UPDATE recharge_orders SET ${columns.join(', ')} WHERE id = ?
+    `).run(...values as never[])
+  }
+
+  createRefundRecord(input: Omit<RefundRecordRow, 'id' | 'createdAt'>): RefundRecordRow {
+    const ts = now()
+    this.db.prepare(`
+      INSERT INTO refund_records (
+        refund_no, order_id, order_no, user_id, org_id,
+        refund_amount_yuan, refund_quota, refund_points,
+        refund_reason, refund_type, status, sync_status, sync_error,
+        fuiou_refund_no, fuiou_response, created_at, processed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.refundNo,
+      input.orderId,
+      input.orderNo,
+      input.userId,
+      input.orgId,
+      input.refundAmountYuan,
+      input.refundQuota,
+      input.refundPoints,
+      input.refundReason,
+      input.refundType,
+      input.status,
+      input.syncStatus,
+      input.syncError,
+      input.fuiouRefundNo,
+      input.fuiouResponse,
+      ts,
+      input.processedAt,
+    )
+    const row = this.db.prepare(`
+      SELECT * FROM refund_records WHERE refund_no = ?
+    `).get(input.refundNo) as SqlRow
+    return mapRefundRecord(row)
   }
 
   // ---- phone verification codes (login_method: 0) ----

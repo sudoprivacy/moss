@@ -35,6 +35,9 @@ const FIELD_LABELS: Record<string, string> = {
   'cabin.controlAuth': '控制接口鉴权',
   'cabin.broadcastApiKey': '广播 API Key',
   'cabin.broadcastAuth': '广播鉴权',
+  'systemConfig.sudorouterAdminToken': 'SudoRouter 管理 Token',
+  'systemConfig.recharge.fuiou.merchantPrivateKey': '富友商户私钥',
+  'systemConfig.recharge.fuiou.publicKey': '富友平台公钥',
 }
 
 const GROUP_META: Record<
@@ -54,9 +57,17 @@ const GROUP_META: Record<
     title: '客舱服务凭据',
     description: '客舱 AI 相关的服务鉴权与 API Key（server.json 的 cabin.*）。',
   },
+  sudorouter: {
+    title: 'SudoRouter 凭据',
+    description: '用于创建网关账号、查询余额、发放和扣减模型积分。',
+  },
+  fuiou: {
+    title: '富友支付凭据',
+    description: '用于 Sudowork 在线充值下单、回调验签和退款。',
+  },
 }
 
-const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin']
+const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin', 'sudorouter', 'fuiou']
 
 /**
  * 清空后会回落公开 dev 常量、导致已签发资源 URL 失效且可被伪造的 HMAC 密钥字段。
@@ -65,6 +76,12 @@ const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin']
 const HMAC_SECRET_PATHS = new Set([
   'wikiIndex.resourceTokenSecret',
   'cabin.tokenSecret',
+])
+
+const PAYMENT_SECRET_PATHS = new Set([
+  'systemConfig.sudorouterAdminToken',
+  'systemConfig.recharge.fuiou.merchantPrivateKey',
+  'systemConfig.recharge.fuiou.publicKey',
 ])
 
 function CredentialRow({
@@ -78,6 +95,7 @@ function CredentialRow({
   const [saving, setSaving] = useState(false)
   const label = FIELD_LABELS[item.path] ?? item.path
   const isHmacSecret = HMAC_SECRET_PATHS.has(item.path)
+  const isPaymentSecret = PAYMENT_SECRET_PATHS.has(item.path)
 
   // 提交契约：脱敏占位（**** 开头）视为未修改，禁止提交覆盖真实凭据
   const isPlaceholder = value.trim().startsWith('****')
@@ -108,6 +126,8 @@ function CredentialRow({
     if (saving) return
     const warning = isHmacSecret
       ? `确认清空「${label}」？清空后该 HMAC 密钥将回落公开 dev 常量，已签发的资源 URL 会失效且可被伪造。`
+      : isPaymentSecret
+        ? `确认清空「${label}」？清空后 Sudowork 在线充值、余额发放或退款可能无法使用。`
       : `确认清空「${label}」？`
     if (!window.confirm(warning)) return
     setSaving(true)
@@ -167,6 +187,12 @@ function CredentialRow({
         <p className="flex items-center gap-1.5 text-xs text-destructive">
           <ShieldAlert className="size-3.5 shrink-0" />
           清空后回落公开 dev 常量，已签发资源 URL 将失效且可被伪造。
+        </p>
+      ) : null}
+      {isPaymentSecret ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <ShieldAlert className="size-3.5 shrink-0" />
+          清空后 Sudowork 在线充值、余额发放或退款可能无法使用。
         </p>
       ) : null}
     </div>
