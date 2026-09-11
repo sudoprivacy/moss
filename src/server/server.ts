@@ -1695,7 +1695,7 @@ async function ensureGatewayAccount(
       displayName: input.displayName,
       initialPoints: config.systemConfig.initialPoints ?? 0,
     })
-    authService.setUserModelCredential(input.userId, {
+    await authService.setUserModelCredential(input.userId, {
       sudorouterUserId: account.gatewayUserId,
       sudorouterKey: account.gatewayKey,
     })
@@ -2724,12 +2724,12 @@ export function startServer(
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
-        const { user } = authService.provisionPhoneUser({
+        const { user } = await authService.provisionPhoneUser({
           phone: username,
           nickname,
           autoCreateOrg: authService.phoneAuth.autoCreateOrg,
         })
-        authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
+        await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
         await ensureGatewayAccount(authService, config, {
           userId: user.id,
           username,
@@ -6218,7 +6218,7 @@ export function startServer(
         }
         // The display name, not the login name: `name` holds the phone, which
         // is the stable handle and must not move when someone renames himself.
-        authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
+        await authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
         writeJson(res, 200, { success: true, msg: 'nickname updated' })
         return
       }
@@ -6268,15 +6268,15 @@ export function startServer(
         // already authenticated: a token left behind on a shared machine must
         // not be enough to take the account over.
         try {
-          authService.issueTokenFromPassword({
-            username: authService.getUserName(auth.userId) ?? '',
+          await authService.issueTokenFromPassword({
+            username: (await authService.getUserName(auth.userId)) ?? '',
             password: oldPassword,
           })
         } catch {
           writeJson(res, 403, { success: false, msg: 'Current password is incorrect' })
           return
         }
-        authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
+        await authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
         writeJson(res, 200, { success: true, msg: 'password updated' })
         return
       }

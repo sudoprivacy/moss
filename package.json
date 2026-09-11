@@ -9,7 +9,7 @@
     "build": "bun run scripts/build.js",
     "build:node": "bun run scripts/build.js --target=node",
     "postinstall": "bun run scripts/copy-vendor.js",
-    "lint": "eslint src/server"
+    "lint": "eslint src/server src/channels"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",

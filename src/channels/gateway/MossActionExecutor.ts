@@ -696,7 +696,7 @@ export class MossActionExecutor {
     }
 
     // Update channel session with Moss session ID as conversationId
-    this.sessionManager.updateSessionConversation(
+    await this.sessionManager.updateSessionConversation(
       this.sessionManager.getSession(channelUser.id, chatId)?.id || '',
       sessionId,
     );

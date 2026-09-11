@@ -164,7 +164,7 @@ export class WikiJobExecutor {
     // Local reap: this instance's own in-memory builds that blew the timeout.
     for (const [jobId, state] of this.running.entries()) {
       if (now - state.startedAt > BUILD_TIMEOUT_MS) {
-        this.failJob(jobId, state.wikiId, 'build exceeded timeout')
+        await this.failJob(jobId, state.wikiId, 'build exceeded timeout')
         this.running.delete(jobId)
       }
     }
@@ -393,11 +393,11 @@ export class WikiJobExecutor {
     } catch (err) {
       if (err instanceof BuildCancelledError || this.cancelRequested.has(job.id)) {
         console.log(`[WikiJobExecutor] job ${job.id} cancelled`)
-        this.cancelJobRecord(job.id, job.wikiId)
+        await this.cancelJobRecord(job.id, job.wikiId)
       } else {
         const message = err instanceof Error ? err.message : String(err)
         console.error(`[WikiJobExecutor] job ${job.id} failed:`, message)
-        this.failJob(job.id, job.wikiId, message)
+        await this.failJob(job.id, job.wikiId, message)
       }
     } finally {
       this.cancelRequested.delete(job.id)

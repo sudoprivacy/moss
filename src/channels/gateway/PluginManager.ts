@@ -7,7 +7,7 @@
 import type { DirectConnectStore } from '../../server/db.js';
 import type { SqlRow } from '../../server/db/driver.js';
 import type { NexusClient } from '../../server/nexus/nexusClient.js';
-import type { SessionManager } from './SessionManager.js';
+import type { SessionManager } from '../core/SessionManager.js';
 import type { BasePlugin, PluginMessageHandler, PluginConfirmHandler } from '../plugins/BasePlugin.js';
 import type { IChannelPluginConfig, IChannelPluginStatus, IUnifiedIncomingMessage, PluginType } from '../types.js';
 import { hasPluginCredentials } from '../types.js';
@@ -322,7 +322,7 @@ export class PluginManager {
    * Handle incoming message from a plugin
    */
   private async handleIncomingMessage(message: IUnifiedIncomingMessage): Promise<void> {
-    this.sessionManager.updateSessionActivity(message.user.id);
+    await this.sessionManager.updateSessionActivity(message.user.id);
 
     if (this.messageHandler) {
       await this.messageHandler(message);
