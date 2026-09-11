@@ -24,6 +24,14 @@
 #      后续版本计划改为 SA 直连以消除该共享文件依赖（届时本挂载可移除）。
 #   4. Nexus 以独立 Deployment 部署（单写者，单点边界声明见其清单/README-ha），
 #      endpoint 经下方 MOSS_NEXUS_ENDPOINT 指向。
+#   5. 两个 ConfigMap（本清单引用但不自带，须先创建，见 README-ha K8s 节）：
+#        - moss-server-json：提供 /app/server.json（下方 volume 挂载）。
+#            kubectl -n moss-control create configmap moss-server-json \
+#              --from-file=server.json=deploy/server.json
+#        - moss-server-config：注入非敏感 env（下方 envFrom）。缺失会导致 pod
+#            CreateContainerConfigError 或缺配启动。
+#            kubectl -n moss-control create configmap moss-server-config \
+#              --from-literal=<KEY>=<VALUE> ...
 #
 # 实例扩缩容：replicas 变化后【必须同步】moss-nginx-route.yaml 的 upstream/map
 # 条目（新 pod 的 DNS 与 MOSS_INSTANCE_ID=pod name），再滚动重启 nginx——见
@@ -36,6 +44,11 @@ metadata:
   namespace: moss-control
 spec:
   clusterIP: None
+  # Resolve pod DNS (and route/auth-proxy FQDNs) even before a pod is Ready, so
+  # a restarting/booting instance is still addressable during takeover; without
+  # this the headless A-records drop not-ready pods and cross-instance routing
+  # black-holes during rollouts.
+  publishNotReadyAddresses: true
   selector:
     app: moss-server
   ports:
@@ -92,9 +105,17 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            # auth proxy 仅被同 pod 的 runner 使用（headless 内稳定 pod DNS）。
+            # auth proxy 被 scode pod（moss-sessions ns）连接，须用跨 ns 可解析的 FQDN；
+            # 短名在他 ns 不可解析。
             - name: MOSS_AUTH_PROXY_URL
-              value: http://$(POD_NAME).moss-server-headless:12013
+              value: http://$(POD_NAME).moss-server-headless.moss-control.svc.cluster.local:12013
+            # runtime（k8s）回连本实例 server_url。必须在 POD_NAME 之后定义（$(VAR)
+            # 只展开其之前定义的 env），FQDN 供 scode pod 跨 ns 解析。
+            - name: MOSS_SERVER_URL
+              value: http://$(POD_NAME).moss-server-headless.moss-control.svc.cluster.local:43127
+            # kubeconfig 读取路径：env 优先于 server.json 默认（config.ts），比 subPath 稳。
+            - name: MOSS_K8S_KUBECONFIG
+              value: /root/.moss/server/kubeconfig/kubeconfig
             - name: MOSS_NEXUS_MODE
               value: external
             - name: MOSS_NEXUS_ENDPOINT

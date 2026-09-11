@@ -117,13 +117,17 @@ services:
       # auth proxy 绑定全网卡，URL 指向本实例容器名（多实例下不能指向固定单容器）。
       - MOSS_AUTH_PROXY_HOST=0.0.0.0
       - MOSS_AUTH_PROXY_URL=http://moss-server-a:12013
+      # runtime（docker/k8s）回连本实例的 server_url；指向本实例容器名，与 nginx
+      # upstream 成员名严格一致。缺失会导致 docker runtime 的 wiki CLI 等回连断链。
+      - MOSS_SERVER_URL=http://moss-server-a:43127
       # —— HA 专属增量 env ——
       - MOSS_INSTANCE_ID=a
       # nexus external：只连接不 spawn（http 明文允许）。
       - MOSS_NEXUS_MODE=external
       - MOSS_NEXUS_ENDPOINT=http://nexus:2126
       # ws_url 指向 LB 入口（buildWsUrl 优先 publicBaseUrl）。填 Nginx 对外地址。
-      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL}
+      # 强制必填（:? 语法）：漏配时内部通道回环自身且丢路由参数，对非本机会话 100% 失败。
+      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL:?set MOSS_PUBLIC_BASE_URL (http://<LB-VIP>)}
       # 显式开启 drain（默认 0=现状行为不 drain）。
       - MOSS_SHUTDOWN_GRACE_MS=30000
       # 企微回调监听器（独立端口 43128；无状态，经 nginx 双入口轮询安全）。
@@ -154,10 +158,11 @@ services:
       - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
       - MOSS_AUTH_PROXY_HOST=0.0.0.0
       - MOSS_AUTH_PROXY_URL=http://moss-server-b:12013
+      - MOSS_SERVER_URL=http://moss-server-b:43127
       - MOSS_INSTANCE_ID=b
       - MOSS_NEXUS_MODE=external
       - MOSS_NEXUS_ENDPOINT=http://nexus:2126
-      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL}
+      - MOSS_PUBLIC_BASE_URL=${MOSS_PUBLIC_BASE_URL:?set MOSS_PUBLIC_BASE_URL (http://<LB-VIP>)}
       - MOSS_SHUTDOWN_GRACE_MS=30000
       - MOSS_CALLBACK_PORT=43128
     networks:

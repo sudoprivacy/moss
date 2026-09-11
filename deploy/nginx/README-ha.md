@@ -265,9 +265,16 @@ owner 主机死 ──► 存量 runner 心跳失配（≤10s，fencing 自杀�
 
 清单与次序：
 
+0. **ConfigMap 准备（statefulset 引用但不自带，必须先创建）**：
+   - `moss-server-json` —— 提供 `/app/server.json`：
+     `kubectl -n moss-control create configmap moss-server-json --from-file=server.json=deploy/server.json`
+   - `moss-server-config` —— 注入非敏感 env（`envFrom`）：
+     `kubectl -n moss-control create configmap moss-server-config --from-literal=<KEY>=<VALUE> ...`
+   缺任一 → pod `CreateContainerConfigError` 或缺配启动。
 1. `moss-nexus.yaml` —— Nexus 单实例（vault 单写者，**replicas 必须为 1**，
    单点边界见文件头）；
-2. `moss-server-statefulset.yaml` —— headless service + StatefulSet
+2. `moss-server-statefulset.yaml` —— headless service（`publishNotReadyAddresses:
+   true`，未就绪 pod 也可被解析，接管期不黑洞）+ StatefulSet
    （`MOSS_INSTANCE_ID` 由 fieldRef 取 pod name）+ RWX PVC（runtime 与 MOSS_HOME
    两个卷，NFS StorageClass）+ PG 连接经 Secret `moss-pg`（key `url`）注入 +
    kubeconfig 经 Secret `moss-k8s-kubeconfig` 挂载（仅 k8s runtime 会话需要；
@@ -279,6 +286,14 @@ owner 主机死 ──► 存量 runner 心跳失配（≤10s，fencing 自杀�
 **扩缩容同步义务**：`replicas` 变化后必须同步 `moss-nginx-conf` 的三组 upstream
 与两级 map 键（= pod name），再滚动重启 nginx Deployment——不同步则新 pod 不参与
 owner 路由（WS 409 风暴）。
+
+**pod 重建（IP 漂移）SOP（重要）**：nginx 的 upstream 是静态 upstream 组，nginx
+在启动/reload 时解析一次 pod DNS 并缓存 IP。**任何 pod 重建**（滚动更新、崩溃重启、
+节点驱逐——即使 `replicas` 不变、pod name 不变）都会让该 pod 拿到新 IP，而 nginx 仍
+打旧 IP → 路由黑洞。因此 **pod 重建后必须滚动重启 `moss-nginx` Deployment**
+（`kubectl -n moss-control rollout restart deploy/moss-nginx`）令其重新解析。
+未采用 resolver 变量路由：非 upstream 组名的变量 `proxy_pass` 需 `resolver` 且丢失
+keepalive/max_fails，重构 conf 结构风险大于收益，故以本 SOP 兜底。
 
 **TLS**：`moss-ingress.yaml` 作为可选前置挂 `moss-nginx` Service（此时删除其
 affinity annotation，与两级 map 互斥；该文件头部注释已更新）。
