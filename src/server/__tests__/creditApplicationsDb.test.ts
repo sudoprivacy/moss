@@ -6,6 +6,7 @@ import { AuthCenterDb } from '../authCenter/db.js'
 import { AuthService } from '../auth/service.js'
 import { reviewApplication, submitApplication } from '../credits/creditApplications.js'
 import type { SudorouterClient } from '../credits/sudorouter.js'
+import { fakeGateway } from './fakeGateway.js'
 
 /**
  * The credit-application logic is unit-tested against an in-memory store; this
@@ -20,11 +21,7 @@ let userId: string
 
 const POLICY = { minPoints: 100, maxPoints: 10_000, allowDuplicatePending: false }
 
-const noopGateway: SudorouterClient = {
-  getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-  getModelUsage: async () => [],
-  addPoints: async () => {},
-}
+const noopGateway: SudorouterClient = fakeGateway()
 
 beforeEach(() => {
   raw = new DatabaseSync(':memory:')

@@ -10,6 +10,7 @@ import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
+import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
 import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.js'
@@ -297,14 +298,30 @@ function buildSmsSender(
   }
 
   return async (phone: string, code: string) => {
-    const [id, key] = await Promise.all([
-      nexus.getSecret(tencent.vaultNamespace, tencent.secretIdKey),
-      nexus.getSecret(tencent.vaultNamespace, tencent.secretKeyKey),
-    ])
-    if (!id?.value || !key?.value) {
+    // Credentials page first, vault second.
+    //
+    // The vault pair works but nothing can write it: no API or admin screen
+    // puts a value at an arbitrary vault namespace, so these credentials were
+    // placed there out of band and could never be rotated through the product.
+    // The credentials page is the supported path; the vault stays as the
+    // fallback so deployments already holding a pair there keep sending without
+    // a migration step.
+    const store = getConfigStore()
+    let secretId = store.get('server.sms-secret-id')
+    let secretKey = store.get('server.sms-secret-key')
+    if (!secretId || !secretKey) {
+      const [id, key] = await Promise.all([
+        nexus.getSecret(tencent.vaultNamespace, tencent.secretIdKey),
+        nexus.getSecret(tencent.vaultNamespace, tencent.secretKeyKey),
+      ])
+      secretId = secretId || id?.value || ''
+      secretKey = secretKey || key?.value || ''
+    }
+    if (!secretId || !secretKey) {
       throw new Error(
-        `SMS credentials missing from the vault (${tencent.vaultNamespace}: ` +
-        `${tencent.secretIdKey} / ${tencent.secretKeyKey})`,
+        'SMS credentials are not configured. Set them on the server credentials '
+        + `page (server.sms-secret-id / server.sms-secret-key), or in the vault `
+        + `(${tencent.vaultNamespace}: ${tencent.secretIdKey} / ${tencent.secretKeyKey}).`,
       )
     }
     await sendTencentSms({
@@ -320,7 +337,7 @@ function buildSmsSender(
       // Templates commonly state the validity window; keep it in step with the
       // TTL actually enforced rather than hardcoding a number in the message.
       ttlMinutes: Math.max(1, Math.round(config.phoneAuth.codeTtlSec / 60)),
-      credentials: { secretId: id.value, secretKey: key.value },
+      credentials: { secretId, secretKey },
     })
   }
 }

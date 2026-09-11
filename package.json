@@ -8,7 +8,8 @@
   "scripts": {
     "build": "bun run scripts/build.js",
     "build:node": "bun run scripts/build.js --target=node",
-    "postinstall": "bun run scripts/copy-vendor.js"
+    "postinstall": "bun run scripts/copy-vendor.js",
+    "test": "node scripts/test-server.js"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",
@@ -116,5 +117,8 @@
     "@img/sharp-linux-x64": "*",
     "@img/sharp-win32-arm64": "*",
     "@img/sharp-win32-x64": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13"
   }
 }

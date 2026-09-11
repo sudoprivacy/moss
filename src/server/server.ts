@@ -59,7 +59,7 @@ import { initHubConfig } from './hubConfig.js'
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter' | 'sms'
   path: string
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
@@ -73,6 +73,8 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.cabin-broadcast-api-key', group: 'cabin', path: 'cabin.broadcastApiKey' },
   { key: 'server.cabin-broadcast-auth', group: 'cabin', path: 'cabin.broadcastAuth' },
   { key: 'server.sudorouter-admin-token', group: 'sudorouter', path: 'systemConfig.sudorouterAdminToken' },
+  { key: 'server.sms-secret-id', group: 'sms', path: 'phoneAuth.tencent.secretId' },
+  { key: 'server.sms-secret-key', group: 'sms', path: 'phoneAuth.tencent.secretKey' },
 ]
 import {
   createCustomAssistant,
