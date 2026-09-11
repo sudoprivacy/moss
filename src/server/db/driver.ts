@@ -88,40 +88,64 @@ export interface DbDriver {
 export class SqliteDriver implements DbDriver {
   readonly kind = 'sqlite' as const
   private readonly txStorage = new AsyncLocalStorage<{ db: DatabaseSync }>()
+  /** In-flight top-level transaction, or null. Ordinary (non-tx) statements
+   *  wait for it to clear: on the single shared handle they would otherwise
+   *  interleave INTO the open transaction. Mirrors PgDriver's per-tx
+   *  exclusive client. */
+  private activeTx: Promise<unknown> | null = null
 
   constructor(private readonly db: DatabaseSync) {}
 
+  private async waitOutTx(): Promise<void> {
+    // while, not a single await: back-to-back transactions can start a new one
+    // by the time this wakes, so re-check until the field is actually clear.
+    while (this.activeTx !== null) await this.activeTx.catch(() => {})
+  }
+
   async get<T extends SqlRow = SqlRow>(sql: string, params?: SqlParam[]): Promise<T | undefined> {
+    if (!this.txStorage.getStore()) await this.waitOutTx()
     const db = this.txStorage.getStore()?.db ?? this.db
     return db.prepare(sql).get(...(params ?? [])) as T | undefined
   }
 
   async all<T extends SqlRow = SqlRow>(sql: string, params?: SqlParam[]): Promise<T[]> {
+    if (!this.txStorage.getStore()) await this.waitOutTx()
     const db = this.txStorage.getStore()?.db ?? this.db
     return db.prepare(sql).all(...(params ?? [])) as T[]
   }
 
   async run(sql: string, params?: SqlParam[]): Promise<number> {
+    if (!this.txStorage.getStore()) await this.waitOutTx()
     const db = this.txStorage.getStore()?.db ?? this.db
     const res = db.prepare(sql).run(...(params ?? []))
     return Number(res.changes)
   }
 
   async exec(sql: string): Promise<void> {
+    if (!this.txStorage.getStore()) await this.waitOutTx()
     this.db.exec(sql)
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
     const current = this.txStorage.getStore()
     if (current) return fn() // nested: join the outer transaction
-    this.db.exec('BEGIN TRANSACTION')
+    if (this.activeTx !== null) await this.waitOutTx() // serialize concurrent top-level txns
+    const run = (async () => {
+      this.db.exec('BEGIN TRANSACTION')
+      try {
+        const result = await this.txStorage.run({ db: this.db }, fn)
+        this.db.exec('COMMIT')
+        return result
+      } catch (error) {
+        try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+        throw error
+      }
+    })()
+    this.activeTx = run
     try {
-      const result = await this.txStorage.run({ db: this.db }, fn)
-      this.db.exec('COMMIT')
-      return result
-    } catch (error) {
-      try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ }
-      throw error
+      return await run
+    } finally {
+      this.activeTx = null
     }
   }
 
