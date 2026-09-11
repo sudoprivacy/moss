@@ -904,6 +904,14 @@ export class RuntimeService {
     return null
   }
 
+  /** Whether the given attempt belongs to THIS instance (any runtime state).
+   *  Used by the internal revoke-token route to scope a forwarded revoke to
+   *  sessions this instance actually owns. */
+  async ownsAttempt(attemptId: string): Promise<boolean> {
+    const attempt = await this.store.getAttempt(attemptId)
+    return attempt?.serverInstanceId === this.options.serverInstanceId
+  }
+
   async reconcileOnStartup(): Promise<void> {
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning

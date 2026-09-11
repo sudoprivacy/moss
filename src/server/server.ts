@@ -3546,7 +3546,15 @@ export function startServer(
         if (!hasScope(auth.scopes, 'internal:channel')) {
           throw new HttpError(403, 'Forbidden')
         }
-        const revoked = runtime.revokeSessionTokenLocally(decodeURIComponent(internalRevokeMatch[1] || ''))
+        const sessionId = decodeURIComponent(internalRevokeMatch[1] || '')
+        const session = await runtime.getSession(sessionId)
+        if (!session) throw new HttpError(404, 'Not Found')
+        // Scope the forwarded revoke to attempts this instance actually owns —
+        // aligns with the /ws/internal ownership gate; a peer's session 403s.
+        if (!session.currentAttemptId || !(await runtime.ownsAttempt(session.currentAttemptId))) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const revoked = runtime.revokeSessionTokenLocally(sessionId)
         writeJson(res, 200, { ok: true, revoked })
         return
       }
