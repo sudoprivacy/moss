@@ -333,11 +333,15 @@ export class EventTriggerStore {
    * Atomically claim up to `limit` queued runs, flipping them to 'running'
    * in the same statement that selects them.
    *
-   * This single UPDATE is what makes concurrent executor ticks safe: SQLite
-   * serializes writers, and the `status = 'queued'` predicate is re-evaluated
-   * under that write lock, so a run claimed by one tick is no longer eligible
-   * for the next. Selecting first and updating after would leave a window in
-   * which two ticks both see the same queued row and double-run the event.
+   * This single UPDATE is what makes concurrent executor ticks safe across
+   * instances. The `status = 'queued'` predicate appears on BOTH the inner
+   * SELECT and the outer UPDATE: under PG READ COMMITTED two instances can pick
+   * the same id in their subqueries, but the loser blocks on the row lock and,
+   * when it unblocks, re-evaluates the OUTER `status = 'queued'` against the
+   * winner's committed 'running' row (EvalPlanQual) — which no longer matches,
+   * so the UPDATE skips it and it is not returned. Without the outer predicate
+   * the loser would overwrite started_at and double-run the event. (SQLite
+   * serializes writers, so the subquery re-eval alone already sufficed there.)
    */
   async claimQueuedRuns(limit: number): Promise<EventTriggerRun[]> {
     if (limit <= 0) return []
@@ -351,6 +355,7 @@ export class EventTriggerStore {
         ORDER BY created_at ASC
         LIMIT ?
       )
+      AND status = 'queued'
       RETURNING *
     `, [ts, limit])
     return rows.map(mapRun)

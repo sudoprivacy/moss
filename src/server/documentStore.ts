@@ -98,6 +98,8 @@ export type WikiBuildJob = {
   queuedAt: number
   startedAt: number | null
   finishedAt: number | null
+  claimedBy: string | null
+  claimedAt: number | null
 }
 
 export type WikiBuildJobListItem = WikiBuildJob & {
@@ -254,6 +256,8 @@ function mapBuildJob(row: SqlRow): WikiBuildJob {
     queuedAt: Number(row.queued_at),
     startedAt: row.started_at == null ? null : Number(row.started_at),
     finishedAt: row.finished_at == null ? null : Number(row.finished_at),
+    claimedBy: typeof row.claimed_by === 'string' ? row.claimed_by : null,
+    claimedAt: row.claimed_at == null ? null : Number(row.claimed_at),
   }
 }
 
@@ -676,6 +680,16 @@ export class DocumentStore {
 
   async listQueuedBuildJobs(limit?: number): Promise<WikiBuildJob[]> {
     return (await this.store.listQueuedWikiBuildJobs(limit)).map(mapBuildJob)
+  }
+
+  /** Atomically claim up to `limit` queued jobs for `instanceId` (queued→running CAS). */
+  async claimQueuedBuildJobs(limit: number, instanceId: string | undefined, now: number): Promise<WikiBuildJob[]> {
+    return (await this.store.claimQueuedWikiBuildJobs(limit, instanceId, now)).map(mapBuildJob)
+  }
+
+  /** Jobs stuck 'running' past `before` (owning instance crashed/wedged). */
+  async listStaleRunningBuildJobs(before: number): Promise<WikiBuildJob[]> {
+    return (await this.store.listStaleRunningWikiBuildJobs(before)).map(mapBuildJob)
   }
 
   async createBuildJob(input: { wikiId: string; triggeredBy: string }): Promise<WikiBuildJob> {

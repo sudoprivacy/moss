@@ -18,6 +18,7 @@ import { DirectConnectStore, forPostgresDirectConnectStore } from "../db.js";
 import { CronStore } from "../services/cron/CronStore.js";
 import { AuthCenterDb } from "../authCenter/db.js";
 import { isUniqueViolationOn } from "../auth/service.js";
+import { EventTriggerStore } from "../services/eventTrigger/EventTriggerStore.js";
 
 const PG_URL = process.env.MOSS_PG_TEST_URL ?? "";
 
@@ -366,6 +367,26 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         authDb.consumePhoneLoginCode(phone, hash),
       ]);
       assert.equal(results.filter(Boolean).length, 1, "only one concurrent consume may win");
+    });
+  });
+
+  describe("claimQueuedRuns cross-instance (B2/R5)", () => {
+    it("two pools claiming the same queued run — only one wins under READ COMMITTED", async () => {
+      const ets1 = new EventTriggerStore(fix.driver);
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`);
+      const pool2 = new Pool({ connectionString: url, max: 2 });
+      const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
+      const ets2 = new EventTriggerStore(driver2);
+      try {
+        const run = await ets1.createRun({ triggerId: "t_b2", orgId: "o1", userId: "u1", payloadJson: null });
+        assert.ok(run);
+        const [a, b] = await Promise.all([ets1.claimQueuedRuns(10), ets2.claimQueuedRuns(10)]);
+        const wins =
+          a.filter(r => r.id === run!.id).length + b.filter(r => r.id === run!.id).length;
+        assert.equal(wins, 1, "exactly one instance may claim the run (no double-execution)");
+      } finally {
+        await pool2.end();
+      }
     });
   });
 

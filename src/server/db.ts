@@ -738,6 +738,23 @@ export class DirectConnectStore {
         ON wiki_build_jobs (status, queued_at);
     `)
 
+    // Incremental migration: wiki build-job claim ownership (HA). claimed_by
+    // records which server instance atomically claimed the job (queued→running
+    // CAS); claimed_at is its claim timestamp, used by the stale-job reaper and
+    // by sweepStaging to leave another live instance's in-flight artifacts
+    // alone. Existing rows read NULL (unclaimed / pre-HA). PG side is v2.
+    try {
+      const wikiBuildJobColumns = this.db.prepare(`PRAGMA table_info(wiki_build_jobs)`).all() as SqlRow[]
+      if (!wikiBuildJobColumns.some(c => String(c.name) === 'claimed_by')) {
+        this.db.exec(`ALTER TABLE wiki_build_jobs ADD COLUMN claimed_by TEXT`)
+      }
+      if (!wikiBuildJobColumns.some(c => String(c.name) === 'claimed_at')) {
+        this.db.exec(`ALTER TABLE wiki_build_jobs ADD COLUMN claimed_at INTEGER`)
+      }
+    } catch (error) {
+      console.error('[DB] Failed to add wiki_build_jobs claim columns:', error)
+    }
+
     // ============================================================
     // Document Center v2: external sources + connector abstraction
     // Adds support for pulling documents from external systems
@@ -3137,6 +3154,42 @@ export class DirectConnectStore {
     )
   }
 
+  /**
+   * Atomically claim up to `limit` queued jobs, flipping them to 'running' and
+   * stamping the owning instance in the SAME statement (CAS). The inner SELECT
+   * picks candidates; the outer `AND status = 'queued'` re-checks under the row
+   * lock (PG EvalPlanQual / SQLite writer serialization) so two instances polling
+   * concurrently never both claim the same job and double-run the build. Only the
+   * rows this call actually flipped come back via RETURNING.
+   */
+  async claimQueuedWikiBuildJobs(limit: number, instanceId: string | undefined, now: number): Promise<SqlRow[]> {
+    if (limit <= 0) return []
+    return this.driver.all<SqlRow>(`
+      UPDATE wiki_build_jobs
+      SET status = 'running', claimed_by = ?, claimed_at = ?, started_at = COALESCE(started_at, ?)
+      WHERE id IN (
+        SELECT id FROM wiki_build_jobs
+        WHERE status = 'queued'
+        ORDER BY queued_at
+        LIMIT ?
+      )
+      AND status = 'queued'
+      RETURNING *
+    `, [instanceId ?? null, now, now, limit])
+  }
+
+  /**
+   * Jobs still 'running' whose claim/start stamp is older than `before` — i.e.
+   * the owning instance crashed or wedged mid-build. The reaper fails these so
+   * they stop occupying the wiki's build slot forever.
+   */
+  async listStaleRunningWikiBuildJobs(before: number): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM wiki_build_jobs WHERE status = 'running' AND COALESCE(claimed_at, started_at) < ?`,
+      [before],
+    )
+  }
+
   async createWikiBuildJob(row: {
     id: string
     wiki_id: string
@@ -3158,23 +3211,26 @@ export class DirectConnectStore {
     started_at?: number
     finished_at?: number
   }): Promise<void> {
-    const existing = await this.getWikiBuildJob(id)
-    if (!existing) return
-    await this.driver.run(`
-      UPDATE wiki_build_jobs
-      SET status = ?, progress = ?, current_step = ?, error_message = ?,
-          session_id = ?, started_at = ?, finished_at = ?
-      WHERE id = ?
-    `, [
-      updates.status ?? (existing.status as string),
-      updates.progress !== undefined ? updates.progress : (existing.progress as number),
-      updates.current_step !== undefined ? updates.current_step : (existing.current_step as string | null),
-      updates.error_message !== undefined ? updates.error_message : (existing.error_message as string | null),
-      updates.session_id !== undefined ? updates.session_id : (existing.session_id as string | null),
-      updates.started_at ?? (existing.started_at as number | null),
-      updates.finished_at ?? (existing.finished_at as number | null),
-      id,
-    ])
+    // Dynamic SET: only the columns explicitly provided are written. Read-then-
+    // write-all would let a slow owner's progress update (which carries no
+    // status) re-write existing.status='running' back over a value the stale
+    // reaper just set to 'failed', resurrecting a dead job and making the reaper
+    // useless. Touching only provided columns keeps status changes authoritative.
+    const sets: string[] = []
+    const params: SqlParam[] = []
+    if (updates.status !== undefined) { sets.push('status = ?'); params.push(updates.status) }
+    if (updates.progress !== undefined) { sets.push('progress = ?'); params.push(updates.progress) }
+    if (updates.current_step !== undefined) { sets.push('current_step = ?'); params.push(updates.current_step) }
+    if (updates.error_message !== undefined) { sets.push('error_message = ?'); params.push(updates.error_message) }
+    if (updates.session_id !== undefined) { sets.push('session_id = ?'); params.push(updates.session_id) }
+    if (updates.started_at !== undefined) { sets.push('started_at = ?'); params.push(updates.started_at) }
+    if (updates.finished_at !== undefined) { sets.push('finished_at = ?'); params.push(updates.finished_at) }
+    if (sets.length === 0) return
+    params.push(id)
+    await this.driver.run(
+      `UPDATE wiki_build_jobs SET ${sets.join(', ')} WHERE id = ?`,
+      params,
+    )
   }
 
   // ==================== Document Center v2: External Sources ====================
