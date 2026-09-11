@@ -1067,6 +1067,7 @@ export class AuthCenterDb {
   listRechargeOrdersForAdmin(input: {
     orgId?: string
     status?: number
+    syncStatus?: RechargeSyncStatus
     orderNo?: string
     userPhone?: string
     startDate?: string
@@ -1083,6 +1084,10 @@ export class AuthCenterDb {
     if (input.status !== undefined) {
       where.push('status = ?')
       params.push(input.status)
+    }
+    if (input.syncStatus) {
+      where.push('sync_status = ?')
+      params.push(input.syncStatus)
     }
     if (input.orderNo) {
       where.push('order_no LIKE ?')
@@ -1176,6 +1181,56 @@ export class AuthCenterDb {
       SELECT * FROM refund_records WHERE refund_no = ?
     `).get(input.refundNo) as SqlRow
     return mapRefundRecord(row)
+  }
+
+  listRefundRecordsForAdmin(input: {
+    orgId?: string
+    orderNo?: string
+    userId?: string
+    startDate?: string
+    endDate?: string
+    limit: number
+    offset: number
+  }): { list: RefundRecordRow[]; total: number } {
+    const where: string[] = []
+    const params: unknown[] = []
+    if (input.orgId) {
+      where.push('org_id = ?')
+      params.push(input.orgId)
+    }
+    if (input.orderNo) {
+      where.push('order_no LIKE ?')
+      params.push(`%${input.orderNo}%`)
+    }
+    if (input.userId) {
+      where.push('user_id = ?')
+      params.push(input.userId)
+    }
+    if (input.startDate) {
+      const start = Date.parse(`${input.startDate}T00:00:00`)
+      if (Number.isFinite(start)) {
+        where.push('created_at >= ?')
+        params.push(start)
+      }
+    }
+    if (input.endDate) {
+      const end = Date.parse(`${input.endDate}T23:59:59`)
+      if (Number.isFinite(end)) {
+        where.push('created_at <= ?')
+        params.push(end)
+      }
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+    const rows = this.db.prepare(`
+      SELECT * FROM refund_records
+      ${whereSql}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, input.limit, input.offset) as SqlRow[]
+    const counted = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM refund_records ${whereSql}
+    `).get(...params) as SqlRow | undefined
+    return { list: rows.map(mapRefundRecord), total: Number(counted?.n ?? 0) }
   }
 
   // ---- phone verification codes (login_method: 0) ----

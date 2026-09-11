@@ -1289,6 +1289,14 @@ export class AuthService {
       createRefund(input) {
         return db.createRefundRecord(input) as RefundRecord
       },
+      listRefundsForAdmin(input) {
+        const result = db.listRefundRecordsForAdmin({
+          ...input,
+          limit: input.pageSize,
+          offset: (input.page - 1) * input.pageSize,
+        })
+        return { list: result.list as RefundRecord[], total: result.total }
+      },
     }
   }
 

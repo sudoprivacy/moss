@@ -5,9 +5,11 @@ import {
   cancelRechargeOrder,
   createRechargeOrder,
   handleRechargeCallback,
+  retryRechargeOrderSync,
   payRechargeOrder,
   queryRechargeOrder,
   rechargePackagesWithCny,
+  syncRechargeOrderStatus,
   type RechargeOrder,
   type RechargeOrderStore,
   type RefundRecord,
@@ -57,6 +59,7 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
       let list = rows.slice()
       if (input.orgId) list = list.filter(order => order.orgId === input.orgId)
       if (input.status !== undefined) list = list.filter(order => order.status === input.status)
+      if (input.syncStatus) list = list.filter(order => order.syncStatus === input.syncStatus)
       return { list: list.slice((input.page - 1) * input.pageSize, input.page * input.pageSize), total: list.length }
     },
     update(id, patch) {
@@ -67,6 +70,12 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
       const row: RefundRecord = { ...input, id: refunds.length + 1, createdAt: Date.now() }
       refunds.push(row)
       return row
+    },
+    listRefundsForAdmin(input) {
+      let list = refunds.slice()
+      if (input.orgId) list = list.filter(refund => refund.orgId === input.orgId)
+      if (input.orderNo) list = list.filter(refund => refund.orderNo.includes(input.orderNo!))
+      return { list: list.slice((input.page - 1) * input.pageSize, input.page * input.pageSize), total: list.length }
     },
   }
 }
@@ -267,5 +276,88 @@ describe('recharge callback settlement', () => {
       () => '42',
     )
     expect(calls).toBe(1)
+  })
+})
+
+describe('manual recharge reconciliation', () => {
+  it('retries a safe failed SudoRouter sync once', async () => {
+    const store = makeStore()
+    const order = createRechargeOrder(store, POLICY, {
+      userId: 'user-1',
+      orgId: 'org-1',
+      amount: 1,
+      paymentMethod: 'ALIPAY',
+    })
+    store.update(order.id, {
+      status: ORDER_STATUS.FAILED,
+      syncStatus: 'SYNC_FAILED',
+      syncError: 'gateway refused',
+    })
+    let credited = 0
+    await retryRechargeOrderSync(
+      store,
+      gateway(async (_id, points) => { credited += points }),
+      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+    )
+    expect(credited).toBe(1000)
+    expect(store.getByOrderNo(order.orderNo)).toMatchObject({
+      status: ORDER_STATUS.SUCCESS,
+      syncStatus: 'SYNCED',
+    })
+  })
+
+  it('does not retry an unknown SudoRouter sync', async () => {
+    const store = makeStore()
+    const order = createRechargeOrder(store, POLICY, {
+      userId: 'user-1',
+      orgId: 'org-1',
+      amount: 1,
+      paymentMethod: 'ALIPAY',
+    })
+    store.update(order.id, {
+      status: ORDER_STATUS.FAILED,
+      syncStatus: 'SYNC_UNKNOWN',
+      syncError: 'timeout',
+    })
+    let credited = 0
+    await expect(retryRechargeOrderSync(
+      store,
+      gateway(async (_id, points) => { credited += points }),
+      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+    )).rejects.toThrow(/人工核对/)
+    expect(credited).toBe(0)
+  })
+
+  it('syncs a paid Fuiou order and settles it through SudoRouter', async () => {
+    const store = makeStore()
+    const order = createRechargeOrder(store, POLICY, {
+      userId: 'user-1',
+      orgId: 'org-1',
+      amount: 1,
+      paymentMethod: 'ALIPAY',
+    })
+    store.update(order.id, { status: ORDER_STATUS.PAYING })
+    let credited = 0
+    await syncRechargeOrderStatus(
+      store,
+      fuiou({
+        queryOrder: async () => ({
+          success: true,
+          data: {
+            order_id: order.orderNo,
+            order_st: '1',
+            order_amt: '730',
+            order_date: order.orderDate,
+          },
+          request: { method: 'POST', url: 'https://fuiou.example', body: {} },
+          response: { status: 200, data: {} },
+          duration_ms: 1,
+        }),
+      }),
+      gateway(async (_id, points) => { credited += points }),
+      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+    )
+    expect(credited).toBe(1000)
+    expect(store.getByOrderNo(order.orderNo)?.syncStatus).toBe('SYNCED')
   })
 })

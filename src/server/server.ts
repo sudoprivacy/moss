@@ -53,11 +53,15 @@ import {
   cancelRechargeOrder,
   createRechargeOrder,
   handleRechargeCallback,
+  listAdminRechargeRecords,
   listRechargeOrders,
   payRechargeOrder,
   queryRechargeOrder,
   rechargePackagesWithCny,
   refundRechargeOrder,
+  retryRechargeOrderSync,
+  syncPendingRechargeOrders,
+  syncRechargeOrderStatus,
   toAdminOrderPayload,
   toCreatedOrderPayload,
 } from './credits/recharge.js'
@@ -6476,9 +6480,11 @@ export function startServer(
         const page = Math.max(1, Number(url.searchParams.get('page') || 1))
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
         const statusParam = url.searchParams.get('status')
+        const syncStatusParam = url.searchParams.get('sync_status')?.trim()
         const result = authService.rechargeOrders.listForAdmin({
           orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
           status: statusParam == null || statusParam === '' ? undefined : Number(statusParam),
+          syncStatus: syncStatusParam ? syncStatusParam as never : undefined,
           orderNo: url.searchParams.get('order_no')?.trim() || undefined,
           userPhone: url.searchParams.get('user_phone')?.trim() || undefined,
           startDate: url.searchParams.get('start_date')?.trim() || undefined,
@@ -6494,6 +6500,25 @@ export function startServer(
             page,
             pageSize,
           },
+        })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/admin/recharge-records') {
+        authService.requireScope(auth, 'admin:users')
+        const page = Math.max(1, Number(url.searchParams.get('page') || 1))
+        const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
+        writeJson(res, 200, {
+          success: true,
+          data: listAdminRechargeRecords(authService.rechargeOrders, {
+            orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
+            orderNo: url.searchParams.get('order_no')?.trim() || undefined,
+            userPhone: url.searchParams.get('user_phone')?.trim() || undefined,
+            startDate: url.searchParams.get('start_date')?.trim() || undefined,
+            endDate: url.searchParams.get('end_date')?.trim() || undefined,
+            page,
+            pageSize,
+          }),
         })
         return
       }
@@ -6544,6 +6569,90 @@ export function startServer(
             daily: [],
           },
         })
+        return
+      }
+
+      const adminRechargeRetryMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)\/retry$/)
+      if (req.method === 'POST' && adminRechargeRetryMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const raw = decodeURIComponent(adminRechargeRetryMatch[1] || '')
+        const byId = /^\d+$/.test(raw) ? authService.rechargeOrders.getById(Number(raw)) : null
+        const existing = byId ?? authService.rechargeOrders.getByOrderNo(raw)
+        if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        try {
+          const data = await retryRechargeOrderSync(
+            authService.rechargeOrders,
+            buildSudorouterClient(config),
+            {
+              orderId: byId ? existing.id : undefined,
+              orderNo: byId ? undefined : existing.orderNo,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '订单同步重试成功', data })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      const adminRechargeSyncMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)\/sync$/)
+      if (req.method === 'POST' && adminRechargeSyncMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const orderNo = decodeURIComponent(adminRechargeSyncMatch[1] || '')
+        const existing = authService.rechargeOrders.getByOrderNo(orderNo)
+        if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        try {
+          const data = await syncRechargeOrderStatus(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            buildSudorouterClient(config),
+            {
+              orderNo,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '订单状态同步完成', data })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/admin/recharge/sync') {
+        authService.requireScope(auth, 'admin:users')
+        try {
+          const data = await syncPendingRechargeOrders(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            buildSudorouterClient(config),
+            {
+              orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '待处理订单同步完成', data })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
         return
       }
 
