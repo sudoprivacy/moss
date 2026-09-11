@@ -430,3 +430,42 @@ describe('usage log reading', () => {
     expect(quotaToPoints(usage.reduce((n, r) => n + r.costQuota, 0))).toBe(1)
   })
 })
+
+describe('gateway field limits', () => {
+  it('trims a display name the gateway would reject', async () => {
+    // The gateway validates username, password and display_name at 20 characters
+    // and answers with a field-validation blob. A user is free to type a longer
+    // nickname, and it must not cost them their account.
+    const calls: Array<{ path: string; body: unknown }> = []
+    const client = createSudorouterClient({
+      baseUrl: 'https://gateway.example',
+      getAdminToken: async () => 't',
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url).replace('https://gateway.example', '')
+        calls.push({ path, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        const data = path.startsWith('/api/user/search') ? []
+          : path.startsWith('/api/token/') ? { key: 'k' }
+          : { id: 1 }
+        return new Response(JSON.stringify({ success: true, data }))
+      }) as unknown as typeof fetch,
+    })
+    await client.provisionAccount({
+      username: '13800138000',
+      displayName: 'a display name far longer than twenty characters',
+      initialPoints: 0,
+    })
+    const body = calls.find(c => c.path === '/api/user/')?.body as { display_name: string }
+    expect(body.display_name).toHaveLength(20)
+  })
+
+  it('refuses a username the gateway cannot store, with a reason', async () => {
+    const client = createSudorouterClient({
+      baseUrl: 'https://gateway.example',
+      getAdminToken: async () => 't',
+      fetchImpl: (async () => new Response(JSON.stringify({ success: true, data: [] }))) as unknown as typeof fetch,
+    })
+    await expect(client.provisionAccount({
+      username: 'x'.repeat(21), initialPoints: 0,
+    })).rejects.toThrow(/too long for the gateway/)
+  })
+})
