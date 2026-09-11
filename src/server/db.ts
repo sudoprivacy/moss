@@ -2350,7 +2350,7 @@ export class DirectConnectStore {
   async getChannelSessionTurnCount(userId: string, chatId?: string): Promise<number> {
     const row = await this.driver.get<SqlRow>(
       `SELECT MAX(COALESCE(turn_count, 0)) AS tc FROM channel_sessions
-       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
       [userId, chatId ?? null],
     )
     return row ? Number(row.tc ?? 0) : 0
@@ -2360,7 +2360,7 @@ export class DirectConnectStore {
   async incrementChannelSessionTurnCount(userId: string, chatId?: string): Promise<number> {
     await this.driver.run(
       `UPDATE channel_sessions SET turn_count = COALESCE(turn_count, 0) + 1
-       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
       [userId, chatId ?? null],
     )
     return this.getChannelSessionTurnCount(userId, chatId)
@@ -2381,7 +2381,7 @@ export class DirectConnectStore {
   async resetChannelSessionTurnCount(userId: string, chatId?: string): Promise<void> {
     await this.driver.run(
       `UPDATE channel_sessions SET turn_count = 0
-       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
       [userId, chatId ?? null],
     )
   }
