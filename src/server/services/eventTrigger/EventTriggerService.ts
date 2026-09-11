@@ -142,9 +142,14 @@ export class EventTriggerService {
     if (!this.stopped) return
     this.stopped = false
 
-    // Any run still 'running' at boot was orphaned by a restart — it can
-    // never complete, and would otherwise hold a slot forever.
-    const reaped = await this.store.reapStaleRuns(Date.now(), 'Server restarted while run was in progress')
+    // Only reap runs older than the run timeout + margin — NOT every in-flight
+    // run. Under HA a rolling restart brings up a new instance while the other
+    // is still serving; reaping all queued/running at boot would erase the
+    // peer's freshly-enqueued / in-progress runs and lose those events forever.
+    // A genuinely orphaned run is older than the timeout and still gets reaped
+    // (aligns with CronService's "timeout + 60s margin" convention).
+    const staleBefore = Date.now() - (DEFAULT_RUN_TIMEOUT_MS + 60_000)
+    const reaped = await this.store.reapStaleRuns(staleBefore, 'Run did not complete within the timeout (reaped as stale)')
     if (reaped > 0) {
       console.log(`[EventTriggerService] reaped ${reaped} orphaned run(s) at startup`)
     }

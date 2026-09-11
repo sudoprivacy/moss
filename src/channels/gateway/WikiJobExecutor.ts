@@ -120,6 +120,9 @@ export class WikiJobExecutor {
       modelId: 'Xenova/multilingual-e5-small',
       maxPassagesPerWiki: 20_000,
     },
+    /** This server instance's id (HA). Stamped on claimed jobs so peers leave
+     * each other's in-flight staging artifacts alone; undefined = single instance. */
+    private instanceId?: string,
   ) {}
 
   /** Start polling for queued jobs. Idempotent. */
@@ -157,8 +160,8 @@ export class WikiJobExecutor {
   }
 
   private async tickOnce(): Promise<void> {
-    // Reap timed-out jobs
     const now = Date.now()
+    // Local reap: this instance's own in-memory builds that blew the timeout.
     for (const [jobId, state] of this.running.entries()) {
       if (now - state.startedAt > BUILD_TIMEOUT_MS) {
         this.failJob(jobId, state.wikiId, 'build exceeded timeout')
@@ -166,12 +169,29 @@ export class WikiJobExecutor {
       }
     }
 
-    // Pull queued jobs up to the concurrency cap
+    // DB reap: jobs left 'running' by a crashed/wedged instance (or by this one
+    // before a restart) past the timeout. Fail them so the wiki's build slot is
+    // freed and a "永卡 running" job cannot block re-builds forever. A fresh
+    // build re-enqueues a NEW job row. failJob's status write is authoritative
+    // (updateWikiBuildJob only writes provided columns), so a slow owner's later
+    // progress update cannot resurrect a reaped job.
+    try {
+      const stale = await this.docStore.listStaleRunningBuildJobs(now - BUILD_TIMEOUT_MS)
+      for (const job of stale) {
+        if (this.running.has(job.id)) continue // covered by the local reap above
+        await this.failJob(job.id, job.wikiId, 'build owner unavailable (reaped as stale)')
+      }
+    } catch (err) {
+      console.error('[WikiJobExecutor] stale-job reap failed:', err)
+    }
+
+    // Pull queued jobs up to the concurrency cap via an atomic CAS claim, so two
+    // instances polling the shared DB never both run the same job.
     const slotsAvailable = MAX_CONCURRENT_BUILDS - this.running.size
     if (slotsAvailable <= 0) return
 
-    const queued = await this.docStore.listQueuedBuildJobs(slotsAvailable)
-    for (const job of queued) {
+    const claimed = await this.docStore.claimQueuedBuildJobs(slotsAvailable, this.instanceId, Date.now())
+    for (const job of claimed) {
       // Fire-and-forget — runJob handles its own state updates.
       this.running.set(job.id, { jobId: job.id, wikiId: job.wikiId, startedAt: Date.now() })
       void this.runJob(job).finally(() => {
@@ -189,12 +209,12 @@ export class WikiJobExecutor {
     // earlier-started build cannot clobber a newer one's output.
     const startedAt = this.running.get(job.id)?.startedAt ?? Date.now()
 
-    // Mark job + wiki as running
+    // The claim (claimQueuedWikiBuildJobs) already flipped status→'running' and
+    // stamped started_at; here we only advance the progress/step (dynamic SET
+    // leaves status untouched, so a concurrent stale-reap stays authoritative).
     await this.docStore.updateBuildJob(job.id, {
-      status: 'running',
       progress: 5,
       currentStep: '准备工作目录',
-      startedAt: Date.now(),
     })
     await this.docStore.setWikiBuildResult(job.wikiId, { status: 'running' })
 
@@ -602,6 +622,39 @@ export class WikiJobExecutor {
   }
 
   /**
+   * Staging entry names are "<wikiId>.<jobId>" (build dir) or
+   * "<wikiId>.<jobId>.old" (published-swap leftover). wikiId/jobId are dotless
+   * ids, so the jobId is the last dot-segment of the base.
+   */
+  private jobIdFromStagingName(name: string): string | null {
+    const base = name.endsWith('.old') ? name.slice(0, -'.old'.length) : name
+    const dotIdx = base.lastIndexOf('.')
+    if (dotIdx <= 0) return null
+    return base.slice(dotIdx + 1)
+  }
+
+  /**
+   * True when the staging artifact for `jobId` belongs to a DIFFERENT live
+   * instance's in-flight build — such artifacts must not be recovered or
+   * deleted by this instance's sweep (the peer may be mid-publish). A job with
+   * no record, not 'running', stale past the timeout, or owned by this instance
+   * is reclaimable. On a DB read error we err on the safe side (treat as foreign
+   * / leave it) rather than risk clobbering a peer's build.
+   */
+  private async isForeignActiveJob(jobId: string, now: number): Promise<boolean> {
+    try {
+      const job = await this.docStore.getBuildJob(jobId)
+      if (!job) return false // no record → orphan, reclaimable
+      if (job.status !== 'running') return false // terminal/queued → not actively building
+      const stampedAt = job.claimedAt ?? job.startedAt ?? 0
+      if (now - stampedAt > BUILD_TIMEOUT_MS) return false // stale → reclaimable
+      return job.claimedBy != null && job.claimedBy !== this.instanceId
+    } catch {
+      return true // DB hiccup: don't risk deleting a possibly-active peer artifact
+    }
+  }
+
+  /**
    * Reclaim orphaned staging artifacts left by a crash mid-build or
    * mid-swap. Called once on start().
    *
@@ -619,6 +672,8 @@ export class WikiJobExecutor {
       return // .stage/ doesn't exist yet — nothing to sweep
     }
 
+    const now = Date.now()
+
     // Pass 1: recover any interrupted swaps from `<wikiId>.<jobId>.old`.
     for (const name of entries) {
       if (!name.endsWith('.old')) continue
@@ -628,6 +683,12 @@ export class WikiJobExecutor {
       const dotIdx = base.lastIndexOf('.')
       if (dotIdx <= 0) continue
       const wikiId = base.slice(0, dotIdx)
+      const jobId = base.slice(dotIdx + 1)
+      // Another live instance's in-flight job may be mid-publish (its live dir
+      // renamed to this .old between swap step 1 and 2). Recovering it here
+      // would rename the .old back over the peer's swap and break its step 2.
+      // Leave it to its owner.
+      if (await this.isForeignActiveJob(jobId, now)) continue
       const liveDir = path.join(MOSS_WIKIS_DIR, wikiId)
       const oldPath = path.join(STAGE_DIR, name)
       if (!(await this.pathExists(liveDir))) {
@@ -644,7 +705,9 @@ export class WikiJobExecutor {
       await rm(oldPath, { recursive: true, force: true }).catch(() => {})
     }
 
-    // Pass 2: drop everything else still under .stage/ (abandoned builds).
+    // Pass 2: drop remaining staging entries (abandoned builds) — EXCEPT those
+    // owned by another live instance's in-flight job (its build dir, or an .old
+    // it is still swapping). Those belong to a peer and must be left alone.
     let remaining: string[]
     try {
       remaining = await readdir(STAGE_DIR)
@@ -652,6 +715,8 @@ export class WikiJobExecutor {
       return
     }
     for (const name of remaining) {
+      const jobId = this.jobIdFromStagingName(name)
+      if (jobId && (await this.isForeignActiveJob(jobId, now))) continue
       await rm(path.join(STAGE_DIR, name), { recursive: true, force: true }).catch((e) => {
         console.error(`[WikiJobExecutor] failed to sweep staging entry ${name}:`, e)
       })
