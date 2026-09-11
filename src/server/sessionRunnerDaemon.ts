@@ -301,13 +301,17 @@ export class SessionRunnerDaemon {
           )
         }
         this.#state = code === 0 ? 'stopped' : 'failed'
-        await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
+        // Owner-scoped terminal write: if this daemon was fenced (a new owner
+        // claimed the attempt), the UPDATE does not land and stillOwner is
+        // false — we must then skip the session terminal write so we don't
+        // clobber the takeover owner's live session.
+        const stillOwner = await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
           runtimeState,
           exitCode: code,
           exitSignal: signal,
           stopReason: this.#stopping ? this.#stopReason : 'runtime_exit',
           errorText,
-        })
+        }, this.manifest.config.instanceId)
         // Lifecycle marks:
         //   terminate (client-initiated delete)    -> status=terminated, desired=terminated
         //   idle / busy-ceiling kill (server-side) -> status=ended, desired=ACTIVE
@@ -341,11 +345,18 @@ export class SessionRunnerDaemon {
           nextStatus = 'failed'
           nextDesired = 'active'
         }
-        await this.#store.markSessionEnded(
-          this.manifest.session.sessionId,
-          nextStatus,
-          nextDesired,
-        )
+        if (stillOwner) {
+          await this.#store.markSessionEnded(
+            this.manifest.session.sessionId,
+            nextStatus,
+            nextDesired,
+          )
+        } else {
+          process.stderr.write(
+            `[SessionRunnerDaemon] session ${this.manifest.session.sessionId} attempt ${this.manifest.attempt.attemptId} fenced (owner changed); skipping terminal session write\n`,
+          )
+        }
+        // Event log is written regardless — it carries no ownership semantics.
         await this.#store.addEvent(
           this.manifest.session.sessionId,
           this.manifest.attempt.attemptId,
@@ -745,19 +756,29 @@ export class SessionRunnerDaemon {
     this.#broadcast({ type: 'exit', code: 1, signal: null })
     // Each DB write is best-effort: if the store is unwritable, we still want
     // to finish shutting the runner down cleanly rather than crash mid-#fail.
+    // Default true so single-instance (undefined instanceId) and store-write
+    // failures keep the original best-effort terminal write; only a successful
+    // owner-scoped UPDATE that matched nothing (we were fenced) skips it.
+    let stillOwner = true
     try {
-      await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
+      stillOwner = await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
         runtimeState: 'failed',
         stopReason,
         errorText: message,
-      })
+      }, this.manifest.config.instanceId)
     } catch (dbErr) {
       process.stderr.write(`[SessionRunnerDaemon] #fail markAttemptStopped failed: ${dbErr}\n`)
     }
-    try {
-      await this.#store.markSessionEnded(this.manifest.session.sessionId, 'failed', 'active')
-    } catch (dbErr) {
-      process.stderr.write(`[SessionRunnerDaemon] #fail markSessionEnded failed: ${dbErr}\n`)
+    if (stillOwner) {
+      try {
+        await this.#store.markSessionEnded(this.manifest.session.sessionId, 'failed', 'active')
+      } catch (dbErr) {
+        process.stderr.write(`[SessionRunnerDaemon] #fail markSessionEnded failed: ${dbErr}\n`)
+      }
+    } else {
+      process.stderr.write(
+        `[SessionRunnerDaemon] session ${this.manifest.session.sessionId} attempt ${this.manifest.attempt.attemptId} fenced (owner changed); skipping terminal session write\n`,
+      )
     }
     try {
       await this.#store.addEvent(

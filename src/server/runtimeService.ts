@@ -742,6 +742,27 @@ export class RuntimeService {
         Math.min(this.options.config.reattachProbeTimeoutMs, 500),
       )
       if (healthy) {
+        // Host same-machine takeover guard (R19): after an adopt claim flips DB
+        // ownership to self, the live socket may still be served by the OLD
+        // instance's daemon (its on-disk manifest carries the old instanceId),
+        // which fencing is about to kill. Marking 'active' here would hand the
+        // client a runner that is about to die. If the running daemon belongs to
+        // another instance, wait for it to be fenced and respawn instead of
+        // marking active. Windows named pipes (no instance isolation) are
+        // covered the same way. Read failure / no instanceId → normal path.
+        const runnerInstanceId = await this.#readAttemptRunnerInstanceId(
+          session.sessionId,
+          existing.generation,
+        )
+        if (
+          this.options.serverInstanceId &&
+          runnerInstanceId &&
+          runnerInstanceId !== this.options.serverInstanceId
+        ) {
+          await this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
+          this.#scheduleFencingWait(session)
+          return { session: (await this.store.getSession(sessionId)) ?? session }
+        }
         await this.store.setSessionLifecycle(
           session.sessionId,
           'active',
@@ -1394,6 +1415,28 @@ export class RuntimeService {
    * triggers (multiple foreground 503s, the adopt timer) collapse into one
    * spawn. Fire-and-forget by design; deduped per session.
    */
+  /**
+   * Read the runner manifest's owning instanceId from disk for one attempt
+   * generation. Returns null on any read/parse failure or when the manifest
+   * carries no instanceId (single-instance) so callers fall back to their
+   * normal path (safe default). Used by the non-blocking GET to tell a
+   * self-owned (DB) attempt whose live socket is still served by another
+   * instance's not-yet-fenced daemon apart from a genuinely self-served one.
+   */
+  async #readAttemptRunnerInstanceId(
+    sessionId: string,
+    generation: number,
+  ): Promise<string | null> {
+    try {
+      const attemptDir = getAttemptDir(this.options.config, sessionId, generation)
+      const raw = await readFile(join(attemptDir, 'manifest.json'), 'utf8')
+      const parsed = JSON.parse(raw) as { config?: { instanceId?: string } }
+      return parsed.config?.instanceId ?? null
+    } catch {
+      return null
+    }
+  }
+
   #scheduleFencingWait(session: SessionRecord): void {
     if (this.#fencingWaits.has(session.sessionId)) return
     this.#fencingWaits.add(session.sessionId)
