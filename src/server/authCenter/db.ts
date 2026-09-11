@@ -249,6 +249,7 @@ function mapRefundRecord(row: SqlRow): RefundRecordRow {
     orderNo: String(row.order_no),
     userId: String(row.user_id),
     orgId: String(row.org_id),
+    adminId: row.admin_id == null ? null : String(row.admin_id),
     refundAmountYuan: Number(row.refund_amount_yuan),
     refundQuota: Number(row.refund_quota),
     refundPoints: Number(row.refund_points),
@@ -586,6 +587,7 @@ export class AuthCenterDb {
         order_no TEXT NOT NULL,
         user_id TEXT NOT NULL REFERENCES users(id),
         org_id TEXT NOT NULL,
+        admin_id TEXT,
         refund_amount_yuan REAL NOT NULL,
         refund_quota INTEGER NOT NULL,
         refund_points INTEGER NOT NULL,
@@ -604,6 +606,11 @@ export class AuthCenterDb {
       CREATE INDEX IF NOT EXISTS refund_records_user_idx
         ON refund_records (user_id, created_at DESC);
     `)
+    this.ensureColumn(
+      'refund_records',
+      'admin_id',
+      'ALTER TABLE refund_records ADD COLUMN admin_id TEXT',
+    )
     this.ensureColumn(
       'users',
       'sudorouter_user_id',
@@ -1149,21 +1156,38 @@ export class AuthCenterDb {
     `).run(...values as never[])
   }
 
+  claimRechargeRefund(id: number, reason: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE recharge_orders
+      SET status = ?, remark = ?, updated_at = ?
+      WHERE id = ? AND status = ?
+    `).run(
+      4,
+      `退款原因: ${reason}`,
+      now(),
+      id,
+      2,
+    )
+    return result.changes > 0
+  }
+
   createRefundRecord(input: Omit<RefundRecordRow, 'id' | 'createdAt'>): RefundRecordRow {
     const ts = now()
     this.db.prepare(`
       INSERT INTO refund_records (
         refund_no, order_id, order_no, user_id, org_id,
+        admin_id,
         refund_amount_yuan, refund_quota, refund_points,
         refund_reason, refund_type, status, sync_status, sync_error,
         fuiou_refund_no, fuiou_response, created_at, processed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.refundNo,
       input.orderId,
       input.orderNo,
       input.userId,
       input.orgId,
+      input.adminId,
       input.refundAmountYuan,
       input.refundQuota,
       input.refundPoints,
@@ -1187,6 +1211,7 @@ export class AuthCenterDb {
     orgId?: string
     orderNo?: string
     userId?: string
+    userPhone?: string
     startDate?: string
     endDate?: string
     limit: number
@@ -1205,6 +1230,10 @@ export class AuthCenterDb {
     if (input.userId) {
       where.push('user_id = ?')
       params.push(input.userId)
+    }
+    if (input.userPhone) {
+      where.push('order_no IN (SELECT order_no FROM recharge_orders WHERE user_phone LIKE ?)')
+      params.push(`%${input.userPhone}%`)
     }
     if (input.startDate) {
       const start = Date.parse(`${input.startDate}T00:00:00`)

@@ -1286,6 +1286,9 @@ export class AuthService {
       update(id, patch) {
         db.updateRechargeOrder(id, patch)
       },
+      claimRefund(id, reason) {
+        return db.claimRechargeRefund(id, reason)
+      },
       createRefund(input) {
         return db.createRefundRecord(input) as RefundRecord
       },

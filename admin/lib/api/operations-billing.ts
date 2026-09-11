@@ -6,7 +6,7 @@ type ApiResponse<T> = {
   data: T
 }
 
-export type RechargeSyncStatus = 'NONE' | 'PROCESSING' | 'SYNCED' | 'SYNC_FAILED' | 'SYNC_UNKNOWN'
+export type RechargeSyncStatus = 'NONE' | 'PROCESSING' | 'SYNCED' | 'SYNC_FAILED' | 'SYNC_UNKNOWN' | 'SYNC_INVALID'
 
 export type RechargeOrder = {
   id: number

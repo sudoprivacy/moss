@@ -3,8 +3,10 @@ import type { FuiouClient } from '../credits/fuiou.js'
 import {
   ORDER_STATUS,
   cancelRechargeOrder,
+  calculateRefund,
   createRechargeOrder,
   handleRechargeCallback,
+  refundRechargeOrder,
   retryRechargeOrderSync,
   payRechargeOrder,
   queryRechargeOrder,
@@ -66,6 +68,16 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
       const order = rows.find(item => item.id === id)
       if (order) Object.assign(order, patch, { updatedAt: Date.now() })
     },
+    claimRefund(id, reason) {
+      const order = rows.find(item => item.id === id)
+      if (!order || order.status !== ORDER_STATUS.SUCCESS) return false
+      Object.assign(order, {
+        status: ORDER_STATUS.REFUNDED,
+        remark: `退款原因: ${reason}`,
+        updatedAt: Date.now(),
+      })
+      return true
+    },
     createRefund(input) {
       const row: RefundRecord = { ...input, id: refunds.length + 1, createdAt: Date.now() }
       refunds.push(row)
@@ -75,6 +87,10 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
       let list = refunds.slice()
       if (input.orgId) list = list.filter(refund => refund.orgId === input.orgId)
       if (input.orderNo) list = list.filter(refund => refund.orderNo.includes(input.orderNo!))
+      if (input.userPhone) {
+        const orderNos = new Set(rows.filter(order => order.userPhone?.includes(input.userPhone!)).map(order => order.orderNo))
+        list = list.filter(refund => orderNos.has(refund.orderNo))
+      }
       return { list: list.slice((input.page - 1) * input.pageSize, input.page * input.pageSize), total: list.length }
     },
   }
@@ -277,6 +293,36 @@ describe('recharge callback settlement', () => {
     )
     expect(calls).toBe(1)
   })
+
+  it('marks amount mismatches as invalid and not retryable', async () => {
+    const store = makeStore()
+    const order = createRechargeOrder(store, POLICY, {
+      userId: 'user-1',
+      orgId: 'org-1',
+      amount: 1,
+      paymentMethod: 'ALIPAY',
+    })
+    await expect(handleRechargeCallback(
+      store,
+      fuiou({
+        handleCallback: async payload => ({
+          order_id: payload.message,
+          order_st: '1',
+          order_amt: '1',
+          order_date: '20260911',
+        }),
+      }),
+      gateway(async () => {}),
+      { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
+      () => '42',
+    )).rejects.toThrow(/金额不一致/)
+    expect(store.getByOrderNo(order.orderNo)?.syncStatus).toBe('SYNC_INVALID')
+    await expect(retryRechargeOrderSync(
+      store,
+      gateway(async () => {}),
+      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+    )).rejects.toThrow(/不支持重试/)
+  })
 })
 
 describe('manual recharge reconciliation', () => {
@@ -359,5 +405,114 @@ describe('manual recharge reconciliation', () => {
     )
     expect(credited).toBe(1000)
     expect(store.getByOrderNo(order.orderNo)?.syncStatus).toBe('SYNCED')
+  })
+
+  it('does not double credit when a callback settles during a manual sync', async () => {
+    const store = makeStore()
+    const order = createRechargeOrder(store, POLICY, {
+      userId: 'user-1',
+      orgId: 'org-1',
+      amount: 1,
+      paymentMethod: 'ALIPAY',
+    })
+    store.update(order.id, { status: ORDER_STATUS.PAYING })
+    let credited = 0
+    const client = gateway(async (_id, points) => { credited += points })
+    await handleRechargeCallback(
+      store,
+      fuiou(),
+      client,
+      { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
+      () => '42',
+    )
+    await syncRechargeOrderStatus(
+      store,
+      fuiou({
+        queryOrder: async () => ({
+          success: true,
+          data: {
+            order_id: order.orderNo,
+            order_st: '1',
+            order_amt: '730',
+            order_date: order.orderDate,
+          },
+          request: { method: 'POST', url: 'https://fuiou.example', body: {} },
+          response: { status: 200, data: {} },
+          duration_ms: 1,
+        }),
+      }),
+      client,
+      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+    )
+    expect(credited).toBe(1000)
+  })
+})
+
+describe('refund reconciliation', () => {
+  it('prices used points against the full package including bonus', () => {
+    const calc = calculateRefund({
+      order: {
+        id: 1,
+        orderNo: 'o1',
+        userId: 'user-1',
+        userPhone: null,
+        orgId: 'org-1',
+        amountUsd: 5,
+        amountYuan: 36.5,
+        amountCents: 3650,
+        exchangeRate: 7.3,
+        quotaAmount: 2_750_000,
+        pointsAmount: 5500,
+        bonusPoints: 500,
+        paymentMethod: 'ALIPAY',
+        orderDate: '20260911',
+        fuiouOrderInfo: null,
+        status: ORDER_STATUS.SUCCESS,
+        syncStatus: 'SYNCED',
+        syncError: null,
+        callbackData: null,
+        callbackTime: null,
+        callbackAmountCents: null,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        expiredAt: Date.now(),
+        remark: null,
+      },
+      userRemainingPoints: 5000,
+    })
+    expect(calc.usedPoints).toBe(500)
+    expect(calc.refundAmount).toBe(3318)
+  })
+
+  it('claims an order before refund side effects so a second refund cannot run', async () => {
+    const store = makeStore()
+    const order = createRechargeOrder(store, POLICY, {
+      userId: 'user-1',
+      orgId: 'org-1',
+      amount: 1,
+      paymentMethod: 'ALIPAY',
+    })
+    store.update(order.id, { status: ORDER_STATUS.SUCCESS, syncStatus: 'SYNCED' })
+    let deductions = 0
+    const debitGateway: SudorouterClient = {
+      ...gateway(async (_id, points) => {
+        if (points < 0) deductions += 1
+      }),
+      getCredits: async () => ({ remainingPoints: 1000, usedPoints: 0 }),
+    }
+    await refundRechargeOrder(
+      store,
+      fuiou({ isTestMode: () => true }),
+      debitGateway,
+      { orderNo: order.orderNo, reason: 'test', adminId: 'admin-1', getGatewayUserId: () => '42' },
+    )
+    await expect(refundRechargeOrder(
+      store,
+      fuiou({ isTestMode: () => true }),
+      debitGateway,
+      { orderNo: order.orderNo, reason: 'test', adminId: 'admin-2', getGatewayUserId: () => '42' },
+    )).rejects.toThrow(/订单状态不支持退款/)
+    expect(deductions).toBe(1)
+    expect(store.refunds[0]?.adminId).toBe('admin-1')
   })
 })

@@ -102,7 +102,8 @@ export class FuiouError extends Error {
 class RsaCrypto {
   private publicKey: forge.pki.rsa.PublicKey | null = null
   private privateKey: forge.pki.rsa.PrivateKey | null = null
-  private keySize = 1024
+  private publicKeySize = 1024
+  private privateKeySize = 1024
 
   private normalizeKey(key: string, type: 'public' | 'private'): string {
     let normalized = key.trim().replace(/\\n/g, '\n')
@@ -124,19 +125,19 @@ class RsaCrypto {
 
   loadPublicKey(key: string): void {
     this.publicKey = forge.pki.publicKeyFromPem(this.normalizeKey(key, 'public'))
-    this.keySize = this.publicKey.n.bitLength()
+    this.publicKeySize = this.publicKey.n.bitLength()
   }
 
   loadPrivateKey(key: string): void {
     const privateKey = forge.pki.decryptRsaPrivateKey(this.normalizeKey(key, 'private'))
     if (!privateKey) throw new FuiouError('Merchant private key cannot be decrypted')
     this.privateKey = privateKey
-    this.keySize = privateKey.n.bitLength()
+    this.privateKeySize = privateKey.n.bitLength()
   }
 
   encryptWithPublicKey(data: Buffer): Buffer {
     if (!this.publicKey) throw new FuiouError('Fuiou public key is not loaded')
-    const blockSize = Math.floor(this.keySize / 8) - 11
+    const blockSize = Math.floor(this.publicKeySize / 8) - 11
     const chunks: string[] = []
     for (let i = 0; i < data.length; i += blockSize) {
       const chunk = data.subarray(i, Math.min(i + blockSize, data.length))
@@ -147,7 +148,7 @@ class RsaCrypto {
 
   decryptWithPrivateKey(data: Buffer): Buffer {
     if (!this.privateKey) throw new FuiouError('Merchant private key is not loaded')
-    const blockSize = Math.floor(this.keySize / 8)
+    const blockSize = Math.floor(this.privateKeySize / 8)
     const chunks: string[] = []
     for (let i = 0; i < data.length; i += blockSize) {
       const chunk = data.subarray(i, Math.min(i + blockSize, data.length))

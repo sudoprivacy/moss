@@ -67,6 +67,7 @@ const SYNC_OPTIONS = [
   { value: 'SYNCED', label: '已同步' },
   { value: 'SYNC_FAILED', label: '同步失败' },
   { value: 'SYNC_UNKNOWN', label: '结果未知' },
+  { value: 'SYNC_INVALID', label: '金额异常' },
 ]
 
 const numberFormatter = new Intl.NumberFormat('zh-CN')
@@ -93,7 +94,7 @@ function formatTime(value: string | null | undefined): string {
 function syncBadge(syncStatus: string, syncError?: string | null) {
   const variant =
     syncStatus === 'SYNCED' ? 'default'
-      : syncStatus === 'SYNC_UNKNOWN' || syncStatus === 'SYNC_FAILED' ? 'destructive'
+      : syncStatus === 'SYNC_UNKNOWN' || syncStatus === 'SYNC_FAILED' || syncStatus === 'SYNC_INVALID' ? 'destructive'
         : 'secondary'
   return (
     <div className="flex flex-col gap-1">
@@ -222,7 +223,7 @@ export default function OperationsBillingPage() {
                 支付异常处理
               </CardTitle>
               <p className="mt-1 text-sm text-muted-foreground">
-                `SYNC_UNKNOWN` 不会自动重试，需要先核对富友与 SudoRouter 余额。
+                `SYNC_UNKNOWN` 和金额异常订单不会自动重试，需要先核对富友与 SudoRouter。
               </p>
             </div>
             <div className="flex gap-2">
@@ -312,7 +313,7 @@ export default function OperationsBillingPage() {
                           <TableCell>{formatTime(order.created_at)}</TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-2">
-                              {order.sync_status === 'SYNC_UNKNOWN' ? (
+                              {order.sync_status === 'SYNC_UNKNOWN' || order.sync_status === 'SYNC_INVALID' ? (
                                 <Button variant="outline" size="sm" disabled>
                                   <AlertTriangle className="size-4" />
                                   人工核对

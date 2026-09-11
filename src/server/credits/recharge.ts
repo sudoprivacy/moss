@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { FuiouCallbackPayload, FuiouClient } from './fuiou.js'
-import { pointsToQuota, SudorouterError, type SudorouterClient } from './sudorouter.js'
+import { isSudorouterRefusal, pointsToQuota, type SudorouterClient } from './sudorouter.js'
 
 export const ORDER_STATUS = {
   PENDING: 0,
@@ -28,6 +28,7 @@ export type RechargeSyncStatus =
   | 'SYNCED'
   | 'SYNC_FAILED'
   | 'SYNC_UNKNOWN'
+  | 'SYNC_INVALID'
 
 export type PaymentMethod = 'ALIPAY' | 'WECHAT'
 
@@ -88,6 +89,7 @@ export type RefundRecord = {
   orderNo: string
   userId: string
   orgId: string
+  adminId: string | null
   refundAmountYuan: number
   refundQuota: number
   refundPoints: number
@@ -123,11 +125,13 @@ export type RechargeOrderStore = {
   update(id: number, patch: Partial<Pick<RechargeOrder,
     'status' | 'syncStatus' | 'syncError' | 'fuiouOrderInfo' | 'callbackData'
     | 'callbackTime' | 'callbackAmountCents' | 'remark'>>): void
+  claimRefund(id: number, reason: string): boolean
   createRefund(input: Omit<RefundRecord, 'id' | 'createdAt'>): RefundRecord
   listRefundsForAdmin(input: {
     orgId?: string
     orderNo?: string
     userId?: string
+    userPhone?: string
     startDate?: string
     endDate?: string
     page: number
@@ -150,6 +154,24 @@ function iso(ts: number | null): string | null {
   return ts == null ? null : new Date(ts).toISOString()
 }
 
+function localDateParts(date = new Date()): { year: number; month: number; day: number } {
+  return {
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+    day: date.getDate(),
+  }
+}
+
+export function localDateCompact(date = new Date()): string {
+  const { year, month, day } = localDateParts(date)
+  return `${year}${String(month).padStart(2, '0')}${String(day).padStart(2, '0')}`
+}
+
+export function localDateDashed(date = new Date()): string {
+  const { year, month, day } = localDateParts(date)
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
 export function rechargePackagesWithCny(exchangeRate: number): Array<RechargePackage & {
   amount_cny: number
   exchange_rate: number
@@ -170,10 +192,6 @@ function normalizeAmount(value: unknown): number {
 function newOrderNo(userId: string): string {
   const userPart = userId.replace(/[^A-Za-z0-9]/g, '').slice(-8) || 'U'
   return `USR${userPart}NO${Date.now()}${randomUUID().slice(0, 6).toUpperCase()}`
-}
-
-function todayCompact(): string {
-  return new Date().toISOString().slice(0, 10).replace(/-/g, '')
 }
 
 export function createRechargeOrder(
@@ -213,7 +231,7 @@ export function createRechargeOrder(
     pointsAmount,
     bonusPoints,
     paymentMethod: input.paymentMethod,
-    orderDate: todayCompact(),
+    orderDate: localDateCompact(),
     expiredAt: createdAt + policy.orderExpireMinutes * 60_000,
   })
 }
@@ -242,7 +260,7 @@ export async function payRechargeOrder(
     orderAmt: String(payCents),
     orderPayType: order.paymentMethod,
     goodsName: `TUC${order.amountUsd}USD`,
-    goodsDetail: `充值${order.amountUsd}美元 (¥${order.amountYuan.toFixed(2)})`,
+    goodsDetail: `充值${order.amountUsd}美元 (￥${order.amountYuan.toFixed(2)})`,
   })
   if (!result.success || !result.data?.order_info) {
     throw new RechargeError(400, result.error || '支付二维码获取失败')
@@ -275,7 +293,8 @@ export async function handleRechargeCallback(
   if (!fuiou.isTestMode() && callbackAmount !== expectedAmount) {
     store.update(order.id, {
       status: ORDER_STATUS.FAILED,
-      syncStatus: 'SYNC_FAILED',
+      syncStatus: 'SYNC_INVALID',
+      syncError: `Paid amount ${callbackAmount} did not match order amount ${expectedAmount}`,
       callbackData: JSON.stringify(payload),
       callbackTime: now(),
       callbackAmountCents: callbackAmount,
@@ -307,7 +326,7 @@ export async function handleRechargeCallback(
   return { order_no: order.orderNo }
 }
 
-async function settlePaidRechargeOrder(
+export async function settlePaidRechargeOrder(
   store: RechargeOrderStore,
   sudorouter: SudorouterClient | null,
   order: RechargeOrder,
@@ -326,9 +345,20 @@ async function settlePaidRechargeOrder(
     if (input.callbackAmountCents !== undefined) patch.callbackAmountCents = input.callbackAmountCents
     return patch
   }
-  const gatewayUserId = input.getGatewayUserId(order.userId)
+  const current = store.getById(order.id) ?? store.getByOrderNo(order.orderNo)
+  if (!current) throw new RechargeError(404, '订单不存在')
+  if (current.status === ORDER_STATUS.SUCCESS || current.syncStatus === 'SYNCED') return
+  if (current.syncStatus === 'PROCESSING') return
+  if (current.syncStatus === 'SYNC_UNKNOWN') {
+    throw new RechargeError(409, '订单同步状态不确定，请先人工核对 Sudorouter 余额')
+  }
+  if (current.syncStatus === 'SYNC_INVALID') {
+    throw new RechargeError(409, '订单金额异常，不允许重试发放')
+  }
+
+  const gatewayUserId = input.getGatewayUserId(current.userId)
   if (!gatewayUserId) {
-    store.update(order.id, {
+    store.update(current.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_FAILED',
       syncError: 'User has no model gateway account',
@@ -338,7 +368,7 @@ async function settlePaidRechargeOrder(
     throw new RechargeError(409, '用户信息异常')
   }
   if (!sudorouter) {
-    store.update(order.id, {
+    store.update(current.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_FAILED',
       syncError: 'Model gateway is not configured',
@@ -348,7 +378,7 @@ async function settlePaidRechargeOrder(
     throw new RechargeError(503, '模型网关未配置')
   }
 
-  store.update(order.id, {
+  store.update(current.id, {
     status: ORDER_STATUS.PAYING,
     syncStatus: 'PROCESSING',
     syncError: null,
@@ -356,11 +386,11 @@ async function settlePaidRechargeOrder(
   })
 
   try {
-    await sudorouter.addPoints(gatewayUserId, order.pointsAmount, `充值订单: ${order.orderNo}`)
+    await sudorouter.addPoints(gatewayUserId, current.pointsAmount, `充值订单: ${current.orderNo}`)
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error)
-    const refused = error instanceof SudorouterError && error.status !== undefined
-    store.update(order.id, {
+    const refused = isSudorouterRefusal(error)
+    store.update(current.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: refused ? 'SYNC_FAILED' : 'SYNC_UNKNOWN',
       syncError: messageText.slice(0, 500),
@@ -369,7 +399,7 @@ async function settlePaidRechargeOrder(
     throw new RechargeError(502, refused ? `Sudorouter 更新失败: ${messageText}` : `Sudorouter 更新结果未知: ${messageText}`)
   }
 
-  store.update(order.id, {
+  store.update(current.id, {
     status: ORDER_STATUS.SUCCESS,
     syncStatus: 'SYNCED',
     syncError: null,
@@ -423,7 +453,12 @@ export async function syncRechargeOrderStatus(
   if (order.syncStatus === 'SYNC_UNKNOWN') {
     throw new RechargeError(409, '订单同步状态不确定，请先人工核对 Sudorouter 余额')
   }
-  if (order.status !== ORDER_STATUS.PAYING && order.status !== ORDER_STATUS.PENDING && order.status !== ORDER_STATUS.FAILED) {
+  if (
+    order.status !== ORDER_STATUS.PAYING &&
+    order.status !== ORDER_STATUS.PENDING &&
+    order.status !== ORDER_STATUS.FAILED &&
+    order.status !== ORDER_STATUS.CANCELLED
+  ) {
     return toAdminOrderPayload(order)
   }
 
@@ -436,7 +471,7 @@ export async function syncRechargeOrderStatus(
   if (!fuiou.isTestMode() && data.order_st === '1' && amount !== expectedAmount) {
     store.update(order.id, {
       status: ORDER_STATUS.FAILED,
-      syncStatus: 'SYNC_FAILED',
+      syncStatus: 'SYNC_INVALID',
       syncError: 'Fuiou amount mismatch during manual sync',
       callbackData: JSON.stringify(data),
       callbackTime: now(),
@@ -484,14 +519,20 @@ export async function syncPendingRechargeOrders(
     getGatewayUserId: (userId: string) => string | null
   },
 ): Promise<{ total: number; success: number; failed: number; skipped: number; results: Array<{ order_no: string; success: boolean; error?: string }> }> {
-  const pending = store.listForAdmin({
+  const candidates = store.listForAdmin({
     orgId: input.orgId,
-    status: ORDER_STATUS.PAYING,
     page: 1,
     pageSize: 500,
-  }).list.filter(order => order.expiredAt > now())
-  const summary = { total: pending.length, success: 0, failed: 0, skipped: 0, results: [] as Array<{ order_no: string; success: boolean; error?: string }> }
-  for (const order of pending) {
+  }).list.filter(order =>
+    (order.status === ORDER_STATUS.PENDING ||
+      order.status === ORDER_STATUS.PAYING ||
+      order.status === ORDER_STATUS.FAILED ||
+      order.status === ORDER_STATUS.CANCELLED) &&
+    order.syncStatus !== 'SYNCED' &&
+    order.syncStatus !== 'SYNC_UNKNOWN' &&
+    order.syncStatus !== 'SYNC_INVALID')
+  const summary = { total: candidates.length, success: 0, failed: 0, skipped: 0, results: [] as Array<{ order_no: string; success: boolean; error?: string }> }
+  for (const order of candidates) {
     try {
       await syncRechargeOrderStatus(store, fuiou, sudorouter, {
         orderNo: order.orderNo,
@@ -637,6 +678,7 @@ export function listAdminRechargeRecords(
   const refunds = store.listRefundsForAdmin({
     orgId: input.orgId,
     orderNo: input.orderNo,
+    userPhone: input.userPhone,
     startDate: input.startDate,
     endDate: input.endDate,
     page: 1,
@@ -661,24 +703,27 @@ export function listAdminRechargeRecords(
       sync_error: order.syncError,
       created_at: iso(order.createdAt),
     })),
-    ...refunds.map(refund => ({
-      id: `refund:${refund.id}`,
-      source: 'REFUND',
-      source_text: '退款扣减',
-      order_no: refund.orderNo,
-      user_id: refund.userId,
-      user_phone: null,
-      amount_usd: null,
-      amount_cny: -refund.refundAmountYuan,
-      points: -refund.refundPoints,
-      bonus_points: 0,
-      payment_method: null,
-      status: refund.status,
-      status_text: refund.status === 1 ? '已处理' : '处理异常',
-      sync_status: refund.syncStatus,
-      sync_error: refund.syncError,
-      created_at: iso(refund.createdAt),
-    })),
+    ...refunds.map(refund => {
+      const order = store.getByOrderNo(refund.orderNo)
+      return {
+        id: `refund:${refund.id}`,
+        source: 'REFUND',
+        source_text: '退款扣减',
+        order_no: refund.orderNo,
+        user_id: refund.userId,
+        user_phone: order?.userPhone ?? null,
+        amount_usd: null,
+        amount_cny: -refund.refundAmountYuan,
+        points: -refund.refundPoints,
+        bonus_points: 0,
+        payment_method: null,
+        status: refund.status,
+        status_text: refund.status === 1 ? '已处理' : '处理异常',
+        sync_status: refund.syncStatus,
+        sync_error: refund.syncError,
+        created_at: iso(refund.createdAt),
+      }
+    }),
   ].sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''))
   const start = (input.page - 1) * input.pageSize
   return {
@@ -714,7 +759,7 @@ export function calculateRefund(input: {
     }
   }
   const usedPoints = orderPoints - userBalance
-  const usedAmountCents = Math.round((usedPoints / 1000) * input.order.exchangeRate * 100)
+  const usedAmountCents = Math.round((usedPoints / orderPoints) * originalAmount)
   return {
     orderPoints,
     userBalance,
@@ -747,35 +792,44 @@ export async function refundRechargeOrder(
   const credits = await sudorouter.getCredits(gatewayUserId)
   const calc = calculateRefund({ order, userRemainingPoints: credits.remainingPoints })
   const refundNo = `RF${Date.now()}${randomUUID().slice(0, 6).toUpperCase()}`
-  const refundDate = todayCompact()
+  const refundDate = localDateCompact()
+
+  if (!store.claimRefund(order.id, input.reason)) {
+    throw new RechargeError(409, '订单退款正在处理或已处理')
+  }
 
   let fuiouResponse: unknown = null
   if (!fuiou.isTestMode()) {
-    const result = await fuiou.refundOrder({
-      refund_order_date: refundDate,
-      refund_order_id: refundNo,
-      pay_order_date: order.orderDate,
-      pay_order_id: order.orderNo,
-      refund_amt: String(calc.refundAmount),
-    })
-    fuiouResponse = result.response.data
-    if (!result.success) throw new RechargeError(400, result.error || '退款请求失败')
-    if (result.data?.refund_st !== '5') throw new RechargeError(400, '退款状态异常')
+    try {
+      const result = await fuiou.refundOrder({
+        refund_order_date: refundDate,
+        refund_order_id: refundNo,
+        pay_order_date: order.orderDate,
+        pay_order_id: order.orderNo,
+        refund_amt: String(calc.refundAmount),
+      })
+      fuiouResponse = result.response.data
+      if (!result.success) throw new RechargeError(400, result.error || '退款请求失败')
+      if (result.data?.refund_st !== '5') throw new RechargeError(400, '退款状态异常')
+    } catch (error) {
+      store.update(order.id, { status: ORDER_STATUS.SUCCESS, remark: '退款请求失败' })
+      throw error
+    }
   }
 
-  store.update(order.id, { status: ORDER_STATUS.REFUNDED, remark: `退款原因: ${input.reason}` })
   if (calc.deductPoints > 0) {
     try {
       await sudorouter.addPoints(gatewayUserId, -calc.deductPoints, `退款扣除: ${order.orderNo}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      const refused = error instanceof SudorouterError && error.status !== undefined
+      const refused = isSudorouterRefusal(error)
       store.createRefund({
         refundNo,
         orderId: order.id,
         orderNo: order.orderNo,
         userId: order.userId,
         orgId: order.orgId,
+        adminId: input.adminId,
         refundAmountYuan: calc.refundAmount / 100,
         refundQuota: pointsToQuota(calc.deductPoints),
         refundPoints: calc.deductPoints,
@@ -797,6 +851,7 @@ export async function refundRechargeOrder(
     orderNo: order.orderNo,
     userId: order.userId,
     orgId: order.orgId,
+    adminId: input.adminId,
     refundAmountYuan: calc.refundAmount / 100,
     refundQuota: pointsToQuota(calc.deductPoints),
     refundPoints: calc.deductPoints,

@@ -30,7 +30,6 @@ import {
   createSudorouterClient,
   pointsToQuota,
   quotaToPoints,
-  SudorouterError,
   type SudorouterClient,
 } from './credits/sudorouter.js'
 
@@ -55,11 +54,13 @@ import {
   handleRechargeCallback,
   listAdminRechargeRecords,
   listRechargeOrders,
+  localDateDashed,
   payRechargeOrder,
   queryRechargeOrder,
   rechargePackagesWithCny,
   refundRechargeOrder,
   retryRechargeOrderSync,
+  settlePaidRechargeOrder,
   syncPendingRechargeOrders,
   syncRechargeOrderStatus,
   toAdminOrderPayload,
@@ -6280,6 +6281,10 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/create') {
+        if (config.systemConfig.rechargeMode !== 'pay') {
+          writeJson(res, 403, { success: false, msg: '充值功能未开启' })
+          return
+        }
         const body = await readJsonBody(req)
         const user = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         if (!user) {
@@ -6310,6 +6315,10 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/pay') {
+        if (config.systemConfig.rechargeMode !== 'pay') {
+          writeJson(res, 403, { success: false, msg: '充值功能未开启' })
+          return
+        }
         const body = await readJsonBody(req)
         const orderNo = typeof body.order_no === 'string' ? body.order_no.trim() : ''
         if (!orderNo) {
@@ -6417,6 +6426,10 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/credit-applications') {
+        if (config.systemConfig.rechargeMode !== 'approve') {
+          writeJson(res, 403, { success: false, msg: '积分申请未开启' })
+          return
+        }
         const body = await readJsonBody(req)
         try {
           const app = submitApplication(
@@ -6532,8 +6545,8 @@ export function startServer(
         })
         const rows = result.list
         const successRows = rows.filter(order => order.status === ORDER_STATUS.SUCCESS)
-        const today = new Date().toISOString().slice(0, 10)
-        const todayRows = rows.filter(order => new Date(order.createdAt).toISOString().slice(0, 10) === today)
+        const today = localDateDashed()
+        const todayRows = rows.filter(order => localDateDashed(new Date(order.createdAt)) === today)
         const byPayment = (method: 'ALIPAY' | 'WECHAT') => {
           const methodRows = successRows.filter(order => order.paymentMethod === method)
           return {
@@ -6757,26 +6770,22 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '订单状态无效' })
           return
         }
-        const gatewayUserId = authService.getUserModelCredential(order.userId)?.sudorouterUserId
-        const client = buildSudorouterClient(config)
-        if (!gatewayUserId || !client) {
-          writeJson(res, 409, { success: false, msg: '用户信息异常' })
-          return
-        }
-        authService.rechargeOrders.update(order.id, { status: ORDER_STATUS.PAYING, syncStatus: 'PROCESSING', syncError: null })
         try {
-          await client.addPoints(gatewayUserId, order.pointsAmount, `模拟充值订单: ${order.orderNo}`)
-          authService.rechargeOrders.update(order.id, { status: ORDER_STATUS.SUCCESS, syncStatus: 'SYNCED', syncError: null })
+          await settlePaidRechargeOrder(
+            authService.rechargeOrders,
+            buildSudorouterClient(config),
+            order,
+            {
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
           writeJson(res, 200, { success: true, msg: '模拟支付成功', data: { order_no: order.orderNo } })
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          const refused = err instanceof SudorouterError && err.status !== undefined
-          authService.rechargeOrders.update(order.id, {
-            status: ORDER_STATUS.FAILED,
-            syncStatus: refused ? 'SYNC_FAILED' : 'SYNC_UNKNOWN',
-            syncError: message.slice(0, 500),
-          })
-          writeJson(res, 502, { success: false, msg: message })
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
         }
         return
       }
