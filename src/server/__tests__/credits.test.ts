@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { fakeGateway } from './fakeGateway.js'
 import {
   createSudorouterClient,
   pointsToQuota,
@@ -158,11 +159,7 @@ describe('submitting an application', () => {
 
 describe('reviewing an application', () => {
   function gateway(behaviour: () => void): SudorouterClient {
-    return {
-      getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-      getModelUsage: async () => [],
-      addPoints: async () => behaviour(),
-    }
+    return fakeGateway({ addPoints: async () => behaviour() })
   }
 
   it('credits the gateway on approval', async () => {
@@ -171,11 +168,9 @@ describe('reviewing an application', () => {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     let credited = 0
-    const client: SudorouterClient = {
-      getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-      getModelUsage: async () => [],
+    const client: SudorouterClient = fakeGateway({
       addPoints: async (_id, points) => { credited = points },
-    }
+    })
     const reviewed = await reviewApplication(store, client, {
       id: app.id, approve: true, gatewayUserId: '42', adminComment: 'ok',
     })
@@ -190,11 +185,9 @@ describe('reviewing an application', () => {
       userId: 'u1', orgId: 'o1', requestedPoints: 5000, reason: null,
     })
     let credited = 0
-    const reviewed = await reviewApplication(store, {
-      getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-      getModelUsage: async () => [],
+    const reviewed = await reviewApplication(store, fakeGateway({
       addPoints: async (_id, points) => { credited = points },
-    }, { id: app.id, approve: true, approvedPoints: 1000, gatewayUserId: '42' })
+    }), { id: app.id, approve: true, approvedPoints: 1000, gatewayUserId: '42' })
     expect(reviewed.approvedPoints).toBe(1000)
     expect(credited).toBe(1000)
   })
