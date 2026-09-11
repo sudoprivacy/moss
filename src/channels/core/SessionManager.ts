@@ -26,12 +26,34 @@ export class SessionManager {
 
   private db: DirectConnectStore;
 
+  // Tracks the initial (and latest reload) load so consumers can await it.
+  private readyPromise: Promise<void>;
+
   constructor(db: DirectConnectStore) {
     this.db = db;
-    // Async store seam: load runs as a fire-and-forget microtask chain — under
-    // the sqlite driver it completes before any await-based consumer reads the
-    // cache (all message-handling paths are async).
-    void this.loadActiveSessions();
+    // Store the load promise (previously fire-and-forget). Under PG the first
+    // load is a network round-trip; a message arriving in that window would
+    // otherwise miss the cache and take the "new session" branch, creating a
+    // duplicate channel_sessions row. Consumers await whenReady() first.
+    this.readyPromise = this.loadActiveSessions();
+  }
+
+  /** Resolves once the initial load (or latest reload) has completed. */
+  whenReady(): Promise<void> {
+    return this.readyPromise;
+  }
+
+  /**
+   * Rebuild the in-memory cache from the DB and re-arm whenReady(). Called
+   * after a channel-plugin lease transfers to this instance (B8 failover): the
+   * new holder's startup snapshot predates the sessions the previous holder
+   * created, so without a reload getSession would miss them and create
+   * duplicate channel_sessions rows. loadActiveSessions swaps a freshly-built
+   * map in atomically, so a concurrent read never observes a half-empty cache.
+   */
+  reload(): Promise<void> {
+    this.readyPromise = this.loadActiveSessions();
+    return this.readyPromise;
   }
 
   /**
@@ -47,9 +69,12 @@ export class SessionManager {
   private async loadActiveSessions(): Promise<void> {
     const rows = await this.db.listChannelSessions();
 
+    // Build into a fresh map and swap it in atomically at the end, so a reload
+    // never exposes a partially-populated cache to a concurrent reader.
+    const next = new Map<string, IChannelSession>();
     for (const session of rows) {
       const key = this.buildKey(String(session.user_id), session.chat_id ? String(session.chat_id) : undefined);
-      this.activeSessions.set(key, {
+      next.set(key, {
         id: String(session.id),
         userId: String(session.user_id),
         agentType: String(session.agent_type) as IChannelSession['agentType'],
@@ -60,6 +85,7 @@ export class SessionManager {
         lastActivity: Number(session.last_activity),
       });
     }
+    this.activeSessions = next;
   }
 
   /**
