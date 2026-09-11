@@ -16,6 +16,7 @@
  *  - "env 未设置"判定一律用 truthiness 语义（与 config.ts 现状 `env || raw` 同款）
  */
 
+import { createHash } from 'crypto'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { ServerConfig } from '../types.js'
 
@@ -157,6 +158,8 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
 export class ConfigStore {
   private readonly client: NexusClient | null
   private readonly cache = new Map<ConfigKey, string>()
+  private refreshTimer: NodeJS.Timeout | null = null
+  private lastFingerprint: string | null = null
 
   constructor(client: NexusClient | null) {
     this.client = client
@@ -261,6 +264,75 @@ export class ConfigStore {
       if (!field.ignoreEnvGate && process.env[field.envName]) continue
       // Nexus 有值用 Nexus，否则回落默认/undefined —— 覆盖并丢弃文件值
       field.apply(config, this.cache.get(field.key) || field.fallbackValue)
+    }
+  }
+
+  /**
+   * 跨实例刷新（计划 E3/R20）：Nexus secret 无 updated_at 元数据，故用 12 个 key 的
+   * 值哈希做指纹。变化即另一实例改了敏感配置——重载并就地 hydrate，使本实例新会话
+   * 用上新值，而非陈旧到重启。轮询按需 fail-soft（吞错保旧值）。
+   */
+  async computeFingerprint(): Promise<string> {
+    if (!this.client) return ''
+    const parts: string[] = []
+    for (const key of CONFIG_KEYS) {
+      const record = await this.client.getSecret(CONFIG_NAMESPACE, key)
+      parts.push(`${key}=${record?.value ?? ''}`)
+    }
+    return createHash('sha256').update(parts.join('\n')).digest('hex')
+  }
+
+  /**
+   * 无探针只读重载：仅 12 次 getSecret + 写 cache。启动首次仍走带探针的 loadAll
+   * （fail-fast 校验），刷新走这里——探针的 put/get/delete 写操作与"吞错保旧值"的
+   * 轮询语义冲突，故重载不再探针。上游删除的 key 从 cache 移除以反映删除。
+   */
+  private async readAll(): Promise<void> {
+    if (!this.client) return
+    for (const key of CONFIG_KEYS) {
+      const record = await this.client.getSecret(CONFIG_NAMESPACE, key)
+      if (record && record.value !== null) this.cache.set(key, record.value)
+      else this.cache.delete(key)
+    }
+  }
+
+  private async safeFingerprint(): Promise<string | null> {
+    try {
+      return await this.computeFingerprint()
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 指纹轮询：间隔 30s（敏感配置无秒级时效需求，12 次 gRPC get/轮）。指纹变化 →
+   * readAll + hydrateConfig 就地赋值（消费者持有的 config/config.cabin 引用不失效）。
+   * reload 失败吞错记日志保旧值，下轮重试（对齐 authProxy startRulesChangePolling）。
+   */
+  startRefreshPolling(config: ServerConfig, intervalMs = 30_000): void {
+    if (!this.client || this.refreshTimer) return
+    void this.safeFingerprint().then(fp => { this.lastFingerprint = fp })
+    this.refreshTimer = setInterval(() => {
+      void (async () => {
+        const fp = await this.safeFingerprint()
+        if (fp === null || fp === this.lastFingerprint) return
+        try {
+          await this.readAll()
+          this.hydrateConfig(config)
+          // 采用重载后的指纹（处理 reload 与再读之间又落地一次变更）
+          this.lastFingerprint = (await this.safeFingerprint()) ?? fp
+        } catch (err) {
+          console.error('[ConfigStore] 刷新重载失败（保留旧值）:', err instanceof Error ? err.message : err)
+        }
+      })()
+    }, intervalMs)
+    this.refreshTimer.unref?.()
+  }
+
+  stopRefreshPolling(): void {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer)
+      this.refreshTimer = null
     }
   }
 }

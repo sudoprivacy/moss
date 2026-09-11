@@ -60,6 +60,16 @@ export type MsgAuditWorkerOptions = {
   intervalSec?: number
   /** Pages per instance per tick. Env: MOSS_MSGAUDIT_MAX_PAGES. */
   maxPagesPerTick?: number
+  /**
+   * HA lease hooks. When BOTH are present, each corpApp is claimed in the DB
+   * before its pull and released after settle, so two instances behind an LB
+   * never pull the same corpApp concurrently (which would race the cursor and
+   * the JSONL read-modify-write). `claimLease` returns false when another live
+   * instance holds the lease (skip this tick). Absent (single instance /
+   * tests) → no lease, pull always runs.
+   */
+  claimLease?: (corpAppId: string, leaseUntil: number, now: number) => Promise<boolean>
+  releaseLease?: (corpAppId: string) => Promise<void>
 }
 
 /** Read a positive-integer setting from env, falling back to `dflt`. */
@@ -133,6 +143,8 @@ export class MsgAuditWorker {
 
   private readonly intervalMs: number
   private readonly maxPagesPerTick: number
+  private readonly claimLease?: MsgAuditWorkerOptions['claimLease']
+  private readonly releaseLease?: MsgAuditWorkerOptions['releaseLease']
 
   constructor(
     private listInstances: InstanceProvider,
@@ -144,6 +156,8 @@ export class MsgAuditWorker {
       (opts.intervalSec ?? envInt('MOSS_MSGAUDIT_INTERVAL_SEC', DEFAULT_INTERVAL_SEC, 30)) * 1000
     this.maxPagesPerTick =
       opts.maxPagesPerTick ?? envInt('MOSS_MSGAUDIT_MAX_PAGES', DEFAULT_MAX_PAGES_PER_TICK, 0)
+    this.claimLease = opts.claimLease
+    this.releaseLease = opts.releaseLease
   }
 
   start(): void {
@@ -176,6 +190,24 @@ export class MsgAuditWorker {
     const instances = await this.listInstances()
     for (const cfg of instances) {
       if (this.inflight.has(cfg.corpAppId)) continue
+
+      // HA lease: claim this corpApp before pulling. Skip if another live
+      // instance holds it. TTL covers the whole child pull window plus margin;
+      // on stop()/crash we deliberately do NOT release — the lease expires on
+      // its own so a peer never takes over while our child is still writing.
+      const leased = this.claimLease != null
+      if (leased) {
+        const now = Date.now()
+        let claimed = false
+        try {
+          claimed = await this.claimLease!(cfg.corpAppId, now + CHILD_TIMEOUT_MS + 60_000, now)
+        } catch (err) {
+          console.error(`[msgaudit] ${cfg.corpAppId} lease claim failed:`, err instanceof Error ? err.message : err)
+          continue
+        }
+        if (!claimed) continue
+      }
+
       this.inflight.add(cfg.corpAppId)
       try {
         const r = await pullInChild({ ...cfg, maxPages: this.maxPagesPerTick })
@@ -193,6 +225,13 @@ export class MsgAuditWorker {
         console.error(`[msgaudit] ${cfg.corpAppId} pull failed:`, err instanceof Error ? err.message : err)
       } finally {
         this.inflight.delete(cfg.corpAppId)
+        // Release on settle (success OR failure) so a peer can take over
+        // immediately. Only release a lease we actually claimed.
+        if (leased && this.releaseLease) {
+          await this.releaseLease(cfg.corpAppId).catch(err =>
+            console.error(`[msgaudit] ${cfg.corpAppId} lease release failed:`, err instanceof Error ? err.message : err),
+          )
+        }
       }
     }
   }

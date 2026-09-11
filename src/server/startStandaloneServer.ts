@@ -97,6 +97,11 @@ async function finishStandaloneServerStartup(
   const configStore = initConfigStore(nexusClient)
   await configStore.loadAll()
   configStore.hydrateConfig(config)
+  // Cross-instance refresh (R20): another instance editing a Nexus-backed
+  // sensitive config is picked up within one poll and hydrated in place, so a
+  // peer's new sessions use the new value instead of staying stale until
+  // restart. Stopped in server.stop.
+  configStore.startRefreshPolling(config)
   initHubConfig({
     hubApiBaseUrl: config.hubApiBaseUrl,
     hubAuthorization: config.hubAuthorization,

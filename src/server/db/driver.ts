@@ -68,6 +68,18 @@ export interface DbDriver {
    * in-process re-entrancy is already guarded by caller-side state.
    */
   tryRunExclusive<T>(lockKey: string, fn: () => Promise<T>): Promise<T | null>
+  /**
+   * Like tryRunExclusive but SESSION-scoped on PG (not tx-scoped). The advisory
+   * lock is held on a dedicated connection while `fn` runs on the pool with each
+   * statement autocommitting — use this for long `fn` bodies (network I/O + many
+   * writes) that must NOT be wrapped in one giant transaction: a tx-scoped lock
+   * there pins a pool connection for minutes, is killed by
+   * idle_in_transaction_session_timeout, and hides its writes until commit.
+   * Resolves null when another holder has the lock. Sqlite is the same no-op
+   * passthrough as tryRunExclusive (single process — no second process to
+   * exclude).
+   */
+  tryRunExclusiveSession<T>(lockKey: string, fn: () => Promise<T>): Promise<T | null>
   close(): Promise<void>
 }
 
@@ -118,6 +130,11 @@ export class SqliteDriver implements DbDriver {
     return fn()
   }
 
+  async tryRunExclusiveSession<T>(lockKey: string, fn: () => Promise<T>): Promise<T | null> {
+    void lockKey
+    return fn()
+  }
+
   async close(): Promise<void> {
     this.db.close()
   }
@@ -130,6 +147,10 @@ export interface PgPoolLike {
   connect: () => Promise<{
     query: (sql: string, params?: unknown[]) => Promise<{ rows: SqlRow[]; rowCount: number | null }>
     release: () => void
+    // node-postgres PoolClient.destroy: forcibly closes the connection (and any
+    // session-level lock it holds) instead of returning it to the pool. Used
+    // when an advisory unlock fails so a lock never rides a pooled connection.
+    destroy?: () => void
   }>
   on: (event: string, listener: (err: Error) => void) => void
   end: () => Promise<void>
@@ -138,6 +159,7 @@ export interface PgPoolLike {
 interface PgClientLike {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: SqlRow[]; rowCount: number | null }>
   release: () => void
+  destroy?: () => void
 }
 
 export class PgDriver implements DbDriver {
@@ -293,6 +315,36 @@ export class PgDriver implements DbDriver {
       if (!res?.ok) return null
       return fn()
     })
+  }
+
+  async tryRunExclusiveSession<T>(lockKey: string, fn: () => Promise<T>): Promise<T | null> {
+    // Session-scoped advisory lock on a dedicated client. fn runs on the POOL —
+    // route() has no ALS tx context here, so each of fn's statements
+    // autocommits (no minutes-long transaction, writes visible as they land).
+    // The dedicated client only holds the lock; it issues no work statements.
+    const client = await this.pool.connect()
+    let locked = false
+    try {
+      const res = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey])
+      const ok = (res.rows[0] as { ok?: boolean } | undefined)?.ok === true
+      if (!ok) return null
+      locked = true
+      return await fn()
+    } finally {
+      if (locked) {
+        try {
+          await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey])
+          client.release()
+        } catch {
+          // Unlock failed — destroy the connection so the session (and thus the
+          // lock) is torn down rather than returned to the pool still locked.
+          if (client.destroy) client.destroy()
+          else client.release()
+        }
+      } else {
+        client.release()
+      }
+    }
   }
 
   async close(): Promise<void> {

@@ -275,10 +275,15 @@ export class SourceSyncWorker {
     // unique constraints — parallel runs create duplicate root/folder/
     // document rows that survive every later sweep, and one instance's
     // reverse-sweep can soft-delete rows the other just upserted (its `seen`
-    // set predates them). The tx-scoped advisory lock makes one runner win
-    // per source; the loser skips this tick. Sqlite deployments are a no-op
-    // passthrough (single process — inflight already covers them).
-    const result = await this.db.driver.tryRunExclusive(
+    // set predates them). A SESSION-scoped advisory lock makes one runner win
+    // per source while its statements autocommit — a whole sync (network +
+    // every upsert) must NOT ride one giant transaction (connection pinned for
+    // minutes, idle_in_transaction_session_timeout kill, running status hidden
+    // until commit). runSyncLocked is idempotent upsert + reverse-sweep, so a
+    // crash mid-run is reconciled by the next tick — the all-or-nothing the tx
+    // gave us is not needed. Sqlite is a no-op passthrough (single process —
+    // inflight already covers it).
+    const result = await this.db.driver.tryRunExclusiveSession(
       `source-sync:${source.id}`,
       () => this.runSyncLocked(source),
     )

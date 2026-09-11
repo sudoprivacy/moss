@@ -2426,7 +2426,12 @@ export function startServer(
       }
     }
     return configs
-  })
+  }, config.instanceId ? {
+    // HA: gate each corpApp pull behind a DB lease keyed by this instance id.
+    claimLease: (corpAppId, leaseUntil, now) =>
+      runtime.store.claimMsgAuditLease(corpAppId, config.instanceId!, leaseUntil, now),
+    releaseLease: (corpAppId) => runtime.store.releaseMsgAuditLease(corpAppId, config.instanceId!),
+  } : undefined)
   msgAuditWorker.start()
 
   // Start cron service for scheduled task execution
@@ -10372,6 +10377,7 @@ export function startServer(
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()
+      getConfigStore().stopRefreshPolling()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())
