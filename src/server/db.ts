@@ -1768,6 +1768,15 @@ export class DirectConnectStore {
     return true
   }
 
+  /**
+   * Write an attempt terminal. With `ownerInstanceId` (fencing-aware exit
+   * chain — mirrors touchAttemptHeartbeat's owner mode) the UPDATE only lands
+   * while this instance still owns the attempt AND it is still starting/running,
+   * returning false when a new owner already claimed it: a fenced old daemon
+   * must NOT clobber the takeover owner's live session. Without it the
+   * unconditional legacy UPDATE applies and this returns true (single-instance
+   * / markAttemptLost / reconcile paths unchanged).
+   */
   async markAttemptStopped(
     attemptId: string,
     input: {
@@ -1777,14 +1786,13 @@ export class DirectConnectStore {
       stopReason?: string | null
       errorText?: string | null
     },
-  ): Promise<void> {
+    ownerInstanceId?: string,
+  ): Promise<boolean> {
     const ts = now()
-    await this.driver.run(`
-      UPDATE session_attempts
+    const setClause = `
       SET runtime_state = ?, stopped_at = ?, last_heartbeat_at = ?,
-          exit_code = ?, exit_signal = ?, stop_reason = ?, error_text = ?
-      WHERE attempt_id = ?
-    `, [
+          exit_code = ?, exit_signal = ?, stop_reason = ?, error_text = ?`
+    const setParams = [
       input.runtimeState,
       ts,
       ts,
@@ -1792,8 +1800,23 @@ export class DirectConnectStore {
       input.exitSignal ?? null,
       input.stopReason ?? null,
       input.errorText ?? null,
-      attemptId,
-    ])
+    ]
+    if (ownerInstanceId) {
+      const changes = await this.driver.run(`
+        UPDATE session_attempts
+        ${setClause}
+        WHERE attempt_id = ?
+          AND server_instance_id = ?
+          AND runtime_state IN ('starting', 'running')
+      `, [...setParams, attemptId, ownerInstanceId])
+      return changes > 0
+    }
+    await this.driver.run(`
+      UPDATE session_attempts
+      ${setClause}
+      WHERE attempt_id = ?
+    `, [...setParams, attemptId])
+    return true
   }
 
   async markAttemptLost(attemptId: string, errorText: string): Promise<void> {

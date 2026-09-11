@@ -101,3 +101,55 @@ describe("touchAttemptHeartbeat — fencing conditions (HA)", () => {
     assert.equal(await store.touchAttemptHeartbeat("nope", "running", "a"), false);
   });
 });
+
+describe("markAttemptStopped — owner-conditional exit chain (B4/R9)", () => {
+  it("lands while this instance still owns a running attempt", async () => {
+    const store = setup();
+    const { attemptId } = await seedAttempt(store, "a");
+    const ok = await store.markAttemptStopped(
+      attemptId,
+      { runtimeState: "stopped", stopReason: "runtime_exit" },
+      "a",
+    );
+    assert.equal(ok, true);
+    const row = store.db
+      .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
+      .get(attemptId) as { runtime_state: string };
+    assert.equal(row.runtime_state, "stopped");
+  });
+
+  it("does NOT land (returns false, no clobber) after another instance claimed the attempt", async () => {
+    const store = setup();
+    await store.registerServerInstance("hostA", 101, "a");
+    await store.registerServerInstance("hostB", 202, "b");
+    const { attemptId } = await seedAttempt(store, "a");
+    store.db
+      .prepare("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ?")
+      .run(Date.now() - 60_000, "a");
+    // Failover: b claims while a's old daemon is still alive and now exits,
+    // running the owner-scoped terminal write with its OWN (old) instanceId.
+    assert.equal(await store.claimAttempt(attemptId, "b", 30_000), true);
+    const ok = await store.markAttemptStopped(
+      attemptId,
+      { runtimeState: "stopped", stopReason: "runtime_exit" },
+      "a",
+    );
+    assert.equal(ok, false, "fenced old owner's terminal write must not land");
+    const row = store.db
+      .prepare("SELECT server_instance_id, runtime_state FROM session_attempts WHERE attempt_id = ?")
+      .get(attemptId) as { server_instance_id: string; runtime_state: string };
+    assert.equal(row.server_instance_id, "b", "attempt still owned by the takeover instance");
+    assert.notEqual(row.runtime_state, "stopped", "takeover owner's live attempt not clobbered to terminal");
+  });
+
+  it("legacy call (no ownerInstanceId) writes unconditionally and returns true", async () => {
+    const store = setup();
+    const { attemptId } = await seedAttempt(store, "a");
+    const ok = await store.markAttemptStopped(attemptId, { runtimeState: "lost", stopReason: "runner_unavailable" });
+    assert.equal(ok, true);
+    const row = store.db
+      .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
+      .get(attemptId) as { runtime_state: string };
+    assert.equal(row.runtime_state, "lost");
+  });
+});
