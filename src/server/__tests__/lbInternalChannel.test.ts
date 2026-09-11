@@ -160,4 +160,43 @@ describe("internalSessionChannel (P2-5)", () => {
     assert.match(received[0]!, /"type":"ping"/);
     channel.destroy();
   });
+
+  it("write on a closed channel returns false, invokes onError and emits 'error'", async () => {
+    const server = await startEchoWsServer();
+    const { url } = server;
+    const store = {
+      getSession: (id: string) => ({
+        sessionId: id,
+        userId: 'u1',
+        orgId: 'o1',
+        currentAttemptId: 'att1',
+      }),
+      getAttemptOwnerStatus: () => ({ ownerInstanceId: null, ownerLive: false }),
+    } as unknown as DirectConnectStore;
+    const deps = {
+      authService: {
+        issueInternalChannelToken: () => ({ access_token: 'tok' }),
+      } as unknown as AuthService,
+      store,
+      config: { host: '127.0.0.1', port: 0, routeCookieName: 'moss_route' },
+    } as unknown as ChannelDeps;
+    (deps.config as unknown as { publicBaseUrl: string }).publicBaseUrl =
+      url('/').replace(/\/$/, '');
+
+    const channel: InternalSessionChannel = await openInternalSessionChannel(deps, 's1');
+    // Close the underlying ws so the next write observes a non-OPEN state.
+    channel.destroy();
+
+    const errorsSeen: unknown[] = [];
+    channel.on('error', (e: unknown) => errorsSeen.push(e));
+    let onErrorArg: unknown;
+    const ok = channel.write(JSON.stringify({ type: 'ping' }), (e: unknown) => {
+      onErrorArg = e;
+    });
+
+    assert.equal(ok, false, "write on a closed channel must report failure");
+    assert.ok(onErrorArg instanceof Error, "onError callback receives an Error");
+    assert.equal(errorsSeen.length, 1, "a live 'error' listener receives exactly one emit");
+    assert.ok(errorsSeen[0] instanceof Error);
+  });
 });

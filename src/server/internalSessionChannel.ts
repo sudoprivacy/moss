@@ -220,6 +220,11 @@ function connectOnce(url: string, token: string): Promise<InternalSessionChannel
         ws.send(line, onError ? (error: unknown) => onError(error) : undefined)
         return true
       }
+      const error = new Error(`internal channel write failed: ws state ${ws.readyState}`)
+      onError?.(error)
+      // 只在有监听时 emit：调用方 cleanup 后已 off('error')，bare emitter 上
+      // emit('error') 会直接 throw
+      if (emitter.listenerCount('error') > 0) emitter.emit('error', error)
       return false
     }
     emitter.end = () => emitter.destroy()
