@@ -2280,7 +2280,12 @@ export function startServer(
       }
     }
     return configs
-  })
+  }, config.instanceId ? {
+    // HA: gate each corpApp pull behind a DB lease keyed by this instance id.
+    claimLease: (corpAppId, leaseUntil, now) =>
+      runtime.store.claimMsgAuditLease(corpAppId, config.instanceId!, leaseUntil, now),
+    releaseLease: (corpAppId) => runtime.store.releaseMsgAuditLease(corpAppId, config.instanceId!),
+  } : undefined)
   msgAuditWorker.start()
 
   // 企微会话存档: daily retention sweep for downloaded media. Separate
@@ -10693,6 +10698,7 @@ export function startServer(
       wss.close()
       msgAuditWorker.stop()
       msgAuditPurgeWorker.stop()
+      getConfigStore().stopRefreshPolling()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())

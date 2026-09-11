@@ -292,6 +292,53 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     });
   });
 
+  describe("tryRunExclusiveSession — session-scoped advisory lock (E1/R17)", () => {
+    it("excludes a second pool on the same key, allows a different key, releases on return", async () => {
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`);
+      const pool2 = new Pool({ connectionString: url, max: 2 });
+      const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
+      try {
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve });
+        const holder = fix.driver.tryRunExclusiveSession("sess-lock", async () => { await gate; return "held"; });
+        await new Promise(r => setTimeout(r, 200));
+        const loser = await driver2.tryRunExclusiveSession("sess-lock", async () => "should-not-run");
+        assert.equal(loser, null, "contending session run must be rejected, not queued");
+        const other = await driver2.tryRunExclusiveSession("sess-lock-other", async () => "ok");
+        assert.equal(other, "ok", "a different key is not blocked");
+        release();
+        assert.equal(await holder, "held");
+        const after = await driver2.tryRunExclusiveSession("sess-lock", async () => "re-taken");
+        assert.equal(after, "re-taken", "lock is takeable again after fn returns");
+      } finally {
+        await pool2.end();
+      }
+    });
+
+    it("writes inside fn autocommit and are visible to another connection mid-run (no long transaction)", async () => {
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`);
+      const pool2 = new Pool({ connectionString: url, max: 2 });
+      const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
+      try {
+        const name = `sesslock_${Math.random().toString(36).slice(2)}`;
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve });
+        const holder = fix.driver.tryRunExclusiveSession("sess-vis", async () => {
+          await fix.store.createConfigItem({ name, pinyin: "p", scope: "user" });
+          await gate; // still "inside" fn
+          return "done";
+        });
+        await new Promise(r => setTimeout(r, 200));
+        const rows = await driver2.all("SELECT 1 AS x FROM config_items WHERE name = ?", [name]);
+        assert.equal(rows.length, 1, "a row committed inside fn must be visible to another connection mid-run");
+        release();
+        assert.equal(await holder, "done");
+      } finally {
+        await pool2.end();
+      }
+    });
+  });
+
   describe("AuthCenterDb shared-store construction on PG", () => {
     it("constructs without sqlite init and reads/writes server_config", async () => {
       const authDb = new AuthCenterDb(fix.store);
@@ -384,6 +431,31 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         const wins =
           a.filter(r => r.id === run!.id).length + b.filter(r => r.id === run!.id).length;
         assert.equal(wins, 1, "exactly one instance may claim the run (no double-execution)");
+      } finally {
+        await pool2.end();
+      }
+    });
+  });
+
+  describe("msgaudit lease cross-instance (E2/R18)", () => {
+    it("two pools claiming the same corpApp — only one wins; expiry lets the other take over", async () => {
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`);
+      const pool2 = new Pool({ connectionString: url, max: 2 });
+      const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
+      const store2 = forPostgresDirectConnectStore(driver2);
+      try {
+        const corpApp = `ca_${Math.random().toString(36).slice(2)}`;
+        const now = Date.now();
+        const ttl = 60_000;
+        const [a, b] = await Promise.all([
+          fix.store.claimMsgAuditLease(corpApp, "A", now + ttl, now),
+          store2.claimMsgAuditLease(corpApp, "B", now + ttl, now),
+        ]);
+        assert.equal([a, b].filter(Boolean).length, 1, "exactly one instance may hold the lease");
+        // Before expiry, neither foreign re-claim succeeds.
+        assert.equal(await store2.claimMsgAuditLease(corpApp, "C", now + ttl, now + 1_000), false);
+        // After expiry, it can be taken over.
+        assert.equal(await store2.claimMsgAuditLease(corpApp, "C", now + 2 * ttl, now + ttl + 1), true);
       } finally {
         await pool2.end();
       }

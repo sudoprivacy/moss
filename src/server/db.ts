@@ -834,6 +834,16 @@ export class DirectConnectStore {
       CREATE UNIQUE INDEX IF NOT EXISTS corp_app_inbound_seq_uniq
         ON corp_app_inbound (corp_app_id, seq);
       DROP INDEX IF EXISTS corp_app_inbound_seq_idx;
+
+      -- HA: per-corpApp msgaudit pull lease. One live instance holds a
+      -- corpApp's lease while it pulls (forked child), so two instances behind
+      -- an LB never pull the same instance concurrently (which would race the
+      -- cursor and the JSONL read-modify-write). PG side is in v2.
+      CREATE TABLE IF NOT EXISTS msgaudit_leases (
+        corp_app_id  TEXT PRIMARY KEY,
+        instance_id  TEXT,
+        lease_until  INTEGER
+      );
     `)
 
     // Incremental migration: add v2 columns to existing P0 tables.
@@ -3394,6 +3404,34 @@ export class DirectConnectStore {
     return this.driver.all<SqlRow>(
       `SELECT * FROM corp_apps WHERE type = ? AND enabled = 1 ORDER BY created_at`,
       [type],
+    )
+  }
+
+  /**
+   * Claim the msgaudit pull lease for one corpApp. Single-statement UPSERT: the
+   * INSERT wins when no row exists; on conflict the DO UPDATE runs ONLY when the
+   * existing lease has expired (`lease_until < now`), so a live holder is never
+   * displaced. Returns true iff this call took/renewed the lease (changes > 0).
+   * Verified: the conflict-with-unmet-WHERE reports 0 affected rows on both
+   * SQLite and PG (see msgAuditLease.test.ts).
+   */
+  async claimMsgAuditLease(corpAppId: string, instanceId: string, leaseUntil: number, now: number): Promise<boolean> {
+    const changes = await this.driver.run(`
+      INSERT INTO msgaudit_leases (corp_app_id, instance_id, lease_until)
+      VALUES (?, ?, ?)
+      ON CONFLICT(corp_app_id) DO UPDATE SET
+        instance_id = excluded.instance_id,
+        lease_until = excluded.lease_until
+      WHERE msgaudit_leases.lease_until < ?
+    `, [corpAppId, instanceId, leaseUntil, now])
+    return changes > 0
+  }
+
+  /** Release a lease this instance holds (no-op if another instance owns it). */
+  async releaseMsgAuditLease(corpAppId: string, instanceId: string): Promise<void> {
+    await this.driver.run(
+      `DELETE FROM msgaudit_leases WHERE corp_app_id = ? AND instance_id = ?`,
+      [corpAppId, instanceId],
     )
   }
 
