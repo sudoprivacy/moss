@@ -1243,15 +1243,22 @@ export class AuthService {
    * Short-lived token for server-internal session channels (HA): minted for
    * the session's OWN user/org so the regular upgrade auth chain applies
    * unchanged (verifyAccessToken + isUserActive + canAccessSession — the
-   * "self" branch). No new auth surface, no standing privileged identity; the
-   * attach scope is belt-and-braces on top of the self-ownership check.
+   * "self" branch). No new auth surface, no standing privileged identity.
+   *
+   * Scope is ONLY internal:channel — NOT sessions:attach:any. The internal WS
+   * endpoint's double gate passes via canAccessSession's self branch
+   * (session.userId === auth.userId; the token is minted per-session for its
+   * own user), so attach:any bought nothing here — but if leaked within its
+   * 120s window it would have satisfied every attach:any-gated HTTP/WS endpoint
+   * (context/workspace data plane). Dropping it removes that blast radius while
+   * the self-ownership check still admits the intended internal use.
    */
   async issueInternalChannelToken(userId: string, orgId: string): Promise<{ access_token: string } | null> {
     const user = await this.db.getUserById(userId)
     if (!user || user.status !== 'active') return null
     const issued = await this.issueToken({
       user,
-      scopes: ['sessions:attach:any', 'internal:channel'],
+      scopes: ['internal:channel'],
       keyId: 'internal-channel',
       accessTtlSec: 120,
       orgIdOverride: orgId,

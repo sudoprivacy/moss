@@ -115,7 +115,22 @@ Authorization: Bearer <access_token>
 
 ### GET `/healthz`
 
-存活检查。
+存活检查（匿名，LB 可达）。仅返回存活标志，不暴露全局会话数或 auth_mode。
+
+示例响应：
+
+```json
+{
+  "ok": true,
+  "ready": true
+}
+```
+
+### GET `/readyz`
+
+就绪检查（LB 摘流依据，匿名）：并行探测 db / nexus / runtime，draining 时返回 `503`。
+匿名响应体仅含 `ok`/`ready`/`instance_id`（LB 粘性与冒烟脚本消费 `instance_id`）；完整
+健康矩阵已移到鉴权端点 `GET /api/v1/admin/health`。
 
 示例响应：
 
@@ -123,14 +138,16 @@ Authorization: Bearer <access_token>
 {
   "ok": true,
   "ready": true,
-  "sessions": 2,
-  "auth_mode": "local"
+  "instance_id": "a"
 }
 ```
 
-### GET `/readyz`
+- 任一检查失败或 `draining=true` 时整体 `ready=false` 并返回 `503`。
 
-就绪检查（LB 摘流依据）：并行探测 db / nexus / runtime，draining 时返回 `503`。
+### GET `/api/v1/admin/health`
+
+就绪明细（**super_admin** 鉴权）。返回完整健康矩阵 + 全局会话数 + auth_mode——即从匿名
+`/healthz`、`/readyz` 收窄掉的细节（R13）。
 
 示例响应：
 
@@ -145,13 +162,14 @@ Authorization: Bearer <access_token>
     "runtime": true,
     "k8s": null,
     "draining": false
-  }
+  },
+  "sessions": 2,
+  "auth_mode": "local"
 }
 ```
 
 - `runtime` 仅在 default runtime 为 docker/k8s 时参与判定（`host` 时为 `null`）。
 - `k8s` 仅在 default runtime 为 k8s 时有值。
-- 任一检查失败或 `draining=true` 时整体 `ready=false` 并返回 `503`。
 
 ## Auth Proxy
 

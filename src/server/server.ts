@@ -2605,12 +2605,10 @@ export function startServer(
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/healthz') {
-        writeJson(res, 200, {
-          ok: true,
-          ready: true,
-          sessions: await runtime.countActiveSessions(),
-          auth_mode: config.authMode,
-        })
+        // Anonymous behind the LB: expose only liveness, never the global
+        // session count or auth_mode (R13). No DB touch, so /healthz stays a
+        // pure liveness signal (k8s liveness best practice).
+        writeJson(res, 200, { ok: true, ready: true })
         return
       }
 
@@ -2618,10 +2616,14 @@ export function startServer(
         const readiness = await computeReadiness(config, runtime, {
           isDraining: () => draining,
         })
-        // httpStatus is an internal carrier for the status code; the body itself
-        // stays { ok, ready, instance_id, checks } per the HA design doc §10.
-        const { httpStatus, ...body } = readiness
-        writeJson(res, httpStatus, body)
+        // Anonymous body carries only ok/ready + instance_id (LB stickiness /
+        // ha-p0p2-smoke consume instance_id). The full checks matrix moved to
+        // the authenticated GET /api/v1/admin/health (R13).
+        writeJson(res, readiness.httpStatus, {
+          ok: readiness.ok,
+          ready: readiness.ready,
+          instance_id: readiness.instance_id,
+        })
         return
       }
 
@@ -3623,6 +3625,23 @@ export function startServer(
       // Delete relies on the FK constraint to reject non-empty orgs
       // (translated to HTTP 409 by the service).
       // ============================================================
+
+      if (req.method === 'GET' && pathname === '/api/v1/admin/health') {
+        // Super-admin-only detailed readiness (R13): the full checks matrix plus
+        // the global session count and auth_mode that were removed from the
+        // anonymous /healthz & /readyz. Anonymous callers behind the LB cannot
+        // reach this.
+        await authService.requireSuperAdmin(auth)
+        const readiness = await computeReadiness(config, runtime, { isDraining: () => draining })
+        const { httpStatus: _httpStatus, ...readinessBody } = readiness
+        void _httpStatus
+        writeJson(res, 200, {
+          ...readinessBody,
+          sessions: await runtime.countActiveSessions(),
+          auth_mode: config.authMode,
+        })
+        return
+      }
 
       if (req.method === 'GET' && pathname === '/api/v1/organizations') {
         // Cross-org: only super_admin may enumerate all organizations (powers
