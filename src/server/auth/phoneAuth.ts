@@ -225,7 +225,7 @@ export class PhoneAuthService {
       await this.db.bumpPhoneLoginCodeAttempts(phone)
       return false
     }
-    this.db.deletePhoneLoginCode(phone)
+    await this.db.deletePhoneLoginCode(phone)
     return true
   }
 

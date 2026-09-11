@@ -10,7 +10,8 @@
     "build:node": "bun run scripts/build.js --target=node",
     "postinstall": "bun run scripts/copy-vendor.js",
     "test": "node scripts/test-server.js",
-    "typecheck": "node scripts/typecheck-ratchet.js"
+    "typecheck": "node scripts/typecheck-ratchet.js",
+    "lint": "eslint src/server"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",
@@ -128,7 +129,9 @@
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.1",
     "bun-types": "^1.4.2",
+    "eslint": "^10.10.0",
     "tsx": "^4.23.13",
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "typescript-eslint": "^8.70.0"
   }
 }

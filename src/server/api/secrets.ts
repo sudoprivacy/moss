@@ -184,7 +184,7 @@ export function createSecretsApi(db: {
           if (found) {
             if (chainDeptId === deptId) {
               const readItemId = await resolveConfigItemId(ns, orgId)
-              writeAudit(userId, undefined, 'read', readItemId, ns, key, undefined, ip, orgId)
+              void writeAudit(userId, undefined, 'read', readItemId, ns, key, undefined, ip, orgId)
               return { success: true, data: { ...found, source: 'own' as const } }
             }
             // Inherited from an ancestor department.
@@ -220,7 +220,7 @@ export function createSecretsApi(db: {
         const ns = orgScopedNamespace(namespace, orgId)
         const secret = await nexus.getSecret(ns, key, secretSubject(ns, userId))
         if (!secret) return { success: false, error: { code: 'not_found', message: '凭据不存在' } }
-        writeAudit(userId, undefined, 'read', undefined, ns, key, undefined, ip, orgId)
+        void writeAudit(userId, undefined, 'read', undefined, ns, key, undefined, ip, orgId)
         return { success: true, data: secret }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -241,7 +241,7 @@ export function createSecretsApi(db: {
         const existing = await nexus.getSecret(ns, key, secretSubject(ns, userId)).catch(() => null)
         const action = existing && existing.version > 0 ? 'updated' : 'created'
         await nexus.putSecret(ns, key, value, secretSubject(ns, userId))
-        writeAudit(userId, undefined, action, undefined, ns, key, { value_length: value.length }, ip, orgId)
+        void writeAudit(userId, undefined, action, undefined, ns, key, { value_length: value.length }, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -252,7 +252,7 @@ export function createSecretsApi(db: {
       try {
         const ns = orgScopedNamespace(namespace, orgId)
         await nexus.deleteSecret(ns, key, secretSubject(ns, userId))
-        writeAudit(userId, undefined, 'deleted', undefined, ns, key, undefined, ip, orgId)
+        void writeAudit(userId, undefined, 'deleted', undefined, ns, key, undefined, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -263,7 +263,7 @@ export function createSecretsApi(db: {
       try {
         const ns = orgScopedNamespace(namespace, orgId)
         await nexus.enableSecret(ns, key, secretSubject(ns, userId))
-        writeAudit(userId, undefined, 'enabled', undefined, ns, key, undefined, ip, orgId)
+        void writeAudit(userId, undefined, 'enabled', undefined, ns, key, undefined, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
@@ -274,7 +274,7 @@ export function createSecretsApi(db: {
       try {
         const ns = orgScopedNamespace(namespace, orgId)
         await nexus.disableSecret(ns, key, secretSubject(ns, userId))
-        writeAudit(userId, undefined, 'disabled', undefined, ns, key, undefined, ip, orgId)
+        void writeAudit(userId, undefined, 'disabled', undefined, ns, key, undefined, ip, orgId)
         return { success: true }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }

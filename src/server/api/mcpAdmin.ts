@@ -265,7 +265,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
 
       const server = await mcpStore.createMcpServer(auth.orgId, resolvedInput, auth.userId)
-      writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { name: input.name }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { name: input.name }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: server }
     },
@@ -310,7 +310,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         await mcpStore.clearUserDisabledForMcpServer(auth.orgId, id)
       }
 
-      writeAudit(auth.orgId, auth.userId, 'update', server.id, server.name, { updated_fields: Object.keys(input) }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'update', server.id, server.name, { updated_fields: Object.keys(input) }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: server }
     },
@@ -324,7 +324,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
       const deleted = await mcpStore.deleteMcpServer(auth.orgId, id)
       if (deleted) {
-        writeAudit(auth.orgId, auth.userId, 'delete', null, existing.name, { id }, ip)
+        void writeAudit(auth.orgId, auth.userId, 'delete', null, existing.name, { id }, ip)
         broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       }
       return { success: true }
@@ -338,7 +338,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       await assertCanManageExistingMcp(auth, existing)
 
       const server = await mcpStore.setMcpServerEnabled(auth.orgId, id, enabled, auth.userId)
-      writeAudit(auth.orgId, auth.userId, enabled ? 'enable' : 'disable', id, existing.name, undefined, ip)
+      void writeAudit(auth.orgId, auth.userId, enabled ? 'enable' : 'disable', id, existing.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: server }
     },
@@ -357,7 +357,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         await mcpStore.setMcpServerStatus(auth.orgId, id, 'error', auth.userId)
       }
 
-      writeAudit(
+      void writeAudit(
         auth.orgId, auth.userId, 'test_connection', id, server.name,
         { ok: result.ok, message: result.message, latency_ms: result.latency_ms },
         ip,
@@ -395,7 +395,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     async updateMcpPolicy(auth: AuthContext, input: McpPolicyInput, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
       const policy = await mcpStore.upsertMcpPolicy(auth.orgId, input, auth.userId)
-      writeAudit(auth.orgId, auth.userId, 'update_policy', null, null, { updated_fields: Object.keys(input) }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'update_policy', null, null, { updated_fields: Object.keys(input) }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.policy.changed' })
       return { success: true, data: policy }
     },
@@ -426,7 +426,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         await mcpStore.setMcpServerStatus(auth.orgId, updated.mcp_server_id, 'enabled', auth.userId)
       }
 
-      writeAudit(auth.orgId, auth.userId, 'approve_request', request.mcp_server_id, null, { request_id: requestId }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'approve_request', request.mcp_server_id, null, { request_id: requestId }, ip)
       return { success: true, data: updated }
     },
 
@@ -444,7 +444,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         review_note: reviewNote,
       })
 
-      writeAudit(auth.orgId, auth.userId, 'reject_request', request.mcp_server_id, null, { request_id: requestId, reason: reviewNote }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'reject_request', request.mcp_server_id, null, { request_id: requestId, reason: reviewNote }, ip)
       return { success: true, data: updated }
     },
 
@@ -528,7 +528,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         } catch { /* ignore parse errors, already validated */ }
       }
       const template = await mcpStore.createTemplate(auth.orgId, input, auth.userId)
-      writeAudit(auth.orgId, auth.userId, 'create_template', template.id, template.name, undefined, ip)
+      void writeAudit(auth.orgId, auth.userId, 'create_template', template.id, template.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: template }
     },
@@ -586,7 +586,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         } catch { /* ignore parse errors, already validated */ }
       }
       const template = await mcpStore.updateTemplate(auth.orgId, id, input)
-      writeAudit(auth.orgId, auth.userId, 'update_template', template.id, template.name, { updated_fields: Object.keys(input).filter(k => (input as Record<string, unknown>)[k] !== undefined) }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'update_template', template.id, template.name, { updated_fields: Object.keys(input).filter(k => (input as Record<string, unknown>)[k] !== undefined) }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: template }
     },
@@ -600,7 +600,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
         throw err
       }
       await mcpStore.deleteTemplate(auth.orgId, id)
-      writeAudit(auth.orgId, auth.userId, 'delete_template', id, existing.name, undefined, ip)
+      void writeAudit(auth.orgId, auth.userId, 'delete_template', id, existing.name, undefined, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true }
     },
@@ -705,7 +705,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       // Increment template downloads
       await mcpStore.incrementDownloads(auth.orgId, templateId)
 
-      writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { template_id: templateId, template_name: template.name }, ip)
+      void writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { template_id: templateId, template_name: template.name }, ip)
       broadcastMcpEvent({ org_id: auth.orgId, type: 'mcp.changed' })
       return { success: true, data: server }
     },

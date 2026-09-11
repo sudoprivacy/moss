@@ -438,7 +438,7 @@ export class SessionManager {
     }
 
     this.#clearTimeout(record)
-    record.handle.destroy(force)
+    void record.handle.destroy(force)
   }
 
   async destroyAll(force = true): Promise<void> {
