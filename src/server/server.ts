@@ -44,6 +44,28 @@ import {
   submitApplication,
   toPayload,
 } from './credits/creditApplications.js'
+import { createFuiouClient, type FuiouCallbackPayload, type FuiouClient } from './credits/fuiou.js'
+import {
+  ORDER_STATUS,
+  RechargeError,
+  calculateRefund,
+  cancelRechargeOrder,
+  createRechargeOrder,
+  handleRechargeCallback,
+  listAdminRechargeRecords,
+  listRechargeOrders,
+  localDateDashed,
+  payRechargeOrder,
+  queryRechargeOrder,
+  rechargePackagesWithCny,
+  refundRechargeOrder,
+  retryRechargeOrderSync,
+  settlePaidRechargeOrder,
+  syncPendingRechargeOrders,
+  syncRechargeOrderStatus,
+  toAdminOrderPayload,
+  toCreatedOrderPayload,
+} from './credits/recharge.js'
 import {
   buildRemoteWorkspaceTree,
   createPodWorkspaceAccess,
@@ -54,12 +76,14 @@ import { buildClientCredentials, sealCredentials } from './credentialsEnvelope.j
 import type { ConfigKey } from './configStore/configStore.js'
 
 const SUDOROUTER_ADMIN_TOKEN_KEY: ConfigKey = 'server.sudorouter-admin-token'
+const FUIOU_MERCHANT_PRIVATE_KEY: ConfigKey = 'server.fuiou-merchant-private-key'
+const FUIOU_PUBLIC_KEY: ConfigKey = 'server.fuiou-public-key'
 import { initHubConfig } from './hubConfig.js'
 
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter' | 'fuiou'
   path: string
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
@@ -73,6 +97,8 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.cabin-broadcast-api-key', group: 'cabin', path: 'cabin.broadcastApiKey' },
   { key: 'server.cabin-broadcast-auth', group: 'cabin', path: 'cabin.broadcastAuth' },
   { key: 'server.sudorouter-admin-token', group: 'sudorouter', path: 'systemConfig.sudorouterAdminToken' },
+  { key: 'server.fuiou-merchant-private-key', group: 'fuiou', path: 'systemConfig.recharge.fuiou.merchantPrivateKey' },
+  { key: 'server.fuiou-public-key', group: 'fuiou', path: 'systemConfig.recharge.fuiou.publicKey' },
 ]
 import {
   createCustomAssistant,
@@ -1692,6 +1718,36 @@ function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
   })
 }
 
+function buildRechargePolicy(config: ServerConfig) {
+  const recharge = config.systemConfig.recharge
+  return {
+    minAmountUsd: recharge?.minAmountUsd ?? 1,
+    maxAmountUsd: recharge?.maxAmountUsd ?? 10000,
+    usdToCnyRate: recharge?.usdToCnyRate ?? 7.3,
+    orderExpireMinutes: recharge?.orderExpireMinutes ?? 30,
+  }
+}
+
+function buildFuiouClient(config: ServerConfig): FuiouClient | null {
+  const fuiou = config.systemConfig.recharge?.fuiou
+  if (!fuiou) return null
+  const store = getConfigStore()
+  const callbackBase = (fuiou.callbackBaseUrl?.trim() || config.publicBaseUrl || `http://${config.host}:${config.port}`)
+    .replace(/\/+$/, '')
+  return createFuiouClient({
+    isTest: fuiou.testMode ?? false,
+    merchantCode: fuiou.merchantCode ?? '',
+    callbackUrl: `${callbackBase}/api/v1/recharge/callback`,
+    timeoutMs: fuiou.timeoutMs ?? 10_000,
+    testApiUrl: fuiou.testApiUrl,
+    prodApiUrl: fuiou.prodApiUrl,
+    testRefundUrl: fuiou.testRefundUrl,
+    prodRefundUrl: fuiou.prodRefundUrl,
+    merchantPrivateKey: store.get(FUIOU_MERCHANT_PRIVATE_KEY) ?? undefined,
+    publicKey: store.get(FUIOU_PUBLIC_KEY) ?? undefined,
+  })
+}
+
 /**
  * The points a user has left and has spent.
  *
@@ -2571,6 +2627,33 @@ export function startServer(
           success: true,
           data: buildPublicSystemConfig(config, getSystemSettings().url),
         })
+        return
+      }
+
+      if ((req.method === 'GET' || isHead) && pathname === '/api/v1/recharge/packages') {
+        writeJson(res, 200, {
+          success: true,
+          data: rechargePackagesWithCny(buildRechargePolicy(config).usdToCnyRate),
+        })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/recharge/callback') {
+        try {
+          await handleRechargeCallback(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            buildSudorouterClient(config),
+            await readJsonBody(req) as unknown as FuiouCallbackPayload,
+            userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+          )
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('success')
+        } catch (err) {
+          console.error('[recharge] callback failed:', err instanceof Error ? err.message : String(err))
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('fail')
+        }
         return
       }
 
@@ -6197,6 +6280,110 @@ export function startServer(
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/recharge/create') {
+        if (config.systemConfig.rechargeMode !== 'pay') {
+          writeJson(res, 403, { success: false, msg: '充值功能未开启' })
+          return
+        }
+        const body = await readJsonBody(req)
+        const user = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        if (!user) {
+          writeJson(res, 404, { success: false, msg: '用户不存在' })
+          return
+        }
+        try {
+          const order = createRechargeOrder(
+            authService.rechargeOrders,
+            buildRechargePolicy(config),
+            {
+              userId: auth.userId,
+              userPhone: user.phone,
+              orgId: auth.orgId,
+              amount: body.amount,
+              paymentMethod: body.payment_method,
+            },
+          )
+          writeJson(res, 200, { success: true, data: toCreatedOrderPayload(order) })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/recharge/pay') {
+        if (config.systemConfig.rechargeMode !== 'pay') {
+          writeJson(res, 403, { success: false, msg: '充值功能未开启' })
+          return
+        }
+        const body = await readJsonBody(req)
+        const orderNo = typeof body.order_no === 'string' ? body.order_no.trim() : ''
+        if (!orderNo) {
+          writeJson(res, 400, { success: false, msg: '订单号不能为空' })
+          return
+        }
+        try {
+          const result = await payRechargeOrder(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            auth.userId,
+            orderNo,
+          )
+          writeJson(res, 200, { success: true, data: { order_no: orderNo, ...result } })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      const rechargeQueryMatch = pathname.match(/^\/api\/v1\/recharge\/query\/([^/]+)$/)
+      if (req.method === 'GET' && rechargeQueryMatch) {
+        const orderNo = decodeURIComponent(rechargeQueryMatch[1] || '')
+        const order = queryRechargeOrder(authService.rechargeOrders, auth.userId, orderNo)
+        if (!order) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        writeJson(res, 200, { success: true, data: order })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/recharge/list') {
+        const page = Math.max(1, Number(url.searchParams.get('page') || 1))
+        const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || 20)))
+        writeJson(res, 200, {
+          success: true,
+          data: listRechargeOrders(authService.rechargeOrders, auth.userId, page, pageSize),
+        })
+        return
+      }
+
+      const rechargeCancelMatch = pathname.match(/^\/api\/v1\/recharge\/cancel\/([^/]+)$/)
+      if (req.method === 'POST' && rechargeCancelMatch) {
+        try {
+          cancelRechargeOrder(
+            authService.rechargeOrders,
+            auth.userId,
+            decodeURIComponent(rechargeCancelMatch[1] || ''),
+          )
+          writeJson(res, 200, { success: true, msg: '订单已取消' })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/user/model-usage-stats') {
         const gatewayUserId = authService.getUserModelCredential(auth.userId)?.sudorouterUserId
         if (!gatewayUserId) {
@@ -6239,6 +6426,10 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/credit-applications') {
+        if (config.systemConfig.rechargeMode !== 'approve') {
+          writeJson(res, 403, { success: false, msg: '积分申请未开启' })
+          return
+        }
         const body = await readJsonBody(req)
         try {
           const app = submitApplication(
@@ -6289,6 +6480,308 @@ export function startServer(
           writeJson(res, 200, { success: true, data: toPayload(reviewed, pointsToQuota) })
         } catch (err) {
           if (err instanceof CreditApplicationError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/admin/recharge/orders') {
+        authService.requireScope(auth, 'admin:users')
+        const page = Math.max(1, Number(url.searchParams.get('page') || 1))
+        const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
+        const statusParam = url.searchParams.get('status')
+        const syncStatusParam = url.searchParams.get('sync_status')?.trim()
+        const result = authService.rechargeOrders.listForAdmin({
+          orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
+          status: statusParam == null || statusParam === '' ? undefined : Number(statusParam),
+          syncStatus: syncStatusParam ? syncStatusParam as never : undefined,
+          orderNo: url.searchParams.get('order_no')?.trim() || undefined,
+          userPhone: url.searchParams.get('user_phone')?.trim() || undefined,
+          startDate: url.searchParams.get('start_date')?.trim() || undefined,
+          endDate: url.searchParams.get('end_date')?.trim() || undefined,
+          page,
+          pageSize,
+        })
+        writeJson(res, 200, {
+          success: true,
+          data: {
+            list: result.list.map(order => toAdminOrderPayload(order, authService.getUserName(order.userId))),
+            total: result.total,
+            page,
+            pageSize,
+          },
+        })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/admin/recharge-records') {
+        authService.requireScope(auth, 'admin:users')
+        const page = Math.max(1, Number(url.searchParams.get('page') || 1))
+        const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
+        writeJson(res, 200, {
+          success: true,
+          data: listAdminRechargeRecords(authService.rechargeOrders, {
+            orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
+            orderNo: url.searchParams.get('order_no')?.trim() || undefined,
+            userPhone: url.searchParams.get('user_phone')?.trim() || undefined,
+            startDate: url.searchParams.get('start_date')?.trim() || undefined,
+            endDate: url.searchParams.get('end_date')?.trim() || undefined,
+            page,
+            pageSize,
+          }),
+        })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/admin/recharge/stats') {
+        authService.requireScope(auth, 'admin:users')
+        const result = authService.rechargeOrders.listForAdmin({
+          orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
+          page: 1,
+          pageSize: 100000,
+        })
+        const rows = result.list
+        const successRows = rows.filter(order => order.status === ORDER_STATUS.SUCCESS)
+        const today = localDateDashed()
+        const todayRows = rows.filter(order => localDateDashed(new Date(order.createdAt)) === today)
+        const byPayment = (method: 'ALIPAY' | 'WECHAT') => {
+          const methodRows = successRows.filter(order => order.paymentMethod === method)
+          return {
+            payment_method: method,
+            count: methodRows.length,
+            amount_usd: methodRows.reduce((sum, order) => sum + order.amountUsd, 0),
+            amount_cny: methodRows.reduce((sum, order) => sum + order.amountYuan, 0),
+          }
+        }
+        writeJson(res, 200, {
+          success: true,
+          data: {
+            total: {
+              orders: rows.length,
+              amount_usd: successRows.reduce((sum, order) => sum + order.amountUsd, 0),
+              amount_cny: successRows.reduce((sum, order) => sum + order.amountYuan, 0),
+              points: successRows.reduce((sum, order) => sum + order.pointsAmount, 0),
+              bonus: successRows.reduce((sum, order) => sum + order.bonusPoints, 0),
+              success_count: successRows.length,
+              failed_count: rows.filter(order => order.status === ORDER_STATUS.FAILED).length,
+              pending_count: rows.filter(order => order.status === ORDER_STATUS.PENDING || order.status === ORDER_STATUS.PAYING).length,
+            },
+            today: {
+              orders: todayRows.length,
+              amount_usd: todayRows.filter(order => order.status === ORDER_STATUS.SUCCESS).reduce((sum, order) => sum + order.amountUsd, 0),
+              amount_cny: todayRows.filter(order => order.status === ORDER_STATUS.SUCCESS).reduce((sum, order) => sum + order.amountYuan, 0),
+              points: todayRows.filter(order => order.status === ORDER_STATUS.SUCCESS).reduce((sum, order) => sum + order.pointsAmount, 0),
+            },
+            by_payment: {
+              ALIPAY: byPayment('ALIPAY'),
+              WECHAT: byPayment('WECHAT'),
+            },
+            daily: [],
+          },
+        })
+        return
+      }
+
+      const adminRechargeRetryMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)\/retry$/)
+      if (req.method === 'POST' && adminRechargeRetryMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const raw = decodeURIComponent(adminRechargeRetryMatch[1] || '')
+        const byId = /^\d+$/.test(raw) ? authService.rechargeOrders.getById(Number(raw)) : null
+        const existing = byId ?? authService.rechargeOrders.getByOrderNo(raw)
+        if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        try {
+          const data = await retryRechargeOrderSync(
+            authService.rechargeOrders,
+            buildSudorouterClient(config),
+            {
+              orderId: byId ? existing.id : undefined,
+              orderNo: byId ? undefined : existing.orderNo,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '订单同步重试成功', data })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      const adminRechargeSyncMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)\/sync$/)
+      if (req.method === 'POST' && adminRechargeSyncMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const orderNo = decodeURIComponent(adminRechargeSyncMatch[1] || '')
+        const existing = authService.rechargeOrders.getByOrderNo(orderNo)
+        if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        try {
+          const data = await syncRechargeOrderStatus(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            buildSudorouterClient(config),
+            {
+              orderNo,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '订单状态同步完成', data })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/admin/recharge/sync') {
+        authService.requireScope(auth, 'admin:users')
+        try {
+          const data = await syncPendingRechargeOrders(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            buildSudorouterClient(config),
+            {
+              orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '待处理订单同步完成', data })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      const adminRechargeDetailMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)$/)
+      if (req.method === 'GET' && adminRechargeDetailMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(adminRechargeDetailMatch[1] || ''))
+        if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        writeJson(res, 200, {
+          success: true,
+          data: toAdminOrderPayload(order, authService.getUserName(order.userId)),
+        })
+        return
+      }
+
+      const refundCalcMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/refund-calc\/([^/]+)$/)
+      if (req.method === 'GET' && refundCalcMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(refundCalcMatch[1] || ''))
+        if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        if (order.status !== ORDER_STATUS.SUCCESS) {
+          writeJson(res, 400, { success: false, msg: '订单状态不支持退款' })
+          return
+        }
+        const gatewayUserId = authService.getUserModelCredential(order.userId)?.sudorouterUserId
+        const client = buildSudorouterClient(config)
+        if (!gatewayUserId || !client) {
+          writeJson(res, 409, { success: false, msg: '用户信息异常' })
+          return
+        }
+        const credits = await client.getCredits(gatewayUserId)
+        const calc = calculateRefund({ order, userRemainingPoints: credits.remainingPoints })
+        writeJson(res, 200, {
+          success: true,
+          data: {
+            order_points: calc.orderPoints,
+            user_balance: calc.userBalance,
+            used_points: calc.usedPoints,
+            refund_amount: calc.refundAmount,
+            refund_amount_yuan: (calc.refundAmount / 100).toFixed(2),
+            deduct_points: calc.deductPoints,
+            original_amount: calc.originalAmount,
+            original_amount_yuan: (calc.originalAmount / 100).toFixed(2),
+          },
+        })
+        return
+      }
+
+      const refundMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)\/refund$/)
+      if (req.method === 'POST' && refundMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const body = await readJsonBody(req).catch(() => ({}))
+        const orderNo = decodeURIComponent(refundMatch[1] || '')
+        const order = authService.rechargeOrders.getByOrderNo(orderNo)
+        if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        try {
+          const result = await refundRechargeOrder(
+            authService.rechargeOrders,
+            buildFuiouClient(config),
+            buildSudorouterClient(config),
+            {
+              orderNo,
+              reason: typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : '用户申请退款',
+              adminId: auth.userId,
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '退款成功', data: result })
+        } catch (err) {
+          if (err instanceof RechargeError) {
+            writeJson(res, err.statusCode, { success: false, msg: err.message })
+            return
+          }
+          throw err
+        }
+        return
+      }
+
+      const simulateMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/simulate-payment\/([^/]+)$/)
+      if (req.method === 'POST' && simulateMatch) {
+        authService.requireScope(auth, 'admin:users')
+        const fuiou = buildFuiouClient(config)
+        if (!fuiou?.isTestMode()) {
+          writeJson(res, 400, { success: false, msg: '仅在测试模式下可用' })
+          return
+        }
+        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(simulateMatch[1] || ''))
+        if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
+          writeJson(res, 404, { success: false, msg: '订单不存在' })
+          return
+        }
+        if (order.status !== ORDER_STATUS.PENDING && order.status !== ORDER_STATUS.PAYING) {
+          writeJson(res, 400, { success: false, msg: '订单状态无效' })
+          return
+        }
+        try {
+          await settlePaidRechargeOrder(
+            authService.rechargeOrders,
+            buildSudorouterClient(config),
+            order,
+            {
+              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            },
+          )
+          writeJson(res, 200, { success: true, msg: '模拟支付成功', data: { order_no: order.orderNo } })
+        } catch (err) {
+          if (err instanceof RechargeError) {
             writeJson(res, err.statusCode, { success: false, msg: err.message })
             return
           }

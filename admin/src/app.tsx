@@ -9,6 +9,7 @@ const BudgetPage = lazy(() => import('./pages/budget-page'))
 const SessionsPage = lazy(() => import('./pages/sessions-page'))
 const CabinConversationsPage = lazy(() => import('./pages/cabin-conversations-page'))
 const UsersPage = lazy(() => import('./pages/users-page'))
+const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page'))
 const ApiKeysPage = lazy(() => import('./pages/api-keys-page'))
 const SystemSettingsPage = lazy(() => import('./pages/system-settings-page'))
 const ServerCredentialsPage = lazy(() => import('./pages/server-credentials-page'))
@@ -96,6 +97,14 @@ export default function App() {
           element={
             <SuspendedRoute>
               <UsersPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path="/operations/billing"
+          element={
+            <SuspendedRoute>
+              <OperationsBillingPage />
             </SuspendedRoute>
           }
         />

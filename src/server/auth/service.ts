@@ -10,6 +10,7 @@ import {
   type CreditApplication,
   type CreditApplicationStore,
 } from '../credits/creditApplications.js'
+import type { RechargeOrder, RechargeOrderStore, RefundRecord } from '../credits/recharge.js'
 import {
   AuthCenterDb,
   type AuthCenterApiKey,
@@ -1254,6 +1255,50 @@ export class AuthService {
       },
       updateStatus(id, patch) {
         db.updateCreditApplicationStatus(id, patch)
+      },
+    }
+  }
+
+  get rechargeOrders(): RechargeOrderStore {
+    const db = this.db
+    return {
+      create(input) {
+        return db.createRechargeOrder(input) as RechargeOrder
+      },
+      getByOrderNo(orderNo) {
+        return db.getRechargeOrderByNo(orderNo) as RechargeOrder | null
+      },
+      getById(id) {
+        return db.getRechargeOrderById(id) as RechargeOrder | null
+      },
+      listForUser(userId, page, pageSize) {
+        const result = db.listRechargeOrdersForUser(userId, pageSize, (page - 1) * pageSize)
+        return { list: result.list as RechargeOrder[], total: result.total }
+      },
+      listForAdmin(input) {
+        const result = db.listRechargeOrdersForAdmin({
+          ...input,
+          limit: input.pageSize,
+          offset: (input.page - 1) * input.pageSize,
+        })
+        return { list: result.list as RechargeOrder[], total: result.total }
+      },
+      update(id, patch) {
+        db.updateRechargeOrder(id, patch)
+      },
+      claimRefund(id, reason) {
+        return db.claimRechargeRefund(id, reason)
+      },
+      createRefund(input) {
+        return db.createRefundRecord(input) as RefundRecord
+      },
+      listRefundsForAdmin(input) {
+        const result = db.listRefundRecordsForAdmin({
+          ...input,
+          limit: input.pageSize,
+          offset: (input.page - 1) * input.pageSize,
+        })
+        return { list: result.list as RefundRecord[], total: result.total }
       },
     }
   }
