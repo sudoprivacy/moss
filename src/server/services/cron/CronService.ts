@@ -521,7 +521,7 @@ export class CronService {
     }
 
     if (job.boundSessionId) {
-      const existingSession = this.config.runtimeService.getSession(job.boundSessionId)
+      const existingSession = await this.config.runtimeService.getSession(job.boundSessionId)
       if (existingSession) {
         // A bound session is explicitly pinned by the user, so we do not rotate
         // it out from under the job (that would silently break the binding).
@@ -542,7 +542,7 @@ export class CronService {
     }
 
     if (job.lastSessionId) {
-      const existingSession = this.config.runtimeService.getSession(job.lastSessionId)
+      const existingSession = await this.config.runtimeService.getSession(job.lastSessionId)
       if (existingSession) {
         // Auto-chained reuse (lastSessionId): retire and rotate once the session
         // has served enough runs that its runtime transcript is at risk of
