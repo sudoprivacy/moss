@@ -1344,9 +1344,12 @@ export class DirectConnectStore {
     }
   }
 
-  close(): void {
-    (this as any)._closed = true
-    this.db.close()
+  async close(): Promise<void> {
+    ;(this as any)._closed = true
+    // Driver-polymorphic: sqlite closes its handle, postgres ends the pool.
+    // The postgres construction form leaves `db` undefined, so the old
+    // `this.db.close()` crashed there and never released the connections.
+    await this.driver.close()
   }
 
   isOpen(): boolean {

@@ -520,9 +520,12 @@ export type ServerConfig = {
   databaseUrl?: string
   /**
    * Auth-proxy base URL injected into runner env. Env MOSS_AUTH_PROXY_URL
-   * (preferred), else file config, else http://localhost:12013.
+   * (preferred), else file config, else null = not explicitly set — the
+   * consumer falls back to the proxy's actually-bound port at runtime, so a
+   * deployment that moved MOSS_AUTH_PROXY_PORT never ends up pointing at a
+   * stale literal.
    */
-  authProxyUrl: string
+  authProxyUrl: string | null
   dockerNetwork?: string
   dockerStopTimeoutSec: number
   dockerLabels: Record<string, string>

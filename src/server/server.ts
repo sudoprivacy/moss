@@ -3528,6 +3528,22 @@ export function startServer(
 
       const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || undefined
 
+      // Internal (HA): token-revoke forward target. Terminate is a REST op
+      // the LB may route to a non-owner instance; the auth-proxy token
+      // registry lives in the owner's process, so the non-owner forwards the
+      // revoke here over the owner-aware route (same mechanism as the
+      // internal WS channel). Scope-gated to the short-lived tokens minted
+      // by issueInternalChannelToken — regular user/admin tokens 403.
+      const internalRevokeMatch = pathname.match(/^\/api\/v1\/internal\/sessions\/([^/]+)\/revoke-token$/)
+      if (req.method === 'POST' && internalRevokeMatch) {
+        if (!hasScope(auth.scopes, 'internal:channel')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const revoked = runtime.revokeSessionTokenLocally(decodeURIComponent(internalRevokeMatch[1] || ''))
+        writeJson(res, 200, { ok: true, revoked })
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/roles') {
         authService.requireScope(auth, 'admin:users')
         writeJson(res, 200, authService.listRoles())

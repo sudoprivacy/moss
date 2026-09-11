@@ -57,6 +57,7 @@ import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import {
   openInternalSessionChannel,
+  revokeInternalSessionToken,
   type InternalSessionChannel,
 } from './internalSessionChannel.js'
 import { resolveRuntimeScodePath } from './runtimeScodePath.js'
@@ -1072,16 +1073,44 @@ export class RuntimeService {
     }
   }
 
+  /**
+   * Revoke this session's auth-proxy token on the instance that minted it
+   * (this one). Returns false when there is nothing local to revoke — either
+   * the attempt is owned by another instance (its registry holds the token)
+   * or this instance restarted since spawning (the registry died with the
+   * previous process, so no live token remains anywhere on this host).
+   */
+  revokeSessionTokenLocally(sessionId: string): boolean {
+    const tokenEntry = this.sessionTokens.get(sessionId)
+    if (!tokenEntry || !this.authProxy) return false
+    this.authProxy.revokeToken(tokenEntry.token)
+    this.sessionTokens.delete(sessionId)
+    return true
+  }
+
   async terminateSession(sessionId: string): Promise<void> {
     const session = await this.store.getSession(sessionId)
     if (!session) return
     const attempt = await this.store.getCurrentAttempt(sessionId)
-    // Revoke auth proxy token
-    if (this.authProxy) {
-      const tokenEntry = this.sessionTokens.get(sessionId)
-      if (tokenEntry) {
-        this.authProxy.revokeToken(tokenEntry.token)
-        this.sessionTokens.delete(sessionId)
+    // Revoke auth proxy token. The registry is instance-local (tokens are
+    // minted in spawnAttempt on the OWNING instance), so a terminate the LB
+    // routed to a non-owner finds nothing local — forward the revoke to the
+    // owner via the same owner-aware route the internal WS channel uses. A
+    // dead owner needs nothing: its registry died with the process.
+    if (this.authProxy && !this.revokeSessionTokenLocally(sessionId)) {
+      if (
+        attempt?.serverInstanceId &&
+        attempt.serverInstanceId !== this.options.serverInstanceId
+      ) {
+        await revokeInternalSessionToken(
+          {
+            authService: this.authService,
+            store: this.store,
+            config: this.options.config,
+          },
+          session,
+          attempt.serverInstanceId,
+        )
       }
     }
     await this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
@@ -1363,18 +1392,45 @@ export class RuntimeService {
     const timeoutMs = this.options.config.heartbeatTimeoutMs * 3
     const startedAt = Date.now()
     const poll = async () => {
-      const current = await this.store.getSession(session.sessionId)
-      const attempt = current?.currentAttemptId
-        ? await this.store.getAttempt(current.currentAttemptId)
-        : null
+      let current: SessionRecord | null = null
+      let attempt: AttemptRecord | null = null
+      try {
+        current = await this.store.getSession(session.sessionId)
+        attempt = current?.currentAttemptId
+          ? await this.store.getAttempt(current.currentAttemptId)
+          : null
+      } catch {
+        // DB hiccup: release the slot so a later trigger (foreground 503,
+        // adopt timer) can schedule a fresh wait instead of this sessionId
+        // staying in the set for the rest of the process lifetime.
+        this.#fencingWaits.delete(session.sessionId)
+        return
+      }
+      const timedOut = Date.now() - startedAt > timeoutMs
       if (
         !current ||
         !attempt ||
         !this.#attemptHeartbeatFresh(attempt) ||
-        Date.now() - startedAt > timeoutMs
+        timedOut
       ) {
         this.#fencingWaits.delete(session.sessionId)
-        if (current && attempt && !this.#attemptHeartbeatFresh(attempt)) {
+        if (current && attempt && (!this.#attemptHeartbeatFresh(attempt) || timedOut)) {
+          // Timeout with a still-fresh heartbeat = the runner lives but its
+          // attach socket is unreachable (e.g. OS tmp-dir cleanup) — the
+          // expiry condition can never become true, so fence instead of
+          // silently giving up (pre-P2 semantics: mark lost + respawn).
+          // markAttemptLost flips runtime_state off 'running'; the runner's
+          // fenced heartbeat exits it within one interval, so the respawn
+          // pays the same short double-write window a normal failover does.
+          if (timedOut && this.#attemptHeartbeatFresh(attempt)) {
+            await this.store.markAttemptLost(
+              attempt.attemptId,
+              'fencing wait timed out (attach unreachable, heartbeat fresh)',
+            )
+            await this.store.addEvent(current.sessionId, attempt.attemptId, 'attempt_lost', {
+              reason: 'fencing_wait_timeout_heartbeat_fresh',
+            })
+          }
           void this.ensureAttempt(current).catch(async error => {
             await this.store.addEvent(
               current.sessionId,
@@ -1904,12 +1960,14 @@ export class RuntimeService {
     if (this.authProxy) {
       const authToken = randomUUID()
       // Session credential-fetch URL. config.authProxyUrl resolves as: env
-      // MOSS_AUTH_PROXY_URL → server.json authProxyUrl → http://localhost:12013.
-      // HA/Docker/K8s MUST point this at a container-reachable address (localhost
-      // is not reachable from a session container/pod), so moving
-      // MOSS_AUTH_PROXY_PORT off its default also requires setting
-      // MOSS_AUTH_PROXY_URL to match — avoids the port literal drifting apart.
+      // MOSS_AUTH_PROXY_URL → server.json authProxyUrl → null. When null
+      // (not explicitly set) the URL is derived from the proxy's actually
+      // bound port, so MOSS_AUTH_PROXY_PORT can move without a matching URL
+      // edit. HA/Docker/K8s MUST still point this at a container-reachable
+      // address (localhost is not reachable from a session container/pod) —
+      // those deployments set the URL explicitly.
       const proxyUrl = this.options.config.authProxyUrl
+        ?? `http://localhost:${this.authProxy.port}`
       runnerEnv.SUDOWORK_AUTH_PROXY_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_BASE_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_TOKEN = authToken

@@ -118,10 +118,10 @@ describe("LB HA config resolution (readServerConfig)", () => {
   });
 
   // P1-2a: storage backend + auth-proxy URL resolution (HA PG groundwork).
-  it("authProxyUrl defaults to http://localhost:12013 (unchanged behavior)", async () => {
+  it("authProxyUrl defaults to null (consumer derives it from the bound port)", async () => {
     const path = await writeConfig({});
     const { config } = await readServerConfig(path);
-    assert.equal(config.authProxyUrl, "http://localhost:12013");
+    assert.equal(config.authProxyUrl, null);
   });
 
   it("authProxyUrl honors server.json, and ENV takes precedence", async () => {

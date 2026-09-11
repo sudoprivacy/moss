@@ -284,7 +284,7 @@ async function finishStandaloneServerStartup(
     await authProxy.stop()
     await nexusManager.stop()
     await store.stopServerInstance(instance.instanceId)
-    store.close()
+    await store.close()
   }
 
   return {

@@ -1,6 +1,6 @@
 // Runs under Node: `tsx --test`. Covers the internal session channel helper
-// (P2-5): line protocol over a real local WS server, 4xx fast-fail (no
-// retry), and 5xx retry behaviour (first retry wins).
+// (P2-5): line protocol over a real local WS server, 401/403/404 fast-fail
+// (no retry), and retry behaviour for 5xx / 409 / network (first retry wins).
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server as HttpServer } from "node:http";
@@ -120,6 +120,44 @@ describe("internalSessionChannel (P2-5)", () => {
       (e: unknown) => (e as Error & { status?: number }).status === 401,
     );
     // Fast-fail: no 1s+ backoff was paid.
-    assert.ok(Date.now() - startedAt < 900, "4xx must not enter the retry loop");
+    assert.ok(Date.now() - startedAt < 900, "401 must not enter the retry loop");
+  });
+
+  it("409 (owned by a live peer) retries instead of fast-failing", async () => {
+    // First upgrade answers 409 the way the server does for owner
+    // contention (bare status line, see server.ts internal handler); the
+    // retry lands on a healthy echo endpoint and the channel opens.
+    const wss = new WebSocketServer({ noServer: true });
+    wss.on('connection', ws => {
+      ws.on('message', data => ws.send(data.toString('utf8')));
+    });
+    let upgrades = 0;
+    const http: HttpServer = createServer();
+    http.on('upgrade', (req, socket, head) => {
+      upgrades += 1;
+      if (upgrades === 1) {
+        socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+    });
+    await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+    const port = (http.address() as { port: number }).port;
+    closers.push(() => { wss.close(); http.close(); });
+
+    const deps = makeDeps(port, 'tok');
+    const channel: InternalSessionChannel = await openInternalSessionChannel(deps, 's1');
+    assert.ok(upgrades >= 2, 'the 409 must have been retried, not aborted');
+
+    const received: string[] = [];
+    channel.on('data', (line: string) => received.push(line));
+    channel.write(JSON.stringify({ type: 'ping' }));
+    await new Promise<void>(resolve => {
+      const check = () => (received.length > 0 ? resolve() : setTimeout(check, 10));
+      check();
+    });
+    assert.match(received[0]!, /"type":"ping"/);
+    channel.destroy();
   });
 });

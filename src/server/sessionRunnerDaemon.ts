@@ -406,7 +406,7 @@ export class SessionRunnerDaemon {
       this.#server = null
     }
     await safeUnlink(this.manifest.attempt.attachPath)
-    this.#store.close()
+    await this.#store.close()
   }
 
   #onClient(socket: SocketWithBuffer): void {
