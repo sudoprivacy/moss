@@ -7,6 +7,7 @@ import { delimiter, dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { spawn, type ChildProcess } from 'child_process'
 import { loadBudgetStats } from './budgetStats.js'
+import { isAttemptHeartbeatFresh } from './attemptLiveness.js'
 import {
   DirectConnectStore,
   mergeRuntime,
@@ -1269,7 +1270,7 @@ export class RuntimeService {
           this.options.config.heartbeatTimeoutMs,
         )
         if (!claimed) return existing
-        if (this.#attemptHeartbeatFresh(existing)) {
+        if (isAttemptHeartbeatFresh(existing, this.options.config.heartbeatTimeoutMs)) {
           // Takeover in progress: the previous owner's detached runner is
           // still alive on its host with a fresh heartbeat. Fencing kills
           // it within one heartbeat interval; respawning before its
@@ -1290,7 +1291,7 @@ export class RuntimeService {
         return existing
       }
 
-      if (ownerIsSelf && this.#attemptHeartbeatFresh(existing)) {
+      if (ownerIsSelf && isAttemptHeartbeatFresh(existing, this.options.config.heartbeatTimeoutMs)) {
         // Self-owned, DB-stored attachPath unreachable, runner heartbeat
         // still fresh. Try the legacy (pre-socket-decoupling) name
         // defensively: a detached runner from before an upgrade still
@@ -1350,17 +1351,6 @@ export class RuntimeService {
     return await this.spawnAttempt(session, {
       resumeTranscriptSessionId: session.transcriptSessionId,
     })
-  }
-
-  /**
-   * Fresh = the runner daemon's heartbeat landed within the expiry window.
-   * (NULL heartbeat counts as stale — nothing vouches for the runner.)
-   */
-  #attemptHeartbeatFresh(attempt: AttemptRecord): boolean {
-    return (
-      attempt.lastHeartbeatAt !== null &&
-      Date.now() - attempt.lastHeartbeatAt < this.options.config.heartbeatTimeoutMs
-    )
   }
 
   /**
@@ -1461,11 +1451,11 @@ export class RuntimeService {
       if (
         !current ||
         !attempt ||
-        !this.#attemptHeartbeatFresh(attempt) ||
+        !isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs) ||
         timedOut
       ) {
         this.#fencingWaits.delete(session.sessionId)
-        if (current && attempt && (!this.#attemptHeartbeatFresh(attempt) || timedOut)) {
+        if (current && attempt && (!isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs) || timedOut)) {
           // Timeout with a still-fresh heartbeat = the runner lives but its
           // attach socket is unreachable (e.g. OS tmp-dir cleanup) — the
           // expiry condition can never become true, so fence instead of
@@ -1473,7 +1463,7 @@ export class RuntimeService {
           // markAttemptLost flips runtime_state off 'running'; the runner's
           // fenced heartbeat exits it within one interval, so the respawn
           // pays the same short double-write window a normal failover does.
-          if (timedOut && this.#attemptHeartbeatFresh(attempt)) {
+          if (timedOut && isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)) {
             await this.store.markAttemptLost(
               attempt.attemptId,
               'fencing wait timed out (attach unreachable, heartbeat fresh)',
