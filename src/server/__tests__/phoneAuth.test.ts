@@ -80,6 +80,20 @@ describe('verification codes', () => {
     assert.equal(await service.verifyCode(PHONE, code), false)
   })
 
+  it('two concurrent verifies of the same code succeed exactly once (atomic consume)', async () => {
+    const service = new PhoneAuthService(db, makeConfig(), SECRET)
+    const code = await sendAndCaptureCode(service, PHONE)
+
+    // Both reads see the same live code and pass the compare; only one DELETE
+    // reports a removed row, so exactly one call issues a token. (SQLite
+    // serialises writers; the PG two-pool race is covered in pgBackend.test.ts.)
+    const results = await Promise.all([
+      service.verifyCode(PHONE, code),
+      service.verifyCode(PHONE, code),
+    ])
+    assert.equal(results.filter(Boolean).length, 1)
+  })
+
   it('rejects a wrong code without consuming the real one', async () => {
     const service = new PhoneAuthService(db, makeConfig(), SECRET)
     const code = await sendAndCaptureCode(service, PHONE)

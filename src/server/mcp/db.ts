@@ -429,8 +429,8 @@ export class McpStore {
     )
     const total = countRow?.c ?? 0
 
-    const page = filter?.page ?? 1
-    const pageSize = filter?.page_size ?? 20
+    const page = Number.isFinite(Number(filter?.page)) ? Math.max(1, Number(filter?.page)) : 1
+    const pageSize = Number.isFinite(Number(filter?.page_size)) ? Math.min(100, Math.max(1, Number(filter?.page_size))) : 20
     const offset = (page - 1) * pageSize
 
     const rows = await this.driver.all<SqlRow>(
@@ -870,8 +870,8 @@ export class McpStore {
     )
     const total = countRow?.c ?? 0
 
-    const page = filter?.page ?? 1
-    const pageSize = filter?.page_size ?? 20
+    const page = Number.isFinite(Number(filter?.page)) ? Math.max(1, Number(filter?.page)) : 1
+    const pageSize = Number.isFinite(Number(filter?.page_size)) ? Math.min(100, Math.max(1, Number(filter?.page_size))) : 20
     const offset = (page - 1) * pageSize
 
     const rows = await this.driver.all<SqlRow>(
@@ -960,8 +960,8 @@ export class McpStore {
     )
     const total = countRow?.c ?? 0
 
-    const page = filter?.page ?? 1
-    const pageSize = filter?.page_size ?? 20
+    const page = Number.isFinite(Number(filter?.page)) ? Math.max(1, Number(filter?.page)) : 1
+    const pageSize = Number.isFinite(Number(filter?.page_size)) ? Math.min(100, Math.max(1, Number(filter?.page_size))) : 20
     const offset = (page - 1) * pageSize
 
     const rows = await this.driver.all<SqlRow>(

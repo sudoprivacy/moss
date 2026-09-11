@@ -225,8 +225,10 @@ export class PhoneAuthService {
       await this.db.bumpPhoneLoginCodeAttempts(phone)
       return false
     }
-    await this.db.deletePhoneLoginCode(phone)
-    return true
+    // Atomic consume rather than read-then-delete: if a concurrent verify of
+    // the same code already deleted this exact hash, our DELETE affects 0 rows
+    // and we return false, so only one caller ever succeeds.
+    return await this.db.consumePhoneLoginCode(phone, record.codeHash)
   }
 
   /**

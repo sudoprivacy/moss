@@ -3756,8 +3756,10 @@ export class DirectConnectStore {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const countRow = await this.driver.get<{ c: number }>(`SELECT COUNT(*) AS c FROM config_items ${where}`, params as SqlParam[])
     const total = countRow?.c ?? 0
-    const page = opts.page ?? 1
-    const pageSize = opts.pageSize ?? 20
+    // Normalize page/pageSize: entry points pass raw strings (?page=abc / ?page=-5),
+    // which would crash SQLite (datatype mismatch) or PG (OFFSET -N → 500).
+    const page = Number.isFinite(Number(opts.page)) ? Math.max(1, Number(opts.page)) : 1
+    const pageSize = Number.isFinite(Number(opts.pageSize)) ? Math.min(100, Math.max(1, Number(opts.pageSize))) : 20
     const offset = (page - 1) * pageSize
     const items = await this.driver.all<SqlRow>(
       `SELECT * FROM config_items ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
@@ -4223,8 +4225,8 @@ export class DirectConnectStore {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const countRow = await this.driver.get<{ c: number }>(`SELECT COUNT(*) AS c FROM secret_audit_log ${where}`, params as SqlParam[])
     const total = countRow?.c ?? 0
-    const page = opts.page ?? 1
-    const pageSize = opts.pageSize ?? 20
+    const page = Number.isFinite(Number(opts.page)) ? Math.max(1, Number(opts.page)) : 1
+    const pageSize = Number.isFinite(Number(opts.pageSize)) ? Math.min(100, Math.max(1, Number(opts.pageSize))) : 20
     const offset = (page - 1) * pageSize
     const items = await this.driver.all<SqlRow>(
       `SELECT * FROM secret_audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
