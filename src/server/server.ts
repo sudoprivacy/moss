@@ -362,12 +362,14 @@ function serializeSession(session: {
 function makeUserNameResolver(
   getUserName: (userId: string) => Promise<string | undefined>,
 ): (userId: string) => Promise<string | undefined> {
-  const cache = new Map<string, string | undefined>()
+  const cache = new Map<string, Promise<string | undefined>>()
   return async (userId: string) => {
-    if (cache.has(userId)) return cache.get(userId)
-    const name = await getUserName(userId)
-    cache.set(userId, name)
-    return name
+    let p = cache.get(userId)
+    if (!p) {
+      p = getUserName(userId)
+      cache.set(userId, p)
+    }
+    return p
   }
 }
 
@@ -2344,10 +2346,14 @@ export function startServer(
 
   const documentStore = new DocumentStore(runtime.store)
 
-  // Initialize user model preference store with the shared DB driver.
-  // startServer is synchronous; init builds its table synchronously under the
-  // sqlite driver (DatabaseSync.exec), so fire-and-forget is safe here.
-  void initUserModelPreferenceStore(runtime.store.driver)
+  // Initialize user model preference store with the shared DB driver. An async
+  // init's synchronous throw also becomes a rejected promise, so a DDL failure
+  // must be surfaced loudly at startup, not dropped (aligns with the PG path,
+  // where openStoreAsync throws on DDL failure).
+  void initUserModelPreferenceStore(runtime.store.driver).catch(err => {
+    console.error('[startup] user model preference store init failed:', err)
+    process.exit(1)
+  })
 
   // Document Center v2: seed builtin system assistants (wiki-builder etc.)
   // from the repo into $MOSS_HOME/assistants/system/ if not already present.

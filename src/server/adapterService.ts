@@ -75,8 +75,10 @@ function deepMerge(current: Record<string, unknown>, patch: Record<string, unkno
 
 export class AdapterService {
   constructor(private readonly driver: DbDriver) {
-    // sqlite exec runs synchronously under the hood, so fire-and-forget keeps
-    // the constructor synchronous (pg builds its schema via pg_schema.ts).
+    // sqlite exec runs synchronously under the hood, keeping the constructor
+    // synchronous, but an async exec's throw still becomes a rejected promise —
+    // surface a DDL failure loudly instead of dropping it (pg builds its schema
+    // via pg_schema.ts).
     if (this.driver.kind === 'sqlite') void this.driver.exec(`
       CREATE TABLE IF NOT EXISTS adapter_configs (
         id TEXT PRIMARY KEY,
@@ -90,7 +92,10 @@ export class AdapterService {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS adapter_configs_user_platform_idx
         ON adapter_configs (org_id, user_id, platform);
-    `)
+    `).catch(err => {
+      console.error('[AdapterService] adapter_configs schema init failed:', err)
+      process.exit(1)
+    })
   }
 
   /** Get config for a specific user+platform, returns null if not found */

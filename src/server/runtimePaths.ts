@@ -56,7 +56,8 @@ export function getAttachPath(
     .digest('hex')
     .slice(0, 16)
   if (process.platform === 'win32') {
-    return `\\\\.\\pipe\\moss-session-${name}`
+    const instance = (config.instanceId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_')
+    return `\\\\.\\pipe\\moss-${instance}-session-${name}`
   }
   return join(getInstanceSocketDir(config), `${name}.sock`)
 }
