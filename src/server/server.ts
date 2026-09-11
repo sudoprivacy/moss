@@ -155,7 +155,7 @@ import { MsgAuditWorker } from './corpapps/msgaudit/worker.js'
 import type { PullConfig as MsgAuditPullConfig } from './corpapps/msgaudit/puller.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
-import { configItemToRule } from './authProxy/authProxyServer.js'
+import { loadAuthProxyRules } from './authProxy/authProxyServer.js'
 import { createSecretsApi } from './api/secrets.js'
 import { createCronApi } from './api/cron.js'
 import { CronService } from './services/cron/CronService.js'
@@ -2339,13 +2339,7 @@ export function startServer(
   async function refreshAuthProxyRules(): Promise<void> {
     const ap = runtime.authProxy
     if (!ap) return
-    const items = await runtime.store.getAllActiveConfigItems()
-    const rules = []
-    for (const item of items) {
-      const entries = await runtime.store.getConfigEntries(item.id as number)
-      rules.push(configItemToRule(item, () => entries))
-    }
-    ap.updateRules(rules)
+    await loadAuthProxyRules(runtime.store, ap)
   }
 
   const documentStore = new DocumentStore(runtime.store)

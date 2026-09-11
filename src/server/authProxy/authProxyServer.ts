@@ -88,6 +88,36 @@ export function configItemToRule(
   }
 }
 
+/** Minimal store seam for loadAuthProxyRules — structural on purpose so this
+ * module does not need to import the db module just for the type. */
+export interface AuthProxyRulesStoreSource {
+  getAllActiveConfigItems(orgId?: string): Promise<Array<Record<string, unknown>>>
+  getConfigEntries(configItemId: number): Promise<Array<Record<string, unknown>>>
+}
+
+export interface AuthProxyRulesSink {
+  updateRules(rules: AuthProxyRule[]): void
+}
+
+/**
+ * Load every active config item (with its entries) into the proxy's rule
+ * table. Single source of this loop — previously duplicated three ways
+ * (server.ts refreshAuthProxyRules, startStandaloneServer startup block and
+ * its reloadAuthProxyRules), which is exactly how they could drift apart.
+ */
+export async function loadAuthProxyRules(
+  store: AuthProxyRulesStoreSource,
+  sink: AuthProxyRulesSink,
+): Promise<void> {
+  const items = await store.getAllActiveConfigItems()
+  const rules: AuthProxyRule[] = []
+  for (const item of items) {
+    const entries = await store.getConfigEntries(item.id as number)
+    rules.push(configItemToRule(item, () => entries))
+  }
+  sink.updateRules(rules)
+}
+
 /**
  * Selection rank for a credential scope: higher wins. A user's own credential
  * takes precedence over a department one, which takes precedence over the

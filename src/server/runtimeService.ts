@@ -542,11 +542,19 @@ export class RuntimeService {
         // This is a simple heuristic: list sessions, then filter by those users who belong to the same department.
         // In a real high-scale system, this should be a DB join or aggregate table.
         const allOrgSessions = await this.store.listSessionRecords({ orgId: input.orgId })
-        const sessionUsers = await Promise.all(
-          allOrgSessions.map(s => this.authService.getUserOrNull(s.userId, input.orgId)),
+        // Resolve each DISTINCT user once: active orgs routinely have many
+        // sessions per user, and a per-session getUserOrNull multiplies the
+        // lookups (a network round-trip each on the postgres backend).
+        const uniqueUserIds = [...new Set(allOrgSessions.map(s => s.userId))]
+        const usersById = new Map(
+          await Promise.all(
+            uniqueUserIds.map(id =>
+              this.authService.getUserOrNull(id, input.orgId).then(u => [id, u] as const),
+            ),
+          ),
         )
         const deptSessions = allOrgSessions.filter(
-          (_s, i) => sessionUsers[i]?.departmentId === user.departmentId,
+          s => usersById.get(s.userId)?.departmentId === user.departmentId,
         )
         const deptStats = await loadBudgetStats(deptSessions)
         const deptTotalUsed = deptStats.summary.totalTokens

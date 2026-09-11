@@ -12,7 +12,7 @@ import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
-import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.js'
+import { AuthProxyServer, loadAuthProxyRules } from './authProxy/authProxyServer.js'
 import { TokenMinter } from './authProxy/tokenMinter.js'
 import { setSecretsApiDependencies } from './authProxy/secretsApi.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
@@ -158,29 +158,12 @@ async function finishStandaloneServerStartup(
   authProxy.setTokenMinter(new TokenMinter(authService.getMintedTokenStore()))
 
   // Load config item rules into Auth Proxy now that DB is available
-  const activeItems = await store.getAllActiveConfigItems()
-  const reloadAuthProxyRules = async () => {
-    const items = await store.getAllActiveConfigItems()
-    const rules = []
-    for (const item of items) {
-      const entries = await store.getConfigEntries(item.id as number)
-      rules.push(configItemToRule(item, () => entries))
-    }
-    authProxy.updateRules(rules)
-  }
-  {
-    const startupRules = []
-    for (const item of activeItems) {
-      const entries = await store.getConfigEntries(item.id as number)
-      startupRules.push(configItemToRule(item, () => entries))
-    }
-    authProxy.updateRules(startupRules)
-  }
+  await loadAuthProxyRules(store, authProxy)
   // HA: pick up config-items changes made on OTHER instances (this instance's
   // rules are process-local memory; the API callback only fires locally).
   authProxy.startRulesChangePolling(
     () => store.getConfigRulesFingerprint(),
-    reloadAuthProxyRules,
+    () => loadAuthProxyRules(store, authProxy),
   )
   const policyProvider = {
     async getAuthorizedConfigItemIds(departmentId: string): Promise<number[]> {

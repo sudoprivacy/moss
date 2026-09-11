@@ -56,8 +56,6 @@ export interface DbDriver {
    * and rolled back on throw.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>
-  /** SQLite only: last insert rowid (0 on PG — use RETURNING there). */
-  lastInsertRowid(): number | bigint
   /**
    * Cross-instance mutual exclusion, tx-scoped on PG: run `fn` while holding
    * an exclusive advisory lock on `lockKey`; resolve null when another holder
@@ -78,7 +76,6 @@ export interface DbDriver {
 export class SqliteDriver implements DbDriver {
   readonly kind = 'sqlite' as const
   private readonly txStorage = new AsyncLocalStorage<{ db: DatabaseSync }>()
-  #lastRowid = 0
 
   constructor(private readonly db: DatabaseSync) {}
 
@@ -95,7 +92,6 @@ export class SqliteDriver implements DbDriver {
   async run(sql: string, params?: SqlParam[]): Promise<number> {
     const db = this.txStorage.getStore()?.db ?? this.db
     const res = db.prepare(sql).run(...(params ?? []))
-    this.#lastRowid = Number(res.lastInsertRowid ?? 0)
     return Number(res.changes)
   }
 
@@ -115,10 +111,6 @@ export class SqliteDriver implements DbDriver {
       try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ }
       throw error
     }
-  }
-
-  lastInsertRowid(): number | bigint {
-    return this.#lastRowid
   }
 
   async tryRunExclusive<T>(lockKey: string, fn: () => Promise<T>): Promise<T | null> {
@@ -239,11 +231,6 @@ export class PgDriver implements DbDriver {
     } finally {
       client.release()
     }
-  }
-
-  /** PG has no rowid; call sites must use INSERT ... RETURNING. */
-  lastInsertRowid(): number | bigint {
-    return 0
   }
 
   async tryRunExclusive<T>(lockKey: string, fn: () => Promise<T>): Promise<T | null> {
