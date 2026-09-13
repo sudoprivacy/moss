@@ -32,6 +32,7 @@ const BUN = [
   'untrustedText.test.ts',
   // src/server/__tests__
   'applicationHelloReplay.test.ts',
+  'nexusZoneId.test.ts',
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
   'credits.test.ts',
