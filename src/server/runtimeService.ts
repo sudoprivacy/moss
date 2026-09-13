@@ -1897,11 +1897,8 @@ export class RuntimeService {
     // and the child.once('close') registration below.
     let userContainerAcquired = false
     if (session.runtime.type === 'docker' && containerMode === 'user') {
-      const { ensureUserContainer, acquireSession, buildUserContainerName } =
+      const { ensureUserContainer, acquireSession } =
         await import('./runtime/userContainerRegistry.js')
-      // Must match the name ensureUserContainer computes (same instanceId), or
-      // the spawned runner's container name would diverge from the registry's.
-      userContainerName = buildUserContainerName(session.orgId, session.userId, this.options.config.instanceId)
       inContainerPidFile = getInContainerPidFile(
         this.options.config.runtimeDir,
         session.sessionId,
@@ -1914,7 +1911,7 @@ export class RuntimeService {
       await mkdir(dirname(inContainerPidFile), { recursive: true })
 
       try {
-        await ensureUserContainer(this.options.config, {
+        const userRec = await ensureUserContainer(this.options.config, {
           orgId: session.orgId,
           userId: session.userId,
           role: session.role,
@@ -1928,6 +1925,9 @@ export class RuntimeService {
           this.options.config,
         )
         userContainerAcquired = true
+        // manifest 必须用 registry 的实际容器名：reconcile 认领的存量容器名可能与
+        // 重算名不同（命名规则演进后），预计算名会让 runner exec 不存在的容器。
+        userContainerName = userRec.containerName
       } catch (err) {
         process.stderr.write(
           `[RuntimeService] ensureUserContainer failed for ${session.userId}: ${errorMessage(err)}\n`,

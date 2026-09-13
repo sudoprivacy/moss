@@ -68,7 +68,7 @@ function key(orgId: string, userId: string): string {
   return `${orgId}:${userId}`
 }
 
-/** moss-user-<hash12>-<inst6> avoids leaking orgId/userId into the docker
+/** moss-user-<hash12>-<inst≤40> avoids leaking orgId/userId into the docker
  * container name and stays within Docker's 63-char limit. The instance suffix
  * (HA) keeps two instances sharing one docker.sock from colliding on / killing
  * each other's containers; undefined (single instance) falls back to 'default'
@@ -79,8 +79,16 @@ export function buildUserContainerName(orgId: string, userId: string, instanceId
     .update(`${orgId}:${userId}`)
     .digest('hex')
     .slice(0, 12)
-  const suffix = instanceId ? instanceId.slice(0, 6) : 'default'
+  const suffix = instanceId ? instanceSuffix(instanceId) : 'default'
   return `moss-user-${hash}-${suffix}`
+}
+
+/** Suffix 预算 = 63 - len('moss-user-') - hash12 - 1 = 40。与容器 label（完整
+ * instanceId）同源：≤40 原样保留；更长时前 31 位保可读 + sha1 前 8 位保证
+ * 不同实例必不同名（同前缀截断撞名的回归防护）。 */
+function instanceSuffix(instanceId: string): string {
+  if (instanceId.length <= 40) return instanceId
+  return `${instanceId.slice(0, 31)}-${createHash('sha1').update(instanceId).digest('hex').slice(0, 8)}`
 }
 
 function configHash(input: {
