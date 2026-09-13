@@ -19,9 +19,18 @@
 import { readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
-const DIR = 'src/server/__tests__'
+/**
+ * Suites this gates, by directory. Adding a directory here is what makes its
+ * tests run in CI at all — a test outside these is not protecting anything.
+ */
+const SUITES = ['src/server/__tests__', 'src/channels/__tests__']
 
 const BUN = [
+  // src/channels/__tests__
+  'connectionScope.test.ts',
+  'crashSeedRecovery.test.ts',
+  'untrustedText.test.ts',
+  // src/server/__tests__
   'applicationHelloReplay.test.ts',
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
@@ -58,27 +67,35 @@ const EXCLUDED = {
   'releaseE2eSmoke.test.ts': 'asserts packaged release artifacts absent from a dev tree',
 }
 
-const present = readdirSync(DIR).filter(name => name.endsWith('.test.ts'))
+const present = SUITES.flatMap(dir =>
+  readdirSync(dir)
+    .filter(name => name.endsWith('.test.ts'))
+    .map(name => ({ name, dir })),
+).reduce((acc, { name, dir }) => {
+  if (acc.has(name)) throw new Error(`two suites both contain ${name}; names must be unique across ${SUITES.join(', ')}`)
+  acc.set(name, dir)
+  return acc
+}, new Map())
 const accounted = new Set([...BUN, ...NODE, ...Object.keys(EXCLUDED)])
-const unlisted = present.filter(name => !accounted.has(name))
+const unlisted = [...present.keys()].filter(name => !accounted.has(name))
 if (unlisted.length > 0) {
   console.error(
-    `Unlisted test files in ${DIR}:\n  ${unlisted.join('\n  ')}\n` +
+    `Unlisted test files in ${SUITES.join(' / ')}:\n  ${unlisted.join('\n  ')}\n` +
       'Add each to BUN or NODE in scripts/test-server.js so it actually runs.',
   )
   process.exit(1)
 }
 
-const missing = [...BUN, ...NODE].filter(name => !present.includes(name))
+const missing = [...BUN, ...NODE].filter(name => !present.has(name))
 if (missing.length > 0) {
-  console.error(`Listed but absent from ${DIR}:\n  ${missing.join('\n  ')}`)
+  console.error(`Listed but absent from ${SUITES.join(' / ')}:\n  ${missing.join('\n  ')}`)
   process.exit(1)
 }
 
 function run(label, command, leadingArgs, names) {
   if (names.length === 0) return true
   console.log(`\n=== ${label} (${names.length} files) ===`)
-  const paths = names.map(name => `${DIR}/${name}`)
+  const paths = names.map(name => `${present.get(name)}/${name}`)
   const { status } = spawnSync(command, [...leadingArgs, ...paths], {
     stdio: 'inherit',
     shell: process.platform === 'win32',
