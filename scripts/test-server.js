@@ -57,6 +57,7 @@ const NODE = [
   'lbServerInstance.test.ts',
   'phoneAuth.test.ts',
   'phoneImport.test.ts',
+  'tokenQuota.test.ts',
   'transcriptGuard.test.ts',
 ]
 
