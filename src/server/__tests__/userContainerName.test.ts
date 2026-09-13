@@ -28,9 +28,28 @@ describe("B5: buildUserContainerName instance scoping", () => {
     assert.ok(!name.includes("undefined"));
   });
 
-  it("uses only the first 6 chars of the instance id and stays within Docker's 63-char limit", () => {
+  it("keeps the full instance id in the suffix and stays within Docker's 63-char limit", () => {
     const name = buildUserContainerName("o1", "u1", "0123456789abcdef");
-    assert.ok(name.endsWith("-012345"), `unexpected suffix: ${name}`);
+    assert.ok(name.endsWith("-0123456789abcdef"), `unexpected suffix: ${name}`);
     assert.ok(name.length <= 63);
+  });
+
+  it("differs for instance ids sharing the same 6-char prefix (moss-server-0/1 regression)", () => {
+    assert.notEqual(
+      buildUserContainerName("o1", "u1", "moss-server-0"),
+      buildUserContainerName("o1", "u1", "moss-server-1"),
+    );
+  });
+
+  it("truncates >40-char instance ids to prefix-31 + '-' + hash8, staying within 63 and unique", () => {
+    const longA = `${"x".repeat(41)}0`;
+    const longB = `${"x".repeat(41)}1`;
+    const nameA = buildUserContainerName("o1", "u1", longA);
+    const nameB = buildUserContainerName("o1", "u1", longB);
+    assert.notEqual(nameA, nameB);
+    assert.match(nameA, /-[0-9a-f]{8}$/);
+    assert.match(nameB, /-[0-9a-f]{8}$/);
+    assert.ok(nameA.length <= 63, `nameA too long: ${nameA.length}`);
+    assert.ok(nameB.length <= 63, `nameB too long: ${nameB.length}`);
   });
 });
