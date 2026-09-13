@@ -6,7 +6,7 @@
 // already needs node:sqlite for DirectConnectStore and therefore runs under
 // `tsx --test`).
 import type http from 'http'
-import { ServerDrainingError } from './runtimeService.js'
+import { ServerDrainingError, TokenQuotaExceededError } from './runtimeService.js'
 import { AuthServiceError } from './auth/service.js'
 import type { ServerLogger } from './serverLog.js'
 
@@ -46,6 +46,14 @@ export function writeError(
   // matches every other writeError branch.
   if (error instanceof ServerDrainingError) {
     writeJson(res, 503, { error: error.message })
+    return
+  }
+  // A budget refusal is an answer, not a fault. Left to the fallback below it
+  // became a 500, telling the caller the server had broken when the server had
+  // in fact decided. 403: understood, refused, and retrying changes nothing
+  // until an administrator raises the limit.
+  if (error instanceof TokenQuotaExceededError) {
+    writeJson(res, 403, { error: error.message })
     return
   }
   if (error instanceof AuthServiceError || error instanceof HttpError) {
