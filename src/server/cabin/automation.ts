@@ -124,6 +124,7 @@ export class CabinFlightAutomation {
   private ws: WebSocket | null = null
   private stopped = false
   private reconnectTimer: NodeJS.Timeout | null = null
+  private leadershipTimer: NodeJS.Timeout | null = null
   private connectTimeoutTimer: NodeJS.Timeout | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
   private reconnectAttempts = 0
@@ -138,6 +139,15 @@ export class CabinFlightAutomation {
     private readonly config: ServerConfig,
     private readonly store: CabinStore,
     private readonly healthReports?: CabinHealthReportService,
+    /**
+     * B-8: leader arbitration for multi-instance deployments — only the
+     * (started_at, instance_id)-smallest live instance runs the phase
+     * automation, so two same-configured instances do not double-fire cabin
+     * broadcasts/alerts/hardware commands. Injected by the server (which
+     * holds the RuntimeService); undefined keeps the historical
+     * single-instance behaviour (always leader).
+     */
+    private readonly isLeader?: () => Promise<boolean>,
   ) {
     this.logFile = config.cabin.automationLogFile || join(config.rootDir, 'logs', 'cabin-automation.jsonl')
     this.broadcastClient = new CabinBroadcastClient(config.cabin)
@@ -148,12 +158,58 @@ export class CabinFlightAutomation {
       this.log({ event: 'automation.disabled', ok: true })
       return
     }
-    void this.seedConfiguredSeats()
-    this.connect()
+    void this.runUnderLeadership()
+    // Re-evaluate leadership every 30s: when the current leader dies its
+    // heartbeat goes stale, another instance's check flips it to leader and
+    // its automation takes over; when WE lose leadership (a same-id or older
+    // peer appeared) we suspend to stop double-firing.
+    this.leadershipTimer = setInterval(() => {
+      void this.runUnderLeadership()
+    }, 30_000)
+    this.leadershipTimer.unref?.()
+  }
+
+  private async runUnderLeadership(): Promise<void> {
+    if (this.stopped) return
+    try {
+      const leader = this.isLeader ? await this.isLeader() : true
+      if (leader) {
+        if (!this.ws) {
+          this.log({ event: 'automation.leadership_acquired', ok: true })
+          void this.seedConfiguredSeats()
+          this.connect()
+        }
+      } else if (this.ws) {
+        this.log({ event: 'automation.leadership_lost', ok: true })
+        this.suspend()
+      }
+    } catch (err) {
+      // Arbitration unreachable (DB hiccup): keep the current state —
+      // never flap the automation on a failed check.
+      this.log({ event: 'automation.leadership_check_failed', ok: false, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  /**
+   * B-8: stop serving WITHOUT the finality of stop(): clear the pending
+   * reconnect, detach and close the socket, but leave `stopped` false so a
+   * later re-acquisition of leadership can connect() again. The ws is
+   * nulled BEFORE close so the close handler's wasCurrent check
+   * (this.ws === ws) is false and no auto-reconnect is scheduled.
+   */
+  private suspend(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+    this.clearWsTimers()
+    const ws = this.ws
+    this.ws = null
+    ws?.close()
   }
 
   stop(): void {
     this.stopped = true
+    if (this.leadershipTimer) clearInterval(this.leadershipTimer)
+    this.leadershipTimer = null
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     this.clearWsTimers()

@@ -125,6 +125,62 @@ async function finishStandaloneServerStartup(
   const store = await openStoreAsync(config)
   await store.ensureDefaultConfigItems()
 
+  // E-5: HA-shaped deployment without MOSS_INSTANCE_ID → refuse to start.
+  // The container-name suffix, docker label filter and wiki claim column all
+  // collapse to the 'default' fallback when instanceId is unset, which makes
+  // two such instances claim-kill each other's containers and stage dirs.
+  // We cannot know our own row yet (registration happens below), so the
+  // live-peer count uses an empty-string sentinel — before registration
+  // there is no self row to exclude, and `instance_id != ''` holds for every
+  // real UUID row. (Never pass config.instanceId here: undefined bind values
+  // throw in the driver.)
+  if (!config.instanceId) {
+    const haShaped = Boolean(config.publicBaseUrl)
+      || (await store.countLiveOtherInstances('', config.heartbeatTimeoutMs)) > 0
+    if (haShaped) {
+      throw new Error(
+        '[Startup] Refusing to start: this deployment is HA-shaped (publicBaseUrl set, or live peer instances found) ' +
+          'but MOSS_INSTANCE_ID is not set. Without a per-instance id, container names, docker labels and wiki job ' +
+          'claims collapse to the shared "default" suffix and two instances will destroy each other\'s state. ' +
+          'Set a unique MOSS_INSTANCE_ID per instance.',
+      )
+    }
+  }
+  // B-9: sqlite backend + instanceId set + live peers sharing the file →
+  // refuse: the advisory-lock seam is a no-op passthrough on sqlite, so
+  // cross-instance mutual exclusion (source sync etc.) silently degrades to
+  // double-runs. (The unset-id HA case is already caught by the guard above.)
+  if (store.driver.kind === 'sqlite' && config.instanceId) {
+    const peers = await store.countLiveOtherInstances(config.instanceId, config.heartbeatTimeoutMs)
+    if (peers > 0) {
+      throw new Error(
+        `[Startup] Refusing to start: ${peers} live instance(s) are registered against the shared SQLite file, ` +
+          'but the sqlite backend has no cross-process mutual exclusion (advisory locks are a no-op there) — ' +
+          'two processes would double-run source syncs and races. Use the postgres backend for multi-instance HA.',
+      )
+    }
+  }
+
+  // A-10: cross-host clock-skew visibility. Liveness judgements compare
+  // heartbeats written by OTHER hosts against this host's Date.now() (30s
+  // threshold; the 90s fencing watchdog bounds the damage), so HA hosts are
+  // expected to be NTP-synced — see deploy/nginx/README-ha.md. Advisory
+  // only: compare our clock against the DB's once at boot and warn on skew.
+  try {
+    const row = store.driver.kind === 'postgres'
+      ? await store.driver.get<{ ts: number | string }>(`SELECT (extract(epoch from now()) * 1000) AS ts`)
+      : await store.driver.get<{ ts: number | string }>(`SELECT (CAST(strftime('%s','now') AS INTEGER) * 1000) AS ts`)
+    const dbNow = Number(row?.ts ?? 0)
+    if (dbNow > 0 && Math.abs(Date.now() - dbNow) > 5_000) {
+      console.warn(
+        `[Startup] Host clock differs from the database clock by ${Math.round((Date.now() - dbNow) / 1000)}s — ` +
+          'liveness thresholds assume NTP-synced hosts; large skew causes spurious fences or delayed takeovers.',
+      )
+    }
+  } catch {
+    // Advisory only — never block startup on it.
+  }
+
   // Start Auth Proxy (create instance, will load rules after DB is ready)
   const authProxy = new AuthProxyServer()
   if (nexusClient) {

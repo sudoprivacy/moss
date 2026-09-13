@@ -25,10 +25,11 @@
  *     only works on text columns.
  *
  * Versioning: `_migrations` records each applied migration. DDL runs via
- * driver.exec (one statement batch per migration, on a dedicated connection)
- * rather than inside driver.transaction — PG DDL is transactional but
- * PgDriver.exec does not join the ALS transaction context; idempotent
- * statements make a re-run after a mid-migration crash safe instead.
+ * driver.exec (one statement batch per migration). PgDriver.exec joins the
+ * ALS transaction context when present, so under applyPgSchema's advisory
+ * lock each migration's DDL rides the locked client and commits atomically
+ * with its _migrations INSERT; the idempotent (IF NOT EXISTS) statements
+ * additionally make a re-run after a crash safe.
  */
 import type { DbDriver } from './driver.js'
 
@@ -1147,6 +1148,19 @@ ALTER TABLE channel_plugins ADD COLUMN IF NOT EXISTS lease_owner TEXT;
 ALTER TABLE channel_plugins ADD COLUMN IF NOT EXISTS lease_until BIGINT;
 `
 
+// Third-wave audit fixes (2026-09-13). C-4: the org_id indexes the sqlite
+// authority (db.ts ensureSchema) has always created for the tenant store
+// tables — without them every org-scoped list on PG degrades to a seq scan.
+// E-2: the agent/model snapshot driving settings-change session rotation.
+const MIGRATION_0003_FIXES = `
+-- C-4: org-scoped tenant store indexes (parity with sqlite db.ts)
+CREATE INDEX IF NOT EXISTS idx_tenant_skills_org ON tenant_skills (org_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_assistants_org ON tenant_assistants (org_id);
+
+-- E-2: agent/model snapshot for channel-session settings-change rotation
+ALTER TABLE channel_sessions ADD COLUMN IF NOT EXISTS last_agent_config TEXT;
+`
+
 interface PgMigration {
   version: number
   name: string
@@ -1156,6 +1170,7 @@ interface PgMigration {
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
+  { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
@@ -1185,8 +1200,9 @@ const SCHEMA_MIGRATE_LOCK_TIMEOUT_MS = 60_000
  * CREATE TABLE IF NOT EXISTS can hit pg_type_typname_nsp_index and the
  * INSERT can hit the _migrations PK; running one migration at a time avoids
  * both. The advisory lock is tx-scoped and releases only after fn resolves,
- * so even though `exec` rides a dedicated connection (not the locked tx),
- * the two instances' migration executions stay serialized in time.
+ * and `exec` joins the locked transaction's client (PgDriver.exec is
+ * transaction-aware), so each migration's DDL and its _migrations INSERT
+ * commit atomically together under the lock.
  */
 export async function applyPgSchema(driver: DbDriver): Promise<void> {
   const deadline = Date.now() + SCHEMA_MIGRATE_LOCK_TIMEOUT_MS

@@ -113,3 +113,51 @@ describe("A3: pagination clamp (SQLite)", () => {
     }
   });
 });
+
+describe("C-7: escapeLike + ESCAPE clause", () => {
+  it("escapes the three wildcard/escape characters", async () => {
+    const { escapeLike } = await import("../db/driver.js");
+    assert.equal(escapeLike("100%"), "100\\%");
+    assert.equal(escapeLike("a_b"), "a\\_b");
+    assert.equal(escapeLike("a\\b"), "a\\\\b");
+    assert.equal(escapeLike("plain"), "plain");
+  });
+
+  it("literal %, _ and backslash in a search term match only themselves (sqlite)", async () => {
+    const { escapeLike } = await import("../db/driver.js");
+    const dir = mkdtempSync(join(tmpdir(), "moss-esc-"));
+    try {
+      const store = new DirectConnectStore(join(dir, "t.db"));
+      store.db.exec(`CREATE TABLE esc_probe (id TEXT PRIMARY KEY, name TEXT)`);
+      const ins = store.db.prepare(`INSERT INTO esc_probe (id, name) VALUES (?, ?)`);
+      ins.run("1", "100% done");
+      ins.run("2", "100x done");
+      ins.run("3", "a_b");
+      ins.run("4", "axb");
+      ins.run("5", "a\\b");
+      const sel = store.db.prepare(`SELECT id FROM esc_probe WHERE name LIKE ? ESCAPE '\\'`);
+      const like = (term: string) => sel.all(`%${escapeLike(term)}%`).map((r: { id: string }) => r.id);
+
+      assert.deepEqual(like("100%"), ["1"], "literal % must not act as a wildcard");
+      assert.deepEqual(like("100"), ["1", "2"]);
+      assert.deepEqual(like("a_b"), ["3"], "literal _ must not act as a single-char wildcard");
+      assert.deepEqual(like("a\\b"), ["5"], "literal backslash must match itself");
+      store.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("C-8: isUniqueViolation is exact, not loose-substring", () => {
+  it("no longer matches unrelated errors that merely contain 'unique constraint'", async () => {
+    const { isUniqueViolation } = await import("../db/driver.js");
+    // Pre-C-8 this loose regex (/UNIQUE|unique constraint/i) matched it.
+    assert.equal(isUniqueViolation(new Error("check unique constraint naming docs for details")), false);
+    assert.equal(isUniqueViolation(Error("some UNIQUE path in the docs")), false);
+    // The real SQLite-native message still matches.
+    assert.equal(isUniqueViolation(new Error("UNIQUE constraint failed: esc_probe.id")), true);
+    // PG's SQLSTATE still matches.
+    assert.equal(isUniqueViolation(Object.assign(new Error("dup"), { code: "23505" })), true);
+  });
+});

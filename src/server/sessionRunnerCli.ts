@@ -23,3 +23,19 @@ main().catch((error: unknown) => {
   )
   process.exit(1)
 })
+
+// A-3: the daemon has several fire-and-forget DB writes (void'd in event
+// handlers) whose rejections would otherwise crash the whole runner via
+// Node's default unhandledRejection=throw — turning a one-second DB blip
+// into a full-portfolio session restart. Known paths carry their own
+// catch; this handler is the backstop for the rest: log and count, never
+// exit (the heartbeat interval surfaces persistent DB loss as a fenced
+// exit through the proper chain).
+let unhandledRejectionCount = 0
+process.on('unhandledRejection', (reason: unknown) => {
+  unhandledRejectionCount++
+  process.stderr.write(
+    `[SessionRunnerDaemon] Unhandled rejection #${unhandledRejectionCount}: ` +
+      `${reason instanceof Error ? reason.stack || reason.message : String(reason)}\n`,
+  )
+})

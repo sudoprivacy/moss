@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import type { DbDriver, SqlParam } from '../db/driver.js'
+import { escapeLike, type DbDriver, SqlParam } from '../db/driver.js'
 import type {
   CabinConversation,
   CabinAlert,
@@ -546,8 +546,9 @@ export class CabinStore {
     const clauses: string[] = []
     const params: SqlParam[] = []
     if (input.flightId) {
-      clauses.push('flight_id LIKE ?')
-      params.push(`%${input.flightId}%`)
+      // C-7: escapeLike + ESCAPE (see driver.ts escapeLike).
+      clauses.push("flight_id LIKE ? ESCAPE '\\'")
+      params.push(`%${escapeLike(input.flightId)}%`)
     }
     if (input.flightDate) {
       clauses.push('flight_date = ?')
@@ -786,20 +787,21 @@ export class CabinStore {
     const clauses: string[] = []
     const params: SqlParam[] = []
     if (input.flightId) {
-      clauses.push('flight_id LIKE ?')
-      params.push(`%${input.flightId}%`)
+      // C-7: escapeLike + ESCAPE (see driver.ts escapeLike).
+      clauses.push("flight_id LIKE ? ESCAPE '\\'")
+      params.push(`%${escapeLike(input.flightId)}%`)
     }
     if (input.flightDate) {
       clauses.push('flight_date = ?')
       params.push(input.flightDate)
     }
     if (input.seatId) {
-      clauses.push('seat_id LIKE ?')
-      params.push(`%${input.seatId}%`)
+      clauses.push("seat_id LIKE ? ESCAPE '\\'")
+      params.push(`%${escapeLike(input.seatId)}%`)
     }
     if (input.passenger) {
-      clauses.push('(passenger_id LIKE ? OR passenger_ref LIKE ? OR passenger_name LIKE ?)')
-      const like = `%${input.passenger}%`
+      clauses.push("(passenger_id LIKE ? ESCAPE '\\' OR passenger_ref LIKE ? ESCAPE '\\' OR passenger_name LIKE ? ESCAPE '\\')")
+      const like = `%${escapeLike(input.passenger)}%`
       params.push(like, like, like)
     }
     if (input.status) {

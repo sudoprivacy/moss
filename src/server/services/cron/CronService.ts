@@ -81,6 +81,16 @@ export interface CronServiceConfig {
   workspace?: string
   /** Get user auth context (role, scopes) for session creation */
   getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[] } | null>
+  /**
+   * B-3 cluster awareness: count of live peer instances, excluding self.
+   * Optional because CronService only holds the driver, not the Store —
+   * the server wires it to runtime.countLiveOtherInstances(). When provided
+   * and > 0, markMissedJobsOnStartup skips: peers being alive means this is
+   * a rolling restart, not an outage, and the online peer's 60s poll runs
+   * the due job normally (listDueJobs does not depend on next_run_at being
+   * advanced by the missed-marking).
+   */
+  countLiveOtherInstances?: () => Promise<number>
 }
 
 function isPathInside(base: string, candidate: string): boolean {
@@ -189,6 +199,24 @@ export class CronService {
   }
 
   private async markMissedJobsOnStartup(): Promise<void> {
+    // B-3: while peer instances are alive, "the server was offline" is false —
+    // an overdue next_run_at just means the owning poll hasn't fired yet
+    // (rolling restart). Marking missed here would (a) insert a phantom
+    // missed run with a wrong attribution and (b) advance next_run_at so the
+    // online peer's next poll no longer sees the job due — the run is lost.
+    if (this.config.countLiveOtherInstances) {
+      try {
+        const peers = await this.config.countLiveOtherInstances()
+        if (peers > 0) {
+          console.log(`[CronService] ${peers} live peer instance(s) — skipping missed-job marking (not an outage)`)
+          return
+        }
+      } catch (err) {
+        // Unreadable cluster state: keep the legacy single-instance behaviour
+        // (mark missed) rather than skipping on a failed check.
+        console.warn('[CronService] Live-instance check failed, falling back to missed marking:', err)
+      }
+    }
     const now = Date.now()
     const missedJobs = await this.store.listOverdueJobs(now)
     for (const job of missedJobs) {

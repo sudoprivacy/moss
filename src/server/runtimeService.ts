@@ -778,6 +778,9 @@ export class RuntimeService {
     if (!this.pendingEnsures.has(session.sessionId)) {
       await this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
       void this.ensureAttempt(session).catch(async error => {
+        // A-8: takeover-pending is the DESIGNED control flow of a cross-host
+        // failover (foreground turns it into a 503) — not a reconcile failure.
+        if (error instanceof AttemptTakeoverPendingError) return
         await this.store.addEvent(
           session.sessionId,
           session.currentAttemptId,
@@ -912,6 +915,41 @@ export class RuntimeService {
     return attempt?.serverInstanceId === this.options.serverInstanceId
   }
 
+  /** Whether the attempt's RUNNER (per its on-disk manifest) was spawned by
+   *  THIS instance. DB ownership can say "self" right after a same-host adopt
+   *  while the live socket is still served by the old instance's daemon —
+   *  fencing will kill it within one heartbeat interval, so direct-connect
+   *  fast paths (WS upgrade, internal channel) must check this before
+   *  bridging. Unreadable manifest / no instanceId → true (normal path). */
+  async ownsAttemptRunner(attemptId: string): Promise<boolean> {
+    const attempt = await this.store.getAttempt(attemptId)
+    if (!attempt || !this.options.serverInstanceId) return true
+    const runnerInstanceId = await this.#readAttemptRunnerInstanceId(
+      attempt.sessionId,
+      attempt.generation,
+    )
+    return runnerInstanceId == null || runnerInstanceId === this.options.serverInstanceId
+  }
+
+  /** B-3 cluster awareness for background services constructed with only the
+   *  driver (cron): live-peer count, excluding self by the RESOLVED instance
+   *  id this process actually registered under (random UUID when unset). */
+  async countLiveOtherInstances(): Promise<number> {
+    return await this.store.countLiveOtherInstances(
+      this.options.serverInstanceId,
+      this.options.config.heartbeatTimeoutMs,
+    )
+  }
+
+  /** B-8 cabin arbitration: is THIS instance the (started_at, instance_id)-
+   *  smallest live instance? CabinFlightAutomation only runs its phase
+   *  automation on the leader so a dual-instance HA deployment does not
+   *  double-fire cabin broadcasts/alerts. */
+  async isCabinLeader(): Promise<boolean> {
+    const oldest = await this.store.getOldestLiveInstanceId(this.options.config.heartbeatTimeoutMs)
+    return oldest === this.options.serverInstanceId
+  }
+
   async reconcileOnStartup(): Promise<void> {
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning
@@ -959,6 +997,12 @@ export class RuntimeService {
         // No PID at all → cannot have been running.
         // PID present but not alive → runner crashed silently.
         if (att.runnerPid !== null && safeKill0(att.runnerPid)) continue
+        // A-4: a FRESH heartbeat means the runner is alive on some host
+        // (cross-host adopt, or a same-host daemon we can't signal by pid
+        // check). Stamping it stopped here is what makes startup retire a
+        // healthy session; leave it for the session loop below, which routes
+        // fresh attempts to the fencing-wait (unified with the adopt path).
+        if (isAttemptHeartbeatFresh(att, this.options.config.heartbeatTimeoutMs)) continue
         await this.store.markAttemptStopped(att.attemptId, {
           runtimeState: 'stopped',
           stopReason: 'stale_on_startup',
@@ -992,14 +1036,6 @@ export class RuntimeService {
 
     for (const session of sessions) {
       try {
-        // Per-user container mode: probe scode in the container and reap
-        // orphan processes before resuming. runner-alive cases reattach via
-        // ensureAttempt; runner-dead cases need a clean kill so the next
-        // attempt can fresh-spawn.
-        const runtimeAny = session.runtime as {
-          containerMode?: 'session' | 'user'
-          userContainerName?: string
-        }
         const attempt = session.currentAttemptId
           ? await this.store.getAttempt(session.currentAttemptId)
           : null
@@ -1019,65 +1055,25 @@ export class RuntimeService {
         const runnerAlive = attempt?.runnerPid
           ? safeKill0(attempt.runnerPid)
           : false
-        // Whether any live runtime backs this session. For user containers we
-        // also accept an orphan scode (runner died but scode lives → reapable
-        // and resumable). Defaults to runnerAlive for non-container sessions.
-        let recoverable = runnerAlive
-        if (
-          runtimeAny.containerMode === 'user' &&
-          runtimeAny.userContainerName &&
-          this.options.config.runtimeDir
-        ) {
-          try {
-            const { probeContainerSession } = await import(
-              './runtime/probeContainerSession.js'
-            )
-            const probe = await probeContainerSession({
-              userContainerName: runtimeAny.userContainerName,
-              sessionId: session.sessionId,
-              runtimeDirInContainer: this.options.config.runtimeDir,
-            })
-            if (!runnerAlive && probe.kind === 'alive') {
-              // Orphan scode — runner died with stdio. Reap before resume.
-              recoverable = true
-              const { reapInUserContainer } = await import('./runtime/reaper.js')
-              await reapInUserContainer({
-                userContainerName: runtimeAny.userContainerName,
-                sessionId: session.sessionId,
-                graceMs: 0,
-              })
-              await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_orphan_scode', {
-                userContainer: runtimeAny.userContainerName,
-              })
-              const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
-              logRuntimeMetric('reconcile_orphan_scode', {})
-              logRuntimeEvent('reconcile_orphan_scode', {
-                sessionId: session.sessionId,
-                containerName: runtimeAny.userContainerName,
-              })
-            } else if (probe.kind === 'stale_pid_reuse') {
-              await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_pid_reuse', {
-                pid: probe.pid,
-                recordedStartTicks: probe.recordedStartTicks,
-                currentStartTicks: probe.currentStartTicks,
-              })
-              const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
-              logRuntimeMetric('reconcile_pid_reuse', {})
-              logRuntimeEvent('reconcile_pid_reuse', {
-                sessionId: session.sessionId,
-                pid: probe.pid,
-              })
-            }
-          } catch (probeErr) {
-            await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_probe_failed', {
-              error: errorMessage(probeErr),
-            })
-            const { logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
-            logRuntimeMetric('reconcile_probe_failed', { reason: 'exception' })
-          }
-        }
+        // E-4: the user-container orphan-scode probe branch that used to live
+        // here was dead code — its condition read runtime.containerMode /
+        // runtime.userContainerName off the session row, but no write path
+        // ever populates those fields on sessions (they exist only in the
+        // runner manifest), so the condition was constant-false since its
+        // introduction (17052d65). Removed.
+        const recoverable = runnerAlive
 
         if (!recoverable) {
+          // A-4: fresh heartbeat = the runner lives (on another host after an
+          // adopt, or as a same-host old daemon). Retiring here would kill a
+          // healthy session on takeover — hand it to the fencing-wait instead
+          // (same semantics as the adopt path: the old runner's heartbeat
+          // predicate fails on its next tick and fences it, the wait then
+          // respawns; the desiredState guard inside covers terminated).
+          if (attempt && isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)) {
+            this.#scheduleFencingWait(session)
+            continue
+          }
           // No live runner and no live scode to reattach to. Resurrecting this
           // session would respawn a fresh runner and re-occupy a per-user/global
           // session slot for what is effectively an abandoned session — the
@@ -1091,7 +1087,6 @@ export class RuntimeService {
           await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_retired_unrecoverable', {
             runnerPid: attempt?.runnerPid ?? null,
             previousStatus: session.status,
-            containerMode: runtimeAny.containerMode ?? null,
           })
           const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
           logRuntimeMetric('reconcile_retired_unrecoverable', {})
@@ -1104,6 +1099,9 @@ export class RuntimeService {
 
         await this.ensureAttempt(session)
       } catch (error) {
+        // A-8: takeover-pending is designed control flow, not a failure (see
+        // ensureSessionReadyNonBlocking's note).
+        if (error instanceof AttemptTakeoverPendingError) continue
         await this.store.addEvent(session.sessionId, session.currentAttemptId, 'reconcile_failed', {
           error: errorMessage(error),
         })
@@ -1163,14 +1161,25 @@ export class RuntimeService {
       // remote runner's fenced heartbeat (runtime_state no longer 'running')
       // makes it exit on its own.
       if (attempt.serverInstanceId === this.options.serverInstanceId) {
-        try {
-          process.kill(attempt.runnerPid, 'SIGTERM')
-        } catch (err) {
-          // ESRCH = no such process; the runner already exited and our
-          // termination signal has nothing to deliver. Other codes are real
-          // failures and worth logging.
-          if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ESRCH') {
-            console.warn('[RuntimeService] Failed to terminate runner process:', err)
+        // Same-host adopt guard: after a cross-host adopt flips DB ownership
+        // to self, runnerPid still names a process on the OLD host — killing
+        // it here hits an unrelated local process with the same pid number.
+        // The daemon's manifest records the instance that actually spawned
+        // the runner; only kill when it is unreadable (null → normal path,
+        // same semantics as the non-blocking takeover guard) or names this
+        // instance. A foreign runner exits on its own via the fenced
+        // heartbeat.
+        const runnerInstanceId = await this.#readAttemptRunnerInstanceId(sessionId, attempt.generation)
+        if (runnerInstanceId == null || runnerInstanceId === this.options.serverInstanceId) {
+          try {
+            process.kill(attempt.runnerPid, 'SIGTERM')
+          } catch (err) {
+            // ESRCH = no such process; the runner already exited and our
+            // termination signal has nothing to deliver. Other codes are real
+            // failures and worth logging.
+            if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ESRCH') {
+              console.warn('[RuntimeService] Failed to terminate runner process:', err)
+            }
           }
         }
       }
@@ -1295,6 +1304,26 @@ export class RuntimeService {
         this.options.config.reattachProbeTimeoutMs,
       )
       if (healthy) {
+        // Host same-machine takeover guard (A-2): after an adopt claim flips
+        // DB ownership to self, the socket this probe just confirmed may
+        // still be served by the OLD instance's daemon (its on-disk manifest
+        // carries the old instanceId) — fencing is about to kill it. Marking
+        // 'active' here hands the client a runner that is about to die.
+        // Mirrors the fresh-takeover branch above: wait for the fence, then
+        // the fencing-wait respawns. Read failure / no instanceId → normal
+        // path (same semantics as the non-blocking GET guard).
+        const runnerInstanceId = await this.#readAttemptRunnerInstanceId(
+          session.sessionId,
+          existing.generation,
+        )
+        if (
+          this.options.serverInstanceId &&
+          runnerInstanceId &&
+          runnerInstanceId !== this.options.serverInstanceId
+        ) {
+          this.#scheduleFencingWait(session)
+          throw new AttemptTakeoverPendingError(session.sessionId)
+        }
         await this.store.setSessionLifecycle(session.sessionId, 'active', session.desiredState)
         return existing
       }
@@ -1464,30 +1493,37 @@ export class RuntimeService {
       ) {
         this.#fencingWaits.delete(session.sessionId)
         if (current && attempt && (!isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs) || timedOut)) {
-          // Timeout with a still-fresh heartbeat = the runner lives but its
-          // attach socket is unreachable (e.g. OS tmp-dir cleanup) — the
-          // expiry condition can never become true, so fence instead of
-          // silently giving up (pre-P2 semantics: mark lost + respawn).
-          // markAttemptLost flips runtime_state off 'running'; the runner's
-          // fenced heartbeat exits it within one interval, so the respawn
-          // pays the same short double-write window a normal failover does.
-          if (timedOut && isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)) {
-            await this.store.markAttemptLost(
-              attempt.attemptId,
-              'fencing wait timed out (attach unreachable, heartbeat fresh)',
-            )
-            await this.store.addEvent(current.sessionId, attempt.attemptId, 'attempt_lost', {
-              reason: 'fencing_wait_timeout_heartbeat_fresh',
+          // A-1: the user may have terminated this session while we waited —
+          // never resurrect (nor rewrite the attempt state of) what the user
+          // explicitly stopped; the terminate path already settled it.
+          if (current.desiredState === 'active') {
+            // Timeout with a still-fresh heartbeat = the runner lives but its
+            // attach socket is unreachable (e.g. OS tmp-dir cleanup) — the
+            // expiry condition can never become true, so fence instead of
+            // silently giving up (pre-P2 semantics: mark lost + respawn).
+            // markAttemptLost flips runtime_state off 'running'; the runner's
+            // fenced heartbeat exits it within one interval, so the respawn
+            // pays the same short double-write window a normal failover does.
+            if (timedOut && isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)) {
+              await this.store.markAttemptLost(
+                attempt.attemptId,
+                'fencing wait timed out (attach unreachable, heartbeat fresh)',
+              )
+              await this.store.addEvent(current.sessionId, attempt.attemptId, 'attempt_lost', {
+                reason: 'fencing_wait_timeout_heartbeat_fresh',
+              })
+            }
+            void this.ensureAttempt(current).catch(async error => {
+              // A-8: takeover-pending is designed control flow, not a failure.
+              if (error instanceof AttemptTakeoverPendingError) return
+              await this.store.addEvent(
+                current.sessionId,
+                attempt.attemptId,
+                'reconcile_failed',
+                { error: errorMessage(error) },
+              )
             })
           }
-          void this.ensureAttempt(current).catch(async error => {
-            await this.store.addEvent(
-              current.sessionId,
-              attempt.attemptId,
-              'reconcile_failed',
-              { error: errorMessage(error) },
-            )
-          })
         }
         return
       }

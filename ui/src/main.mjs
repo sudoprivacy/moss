@@ -899,7 +899,11 @@ function remoteDirectRetryDelayMs(retryIndex) {
 // (e.g. the 503 a taking-over instance returns while fencing completes) and
 // network errors (no .status) are retryable.
 function isRetryableRemoteDirectError(error) {
-  const status = error?.status;
+  // D-3: the SDK's DirectConnectError carries statusCode; the local fetch
+  // path (parseRemoteDirectError) sets status. Read both — reading only
+  // .status classified every SDK 4xx as "network error, retry", burning all
+  // 9 attempts (~2 min) on permanent failures.
+  const status = error?.statusCode ?? error?.status;
   if (typeof status === 'number') return status >= 500;
   return true;
 }
@@ -1077,6 +1081,15 @@ function createRemoteDirectRuntime({
         // ws_url, which a cached config would never see.
         const { mod, config } = await ensureSessionConfig();
 
+        // D-4: retiring a non-connected old manager without disconnecting it
+        // leaves an orphan that keeps reconnecting on its own — and its
+        // replay buffer would re-send stale turns into whatever runner it
+        // reaches. Detach it before installing the replacement.
+        if (activeManager && !activeManager.isConnected?.()) {
+          activeManager.disconnect?.();
+          activeManager = null;
+        }
+
         managerConnectPromise = new Promise((resolve, reject) => {
           const manager = new mod.DirectConnectSessionManager(config, {
             onConnected: () => {
@@ -1132,6 +1145,15 @@ function createRemoteDirectRuntime({
               }
               if (turn) {
                 turn.fail(error);
+              }
+              // D-4: the SDK keeps reconnecting on its own after an error;
+              // without an explicit disconnect the old manager stays alive
+              // in the background and its replay buffer would re-send this
+              // turn's prompt into whatever runner it reconnects to — a
+              // silent double execution. Detach it and clear the reference.
+              if (manager === activeManager) {
+                manager.disconnect?.();
+                activeManager = null;
               }
             },
           });

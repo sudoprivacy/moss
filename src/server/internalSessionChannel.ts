@@ -57,6 +57,14 @@ function internalBaseWsUrl(config: ServerConfig): { base: string; behindLb: bool
     try {
       const u = new URL(config.publicBaseUrl)
       const scheme = u.protocol === 'https:' ? 'wss' : 'ws'
+      if (scheme === 'ws' && !warnedPlaintextLb) {
+        warnedPlaintextLb = true
+        process.stderr.write(
+          '[InternalChannel] WARNING: internal channel & token-revoke forwarding ride ' +
+            'publicBaseUrl over PLAIN ws:// — the 120s Bearer token crosses the network in ' +
+            'the clear. Configure an https:// publicBaseUrl (HTTPS ingress) for HA deployments.\n',
+        )
+      }
       const basePath = u.pathname.replace(/\/+$/, '')
       return { base: `${scheme}://${u.host}${basePath}`, behindLb: true }
     } catch {
@@ -66,6 +74,9 @@ function internalBaseWsUrl(config: ServerConfig): { base: string; behindLb: bool
   const host = config.host && config.host !== '0.0.0.0' && config.host !== '::' ? config.host : '127.0.0.1'
   return { base: `ws://${host}:${config.port}`, behindLb: false }
 }
+
+/** D-8: one-shot flag so the plaintext-LB warning fires once per process. */
+let warnedPlaintextLb = false
 
 /** Short-lived JWT for the session's own user/org — reuses the regular
  * upgrade auth chain (verifyAccessToken + isUserActive + canAccessSession)
@@ -161,10 +172,21 @@ export async function revokeInternalSessionToken(
     return
   }
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
-    })
+    // D-6: bound the forward — a dead-but-not-yet-deregistered owner behind
+    // the LB would otherwise hang this await (and the user-facing terminate
+    // request it rides on) until the LB's own proxy timeout.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10_000)
+    let res: Response
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeout)
+    }
     if (!res.ok) {
       process.stderr.write(
         `[InternalChannel] token-revoke forward for session ${session.sessionId} ` +

@@ -29,6 +29,17 @@ export class SessionManager {
   // Tracks the initial (and latest reload) load so consumers can await it.
   private readyPromise: Promise<void>;
 
+  /**
+   * E-3: serializes map-rebuilding mutations (reload) with row-creating
+   * mutations (createSessionWithConversation). Their async interleaving could
+   * double-insert the same (user_id, chat_id) — createSession's delete+insert
+   * completes, then reload's earlier snapshot (taken before the insert) swaps
+   * in and hides the new row, so the next getSession miss creates a SECOND
+   * row (the table has no UNIQUE on that pair). A promise chain keeps the
+   * critical sections ordered without blocking reads.
+   */
+  private mutationQueue: Promise<unknown> = Promise.resolve();
+
   constructor(db: DirectConnectStore) {
     this.db = db;
     // Store the load promise (previously fire-and-forget). Under PG the first
@@ -52,8 +63,13 @@ export class SessionManager {
    * map in atomically, so a concurrent read never observes a half-empty cache.
    */
   reload(): Promise<void> {
-    this.readyPromise = this.loadActiveSessions();
-    return this.readyPromise;
+    const run = this.mutationQueue.then(
+      () => this.loadActiveSessions(),
+      () => this.loadActiveSessions(),
+    )
+    this.readyPromise = run
+    this.mutationQueue = run
+    return run
   }
 
   /**
@@ -123,6 +139,18 @@ export class SessionManager {
    * Create a new session with a specific conversation ID
    */
   async createSessionWithConversation(user: IChannelUser, conversationId: string, agentType: IChannelSession['agentType'] = 'acp', workspace?: string, chatId?: string): Promise<IChannelSession> {
+    // E-3: run inside the same mutation queue as reload() — see the field's
+    // note. The awaited DB round-trips below are exactly the windows across
+    // which a concurrent reload's stale snapshot would hide this row.
+    const run = this.mutationQueue.then(
+      () => this.createSessionWithConversationLocked(user, conversationId, agentType, workspace, chatId),
+      () => this.createSessionWithConversationLocked(user, conversationId, agentType, workspace, chatId),
+    )
+    this.mutationQueue = run.catch(() => {})
+    return run
+  }
+
+  private async createSessionWithConversationLocked(user: IChannelUser, conversationId: string, agentType: IChannelSession['agentType'], workspace: string | undefined, chatId: string | undefined): Promise<IChannelSession> {
     const key = this.buildKey(user.id, chatId);
 
     // Clear existing session if any. Carry the chat's conversation depth across
@@ -303,24 +331,28 @@ export class SessionManager {
   }
 
   /**
-   * Cleanup stale sessions
+   * Cleanup stale sessions.
+   *
+   * E-1: the freshness judgement comes from the SHARED DB, never from this
+   * instance's in-memory copy. In multi-instance deployments only the
+   * lease-holding instance exchanges messages for a plugin, so any OTHER
+   * instance's in-memory lastActivity for that chat is frozen at load time —
+   * judging by it (the old code) deleted rows that were actively exchanging
+   * messages on the peer (their IM turn cap then reset on row revival).
+   * Deleting by DB predicate is safe from every instance; the deleted ids
+   * sync the local map.
    */
   async cleanupStaleSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<number> {
-    const now = Date.now();
-    let cleaned = 0;
-
-    for (const [key, session] of this.activeSessions.entries()) {
-      if (now - session.lastActivity > maxAgeMs) {
-        await this.db.deleteChannelSession(session.id);
-        this.activeSessions.delete(key);
-        cleaned++;
+    const deletedIds = await this.db.deleteStaleChannelSessions(maxAgeMs);
+    if (deletedIds.length > 0) {
+      const deleted = new Set(deletedIds);
+      for (const [key, session] of this.activeSessions.entries()) {
+        if (deleted.has(session.id)) {
+          this.activeSessions.delete(key);
+        }
       }
+      console.log(`[SessionManager] Cleaned up ${deletedIds.length} stale session(s)`);
     }
-
-    if (cleaned > 0) {
-      console.log(`[SessionManager] Cleaned up ${cleaned} stale session(s)`);
-    }
-
-    return cleaned;
+    return deletedIds.length;
   }
 }

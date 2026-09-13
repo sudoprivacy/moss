@@ -226,6 +226,17 @@ export function hasScope(scopes: string[], requiredScope: string): boolean {
 }
 
 /**
+ * Exact-scope membership (no wildcard expansion). For gates where the mere
+ * possession of a broad wildcard — notably the `['*']` every admin/super_admin
+ * login token carries — must NOT grant access (e.g. the internal runner
+ * channel scope, minted only by issueInternalChannelToken). hasScope's
+ * `'*'`/prefix expansion is right for capability checks and wrong here.
+ */
+export function hasExactScope(scopes: string[], requiredScope: string): boolean {
+  return scopes.includes(requiredScope)
+}
+
+/**
  * Admin capability for cron gating: admin/super_admin roles or the admin:cron
  * scope. clientCronEnabled gates client-issued cron actions only — actors with
  * this capability bypass the gate on both the API routes and the scheduler's

@@ -115,7 +115,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -350,6 +350,33 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     });
   });
 
+  describe("HA fixes: LIKE escaping through prepare() (C-7)", () => {
+    it("escapeLike + ESCAPE survives the LIKE→ILIKE rewrite and matches literally", async () => {
+      const { escapeLike } = await import("../db/driver.js");
+      const pool = new Pool({ connectionString: PG_URL, max: 2 });
+      try {
+        const driver = new PgDriver(pool as unknown as PgPoolLike);
+        await driver.run("CREATE TEMP TABLE esc_pg (name TEXT)");
+        for (const n of ["100% done", "100x done", "a_b", "axb", "a\\b"]) {
+          await driver.run("INSERT INTO esc_pg (name) VALUES (?)", [n]);
+        }
+        // driver.prepare() applies rewriteLikeToILike + placeholder numbering —
+        // the exact production path for these statements.
+        const like = async (term: string) =>
+          (await driver.all<{ name: string }>(
+            "SELECT name FROM esc_pg WHERE name LIKE ? ESCAPE '\\'",
+            [`%${escapeLike(term)}%`],
+          )).map(r => r.name);
+        assert.deepEqual(await like("100%"), ["100% done"]);
+        assert.deepEqual(await like("100"), ["100% done", "100x done"]);
+        assert.deepEqual(await like("a_b"), ["a_b"]);
+        assert.deepEqual(await like("a\\b"), ["a\\b"]);
+      } finally {
+        await pool.end();
+      }
+    });
+  });
+
   describe("HA fixes: SQL dialect (A1-A5)", () => {
     it("A2: LIKE search matches across case via ILIKE rewrite", async () => {
       await fix.store.createConfigItem({ name: "GitHubProbe", pinyin: "github", scope: "user" });
@@ -472,6 +499,9 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         // Hand-rolled pre-a18659f v1 shape: bare nullable wikis columns (with a
         // NULL row), users without phone columns, no phone/msgaudit tables,
         // wiki_build_jobs without claim columns, channel_plugins without lease.
+        // tenant_skills/tenant_assistants/channel_sessions stand in minimal —
+        // the real v1 schema has them, and v3's index/column additions target
+        // them; only the columns v3 touches are modelled.
         await driver.exec(`
           CREATE TABLE _migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at BIGINT NOT NULL);
           INSERT INTO _migrations (version, name, applied_at) VALUES (1, 'initial-schema', 0);
@@ -481,8 +511,11 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           INSERT INTO wikis (id, created_by, created_at) VALUES ('w1', 'u1', 0);
           CREATE TABLE wiki_build_jobs (id TEXT PRIMARY KEY, wiki_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', queued_at BIGINT NOT NULL, triggered_by TEXT NOT NULL);
           CREATE TABLE channel_plugins (id TEXT NOT NULL, type TEXT NOT NULL, name TEXT NOT NULL, enabled BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL, user_id TEXT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (id, user_id));
+          CREATE TABLE tenant_skills (id TEXT PRIMARY KEY, org_id TEXT, author_id TEXT, status TEXT);
+          CREATE TABLE tenant_assistants (id TEXT PRIMARY KEY, org_id TEXT, author_id TEXT, status TEXT);
+          CREATE TABLE channel_sessions (id TEXT PRIMARY KEY);
         `);
-        // v1 recorded as applied → applyPgSchema runs only v2.
+        // v1 recorded as applied → applyPgSchema runs only v2 + v3.
         await applyPgSchema(driver);
 
         // wikis columns are backfilled and now NOT NULL.
@@ -513,10 +546,23 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: still exactly [1, 2].
+        // Re-run is a no-op: still exactly [1, 2, 3].
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3]);
+        // v3 (audit fixes): tenant-store org indexes (C-4) + the E-2
+        // channel_sessions snapshot column.
+        for (const idx of ["idx_tenant_skills_org", "idx_tenant_assistants_org"]) {
+          const r = await driver.get<{ n: number }>(
+            "SELECT count(*) AS n FROM pg_indexes WHERE indexname = ?",
+            [idx],
+          );
+          assert.equal(Number(r!.n), 1, `${idx} must exist after v3`);
+        }
+        const colV3 = await driver.get<{ n: number }>(
+          "SELECT count(*) AS n FROM information_schema.columns WHERE table_name = 'channel_sessions' AND column_name = 'last_agent_config'",
+        );
+        assert.equal(Number(colV3!.n), 1, "channel_sessions.last_agent_config must exist after v3");
       } finally {
         await pool.end();
         await dropDatabase(admin, oldDbName);
