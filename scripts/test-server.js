@@ -36,6 +36,8 @@ const BUN = [
   'credentialsEnvelope.test.ts',
   'credits.test.ts',
   'lbHaConfig.test.ts',
+  'lbLifecycleE2e.test.ts',
+  'lbReadiness.test.ts',
   'modelListCache.test.ts',
   'podWorkspace.test.ts',
   'publicSystemConfig.test.ts',
@@ -43,13 +45,18 @@ const BUN = [
   'smsTencent.test.ts',
 ]
 
-/** Reach `AuthCenterDb`, so they need `node:sqlite`. */
+/** Need Node: either they reach `node:sqlite` (Bun lacks it), or they pin the
+ * Node runtime path on purpose — jsonlParse exercises parseJSONL's non-Bun
+ * fallback, the branch the production (node) bundle actually executes. */
 const NODE = [
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
+  'jsonlParse.test.ts',
+  'lbDraining.test.ts',
   'lbServerInstance.test.ts',
   'phoneAuth.test.ts',
   'phoneImport.test.ts',
+  'transcriptGuard.test.ts',
 ]
 
 /**
@@ -59,10 +66,6 @@ const NODE = [
  * which is a defect in its own right. Listing them keeps that visible.
  */
 const EXCLUDED = {
-  // Import `../server.js`, which pulls `node:sqlite` (so Bun cannot load it)
-  // and a `bun:` module (so Node cannot). They run under neither runner.
-  'lbDraining.test.ts': 'imports ../server.js: needs node:sqlite and bun: at once',
-  'lbReadiness.test.ts': 'imports ../server.js: needs node:sqlite and bun: at once',
   // Asserts on the contents of the packaged E2E script; fails on dev checkouts.
   'releaseE2eSmoke.test.ts': 'asserts packaged release artifacts absent from a dev tree',
 }
