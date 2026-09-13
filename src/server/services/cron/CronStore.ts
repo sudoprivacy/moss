@@ -377,7 +377,7 @@ export class CronStore {
     const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM cron_jobs
       WHERE enabled = 1 AND deleted_at IS NULL
-      ORDER BY next_run_at ASC
+      ORDER BY next_run_at ASC NULLS LAST
     `)
     return rows.map(mapCronJob)
   }

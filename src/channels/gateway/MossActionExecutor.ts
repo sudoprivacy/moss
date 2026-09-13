@@ -262,7 +262,8 @@ export class MossActionExecutor {
     // rotation — counting per runtime session would reset on every idle recycle,
     // which is the most common IM path, and the cap would never fire.
     const turnCount = await this.db.incrementChannelSessionTurnCount(channelUser.id, sChatId);
-    const rotation = await this.planRotation(turnCount, mossUserId, platform, pluginId, chatId);
+    const agentConfig = await this.loadAgentConfigSnapshot(pluginId, mossUserId);
+    const rotation = await this.planRotation(turnCount, mossUserId, platform, pluginId, chatId, agentConfig);
 
     // Get or create Moss runtime session
     let channelState = this.channelSessions.get(channelUserKey);
@@ -412,12 +413,35 @@ export class MossActionExecutor {
    * idle recycling reset the depth every 10 minutes; now that sessions genuinely
    * persist, the ceiling is real and rotation is what keeps it bounded.
    */
+  /**
+   * E-2: normalized snapshot of the plugin's agent/model settings — the exact
+   * shape written to channel_sessions.last_agent_config and compared by
+   * planRotation. Null when the plugin/config is unavailable (comparison
+   * skipped). One construction point keeps both sides of the comparison
+   * byte-identical.
+   */
+  private buildAgentConfigSnapshot(configJson: string | null | undefined): string | null {
+    if (typeof configJson !== 'string') return null;
+    try {
+      const cfg = JSON.parse(configJson) as { agent?: unknown; defaultModel?: unknown };
+      return JSON.stringify({ agent: cfg.agent ?? null, defaultModel: cfg.defaultModel ?? null });
+    } catch {
+      return null;
+    }
+  }
+
+  private async loadAgentConfigSnapshot(pluginId: string, ownerUserId: string | undefined): Promise<string | null> {
+    const plugin = ownerUserId ? await this.db.getChannelPlugin(pluginId, ownerUserId) : null;
+    return plugin ? this.buildAgentConfigSnapshot(String(plugin.config_json ?? '')) : null;
+  }
+
   private async planRotation(
     turnCount: number,
     mossUserId: string | undefined,
     platform: string,
     pluginId: string,
     chatId: string,
+    currentAgentConfig: string | null,
   ): Promise<{ rotate: boolean; seedText?: string; notice?: string }> {
     const sChatId = scopedChatId(pluginId, platform, chatId);
     let cap = 0;
@@ -426,15 +450,35 @@ export class MossActionExecutor {
     } catch {
       return { rotate: false };
     }
-    // 0 or negative disables rotation (reuse forever), same as cronReuseMaxRuns.
-    if (!Number.isFinite(cap) || cap <= 0 || turnCount <= cap) return { rotate: false };
+    // E-2: settings-change rotation. The chat's recorded agent/model snapshot
+    // vs the plugin's LIVE config — both read from shared data, so this
+    // evaluates correctly on the lease-holding instance with no
+    // cross-instance cache invalidation (the old "clearAllSessions" approach
+    // only cleared the handling instance's memory). MUST run before the
+    // turn-cap early-return below, or it would only fire for chats already
+    // at the cap. A missing snapshot (pre-upgrade rows / fresh chats) never
+    // forces a rotation.
+    let configChanged = false;
+    if (currentAgentConfig != null && mossUserId) {
+      try {
+        const lastConfig = await this.db.getChannelSessionAgentConfig(mossUserId, sChatId);
+        configChanged = lastConfig != null && lastConfig !== currentAgentConfig;
+      } catch {
+        configChanged = false;
+      }
+    }
+    // 0 or negative disables rotation (reuse forever), same as cronReuseMaxRuns —
+    // but a settings change still rotates (the user asked for a new agent/model).
+    if ((!Number.isFinite(cap) || cap <= 0 || turnCount <= cap) && !configChanged) return { rotate: false };
 
     const previous = mossUserId ? await this.db.findChannelSession(platform, sChatId, mossUserId) : null;
     const seedText = await this.buildSeedForSession(previous?.sessionId);
 
     console.log(
-      `[MossActionExecutor] [session-rotate] chat ${platform}:${sChatId} hit turn cap ` +
-      `(${turnCount} > ${cap}); retiring ${previous?.sessionId ?? 'n/a'}` +
+      `[MossActionExecutor] [session-rotate] chat ${platform}:${sChatId} ` +
+      (configChanged
+        ? `agent/model settings changed; retiring ${previous?.sessionId ?? 'n/a'}`
+        : `hit turn cap (${turnCount} > ${cap}); retiring ${previous?.sessionId ?? 'n/a'}`) +
       `${seedText ? ` with ${seedText.length} chars of seed` : ' without seed'}`,
     );
 
@@ -704,6 +748,18 @@ export class MossActionExecutor {
       this.sessionManager.getSession(channelUser.id, chatId)?.id || '',
       sessionId,
     );
+
+    // E-2: record the agent/model snapshot this runtime session was built
+    // with, so planRotation rotates the chat when the plugin's settings
+    // change (see planRotation's settings-change note).
+    try {
+      const snapshot = plugin ? this.buildAgentConfigSnapshot(String(plugin.config_json ?? '')) : null;
+      if (snapshot != null) {
+        await this.db.setChannelSessionAgentConfig(channelUser.id, sChatId, snapshot);
+      }
+    } catch (error) {
+      console.warn(`[MossActionExecutor] failed to record agent config snapshot for ${platform}:${sChatId}:`, error);
+    }
 
     return state;
   }

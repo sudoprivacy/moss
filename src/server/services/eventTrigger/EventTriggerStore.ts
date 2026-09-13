@@ -403,6 +403,7 @@ export class EventTriggerStore {
           summary = ?,
           finished_at = ?
       WHERE id = ?
+        AND status IN ('queued', 'running')
     `, [
       updates.status,
       updates.sessionId ?? null,
@@ -414,17 +415,26 @@ export class EventTriggerStore {
   }
 
   /**
-   * Fail runs left 'running' past `startedBefore` — the crash-recovery path.
-   * Without this a run orphaned by a server restart stays 'running' forever
-   * and permanently consumes a concurrency slot.
+   * Fail runs left 'running' past their trigger's timeout — the
+   * crash-recovery path. Without this a run orphaned by a server restart
+   * stays 'running' forever and permanently consumes a concurrency slot.
+   *
+   * B-4: only 'running' rows are reaped — 'queued' rows are the SHARED
+   * claim queue (any instance's claimQueuedRuns picks them up), so reaping
+   * by age silently discarded never-executed events during rolling
+   * restarts. The threshold is per-trigger: `COALESCE(timeout_ms, default)`
+   * plus the same 60s margin, so a trigger configured for a 60-minute run
+   * is not failed at the 15-minute default.
    */
-  async reapStaleRuns(startedBefore: number, error: string): Promise<number> {
+  async reapStaleRuns(nowMs: number, defaultTimeoutMs: number, error: string): Promise<number> {
     const changes = await this.driver.run(`
       UPDATE event_trigger_runs
       SET status = 'error', error = ?, finished_at = ?
-      WHERE status IN ('queued', 'running')
-        AND COALESCE(started_at, created_at) < ?
-    `, [error, now(), startedBefore])
+      WHERE status = 'running'
+        AND COALESCE(started_at, created_at) < ? - (
+          COALESCE((SELECT t.timeout_ms FROM event_triggers t WHERE t.id = trigger_id), ?) + 60000
+        )
+    `, [error, now(), nowMs, defaultTimeoutMs])
     return changes
   }
 }

@@ -333,6 +333,13 @@ affinity annotation，与两级 map 互斥；该文件头部注释已更新）�
 - Electron create 请求在 failover 切换瞬间若服务端实际成功而响应丢失，客户端重试
   会再次 create 产生孤儿 session（idle timeout 兜底回收；现状手动重试同样发生，
   自动重试仅略升频率）。
+- 内部通道与跨实例 token 吊销转发优先走 `MOSS_PUBLIC_BASE_URL`（公网 LB）：该地址
+  为 `http://` 时 120s TTL 的 Bearer token 明文过网。**HA 部署要求 HTTPS 入口**
+  （`publicBaseUrl` 配置为 `https://`）；服务端检测到明文 LB 时会输出一次性告警。
+- 跨主机双活依赖各主机时钟一致（NTP/chrony）：runner/实例心跳的新鲜度判定使用
+  各进程本地 `Date.now()` 对比他机写入的时间戳（30s 阈值）。时钟偏差过大只会导致
+  多余 fencing 或延迟接管（90s 超时兜底保证不死锁），不会脑裂；生产环境请确保
+  主机时钟同步在秒级以内。
 
 ## 8. 单点边界汇总（如实声明）
 

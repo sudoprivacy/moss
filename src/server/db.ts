@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
 import { DatabaseSync } from 'node:sqlite'
-import { PgDriver, SqliteDriver, isUniqueViolation, type DbDriver, type PgPoolLike, type SqlParam } from './db/driver.js'
+import { PgDriver, SqliteDriver, isUniqueViolation, escapeLike, type DbDriver, type PgPoolLike, type SqlParam } from './db/driver.js'
 import { applyPgSchema } from './db/pg_schema.js'
 import { McpStore } from './mcp/db.js'
 import { ensureCabinTables } from './cabin/store.js'
@@ -23,6 +23,7 @@ import type {
 import type { SessionRuntimeInfo } from './sessionManager.js'
 import { channelCredentialIdentity } from '../channels/types.js'
 import { resolveRuntimeScodePath } from './runtimeScodePath.js'
+import { ALIVE_ATTEMPT_STATES } from './attemptLiveness.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -489,6 +490,12 @@ export class DirectConnectStore {
       if (!channelSessionColumns.some(c => String(c.name) === 'turn_count')) {
         this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`)
         console.log('[DB] Added channel_sessions.turn_count for IM turn-cap rotation')
+      }
+      // E-2: agent/model snapshot for settings-change rotation (nullable,
+      // read by getChannelSessionAgentConfig; PG side: MIGRATION_0003).
+      if (!channelSessionColumns.some(c => String(c.name) === 'last_agent_config')) {
+        this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN last_agent_config TEXT`)
+        console.log('[DB] Added channel_sessions.last_agent_config for settings-change rotation')
       }
     } catch (error) {
       console.error('[DB] Failed to add channel_sessions.turn_count:', error)
@@ -1366,16 +1373,22 @@ export class DirectConnectStore {
       await this.driver.run(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
       await this.driver.run(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
       // Channels: backfill from the owning user's org where resolvable, else default.
-      await this.driver.exec(`
-        UPDATE channel_plugins
-        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id), '${defaultOrgId}')
-        WHERE org_id IS NULL OR org_id = ''
-      `)
-      await this.driver.exec(`
-        UPDATE channel_users
-        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id), '${defaultOrgId}')
-        WHERE org_id IS NULL OR org_id = ''
-      `)
+      // C-5: parameterized run, not string-interpolated exec — the exec
+      // interface has no parameter slots, which is what forced the template
+      // interpolation. org ids are UUIDs today, but interpolation is a
+      // standing injection surface for zero benefit.
+      await this.driver.run(
+        `UPDATE channel_plugins
+         SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id), ?)
+         WHERE org_id IS NULL OR org_id = ''`,
+        [defaultOrgId],
+      )
+      await this.driver.run(
+        `UPDATE channel_users
+         SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id), ?)
+         WHERE org_id IS NULL OR org_id = ''`,
+        [defaultOrgId],
+      )
     } catch (error) {
       console.error('[DB] backfillOrgScoping failed:', error)
     }
@@ -1401,6 +1414,32 @@ export class DirectConnectStore {
     // conflict (single-instance behavior unchanged).
     const resolvedInstanceId = instanceId ?? randomUUID()
     const ts = now()
+    // B-7: same-id dual-process detection (warn, don't block). A still-fresh
+    // row under the SAME id means either a peer incarnation is alive (normal
+    // k8s StatefulSet same-name re-registration after clean shutdown leaves
+    // the row stale — no warn) or two processes are running with one id — an
+    // ops misconfiguration (two deployments sharing MOSS_INSTANCE_ID, or
+    // start-before-stop) that silently defeats ALL owner-based fencing
+    // (heartbeats refresh each other, claimAttempt short-circuits on same
+    // id). We warn loudly and let startup proceed: blocking would turn a
+    // benign overlap into an outage window.
+    try {
+      const existing = await this.driver.get<{ host: string; pid: number; heartbeat_at: number }>(
+        `SELECT host, pid, heartbeat_at FROM server_instances
+         WHERE instance_id = ? AND status = 'running' AND heartbeat_at >= ?`,
+        [resolvedInstanceId, now() - 30_000],
+      )
+      if (existing) {
+        console.warn(
+          `[DB] server_instances: instance_id ${resolvedInstanceId} is ALREADY live ` +
+            `(host=${existing.host} pid=${existing.pid}, heartbeat ${Date.now() - Number(existing.heartbeat_at)}ms ago) — ` +
+            `two processes sharing one instance id defeat owner fencing (claim short-circuit + mutual heartbeat refresh). ` +
+            `If this is not a start-before-stop overlap, check for duplicated MOSS_INSTANCE_ID deployments.`,
+        )
+      }
+    } catch {
+      // Detection is best-effort — never block registration on it.
+    }
     await this.driver.run(`
       INSERT INTO server_instances (
         instance_id, host, pid, started_at, heartbeat_at, status
@@ -1422,6 +1461,44 @@ export class DirectConnectStore {
       stoppedAt: null,
       status: 'running',
     }
+  }
+
+  /**
+   * B-3 cluster awareness: how many OTHER live instances are registered.
+   * Same liveness predicate claimAttempt/getAttemptOwnerStatus use. Callers
+   * deciding "was the cluster offline" (cron's markMissedJobsOnStartup) must
+   * skip their offline-recovery logic while peers are alive — a rolling
+   * restart is not an outage, and an online peer's poll will run the due
+   * job without this instance rewriting next_run_at out from under it.
+   * selfInstanceId must be the RESOLVED id (registerServerInstance's return
+   * value — a random UUID when MOSS_INSTANCE_ID is unset); passing undefined
+   * either throws in the driver bind or fails to exclude self under SQL
+   * three-valued logic.
+   */
+  async countLiveOtherInstances(selfInstanceId: string, heartbeatTimeoutMs: number): Promise<number> {
+    const row = await this.driver.get<{ n: number | string }>(`
+      SELECT COUNT(*) AS n FROM server_instances
+      WHERE instance_id != ? AND status = 'running' AND heartbeat_at >= ?
+    `, [selfInstanceId, now() - heartbeatTimeoutMs])
+    return Number(row?.n ?? 0)
+  }
+
+  /**
+   * B-8 cabin arbitration: the (started_at, instance_id)-smallest live
+   * instance's id, or null when no live instance is registered. Consumers
+   * compare against their own resolved id to decide leadership — the
+   * instance_id tiebreak makes simultaneous starts produce exactly one
+   * winner. ORDER BY ... LIMIT 1 rather than a NOT EXISTS form so no
+   * self-started_at parameter is needed.
+   */
+  async getOldestLiveInstanceId(heartbeatTimeoutMs: number): Promise<string | null> {
+    const row = await this.driver.get<{ instance_id: string }>(`
+      SELECT instance_id FROM server_instances
+      WHERE status = 'running' AND heartbeat_at >= ?
+      ORDER BY started_at ASC, instance_id ASC
+      LIMIT 1
+    `, [now() - heartbeatTimeoutMs])
+    return row?.instance_id ?? null
   }
 
   async heartbeatServerInstance(instanceId: string): Promise<void> {
@@ -1788,12 +1865,14 @@ export class DirectConnectStore {
     ownerInstanceId?: string,
   ): Promise<boolean> {
     if (ownerInstanceId) {
+      // A-9: keep this IN list generated from attemptLiveness's single
+      // ALIVE_ATTEMPT_STATES whitelist (hand-maintained copies had drifted).
       const changes = await this.driver.run(`
         UPDATE session_attempts
         SET last_heartbeat_at = ?, runtime_state = ?
         WHERE attempt_id = ?
           AND server_instance_id = ?
-          AND runtime_state IN ('starting', 'running')
+          AND runtime_state IN (${ALIVE_ATTEMPT_STATES.map(s => `'${s}'`).join(', ')})
       `, [now(), state, attemptId, ownerInstanceId])
       return changes > 0
     }
@@ -1839,12 +1918,13 @@ export class DirectConnectStore {
       input.errorText ?? null,
     ]
     if (ownerInstanceId) {
+      // A-9: see touchAttemptHeartbeat's note — whitelist from the constant.
       const changes = await this.driver.run(`
         UPDATE session_attempts
         ${setClause}
         WHERE attempt_id = ?
           AND server_instance_id = ?
-          AND runtime_state IN ('starting', 'running')
+          AND runtime_state IN (${ALIVE_ATTEMPT_STATES.map(s => `'${s}'`).join(', ')})
       `, [...setParams, attemptId, ownerInstanceId])
       return changes > 0
     }
@@ -2444,14 +2524,67 @@ export class DirectConnectStore {
     return row ? Number(row.tc ?? 0) : 0
   }
 
-  /** Increment a chat's conversation depth by one turn; returns the new value. */
+  /** Increment a chat's conversation depth by one turn; returns the new value.
+   *  E-1: also refreshes last_activity — with this, every message keeps the
+   *  shared-DB freshness signal current, so a non-holding instance's stale
+   *  sweep (which judges by the DB, not its frozen in-memory copy) never
+   *  deletes a chat that is actively exchanging messages. */
   async incrementChannelSessionTurnCount(userId: string, chatId?: string): Promise<number> {
     await this.driver.run(
-      `UPDATE channel_sessions SET turn_count = COALESCE(turn_count, 0) + 1
+      `UPDATE channel_sessions SET turn_count = COALESCE(turn_count, 0) + 1, last_activity = ?
        WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
-      [userId, chatId ?? null],
+      [now(), userId, chatId ?? null],
     )
     return this.getChannelSessionTurnCount(userId, chatId)
+  }
+
+  /**
+   * E-1: delete channel sessions whose last_activity (per the SHARED DB, not
+   * any instance's in-memory copy) is older than maxAgeMs. Returns the ids
+   * removed so the caller can sync its in-memory map. Two statements instead
+   * of RETURNING — identical across dialects, matching the store's
+   * conservative SQL style.
+   */
+  async deleteStaleChannelSessions(maxAgeMs: number): Promise<string[]> {
+    const rows = await this.driver.all<{ id: string }>(
+      `SELECT id FROM channel_sessions WHERE last_activity < ?`,
+      [now() - maxAgeMs],
+    )
+    if (rows.length === 0) return []
+    const ids = rows.map(r => String(r.id))
+    const placeholders = ids.map(() => '?').join(', ')
+    await this.driver.run(
+      `DELETE FROM channel_sessions WHERE id IN (${placeholders})`,
+      ids,
+    )
+    return ids
+  }
+
+  /**
+   * E-2: the agent/model snapshot a chat's CURRENT runtime session was built
+   * with ({agent, defaultModel} JSON, same keys as channel_plugins.config_json).
+   * planRotation compares it against the plugin's live config so a settings
+   * change rotates the chat to a new session on the NEXT message — evaluated
+   * on the lease-holding instance from shared data, no cross-instance
+   * invalidation needed.
+   */
+  async getChannelSessionAgentConfig(userId: string, chatId?: string): Promise<string | null> {
+    const row = await this.driver.get<{ cfg: string | null }>(
+      `SELECT last_agent_config AS cfg FROM channel_sessions
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')
+       ORDER BY last_activity DESC LIMIT 1`,
+      [userId, chatId ?? null],
+    )
+    return row?.cfg ?? null
+  }
+
+  /** E-2: stamp the agent/model snapshot onto the chat's session row(s). */
+  async setChannelSessionAgentConfig(userId: string, chatId: string | undefined, configJson: string): Promise<void> {
+    await this.driver.run(
+      `UPDATE channel_sessions SET last_agent_config = ?
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
+      [configJson, userId, chatId ?? null],
+    )
   }
 
   /** Seed a freshly-inserted row's depth, used by SessionManager to carry the
@@ -3255,6 +3388,20 @@ export class DirectConnectStore {
     session_id?: string | null
     started_at?: number
     finished_at?: number
+  }, opts?: {
+    /**
+     * B-6 fencing predicates, by caller class. Status-carrying writes are the
+     * terminal-state battles this guards: (a) the owner's success write must
+     * only land while the job is still running AND still claimed by it — a
+     * reaper's 'failed' or a cancel's 'cancelled' wins and the late success
+     * write is rejected; (b) the cross-instance reaper's 'failed' write must
+     * only carry the status predicate (NOT claimed_by=self — it reaps OTHER
+     * instances' jobs); (c) the cancel fallback accepts both queued and
+     * running rows. Status-free progress writes pass untouched (dynamic SET
+     * keeps them from resurrecting anything).
+     */
+    expectedStatuses?: string[]
+    ownerInstanceId?: string
   }): Promise<void> {
     // Dynamic SET: only the columns explicitly provided are written. Read-then-
     // write-all would let a slow owner's progress update (which carries no
@@ -3271,9 +3418,19 @@ export class DirectConnectStore {
     if (updates.started_at !== undefined) { sets.push('started_at = ?'); params.push(updates.started_at) }
     if (updates.finished_at !== undefined) { sets.push('finished_at = ?'); params.push(updates.finished_at) }
     if (sets.length === 0) return
+    let where = 'id = ?'
+    if (updates.status !== undefined && opts?.expectedStatuses?.length) {
+      const placeholders = opts.expectedStatuses.map(() => '?').join(', ')
+      where += ` AND status IN (${placeholders})`
+      params.push(...opts.expectedStatuses)
+      if (opts.ownerInstanceId !== undefined) {
+        where += ' AND claimed_by = ?'
+        params.push(opts.ownerInstanceId)
+      }
+    }
     params.push(id)
     await this.driver.run(
-      `UPDATE wiki_build_jobs SET ${sets.join(', ')} WHERE id = ?`,
+      `UPDATE wiki_build_jobs SET ${sets.join(', ')} WHERE ${where}`,
       params,
     )
   }
@@ -3296,7 +3453,7 @@ export class DirectConnectStore {
   /** Cross-org: used by the sync worker which has no caller context. */
   async listAllEnabledExternalSources(): Promise<SqlRow[]> {
     return this.driver.all<SqlRow>(
-      `SELECT * FROM external_sources WHERE enabled = 1 ORDER BY last_sync_at`,
+      `SELECT * FROM external_sources WHERE enabled = 1 ORDER BY last_sync_at NULLS LAST`,
     )
   }
 
@@ -3894,8 +4051,11 @@ export class DirectConnectStore {
       params.push(opts.orgId)
     }
     if (opts.name) {
-      conditions.push('(name LIKE ? OR pinyin LIKE ?)')
-      params.push(`%${opts.name}%`, `%${opts.name}%`)
+      // C-7: escapeLike + ESCAPE — a literal %/_/\ in the search term must
+      // match itself, and both dialects must treat backslashes alike.
+      conditions.push("(name LIKE ? ESCAPE '\\' OR pinyin LIKE ? ESCAPE '\\')")
+      const term = `%${escapeLike(opts.name)}%`
+      params.push(term, term)
     }
     if (opts.scope) {
       conditions.push('scope = ?')

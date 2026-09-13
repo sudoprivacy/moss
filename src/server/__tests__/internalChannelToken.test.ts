@@ -9,9 +9,20 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { AuthCenterDb } from "../authCenter/db.js";
 import { AuthService } from "../auth/service.js";
-import { verifyAccessToken } from "../auth/token.js";
+import { verifyAccessToken, hasExactScope } from "../auth/token.js";
 
 describe("D1: internal-channel token scope", () => {
+  it("hasExactScope rejects wildcard tokens that hasScope would admit (admin '*' / prefix)", () => {
+    // The /ws/internal and internal revoke-token gates use hasExactScope —
+    // an admin/super_admin login token carries ['*'], which satisfies
+    // hasScope's wildcard expansion and would defeat the gate. Lock that in.
+    assert.equal(hasExactScope(["*"], "internal:channel"), false);
+    assert.equal(hasExactScope(["internal:*"], "internal:channel"), false);
+    assert.equal(hasExactScope(["sessions:attach:any"], "internal:channel"), false);
+    assert.equal(hasExactScope(["internal:channel"], "internal:channel"), true);
+    assert.equal(hasExactScope([], "internal:channel"), false);
+  });
+
   it("mints a token scoped to internal:channel only (no sessions:attach:any)", async () => {
     const raw = new DatabaseSync(":memory:");
     const db = new AuthCenterDb(raw, ":memory:");

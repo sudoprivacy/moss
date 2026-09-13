@@ -74,7 +74,17 @@ export class SessionRunnerDaemon {
   #lastOutputTouchAt = 0
   #state: 'starting' | 'running' | 'stopped' | 'failed' = 'starting'
   #stopping = false
+  #heartbeatFailures = 0
   #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' | 'fenced' = 'runtime_exit'
+  /**
+   * A-5: set when a path explicitly chose #stopReason (fenced / idle_*).
+   * The generic SIGTERM/SIGINT handlers must not overwrite that choice with
+   * 'terminated' — without this guard the fenced reason is unreachable at
+   * onExit time (both handlers fire on the self-SIGTERM the fenced path
+   * sends). The DB never sees 'fenced' either way (the fenced writer's own
+   * predicate already fails — by design), so this is audit-visibility only.
+   */
+  #stopReasonExplicit = false
   #idleTimer: NodeJS.Timeout | null = null
   #busyCeilingTimer: NodeJS.Timeout | null = null
   #busyUnsubscribe: (() => void) | null = null
@@ -375,12 +385,12 @@ export class SessionRunnerDaemon {
 
       process.once('SIGTERM', () => {
         this.#stopping = true
-        this.#stopReason = 'terminated'
+        if (!this.#stopReasonExplicit) this.#stopReason = 'terminated'
         void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
       process.once('SIGINT', () => {
         this.#stopping = true
-        this.#stopReason = 'terminated'
+        if (!this.#stopReasonExplicit) this.#stopReason = 'terminated'
         void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
     } catch (error) {
@@ -423,11 +433,19 @@ export class SessionRunnerDaemon {
   #onClient(socket: SocketWithBuffer): void {
     this.#clients.add(socket)
     this.#clearIdleTimer()
-    void this.#store.setSessionLifecycle(
-      this.manifest.session.sessionId,
-      'active',
-      'active',
-    )
+    // A-6: only stamp lifecycle while the session is genuinely live — a
+    // fenced/terminated session's late client attach must not flip the row
+    // back to active over whatever the takeover side wrote.
+    void this.#store.getSession(this.manifest.session.sessionId).then(session => {
+      if (session && session.status !== 'terminated' && session.status !== 'ended') {
+        return this.#store.setSessionLifecycle(
+          this.manifest.session.sessionId,
+          'active',
+          'active',
+        )
+      }
+      return undefined
+    }).catch(() => {})
     this.#send(socket, {
       type: 'hello',
       attemptId: this.manifest.attempt.attemptId,
@@ -506,14 +524,30 @@ export class SessionRunnerDaemon {
    * manifest) keeps the unconditional legacy update and never fences.
    */
   async #heartbeat(state: 'running' = 'running'): Promise<void> {
-    const ok = await this.#store.touchAttemptHeartbeat(
-      this.manifest.attempt.attemptId,
-      state,
-      this.manifest.config.instanceId,
-    )
+    // A-3: a DB hiccup (e.g. a PG blip) must reject here WITHOUT crashing the
+    // runner process — the interval timer retries within one period anyway.
+    // Only a definitive negative answer (ok=false, the fencing predicate
+    // failed) is an exit condition; transport errors are not.
+    let ok: boolean
+    try {
+      ok = await this.#store.touchAttemptHeartbeat(
+        this.manifest.attempt.attemptId,
+        state,
+        this.manifest.config.instanceId,
+      )
+    } catch (err) {
+      this.#heartbeatFailures++
+      process.stderr.write(
+        `[SessionRunnerDaemon] Heartbeat write failed (${this.#heartbeatFailures} consecutive): ` +
+          `${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return
+    }
+    this.#heartbeatFailures = 0
     if (!ok && !this.#stopping) {
       this.#stopping = true
       this.#stopReason = 'fenced'
+      this.#stopReasonExplicit = true
       process.stderr.write(
         '[SessionRunnerDaemon] Heartbeat fenced (owner changed or attempt no longer running); exiting\n',
       )
@@ -533,8 +567,16 @@ export class SessionRunnerDaemon {
     const now = Date.now()
     if (now - this.#lastOutputTouchAt < 1_000) return
     this.#lastOutputTouchAt = now
+    // #heartbeat swallows its own transport errors (A-3); touchSessionActivity
+    // is a best-effort liveness touch and gets the same treatment — neither
+    // may turn an output line into an unhandled rejection.
     void this.#heartbeat()
-    void this.#store.touchSessionActivity(this.manifest.session.sessionId)
+    void this.#store.touchSessionActivity(this.manifest.session.sessionId).catch(err => {
+      process.stderr.write(
+        `[SessionRunnerDaemon] Session activity touch failed: ` +
+          `${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
   }
 
   #broadcast(message: RunnerServerMessage): void {
@@ -599,11 +641,17 @@ export class SessionRunnerDaemon {
       this.#detachedSince = now
       if (this.#busy) this.#detachedBusySince = now
     }
-    void this.#store.setSessionLifecycle(
-      this.manifest.session.sessionId,
-      'detached',
-      'active',
-    )
+    // A-6: guarded the same way as #onClient's write — see the note there.
+    void this.#store.getSession(this.manifest.session.sessionId).then(session => {
+      if (session && session.status !== 'terminated' && session.status !== 'ended') {
+        return this.#store.setSessionLifecycle(
+          this.manifest.session.sessionId,
+          'detached',
+          'active',
+        )
+      }
+      return undefined
+    }).catch(() => {})
 
     if (!this.#busy) {
       if (idleMs <= 0) return
@@ -615,6 +663,7 @@ export class SessionRunnerDaemon {
       this.#idleTimer = setTimeout(() => {
         this.#stopping = true
         this.#stopReason = 'idle_timeout'
+        this.#stopReasonExplicit = true
         void this.#store.addEvent(
           this.manifest.session.sessionId,
           this.manifest.attempt.attemptId,
@@ -634,6 +683,7 @@ export class SessionRunnerDaemon {
     this.#busyCeilingTimer = setTimeout(() => {
       this.#stopping = true
       this.#stopReason = 'idle_busy_timeout'
+      this.#stopReasonExplicit = true
       void this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,

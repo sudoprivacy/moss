@@ -268,21 +268,25 @@ export class SourceSyncWorker {
   // ============================================================
 
   private async runSync(source: ExternalSourceRow): Promise<SyncRunStats> {
-    this.inflight.set(source.id, Date.now())
-    // P1-3 mutual exclusion: the inflight Map above only dedups within THIS
-    // process. Behind an LB two instances can start the same source
-    // concurrently, and the sync write path is check-then-insert without
-    // unique constraints — parallel runs create duplicate root/folder/
-    // document rows that survive every later sweep, and one instance's
-    // reverse-sweep can soft-delete rows the other just upserted (its `seen`
-    // set predates them). A SESSION-scoped advisory lock makes one runner win
-    // per source while its statements autocommit — a whole sync (network +
-    // every upsert) must NOT ride one giant transaction (connection pinned for
-    // minutes, idle_in_transaction_session_timeout kill, running status hidden
-    // until commit). runSyncLocked is idempotent upsert + reverse-sweep, so a
-    // crash mid-run is reconciled by the next tick — the all-or-nothing the tx
-    // gave us is not needed. Sqlite is a no-op passthrough (single process —
-    // inflight already covers it).
+    // P1-3 mutual exclusion: the inflight Map (set inside runSyncLocked, i.e.
+    // only once the lock is actually held) only dedups within THIS process.
+    // Behind an LB two instances can start the same source concurrently, and
+    // the sync write path is check-then-insert without unique constraints —
+    // parallel runs create duplicate root/folder/document rows that survive
+    // every later sweep, and one instance's reverse-sweep can soft-delete
+    // rows the other just upserted (its `seen` set predates them). A
+    // SESSION-scoped advisory lock makes one runner win per source while its
+    // statements autocommit — a whole sync (network + every upsert) must NOT
+    // ride one giant transaction (connection pinned for minutes,
+    // idle_in_transaction_session_timeout kill, running status hidden until
+    // commit). runSyncLocked is idempotent upsert + reverse-sweep, so a crash
+    // mid-run is reconciled by the next tick — the all-or-nothing the tx gave
+    // us is not needed. Sqlite is a no-op passthrough (single process —
+    // inflight already covers it). Marking inflight only AFTER winning the
+    // lock matters: a losing tick returns skipped without ever touching the
+    // map, so a leaked inflight entry can never outlive the winner (B-1 —
+    // the old set-before-lock order leaked on every lock loss and stalled
+    // the source on this instance until the 30min stale cleanup).
     const result = await this.db.driver.tryRunExclusiveSession(
       `source-sync:${source.id}`,
       () => this.runSyncLocked(source),
@@ -304,6 +308,11 @@ export class SourceSyncWorker {
     })
 
     try {
+      // Lock held from here on — now (and only now) is it safe to tell the
+      // local tick "this source is inflight on this instance". Paired with
+      // the finally-delete below; inside the try so any later throw still
+      // cleans up.
+      this.inflight.set(source.id, Date.now())
       const config = this.parseConfig(source)
       const credentials = await this.loadCredentials(source)
       const connector = createConnector(source.type)

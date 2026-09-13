@@ -55,24 +55,59 @@ describe("B1: wiki build-job claim CAS + stale reaper", () => {
 });
 
 describe("B3: event-trigger boot reap age threshold", () => {
-  it("does not reap a freshly created run, but does reap one older than the timeout", async () => {
+  const insertTrigger = (store: DirectConnectStore, id: string, timeoutMs: number | null) => {
+    store.db.prepare(
+      "INSERT INTO event_triggers (id, org_id, user_id, name, secret_hash, secret_prefix, prompt_template, timeout_ms, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, "o1", "u1", `t-${id}`, "hash", "prefix", "prompt", timeoutMs, Date.now(), Date.now());
+  };
+
+  it("does not reap a fresh run, reaps an old RUNNING run, but never reaps queued (B-4)", async () => {
     const store = new DirectConnectStore(":memory:");
     const ets = new EventTriggerStore(store.driver);
     const now = Date.now();
+    insertTrigger(store, "t1", null);
 
     const fresh = await ets.createRun({ triggerId: "t1", orgId: "o1", userId: "u1", payloadJson: null });
     assert.ok(fresh);
-    // Boot reap threshold = now - (timeout + margin). A run created just now is
-    // NOT reaped (this is the fix: a rolling restart must not erase the peer's
+    // Boot reap threshold = per-trigger timeout + margin. A run created just
+    // now is NOT reaped (a rolling restart must not erase the peer's
     // in-flight/just-enqueued runs).
-    const staleBefore = now - (EVENT_RUN_TIMEOUT_MS + 60_000);
-    const reapedFresh = await ets.reapStaleRuns(staleBefore, "stale");
+    const reapedFresh = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
     assert.equal(reapedFresh, 0);
 
-    // Age it beyond the threshold → now it IS reaped.
+    // An aged run still 'queued' is NEVER reaped — the queued set is the
+    // shared claim queue any instance's claimQueuedRuns picks up; reaping by
+    // age silently discarded never-executed events.
     store.db.prepare("UPDATE event_trigger_runs SET created_at = ? WHERE id = ?").run(now - 60 * 60 * 1000, fresh!.id);
-    const reapedOld = await ets.reapStaleRuns(staleBefore, "stale");
-    assert.equal(reapedOld, 1);
+    const reapedQueued = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
+    assert.equal(reapedQueued, 0);
+
+    // The same aged run flipped to 'running' IS reaped (orphaned by a crash).
+    store.db.prepare("UPDATE event_trigger_runs SET status = 'running' WHERE id = ?").run(fresh!.id);
+    const reapedRunning = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
+    assert.equal(reapedRunning, 1);
+    store.db.close();
+  });
+
+  it("honours a per-trigger timeout larger than the default (B-4)", async () => {
+    const store = new DirectConnectStore(":memory:");
+    const ets = new EventTriggerStore(store.driver);
+    const now = Date.now();
+    // Trigger configured for a 60-minute run timeout.
+    insertTrigger(store, "t60", 60 * 60 * 1000);
+
+    const run = await ets.createRun({ triggerId: "t60", orgId: "o1", userId: "u1", payloadJson: null });
+    assert.ok(run);
+    // 'running' for 20 minutes: past the 15-min DEFAULT threshold, well
+    // within this trigger's 60-min timeout → must NOT be reaped.
+    store.db.prepare("UPDATE event_trigger_runs SET status = 'running', started_at = ? WHERE id = ?").run(now - 20 * 60 * 1000, run!.id);
+    const reapedAtDefault = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
+    assert.equal(reapedAtDefault, 0);
+
+    // Aged past the per-trigger threshold (60min + 60s margin) → reaped.
+    store.db.prepare("UPDATE event_trigger_runs SET started_at = ? WHERE id = ?").run(now - 62 * 60 * 1000, run!.id);
+    const reapedPastCustom = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
+    assert.equal(reapedPastCustom, 1);
     store.db.close();
   });
 });

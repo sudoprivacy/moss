@@ -12,7 +12,7 @@ import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
 import { readTenantAssistantMultipart, type TenantAssistantMultipartFile } from './utils/tenantAssistantMultipart.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
-import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
+import { hasScope, hasExactScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
@@ -1303,6 +1303,29 @@ function canAccessSession(
   )
 }
 
+/**
+ * D-5: redact credential-bearing query values before a URL reaches the log.
+ * The WS upgrade path accepts refresh_token as a query fallback (7-day TTL
+ * token) and upgrade logging used to dump req.url verbatim — anyone able to
+ * read the log could mint a fresh 7-day session. Path is kept; only known
+ * auth-parameter VALUES are masked.
+ */
+const REDACTED_QUERY_KEYS = new Set(['refresh_token', 'token', 'access_token'])
+function redactWsUrl(rawUrl: string | undefined): string {
+  if (!rawUrl) return ''
+  try {
+    const url = new URL(rawUrl, 'http://localhost')
+    for (const key of url.searchParams.keys()) {
+      if (REDACTED_QUERY_KEYS.has(key)) {
+        url.searchParams.set(key, '***')
+      }
+    }
+    return `${url.pathname}${url.search}`
+  } catch {
+    return '<unparseable-url>'
+  }
+}
+
 function normalizeWorkspaceRelativePath(value: string | null): string {
   if (!value) return ''
   if (value.includes('\0')) throw new HttpError(400, 'Invalid path')
@@ -2054,6 +2077,7 @@ export function startServer(
     defaultRuntime: config.defaultRuntime,
     dockerContainerMode: config.docker?.containerMode ?? 'session',
     workspace: config.workspace,
+    countLiveOtherInstances: () => runtime.countLiveOtherInstances(),
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
@@ -2442,7 +2466,7 @@ export function startServer(
   const channelsApi = createChannelsApi(runtime.store)
   const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime, healthReports: cabinHealthReports }) : null
   const cabinFlightAutomation = config.cabin.enabled && cabinAdminStore
-    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports)
+    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports, () => runtime.isCabinLeader())
     : null
   cabinFlightAutomation?.start()
 
@@ -3447,15 +3471,23 @@ export function startServer(
       // registry lives in the owner's process, so the non-owner forwards the
       // revoke here over the owner-aware route (same mechanism as the
       // internal WS channel). Scope-gated to the short-lived tokens minted
-      // by issueInternalChannelToken — regular user/admin tokens 403.
+      // by issueInternalChannelToken — regular user/admin tokens 403
+      // (hasExactScope: the admin `*` wildcard must not satisfy the gate).
       const internalRevokeMatch = pathname.match(/^\/api\/v1\/internal\/sessions\/([^/]+)\/revoke-token$/)
       if (req.method === 'POST' && internalRevokeMatch) {
-        if (!hasScope(auth.scopes, 'internal:channel')) {
+        if (!hasExactScope(auth.scopes, 'internal:channel')) {
           throw new HttpError(403, 'Forbidden')
         }
         const sessionId = decodeURIComponent(internalRevokeMatch[1] || '')
         const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Not Found')
+        // Subject ownership (org/user), aligned with the /ws/internal gate:
+        // ownsAttempt below only proves the attempt lives on THIS instance —
+        // it says nothing about the caller, and the LB route param lets any
+        // client aim the request at the owner instance.
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
         // Scope the forwarded revoke to attempts this instance actually owns —
         // aligns with the /ws/internal ownership gate; a peer's session 403s.
         if (!session.currentAttemptId || !(await runtime.ownsAttempt(session.currentAttemptId))) {
@@ -4037,13 +4069,16 @@ export function startServer(
         // Running job: signal the executor to terminate its session and unwind.
         // Not in the running set (queued, or owned by another instance): mark
         // it cancelled directly so the executor skips it when a slot frees.
+        // Predicate accepts queued|running only — with the runJob stage
+        // checkpoints (B-5) the remote owner now notices this cancelled row at
+        // its next stage boundary and unwinds instead of publishing over it.
         const signalled = await wikiJobExecutor.cancelJob(jobId)
         if (!signalled) {
           await documentStore.updateBuildJob(jobId, {
             status: 'cancelled',
             currentStep: '已终止',
             finishedAt: Date.now(),
-          })
+          }, { expectedStatuses: ['queued', 'running'] })
         }
         writeJson(res, 200, { job_id: jobId, status: 'cancelling' })
         return
@@ -4061,7 +4096,7 @@ export function startServer(
         const url = new URL(req.url ?? '', 'http://localhost')
         const limitParam = Number(url.searchParams.get('limit') ?? '20')
         writeJson(res, 200, {
-          jobs: await documentStore.listBuildJobs(wikiId, Number.isFinite(limitParam) ? limitParam : 20),
+          jobs: await documentStore.listBuildJobs(wikiId, Math.max(1, Math.min(Number.isFinite(limitParam) ? limitParam : 20, 100))),
         })
         return
       }
@@ -8015,7 +8050,7 @@ export function startServer(
         const jobId = cronRunsMatch[1]
         const limitRaw = url.searchParams.get('limit')
         const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
-        const result = await cronApi.listRuns(auth, jobId, Number.isFinite(limit) ? limit : 50, cronSubtreeUserIds)
+        const result = await cronApi.listRuns(auth, jobId, Math.max(1, Math.min(Number.isFinite(limit) ? limit : 50, 100)), cronSubtreeUserIds)
         writeJson(res, 200, result)
         return
       }
@@ -8062,7 +8097,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:triggers')
         const limitRaw = url.searchParams.get('limit')
         const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
-        const result = await eventTriggerApi.listRuns(auth, triggerRunsMatch[1], Number.isFinite(limit) ? limit : 50)
+        const result = await eventTriggerApi.listRuns(auth, triggerRunsMatch[1], Math.max(1, Math.min(Number.isFinite(limit) ? limit : 50, 100)))
         if (!result) throw new HttpError(404, 'Trigger not found')
         writeJson(res, 200, result)
         return
@@ -10300,7 +10335,7 @@ export function startServer(
   server.on('upgrade', (req, socket, head) => {
     void (async () => {
       try {
-        process.stderr.write(`[WS Upgrade] Incoming request: ${req.url}\n`)
+        process.stderr.write(`[WS Upgrade] Incoming request: ${redactWsUrl(req.url)}\n`)
         let token = getBearerToken(req)
         let auth = token ? await authService.verifyAccessToken(token) : null
 
@@ -10323,7 +10358,7 @@ export function startServer(
         }
 
         if (!auth) {
-          process.stderr.write(`[WS Upgrade Auth Failed v2] Token: ${token ? (token.slice(0, 10) + '...') : 'MISSING'}, URL: ${req.url}\n`)
+          process.stderr.write(`[WS Upgrade Auth Failed v2] Token: ${token ? (token.slice(0, 10) + '...') : 'MISSING'}, URL: ${redactWsUrl(req.url)}\n`)
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
           socket.destroy()
           return
@@ -10349,7 +10384,7 @@ export function startServer(
         // here, every line goes through verbatim.
         const internalMatch = pathname.match(/^\/ws\/internal\/sessions\/([^/]+)$/)
         if (internalMatch) {
-          const sessionId = internalMatch[1] || ''
+          const sessionId = decodeURIComponent(internalMatch[1] || '')
           const session = await runtime.getSession(sessionId)
           if (!session) {
             socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
@@ -10366,8 +10401,10 @@ export function startServer(
           // issueInternalChannelToken. A regular user/admin token — which
           // passes canAccessSession via the self/attach-any branch — must not
           // reach the raw runner-protocol passthrough below (arbitrary
-          // protocol frames both ways, e.g. shutdown).
-          if (!hasScope(auth.scopes, 'internal:channel')) {
+          // protocol frames both ways, e.g. shutdown). hasExactScope, NOT
+          // hasScope: admin/super_admin logins carry the `*` wildcard, which
+          // would satisfy hasScope's expansion and defeat this gate entirely.
+          if (!hasExactScope(auth.scopes, 'internal:channel')) {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
             socket.destroy()
             return
@@ -10443,7 +10480,7 @@ export function startServer(
           return
         }
 
-        const sessionId = match[1] || ''
+        const sessionId = decodeURIComponent(match[1] || '')
         const session = await runtime.getSession(sessionId)
         if (!session) {
           socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
@@ -10483,6 +10520,21 @@ export function startServer(
             `[WS Upgrade] session ${sessionId} is owned by a live other instance — not bridging here\n`,
           )
           socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+          socket.destroy()
+          return
+        }
+
+        // A-2: the fast path below bridges without ensureSessionReady's
+        // manifest guard. After a same-host adopt, DB ownership says "self"
+        // but the live socket may still be served by the OLD instance's
+        // daemon (its manifest carries the old instanceId) — fencing kills
+        // it within one heartbeat interval. 503 so the client retries after
+        // the fence instead of being handed a runner that is about to die.
+        if (
+          locallyOwnedAttempt &&
+          !await runtime.ownsAttemptRunner(locallyOwnedAttempt.attemptId)
+        ) {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
           socket.destroy()
           return
         }
@@ -10730,6 +10782,11 @@ export function startServer(
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()
+      // B-2: event triggers must stop claiming runs during the drain window
+      // too — otherwise the ≤2s tick keeps claimQueuedRuns'ing runs that die
+      // with the process (stuck 'running' until the next instance's startup
+      // reap marks them error). stop() exists but had no caller.
+      eventTriggerService.stop()
       msgAuditPurgeWorker.stop()
       getConfigStore().stopRefreshPolling()
       // Stop channel plugins (and release their HA leases) on graceful shutdown

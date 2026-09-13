@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import type { DbDriver, SqlParam } from '../db/driver.js'
+import { escapeLike, type DbDriver, type SqlParam } from '../db/driver.js'
 import type { McpServer, McpPolicy, McpAuditLog, McpApprovalRequest, McpTemplate, McpServerInput, McpPolicyInput, McpTemplateInput, McpServerListFilter, McpAuditLogFilter, McpTemplateListFilter } from './types.js'
 import type { VisibleTo } from '../visibilityFilter.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
@@ -948,8 +948,9 @@ export class McpStore {
       params.push(filter.category)
     }
     if (filter?.search) {
-      conditions.push('(name LIKE ? OR description LIKE ?)')
-      const term = `%${filter.search}%`
+      // C-7: escapeLike + ESCAPE (see driver.ts escapeLike).
+      conditions.push("(name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')")
+      const term = `%${escapeLike(filter.search)}%`
       params.push(term, term)
     }
 

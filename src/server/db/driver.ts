@@ -36,7 +36,22 @@ export function isUniqueViolation(err: unknown): boolean {
     const code = (err as { code?: unknown }).code
     if (code === '23505') return true
   }
-  return /UNIQUE|unique constraint/i.test(String(err))
+  // C-8: exact SQLite-native message prefix instead of a loose substring
+  // regex — "/UNIQUE|unique constraint/i" matched any error text that merely
+  // contained the word (e.g. a constraint name in an unrelated failure),
+  // silently converting real errors into "duplicate" domain results.
+  return String(err).includes('UNIQUE constraint failed')
+}
+
+/**
+ * C-7: escape a user-supplied LIKE/ILIKE search term so its literal `%`, `_`
+ * and `\` characters match themselves. Pair with `ESCAPE '\'` on the
+ * operator. Both dialects honour ESCAPE (SQLite's LIKE has no default
+ * escape character, PG's ILIKE defaults to backslash — without the clause
+ * the two backends disagree on backslash-containing terms).
+ */
+export function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, ch => `\\${ch}`)
 }
 
 export interface DbDriver {
@@ -99,7 +114,23 @@ export class SqliteDriver implements DbDriver {
   private async waitOutTx(): Promise<void> {
     // while, not a single await: back-to-back transactions can start a new one
     // by the time this wakes, so re-check until the field is actually clear.
-    while (this.activeTx !== null) await this.activeTx.catch(() => {})
+    // C-2: bounded — a statement issued OUTSIDE the tx context (empty ALS)
+    // that the transaction body itself awaits would otherwise loop forever
+    // (the txn can only settle after the statement returns, the statement
+    // only returns after the txn settles). No production call site does that
+    // today (all four are straight await chains), so this is a fence, not a
+    // fix: fail loudly after 30s instead of wedging the process silently.
+    const deadline = Date.now() + 30_000
+    while (this.activeTx !== null) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          'SqliteDriver: timed out waiting for the active transaction to settle ' +
+            '(possible deadlock: a transaction-context statement is awaiting a ' +
+            'statement issued outside the transaction)',
+        )
+      }
+      await this.activeTx.catch(() => {})
+    }
   }
 
   async get<T extends SqlRow = SqlRow>(sql: string, params?: SqlParam[]): Promise<T | undefined> {
@@ -300,8 +331,19 @@ export class PgDriver implements DbDriver {
   }
 
   async exec(sql: string): Promise<void> {
-    // DDL / multi-statement: always on a dedicated connection (PG simple
-    // query protocol allows multiple statements per string).
+    // DDL / multi-statement: PG's simple query protocol allows multiple
+    // statements per string. C-3/C-10: inside a transaction context, exec
+    // JOINS that transaction (same exclusive client) — aligning with
+    // SqliteDriver.exec's semantics and, critically, keeping
+    // applyPgSchema's DDL on the advisory-locked client instead of leaving
+    // the lock-holding transaction idle-in-transaction (killable by
+    // idle_in_transaction_session_timeout) while DDL runs elsewhere; the
+    // DDL + _migrations INSERT now commit or roll back atomically.
+    const ctx = this.txStorage.getStore()
+    if (ctx) {
+      await ctx.client.query(sql)
+      return
+    }
     const client = await this.pool.connect()
     try {
       await client.query(sql)
@@ -331,9 +373,12 @@ export class PgDriver implements DbDriver {
     // The lock lives and dies with this transaction, so fn MUST run inside it
     // (its statements join the same connection via the ALS context) — running
     // it after COMMIT would let the next contender in mid-flight.
+    // C-9: hashtextextended (64-bit) over hashtext (32-bit) widens the advisory
+    // key space; acquire and release must hash identically, so all three
+    // sites below move together.
     return this.transaction(async () => {
       const res = await this.get<{ ok: boolean }>(
-        'SELECT pg_try_advisory_xact_lock(hashtext(?)) AS ok',
+        'SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS ok',
         [lockKey],
       )
       if (!res?.ok) return null
@@ -349,7 +394,7 @@ export class PgDriver implements DbDriver {
     const client = await this.pool.connect()
     let locked = false
     try {
-      const res = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey])
+      const res = await client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok', [lockKey])
       const ok = (res.rows[0] as { ok?: boolean } | undefined)?.ok === true
       if (!ok) return null
       locked = true
@@ -357,7 +402,7 @@ export class PgDriver implements DbDriver {
     } finally {
       if (locked) {
         try {
-          await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey])
+          await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockKey])
           client.release()
         } catch {
           // Unlock failed — destroy the connection so the session (and thus the

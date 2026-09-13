@@ -712,7 +712,11 @@ export class DocumentStore {
     sessionId: string | null
     startedAt: number
     finishedAt: number
-  }>): Promise<void> {
+  }>, opts?: {
+    /** B-6 fencing predicates — see Store.updateWikiBuildJob's opts doc. */
+    expectedStatuses?: string[]
+    ownerInstanceId?: string
+  }): Promise<void> {
     await this.store.updateWikiBuildJob(id, {
       status: updates.status,
       progress: updates.progress,
@@ -721,7 +725,7 @@ export class DocumentStore {
       session_id: updates.sessionId,
       started_at: updates.startedAt,
       finished_at: updates.finishedAt,
-    })
+    }, opts)
   }
 }
 
