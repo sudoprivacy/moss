@@ -4,9 +4,9 @@ import { dirname, join } from 'path'
 import pMap from 'p-map'
 import type { Entry, TranscriptMessage } from '../types/logs.js'
 import { errorMessage, isENOENT } from '../utils/errors.js'
-import { readJSONLFile } from '../utils/json.js'
+import { readJSONLFile } from '../utils/jsonl.js'
 import { SYNTHETIC_MODEL } from '../utils/syntheticModel.js'
-import { isTranscriptMessage } from '../utils/sessionStorage.js'
+import { isTranscriptMessage } from '../utils/transcriptGuard.js'
 import type { SessionRecord } from './types.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000

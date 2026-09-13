@@ -54,6 +54,7 @@ import {
   sortLogs,
   type TranscriptMessage,
 } from '../types/logs.js'
+import { isTranscriptMessage } from './transcriptGuard.js'
 import type {
   AssistantMessage,
   AttachmentMessage,
@@ -125,25 +126,10 @@ const MAX_TOMBSTONE_REWRITE_BYTES = 50 * 1024 * 1024
 const SKIP_FIRST_PROMPT_PATTERN =
   /^(?:\s*<[a-z][\w-]*[\s>]|\[Request interrupted by user[^\]]*\])/
 
-/**
- * Type guard to check if an entry is a transcript message.
- * Transcript messages include user, assistant, attachment, and system messages.
- * IMPORTANT: This is the single source of truth for what constitutes a transcript message.
- * loadTranscriptFile() uses this to determine which messages to load into the chain.
- *
- * Progress messages are NOT transcript messages. They are ephemeral UI state
- * and must not be persisted to the JSONL or participate in the parentUuid
- * chain. Including them caused chain forks that orphaned real conversation
- * messages on resume (see #14373, #23537).
- */
-export function isTranscriptMessage(entry: Entry): entry is TranscriptMessage {
-  return (
-    entry.type === 'user' ||
-    entry.type === 'assistant' ||
-    entry.type === 'attachment' ||
-    entry.type === 'system'
-  )
-}
+// isTranscriptMessage moved to ./transcriptGuard.ts (server modules need the
+// guard without sessionStorage's CLI-only import graph). Re-exported here so
+// existing importers (sessionUsage.ts and internal call sites) stay unchanged.
+export { isTranscriptMessage } from './transcriptGuard.js'
 
 /**
  * Entries that participate in the parentUuid chain. Used on the write path

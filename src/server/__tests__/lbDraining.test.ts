@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import type http from "node:http";
 import { DirectConnectStore } from "../db.js";
 import { RuntimeService, ServerDrainingError } from "../runtimeService.js";
-import { writeError } from "../server.js";
+import { writeError } from "../httpRespond.js";
 import type { AuthService } from "../auth/service.js";
 import type { ServerConfig } from "../types.js";
 import type { SessionCreateInput, SessionRecord } from "../types.js";
