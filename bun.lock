@@ -37,6 +37,7 @@
         "@opentelemetry/sdk-metrics": "^2.6.1",
         "@opentelemetry/sdk-trace-base": "^2.6.1",
         "@opentelemetry/semantic-conventions": "^1.40.0",
+        "@sudo/contracts": "github:sudoprivacy/sudostack#45304cf15d1e8d02814e46b7b2fe0b3c30c1709c",
         "@xenova/transformers": "^2.17.2",
         "@xmldom/xmldom": "^0.9.9",
         "ajv": "^8.18.0",
@@ -556,6 +557,8 @@
     "@smithy/util-utf8": ["@smithy/util-utf8@4.2.2", "https://registry.npmmirror.com/@smithy/util-utf8/-/util-utf8-4.2.2.tgz", { "dependencies": { "@smithy/util-buffer-from": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-75MeYpjdWRe8M5E3AW0O4Cx3UadweS+cwdXjwYGBW5h/gxxnbeZ877sLPX/ZJA9GVTlL/qG0dXP29JWFCD1Ayw=="],
 
     "@smithy/uuid": ["@smithy/uuid@1.1.2", "https://registry.npmmirror.com/@smithy/uuid/-/uuid-1.1.2.tgz", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-O/IEdcCUKkubz60tFbGA7ceITTAJsty+lBjNoorP4Z6XRqaFb/OjQjZODophEcuq68nKm6/0r+6/lLQ+XVpk8g=="],
+
+    "@sudo/contracts": ["@sudo/contracts@github:sudoprivacy/sudostack#45304cf", {}, "sudoprivacy-sudostack-45304cf", "sha512-wrEl9QYDaGe8Z8MdIAUuYd8sm/q2buALd9DuuIrAmYtteUhX37Nhd7bbQre0hA2Ta+ae3o/G1VoHkfwpFnziAw=="],
 
     "@types/long": ["@types/long@4.0.2", "", {}, "sha512-MqTGEo5bj5t157U6fA/BiDynNkn0YknVdh48CMPkTSpFTVmvao5UQmm7uEF6xBEo7qIMAlY/JSleYaE6VOdpaA=="],
 

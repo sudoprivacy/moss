@@ -108,7 +108,8 @@
     "xmlbuilder": "^15.1.1",
     "xss": "^1.0.15",
     "yaml": "^2.8.3",
-    "zod": "*"
+    "zod": "*",
+    "@sudo/contracts": "github:sudoprivacy/sudostack#45304cf15d1e8d02814e46b7b2fe0b3c30c1709c"
   },
   "optionalDependencies": {
     "@img/sharp-darwin-arm64": "*",
