@@ -1,10 +1,12 @@
-// Runs under Node: `tsx --test`. Covers computeReadiness (probes fully
-// stubbed — no live nexus listener / docker / kubectl needed, deterministic)
-// and setRouteCookieHeader, both exported from server.ts for testability.
+// Runs under bun:test. Covers computeReadiness (probes fully stubbed — no
+// live nexus listener / docker / kubectl needed, deterministic) and
+// setRouteCookieHeader, both exported from readiness.ts (extracted from
+// server.ts, which could load under neither runner: node:sqlite blocks bun,
+// bun:bundle blocks node).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type http from "node:http";
-import { computeReadiness, setRouteCookieHeader } from "../server.js";
+import { computeReadiness, setRouteCookieHeader } from "../readiness.js";
 import type { ServerConfig } from "../types.js";
 import type { RuntimeService } from "../runtimeService.js";
 

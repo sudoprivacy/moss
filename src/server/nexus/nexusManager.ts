@@ -1,3 +1,4 @@
+import { validateZoneId, describeRefusal } from '@sudo/contracts/zone-id'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
 import {
   copyFileSync,
@@ -106,14 +107,58 @@ export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
   return { mode, endpoint, authToken: env.MOSS_NEXUS_AUTH_TOKEN?.trim() ?? '', tls }
 }
 
-export function buildNexusArgs(grpcPort: number, dataDir: string, pluginDir: string): string[] {
-  return [
+/**
+ * Builds the daemon's argv, refusing a zone id we would not be allowed to keep.
+ *
+ * `clusterInit` names the zone this node founds. Omitted, the daemon founds its
+ * default root zone, which is what every deployment does today — so passing
+ * nothing behaves exactly as before.
+ *
+ * The id is checked here, before spawning, rather than left to the daemon. Two
+ * reasons, and the second is the one that matters:
+ *
+ *   * a spawn that fails on argv is a worse error than a refusal that names the
+ *     offending id and the rule it broke;
+ *   * the daemon only refuses on FIRST boot. On a restart it warns and carries
+ *     on, deliberately, so that a new rule cannot take down a node that has been
+ *     serving for months. That leniency is right for the daemon and wrong for
+ *     us: moss generating an id is always creating one, never inheriting one, so
+ *     there is no running deployment for us to protect and no reason to let a
+ *     malformed id through.
+ *
+ * `validateZoneId` is not written here. It is derived from
+ * `contracts/zone-id/spec.json` in nexus-vfs — the repository that owns the
+ * concept — via sudostack, which pins a revision rather than copying the rules.
+ * The same spec generates the daemon's own Rust validator, so the two cannot
+ * disagree about what is valid.
+ */
+export function buildNexusArgs(
+  grpcPort: number,
+  dataDir: string,
+  pluginDir: string,
+  clusterInit?: string,
+): string[] {
+  const args = [
     'serve-local',
     '--port', String(grpcPort),
     '--data-dir', dataDir,
     '--no-tls',
     '--plugin-dir', pluginDir,
   ]
+
+  if (clusterInit !== undefined) {
+    const refusal = validateZoneId(clusterInit)
+    if (refusal) {
+      throw new Error(
+        `refusing to start nexusd with zone id ${JSON.stringify(clusterInit)}: ${describeRefusal(refusal)}. ` +
+          'A zone id is the first path segment of everything in the zone and cannot be changed afterwards — ' +
+          'pointing at a different id later creates a new empty zone and abandons the old one.',
+      )
+    }
+    args.push('--cluster-init', clusterInit)
+  }
+
+  return args
 }
 
 /**

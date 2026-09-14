@@ -37,6 +37,8 @@ export const CONFIG_KEYS = [
   'server.sudorouter-admin-token',
   'server.fuiou-merchant-private-key',
   'server.fuiou-public-key',
+  'server.sms-secret-id',
+  'server.sms-secret-key',
 ] as const
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number]

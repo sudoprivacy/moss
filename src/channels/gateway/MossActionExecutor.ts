@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { neutralizeUntrustedMarkup } from '../utils/untrustedText.js'
 import net from 'net';
 import type { RuntimeService } from '../../server/runtimeService.js';
 import type { DirectConnectStore } from '../../server/db.js';
@@ -184,7 +185,10 @@ export class MossActionExecutor {
         await existingLock;
       }
 
-      const lockPromise = this.processMessage(platform, pluginId, chatId, user, content.text, sendFn, editFn, mossUserId);
+      // Defanged at the boundary: channel text is written by whoever holds the
+      // far-side IM account, and it reaches the agent as a plain user turn.
+      const safeText = neutralizeUntrustedMarkup(content.text);
+      const lockPromise = this.processMessage(platform, pluginId, chatId, user, safeText, sendFn, editFn, mossUserId);
       this.conversationLocks.set(lockKey, lockPromise);
 
       try {

@@ -1,8 +1,6 @@
 import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
 import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
 import os from 'os'
@@ -19,6 +17,8 @@ import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService, ServerDrainingError } from './runtimeService.js'
+import { HttpError, writeError, writeJson } from './httpRespond.js'
+import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
@@ -83,7 +83,7 @@ import { initHubConfig } from './hubConfig.js'
 /** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter' | 'fuiou'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter' | 'fuiou' | 'sms'
   path: string
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
@@ -99,6 +99,8 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.sudorouter-admin-token', group: 'sudorouter', path: 'systemConfig.sudorouterAdminToken' },
   { key: 'server.fuiou-merchant-private-key', group: 'fuiou', path: 'systemConfig.recharge.fuiou.merchantPrivateKey' },
   { key: 'server.fuiou-public-key', group: 'fuiou', path: 'systemConfig.recharge.fuiou.publicKey' },
+  { key: 'server.sms-secret-id', group: 'sms', path: 'phoneAuth.tencent.secretId' },
+  { key: 'server.sms-secret-key', group: 'sms', path: 'phoneAuth.tencent.secretKey' },
 ]
 import {
   createCustomAssistant,
@@ -194,7 +196,6 @@ import { handleMcpSseConnection, broadcastMcpEvent } from './api/mcpEvents.js'
 import { McpStore } from './mcp/db.js'
 import type { McpTemplateListFilter } from './mcp/types.js'
 import type { NexusClient } from './nexus/nexusClient.js'
-import { connectTcp, resolveNexusConfigFromEnv } from './nexus/nexusManager.js'
 import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
@@ -320,16 +321,6 @@ const MIME_TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.txt': 'text/plain; charset=utf-8',
   '.webp': 'image/webp',
-}
-
-class HttpError extends Error {
-  constructor(
-    readonly statusCode: number,
-    message: string,
-  ) {
-    super(message)
-    this.name = 'HttpError'
-  }
 }
 
 function isJsonBody(value: unknown): value is JsonBody {
@@ -1099,19 +1090,6 @@ function authenticateRequest(
   return auth
 }
 
-function writeJson(
-  res: http.ServerResponse,
-  status: number,
-  body: unknown,
-): void {
-  const payload = JSON.stringify(body)
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(payload),
-  })
-  res.end(payload)
-}
-
 /**
  * Attach sudocode.json fields (sudorouter_key, model_service_url, models)
  * to the login response only when the user has local authorization.
@@ -1270,187 +1248,6 @@ function buildWsUrl(server: http.Server, config: ServerConfig, sessionId: string
   }
 
   return `ws://${host}:${actualPort}${path}`
-}
-
-function tryParseUrl(value: string): URL | null {
-  try {
-    return new URL(value)
-  } catch {
-    return null
-  }
-}
-
-/**
- * Sticky-routing cookie for multi-instance LB deployments (Nginx
- * `map $cookie_moss_route`). Only set when `config.instanceId` is configured
- * (`MOSS_INSTANCE_ID`) — single-instance deployments keep their current
- * behavior (no Set-Cookie at all). HttpOnly + SameSite=Lax per the HA design;
- * `Secure` is appended when MOSS_ROUTE_COOKIE_SECURE=true (HTTPS entry).
- * Called once at the top of the HTTP handler so every response (API, static,
- * SSE, unauthenticated) carries it; WS upgrades don't pass through the HTTP
- * handler, but browser WebSocket handshakes send cookies automatically.
- */
-export function setRouteCookieHeader(res: http.ServerResponse, config: ServerConfig): void {
-  if (!config.instanceId) return
-  const parts = [
-    `${config.routeCookieName}=${config.instanceId}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-  ]
-  if (config.routeCookieSecure) parts.push('Secure')
-  res.setHeader('Set-Cookie', parts.join('; '))
-}
-
-const execFileAsync = promisify(execFile)
-
-/** Readiness probe surface for /readyz — injectable for unit tests (M5). */
-export type ReadinessProbes = {
-  isDraining(): boolean
-  probeDb(): Promise<boolean>
-  probeNexus(): Promise<boolean>
-  probeDocker(): Promise<boolean>
-  probeK8s(): Promise<boolean>
-}
-
-export type ReadinessResult = {
-  ok: boolean
-  ready: boolean
-  instance_id: string | null
-  checks: {
-    db: boolean
-    nexus: boolean
-    /** null = not applicable (defaultRuntime has nothing to probe, e.g. host). */
-    runtime: boolean | null
-    /** null unless defaultRuntime='k8s' (same probe as checks.runtime then). */
-    k8s: boolean | null
-    draining: boolean
-  }
-  httpStatus: 200 | 503
-}
-
-async function probeWithTimeout(probe: Promise<boolean>, timeoutMs: number): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<boolean>(resolve => {
-    timer = setTimeout(() => resolve(false), timeoutMs)
-  })
-  try {
-    return await Promise.race([probe, timeout])
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-/**
- * Readiness for /readyz (LB removal signal). Checks run in parallel
- * (Promise.allSettled; per-probe timeout: db/nexus/docker 2s, k8s 5s — kubectl
- * cold start + TLS can exceed 2s). `ready = !draining && db && nexus &&
- * (runtime !== false)`. Probes are injectable so unit tests get deterministic
- * behavior without a live nexus listener or docker/kubectl binaries.
- */
-export async function computeReadiness(
-  config: ServerConfig,
-  runtime: RuntimeService,
-  probes?: Partial<ReadinessProbes>,
-): Promise<ReadinessResult> {
-  const isDraining = probes?.isDraining ?? (() => false)
-  const probeDb =
-    probes?.probeDb ??
-    (async () => {
-      try {
-        runtime.store.db.prepare('SELECT 1').get()
-        return true
-      } catch {
-        return false
-      }
-    })
-  const probeNexus =
-    probes?.probeNexus ??
-    (async () => {
-      // Embedded: the child nexusd listens on loopback:grpcPort. External:
-      // parse host:port from MOSS_NEXUS_ENDPOINT (ServerConfig carries no
-      // nexus fields — resolveNexusConfigFromEnv is the source of truth).
-      const nexusConfig = resolveNexusConfigFromEnv()
-      if (nexusConfig.mode === 'external') {
-        const endpoint = tryParseUrl(nexusConfig.endpoint)
-        if (!endpoint) return false
-        const port = endpoint.port ? Number(endpoint.port) : 443
-        try {
-          await connectTcp(port, 2_000, endpoint.hostname)
-          return true
-        } catch {
-          return false
-        }
-      }
-      try {
-        await connectTcp(nexusConfig.grpcPort, 2_000)
-        return true
-      } catch {
-        return false
-      }
-    })
-  const probeDocker =
-    probes?.probeDocker ??
-    (async () => {
-      try {
-        await execFileAsync('docker', ['info'], { timeout: 2_000 })
-        return true
-      } catch {
-        return false
-      }
-    })
-  const probeK8s =
-    probes?.probeK8s ??
-    (async () => {
-      // kubeconfig is optional (kubectl then falls back to its own defaults);
-      // only pass --kubeconfig when set, mirroring k8sBackend's optional wiring.
-      const args: string[] = []
-      if (config.k8s?.kubeconfig) args.push('--kubeconfig', config.k8s.kubeconfig)
-      args.push('get', '--raw', '/readyz')
-      try {
-        await execFileAsync('kubectl', args, { timeout: 5_000 })
-        return true
-      } catch {
-        return false
-      }
-    })
-
-  const draining = isDraining()
-  const settled = await Promise.allSettled([
-    probeWithTimeout(probeDb(), 2_500),
-    probeWithTimeout(probeNexus(), 2_500),
-    // 5.5s outer bound > the 5s kubectl timeout inside the default probe.
-    probeWithTimeout(
-      config.defaultRuntime === 'docker'
-        ? probeDocker()
-        : config.defaultRuntime === 'k8s'
-          ? probeK8s()
-          : Promise.resolve<boolean | null>(null),
-      5_500,
-    ),
-  ])
-  // A probe rejecting (e.g. resolveNexusConfigFromEnv throwing on a misconfigured
-  // https endpoint) must degrade to "not ready" (503), not crash /readyz into a
-  // 500 — hence allSettled with rejected → false.
-  const db = settled[0].status === 'fulfilled' ? settled[0].value : false
-  const nexus = settled[1].status === 'fulfilled' ? settled[1].value : false
-  const runtimeProbe = settled[2].status === 'fulfilled' ? settled[2].value : false
-
-  const runtimeCheck = config.defaultRuntime === 'host' ? null : runtimeProbe
-  const ready = !draining && db && nexus && runtimeCheck !== false
-  return {
-    ok: ready,
-    ready,
-    instance_id: config.instanceId ?? null,
-    checks: {
-      db,
-      nexus,
-      runtime: runtimeCheck,
-      k8s: config.defaultRuntime === 'k8s' ? runtimeCheck : null,
-      draining,
-    },
-    httpStatus: ready ? 200 : 503,
-  }
 }
 
 function canAccessSession(
@@ -2159,32 +1956,6 @@ async function serveAdminRequest(
   await writeFileResponse(res, join(adminDistDir, 'index.html'), headOnly)
 }
 
-// Exported for unit testing the ServerDrainingError → 503 mapping (same
-// test-only export convention as computeReadiness / setRouteCookieHeader).
-export function writeError(
-  logger: ServerLogger,
-  res: http.ServerResponse,
-  error: unknown,
-): void {
-  // Graceful drain: reject during the SIGTERM grace window with 503 (instance
-  // unavailable). Kept as the first check and before the fallback 500 below so
-  // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
-  // matches every other writeError branch.
-  if (error instanceof ServerDrainingError) {
-    writeJson(res, 503, { error: error.message })
-    return
-  }
-  if (error instanceof AuthServiceError || error instanceof HttpError) {
-    writeJson(res, error.statusCode, { error: error.message })
-    return
-  }
-
-  logger.error(error instanceof Error ? error.message : String(error))
-  writeJson(res, 500, {
-    error: error instanceof Error ? error.message : String(error),
-  })
-}
-
 function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const origin = req.headers.origin
   if (!origin) return false
@@ -2700,6 +2471,67 @@ export function startServer(
       // Self-service signup, step 3: exchange a register token for an account.
       // Step 2 is the phone branch of /api/v1/auth/login below, which is what
       // hands out the register token after a code checks out.
+      // Password sign-in for a deployment running `login_method: 1`. The
+      // client posts `phone` because that is the field it collects, but the
+      // value is the username — moss stores the phone as the username for
+      // phone accounts, so the same lookup serves both.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/login-by-config') {
+        const body = await readJsonBody(req)
+        try {
+          const result = authService.issueTokenFromPassword({
+            username: typeof body.phone === 'string' ? body.phone : (typeof body.username === 'string' ? body.username : ''),
+            password: typeof body.password === 'string' ? body.password : '',
+          })
+          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+        } catch (err) {
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          // Deliberately the same message for an unknown account and a wrong
+          // password: telling them apart tells an attacker which usernames exist.
+          writeJson(res, status, { success: false, msg: 'Username or password is incorrect' })
+        }
+        return
+      }
+
+      // Self-service sign-up for a password deployment. Same shape as the
+      // phone flow it sits beside: an invitation code gates entry, the account
+      // is provisioned at the gateway, and the caller is signed in.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/register-password') {
+        const body = await readJsonBody(req)
+        const username = typeof body.phone === 'string' ? body.phone.trim() : ''
+        const password = typeof body.password === 'string' ? body.password : ''
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        if (!username || !password || !nickname) {
+          writeJson(res, 400, { success: false, msg: 'phone, password and nickname are required' })
+          return
+        }
+        // The same gate the phone flow uses, so turning invitations on or off
+        // applies to both rather than leaving one door open.
+        if (!authService.phoneAuth.checkInvitationCode(body.invitation_code)) {
+          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+          return
+        }
+        if (authService.findUserByPhone(username)) {
+          writeJson(res, 409, { success: false, msg: 'This account already exists' })
+          return
+        }
+        const { user } = authService.provisionPhoneUser({
+          phone: username,
+          nickname,
+          autoCreateOrg: authService.phoneAuth.autoCreateOrg,
+        })
+        authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
+        await ensureGatewayAccount(authService, config, {
+          userId: user.id,
+          username,
+          displayName: nickname,
+        })
+        writeJson(res, 200, {
+          success: true,
+          data: attachSudocodeFields(authService.issueTokenFromPhone(username)),
+        })
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/auth/register') {
         const body = await readJsonBody(req)
         const phoneAuth = authService.phoneAuth
@@ -6176,27 +6008,6 @@ export function startServer(
         return
       }
 
-      // Password sign-in for a deployment running `login_method: 1`. The
-      // client posts `phone` because that is the field it collects, but the
-      // value is the username — moss stores the phone as the username for
-      // phone accounts, so the same lookup serves both.
-      if (req.method === 'POST' && pathname === '/api/v1/auth/login-by-config') {
-        const body = await readJsonBody(req)
-        try {
-          const result = authService.issueTokenFromPassword({
-            username: typeof body.phone === 'string' ? body.phone : (typeof body.username === 'string' ? body.username : ''),
-            password: typeof body.password === 'string' ? body.password : '',
-          })
-          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
-        } catch (err) {
-          const status = err instanceof AuthServiceError ? err.statusCode : 401
-          // Deliberately the same message for an unknown account and a wrong
-          // password: telling them apart tells an attacker which usernames exist.
-          writeJson(res, status, { success: false, msg: 'Username or password is incorrect' })
-        }
-        return
-      }
-
       if (req.method === 'POST' && pathname === '/api/v1/auth/change-password') {
         const body = await readJsonBody(req)
         const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword : ''
@@ -6224,46 +6035,6 @@ export function startServer(
         }
         authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
         writeJson(res, 200, { success: true, msg: 'password updated' })
-        return
-      }
-
-      // Self-service sign-up for a password deployment. Same shape as the
-      // phone flow it sits beside: an invitation code gates entry, the account
-      // is provisioned at the gateway, and the caller is signed in.
-      if (req.method === 'POST' && pathname === '/api/v1/auth/register-password') {
-        const body = await readJsonBody(req)
-        const username = typeof body.phone === 'string' ? body.phone.trim() : ''
-        const password = typeof body.password === 'string' ? body.password : ''
-        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
-        if (!username || !password || !nickname) {
-          writeJson(res, 400, { success: false, msg: 'phone, password and nickname are required' })
-          return
-        }
-        // The same gate the phone flow uses, so turning invitations on or off
-        // applies to both rather than leaving one door open.
-        if (!authService.phoneAuth.checkInvitationCode(body.invitation_code)) {
-          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
-          return
-        }
-        if (authService.findUserByPhone(username)) {
-          writeJson(res, 409, { success: false, msg: 'This account already exists' })
-          return
-        }
-        const { user } = authService.provisionPhoneUser({
-          phone: username,
-          nickname,
-          autoCreateOrg: authService.phoneAuth.autoCreateOrg,
-        })
-        authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
-        await ensureGatewayAccount(authService, config, {
-          userId: user.id,
-          username,
-          displayName: nickname,
-        })
-        writeJson(res, 200, {
-          success: true,
-          data: attachSudocodeFields(authService.issueTokenFromPhone(username)),
-        })
         return
       }
 

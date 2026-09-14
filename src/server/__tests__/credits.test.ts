@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { fakeGateway } from './fakeGateway.js'
 import {
   createSudorouterClient,
   pointsToQuota,
@@ -158,11 +159,7 @@ describe('submitting an application', () => {
 
 describe('reviewing an application', () => {
   function gateway(behaviour: () => void): SudorouterClient {
-    return {
-      getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-      getModelUsage: async () => [],
-      addPoints: async () => behaviour(),
-    }
+    return fakeGateway({ addPoints: async () => behaviour() })
   }
 
   it('credits the gateway on approval', async () => {
@@ -171,11 +168,9 @@ describe('reviewing an application', () => {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     let credited = 0
-    const client: SudorouterClient = {
-      getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-      getModelUsage: async () => [],
+    const client: SudorouterClient = fakeGateway({
       addPoints: async (_id, points) => { credited = points },
-    }
+    })
     const reviewed = await reviewApplication(store, client, {
       id: app.id, approve: true, gatewayUserId: '42', adminComment: 'ok',
     })
@@ -190,11 +185,9 @@ describe('reviewing an application', () => {
       userId: 'u1', orgId: 'o1', requestedPoints: 5000, reason: null,
     })
     let credited = 0
-    const reviewed = await reviewApplication(store, {
-      getCredits: async () => ({ remainingPoints: 0, usedPoints: 0 }),
-      getModelUsage: async () => [],
+    const reviewed = await reviewApplication(store, fakeGateway({
       addPoints: async (_id, points) => { credited = points },
-    }, { id: app.id, approve: true, approvedPoints: 1000, gatewayUserId: '42' })
+    }), { id: app.id, approve: true, approvedPoints: 1000, gatewayUserId: '42' })
     expect(reviewed.approvedPoints).toBe(1000)
     expect(credited).toBe(1000)
   })
@@ -428,5 +421,44 @@ describe('usage log reading', () => {
     const usage = await clientReturning(rows).getModelUsage('42', 0, 1)
     expect(usage.every(r => r.cost === 0)).toBe(true)
     expect(quotaToPoints(usage.reduce((n, r) => n + r.costQuota, 0))).toBe(1)
+  })
+})
+
+describe('gateway field limits', () => {
+  it('trims a display name the gateway would reject', async () => {
+    // The gateway validates username, password and display_name at 20 characters
+    // and answers with a field-validation blob. A user is free to type a longer
+    // nickname, and it must not cost them their account.
+    const calls: Array<{ path: string; body: unknown }> = []
+    const client = createSudorouterClient({
+      baseUrl: 'https://gateway.example',
+      getAdminToken: async () => 't',
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url).replace('https://gateway.example', '')
+        calls.push({ path, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        const data = path.startsWith('/api/user/search') ? []
+          : path.startsWith('/api/token/') ? { key: 'k' }
+          : { id: 1 }
+        return new Response(JSON.stringify({ success: true, data }))
+      }) as unknown as typeof fetch,
+    })
+    await client.provisionAccount({
+      username: '13800138000',
+      displayName: 'a display name far longer than twenty characters',
+      initialPoints: 0,
+    })
+    const body = calls.find(c => c.path === '/api/user/')?.body as { display_name: string }
+    expect(body.display_name).toHaveLength(20)
+  })
+
+  it('refuses a username the gateway cannot store, with a reason', async () => {
+    const client = createSudorouterClient({
+      baseUrl: 'https://gateway.example',
+      getAdminToken: async () => 't',
+      fetchImpl: (async () => new Response(JSON.stringify({ success: true, data: [] }))) as unknown as typeof fetch,
+    })
+    await expect(client.provisionAccount({
+      username: 'x'.repeat(21), initialPoints: 0,
+    })).rejects.toThrow(/too long for the gateway/)
   })
 })

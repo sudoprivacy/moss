@@ -350,6 +350,36 @@ export class ServerDrainingError extends Error {
   }
 }
 
+/**
+ * A token budget refused this work. Distinct from a bare Error because a policy
+ * refusal and a server fault are not the same answer: the former is final until
+ * an admin raises the limit, the latter is worth retrying. Thrown as a plain
+ * Error they collapsed into one 500, which reads to the caller as "moss is
+ * broken" for what is in fact "you are out of budget".
+ */
+export class TokenQuotaExceededError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TokenQuotaExceededError'
+  }
+}
+
+/**
+ * How long a computed usage total may be reused.
+ *
+ * Usage is not stored anywhere — `loadBudgetStats` derives it by parsing every
+ * transcript file the user owns, plus every subagent transcript beneath them.
+ * That is fine once per session creation and far too expensive on the respawn
+ * path, which the quota now also guards.
+ *
+ * Staleness is bounded in the direction that matters: usage only ever grows, so
+ * a cached total can let a user overshoot by at most one window's worth of
+ * tokens, and never keeps refusing someone whose usage has gone down (it
+ * cannot). Limits are read fresh every time, so raising a limit takes effect
+ * immediately rather than after the window.
+ */
+const USAGE_CACHE_TTL_MS = 15_000
+
 export class RuntimeService {
   readonly store: DirectConnectStore
   readonly authService: AuthService
@@ -357,6 +387,8 @@ export class RuntimeService {
   private readonly mcpUserConfig: McpUserConfigApi | null
   private readonly pendingEnsures = new Map<string, Promise<AttemptRecord>>()
   private readonly sessionTokens = new Map<string, { token: string; pid: number }>()
+  /** Derived usage totals, keyed by scope; see USAGE_CACHE_TTL_MS. */
+  private readonly usageCache = new Map<string, { totalTokens: number; at: number }>()
   authProxy: AuthProxyServer | null = null
   /**
    * Graceful-drain flag (multi-instance LB). Set true by server.ts beginDrain()
@@ -461,6 +493,71 @@ export class RuntimeService {
     return this.store.countActiveSessions()
   }
 
+  /** Usage for one scope, recomputed at most once per USAGE_CACHE_TTL_MS. */
+  private async totalTokensUsed(
+    key: string,
+    sessions: () => SessionRecord[],
+  ): Promise<number> {
+    const cached = this.usageCache.get(key)
+    const now = Date.now()
+    if (cached && now - cached.at < USAGE_CACHE_TTL_MS) return cached.totalTokens
+    const stats = await loadBudgetStats(sessions())
+    const totalTokens = stats.summary.totalTokens
+    this.usageCache.set(key, { totalTokens, at: now })
+    return totalTokens
+  }
+
+  /**
+   * Refuses work that a token budget has no room for.
+   *
+   * Called at two doors, deliberately: createSession, so a refused creation
+   * writes no row, and spawnAttempt, which is where a runtime — and therefore
+   * the spending — actually starts. Guarding only the first left the budget
+   * enforceable on paper and bypassable in practice: a user at their limit
+   * could not open a new session but could resume an existing one (resume, WS
+   * cold upgrade, a cron or channel respawn) and keep consuming indefinitely.
+   *
+   * The gate belongs on the door where the decision to spend is made, and
+   * `spawnAttempt` is that door for every path — its own comment already called
+   * it "the single choke point every spin-up funnels through". Reattaching to a
+   * live runtime returns earlier and is untouched: reading what you already have
+   * is not spending.
+   */
+  private async assertWithinTokenQuota(userId: string, orgId: string): Promise<void> {
+    const limits = this.authService.getTokenLimits(userId, orgId)
+    if (limits.userLimit === null && limits.departmentLimit === null) return
+
+    if (limits.userLimit !== null) {
+      const used = await this.totalTokensUsed(`user:${orgId}:${userId}`, () =>
+        this.store.listUserSessions(orgId, userId),
+      )
+      if (used >= limits.userLimit) {
+        throw new TokenQuotaExceededError(
+          `个人 Token 额度已用尽 (已用: ${used.toLocaleString()}, 限额: ${limits.userLimit.toLocaleString()})`,
+        )
+      }
+    }
+
+    if (limits.departmentLimit !== null) {
+      const user = this.authService.getUserOrNull(userId, orgId)
+      const departmentId = user?.departmentId
+      if (!departmentId) return
+      const used = await this.totalTokensUsed(`dept:${orgId}:${departmentId}`, () =>
+        // No department column on sessions and no usage aggregate anywhere, so
+        // membership is resolved per session. Both lookups are synchronous
+        // reads against the already-open database.
+        this.store
+          .listSessionRecords({ orgId })
+          .filter(s => this.authService.getUserOrNull(s.userId, orgId)?.departmentId === departmentId),
+      )
+      if (used >= limits.departmentLimit) {
+        throw new TokenQuotaExceededError(
+          `部门 Token 额度已用尽 (已用: ${used.toLocaleString()}, 限额: ${limits.departmentLimit.toLocaleString()})`,
+        )
+      }
+    }
+  }
+
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
     // Graceful drain: reject before writing any session row (avoids a stranded
     // status='failed' half-created record that spawnAttempt-level rejection
@@ -479,35 +576,10 @@ export class RuntimeService {
       )
     }
 
-    // Token Quota Enforcement (System wide / User specific / Department specific)
-    const [budgetStats, limits] = await Promise.all([
-      loadBudgetStats(this.store.listUserSessions(input.orgId, input.userId)),
-      this.authService.getTokenLimits(input.userId, input.orgId)
-    ])
-    const totalTokensUsed = budgetStats.summary.totalTokens
-
-    // 1. Check User Limit
-    if (limits.userLimit !== null && totalTokensUsed >= limits.userLimit) {
-      throw new Error(`个人 Token 额度已用尽 (已用: ${totalTokensUsed.toLocaleString()}, 限额: ${limits.userLimit.toLocaleString()})`)
-    }
-
-    // 2. Check Department Limit (Aggregate usage for all users in department)
-    if (limits.departmentLimit !== null) {
-      const user = await this.authService.getUserOrNull(input.userId, input.orgId)
-      if (user?.departmentId) {
-        const deptSessions = this.store.listSessionRecords({ orgId: input.orgId }).filter(s => {
-          // This is a simple heuristic: list sessions, then filter by those users who belong to the same department.
-          // In a real high-scale system, this should be a DB join or aggregate table.
-          const sessionUser = this.authService.getUserOrNull(s.userId, input.orgId)
-          return sessionUser?.departmentId === user.departmentId
-        })
-        const deptStats = await loadBudgetStats(deptSessions)
-        const deptTotalUsed = deptStats.summary.totalTokens
-        if (deptTotalUsed >= limits.departmentLimit) {
-          throw new Error(`部门 Token 额度已用尽 (已用: ${deptTotalUsed.toLocaleString()}, 限额: ${limits.departmentLimit.toLocaleString()})`)
-        }
-      }
-    }
+    // Refused before any row is written, so a rejected creation leaves nothing
+    // behind. The same check runs again at spawnAttempt, which is where tokens
+    // actually start being spent; see assertWithinTokenQuota.
+    await this.assertWithinTokenQuota(input.userId, input.orgId)
 
     const sessionId = randomUUID()
     let runtimeInput = input.runtime
@@ -1132,6 +1204,11 @@ export class RuntimeService {
     // an already-running local attempt reuse the healthy attach earlier and
     // never reach here, so they are unaffected.
     if (this.draining) throw new ServerDrainingError()
+    // Same choke point, same reason: this is where spending starts, whichever
+    // path arrived here. createSession checks too, to keep a refused creation
+    // from leaving a row; the usage total is memoised so the pair costs one
+    // computation, not two.
+    await this.assertWithinTokenQuota(session.userId, session.orgId)
     // Effective agent for this attempt. Callers that *create* a session
     // pass `options.assistantName`, but relaunch/reuse paths (e.g. a reused
     // cron session — spawnAttempt is reached via ensureRuntime with only
