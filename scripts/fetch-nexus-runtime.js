@@ -51,9 +51,9 @@ const SHA256 = {
   'nexus-vault-macos-arm64.tar.gz': '8ad59f175c9079709ced75dabea5b90fe89ea6d133c8cb37e5153f1ab0a0e67b',
   'nexus-vault-macos-x86_64.tar.gz': '7bce4cfa6de33f886b8bdc6ca9fd3c6f6f1cd732358d0a361179f54c2bd64111',
   'nexus-vault-windows-x86_64.zip': '23619d44c877dbd377dca96fdef944efe14553f9e4a4580f668df29eb504c603',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'c9af8542fdfe08925bb554253d2edb73537428d67900e38a34db6b2db2cb6c40',
-  'nexusd-cluster-macos-x86_64.tar.gz': 'ce4609a4f3e4015a3538fc5f520da7cf94d23f3605425dc2916689477e2bcf7e',
-  'nexusd-cluster-windows-x86_64.zip': 'e4cf87c84a4ee60ea53614d630fbb75b4710367891d1edbd0b66dd7917ad9c75',
+  'nexusd-cluster-macos-aarch64.tar.gz': 'be41487657e10955f37395c8c671f0c820359c148c2afb86c5d10162822f53ab',
+  'nexusd-cluster-macos-x86_64.tar.gz': 'f8e9aceed8f02192621b27a71040708d30a89b1eccde86c1a5a2190328b38d8b',
+  'nexusd-cluster-windows-x86_64.zip': '65199f632da8e75de0da4e7be6e3389891b71c1a854d096b9f604890436a9156',
 }
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'

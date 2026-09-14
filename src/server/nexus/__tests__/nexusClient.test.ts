@@ -216,15 +216,15 @@ describe('NexusClient（加密服务门面语义）', () => {
     ])
   })
 
-  it('listConfiguredNamespaces: DISTINCT + 前缀', () => {
+  it('listConfiguredNamespaces: DISTINCT + 前缀', async () => {
     const fake = new FakeNative()
     fake.set('org:1:system:weather', 'token', 'a')
     fake.set('org:1:role:dept1', 'apiKey', 'b')
     fake.set('user:u1:foo', 'apiKey', 'c')
     const client = makeClient(fake)
-    expect(client.listConfiguredNamespaces('org:1'))
+    expect(await client.listConfiguredNamespaces('org:1'))
       .toEqual(new Set(['org:1:system:weather', 'org:1:role:dept1']))
-    expect(client.listConfiguredNamespaces())
+    expect(await client.listConfiguredNamespaces())
       .toEqual(new Set(['org:1:system:weather', 'org:1:role:dept1', 'user:u1:foo']))
   })
 })
