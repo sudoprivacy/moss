@@ -6,7 +6,8 @@ import {
   mkdirSync,
   writeFileSync,
 } from 'fs'
-import { connect, createServer } from 'net'
+import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import { createServer } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
 import runtimeVersions from './runtime-versions.json' with { type: 'json' }
@@ -237,27 +238,6 @@ export async function assertTcpPortAvailable(port: number): Promise<void> {
   })
 }
 
-/**
- * Bare TCP liveness probe. Exported for the /readyz nexus check: embedded mode
- * probes 127.0.0.1:<grpcPort>, external mode probes the endpoint's host:port
- * (hence the optional host parameter — defaults keep existing call sites).
- */
-export function connectTcp(port: number, timeoutMs: number, host = '127.0.0.1'): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const socket = connect(port, host)
-    let settled = false
-    const finish = (error?: Error) => {
-      if (settled) return
-      settled = true
-      socket.destroy()
-      error ? reject(error) : resolve()
-    }
-    socket.once('connect', () => finish())
-    socket.once('error', error => finish(error))
-    socket.setTimeout(timeoutMs, () => finish(new Error('connect timeout')))
-  })
-}
-
 function appendBounded(current: string, next: string): string {
   const combined = `${current}${next}`
   return combined.length <= MAX_STDERR_CAPTURE_CHARS
@@ -284,6 +264,7 @@ export class NexusManager {
   private readonly healthTimeoutMs: number
   private readonly pollIntervalMs: number
   private readonly connectTimeoutMs: number
+  private probeClient: NexusVfsClient | null = null
   private readonly config: ResolvedNexusConfig
   private isRustBinary = false
 
@@ -481,6 +462,20 @@ export class NexusManager {
     return null
   }
 
+  /**
+   * One RPC that only a serving VFS can answer. Built once and reused for the
+   * whole startup poll: a client per attempt would open a channel per attempt.
+   */
+  private async probeServing(): Promise<void> {
+    if (!this.probeClient) {
+      const tls = this.tlsConfig
+      this.probeClient = tls
+        ? NexusVfsClient.withMtls(this.grpcUrl, tls)
+        : new NexusVfsClient(this.grpcUrl)
+    }
+    await this.probeClient.serverInfo(this.authToken)
+  }
+
   private async waitForGrpcReady(
     child: ChildProcess,
     getExitInfo: () => NexusExitInfo | null,
@@ -511,7 +506,13 @@ export class NexusManager {
       }
 
       try {
-        await connectTcp(this.grpcPort, this.connectTimeoutMs)
+        // A real RPC, not a TCP connect. The port binds before the VFS service
+        // can answer on it (it is the raft data plane first), so accepting a
+        // connection here would declare nexus ready while the kernel is still
+        // wiring and declared mounts have not yet applied. Everything moss does
+        // in that window goes to a daemon that cannot answer for it yet — and
+        // before v0.7.7 some of it was answered WRONGLY rather than refused.
+        await this.probeServing()
         const afterConnectExit = getExitInfo()
         if (!afterConnectExit && child.exitCode === null && child.signalCode === null) return
       } catch (error) {

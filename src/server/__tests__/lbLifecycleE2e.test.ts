@@ -176,7 +176,18 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     expect(response.headers.get('set-cookie')).toBe('moss_route=e2e-inst-1; Path=/; HttpOnly; SameSite=Lax')
   }, 60_000)
 
-  it('MOSS_NEXUS_MODE=external with a reachable TCP endpoint → /readyz is 200 with nexus:true', async () => {
+  // This case used to assert 200 / nexus:true, which wrote the wrong contract
+  // down: the endpoint below is a socket that accepts a connection and destroys
+  // it, and no VFS has ever answered on it. A TCP accept says a process is
+  // listening, not that it can serve — nexusd binds its port early because that
+  // port is the raft data plane, and from nexus-vfs v0.7.7 it explicitly holds
+  // client requests until the kernel is wired and the declared topology has
+  // applied. Reporting ready on an accept is how a load balancer sends traffic
+  // to an instance whose nexus cannot answer yet.
+  //
+  // So this is the regression test for that probe: a listener that only accepts
+  // must NOT be ready. It fails against the TCP-connect probe it replaced.
+  it('MOSS_NEXUS_MODE=external pointing at a socket that only accepts → /readyz is 503 with nexus:false', async () => {
     const listener = createServer(socket => socket.destroy())
     tcpListeners.push(listener)
     const endpointPort = await new Promise<number>(resolvePort => {
@@ -192,10 +203,10 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     })
     const response = await fetch(`${fixture.baseUrl}/readyz`)
 
-    expect(response.status, fixture.stderrOutput.join('')).toBe(200)
+    expect(response.status, fixture.stderrOutput.join('')).toBe(503)
     const body = await response.json() as { ok: boolean; checks: { nexus: boolean } }
-    expect(body.ok).toBe(true)
-    expect(body.checks.nexus).toBe(true)
+    expect(body.ok).toBe(false)
+    expect(body.checks.nexus).toBe(false)
   }, 60_000)
 
   it('drain via stdin DRAIN → /readyz 503 with draining:true and POST /api/v1/sessions rejected 503 with the draining message', async () => {

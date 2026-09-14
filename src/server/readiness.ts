@@ -8,7 +8,30 @@ import { promisify } from 'util'
 import type http from 'http'
 import type { ServerConfig } from './types.js'
 import type { RuntimeService } from './runtimeService.js'
-import { connectTcp, resolveNexusConfigFromEnv } from './nexus/nexusManager.js'
+import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import { resolveNexusConfigFromEnv, type ResolvedNexusConfig } from './nexus/nexusManager.js'
+
+/**
+ * One client per endpoint, reused across polls.
+ *
+ * /readyz is polled by the load balancer on a short interval; a client per poll
+ * would open a gRPC channel per poll and never close it.
+ */
+const probeClients = new Map<string, NexusVfsClient>()
+
+function probeClientFor(nexusConfig: ResolvedNexusConfig): { client: NexusVfsClient; token: string } {
+  const endpoint = nexusConfig.mode === 'external'
+    ? nexusConfig.endpoint
+    : `127.0.0.1:${nexusConfig.grpcPort}`
+  const token = nexusConfig.mode === 'external' ? nexusConfig.authToken : ''
+  let client = probeClients.get(endpoint)
+  if (!client) {
+    const tls = nexusConfig.mode === 'external' ? nexusConfig.tls : null
+    client = tls ? NexusVfsClient.withMtls(endpoint, tls) : new NexusVfsClient(endpoint)
+    probeClients.set(endpoint, client)
+  }
+  return { client, token }
+}
 
 export function tryParseUrl(value: string): URL | null {
   try {
@@ -105,23 +128,22 @@ export async function computeReadiness(
   const probeNexus =
     probes?.probeNexus ??
     (async () => {
-      // Embedded: the child nexusd listens on loopback:grpcPort. External:
-      // parse host:port from MOSS_NEXUS_ENDPOINT (ServerConfig carries no
-      // nexus fields — resolveNexusConfigFromEnv is the source of truth).
+      // A real RPC, not a TCP connect. nexusd binds its port early — that port
+      // is the raft data plane, and peers need it to form the cluster — while
+      // the VFS service co-hosted on it only starts answering once the kernel
+      // is wired and the declared topology has converged. So an accepted
+      // connection says the process is alive, not that it can serve, and from
+      // nexus-vfs v0.7.7 the daemon is explicit about the difference: requests
+      // in that window are held, not answered.
+      //
+      // Reporting ready there is the failure this whole check exists to
+      // prevent — the load balancer sends traffic to an instance whose nexus
+      // cannot yet answer, and every one of those requests waits or fails.
+      // serverInfo is the cheapest call that only a serving VFS can satisfy.
       const nexusConfig = resolveNexusConfigFromEnv()
-      if (nexusConfig.mode === 'external') {
-        const endpoint = tryParseUrl(nexusConfig.endpoint)
-        if (!endpoint) return false
-        const port = endpoint.port ? Number(endpoint.port) : 443
-        try {
-          await connectTcp(port, 2_000, endpoint.hostname)
-          return true
-        } catch {
-          return false
-        }
-      }
       try {
-        await connectTcp(nexusConfig.grpcPort, 2_000)
+        const { client, token } = probeClientFor(nexusConfig)
+        await client.serverInfo(token)
         return true
       } catch {
         return false
