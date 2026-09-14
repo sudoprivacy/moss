@@ -30,6 +30,15 @@
 export type SdkHandle = {
   getChatData(seq: number, limit: number): Promise<RawChatRecord[]>
   decryptData(randomKey: string, encryptedMsg: string): string
+  /**
+   * Download one media object (image/emotion/file/video/voice) by its
+   * `sdkfileid`. Returns the assembled bytes.
+   *
+   * WeCom streams media in chunks: each call returns a slice plus an
+   * `outindexbuf` cursor for the next one, until `is_finish` is set. A
+   * ~1MB image therefore takes several round trips.
+   */
+  getMediaData(sdkFileId: string): Buffer
   destroy(): void
 }
 
@@ -43,7 +52,11 @@ export type RawChatRecord = {
 }
 
 type KoffiLib = { func(signature: string): (...args: unknown[]) => unknown }
-type Koffi = { load(path: string): KoffiLib }
+type Koffi = {
+  load(path: string): KoffiLib
+  /** Read `len` elements of `type` from a native pointer (binary-safe). */
+  decode(ptr: unknown, type: string, len: number): unknown
+}
 
 let koffiCache: Koffi | null = null
 
@@ -152,6 +165,21 @@ export function openSdk(corpId: string, secret: string): SdkHandle {
     }
   }
 
+  // Media chunking: a single GetMediaData call returns at most ~512KB, so
+  // large files need several passes threaded by outindexbuf.
+  const NewMediaData = lib.func('void* NewMediaData()')
+  const FreeMediaData = lib.func('void FreeMediaData(void*)')
+  const GetMediaDataFn = lib.func(
+    'int GetMediaData(void*, const char*, const char*, const char*, const char*, int, void*)',
+  )
+  const GetOutIndexBuf = lib.func('const char* GetOutIndexBuf(void*)')
+  const GetDataFn = lib.func('const char* GetData(void*)')
+  const GetDataLen = lib.func('int GetDataLen(void*)')
+  const IsMediaDataFinish = lib.func('int IsMediaDataFinish(void*)')
+
+  /** Guard against a malformed is_finish looping forever. */
+  const MAX_MEDIA_CHUNKS = 512
+
   return {
     async getChatData(seq: number, limit: number): Promise<RawChatRecord[]> {
       let body: string
@@ -172,6 +200,39 @@ export function openSdk(corpId: string, secret: string): SdkHandle {
 
     decryptData(randomKey: string, encryptedMsg: string): string {
       return withSlice((slice) => Number(DecryptDataFn(randomKey, encryptedMsg, slice)))
+    },
+
+    getMediaData(sdkFileId: string): Buffer {
+      const chunks: Buffer[] = []
+      let indexBuf = ''
+      for (let i = 0; i < MAX_MEDIA_CHUNKS; i++) {
+        const media = NewMediaData() as unknown
+        try {
+          const rc = Number(GetMediaDataFn(sdk, indexBuf || null, sdkFileId, null, null, 30, media))
+          if (rc !== 0) {
+            // 10005 = fileid invalid/expired: sdkfileid lives ~3 days, so a
+            // late download is the expected failure, not a bug.
+            throw new Error(`GetMediaData rc=${rc}${rc === 10005 ? ' (sdkfileid expired or invalid)' : ''}`)
+          }
+          const len = Number(GetDataLen(media))
+          if (len > 0) {
+            // koffi hands back a NUL-terminated string view; media is
+            // binary, so decode the pointer as a sized buffer instead.
+            const ptr = GetDataFn(media) as unknown
+            chunks.push(Buffer.from(koffi.decode(ptr, 'uint8_t', len) as Uint8Array))
+          }
+          if (Number(IsMediaDataFinish(media)) === 1) break
+          indexBuf = String(GetOutIndexBuf(media) ?? '')
+          if (!indexBuf) break
+        } finally {
+          try {
+            FreeMediaData(media)
+          } catch {
+            // best-effort
+          }
+        }
+      }
+      return Buffer.concat(chunks)
     },
 
     destroy(): void {

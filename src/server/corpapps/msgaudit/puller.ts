@@ -15,7 +15,16 @@
 import { decryptRandomKey, parsePrivateKeys } from './crypto.js'
 import { normalizeRecord } from './normalize.js'
 import { openSdk, type RawChatRecord, type SdkHandle } from './sdk.js'
-import { appendRecords, readCursor, updateRooms, writeCursor, type ChatRecord } from './store.js'
+import {
+  appendRecords,
+  readCursor,
+  updateRooms,
+  writeCursor,
+  writeMedia,
+  type ChatRecord,
+} from './store.js'
+import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
+import { readUserCache, resolveMissing, writeUserCache, type NameLookup } from './users.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
 const PAGE_LIMIT = 1000
@@ -49,6 +58,16 @@ export type PullConfig = {
    * and/or whitespace. Empty (or absent) archives every conversation.
    */
   roomFilterRaw?: string
+  /** Media types to download ("image,emotion" / "all"); empty = none. */
+  mediaTypesRaw?: string
+  /** Skip files larger than this (bytes). 0 = no limit. */
+  mediaMaxBytes?: number
+  /**
+   * Resolves a userid to a display name. Supplied by the caller because
+   * the 会话存档 SDK has no directory API — it comes from a sibling
+   * self-built app. Absent = keep raw ids.
+   */
+  nameLookup?: NameLookup
 }
 
 export type PullResult = {
@@ -56,6 +75,12 @@ export type PullResult = {
   written: number
   /** Decrypted but dropped by the room filter. */
   filtered: number
+  /** Media objects written to disk. */
+  media: number
+  /** Media downloads that were skipped or failed. */
+  mediaFailed: number
+  /** Ids newly resolved to display names this run. */
+  namesResolved: number
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -107,8 +132,15 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let written = 0
   let failed = 0
   let filtered = 0
+  let media = 0
+  let mediaFailed = 0
+  let namesResolved = 0
   let pages = 0
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
+  const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
+  const mediaMax = Number(cfg.mediaMaxBytes) > 0 ? Number(cfg.mediaMaxBytes) : 0
+  const userDir = cfg.nameLookup ? await readUserCache(cfg.corpAppId) : {}
+  let userDirDirty = false
 
   const sdk = openSdk(cfg.corpId, cfg.secret)
   try {
@@ -134,6 +166,50 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
         console.error(
           `[msgaudit] ${pageFailed}/${page.length} records failed to decrypt in page at seq ${cursor}: ${firstError}`,
         )
+      }
+
+      // Media and names are attached BEFORE the records are written, so a
+      // transcript line is never published without the annotations that
+      // belong to it. Both are best-effort: a failure here must not cost
+      // the message itself, which is the only irreplaceable part.
+      if (mediaTypes.size > 0) {
+        for (const rec of records) {
+          if (!mediaTypes.has(rec.msgtype)) continue
+          const box = mediaBox(rec)
+          if (!box) continue
+          const size = mediaSize(box)
+          if (mediaMax > 0 && size > mediaMax) {
+            rec.mediaError = `skipped: ${size} bytes exceeds limit ${mediaMax}`
+            mediaFailed += 1
+            continue
+          }
+          try {
+            const bytes = sdk.getMediaData(String(box.sdkfileid))
+            if (bytes.length === 0) throw new Error('empty download')
+            rec.mediaPath = await writeMedia(cfg.corpAppId, rec.msgid, mediaExt(rec, box), bytes)
+            media += 1
+          } catch (err) {
+            rec.mediaError = err instanceof Error ? err.message : String(err)
+            mediaFailed += 1
+          }
+        }
+      }
+
+      if (cfg.nameLookup) {
+        const ids = new Set<string>()
+        for (const rec of records) {
+          if (rec.from) ids.add(rec.from)
+          for (const id of rec.to) ids.add(id)
+        }
+        const r = await resolveMissing(userDir, ids, cfg.nameLookup)
+        if (r.resolved > 0) {
+          namesResolved += r.resolved
+          userDirDirty = true
+        }
+        for (const rec of records) {
+          if (rec.from && userDir[rec.from]) rec.fromName = userDir[rec.from]
+          if (rec.to.length > 0) rec.toNames = rec.to.map((id) => userDir[id] ?? id)
+        }
       }
 
       // Write first, then advance — see ORDERING above.
@@ -162,5 +238,11 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     }
   }
 
-  return { fetched, written, failed, filtered, cursor, pages }
+  if (userDirDirty) {
+    await writeUserCache(cfg.corpAppId, userDir).catch(() => {
+      // a lost cache costs re-lookups next run, not data
+    })
+  }
+
+  return { fetched, written, failed, filtered, media, mediaFailed, namesResolved, cursor, pages }
 }

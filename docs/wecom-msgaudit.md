@@ -181,7 +181,46 @@ wr_l7aCgAAoFEUD7y9cEvqAzpmL-WPWg, wr_l7aCgAAWRF4xBDPJEFfSmwIV3W3Mg
 修改后**下一轮拉取生效**（默认 5 分钟），不影响已归档的记录。日志会显示
 `filtered=N`。
 
-## 十、幂等与游标
+## 十、媒体文件与姓名解析
+
+### 媒体下载
+
+实例配置 `mediaTypes` 选择要下载的类型（`image`、`emotion`、`file`、`video`、
+`voice`，逗号分隔；`all` 表示全部；留空不下载）。`mediaMaxBytes` 设单文件上限。
+
+```
+$MOSS_HOME/msgaudit/<corpAppId>/media/<msgid>.<ext>
+```
+
+记录里增加 `mediaPath` 指向该文件；跳过或失败时写 `mediaError` 说明原因。
+
+⚠️ **必须在拉取当时下载。** 企微的 `sdkfileid` 只有约 **3 天**有效期，过期后
+`GetMediaData` 返回 `10005`，内容永久无法取回（只剩 md5 与大小）。
+**没有「以后再下」这个选项** —— 做成事后按需下载是不可靠的。
+
+实现细节：企微分片返回媒体，用 `outindexbuf` 作游标循环直到 `is_finish`。
+注意图片的大小字段是 `filesize`，而表情是 `imagesize`，两者不同。
+
+### 姓名解析
+
+配置 `nameLookupApp` 填同企业下某个「企微自建应用」实例的名称，即可把 userid
+解析为姓名，写入记录的 `fromName` / `toNames`。
+
+会话存档 SDK 没有通讯录接口，只能借道自建应用的 REST API：内部成员走
+`/cgi-bin/user/get`，外部联系人走 `/cgi-bin/externalcontact/get`。该应用需在
+企微后台配置**可信 IP**，否则解析失败（记录保留原始 id，不影响归档本身）。
+
+**姓名在首次见到该 id 时解析并永久缓存**到 `users.json`，原因是解析能力会过期：
+
+| | 离群后 | 离职 / 解除好友后 |
+|---|---|---|
+| 内部成员 | ✅ 仍可查（通讯录） | ❌ 通讯录删除后不可查 |
+| 外部联系人 | ✅ 仍可查（若仍是好友） | ❌ `84061`，永久不可查 |
+
+归档是永久的，而解析不是 —— 所以必须在归档时就把姓名固化下来。
+解析失败的 id 不写入缓存，下次仍会重试（可能只是可信 IP 未配好）。
+
+## 十一、幂等与游标
 
 - 记录**先落盘、后推进游标**，且游标**逐页提交**。moss 重启/崩溃后从 `cursor.json` 续拉：
   已提交的页不会重拉，未提交的页会重放并由 msgid 去重吸收 —— **既不重复也不遗漏**。
@@ -189,11 +228,11 @@ wr_l7aCgAAoFEUD7y9cEvqAzpmL-WPWg, wr_l7aCgAAWRF4xBDPJEFfSmwIV3W3Mg
 - `cursor.json` 用临时文件 + rename 原子写：游标写坏会导致全量重放或永久跳过
 - 解密失败的记录（通常是私钥版本缺失）**计数并跳过**，游标照常前进 —— 否则整个存档会永久卡在那条记录后面
 
-## 十一、尚未实现
+## 十二、尚未实现
 
-- **媒体文件**：图片/语音/文件的二进制需 `GetMediaData` 单独拉取，当前只存元数据
+- **媒体文件的事后补拉**：`sdkfileid` 过期后无法补，只能在拉取当时下载（见第十节）
 - **明文加密存储**：解密后的聊天内容以明文 JSONL 落盘。是否静态加密、保留多久，取决于你的合规要求
-## 十二、FFI 绑定验证状态
+## 十三、FFI 绑定验证状态
 
 `sdk.ts` 的函数签名已在 **linux/amd64（CentOS 7, glibc 2.17）** 上、于实际部署镜像
 `my-moss-server` 内验证通过：

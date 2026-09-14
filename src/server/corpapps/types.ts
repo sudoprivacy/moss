@@ -217,6 +217,14 @@ export interface CorpAppConnector {
    */
   testConnection(): Promise<TestConnectionResult>
 
+  /**
+   * Optional: resolve a userid to a display name. `external` selects the
+   * directory (corp roster vs external contacts). Returns null when the
+   * provider cannot resolve it — a departed external contact is the
+   * common case, not an error.
+   */
+  getUserName?(userId: string, external: boolean): Promise<string | null>
+
   /** Optional: identity/info about the connected app. */
   getInfo?(): Promise<CorpAppInfo>
 
