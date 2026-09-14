@@ -63,13 +63,10 @@ export type ChatRecord = {
   /** Provider payload for non-text types, passed through unchanged. */
   payload?: Record<string, unknown>
   /**
-   * Relative path (from the instance dir) of the downloaded media file,
-   * e.g. "media/<msgid>.jpg". Absent when the type carries no media, when
-   * downloading is off, or when the download failed.
+   * Media is NOT referenced here: it is downloaded after this line is
+   * already durable, and its outcome lives in media/<day>.index.jsonl
+   * keyed by msgid (see mediaIndex.ts).
    */
-  mediaPath?: string
-  /** Why a media download was skipped or failed — kept for diagnosis. */
-  mediaError?: string
   /** Display name of `from`, resolved at archive time (see users.ts). */
   fromName?: string
   /** Display names parallel to `to`; an entry is the raw id if unresolved. */
@@ -91,21 +88,25 @@ export function appDir(corpAppId: string): string {
 /**
  * Write one media object next to the transcript.
  *
- * Named by msgid (unique per message) rather than by content hash so a
+ * Partitioned by the message's own UTC day, mirroring chat/<room>/<day>,
+ * so retention can be enforced by deleting whole day directories rather
+ * than stat-ing every file. Named by msgid (unique per message) so a
  * record and its file are trivially correlated by eye. Returns the path
  * relative to the instance dir, which is what goes into the record.
  */
 export async function writeMedia(
   corpAppId: string,
   msgid: string,
+  msgtime: number,
   ext: string,
   bytes: Buffer,
 ): Promise<string> {
-  const dir = path.join(appDir(corpAppId), 'media')
+  const day = dayKey(msgtime)
+  const dir = path.join(appDir(corpAppId), 'media', day)
   await fsp.mkdir(dir, { recursive: true })
   const name = `${sanitizeSegment(msgid)}${ext}`
   await fsp.writeFile(path.join(dir, name), bytes)
-  return `media/${name}`
+  return `media/${day}/${name}`
 }
 
 /**

@@ -189,10 +189,29 @@ wr_l7aCgAAoFEUD7y9cEvqAzpmL-WPWg, wr_l7aCgAAWRF4xBDPJEFfSmwIV3W3Mg
 `voice`，逗号分隔；`all` 表示全部；留空不下载）。`mediaMaxBytes` 设单文件上限。
 
 ```
-$MOSS_HOME/msgaudit/<corpAppId>/media/<msgid>.<ext>
+$MOSS_HOME/msgaudit/<corpAppId>/media/<YYYY-MM-DD>/<msgid>.<ext>
+                                 media/<YYYY-MM-DD>.index.jsonl
 ```
 
-记录里增加 `mediaPath` 指向该文件；跳过或失败时写 `mediaError` 说明原因。
+**按消息日期分目录**，与 `chat/<room>/<day>` 一致 —— 这样按时间清理旧资源
+只需删整个日期目录，不必逐文件判断。
+
+**下载不阻塞消息落盘。** 顺序是：先写 JSONL（消息是不可替代的部分），
+再下载媒体。所以媒体结果不写在消息行里，而是写进同目录的 `<day>.index.jsonl`
+边车索引，用 `msgid` 关联：
+
+```json
+{"msgid":"...","msgtime":1772000000000,"path":"media/2026-03-01/xxx.jpg"}
+{"msgid":"...","msgtime":1772000000000,"error":"rc=10005 ... (after 3 attempts)"}
+```
+
+同一 msgid 后写的条目覆盖先写的，所以重试成功会取代之前的失败记录。
+
+**失败重试 3 次**（500ms / 1000ms 退避）。但 `10005`（sdkfileid 过期）是永久性
+错误，会立即放弃不重试 —— 重试只会拖慢整批。
+
+清理旧资源：`purgeMediaBefore(corpAppId, cutoff)` 删除早于该日期的媒体目录与
+索引，**不动聊天记录**（文本很小且值得长期保留，占空间的是媒体）。
 
 ⚠️ **必须在拉取当时下载。** 企微的 `sdkfileid` 只有约 **3 天**有效期，过期后
 `GetMediaData` 返回 `10005`，内容永久无法取回（只剩 md5 与大小）。

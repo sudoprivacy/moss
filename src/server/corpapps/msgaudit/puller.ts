@@ -24,10 +24,45 @@ import {
   type ChatRecord,
 } from './store.js'
 import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
+import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
 import { readUserCache, resolveMissing, writeUserCache, type NameLookup } from './users.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
 const PAGE_LIMIT = 1000
+
+/** Attempts per media object before giving up. */
+const MEDIA_RETRIES = 3
+
+/**
+ * Fetch one media object, retrying transient failures.
+ *
+ * An expired `sdkfileid` (10005) is permanent, so retrying it only wastes
+ * time and delays the rest of the batch — that case bails immediately.
+ * Everything else (network blips, transient SDK errors) gets three tries
+ * with a short backoff.
+ */
+async function downloadWithRetry(
+  sdk: SdkHandle,
+  rec: ChatRecord,
+  box: Record<string, unknown>,
+): Promise<{ bytes?: Buffer; error?: string }> {
+  let lastError = ''
+  for (let attempt = 1; attempt <= MEDIA_RETRIES; attempt++) {
+    try {
+      const bytes = sdk.getMediaData(String(box.sdkfileid))
+      if (bytes.length === 0) throw new Error('empty download')
+      return { bytes }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err)
+      // 10005 = fileid expired/invalid: no amount of retrying helps.
+      if (lastError.includes('10005')) break
+      if (attempt < MEDIA_RETRIES) {
+        await new Promise((r) => setTimeout(r, 500 * attempt))
+      }
+    }
+  }
+  return { error: `${lastError} (after ${MEDIA_RETRIES} attempts)` }
+}
 
 /**
  * Parse the admin's room filter into a lookup set.
@@ -141,6 +176,7 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   const mediaMax = Number(cfg.mediaMaxBytes) > 0 ? Number(cfg.mediaMaxBytes) : 0
   const userDir = cfg.nameLookup ? await readUserCache(cfg.corpAppId) : {}
   let userDirDirty = false
+  const pendingMedia: MediaIndexEntry[] = []
 
   const sdk = openSdk(cfg.corpId, cfg.secret)
   try {
@@ -168,33 +204,8 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
         )
       }
 
-      // Media and names are attached BEFORE the records are written, so a
-      // transcript line is never published without the annotations that
-      // belong to it. Both are best-effort: a failure here must not cost
-      // the message itself, which is the only irreplaceable part.
-      if (mediaTypes.size > 0) {
-        for (const rec of records) {
-          if (!mediaTypes.has(rec.msgtype)) continue
-          const box = mediaBox(rec)
-          if (!box) continue
-          const size = mediaSize(box)
-          if (mediaMax > 0 && size > mediaMax) {
-            rec.mediaError = `skipped: ${size} bytes exceeds limit ${mediaMax}`
-            mediaFailed += 1
-            continue
-          }
-          try {
-            const bytes = sdk.getMediaData(String(box.sdkfileid))
-            if (bytes.length === 0) throw new Error('empty download')
-            rec.mediaPath = await writeMedia(cfg.corpAppId, rec.msgid, mediaExt(rec, box), bytes)
-            media += 1
-          } catch (err) {
-            rec.mediaError = err instanceof Error ? err.message : String(err)
-            mediaFailed += 1
-          }
-        }
-      }
-
+      // Names are resolved before the write so a transcript line carries
+      // its annotations from the start. Media is NOT: see below.
       if (cfg.nameLookup) {
         const ids = new Set<string>()
         for (const rec of records) {
@@ -217,6 +228,48 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
       await updateRooms(cfg.corpAppId, records)
       written += w
 
+      // Media is downloaded AFTER the transcript is durable, and its
+      // outcome is recorded in a sidecar rather than in the message line.
+      // Downloading first would mean a slow or wedged media fetch delays
+      // (or (on a crash) loses) the messages themselves — and the message
+      // is the irreplaceable part, while media is merely time-limited.
+      if (mediaTypes.size > 0) {
+        for (const rec of records) {
+          if (!mediaTypes.has(rec.msgtype)) continue
+          const box = mediaBox(rec)
+          if (!box) continue
+          const size = mediaSize(box)
+          if (mediaMax > 0 && size > mediaMax) {
+            pendingMedia.push({
+              msgid: rec.msgid,
+              msgtime: rec.msgtime,
+              error: `skipped: ${size} bytes exceeds limit ${mediaMax}`,
+            })
+            mediaFailed += 1
+            continue
+          }
+          const outcome = await downloadWithRetry(sdk, rec, box)
+          if (outcome.bytes) {
+            const rel = await writeMedia(
+              cfg.corpAppId,
+              rec.msgid,
+              rec.msgtime,
+              mediaExt(rec, box),
+              outcome.bytes,
+            )
+            pendingMedia.push({ msgid: rec.msgid, msgtime: rec.msgtime, path: rel })
+            media += 1
+          } else {
+            pendingMedia.push({
+              msgid: rec.msgid,
+              msgtime: rec.msgtime,
+              error: outcome.error ?? 'download failed',
+            })
+            mediaFailed += 1
+          }
+        }
+      }
+
       // Advance past the whole page, including records we could not
       // decrypt: they will never become readable, and leaving the cursor
       // behind them would block the archive permanently.
@@ -236,6 +289,12 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     } catch {
       // best-effort
     }
+  }
+
+  if (pendingMedia.length > 0) {
+    await appendMediaIndex(cfg.corpAppId, pendingMedia).catch(() => {
+      // the files are already on disk; a lost index entry is cosmetic
+    })
   }
 
   if (userDirDirty) {
