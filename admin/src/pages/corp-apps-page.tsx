@@ -74,6 +74,29 @@ type FieldSpec = {
   /** Longer explanation rendered under the input, for settings whose effect is
    *  not obvious from the label alone. */
   hint?: string
+  /**
+   * Validate a non-empty value before saving. Return an error message to
+   * block the save, or null to accept. Without this the server silently
+   * normalises bad input (e.g. an unparseable retention becomes "never
+   * purge"), which looks identical to a working config until the day
+   * someone notices nothing was ever deleted.
+   */
+  validate?: (value: string) => string | null
+}
+
+/** Shared validator for optional whole-number settings. */
+function positiveIntValidator(min: number, label: string) {
+  return (value: string): string | null => {
+    // Empty means "unset", which is a valid choice for every optional
+    // field here — callers already skip blanks, but guard anyway so this
+    // stays correct if reused somewhere that does not.
+    if (!value.trim()) return null
+    const n = Number(value)
+    if (!Number.isFinite(n)) return `${label}必须是数字`
+    if (!Number.isInteger(n)) return `${label}必须是整数,不能带小数`
+    if (n < min) return `${label}必须 >= ${min}`
+    return null
+  }
 }
 
 const TYPE_FIELDS: Record<string, FieldSpec[]> = {
@@ -156,6 +179,7 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       bucket: 'config',
       optional: true,
       placeholder: '例如:30',
+      validate: positiveIntValidator(1, '保留天数'),
       hint:
         '只影响下载的图片/文件等资源,聊天记录本身永久保留(文本很小,占空间的是资源)。' +
         '填 30 表示保留最近 30 天,更早的按日期整目录删除;每天清理一次。' +
@@ -167,6 +191,7 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       bucket: 'config',
       optional: true,
       placeholder: '52428800',
+      validate: positiveIntValidator(0, '大小上限'),
       hint: '超过此大小的资源跳过不下载,索引里会写明原因。填 0 表示不限制。',
     },
     {
@@ -547,6 +572,13 @@ function CorpAppDialog({
         return
       }
       if (!v) continue
+      if (f.validate) {
+        const err = f.validate(v)
+        if (err) {
+          toast.error(`${f.label}:${err}`)
+          return
+        }
+      }
       if (f.bucket === 'config') config[f.key] = v
       else credentials[f.key] = v
     }
@@ -645,6 +677,13 @@ function CorpAppDialog({
                     : f.placeholder
                 }
               />
+              {(() => {
+                // Inline feedback as the admin types, so a bad value is
+                // obvious before they hit save rather than after.
+                const raw = fieldValues[f.key] ?? ''
+                const err = raw && f.validate ? f.validate(raw) : null
+                return err ? <p className="text-xs text-destructive">{err}</p> : null
+              })()}
               {f.hint && (
                 <p className="text-xs text-muted-foreground leading-relaxed">{f.hint}</p>
               )}
