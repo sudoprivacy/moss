@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { buildRemoteWorkspaceTree, joinInPod, parseStatLines } from '../backends/podWorkspace.js'
+import {
+  buildRemoteWorkspaceTree,
+  isPodNotReadyExecError,
+  joinInPod,
+  parseStatLines,
+} from '../backends/podWorkspace.js'
 import { bytesLookLikeText } from '../workspaceText.js'
 
 const POLICY = { skipDirs: new Set(['.git', 'node_modules']), maxEntriesPerDir: 500 }
@@ -16,6 +21,39 @@ const POLICY = { skipDirs: new Set(['.git', 'node_modules']), maxEntriesPerDir: 
  */
 
 const ROOT = '/workspace/session-1'
+
+describe('pod exec readiness', () => {
+  it('retries the failures that mean the container is not up yet', () => {
+    // Observed on the deployed cluster: the pod was already phase Running, but its
+    // container started about a second later. The workspace panel opens with the
+    // session, so its first file-tree request landed inside that window and came
+    // back with this — while the very same exec succeeded moments afterwards.
+    expect(
+      isPodNotReadyExecError(
+        1,
+        'error: unable to upgrade connection: container not found ("scode")',
+      ),
+    ).toBe(true)
+    expect(isPodNotReadyExecError(1, 'Error from server: error dialing backend: EOF')).toBe(true)
+    expect(
+      isPodNotReadyExecError(1, 'container "scode" in pod "scode-abc" is not created or running'),
+    ).toBe(true)
+  })
+
+  it('does not retry an error from the command running inside the pod', () => {
+    // These arrive through the same channel with the same exit code. Retrying a
+    // wrong path would trade an immediate, accurate error for a multi-second hang.
+    expect(
+      isPodNotReadyExecError(1, 'cat: /workspace/session-1/nope.txt: No such file or directory'),
+    ).toBe(false)
+    expect(isPodNotReadyExecError(2, 'sh: 1: stat: not found')).toBe(false)
+    expect(isPodNotReadyExecError(1, '')).toBe(false)
+  })
+
+  it('never retries a call that succeeded, whatever it wrote to stderr', () => {
+    expect(isPodNotReadyExecError(0, 'unable to upgrade connection')).toBe(false)
+  })
+})
 
 describe('pod stat output', () => {
   it('reads type, size and path out of the listing', () => {
