@@ -52,19 +52,25 @@ export function mediaSize(box: Record<string, unknown>): number {
 
 /**
  * File extension for the downloaded bytes. Emotions declare type 1=GIF,
- * 2=PNG; other kinds carry a filename we can borrow, else a neutral
- * extension so the file is still openable by content sniffing.
+ * 2=PNG; files carry an explicit `fileext` (falling back to parsing
+ * `filename`); anything unknown gets a neutral extension so the bytes are
+ * still openable by content sniffing.
  */
 export function mediaExt(rec: ChatRecord, box: Record<string, unknown>): string {
   if (rec.msgtype === 'emotion') return Number(box.type) === 2 ? '.png' : '.gif'
   if (rec.msgtype === 'image') return '.jpg'
   if (rec.msgtype === 'voice') return '.amr'
   if (rec.msgtype === 'video') return '.mp4'
+  // WeCom sends a dedicated `fileext` (verified on real traffic: "txt",
+  // no leading dot). Prefer it over parsing `filename`, which may carry
+  // no extension at all or several dots.
+  const declared = typeof box.fileext === 'string' ? box.fileext.trim().toLowerCase() : ''
+  if (/^[a-z0-9]{1,16}$/.test(declared)) return `.${declared}`
   const name = typeof box.filename === 'string' ? box.filename : ''
   const dot = name.lastIndexOf('.')
   if (dot > 0 && dot < name.length - 1) {
     const ext = name.slice(dot).toLowerCase()
-    if (/^\.[a-z0-9]{1,8}$/.test(ext)) return ext
+    if (/^\.[a-z0-9]{1,16}$/.test(ext)) return ext
   }
   return '.bin'
 }
