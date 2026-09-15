@@ -32,13 +32,18 @@ const SCOPE = 'src/server/'
 // cannot run is worse than no gate at all — hence the guard below.
 const repoRoot = join(here, '..')
 const compiler = join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc')
-const run = spawnSync(process.execPath, [compiler, '--noEmit', '-p', 'tsconfig.json'], {
+// `--listFiles` costs nothing extra on the same run and gives the most basic
+// health signal there is: how much code the compiler actually looked at. An error
+// count can collapse to zero either because the code is clean or because nothing
+// was examined, and those two must never be confused.
+const run = spawnSync(process.execPath, [compiler, '--noEmit', '--listFiles', '-p', 'tsconfig.json'], {
   cwd: repoRoot,
   encoding: 'utf8',
 })
 
 const output = `${run.stdout ?? ''}${run.stderr ?? ''}`
 const errorLines = output.split('\n').filter(line => /error TS\d+/.test(line))
+const compiledFiles = output.split('\n').filter(line => /\.(ts|tsx|d\.ts)$/.test(line.trim()))
 
 // tsc exits 0 and silent when clean, and non-zero *with* error lines when it
 // found problems. Non-zero with nothing parsed means it never ran — report that
@@ -49,6 +54,32 @@ if (run.error || (run.status !== 0 && errorLines.length === 0)) {
   console.error(`  output: ${output.trim().slice(0, 400) || '(none)'}`)
   process.exit(2)
 }
+
+// A bad tsconfig, no matched inputs, or an unknown option surfaces as one or two
+// error lines. That would slip past the check above — "almost no errors" reads as
+// success — while meaning the compiler never examined the code.
+const configErrors = errorLines.filter(line => /error TS(5\d{3}|6053|18003)\b/.test(line))
+if (configErrors.length > 0) {
+  console.error('typecheck hit a configuration error — refusing to report a result.')
+  for (const line of configErrors.slice(0, 5)) console.error(`  ${line}`)
+  process.exit(2)
+}
+
+// The same idea one level down: if the compiler looked at almost nothing, a low
+// error count says nothing about the code. The project pulls in thousands of
+// files (sources plus lib and @types), so a few hundred already means something
+// went wrong with the invocation rather than with the code.
+const MIN_EXPECTED_FILES = 500
+if (compiledFiles.length < MIN_EXPECTED_FILES) {
+  console.error(
+    `typecheck examined only ${compiledFiles.length} files (expected at least ${MIN_EXPECTED_FILES}) — refusing to report a result.`,
+  )
+  console.error(`  status: ${run.status}  parsed error lines: ${errorLines.length}`)
+  console.error(`  output head: ${output.trim().slice(0, 300) || '(none)'}`)
+  process.exit(2)
+}
+
+console.log(`compiler examined ${compiledFiles.length} files, ${errorLines.length} error line(s) total`)
 const scoped = errorLines.filter(line => line.includes(SCOPE))
 
 const baseline = JSON.parse(readFileSync(BASELINE_FILE, 'utf8'))
