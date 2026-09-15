@@ -151,6 +151,17 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
         '默认跳过大于 50MB 的单个文件,如需调整填下面的上限。',
     },
     {
+      key: 'mediaRetentionDays',
+      label: '资源保留天数(可选,留空=永久保留)',
+      bucket: 'config',
+      optional: true,
+      placeholder: '例如:30',
+      hint:
+        '只影响下载的图片/文件等资源,聊天记录本身永久保留(文本很小,占空间的是资源)。' +
+        '填 30 表示保留最近 30 天,更早的按日期整目录删除;每天清理一次。' +
+        '留空或 0 表示永久保留。最小值为 2 —— 填 1 会在日期一翻就删掉当天的资源。',
+    },
+    {
       key: 'mediaMaxBytes',
       label: '单个资源大小上限/字节(可选,默认 50MB)',
       bucket: 'config',

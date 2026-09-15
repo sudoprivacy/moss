@@ -154,6 +154,7 @@ import './corpapps/wecomApp.js'
 import './corpapps/wecomMsgAudit.js'
 import { WeComMsgAuditConnector } from './corpapps/wecomMsgAudit.js'
 import { MsgAuditWorker } from './corpapps/msgaudit/worker.js'
+import { MediaPurgeWorker, type RetentionTarget } from './corpapps/msgaudit/purgeWorker.js'
 import type { PullConfig as MsgAuditPullConfig } from './corpapps/msgaudit/puller.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
@@ -2181,6 +2182,32 @@ export function startServer(
     return configs
   })
   msgAuditWorker.start()
+
+  // 企微会话存档: daily retention sweep for downloaded media. Separate
+  // from the pull loop so a slow sweep never delays archiving, and so a
+  // retention change takes effect without a restart.
+  const msgAuditPurgeWorker = new MediaPurgeWorker(async () => {
+    const targets: RetentionTarget[] = []
+    const { readSecret } = await import('./sources/secrets.js')
+    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+      try {
+        const cfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+        const creds =
+          typeof row.credentials_secret_key === 'string' && row.credentials_secret_key
+            ? await readSecret(row.credentials_secret_key)
+            : {}
+        const connector = new WeComMsgAuditConnector()
+        await connector.init(cfg, creds)
+        if (connector.retentionDays > 1) {
+          targets.push({ corpAppId: String(row.id), retentionDays: connector.retentionDays })
+        }
+      } catch (err) {
+        console.error(`[msgaudit-purge] skip instance ${row.id}:`, err instanceof Error ? err.message : err)
+      }
+    }
+    return targets
+  })
+  msgAuditPurgeWorker.start()
 
   // Start cron service for scheduled task execution
   cronService.start().catch(err => {
@@ -9974,6 +10001,7 @@ export function startServer(
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()
+      msgAuditPurgeWorker.stop()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())

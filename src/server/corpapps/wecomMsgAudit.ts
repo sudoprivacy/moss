@@ -63,6 +63,8 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
   private downloadMedia = false
   /** Per-file download ceiling in bytes; 0 = no limit. */
   private mediaMaxBytes = 0
+  /** Days of media to keep; 0 = keep forever. */
+  private mediaRetentionDays = 0
 
   /**
    * 会话存档 has no AgentId, so the instance key is the corpId alone. The
@@ -95,6 +97,12 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     if (config.mediaMaxBytes === undefined || config.mediaMaxBytes === '') {
       this.mediaMaxBytes = DEFAULT_MEDIA_MAX_BYTES
     }
+    // Retention is opt-in: an unset or invalid value keeps media forever,
+    // because silently deleting an archive is far worse than keeping too
+    // much. A value below 2 is rejected for the same reason — "1 day"
+    // would delete today's media the moment the date rolls over.
+    const days = Number(config.mediaRetentionDays)
+    this.mediaRetentionDays = Number.isInteger(days) && days > 1 ? days : 0
     if (!this.corpId) throw new Error('wecommsgaudit: missing corpId')
   }
 
@@ -123,6 +131,11 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
       return { ok: false, message: 'RSA 私钥无法解析（应为 PEM，或 {"版本号": "PEM"} 的 JSON）' }
     }
     return { ok: true, message: `回调与拉取凭据齐备，私钥版本：${Object.keys(keys).sort().join(', ')}` }
+  }
+
+  /** Days of downloaded media to keep; 0 = never purge. */
+  get retentionDays(): number {
+    return this.mediaRetentionDays
   }
 
   /** Config for the pull worker; null when this instance cannot pull. */
