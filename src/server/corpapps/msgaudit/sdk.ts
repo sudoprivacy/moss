@@ -173,7 +173,12 @@ export function openSdk(corpId: string, secret: string): SdkHandle {
     'int GetMediaData(void*, const char*, const char*, const char*, const char*, int, void*)',
   )
   const GetOutIndexBuf = lib.func('const char* GetOutIndexBuf(void*)')
-  const GetDataFn = lib.func('const char* GetData(void*)')
+  // MUST be void*, not const char*: koffi auto-marshals a char* return
+  // into a JS string, which stops at the first NUL byte — that silently
+  // truncates every binary payload. Verified against the real SDK: the
+  // same call returns a string when declared char* and a pointer when
+  // declared void*. The pointer is then decoded by explicit length.
+  const GetDataFn = lib.func('void* GetData(void*)')
   const GetDataLen = lib.func('int GetDataLen(void*)')
   const IsMediaDataFinish = lib.func('int IsMediaDataFinish(void*)')
 
