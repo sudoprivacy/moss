@@ -660,9 +660,9 @@ function CorpAppDialog({
               </Label>
               {f.type === 'toggle' ? (
                 <Switch
-                  checked={/^(on|true|1|yes|y)$/i.test(fieldValues[f.key] ?? '')}
+                  checked={fieldValues[f.key] === 'true'}
                   onCheckedChange={(checked) =>
-                    setFieldValues((m) => ({ ...m, [f.key]: checked ? 'on' : '' }))
+                    setFieldValues((m) => ({ ...m, [f.key]: checked ? 'true' : 'false' }))
                   }
                 />
               ) : (

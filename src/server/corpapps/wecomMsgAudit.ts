@@ -89,9 +89,8 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     // Non-secret, so it lives in config rather than the credential blob.
     this.roomFilterRaw = String(config.roomFilter ?? '')
     // One switch rather than a type list: the only type worth excluding
-    // for size is video, and mediaMaxBytes already covers that. Accepts
-    // the usual truthy spellings so "true"/"1"/"yes" all work.
-    this.downloadMedia = /^(on|true|1|yes|y)$/i.test(String(config.downloadMedia ?? '').trim())
+    // for size is video, and mediaMaxBytes already covers that.
+    this.downloadMedia = config.downloadMedia === true || config.downloadMedia === 'true'
     const declaredMax = Number(config.mediaMaxBytes)
     this.mediaMaxBytes = Number.isFinite(declaredMax) && declaredMax >= 0 ? declaredMax : DEFAULT_MEDIA_MAX_BYTES
     if (config.mediaMaxBytes === undefined || config.mediaMaxBytes === '') {
