@@ -49,6 +49,19 @@ jobs:
       - name: Run server tests
         run: bun run test
 
+      # Nothing in this repo has ever type-checked: bun executes TypeScript
+      # without checking it, and the release artifact is produced by `bun build`,
+      # a bundler. A wrong-arity call therefore reaches dev under a fully green
+      # suite — that happened in September and was caught only by an out-of-band
+      # compile. This job runs on pull_request, on push to dev, and on server-v*
+      # tags, so the same check guards the PR and the release build.
+      #
+      # It is a ratchet, not a wall: the tree carries ~1500 type errors, so the
+      # gate counts only src/server (the code that ships) and fails when that
+      # count rises above the committed baseline.
+      - name: Typecheck ratchet (src/server)
+        run: bun run typecheck
+
   build:
     name: build-amd64
     runs-on: ubuntu-latest
