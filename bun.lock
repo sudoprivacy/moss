@@ -18,7 +18,7 @@
         "@inquirer/prompts": "*",
         "@larksuiteoapi/node-sdk": "^1.64.0",
         "@modelcontextprotocol/sdk": "*",
-        "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.2.4/nexus-ai-fs-vfs-client-0.2.4.tgz",
+        "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.3.0/nexus-ai-fs-vfs-client-0.3.0.tgz",
         "@opentelemetry/api": "^1.9.1",
         "@opentelemetry/api-logs": "^0.214.0",
         "@opentelemetry/core": "^2.6.1",
@@ -400,7 +400,7 @@
 
     "@napi-rs/canvas-win32-x64-msvc": ["@napi-rs/canvas-win32-x64-msvc@0.1.80", "", { "os": "win32", "cpu": "x64" }, "sha512-Z8jPsM6df5V8B1HrCHB05+bDiCxjE9QA//3YrkKIdVDEwn5RKaqOxCJDRJkl48cJbylcrJbW4HxZbTte8juuPg=="],
 
-    "@nexus-ai-fs/vfs-client": ["@nexus-ai-fs/vfs-client@https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.2.4/nexus-ai-fs-vfs-client-0.2.4.tgz", { "dependencies": { "@grpc/grpc-js": "^1.14.4", "@grpc/proto-loader": "^0.8.0", "protobufjs": "^7.6.6" } }, "sha512-RGEJt+Jqh/pWwymdt+SJkjIa8Zu8CqAZsiS/N0gXLyZoP+FUHvSbzo0/UBNCI4oyOEPqd9yy6bYDdUVSPQ3onw=="],
+    "@nexus-ai-fs/vfs-client": ["@nexus-ai-fs/vfs-client@https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.3.0/nexus-ai-fs-vfs-client-0.3.0.tgz", { "dependencies": { "@grpc/grpc-js": "^1.14.4", "@grpc/proto-loader": "^0.8.0", "protobufjs": "^7.6.6" } }, "sha512-UWTV2IT3LBQjbpZEOqsA4MPvTKNHcZ+fLlmrIICveENo81RVAeI0koePK9NMynog8fxaCtHkgOhXCDNYSwAtOw=="],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "https://registry.npmmirror.com/@opentelemetry/api/-/api-1.9.1.tgz", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 
