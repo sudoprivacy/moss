@@ -191,6 +191,10 @@ export class SqliteDriver implements DbDriver {
   }
 
   async close(): Promise<void> {
+    // L-7: wait out any in-flight transaction first — closing the single
+    // handle underneath it throws synchronously and leaves activeTx set,
+    // wedging every later driver call in waitOutTx's 30s fence.
+    await this.activeTx?.catch(() => {})
     this.db.close()
   }
 }

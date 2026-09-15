@@ -1692,12 +1692,17 @@ export class DirectConnectStore {
     sessionId: string,
     status: SessionStatus,
     desiredState: DesiredSessionState,
+    onlyWhenDesiredActive?: boolean,
   ): Promise<void> {
     const ts = now()
+    // A2: optional predicate for callers that must never overwrite a user
+    // terminate — the spawn-complete write (runtimeService.spawnAttempt) races
+    // a concurrent terminateSession; the conditional UPDATE lands only while
+    // desired_state is still 'active', so the terminated row survives.
     await this.driver.run(`
       UPDATE sessions
       SET status = ?, desired_state = ?, last_active_at = ?
-      WHERE session_id = ?
+      WHERE session_id = ?${onlyWhenDesiredActive ? ` AND desired_state = 'active'` : ''}
     `, [status, desiredState, ts, sessionId])
   }
 
@@ -1936,12 +1941,12 @@ export class DirectConnectStore {
     return true
   }
 
-  async markAttemptLost(attemptId: string, errorText: string): Promise<void> {
+  async markAttemptLost(attemptId: string, errorText: string, ownerInstanceId?: string): Promise<void> {
     await this.markAttemptStopped(attemptId, {
       runtimeState: 'lost',
       stopReason: 'runner_unavailable',
       errorText,
-    })
+    }, ownerInstanceId)
   }
 
   /**
@@ -2023,6 +2028,9 @@ export class DirectConnectStore {
    */
   async listOrphanedActiveSessions(selfInstanceId: string, heartbeatTimeoutMs: number): Promise<SessionRecord[]> {
     const deadBefore = now() - heartbeatTimeoutMs
+    // M-3: bounded — the 30s adoptionTimer re-queries each round, so a mass
+    // orphan event (DC failure across many sessions) drains in batches of
+    // 100 instead of materialising unbounded rows per tick.
     const rows = await this.driver.all<SqlRow>(`
       SELECT s.*
       FROM sessions s
@@ -2039,6 +2047,7 @@ export class DirectConnectStore {
             AND si.heartbeat_at >= ?
         )
       ORDER BY s.last_active_at DESC
+      LIMIT 100
     `, [selfInstanceId, deadBefore])
     return rows.map(mapSession)
   }
@@ -4586,7 +4595,11 @@ export async function openStoreAsync(config: ServerConfig): Promise<DirectConnec
     // node-postgres; moss's integer domain is well below 2^53, so parse every
     // int8 as a JS number globally (P1 type-normalisation rule).
     types.setTypeParser(20, Number)
-    const pool = new Pool({ connectionString: databaseUrl })
+    // F-05: one pool backs every consumer (HTTP/WS/cron/channels/msgaudit/SSE
+    // + advisory-lock clients); pg's default max of 10 can queue under HA load.
+    // Tunable via env, default unchanged.
+    const poolMax = Number(process.env.MOSS_PG_POOL_MAX ?? 10)
+    const pool = new Pool({ connectionString: databaseUrl, max: Number.isFinite(poolMax) && poolMax > 0 ? poolMax : 10 })
     // pg.Pool satisfies PgPoolLike structurally at runtime (query/connect/
     // on/end); @types/pg's overloaded query signatures just don't line up with
     // the seam's single-signature view, hence the cast.
