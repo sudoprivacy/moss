@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -68,7 +69,7 @@ type FieldSpec = {
   key: string
   label: string
   placeholder?: string
-  type?: 'text' | 'password'
+  type?: 'text' | 'password' | 'toggle'
   bucket: 'config' | 'credentials'
   optional?: boolean
   /** Longer explanation rendered under the input, for settings whose effect is
@@ -162,16 +163,11 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
     },
     {
       key: 'downloadMedia',
-      label: '下载图片/文件等资源(可选)',
+      label: '下载图片/文件等资源',
+      type: 'toggle',
       bucket: 'config',
       optional: true,
-      placeholder: '留空=不下载;填 on 开启',
-      hint:
-        '填 on 开启:图片、表情、文件(任意扩展名)、语音、视频都会下载到 media/ 目录,' +
-        '按日期分目录便于按时间清理。同时会把 userid 解析成姓名写入 fromName / toNames' +
-        '(自动使用同企业下的自建应用,无需额外配置)。' +
-        '⚠️ 企微的资源链接只有约 3 天有效期,不开启则内容永久无法取回(只剩 md5 与大小)。' +
-        '默认跳过大于 50MB 的单个文件,如需调整填下面的上限。',
+      hint: '下载图片、表情、文件、语音、视频,并解析发送人姓名。企微资源链接约 3 天后失效,届时无法补下载。',
     },
     {
       key: 'mediaRetentionDays',
@@ -180,10 +176,7 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
       optional: true,
       placeholder: '例如:30',
       validate: positiveIntValidator(1, '保留天数'),
-      hint:
-        '只影响下载的图片/文件等资源,聊天记录本身永久保留(文本很小,占空间的是资源)。' +
-        '填 30 表示保留最近 30 天,更早的按日期整目录删除;每天清理一次。' +
-        '填 1 表示保留到昨天(今天的资源不受影响)。留空或 0 表示永久保留。',
+      hint: '只清理资源,聊天记录永久保留。填 30 = 保留最近 30 天,每天清理一次。',
     },
     {
       key: 'mediaMaxBytes',
@@ -665,18 +658,27 @@ function CorpAppDialog({
                   </>
                 )}
               </Label>
-              <Input
-                type={f.type ?? 'text'}
-                value={fieldValues[f.key] ?? ''}
-                onChange={(e) =>
-                  setFieldValues((m) => ({ ...m, [f.key]: e.target.value }))
-                }
-                placeholder={
-                  f.bucket === 'credentials' && existing && credentialKeys?.includes(f.key)
-                    ? '••••••••  (已保存,留空不修改)'
-                    : f.placeholder
-                }
-              />
+              {f.type === 'toggle' ? (
+                <Switch
+                  checked={/^(on|true|1|yes|y)$/i.test(fieldValues[f.key] ?? '')}
+                  onCheckedChange={(checked) =>
+                    setFieldValues((m) => ({ ...m, [f.key]: checked ? 'on' : '' }))
+                  }
+                />
+              ) : (
+                <Input
+                  type={f.type ?? 'text'}
+                  value={fieldValues[f.key] ?? ''}
+                  onChange={(e) =>
+                    setFieldValues((m) => ({ ...m, [f.key]: e.target.value }))
+                  }
+                  placeholder={
+                    f.bucket === 'credentials' && existing && credentialKeys?.includes(f.key)
+                      ? '••••••••  (已保存,留空不修改)'
+                      : f.placeholder
+                  }
+                />
+              )}
               {(() => {
                 // Inline feedback as the admin types, so a bad value is
                 // obvious before they hit save rather than after.
