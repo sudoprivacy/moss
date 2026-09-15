@@ -405,9 +405,9 @@ export const serverFileConfigSchema = lazySchema(() =>
       /**
        * `disabled` because moss holds no credit ledger of its own. `approve`
        * turns on credit applications, where an administrator grants points and
-       * moss credits them at the gateway. `pay` additionally needs a payment
-       * provider (the client expects an Alipay / WeChat QR), which moss does
-       * not implement — setting it without one leaves the purchase flow dead.
+       * moss credits them at the gateway. `pay` turns on the Sudowork-compatible
+       * paid recharge flow; it needs the Fuiou non-secret settings below plus
+       * the Fuiou keys and SudoRouter admin token in the server credentials vault.
        */
       rechargeMode: z.enum(['pay', 'approve', 'disabled']).default('disabled'),
       /**
@@ -421,6 +421,42 @@ export const serverFileConfigSchema = lazySchema(() =>
         maxPoints: z.number().int().min(0),
         allowDuplicatePending: z.boolean().default(false),
       }).default({ minPoints: 100, maxPoints: 1000000, allowDuplicatePending: false }),
+      recharge: z.object({
+        minAmountUsd: z.number().min(0).default(1),
+        maxAmountUsd: z.number().min(1).default(10000),
+        orderExpireMinutes: z.number().int().min(1).default(30),
+        usdToCnyRate: z.number().min(0).default(7.3),
+        fuiou: z.object({
+          testMode: z.boolean().default(false),
+          merchantCode: z.string().optional(),
+          timeoutMs: z.number().int().min(1000).default(10_000),
+          testApiUrl: z.string().default('https://hlwnets-test.fuioupay.com'),
+          prodApiUrl: z.string().default('https://hlwnets.fuioupay.com'),
+          testRefundUrl: z.string().default('https://refund-transfer-test.fuioupay.com'),
+          prodRefundUrl: z.string().default('https://refund-transfer.fuioupay.com'),
+          callbackBaseUrl: z.string().optional(),
+        }).default({
+          testMode: false,
+          timeoutMs: 10_000,
+          testApiUrl: 'https://hlwnets-test.fuioupay.com',
+          prodApiUrl: 'https://hlwnets.fuioupay.com',
+          testRefundUrl: 'https://refund-transfer-test.fuioupay.com',
+          prodRefundUrl: 'https://refund-transfer.fuioupay.com',
+        }),
+      }).default({
+        minAmountUsd: 1,
+        maxAmountUsd: 10000,
+        orderExpireMinutes: 30,
+        usdToCnyRate: 7.3,
+        fuiou: {
+          testMode: false,
+          timeoutMs: 10_000,
+          testApiUrl: 'https://hlwnets-test.fuioupay.com',
+          prodApiUrl: 'https://hlwnets.fuioupay.com',
+          testRefundUrl: 'https://refund-transfer-test.fuioupay.com',
+          prodRefundUrl: 'https://refund-transfer.fuioupay.com',
+        },
+      }),
       logReport: z.object({
         enabled: z.boolean().default(false),
         baseUrl: z.string().min(1).optional(),
