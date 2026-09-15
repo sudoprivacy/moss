@@ -65,6 +65,7 @@ export class WeComAppConnector implements CorpAppConnector {
     'receive',
     'info',
     'downloadMedia',
+    'getUserName',
     'listApprovals',
     'getApproval',
     'listCustomerGroups',
@@ -185,6 +186,40 @@ export class WeComAppConnector implements CorpAppConnector {
     return this.requireClient().getBytes(
       `/cgi-bin/media/get?media_id=${encodeURIComponent(mediaId)}`,
     )
+  }
+
+  /**
+   * Resolve a userid to a display name.
+   *
+   * Internal ids come from the corp directory (`/cgi-bin/user/get`), so
+   * they keep resolving after the person leaves a group. External ids
+   * (`wo_`/`wm_` prefixed) come from `/cgi-bin/externalcontact/get` and
+   * resolve only while the contact is still linked to some member of the
+   * corp — WeCom answers 84061 once that ends, and the name is then
+   * unrecoverable. Callers that need names permanently must cache them.
+   *
+   * Returns null rather than throwing when the provider cannot resolve
+   * the id, so one departed contact does not fail a whole batch.
+   */
+  async getUserName(userId: string, external: boolean): Promise<string | null> {
+    const client = this.requireClient()
+    try {
+      if (external) {
+        const r = await client.get(
+          `/cgi-bin/externalcontact/get?external_userid=${encodeURIComponent(userId)}`,
+        )
+        if (Number(r.errcode ?? 0) !== 0) return null
+        const contact = r.external_contact as Record<string, unknown> | undefined
+        const name = contact?.name
+        return typeof name === 'string' && name ? name : null
+      }
+      const r = await client.get(`/cgi-bin/user/get?userid=${encodeURIComponent(userId)}`)
+      if (Number(r.errcode ?? 0) !== 0) return null
+      const name = r.name
+      return typeof name === 'string' && name ? name : null
+    } catch {
+      return null
+    }
   }
 
   /**

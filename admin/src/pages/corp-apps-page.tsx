@@ -138,6 +138,38 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
         '不影响已归档的记录。',
     },
     {
+      key: 'mediaTypes',
+      label: '下载媒体文件(可选,留空=不下载)',
+      bucket: 'config',
+      optional: true,
+      placeholder: 'image,emotion  或  all',
+      hint:
+        '可选:image、emotion、file、video、voice,逗号分隔;填 all 表示全部。' +
+        '⚠️ 企微的 sdkfileid 只有约 3 天有效期,所以下载必须在拉取当时完成 ——' +
+        '没有「以后再下」这个选项,现在不下就永久拿不到内容(只剩 md5 与大小)。' +
+        '文件存到 media/ 目录,记录里会多一个 mediaPath 字段指向它。',
+    },
+    {
+      key: 'mediaMaxBytes',
+      label: '单个媒体文件上限/字节(可选,0=不限)',
+      bucket: 'config',
+      optional: true,
+      placeholder: '10485760',
+      hint: '超过此大小的文件跳过不下载,记录里会写明原因。仅在上面填了类型时生效。',
+    },
+    {
+      key: 'nameLookupApp',
+      label: '姓名解析用的自建应用名称(可选)',
+      bucket: 'config',
+      optional: true,
+      placeholder: '例如:数牍',
+      hint:
+        '填写同一企业下某个「企微自建应用」实例的名称,用它把 userid 解析成姓名,' +
+        '写入记录的 fromName / toNames 字段。会话存档的 SDK 没有通讯录接口,只能借道自建应用。' +
+        '姓名在首次见到该 id 时解析并永久缓存(users.json)—— 外部联系人一旦解除好友关系就再也查不到姓名,' +
+        '所以不缓存的话归档会随时间「失去」可读性。该应用需要在企微后台配置可信 IP,否则解析失败(记录仍保留原始 id)。',
+    },
+    {
       key: 'secret',
       label: '会话存档 Secret(拉取聊天记录时必填)',
       type: 'password',

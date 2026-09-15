@@ -56,6 +56,12 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
   private privateKeysRaw = ''
   /** Optional room allowlist (comma/space separated); empty = archive all. */
   private roomFilterRaw = ''
+  /** Media types to download ("image,emotion" / "all"); empty = none. */
+  private mediaTypesRaw = ''
+  /** Per-file download ceiling in bytes; 0 = no limit. */
+  private mediaMaxBytes = 0
+  /** Sibling wecomapp instance used to resolve display names; '' = off. */
+  private nameLookupApp = ''
 
   /**
    * 会话存档 has no AgentId, so the instance key is the corpId alone. The
@@ -79,6 +85,9 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     this.privateKeysRaw = credentials.privateKeys ?? ''
     // Non-secret, so it lives in config rather than the credential blob.
     this.roomFilterRaw = String(config.roomFilter ?? '')
+    this.mediaTypesRaw = String(config.mediaTypes ?? '')
+    this.mediaMaxBytes = Number(config.mediaMaxBytes ?? 0) || 0
+    this.nameLookupApp = String(config.nameLookupApp ?? '')
     if (!this.corpId) throw new Error('wecommsgaudit: missing corpId')
   }
 
@@ -109,6 +118,11 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     return { ok: true, message: `回调与拉取凭据齐备，私钥版本：${Object.keys(keys).sort().join(', ')}` }
   }
 
+  /** Name of the sibling wecomapp used for display-name lookups ('' = off). */
+  get nameLookupAppName(): string {
+    return this.nameLookupApp
+  }
+
   /** Config for the pull worker; null when this instance cannot pull. */
   pullConfig(corpAppId: string): PullConfig | null {
     if (!this.secret || !this.privateKeysRaw) return null
@@ -118,6 +132,8 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
       secret: this.secret,
       privateKeysRaw: this.privateKeysRaw,
       roomFilterRaw: this.roomFilterRaw,
+      mediaTypesRaw: this.mediaTypesRaw,
+      mediaMaxBytes: this.mediaMaxBytes,
     }
   }
 
