@@ -135,6 +135,17 @@ spec:
       labels:
         app: moss-nginx
     spec:
+      # 两副本尽量分节点：nginx 是统一入口，同节点调度会使单节点故障
+      # 同时打掉两个副本（preferred 而非 required，避免小集群无法调度）。
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: moss-nginx
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: nginx
           image: nginx:1.27-alpine
@@ -150,6 +161,18 @@ spec:
         - name: conf
           configMap:
             name: moss-nginx-conf
+---
+# PDB：节点维护/驱逐时至少保 1 个入口副本在线。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: moss-nginx
+  namespace: moss-control
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: moss-nginx
 ---
 apiVersion: v1
 kind: Service

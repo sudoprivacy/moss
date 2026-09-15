@@ -341,6 +341,26 @@ affinity annotation，与两级 map 互斥；该文件头部注释已更新）�
   多余 fencing 或延迟接管（90s 超时兜底保证不死锁），不会脑裂；生产环境请确保
   主机时钟同步在秒级以内。
 
+### 7.4 形态语义与一次性窗口（如实声明）
+
+- **Phase A SQLite 备援语义**：`docker-compose.ha.yml` 的方案 A 是双实例共享
+  SQLite（单写者形态）。B-9 启动守卫（sqlite 后端 + 已设 instanceId + 检测到活
+  peer 即拒绝启动）使备实例以 crash-loop 方式待援：主实例心跳过期（约 30s）后
+  备实例下一次 `restart: always` 重启才接管——这与源设计文档 §14.1"同一时间只
+  有一个实例写入，backup 只在主失败时接管"一致。**Phase B/C（双活）必须使用
+  PostgreSQL 后端**（源设计文档 §14.2；sqlite 的 advisory lock 为 no-op，无跨进
+  程互斥）。
+- **内部通道断连语义**：internal session channel 建立成功后若断线，不自动重连
+  ——消费方（channels gateway / cron / event trigger）在下一次消息发送时按需重
+  建连接（上层补偿），通道对象本身无状态需要恢复。
+- **advisory lock 升级备注**：PG 后端的互斥锁 key 算法为 `hashtextextended`
+  （64 位）。**仅当**曾部署过本分支早期使用 `hashtext`（32 位）的中间版本时，
+  升级到当前版本须停齐所有实例后统一升级（两代算法对同一 key 产生不同的锁，
+  滚动升级窗口不互斥）；从 dev/无 HA 状态直接部署当前版本无此问题。
+- **PG v2 迁移窗口**：首次在已有 v1 数据的 PG 库上执行 schema 迁移时，v2 的
+  wikis 表 `ALTER COLUMN ... SET NOT NULL` 会短暂阻塞该表写入（时长与表行数相
+  关），建议低峰执行（迁移幂等，重跑无副作用）。
+
 ## 8. 单点边界汇总（如实声明）
 
 moss 交付边界是**正确消费**下列共享组件；其自身 HA 属基础设施选型：

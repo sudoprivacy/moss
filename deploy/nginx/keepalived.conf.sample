@@ -30,6 +30,14 @@ vrrp_instance MOSS_VIP {
     priority 150
     advert_int 1
 
+    # VRRP 认证占位：两台主机须一致，部署时替换（≤8 字符，VRRPv2 限制）。
+    # 注意：PASS 认证已被 RFC 弃用且明文可截获——它只挡最粗糙的伪造 advert，
+    # 真正的防线是二层隔离（VRRP 不跨网段/不与不可信主机同二层）。
+    authentication {
+        auth_type PASS
+        auth_pass MossVRRP
+    }
+
     track_script {
         chk_nginx
     }
