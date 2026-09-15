@@ -897,14 +897,17 @@ function remoteDirectRetryDelayMs(retryIndex) {
 
 // 4xx (auth / not-found class) is permanent — surface it immediately. 5xx
 // (e.g. the 503 a taking-over instance returns while fencing completes) and
-// network errors (no .status) are retryable.
+// network errors (no .status) are retryable. 409 is retryable too: the server
+// rejects a WS upgrade whose session attempt is owned by a live OTHER
+// instance precisely so the client re-fetches ws_url and re-routes — clearing
+// the cached sessionPromise below then re-resolves the owner via /resume.
 function isRetryableRemoteDirectError(error) {
   // D-3: the SDK's DirectConnectError carries statusCode; the local fetch
   // path (parseRemoteDirectError) sets status. Read both — reading only
   // .status classified every SDK 4xx as "network error, retry", burning all
   // 9 attempts (~2 min) on permanent failures.
   const status = error?.statusCode ?? error?.status;
-  if (typeof status === 'number') return status >= 500;
+  if (typeof status === 'number') return status >= 500 || status === 409;
   return true;
 }
 

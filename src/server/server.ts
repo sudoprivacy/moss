@@ -2585,8 +2585,22 @@ export function startServer(
     : undefined
   const channelsApi = createChannelsApi(runtime.store)
   const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime, healthReports: cabinHealthReports }) : null
+  // M-18: wrap the leadership probe so transitions are logged — without this
+  // there is no "became/stopped being leader" event to trace a dual-active or
+  // missed-broadcast incident back to its switching moment.
+  let lastCabinLeader: boolean | null = null
+  const cabinLeaderProbe = async (): Promise<boolean> => {
+    const isLeader = await runtime.isCabinLeader()
+    if (isLeader !== lastCabinLeader) {
+      process.stderr.write(
+        `[Cabin] leadership changed: ${lastCabinLeader === null ? 'unknown' : lastCabinLeader} -> ${isLeader}\n`,
+      )
+      lastCabinLeader = isLeader
+    }
+    return isLeader
+  }
   const cabinFlightAutomation = config.cabin.enabled && cabinAdminStore
-    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports, () => runtime.isCabinLeader())
+    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports, cabinLeaderProbe)
     : null
   cabinFlightAutomation?.start()
 
@@ -10179,7 +10193,7 @@ export function startServer(
         // instance owns it (the LB routed us the wrong backend, or a failover is
         // mid-flight), reject with 409 so the client re-fetches ws_url / re-routes
         // to the owner rather than us proxying a runner we do not hold.
-        const locallyOwnedAttempt = session.currentAttemptId
+        let locallyOwnedAttempt = session.currentAttemptId
           ? await runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
           : null
         // Graceful drain: reject WS handshakes that would cold-start a runner
@@ -10191,17 +10205,19 @@ export function startServer(
           socket.destroy()
           return
         }
-        if (
-          session.currentAttemptId &&
-          !locallyOwnedAttempt &&
-          !await runtime.tryOwnAttempt(session.currentAttemptId)
-        ) {
-          process.stderr.write(
-            `[WS Upgrade] session ${sessionId} is owned by a live other instance — not bridging here\n`,
-          )
-          socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
-          socket.destroy()
-          return
+        if (session.currentAttemptId && !locallyOwnedAttempt) {
+          if (!await runtime.tryOwnAttempt(session.currentAttemptId)) {
+            process.stderr.write(
+              `[WS Upgrade] session ${sessionId} is owned by a live other instance — not bridging here\n`,
+            )
+            socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          // M-3: the claim just flipped DB ownership to self — re-read so the
+          // A-2 guard below (ownsAttemptRunner fast path) actually runs instead
+          // of being skipped by the stale pre-claim null snapshot.
+          locallyOwnedAttempt = await runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
         }
 
         // A-2: the fast path below bridges without ensureSessionReady's
@@ -10459,7 +10475,6 @@ export function startServer(
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()
       cronService.stop()
-      eventTriggerService.stop()
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()

@@ -256,7 +256,16 @@ export class PluginManager {
   private async stopPluginLocally(instanceKey: string): Promise<void> {
     const plugin = this.plugins.get(instanceKey);
     if (!plugin) return;
-    await plugin.stop();
+    // M-11: remove the map entry even when stop() throws — the lease is gone
+    // (a peer owns it), so keeping the entry makes every leaseTick retry the
+    // same failing stop forever while the peer and this process both poll the
+    // bot. An un-stoppable plugin object is abandoned either way; the entry
+    // must not be.
+    try {
+      await plugin.stop();
+    } catch (err) {
+      console.error(`[PluginManager] failed to stop lost-lease plugin ${instanceKey}:`, err);
+    }
     this.plugins.delete(instanceKey);
   }
 

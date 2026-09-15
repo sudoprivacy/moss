@@ -340,7 +340,17 @@ async function finishStandaloneServerStartup(
     await server.stop()
     await authProxy.stop()
     await nexusManager.stop()
-    await store.stopServerInstance(instance.instanceId)
+    // M-13: a transient DB error here used to reject the whole stop() chain,
+    // skipping store.close(); the peer heartbeat timeout reaps the stale row
+    // either way, so just log it and keep closing.
+    try {
+      await store.stopServerInstance(instance.instanceId)
+    } catch (err) {
+      console.error(
+        '[Shutdown] failed to mark server instance stopped (peer heartbeat timeout will reap it):',
+        err,
+      )
+    }
     await store.close()
   }
 

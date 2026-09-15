@@ -63,6 +63,24 @@ function extractTranscriptSessionCandidate(value: unknown): {
   return null
 }
 
+/**
+ * A-6/A4: whether the daemon may stamp session lifecycle. Both guards
+ * (#onClient's 'active' stamp and the idle timer's 'detached' stamp) require
+ * a non-terminal status AND the user's desired state to still be 'active' —
+ * desiredState is the authoritative user intent, so a session terminated by
+ * the user (even with status raced to 'failed'/'lost') is never revived here.
+ */
+export function mayStampDaemonLifecycle(
+  session: { status: string; desiredState: string } | null | undefined,
+): boolean {
+  return Boolean(
+    session
+    && session.status !== 'terminated'
+    && session.status !== 'ended'
+    && session.desiredState === 'active',
+  )
+}
+
 export class SessionRunnerDaemon {
   readonly #store: DirectConnectStore
   readonly #backend: RuntimeBackend
@@ -437,7 +455,7 @@ export class SessionRunnerDaemon {
     // fenced/terminated session's late client attach must not flip the row
     // back to active over whatever the takeover side wrote.
     void this.#store.getSession(this.manifest.session.sessionId).then(session => {
-      if (session && session.status !== 'terminated' && session.status !== 'ended') {
+      if (mayStampDaemonLifecycle(session)) {
         return this.#store.setSessionLifecycle(
           this.manifest.session.sessionId,
           'active',
@@ -643,7 +661,7 @@ export class SessionRunnerDaemon {
     }
     // A-6: guarded the same way as #onClient's write — see the note there.
     void this.#store.getSession(this.manifest.session.sessionId).then(session => {
-      if (session && session.status !== 'terminated' && session.status !== 'ended') {
+      if (mayStampDaemonLifecycle(session)) {
         return this.#store.setSessionLifecycle(
           this.manifest.session.sessionId,
           'detached',

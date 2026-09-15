@@ -1087,6 +1087,9 @@ export class RuntimeService {
           await this.store.addEvent(session.sessionId, attempt?.attemptId ?? null, 'reconcile_retired_unrecoverable', {
             runnerPid: attempt?.runnerPid ?? null,
             previousStatus: session.status,
+            // L-1: distinguishes a transient 'lost'/'failed' (socket hiccup,
+            // recoverable via POST /resume) from a genuinely stopped runner.
+            previousRuntimeState: attempt?.runtimeState ?? null,
           })
           const { logRuntimeEvent, logRuntimeMetric } = await import('./runtime/runtimeMetrics.js')
           logRuntimeMetric('reconcile_retired_unrecoverable', {})
@@ -1181,6 +1184,16 @@ export class RuntimeService {
               console.warn('[RuntimeService] Failed to terminate runner process:', err)
             }
           }
+        } else {
+          // M-12: the runner was spawned by another instance — its fenced
+          // heartbeat (runtime_state no longer alive after our
+          // markAttemptStopped) makes it exit on its own. Log the skip so a
+          // "terminate succeeded but the runner kept running" report is
+          // diagnosable instead of silent.
+          process.stderr.write(
+            `[RuntimeService] terminate: skipping SIGTERM for runner of attempt ${attempt.attemptId} ` +
+              `(pid=${attempt.runnerPid} belongs to instance ${runnerInstanceId}; it will exit via fenced heartbeat)\n`,
+          )
         }
       }
     }
@@ -1287,7 +1300,12 @@ export class RuntimeService {
           this.options.config.heartbeatTimeoutMs,
         )
         if (!claimed) return existing
-        if (isAttemptHeartbeatFresh(existing, this.options.config.heartbeatTimeoutMs)) {
+        // F-5: the pre-claim snapshot's heartbeat may be stale — the runner may
+        // have died between our read and the claim. Re-read so a genuinely dead
+        // runner skips straight to respawn instead of scheduling a pointless
+        // fencing-wait cycle off the old timestamp.
+        const refetched = await this.store.getAttempt(existing.attemptId)
+        if (refetched && isAttemptHeartbeatFresh(refetched, this.options.config.heartbeatTimeoutMs)) {
           // Takeover in progress: the previous owner's detached runner is
           // still alive on its host with a fresh heartbeat. Fencing kills
           // it within one heartbeat interval; respawning before its
@@ -1508,6 +1526,10 @@ export class RuntimeService {
               await this.store.markAttemptLost(
                 attempt.attemptId,
                 'fencing wait timed out (attach unreachable, heartbeat fresh)',
+                // M-2: this poll runs ~90s after the claim — long enough for a
+                // faster survivor to have re-claimed the attempt. The owner
+                // predicate keeps us from writing 'lost' over THEIR attempt.
+                this.options.serverInstanceId,
               )
               await this.store.addEvent(current.sessionId, attempt.attemptId, 'attempt_lost', {
                 reason: 'fencing_wait_timeout_heartbeat_fresh',
@@ -2146,7 +2168,11 @@ export class RuntimeService {
       // propagate the error.
       throw err
     }
-    await this.store.setSessionLifecycle(session.sessionId, 'active', 'active')
+    // A2: conditional write — a terminate that landed while we were in
+    // waitForRunnerReady must not be flipped back to active by this spawn.
+    // The stale attempt row is already terminal, so the runner fences itself
+    // out via its owner-conditional heartbeat (changes=0 → SIGTERM chain).
+    await this.store.setSessionLifecycle(session.sessionId, 'active', 'active', true)
     await this.store.addEvent(session.sessionId, attempt.attemptId, 'attempt_spawned', {
       runnerPid: child.pid,
       generation,
