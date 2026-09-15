@@ -2138,7 +2138,42 @@ export function startServer(
         const connector = new WeComMsgAuditConnector()
         await connector.init(cfg, creds)
         const pull = connector.pullConfig(String(row.id))
-        if (pull) configs.push(pull)
+        if (pull) {
+          // Display names come from a sibling self-built app: the 会话存档
+          // SDK has no directory API. The app is found by corpId rather
+          // than asked for by name — an archive instance and the app that
+          // can resolve its users belong to the same corp by definition,
+          // so making the admin name it would be busywork. Resolved
+          // lazily so a missing or IP-blocked app costs names, never the
+          // transcript itself.
+          if (pull.resolveNames) {
+            pull.nameLookup = async (id: string, external: boolean) => {
+              try {
+                const appRow = runtime.store
+                  .listAllCorpAppsByType('wecomapp')
+                  .find(
+                    (r) =>
+                      String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
+                      String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
+                        String(JSON.parse(String(row.config_json ?? '{}')).corpId ?? ''),
+                  ) as Record<string, unknown> | undefined
+                if (!appRow) return null
+                const { createCorpApp } = await import('./corpapps/types.js')
+                const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
+                const appCreds =
+                  typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
+                    ? await readSecret(appRow.credentials_secret_key)
+                    : {}
+                const appConn = createCorpApp(String(appRow.type))
+                await appConn.init(appCfg, appCreds)
+                return appConn.getUserName ? await appConn.getUserName(id, external) : null
+              } catch {
+                return null
+              }
+            }
+          }
+          configs.push(pull)
+        }
       } catch (err) {
         console.error(`[msgaudit] skip instance ${row.id}:`, err instanceof Error ? err.message : err)
       }

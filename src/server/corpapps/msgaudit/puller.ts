@@ -97,10 +97,12 @@ export type PullConfig = {
   mediaTypesRaw?: string
   /** Skip files larger than this (bytes). 0 = no limit. */
   mediaMaxBytes?: number
+  /** Whether to resolve display names (paired with the media switch). */
+  resolveNames?: boolean
   /**
    * Resolves a userid to a display name. Supplied by the caller because
    * the 会话存档 SDK has no directory API — it comes from a sibling
-   * self-built app. Absent = keep raw ids.
+   * self-built app, auto-discovered by corpId. Absent = keep raw ids.
    */
   nameLookup?: NameLookup
 }

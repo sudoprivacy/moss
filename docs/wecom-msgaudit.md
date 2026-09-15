@@ -185,8 +185,14 @@ wr_l7aCgAAoFEUD7y9cEvqAzpmL-WPWg, wr_l7aCgAAWRF4xBDPJEFfSmwIV3W3Mg
 
 ### 媒体下载
 
-实例配置 `mediaTypes` 选择要下载的类型（`image`、`emotion`、`file`、`video`、
-`voice`，逗号分隔；`all` 表示全部；留空不下载）。`mediaMaxBytes` 设单文件上限。
+实例配置 **`downloadMedia`** 填 `on` 即开启 —— 一个开关同时启用**资源下载**与
+**姓名解析**，不需要分别配置。留空则两者都关。
+
+不做细粒度类型选择是刻意的：五类资源里唯一值得因体积排除的是 video，而这已由
+`mediaMaxBytes`（默认 50MB）覆盖，再让管理员逐类勾选只是把决策推给对方。
+
+姓名解析所用的自建应用**按 corpId 自动匹配**同企业下的 wecomapp 实例 ——
+会话存档实例和能解析其成员的应用本就属于同一企业，让管理员填写应用名是多余的。
 
 ```
 $MOSS_HOME/msgaudit/<corpAppId>/media/<YYYY-MM-DD>/<msgid>.<ext>
