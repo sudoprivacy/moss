@@ -8,6 +8,12 @@
 # runner 凭据解析不可用（存量缓存不受影响）。Nexus 自身多副本不在 moss 交付范围；
 # 对可用性敏感的部署可将 vault 数据外置到受管服务形态。
 #
+# 【节点故障恢复 SOP（RWO + Recreate）】：nexus pod 所在节点故障（NotReady 且确认
+# 废弃）时，PVC 卷 attachment 会残留在故障节点上，Recreate 的新 pod 卡 Pending/
+# Terminating。恢复：删除故障节点（kubectl delete node <name>）或清除对应
+# volumeattachment（kubectl patch volumeattachment <name> -p '{"metadata":{"finalizers":null}}'）
+# 后新 pod 方可调度挂卷。
+#
 # 镜像同 moss-server（仅 local 构建产物含 nexusd + vault 插件，说明同
 # docker-compose.ha.yml 的 nexus 服务）。
 # ----------------------------------------------------------------------------
@@ -84,3 +90,27 @@ spec:
   resources:
     requests:
       storage: 5Gi
+---
+# Nexus 以 --no-tls --insecure-no-auth 运行（moss external 客户端仅支持明文无
+# 认证），必须在网络层封堵：ingress 仅允许 moss-server pod。session/scode pod
+# （用户不受控代码）同集群但不同 label，被默认拒绝——不能读写 vault。
+# 调试提示：策略生效后非 moss-server pod 不能直连 nexus:2126，需经 moss-server
+# pod 内执行（kubectl exec deploy/moss-server -- ...）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: moss-nexus-ingress
+  namespace: moss-control
+spec:
+  podSelector:
+    matchLabels:
+      app: moss-nexus
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: moss-server
+      ports:
+        - protocol: TCP
+          port: 2126

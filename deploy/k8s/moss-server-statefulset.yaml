@@ -83,6 +83,14 @@ spec:
               name: http
             - containerPort: 43128
               name: callback
+          # 资源占位（决策点 3）：先给保守值获得失控保护，按压测收敛调整。
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
           env:
             - name: MOSS_SERVER_CONFIG
               value: /app/server.json
@@ -132,10 +140,10 @@ spec:
                   key: url
           envFrom:
             # MOSS_HOST_PATH_MAP 等 storage 映射按需经 ConfigMap 注入（值指向
-            # 下方两个 PVC 挂载点；pod 内路径两实例天然一致）。
+            # 下方两个 PVC 挂载点；pod 内路径两实例天然一致）。不设 optional：
+            # 缺失时 pod CreateContainerConfigError 直接 fail-fast。
             - configMapRef:
                 name: moss-server-config
-                optional: true
           volumeMounts:
             - name: moss-data
               mountPath: /app/data
@@ -148,13 +156,32 @@ spec:
             - name: kubeconfig
               mountPath: /root/.moss/server/kubeconfig
               readOnly: true
+          # startupProbe 覆盖冷启 DDL/seed 窗口（PG 端 openStoreAsync +
+          # ensureDefaultConfigItems 首次部署可能慢于 liveness initialDelay）。
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 43127
+            periodSeconds: 2
+            failureThreshold: 30
+          # liveness = 进程活着（/healthz 恒 200，不读 draining/DB）——死锁/
+          # 事件循环挂死时 kubelet 重启 pod；readiness 才负责摘流。
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 43127
+            periodSeconds: 15
+            timeoutSeconds: 3
           readinessProbe:
             # 含 DB/存储真实检查的实例级就绪（drain 时 503 → nginx 摘流）。
+            # timeoutSeconds 3 > /readyz 内层 DB 探针 2s 预算（server.ts
+            # computeReadiness），避免外部 PG 抖动时 kubelet 先超时误摘。
             httpGet:
               path: /readyz
               port: 43127
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 3
           # 终止宽限 > drain 30s + 兜底 10s（同 compose 形态）。
           terminationGracePeriodSeconds: 45
       volumes:
