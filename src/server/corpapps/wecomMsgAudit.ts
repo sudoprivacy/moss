@@ -99,10 +99,11 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     }
     // Retention is opt-in: an unset or invalid value keeps media forever,
     // because silently deleting an archive is far worse than keeping too
-    // much. A value below 2 is rejected for the same reason — "1 day"
-    // would delete today's media the moment the date rolls over.
+    // much. 1 means "keep through yesterday" — today's media is never at
+    // risk, since the cutoff is today minus N days and the purge keeps
+    // the cutoff day itself.
     const days = Number(config.mediaRetentionDays)
-    this.mediaRetentionDays = Number.isInteger(days) && days > 1 ? days : 0
+    this.mediaRetentionDays = Number.isInteger(days) && days >= 1 ? days : 0
     if (!this.corpId) throw new Error('wecommsgaudit: missing corpId')
   }
 

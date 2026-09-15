@@ -95,7 +95,7 @@ export class MediaPurgeWorker {
     // on the next run without a restart.
     const targets = await this.listTargets()
     for (const t of targets) {
-      if (!(t.retentionDays > 1)) continue
+      if (!(t.retentionDays >= 1)) continue
       const cutoff = new Date(Date.now() - t.retentionDays * 24 * 60 * 60 * 1000)
       const r = await purgeMediaBefore(t.corpAppId, cutoff)
       if (r.days > 0 || r.files > 0) {

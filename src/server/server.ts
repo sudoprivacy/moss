@@ -2198,7 +2198,7 @@ export function startServer(
             : {}
         const connector = new WeComMsgAuditConnector()
         await connector.init(cfg, creds)
-        if (connector.retentionDays > 1) {
+        if (connector.retentionDays >= 1) {
           targets.push({ corpAppId: String(row.id), retentionDays: connector.retentionDays })
         }
       } catch (err) {
