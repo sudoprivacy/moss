@@ -39,12 +39,14 @@ const BUN = [
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
   'credits.test.ts',
+  'fuiou.test.ts',
   'lbHaConfig.test.ts',
   'lbLifecycleE2e.test.ts',
   'lbReadiness.test.ts',
   'modelListCache.test.ts',
   'podWorkspace.test.ts',
   'publicSystemConfig.test.ts',
+  'recharge.test.ts',
   'runtimeScodePaths.test.ts',
   'smsTencent.test.ts',
 ]
@@ -60,6 +62,7 @@ const NODE = [
   'lbServerInstance.test.ts',
   'phoneAuth.test.ts',
   'phoneImport.test.ts',
+  'rechargeDb.test.ts',
   'tokenQuota.test.ts',
   'transcriptGuard.test.ts',
 ]
