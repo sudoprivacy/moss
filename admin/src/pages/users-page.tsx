@@ -1746,11 +1746,12 @@ export default function UsersPage() {
                     <Select
                       onValueChange={field.onChange}
                       value={field.value || ''}
-                      // Organization is immutable for an existing user (req 3):
-                      // read-only in edit mode. In create mode, only a
-                      // super_admin (who has the org list) may choose the org;
-                      // a normal admin is fixed to their own org.
-                      disabled={userDialog.mode === 'edit' || !isSuperAdmin}
+                      // Read-only in both modes. Organization is immutable for
+                      // an existing user, and on create the backend pins the
+                      // org to the caller's current one (body.org_id is never
+                      // trusted) — so this shows where the user will land
+                      // rather than offering a choice that would be ignored.
+                      disabled
                     >
                       <FormControl>
                         <SelectTrigger>
@@ -1774,9 +1775,7 @@ export default function UsersPage() {
                     <FormDescription>
                       {userDialog.mode === 'edit'
                         ? '用户的所属组织不可修改。'
-                        : isSuperAdmin
-                          ? '切换组织后，请重新选择该组织下的部门。'
-                          : '新用户将创建在您所属的组织。'}
+                        : '新用户创建在当前所管理的组织下。如需创建到其他组织，请先切换组织。'}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -1877,7 +1876,12 @@ export default function UsersPage() {
                     <Select
                       onValueChange={field.onChange}
                       value={field.value || ''}
-                      disabled={departmentDialog.mode === 'edit'}
+                      // Read-only in both modes: the backend pins creation to
+                      // the caller's current org and ignores body.org_id, so a
+                      // picker here would offer choices that silently do
+                      // nothing. A super_admin changes the target by switching
+                      // org, not by picking one in this dialog.
+                      disabled
                     >
                       <FormControl>
                         <SelectTrigger>
@@ -1893,11 +1897,11 @@ export default function UsersPage() {
                         ))}
                       </SelectContent>
                     </Select>
-                    {departmentDialog.mode === 'edit' ? (
-                      <FormDescription>
-                        部门所属组织不可修改。如需迁移，请删除后在目标组织重新创建。
-                      </FormDescription>
-                    ) : null}
+                    <FormDescription>
+                      {departmentDialog.mode === 'edit'
+                        ? '部门所属组织不可修改。如需迁移，请删除后在目标组织重新创建。'
+                        : '部门创建在当前所管理的组织下。如需创建到其他组织，请先切换组织。'}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
