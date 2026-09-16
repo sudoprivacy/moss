@@ -27,6 +27,7 @@ import {
   updateMcpTemplate,
   deleteMcpTemplate,
   uploadMcpIcon,
+  type McpAuthType,
   type McpTemplate,
   type McpTemplateFormData,
   type UserConfigItem,
@@ -92,12 +93,18 @@ interface TemplateOauthField {
 }
 
 interface TemplateAuthConfigState {
-  auth_type: string
+  auth_type: McpAuthType
   pre_filled: Record<string, string>
   user_items: TemplateAuthConfigItem[]
   oauth_fields: TemplateOauthField[]
   custom_header_items: TemplateAuthConfigItem[]
   secret_ref: string | null
+}
+
+const MCP_AUTH_TYPES = new Set<McpAuthType>(['none', 'api_key', 'bearer', 'basic', 'oauth', 'custom_header', 'secret_ref'])
+
+function toMcpAuthType(value: string): McpAuthType {
+  return MCP_AUTH_TYPES.has(value as McpAuthType) ? value as McpAuthType : 'none'
 }
 
 function defaultAuthConfigState(): TemplateAuthConfigState {
@@ -244,7 +251,11 @@ export default function McpTemplatesPage() {
         getInstalledSkills().catch(() => [] as { id: string; name: string; displayName?: string }[]),
       ])
       setDepartments(depts.departments || [])
-      setUsers(usrs.users || [])
+      setUsers((usrs.users || []).map(user => ({
+        id: user.id,
+        name: user.name,
+        email: user.email ?? undefined,
+      })))
       setAssistants((asts || []).filter(a => a.id && a.id.trim()))
       setSkills((skls || []).filter(s => s.id && s.id.trim()))
       setOptionsLoaded(true)
@@ -900,8 +911,9 @@ function TemplateAuthConfigStep({
   }, [state.auth_type, selectedDepartmentIds.join(',')])
 
   function handleAuthTypeChange(authType: string) {
+    const nextAuthType = toMcpAuthType(authType)
     const newState: TemplateAuthConfigState = {
-      auth_type: authType,
+      auth_type: nextAuthType,
       pre_filled: {},
       user_items: [],
       oauth_fields: [],

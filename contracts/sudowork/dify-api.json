@@ -1,0 +1,1121 @@
+{
+  "schema_version": 1,
+  "source_commit": "311636c7bbfa4fa1c655aa8bd5c7e898f565f263",
+  "routes": [
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/datasets/:datasetId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 196,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": [
+        "dify_dataset_write"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/datasets/:datasetId/documents/:documentId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 315,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": [
+        "dify_document_write"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/admin/dify/agents/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 384,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/agents/:assistantId/conversations/:conversationId",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 722,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": [
+        "dify_runtime_write"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/datasets",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 105,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id",
+        "page",
+        "limit",
+        "keyword"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/datasets/:datasetId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 154,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/datasets/:datasetId/documents",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 214,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id",
+        "page",
+        "limit",
+        "keyword"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/agents",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 326,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/agents/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 369,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/agents/:assistantId/datasets",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 974,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/binding",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 282,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/datasets",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 584,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/enterprise-assistants",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 434,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 739,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId/enhancement",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 961,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/shareable-tenants",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 574,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "enterprise_id"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/dify/sso",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 251,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "query",
+      "response_kind": "redirect_or_html",
+      "success_contract": [
+        "location_or_html"
+      ],
+      "query_parameters": [
+        "enterprise_id",
+        "redirect"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/conversations",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 678,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "last_id",
+        "limit",
+        "sort_by"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/conversations/:conversationId/messages",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 744,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [
+        "first_id",
+        "limit"
+      ],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/enhancement",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 485,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/messages/:messageId/suggested",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 786,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/meta",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 816,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/:assistantId/parameters",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 805,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/visible",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 260,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/agents/visible/bindings",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 440,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "query",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/admin/datasets/:datasetId",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 168,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "name",
+        "description",
+        "permission"
+      ],
+      "side_effects": [
+        "dify_dataset_write"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/agents/:assistantId/conversations/:conversationId",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 701,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "name",
+        "auto_generate"
+      ],
+      "side_effects": [
+        "dify_runtime_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/datasets",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 124,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "name",
+        "description",
+        "indexing_technique",
+        "permission"
+      ],
+      "side_effects": [
+        "dify_dataset_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/datasets/:datasetId/documents",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 244,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "json_or_multipart",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "file",
+        "name",
+        "text",
+        "indexing_technique"
+      ],
+      "side_effects": [
+        "dify_document_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/datasets/:datasetId/retrieve",
+      "source_file": "src/routes/admin-datasets.ts",
+      "source_line": 337,
+      "router": "adminDatasetsRoutes",
+      "mount_chain": [
+        "src/index.ts:89 app.route(\"/api/v1/admin\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "query",
+        "retrieval_model"
+      ],
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/dify/agents",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 333,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "assistant_id",
+        "name",
+        "description",
+        "mode",
+        "icon",
+        "acl"
+      ],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/dify/binding/provision",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 299,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id"
+      ],
+      "side_effects": [
+        "dify_provision"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/dify/enterprise-assistants",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 607,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json_or_multipart",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "file",
+        "metadata",
+        "tenant_ids",
+        "visible_to_all",
+        "enhancement"
+      ],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/audio-to-text",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 857,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "multipart",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "file",
+        "user"
+      ],
+      "side_effects": [
+        "dify_audio"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/chat",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 604,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "sse",
+      "success_contract": [
+        "sse"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "query",
+        "conversation_id",
+        "inputs",
+        "files",
+        "auto_generate_name"
+      ],
+      "side_effects": [
+        "dify_chat"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/chat/:taskId/stop",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 659,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [],
+      "side_effects": [
+        "dify_runtime_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/enhancement/invoke",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 507,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "query",
+        "inputs",
+        "files"
+      ],
+      "side_effects": [
+        "dify_chat"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/enhancement/invoke-stream",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 548,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "sse",
+      "success_contract": [
+        "sse"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "query",
+        "inputs",
+        "files"
+      ],
+      "side_effects": [
+        "dify_chat"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/files",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 831,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "multipart",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "file",
+        "user"
+      ],
+      "side_effects": [
+        "dify_file_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/messages/:messageId/feedback",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 764,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "rating",
+        "content"
+      ],
+      "side_effects": [
+        "dify_runtime_write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/:assistantId/text-to-audio",
+      "source_file": "src/routes/agents.ts",
+      "source_line": 877,
+      "router": "agentsRoutes",
+      "mount_chain": [
+        "src/index.ts:90 app.route(\"/api/v1/agents\")"
+      ],
+      "domain": "agent_skill",
+      "authentication": "user",
+      "request_kind": "json",
+      "response_kind": "binary",
+      "success_contract": [
+        "binary"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "message_id",
+        "text",
+        "voice",
+        "streaming"
+      ],
+      "side_effects": [
+        "dify_audio"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/agents/:assistantId/acl",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 403,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "rules"
+      ],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/agents/:assistantId/datasets",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 981,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "dataset_ids"
+      ],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 793,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json_or_multipart",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "file",
+        "metadata",
+        "tenant_ids",
+        "visible_to_all"
+      ],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/admin/dify/enterprise-assistants/:assistantId/enhancement",
+      "source_file": "src/routes/admin-dify.ts",
+      "source_line": 907,
+      "router": "adminDifyRoutes",
+      "mount_chain": [
+        "src/index.ts:88 app.route(\"/api/v1/admin/dify\")"
+      ],
+      "domain": "dify",
+      "authentication": "admin",
+      "request_kind": "json",
+      "response_kind": "json",
+      "success_contract": [
+        "success",
+        "data"
+      ],
+      "query_parameters": [],
+      "body_fields": [
+        "enterprise_id",
+        "enable",
+        "mode",
+        "app_name"
+      ],
+      "side_effects": [
+        "dify_app_write"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,704 @@
+{
+  "schema_version": 1,
+  "source_commit": "311636c7bbfa4fa1c655aa8bd5c7e898f565f263",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/credit-applications",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 24,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [
+        "enterprise_id",
+        "keyword",
+        "page",
+        "pageSize",
+        "page_size",
+        "status"
+      ],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/credit-applications/:id",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 50,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge-records",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 347,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [
+        "keyword",
+        "page",
+        "pageSize",
+        "payment_method",
+        "type"
+      ],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/orders",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 14,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [
+        "end_date",
+        "order_no",
+        "page",
+        "pageSize",
+        "page_size",
+        "start_date",
+        "status",
+        "user_phone"
+      ],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/orders/:orderNo",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 126,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/refund-calc/:orderNo",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 297,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/recharge/stats",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 171,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/credit-applications/",
+      "source_file": "src/routes/credit-applications.ts",
+      "source_line": 23,
+      "router": "creditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:98 app.route(\"/api/v1/credit-applications\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [
+        "page",
+        "pageSize"
+      ],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/credit-applications/:id",
+      "source_file": "src/routes/credit-applications.ts",
+      "source_line": 37,
+      "router": "creditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:98 app.route(\"/api/v1/credit-applications\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recharge/list",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 131,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [
+        "page",
+        "pageSize"
+      ],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recharge/packages",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 14,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "public",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recharge/query/:orderNo",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 114,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/credit-applications/:id/approve",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 67,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [
+        "admin_comment",
+        "approved_points"
+      ],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/credit-applications/:id/reject",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 92,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [
+        "admin_comment"
+      ],
+      "success_envelope": [
+        "success",
+        "msg"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/credit-applications/:id/retry-sync",
+      "source_file": "src/routes/admin/credit-applications.ts",
+      "source_line": 113,
+      "router": "adminCreditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:28 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/orders/:id/retry",
+      "source_file": "src/routes/admin/sync.ts",
+      "source_line": 12,
+      "router": "syncRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:24 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "msg"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/orders/:orderNo/refund",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 268,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [
+        "reason"
+      ],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "fuiou_refund",
+        "wallet_debit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/orders/:orderNo/sync",
+      "source_file": "src/routes/admin/sync.ts",
+      "source_line": 46,
+      "router": "syncRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:24 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "fuiou_query",
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/simulate-payment/:orderNo",
+      "source_file": "src/routes/admin/recharge.ts",
+      "source_line": 326,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:23 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/recharge/sync",
+      "source_file": "src/routes/admin/sync.ts",
+      "source_line": 35,
+      "router": "syncRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:24 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "fuiou_query",
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/points",
+      "source_file": "src/routes/admin/points.ts",
+      "source_line": 17,
+      "router": "pointsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:22 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [
+        "amount",
+        "operation",
+        "reason",
+        "sync_sudorouter"
+      ],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "wallet_credit",
+        "wallet_debit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/recharge",
+      "source_file": "src/routes/admin/points.ts",
+      "source_line": 167,
+      "router": "pointsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:22 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [
+        "payment_reference",
+        "points",
+        "reason"
+      ],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/users/:id/sync-quota",
+      "source_file": "src/routes/admin/points.ts",
+      "source_line": 291,
+      "router": "pointsRoutes",
+      "mount_chain": [
+        "src/index.ts:86 app.route(\"/api/v1/admin\")",
+        "src/routes/admin.ts:18 adminRoutes.route(\"/\")",
+        "src/routes/admin/index.ts:22 adminRoutes.route(\"/\")"
+      ],
+      "domain": "admin",
+      "authentication": "admin",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "msg",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "sudorouter_query",
+        "quota_snapshot"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/credit-applications/",
+      "source_file": "src/routes/credit-applications.ts",
+      "source_line": 7,
+      "router": "creditApplicationRoutes",
+      "mount_chain": [
+        "src/index.ts:98 app.route(\"/api/v1/credit-applications\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [],
+      "body_fields": [
+        "reason",
+        "requested_points"
+      ],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/callback",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 98,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "fuiou_callback",
+      "query_parameters": [],
+      "body_fields": [
+        "mchnt_cd",
+        "message",
+        "resp_code",
+        "resp_desc"
+      ],
+      "success_envelope": [],
+      "success_content_type": "text/plain",
+      "success_body": "success",
+      "side_effects": [
+        "fuiou_verify",
+        "wallet_credit",
+        "sudorouter_quota"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/cancel/:orderNo",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 146,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [],
+      "body_fields": [],
+      "success_envelope": [
+        "success",
+        "msg"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/create",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 29,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [],
+      "body_fields": [
+        "amount",
+        "payment_method"
+      ],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recharge/pay",
+      "source_file": "src/routes/recharge.ts",
+      "source_line": 68,
+      "router": "rechargeRoutes",
+      "mount_chain": [
+        "src/index.ts:97 app.route(\"/api/v1/recharge\")"
+      ],
+      "domain": "billing",
+      "authentication": "user",
+      "query_parameters": [],
+      "body_fields": [
+        "order_no"
+      ],
+      "success_envelope": [
+        "success",
+        "data"
+      ],
+      "success_content_type": "application/json",
+      "side_effects": [
+        "fuiou_create"
+      ]
+    }
+  ]
+}

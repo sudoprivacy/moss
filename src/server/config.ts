@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { serverFileConfigSchema, type ServerConfig, type ServerFileConfig } from './types.js'
 import { normalizeHubApiBaseUrl } from './hubConfig.js'
+import { resolveQmsConfig, type QmsSecretEnvironment } from './qms/config.js'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { expandPath } from '../utils/path.js'
 
@@ -55,10 +56,22 @@ export function getDefaultServerConfig(): ServerFileConfig {
     docker: {
       stopTimeoutSec: 10,
       labels: {},
+      containerMode: 'session',
+      maxSessionsPerUser: 5,
+      userContainerIdleTimeoutMs: 20 * 60_000,
+      execKillGraceMs: 5_000,
+      user: {
+        pidsLimit: 512,
+        memory: '4g',
+        cpus: '2',
+        nofile: 4096,
+      },
     },
     k8s: {
       namespace: 'moss-sessions',
       runtimeClassName: 'gvisor',
+      imagePullPolicy: 'IfNotPresent',
+      imagePullSecrets: [],
       cpuLimit: '2',
       memoryLimit: '4Gi',
       podReadyTimeoutSec: 90,
@@ -74,6 +87,35 @@ export function getDefaultServerConfig(): ServerFileConfig {
       level: 'info',
     },
     hub: {},
+    sudoworkCompatibility: {
+      enabled: false,
+      hosts: [],
+      loginMethod: 'password',
+      dify: {
+        baseUrl: 'http://localhost:5001',
+      },
+      sms: {
+        provider: 'disabled',
+        sdkAppId: '',
+        signName: '',
+        templateId: '',
+        signId: '',
+        region: 'ap-beijing',
+        codeLength: 6,
+        expireMinutes: 5,
+        sendIntervalSeconds: 60,
+        maxPerDay: 10,
+      },
+    },
+    qms: {
+      enabled: false,
+      apiKeyHeader: 'X-API-Key',
+      queueFlushIntervalMs: 3_000,
+      queueBatchSize: 50,
+      perfRetentionDays: 90,
+      conversationRetentionDays: 180,
+      encryptionRequired: false,
+    },
     wikiIndex: {
       enabled: true,
       modelId: 'Xenova/multilingual-e5-small',
@@ -96,6 +138,11 @@ export function getDefaultServerConfig(): ServerFileConfig {
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,
       automationEnabled: false,
+      flightStateWsConnectTimeoutMs: 10_000,
+      flightStateWsHeartbeatIntervalMs: 15_000,
+      flightStateWsIdleTimeoutMs: 60_000,
+      flightStateWsReconnectMinMs: 3_000,
+      flightStateWsReconnectMaxMs: 30_000,
       broadcastEnabled: true,
       broadcastTtsVersion: 'flight-phase-v1',
       healthReportEnabled: false,
@@ -104,8 +151,49 @@ export function getDefaultServerConfig(): ServerFileConfig {
       assistantName: 'cabin-ai-flight-attendant',
       assistantDisplayName: '客舱 AI 乘务员',
       createMossSession: false,
+      replyTimeoutMs: 45_000,
+      sessionRecoveryEnabled: true,
+      sessionRecoveryMaxAttempts: 1,
+      contextReplayTurns: 20,
       flightStateDemoEnabled: false,
       logEnabled: true,
+    },
+    phoneAuth: {
+      enabled: false,
+      delivery: 'log',
+      codeTtlSec: 300,
+      resendCooldownSec: 60,
+      maxSendsPerHour: 5,
+      maxVerifyAttempts: 5,
+      autoCreateOrg: true,
+    },
+    systemConfig: {
+      loginMethod: 1,
+      thirdPartyAuth: {
+        enabled: true,
+        providers: [],
+      },
+      rechargeMode: 'disabled',
+      initialPoints: 0,
+      creditApplication: {
+        minPoints: 100,
+        maxPoints: 1000000,
+        allowDuplicatePending: false,
+      },
+      recharge: {
+        minAmountUsd: 1,
+        maxAmountUsd: 10000,
+        orderExpireMinutes: 30,
+        usdToCnyRate: 7.3,
+        fuiou: {
+          testMode: false,
+          timeoutMs: 10_000,
+          testApiUrl: 'https://hlwnets-test.fuioupay.com',
+          prodApiUrl: 'https://hlwnets.fuioupay.com',
+          testRefundUrl: 'https://refund-transfer-test.fuioupay.com',
+          prodRefundUrl: 'https://refund-transfer.fuioupay.com',
+        },
+      },
     },
   }
 }
@@ -280,6 +368,26 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       : undefined,
     hubAuthorization: raw.hub?.authorization?.trim() || undefined,
     cosBaseUrl: raw.hub?.cosBaseUrl?.trim() || undefined,
+    sudoworkCompatibility: {
+      enabled: raw.sudoworkCompatibility.enabled,
+      hosts: raw.sudoworkCompatibility.hosts.map(host => host.trim().toLowerCase()).filter(Boolean),
+      publicBaseUrl: raw.sudoworkCompatibility.publicBaseUrl?.replace(/\/+$/, ''),
+      loginMethod: raw.sudoworkCompatibility.loginMethod,
+      legacyJwtSecret: process.env.SUDOWORK_LEGACY_JWT_SECRET || undefined,
+      redisUrl: process.env.SUDOWORK_REDIS_URL || undefined,
+      dify: {
+        baseUrl: (process.env.DIFY_BASE_URL || raw.sudoworkCompatibility.dify.baseUrl).replace(/\/+$/, ''),
+        systemToken: process.env.DIFY_SYSTEM_TOKEN || undefined,
+        provisionSecret: process.env.DIFY_SYSTEM_SECRET || undefined,
+        ssoSecret: process.env.DIFY_SSO_SECRET || undefined,
+      },
+      sms: {
+        ...raw.sudoworkCompatibility.sms,
+        secretId: process.env.SUDOWORK_TENCENT_SECRET_ID || undefined,
+        secretKey: process.env.SUDOWORK_TENCENT_SECRET_KEY || undefined,
+      },
+    },
+    qms: resolveQmsConfig(raw.qms, process.env as QmsSecretEnvironment, { validateSecrets: false }),
     wikiIndex: {
       enabled: raw.wikiIndex.enabled && process.env.MOSS_WIKI_INDEX_DISABLED !== '1',
       modelId: raw.wikiIndex.modelId,
@@ -294,10 +402,10 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? process.env.CABIN_ENABLED === '1' || process.env.CABIN_ENABLED === 'true'
         : raw.cabin.enabled,
       tokenSecret: process.env.CABIN_TOKEN_SECRET || raw.cabin.tokenSecret,
-      tokenTtlSeconds: readIntEnv('CABIN_TOKEN_TTL_SECONDS', raw.cabin.tokenTtlSeconds),
+      tokenTtlSeconds: readIntEnv('CABIN_TOKEN_TTL_SECONDS', raw.cabin.tokenTtlSeconds)!,
       passengerInfoUrl: process.env.CABIN_PASSENGER_INFO_URL || raw.cabin.passengerInfoUrl,
       passengerInfoAuth: process.env.CABIN_PASSENGER_INFO_AUTH || raw.cabin.passengerInfoAuth,
-      passengerInfoPrivacyLevel: readIntEnv('CABIN_PASSENGER_INFO_PRIVACY_LEVEL', raw.cabin.passengerInfoPrivacyLevel),
+      passengerInfoPrivacyLevel: readIntEnv('CABIN_PASSENGER_INFO_PRIVACY_LEVEL', raw.cabin.passengerInfoPrivacyLevel)!,
       aircraftNo: process.env.CABIN_AIRCRAFT_NO || raw.cabin.aircraftNo,
       asrUrl: process.env.CABIN_ASR_URL || raw.cabin.asrUrl,
       asrModel: process.env.CABIN_ASR_MODEL || raw.cabin.asrModel,
@@ -312,16 +420,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       llmApiKey: process.env.CABIN_LLM_API_KEY || raw.cabin.llmApiKey,
       controlBaseUrl: process.env.CABIN_CONTROL_BASE_URL || raw.cabin.controlBaseUrl,
       controlAuth: process.env.CABIN_CONTROL_AUTH || raw.cabin.controlAuth,
-      controlTimeoutMs: readIntEnv('CABIN_CONTROL_TIMEOUT_MS', raw.cabin.controlTimeoutMs),
+      controlTimeoutMs: readIntEnv('CABIN_CONTROL_TIMEOUT_MS', raw.cabin.controlTimeoutMs)!,
       automationEnabled: process.env.CABIN_AUTOMATION_ENABLED
         ? process.env.CABIN_AUTOMATION_ENABLED === '1' || process.env.CABIN_AUTOMATION_ENABLED === 'true'
         : raw.cabin.automationEnabled,
       flightStateWsUrl: process.env.CABIN_FLIGHT_STATE_WS_URL || raw.cabin.flightStateWsUrl,
-      flightStateWsConnectTimeoutMs: readIntEnv('CABIN_FLIGHT_STATE_WS_CONNECT_TIMEOUT_MS', raw.cabin.flightStateWsConnectTimeoutMs),
-      flightStateWsHeartbeatIntervalMs: readIntEnv('CABIN_FLIGHT_STATE_WS_HEARTBEAT_INTERVAL_MS', raw.cabin.flightStateWsHeartbeatIntervalMs),
-      flightStateWsIdleTimeoutMs: readIntEnv('CABIN_FLIGHT_STATE_WS_IDLE_TIMEOUT_MS', raw.cabin.flightStateWsIdleTimeoutMs),
-      flightStateWsReconnectMinMs: readIntEnv('CABIN_FLIGHT_STATE_WS_RECONNECT_MIN_MS', raw.cabin.flightStateWsReconnectMinMs),
-      flightStateWsReconnectMaxMs: readIntEnv('CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS', raw.cabin.flightStateWsReconnectMaxMs),
+      flightStateWsConnectTimeoutMs: readIntEnv('CABIN_FLIGHT_STATE_WS_CONNECT_TIMEOUT_MS', raw.cabin.flightStateWsConnectTimeoutMs)!,
+      flightStateWsHeartbeatIntervalMs: readIntEnv('CABIN_FLIGHT_STATE_WS_HEARTBEAT_INTERVAL_MS', raw.cabin.flightStateWsHeartbeatIntervalMs)!,
+      flightStateWsIdleTimeoutMs: readIntEnv('CABIN_FLIGHT_STATE_WS_IDLE_TIMEOUT_MS', raw.cabin.flightStateWsIdleTimeoutMs)!,
+      flightStateWsReconnectMinMs: readIntEnv('CABIN_FLIGHT_STATE_WS_RECONNECT_MIN_MS', raw.cabin.flightStateWsReconnectMinMs)!,
+      flightStateWsReconnectMaxMs: readIntEnv('CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS', raw.cabin.flightStateWsReconnectMaxMs)!,
       managedSeats: process.env.CABIN_MANAGED_SEATS || raw.cabin.managedSeats,
       broadcastBaseUrl: process.env.CABIN_BROADCAST_BASE_URL || raw.cabin.broadcastBaseUrl,
       broadcastApiBaseUrl: process.env.CABIN_BROADCAST_API_BASE_URL || raw.cabin.broadcastApiBaseUrl,
@@ -340,14 +448,20 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       healthReportEnabled: process.env.CABIN_HEALTH_REPORT_ENABLED
         ? process.env.CABIN_HEALTH_REPORT_ENABLED === '1' || process.env.CABIN_HEALTH_REPORT_ENABLED === 'true'
         : raw.cabin.healthReportEnabled,
-      healthReportCollectSeconds: readIntEnv('CABIN_HEALTH_REPORT_COLLECT_SECONDS', raw.cabin.healthReportCollectSeconds),
-      healthReportMinSamples: readIntEnv('CABIN_HEALTH_REPORT_MIN_SAMPLES', raw.cabin.healthReportMinSamples),
+      healthReportCollectSeconds: readIntEnv('CABIN_HEALTH_REPORT_COLLECT_SECONDS', raw.cabin.healthReportCollectSeconds)!,
+      healthReportMinSamples: readIntEnv('CABIN_HEALTH_REPORT_MIN_SAMPLES', raw.cabin.healthReportMinSamples)!,
       assistantName: process.env.CABIN_ASSISTANT_NAME || raw.cabin.assistantName,
       assistantDisplayName:
         process.env.CABIN_ASSISTANT_DISPLAY_NAME || raw.cabin.assistantDisplayName,
       createMossSession: process.env.CABIN_CREATE_MOSS_SESSION
         ? process.env.CABIN_CREATE_MOSS_SESSION === '1' || process.env.CABIN_CREATE_MOSS_SESSION === 'true'
         : raw.cabin.createMossSession,
+      replyTimeoutMs: readIntEnv('CABIN_REPLY_TIMEOUT_MS', raw.cabin.replyTimeoutMs)!,
+      sessionRecoveryEnabled: process.env.CABIN_SESSION_RECOVERY_ENABLED
+        ? process.env.CABIN_SESSION_RECOVERY_ENABLED === '1' || process.env.CABIN_SESSION_RECOVERY_ENABLED === 'true'
+        : raw.cabin.sessionRecoveryEnabled,
+      sessionRecoveryMaxAttempts: readIntEnv('CABIN_SESSION_RECOVERY_MAX_ATTEMPTS', raw.cabin.sessionRecoveryMaxAttempts)!,
+      contextReplayTurns: readIntEnv('CABIN_CONTEXT_REPLAY_TURNS', raw.cabin.contextReplayTurns)!,
       flightStateDemoEnabled: process.env.CABIN_FLIGHT_STATE_DEMO_ENABLED
         ? process.env.CABIN_FLIGHT_STATE_DEMO_ENABLED === '1' || process.env.CABIN_FLIGHT_STATE_DEMO_ENABLED === 'true'
         : raw.cabin.flightStateDemoEnabled,

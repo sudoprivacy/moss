@@ -2,6 +2,8 @@ import { authClient, getToken } from './client'
 
 // ===== Types =====
 
+export type McpAuthType = 'none' | 'api_key' | 'bearer' | 'basic' | 'oauth' | 'custom_header' | 'secret_ref'
+
 export interface McpServer {
   id: string
   org_id: string
@@ -23,7 +25,7 @@ export interface McpServer {
   timeout_ms: number
   health_check_url: string | null
   use_proxy: boolean
-  auth_type: 'none' | 'api_key' | 'bearer' | 'basic' | 'oauth' | 'custom_header' | 'secret_ref'
+  auth_type: McpAuthType
   secret_ref: string | null
   auth_config_json: string | null
   visible_to: { department_ids?: string[]; user_ids?: string[] } | null
@@ -116,7 +118,7 @@ export interface McpTemplate {
   args_json: string | null
   env_json: string | null
   timeout_ms: number
-  auth_type: 'none' | 'api_key' | 'bearer' | 'basic' | 'oauth' | 'custom_header' | 'secret_ref'
+  auth_type: McpAuthType
   scope: 'org' | 'department'
   risk_level: 'low' | 'medium' | 'high'
   config_json: string | null

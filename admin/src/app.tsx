@@ -2,6 +2,7 @@ import { Suspense, lazy } from 'react'
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { DashboardShell } from './layouts/dashboard-shell'
+import { OPERATION_ROUTES } from './operations-navigation'
 
 const LoginPage = lazy(() => import('./pages/login-page'))
 const DashboardPage = lazy(() => import('./pages/dashboard-page'))
@@ -21,6 +22,7 @@ const EnterpriseConfigPage = lazy(() => import('./pages/enterprise-config-page')
 const DocumentCenterPage = lazy(() => import('./pages/document-center-page'))
 const ExternalSourcesPage = lazy(() => import('./pages/external-sources-page'))
 const BuildJobsPage = lazy(() => import('./pages/build-jobs-page'))
+const DifyDatasetsPage = lazy(() => import('./pages/dify-datasets-page'))
 const ConfigItemsPage = lazy(() => import('./pages/secrets/config-items-page'))
 const EnterpriseSecretsPage = lazy(() => import('./pages/secrets/enterprise-secrets-page'))
 const DepartmentSecretsPage = lazy(() => import('./pages/secrets/department-secrets-page'))
@@ -29,6 +31,10 @@ const AuditLogPage = lazy(() => import('./pages/secrets/audit-log-page'))
 const RotationAlertsPage = lazy(() => import('./pages/secrets/rotation-alerts-page'))
 const CronJobsPage = lazy(() => import('./pages/cron-jobs-page'))
 const EventTriggersPage = lazy(() => import('./pages/event-triggers-page'))
+const OperationsInvitationsPage = lazy(() => import('./pages/operations-invitations-page'))
+const OperationsAuditPage = lazy(() => import('./pages/operations-audit-page'))
+const OperationsQualityPage = lazy(() => import('./pages/operations-quality-page'))
+const SudoworkSettingsPage = lazy(() => import('./pages/sudowork-settings-page'))
 const McpServersPage = lazy(() => import('./pages/mcp/mcp-servers-page'))
 const McpEnterpriseServersPage = lazy(() => import('./pages/mcp/mcp-enterprise-servers-page'))
 const McpDepartmentServersPage = lazy(() => import('./pages/mcp/mcp-department-servers-page'))
@@ -101,7 +107,7 @@ export default function App() {
           }
         />
         <Route
-          path="/operations/billing"
+          path={OPERATION_ROUTES.billing}
           element={
             <SuspendedRoute>
               <OperationsBillingPage />
@@ -217,7 +223,15 @@ export default function App() {
           path="/document-center/build-jobs"
           element={
             <SuspendedRoute>
-              <BuildJobsPage />
+            <BuildJobsPage />
+          </SuspendedRoute>
+        }
+      />
+        <Route
+          path="/document-center/dify-datasets"
+          element={
+            <SuspendedRoute>
+              <DifyDatasetsPage />
             </SuspendedRoute>
           }
         />
@@ -285,6 +299,38 @@ export default function App() {
           element={
             <SuspendedRoute>
               <EventTriggersPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path={OPERATION_ROUTES.invitations}
+          element={
+            <SuspendedRoute>
+              <OperationsInvitationsPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path={OPERATION_ROUTES.audit}
+          element={
+            <SuspendedRoute>
+              <OperationsAuditPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path={OPERATION_ROUTES.quality}
+          element={
+            <SuspendedRoute>
+              <OperationsQualityPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path={OPERATION_ROUTES.sudoworkSettings}
+          element={
+            <SuspendedRoute>
+              <SudoworkSettingsPage />
             </SuspendedRoute>
           }
         />

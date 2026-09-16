@@ -116,6 +116,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
     cronReuseMaxRuns: settings.cronReuseMaxRuns,
     imReuseMaxTurns: settings.imReuseMaxTurns,
+    mintScriptsDir: settings.mintScriptsDir,
   }
 }
 

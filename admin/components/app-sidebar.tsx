@@ -27,6 +27,10 @@ import {
   Webhook,
   ServerCog,
   ReceiptText,
+  TicketCheck,
+  Activity,
+  ClipboardList,
+  Database,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -45,6 +49,7 @@ import { getOrganizations, switchOrg } from '@/lib/api/auth'
 import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import type { AuthOrgWithCounts } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
+import { OPERATION_ROUTES } from '@/src/operations-navigation'
 
 type NavItem = {
   title: string
@@ -81,12 +86,6 @@ const menuItems: NavItem[] = [
     title: '用户与组织',
     url: '/users',
     icon: Users,
-    requiredScope: 'admin:users',
-  },
-  {
-    title: '计费运营',
-    url: '/operations/billing',
-    icon: ReceiptText,
     requiredScope: 'admin:users',
   },
   {
@@ -146,6 +145,7 @@ const menuItems: NavItem[] = [
       { title: '知识树管理', url: '/document-center/tree', icon: BookText },
       { title: '外部数据源', url: '/document-center/sources', icon: Plug },
       { title: '构建任务', url: '/document-center/build-jobs', icon: ListChecks },
+      { title: 'Dify 数据集', url: '/document-center/dify-datasets', icon: Database },
     ],
   },
   {
@@ -160,6 +160,19 @@ const menuItems: NavItem[] = [
       { title: '用户凭据', url: '/secrets/user-credentials', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:user:write'] },
       { title: '审计日志', url: '/secrets/audit-log', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
       { title: '轮换告警', url: '/secrets/rotation-alerts', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
+    ],
+  },
+  {
+    title: '运营中心',
+    url: '/operations',
+    icon: Activity,
+    requiredScope: 'admin:settings',
+    children: [
+      { title: '邀请码管理', url: OPERATION_ROUTES.invitations, icon: TicketCheck },
+      { title: '账务运营', url: OPERATION_ROUTES.billing, icon: ReceiptText },
+      { title: '业务审计', url: OPERATION_ROUTES.audit, icon: ClipboardList },
+      { title: '质量管理', url: OPERATION_ROUTES.quality, icon: Activity },
+      { title: 'Sudowork 系统设置', url: OPERATION_ROUTES.sudoworkSettings, icon: Settings },
     ],
   },
   {

@@ -65,7 +65,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import type { McpServer, McpServerFormData, McpConfigParseResult, UserConfigItem } from '@/lib/api/mcp'
+import type { McpAuthType, McpServer, McpServerFormData, McpConfigParseResult, UserConfigItem } from '@/lib/api/mcp'
 import { fetchMcpServers, createMcpServer, updateMcpServer, testMcpConnection as testConnection, fetchMcpTemplate, subscribeMcpEvents, uploadMcpIcon, parseMcpConfig, fetchUserConfig, setUserConfigValue, deleteUserConfigValue } from '@/lib/api/mcp'
 import { ApiRequestError } from '@/lib/api/client'
 import { getUsers, getDepartments } from '@/lib/api/auth'
@@ -1453,14 +1453,14 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
             {currentStep === 3 && (
               <div className="space-y-4">
                 <AuthConfigForm
-                  authType={formData.auth_type}
-                  authConfigJson={formData.auth_config_json}
-                  secretRef={formData.secret_ref}
+                  authType={formData.auth_type ?? 'none'}
+                  authConfigJson={formData.auth_config_json ?? null}
+                  secretRef={formData.secret_ref ?? null}
                   scope={formData.scope}
                   departmentId={formData.owner_id}
                   isStdio={isStdio}
                   onChange={(authType, authConfigJson, secretRef) =>
-                    setFormData(prev => ({ ...prev, auth_type: authType, auth_config_json: authConfigJson, secret_ref: secretRef }))
+                    setFormData(prev => ({ ...prev, auth_type: authType as McpAuthType, auth_config_json: authConfigJson, secret_ref: secretRef }))
                   }
                 />
               </div>

@@ -35,9 +35,26 @@ const FIELD_LABELS: Record<string, string> = {
   'cabin.controlAuth': '控制接口鉴权',
   'cabin.broadcastApiKey': '广播 API Key',
   'cabin.broadcastAuth': '广播鉴权',
+  'sudoworkCompatibility.legacyJwtSecret': 'Sudowork 旧 JWT 密钥',
+  'sudoworkCompatibility.redisUrl': 'Sudowork Redis URL',
+  'phoneAuth.tencent.secretId': 'Moss 手机登录腾讯云 Secret ID',
+  'phoneAuth.tencent.secretKey': 'Moss 手机登录腾讯云 Secret Key',
+  'sudoworkCompatibility.sms.secretId': 'Sudowork 腾讯云 Secret ID',
+  'sudoworkCompatibility.sms.secretKey': 'Sudowork 腾讯云 Secret Key',
+  'sudoworkCompatibility.dify.systemToken': 'Dify 系统令牌',
+  'sudoworkCompatibility.dify.provisionSecret': 'Dify 租户开通签名密钥',
+  'sudoworkCompatibility.dify.ssoSecret': 'Dify SSO 签名密钥',
   'systemConfig.sudorouterAdminToken': 'SudoRouter 管理 Token',
+  'billing.sudorouter.apiToken': 'Sudorouter 兼容账务 Token',
   'systemConfig.recharge.fuiou.merchantPrivateKey': '富友商户私钥',
   'systemConfig.recharge.fuiou.publicKey': '富友平台公钥',
+  'qms.postgresUrl': 'QMS PostgreSQL URL',
+  'qms.redisUrl': 'QMS Redis URL',
+  'qms.apiKey': 'QMS API Key',
+  'qms.privateKeyPem': '遥测 RSA 私钥',
+  'qms.publicKeyPem': '遥测 RSA 公钥',
+  'qms.larkWebhookUrl': 'QMS 飞书 Webhook',
+  'qms.smtpUrl': 'QMS SMTP URL',
 }
 
 const GROUP_META: Record<
@@ -57,17 +74,21 @@ const GROUP_META: Record<
     title: '客舱服务凭据',
     description: '客舱 AI 相关的服务鉴权与 API Key（server.json 的 cabin.*）。',
   },
-  sudorouter: {
-    title: 'SudoRouter 凭据',
-    description: '用于创建网关账号、查询余额、发放和扣减模型积分。',
+  sudowork: {
+    title: 'Sudowork 兼容凭据',
+    description: '旧客户端登录态、Redis、短信验证码和 Dify 兼容接口所需凭据。',
   },
-  fuiou: {
-    title: '富友支付凭据',
-    description: '用于 Sudowork 在线充值下单、回调验签和退款。',
+  billing: {
+    title: '支付与额度凭据',
+    description: '富友支付签名、验签和 Sudorouter 额度同步所需凭据。',
+  },
+  qms: {
+    title: '质量与遥测凭据',
+    description: 'QMS 独立存储、接收加密和通知通道所需凭据。',
   },
 }
 
-const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin', 'sudorouter', 'fuiou']
+const GROUP_ORDER: ServerCredentialGroup[] = ['hub', 'wikiIndex', 'cabin', 'sudowork', 'billing', 'qms']
 
 /**
  * 清空后会回落公开 dev 常量、导致已签发资源 URL 失效且可被伪造的 HMAC 密钥字段。
@@ -80,8 +101,17 @@ const HMAC_SECRET_PATHS = new Set([
 
 const PAYMENT_SECRET_PATHS = new Set([
   'systemConfig.sudorouterAdminToken',
+  'billing.sudorouter.apiToken',
   'systemConfig.recharge.fuiou.merchantPrivateKey',
   'systemConfig.recharge.fuiou.publicKey',
+])
+
+const QMS_SECRET_PATHS = new Set([
+  'qms.postgresUrl',
+  'qms.redisUrl',
+  'qms.apiKey',
+  'qms.privateKeyPem',
+  'qms.publicKeyPem',
 ])
 
 function CredentialRow({
@@ -96,6 +126,7 @@ function CredentialRow({
   const label = FIELD_LABELS[item.path] ?? item.path
   const isHmacSecret = HMAC_SECRET_PATHS.has(item.path)
   const isPaymentSecret = PAYMENT_SECRET_PATHS.has(item.path)
+  const isQmsSecret = QMS_SECRET_PATHS.has(item.path)
 
   // 提交契约：脱敏占位（**** 开头）视为未修改，禁止提交覆盖真实凭据
   const isPlaceholder = value.trim().startsWith('****')
@@ -109,7 +140,7 @@ function CredentialRow({
       if (res.ignored) {
         toast.warning(`${label}：提交值与脱敏占位相同，已忽略`)
       } else {
-        toast.success(`${label} 已保存并即时生效`)
+        toast.success(item.restart_required ? `${label} 已保存，重启 Moss 后生效` : `${label} 已保存并即时生效`)
         setValue('')
         onSaved()
       }
@@ -128,12 +159,14 @@ function CredentialRow({
       ? `确认清空「${label}」？清空后该 HMAC 密钥将回落公开 dev 常量，已签发的资源 URL 会失效且可被伪造。`
       : isPaymentSecret
         ? `确认清空「${label}」？清空后 Sudowork 在线充值、余额发放或退款可能无法使用。`
-      : `确认清空「${label}」？`
+        : isQmsSecret
+          ? `确认清空「${label}」？清空后 QMS 遥测接收或质量后台可能无法使用。`
+          : `确认清空「${label}」？`
     if (!window.confirm(warning)) return
     setSaving(true)
     try {
       await updateServerCredential(item.key, '')
-      toast.success(`${label} 已清空并即时生效`)
+      toast.success(item.restart_required ? `${label} 已清空，重启 Moss 后生效` : `${label} 已清空并即时生效`)
       setValue('')
       onSaved()
     } catch (error) {
@@ -153,6 +186,7 @@ function CredentialRow({
         <Badge variant={item.set ? 'secondary' : 'outline'}>
           {item.set ? `已设置 ${item.masked ?? ''}` : '未设置'}
         </Badge>
+        {item.restart_required ? <Badge variant="outline">需重启生效</Badge> : null}
       </div>
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
@@ -193,6 +227,12 @@ function CredentialRow({
         <p className="flex items-center gap-1.5 text-xs text-destructive">
           <ShieldAlert className="size-3.5 shrink-0" />
           清空后 Sudowork 在线充值、余额发放或退款可能无法使用。
+        </p>
+      ) : null}
+      {isQmsSecret ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <ShieldAlert className="size-3.5 shrink-0" />
+          清空后 QMS 遥测接收、加密解析或质量后台可能无法使用。
         </p>
       ) : null}
     </div>

@@ -15,7 +15,7 @@ import { getSystemSettings } from '../systemSettings.js'
  * createJob historically typed auth as { orgId, userId }, but the route always
  * passes the full AuthContext (with role/scopes), so widen it here.
  */
-type CronAuth = { orgId: string; userId: string; role?: string; scopes?: string[] }
+type CronAuth = { orgId: string; userId: string; role: string; scopes?: string[] }
 
 /**
  * Pure org-policy decision for client-issued cron mutations (#83/#85): is the
