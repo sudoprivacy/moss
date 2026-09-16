@@ -19,7 +19,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { SudorouterClient } from './sudorouter.js'
-import { SudorouterError } from './sudorouter.js'
+import { isSudorouterRefusal } from './sudorouter.js'
 
 export type CreditApplicationStatus =
   | 'PENDING'
@@ -203,9 +203,7 @@ export async function reviewApplication(
     await sudorouter.addPoints(input.gatewayUserId, points, `credit application ${app.applicationNo}`)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    // A refusal carries a status: the gateway decided, so nothing was applied.
-    // No status means the answer never arrived and the outcome is unknown.
-    const refused = error instanceof SudorouterError && error.status !== undefined
+    const refused = isSudorouterRefusal(error)
     store.updateStatus(app.id, {
       status: refused ? 'SYNC_FAILED' : 'SYNC_UNKNOWN',
       sudorouterError: message.slice(0, 500),

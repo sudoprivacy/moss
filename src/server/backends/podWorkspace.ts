@@ -62,13 +62,69 @@ export type PodWorkspaceTarget = {
 }
 
 class PodExecError extends Error {
-  constructor(message: string, readonly stderr: string) {
+  constructor(
+    message: string,
+    readonly exitCode: number | null,
+    readonly stderr: string,
+  ) {
     super(stderr.trim() ? `${message}: ${stderr.trim()}` : message)
     this.name = 'PodExecError'
   }
 }
 
-function execInPod(
+/**
+ * True when kubectl could not reach the container *yet*: the pod exists but its
+ * container has not started, or the API server could not upgrade the connection
+ * to it. Deliberately narrow — an error from the command running inside the pod
+ * (a missing file, a bad path) must surface immediately instead of being retried
+ * into the timeout.
+ */
+export function isPodNotReadyExecError(exitCode: number | null, stderr: string): boolean {
+  if (exitCode === 0) return false
+  const text = stderr.toLowerCase()
+  return (
+    text.includes('unable to upgrade connection') ||
+    text.includes('container not found') ||
+    text.includes('error dialing backend') ||
+    text.includes('is not created or running')
+  )
+}
+
+/**
+ * A pod reports phase Running before its container is exec-able — under gvisor
+ * that gap was measured at about a second. The workspace panel opens as soon as
+ * the session does, so its first file-tree request lands inside that window and
+ * kubectl answers `container not found`. That is not a workspace error: the same
+ * exec succeeds moments later. Retrying briefly turns a panel that opened too
+ * early into one that fills in, rather than one the user has to poke again.
+ *
+ * Safe for all three callers: the two reads are idempotent, and the write resends
+ * the same bytes to the same path.
+ */
+const EXEC_RETRY_DELAYS_MS = [250, 500, 1000, 2000]
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function execInPod(
+  target: PodWorkspaceTarget,
+  argv: string[],
+  stdin?: Buffer,
+): Promise<Buffer> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await execInPodOnce(target, argv, stdin)
+    } catch (error) {
+      const notReady =
+        error instanceof PodExecError && isPodNotReadyExecError(error.exitCode, error.stderr)
+      if (!notReady || attempt >= EXEC_RETRY_DELAYS_MS.length) throw error
+      await sleep(EXEC_RETRY_DELAYS_MS[attempt]!)
+    }
+  }
+}
+
+function execInPodOnce(
   target: PodWorkspaceTarget,
   argv: string[],
   stdin?: Buffer,
@@ -103,7 +159,10 @@ function execInPod(
       settled = true
       clearTimeout(timer)
       if (code === 0) resolve(Buffer.concat(out))
-      else reject(new PodExecError(`kubectl exec exited ${code}`, Buffer.concat(err).toString()))
+      else
+        reject(
+          new PodExecError(`kubectl exec exited ${code}`, code, Buffer.concat(err).toString()),
+        )
     })
 
     if (stdin) child.stdin.end(stdin)

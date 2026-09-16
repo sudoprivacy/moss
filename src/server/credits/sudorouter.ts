@@ -84,11 +84,21 @@ export type SudorouterClient = {
   getModelUsage(gatewayUserId: string, fromSec: number, toSec: number): Promise<ModelUsageRow[]>
 }
 
+export type SudorouterErrorOutcome = 'refused' | 'unknown'
+
 export class SudorouterError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly outcome: SudorouterErrorOutcome = status === undefined ? 'unknown' : 'refused',
+  ) {
     super(message)
     this.name = 'SudorouterError'
   }
+}
+
+export function isSudorouterRefusal(error: unknown): boolean {
+  return error instanceof SudorouterError && error.outcome === 'refused'
 }
 
 export type SudorouterConfig = {
@@ -109,7 +119,7 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
   async function call(path: string, init: RequestInit = {}): Promise<unknown> {
     const token = await config.getAdminToken()
     if (!token) {
-      throw new SudorouterError('SudoRouter admin token is not configured')
+      throw new SudorouterError('SudoRouter admin token is not configured', undefined, 'refused')
     }
     let res: Response
     try {
@@ -128,6 +138,8 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
       // distinguishes them, so do not flatten this into a generic message.
       throw new SudorouterError(
         `SudoRouter unreachable: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        'unknown',
       )
     }
     const text = await res.text()
@@ -138,12 +150,12 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
     try {
       body = JSON.parse(text)
     } catch {
-      throw new SudorouterError(`SudoRouter returned unparseable body: ${text.slice(0, 200)}`)
+      throw new SudorouterError(`SudoRouter returned unparseable body: ${text.slice(0, 200)}`, undefined, 'unknown')
     }
     // SudoRouter answers 200 with `success: false` for application-level
     // refusals, so status alone does not tell you whether the call worked.
     if (body.success === false) {
-      throw new SudorouterError(body.message || 'SudoRouter rejected the request')
+      throw new SudorouterError(body.message || 'SudoRouter rejected the request', undefined, 'refused')
     }
     return body.data
   }
@@ -249,7 +261,7 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
     async addPoints(gatewayUserId: string, points: number, comment: string): Promise<void> {
       const id = Number(gatewayUserId)
       if (!Number.isInteger(id)) {
-        throw new SudorouterError(`Gateway user id is not numeric: ${gatewayUserId}`)
+        throw new SudorouterError(`Gateway user id is not numeric: ${gatewayUserId}`, undefined, 'refused')
       }
       await call('/api/user/quota', {
         method: 'PUT',

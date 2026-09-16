@@ -214,6 +214,12 @@ async function doCreate(
     '--cpus', userResources.cpus,
     '--ulimit', `nofile=${userResources.nofile}`,
     '--security-opt', 'seccomp=unconfined',
+    // AppArmor docker-default (enforce on Ubuntu 24.04 hosts) rejects the
+    // mount-propagation flip unshare --mount performs, killing every scode
+    // sandboxed command with "cannot change root filesystem propagation:
+    // Permission denied". Unconfined here is required for the sandbox to
+    // actually start; the container already runs seccomp=unconfined+SYS_ADMIN.
+    '--security-opt', 'apparmor=unconfined',
     '--cap-add', 'SYS_ADMIN',
     '--label', 'moss.kind=user-container',
     '--label', `moss.org=${ctx.orgId}`,

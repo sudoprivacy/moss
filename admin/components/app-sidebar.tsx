@@ -26,6 +26,7 @@ import {
   Plane,
   Webhook,
   ServerCog,
+  ReceiptText,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -80,6 +81,12 @@ const menuItems: NavItem[] = [
     title: '用户与组织',
     url: '/users',
     icon: Users,
+    requiredScope: 'admin:users',
+  },
+  {
+    title: '计费运营',
+    url: '/operations/billing',
+    icon: ReceiptText,
     requiredScope: 'admin:users',
   },
   {
