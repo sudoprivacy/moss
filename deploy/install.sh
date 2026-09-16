@@ -32,7 +32,7 @@ Options:
 Configuration environment variables:
   MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
   MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL,
-  ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
+  MOSS_ARCH, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
 EOF
 }
 
@@ -62,7 +62,24 @@ done
   || die "--offline and --download cannot be used together"
 [ "$UPGRADE_ONLY" = 0 ] || [ "$DOWNLOAD_ONLY" = 0 ] \
   || die "--upgrade and --download cannot be used together"
-ARCH=amd64
+
+detect_arch() {
+  case "$1" in
+    x86_64|amd64) printf '%s\n' amd64 ;;
+    aarch64|arm64) printf '%s\n' arm64 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -n "${MOSS_ARCH:-}" ]; then
+  case "$MOSS_ARCH" in
+    amd64|arm64) ARCH="$MOSS_ARCH" ;;
+    *) die "unsupported MOSS_ARCH: $MOSS_ARCH" ;;
+  esac
+else
+  ARCH="$(detect_arch "$(uname -m)")" \
+    || die "only x86_64/amd64 or aarch64/arm64 is supported"
+fi
 
 case "$RELEASE_TAG" in
   server-v*) VERSION="${RELEASE_TAG#server-v}" ;;
@@ -124,10 +141,10 @@ fi
 
 [ "$(id -u)" -eq 0 ] || die "run as root (for example: curl ... | sudo bash)"
 [ "$(uname -s)" = Linux ] || die "only Linux is supported"
-case "$(uname -m)" in
-  x86_64|amd64) ;;
-  *) die "only x86_64/amd64 is supported" ;;
-esac
+HOST_ARCH="$(detect_arch "$(uname -m)")" \
+  || die "only x86_64/amd64 or aarch64/arm64 is supported"
+[ "$ARCH" = "$HOST_ARCH" ] \
+  || die "selected architecture $ARCH does not match host architecture $HOST_ARCH"
 
 command -v getent >/dev/null 2>&1 || die "getent is required"
 resolve_install_account() {

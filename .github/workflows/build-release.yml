@@ -13,8 +13,14 @@ permissions:
 
 jobs:
   build:
-    name: build-amd64
+    name: build-${{ matrix.arch }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
 
     steps:
       - name: Checkout moss
@@ -39,8 +45,12 @@ jobs:
           [[ "$SCODE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$VERSION-amd64" >> "$GITHUB_OUTPUT"
           echo "scode_version=$SCODE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -83,29 +93,30 @@ jobs:
       - name: Build host server package
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: deploy/package-server.sh "$VERSION" "$ARCH" dist
 
       - name: Build and smoke-test session runtime image
         env:
-          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+          IMAGE_TAG: ${{ steps.release.outputs.version }}-${{ matrix.arch }}
           SCODE_VERSION: ${{ steps.release.outputs.scode_version }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           docker buildx build \
-            --platform linux/amd64 \
+            --platform "linux/$ARCH" \
             --load \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
-          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt
+          docker run --rm --platform "linux/$ARCH" "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt
           grep -Fq "${SCODE_VERSION#v}" dist/scode-version.txt
-          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz"
+          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-$ARCH.tar.gz"
 
       - name: Assemble installer and checksums
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/install.sh > dist/install.sh
@@ -120,7 +131,7 @@ jobs:
       - name: Validate release contents
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           tar -tzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" > dist/server-contents.txt
@@ -149,11 +160,11 @@ jobs:
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5
         with:
-          name: moss-server-release-amd64
+          name: moss-server-release-${{ matrix.arch }}
           path: |
-            dist/moss-server-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
-            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
-            dist/SHA256SUMS-amd64
+            dist/moss-server-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/SHA256SUMS-${{ matrix.arch }}
             dist/install.sh
           retention-days: 30
 
