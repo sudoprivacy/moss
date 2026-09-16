@@ -59,8 +59,15 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
   private privateKeysRaw = ''
   /** Optional room allowlist (comma/space separated); empty = archive all. */
   private roomFilterRaw = ''
-  /** Single switch: download resources AND resolve display names. */
-  private downloadMedia = false
+  /**
+   * Single switch: download resources AND resolve display names.
+   *
+   * Named `mediaEnabled`, not `downloadMedia`: CorpAppConnector declares
+   * an optional `downloadMedia(mediaId)` METHOD, and a boolean field of
+   * the same name makes this class structurally incompatible with the
+   * interface. The config key stays `downloadMedia`.
+   */
+  private mediaEnabled = false
   /** Per-file download ceiling in bytes; 0 = no limit. */
   private mediaMaxBytes = 0
   /** Days of media to keep; 0 = keep forever. */
@@ -90,7 +97,7 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     this.roomFilterRaw = String(config.roomFilter ?? '')
     // One switch rather than a type list: the only type worth excluding
     // for size is video, and mediaMaxBytes already covers that.
-    this.downloadMedia = config.downloadMedia === true || config.downloadMedia === 'true'
+    this.mediaEnabled = config.downloadMedia === true || config.downloadMedia === 'true'
     const declaredMax = Number(config.mediaMaxBytes)
     this.mediaMaxBytes = Number.isFinite(declaredMax) && declaredMax >= 0 ? declaredMax : DEFAULT_MEDIA_MAX_BYTES
     if (config.mediaMaxBytes === undefined || config.mediaMaxBytes === '') {
@@ -147,9 +154,9 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
       secret: this.secret,
       privateKeysRaw: this.privateKeysRaw,
       roomFilterRaw: this.roomFilterRaw,
-      mediaTypesRaw: this.downloadMedia ? 'all' : '',
+      mediaTypesRaw: this.mediaEnabled ? 'all' : '',
       mediaMaxBytes: this.mediaMaxBytes,
-      resolveNames: this.downloadMedia,
+      resolveNames: this.mediaEnabled,
     }
   }
 
