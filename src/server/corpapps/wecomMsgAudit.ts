@@ -39,6 +39,9 @@ import type {
 } from './types.js'
 import { registerCorpApp } from './types.js'
 import { parsePrivateKeys } from './msgaudit/crypto.js'
+
+/** Skip single files above this unless the admin says otherwise (50MB). */
+const DEFAULT_MEDIA_MAX_BYTES = 50 * 1024 * 1024
 import type { PullConfig } from './msgaudit/puller.js'
 import { extractEncrypt, decrypt, readXmlField, verifyUrl } from './wecomCallbackCrypto.js'
 
@@ -56,6 +59,19 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
   private privateKeysRaw = ''
   /** Optional room allowlist (comma/space separated); empty = archive all. */
   private roomFilterRaw = ''
+  /**
+   * Single switch: download resources AND resolve display names.
+   *
+   * Named `mediaEnabled`, not `downloadMedia`: CorpAppConnector declares
+   * an optional `downloadMedia(mediaId)` METHOD, and a boolean field of
+   * the same name makes this class structurally incompatible with the
+   * interface. The config key stays `downloadMedia`.
+   */
+  private mediaEnabled = false
+  /** Per-file download ceiling in bytes; 0 = no limit. */
+  private mediaMaxBytes = 0
+  /** Days of media to keep; 0 = keep forever. */
+  private mediaRetentionDays = 0
 
   /**
    * 会话存档 has no AgentId, so the instance key is the corpId alone. The
@@ -79,6 +95,21 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     this.privateKeysRaw = credentials.privateKeys ?? ''
     // Non-secret, so it lives in config rather than the credential blob.
     this.roomFilterRaw = String(config.roomFilter ?? '')
+    // One switch rather than a type list: the only type worth excluding
+    // for size is video, and mediaMaxBytes already covers that.
+    this.mediaEnabled = config.downloadMedia === true || config.downloadMedia === 'true'
+    const declaredMax = Number(config.mediaMaxBytes)
+    this.mediaMaxBytes = Number.isFinite(declaredMax) && declaredMax >= 0 ? declaredMax : DEFAULT_MEDIA_MAX_BYTES
+    if (config.mediaMaxBytes === undefined || config.mediaMaxBytes === '') {
+      this.mediaMaxBytes = DEFAULT_MEDIA_MAX_BYTES
+    }
+    // Retention is opt-in: an unset or invalid value keeps media forever,
+    // because silently deleting an archive is far worse than keeping too
+    // much. 1 means "keep through yesterday" — today's media is never at
+    // risk, since the cutoff is today minus N days and the purge keeps
+    // the cutoff day itself.
+    const days = Number(config.mediaRetentionDays)
+    this.mediaRetentionDays = Number.isInteger(days) && days >= 1 ? days : 0
     if (!this.corpId) throw new Error('wecommsgaudit: missing corpId')
   }
 
@@ -109,6 +140,11 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
     return { ok: true, message: `回调与拉取凭据齐备，私钥版本：${Object.keys(keys).sort().join(', ')}` }
   }
 
+  /** Days of downloaded media to keep; 0 = never purge. */
+  get retentionDays(): number {
+    return this.mediaRetentionDays
+  }
+
   /** Config for the pull worker; null when this instance cannot pull. */
   pullConfig(corpAppId: string): PullConfig | null {
     if (!this.secret || !this.privateKeysRaw) return null
@@ -118,6 +154,9 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
       secret: this.secret,
       privateKeysRaw: this.privateKeysRaw,
       roomFilterRaw: this.roomFilterRaw,
+      mediaTypesRaw: this.mediaEnabled ? 'all' : '',
+      mediaMaxBytes: this.mediaMaxBytes,
+      resolveNames: this.mediaEnabled,
     }
   }
 

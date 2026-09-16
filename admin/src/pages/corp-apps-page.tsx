@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -68,12 +69,35 @@ type FieldSpec = {
   key: string
   label: string
   placeholder?: string
-  type?: 'text' | 'password'
+  type?: 'text' | 'password' | 'toggle'
   bucket: 'config' | 'credentials'
   optional?: boolean
   /** Longer explanation rendered under the input, for settings whose effect is
    *  not obvious from the label alone. */
   hint?: string
+  /**
+   * Validate a non-empty value before saving. Return an error message to
+   * block the save, or null to accept. Without this the server silently
+   * normalises bad input (e.g. an unparseable retention becomes "never
+   * purge"), which looks identical to a working config until the day
+   * someone notices nothing was ever deleted.
+   */
+  validate?: (value: string) => string | null
+}
+
+/** Shared validator for optional whole-number settings. */
+function positiveIntValidator(min: number, label: string) {
+  return (value: string): string | null => {
+    // Empty means "unset", which is a valid choice for every optional
+    // field here — callers already skip blanks, but guard anyway so this
+    // stays correct if reused somewhere that does not.
+    if (!value.trim()) return null
+    const n = Number(value)
+    if (!Number.isFinite(n)) return `${label}必须是数字`
+    if (!Number.isInteger(n)) return `${label}必须是整数,不能带小数`
+    if (n < min) return `${label}必须 >= ${min}`
+    return null
+  }
 }
 
 const TYPE_FIELDS: Record<string, FieldSpec[]> = {
@@ -136,6 +160,32 @@ const TYPE_FIELDS: Record<string, FieldSpec[]> = {
         '(含单聊)。注意:企微按会话推送,roomid 只有解密后才可见,因此过滤发生在解密之后 ——' +
         '它减少落盘量与存储面,但不会减少拉取量。修改后下一轮拉取(默认 5 分钟)生效,' +
         '不影响已归档的记录。',
+    },
+    {
+      key: 'downloadMedia',
+      label: '下载图片/文件等资源',
+      type: 'toggle',
+      bucket: 'config',
+      optional: true,
+      hint: '下载图片、表情、文件、语音、视频,并解析发送人姓名。企微资源链接约 3 天后失效,届时无法补下载。',
+    },
+    {
+      key: 'mediaRetentionDays',
+      label: '资源保留天数(可选,留空=永久保留)',
+      bucket: 'config',
+      optional: true,
+      placeholder: '例如:30',
+      validate: positiveIntValidator(1, '保留天数'),
+      hint: '只清理资源,聊天记录永久保留。填 30 = 保留最近 30 天,每天清理一次。',
+    },
+    {
+      key: 'mediaMaxBytes',
+      label: '单个资源大小上限/字节(可选,默认 50MB)',
+      bucket: 'config',
+      optional: true,
+      placeholder: '52428800',
+      validate: positiveIntValidator(0, '大小上限'),
+      hint: '超过此大小的资源跳过不下载,索引里会写明原因。填 0 表示不限制。',
     },
     {
       key: 'secret',
@@ -515,6 +565,13 @@ function CorpAppDialog({
         return
       }
       if (!v) continue
+      if (f.validate) {
+        const err = f.validate(v)
+        if (err) {
+          toast.error(`${f.label}:${err}`)
+          return
+        }
+      }
       if (f.bucket === 'config') config[f.key] = v
       else credentials[f.key] = v
     }
@@ -601,18 +658,34 @@ function CorpAppDialog({
                   </>
                 )}
               </Label>
-              <Input
-                type={f.type ?? 'text'}
-                value={fieldValues[f.key] ?? ''}
-                onChange={(e) =>
-                  setFieldValues((m) => ({ ...m, [f.key]: e.target.value }))
-                }
-                placeholder={
-                  f.bucket === 'credentials' && existing && credentialKeys?.includes(f.key)
-                    ? '••••••••  (已保存,留空不修改)'
-                    : f.placeholder
-                }
-              />
+              {f.type === 'toggle' ? (
+                <Switch
+                  checked={fieldValues[f.key] === 'true'}
+                  onCheckedChange={(checked) =>
+                    setFieldValues((m) => ({ ...m, [f.key]: checked ? 'true' : 'false' }))
+                  }
+                />
+              ) : (
+                <Input
+                  type={f.type ?? 'text'}
+                  value={fieldValues[f.key] ?? ''}
+                  onChange={(e) =>
+                    setFieldValues((m) => ({ ...m, [f.key]: e.target.value }))
+                  }
+                  placeholder={
+                    f.bucket === 'credentials' && existing && credentialKeys?.includes(f.key)
+                      ? '••••••••  (已保存,留空不修改)'
+                      : f.placeholder
+                  }
+                />
+              )}
+              {(() => {
+                // Inline feedback as the admin types, so a bad value is
+                // obvious before they hit save rather than after.
+                const raw = fieldValues[f.key] ?? ''
+                const err = raw && f.validate ? f.validate(raw) : null
+                return err ? <p className="text-xs text-destructive">{err}</p> : null
+              })()}
               {f.hint && (
                 <p className="text-xs text-muted-foreground leading-relaxed">{f.hint}</p>
               )}

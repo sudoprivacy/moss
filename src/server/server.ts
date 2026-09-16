@@ -180,6 +180,7 @@ import './corpapps/wecomApp.js'
 import './corpapps/wecomMsgAudit.js'
 import { WeComMsgAuditConnector } from './corpapps/wecomMsgAudit.js'
 import { MsgAuditWorker } from './corpapps/msgaudit/worker.js'
+import { MediaPurgeWorker, type RetentionTarget } from './corpapps/msgaudit/purgeWorker.js'
 import type { PullConfig as MsgAuditPullConfig } from './corpapps/msgaudit/puller.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
@@ -2194,7 +2195,42 @@ export function startServer(
         const connector = new WeComMsgAuditConnector()
         await connector.init(cfg, creds)
         const pull = connector.pullConfig(String(row.id))
-        if (pull) configs.push(pull)
+        if (pull) {
+          // Display names come from a sibling self-built app: the 会话存档
+          // SDK has no directory API. The app is found by corpId rather
+          // than asked for by name — an archive instance and the app that
+          // can resolve its users belong to the same corp by definition,
+          // so making the admin name it would be busywork. Resolved
+          // lazily so a missing or IP-blocked app costs names, never the
+          // transcript itself.
+          if (pull.resolveNames) {
+            pull.nameLookup = async (id: string, external: boolean) => {
+              try {
+                const appRow = runtime.store
+                  .listAllCorpAppsByType('wecomapp')
+                  .find(
+                    (r) =>
+                      String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
+                      String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
+                        String(JSON.parse(String(row.config_json ?? '{}')).corpId ?? ''),
+                  ) as Record<string, unknown> | undefined
+                if (!appRow) return null
+                const { createCorpApp } = await import('./corpapps/types.js')
+                const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
+                const appCreds =
+                  typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
+                    ? await readSecret(appRow.credentials_secret_key)
+                    : {}
+                const appConn = createCorpApp(String(appRow.type))
+                await appConn.init(appCfg, appCreds)
+                return appConn.getUserName ? await appConn.getUserName(id, external) : null
+              } catch {
+                return null
+              }
+            }
+          }
+          configs.push(pull)
+        }
       } catch (err) {
         console.error(`[msgaudit] skip instance ${row.id}:`, err instanceof Error ? err.message : err)
       }
@@ -2202,6 +2238,32 @@ export function startServer(
     return configs
   })
   msgAuditWorker.start()
+
+  // 企微会话存档: daily retention sweep for downloaded media. Separate
+  // from the pull loop so a slow sweep never delays archiving, and so a
+  // retention change takes effect without a restart.
+  const msgAuditPurgeWorker = new MediaPurgeWorker(async () => {
+    const targets: RetentionTarget[] = []
+    const { readSecret } = await import('./sources/secrets.js')
+    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+      try {
+        const cfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+        const creds =
+          typeof row.credentials_secret_key === 'string' && row.credentials_secret_key
+            ? await readSecret(row.credentials_secret_key)
+            : {}
+        const connector = new WeComMsgAuditConnector()
+        await connector.init(cfg, creds)
+        if (connector.retentionDays >= 1) {
+          targets.push({ corpAppId: String(row.id), retentionDays: connector.retentionDays })
+        }
+      } catch (err) {
+        console.error(`[msgaudit-purge] skip instance ${row.id}:`, err instanceof Error ? err.message : err)
+      }
+    }
+    return targets
+  })
+  msgAuditPurgeWorker.start()
 
   // Start cron service for scheduled task execution
   cronService.start().catch(err => {
@@ -10435,6 +10497,7 @@ export function startServer(
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()
+      msgAuditPurgeWorker.stop()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())

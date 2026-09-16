@@ -15,10 +15,54 @@
 import { decryptRandomKey, parsePrivateKeys } from './crypto.js'
 import { normalizeRecord } from './normalize.js'
 import { openSdk, type RawChatRecord, type SdkHandle } from './sdk.js'
-import { appendRecords, readCursor, updateRooms, writeCursor, type ChatRecord } from './store.js'
+import {
+  appendRecords,
+  readCursor,
+  updateRooms,
+  writeCursor,
+  writeMedia,
+  type ChatRecord,
+} from './store.js'
+import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
+import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
+import { readUserCache, resolveMissing, writeUserCache, type NameLookup } from './users.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
 const PAGE_LIMIT = 1000
+
+/** Attempts per media object before giving up. */
+const MEDIA_RETRIES = 3
+
+/**
+ * Fetch one media object, retrying transient failures.
+ *
+ * An expired `sdkfileid` (10005) is permanent, so retrying it only wastes
+ * time and delays the rest of the batch — that case bails immediately.
+ * Everything else (network blips, transient SDK errors) gets three tries
+ * with a short backoff.
+ */
+async function downloadWithRetry(
+  sdk: SdkHandle,
+  rec: ChatRecord,
+  box: Record<string, unknown>,
+): Promise<{ bytes?: Buffer; error?: string }> {
+  let lastError = ''
+  for (let attempt = 1; attempt <= MEDIA_RETRIES; attempt++) {
+    try {
+      const bytes = sdk.getMediaData(String(box.sdkfileid))
+      if (bytes.length === 0) throw new Error('empty download')
+      return { bytes }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err)
+      // 10005 = fileid expired/invalid: no amount of retrying helps.
+      if (lastError.includes('10005')) break
+      if (attempt < MEDIA_RETRIES) {
+        await new Promise((r) => setTimeout(r, 500 * attempt))
+      }
+    }
+  }
+  return { error: `${lastError} (after ${MEDIA_RETRIES} attempts)` }
+}
 
 /**
  * Parse the admin's room filter into a lookup set.
@@ -49,6 +93,18 @@ export type PullConfig = {
    * and/or whitespace. Empty (or absent) archives every conversation.
    */
   roomFilterRaw?: string
+  /** Media types to download ("image,emotion" / "all"); empty = none. */
+  mediaTypesRaw?: string
+  /** Skip files larger than this (bytes). 0 = no limit. */
+  mediaMaxBytes?: number
+  /** Whether to resolve display names (paired with the media switch). */
+  resolveNames?: boolean
+  /**
+   * Resolves a userid to a display name. Supplied by the caller because
+   * the 会话存档 SDK has no directory API — it comes from a sibling
+   * self-built app, auto-discovered by corpId. Absent = keep raw ids.
+   */
+  nameLookup?: NameLookup
 }
 
 export type PullResult = {
@@ -56,6 +112,12 @@ export type PullResult = {
   written: number
   /** Decrypted but dropped by the room filter. */
   filtered: number
+  /** Media objects written to disk. */
+  media: number
+  /** Media downloads that were skipped or failed. */
+  mediaFailed: number
+  /** Ids newly resolved to display names this run. */
+  namesResolved: number
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -107,8 +169,16 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let written = 0
   let failed = 0
   let filtered = 0
+  let media = 0
+  let mediaFailed = 0
+  let namesResolved = 0
   let pages = 0
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
+  const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
+  const mediaMax = Number(cfg.mediaMaxBytes) > 0 ? Number(cfg.mediaMaxBytes) : 0
+  const userDir = cfg.nameLookup ? await readUserCache(cfg.corpAppId) : {}
+  let userDirDirty = false
+  const pendingMedia: MediaIndexEntry[] = []
 
   const sdk = openSdk(cfg.corpId, cfg.secret)
   try {
@@ -136,10 +206,71 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
         )
       }
 
+      // Names are resolved before the write so a transcript line carries
+      // its annotations from the start. Media is NOT: see below.
+      if (cfg.nameLookup) {
+        const ids = new Set<string>()
+        for (const rec of records) {
+          if (rec.from) ids.add(rec.from)
+          for (const id of rec.to) ids.add(id)
+        }
+        const r = await resolveMissing(userDir, ids, cfg.nameLookup)
+        if (r.resolved > 0) {
+          namesResolved += r.resolved
+          userDirDirty = true
+        }
+        for (const rec of records) {
+          if (rec.from && userDir[rec.from]) rec.fromName = userDir[rec.from]
+          if (rec.to.length > 0) rec.toNames = rec.to.map((id) => userDir[id] ?? id)
+        }
+      }
+
       // Write first, then advance — see ORDERING above.
       const { written: w } = await appendRecords(cfg.corpAppId, records)
       await updateRooms(cfg.corpAppId, records)
       written += w
+
+      // Media is downloaded AFTER the transcript is durable, and its
+      // outcome is recorded in a sidecar rather than in the message line.
+      // Downloading first would mean a slow or wedged media fetch delays
+      // (or (on a crash) loses) the messages themselves — and the message
+      // is the irreplaceable part, while media is merely time-limited.
+      if (mediaTypes.size > 0) {
+        for (const rec of records) {
+          if (!mediaTypes.has(rec.msgtype)) continue
+          const box = mediaBox(rec)
+          if (!box) continue
+          const size = mediaSize(box)
+          if (mediaMax > 0 && size > mediaMax) {
+            pendingMedia.push({
+              msgid: rec.msgid,
+              msgtime: rec.msgtime,
+              error: `skipped: ${size} bytes exceeds limit ${mediaMax}`,
+            })
+            mediaFailed += 1
+            continue
+          }
+          const outcome = await downloadWithRetry(sdk, rec, box)
+          if (outcome.bytes) {
+            const rel = await writeMedia(
+              cfg.corpAppId,
+              rec.msgid,
+              rec.msgtime,
+              mediaExt(rec, box),
+              outcome.bytes,
+            )
+            pendingMedia.push({ msgid: rec.msgid, msgtime: rec.msgtime, path: rel })
+            media += 1
+          } else {
+            pendingMedia.push({
+              msgid: rec.msgid,
+              msgtime: rec.msgtime,
+              error: outcome.error ?? 'download failed',
+            })
+            mediaFailed += 1
+          }
+        }
+      }
 
       // Advance past the whole page, including records we could not
       // decrypt: they will never become readable, and leaving the cursor
@@ -162,5 +293,17 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     }
   }
 
-  return { fetched, written, failed, filtered, cursor, pages }
+  if (pendingMedia.length > 0) {
+    await appendMediaIndex(cfg.corpAppId, pendingMedia).catch(() => {
+      // the files are already on disk; a lost index entry is cosmetic
+    })
+  }
+
+  if (userDirDirty) {
+    await writeUserCache(cfg.corpAppId, userDir).catch(() => {
+      // a lost cache costs re-lookups next run, not data
+    })
+  }
+
+  return { fetched, written, failed, filtered, media, mediaFailed, namesResolved, cursor, pages }
 }
