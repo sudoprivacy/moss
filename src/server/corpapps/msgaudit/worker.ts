@@ -19,6 +19,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PullConfig, PullResult } from './puller.js'
 
+/** A name lookup the child needs us to perform (see pullChild.ts). */
+type LookupRequest = { kind: 'lookup'; id: number; userId: string; external: boolean }
+type ResultMessage = { ok: boolean; result?: PullResult; error?: string }
+type ChildMessage = LookupRequest | ResultMessage
+
 /**
  * Locate the forked child's entrypoint.
  *
@@ -101,11 +106,35 @@ export function pullInChild(cfg: PullConfig): Promise<PullResult> {
     }, CHILD_TIMEOUT_MS)
     timer.unref()
 
-    child.on('message', (msg: { ok: boolean; result?: PullResult; error?: string }) => {
+    child.on('message', (msg: ChildMessage) => {
+      // The child cannot be handed cfg.nameLookup directly — IPC is JSON,
+      // so a function arrives as undefined. It asks us instead, and we
+      // answer here where the connector and its credentials live.
+      if (msg && (msg as LookupRequest).kind === 'lookup') {
+        const req = msg as LookupRequest
+        const answer = (name: string | null) => {
+          try {
+            child.send({ kind: 'lookupResult', id: req.id, name })
+          } catch {
+            // child already gone; its own timeout will unblock it
+          }
+        }
+        if (!cfg.nameLookup) {
+          answer(null)
+          return
+        }
+        cfg
+          .nameLookup(req.userId, req.external)
+          .then(answer)
+          .catch(() => answer(null))
+        return
+      }
+
+      const done = msg as ResultMessage
       finish(() => {
         child.kill()
-        if (msg.ok && msg.result) resolve(msg.result)
-        else reject(new Error(msg.error || 'msgaudit: pull failed'))
+        if (done.ok && done.result) resolve(done.result)
+        else reject(new Error(done.error || 'msgaudit: pull failed'))
       })
     })
 
