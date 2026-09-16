@@ -1,7 +1,7 @@
 import { authClient } from './client'
 
 /** server.json 侧凭据字段的分组（与服务端 SERVER_CREDENTIAL_FIELDS 一致）。 */
-export type ServerCredentialGroup = 'hub' | 'wikiIndex' | 'cabin'
+export type ServerCredentialGroup = 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter' | 'fuiou'
 
 /** GET /api/v1/server-credentials 的单项：脱敏展示，不返回明文。 */
 export interface ServerCredentialItem {
