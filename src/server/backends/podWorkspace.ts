@@ -73,11 +73,11 @@ class PodExecError extends Error {
 }
 
 /**
- * True when kubectl could not reach the container *yet*: the pod exists but its
- * container has not started, or the API server could not upgrade the connection
- * to it. Deliberately narrow — an error from the command running inside the pod
- * (a missing file, a bad path) must surface immediately instead of being retried
- * into the timeout.
+ * True when kubectl could not reach the container *yet*: the Pod has not been
+ * admitted to the API yet, it exists but its container has not started, or the
+ * API server could not upgrade the connection to it. Deliberately narrow — an
+ * error from the command running inside the pod (a missing file, a bad path)
+ * must surface immediately instead of being retried into the timeout.
  */
 export function isPodNotReadyExecError(exitCode: number | null, stderr: string): boolean {
   if (exitCode === 0) return false
@@ -86,9 +86,24 @@ export function isPodNotReadyExecError(exitCode: number | null, stderr: string):
     text.includes('unable to upgrade connection') ||
     text.includes('container not found') ||
     text.includes('error dialing backend') ||
-    text.includes('is not created or running')
+    text.includes('is not created or running') ||
+    POD_OBJECT_MISSING.test(text)
   )
 }
+
+/**
+ * `Error from server (NotFound): pods "scode-xxx" not found` — the Pod object is
+ * not visible to the API server yet, which is a window *earlier* than the ones
+ * above: those need a Pod that already exists. A session's first workspace read
+ * can land there, between the spawn call returning and the Pod being admitted.
+ * Observed on the deployed cluster: three execs failed this way within one
+ * second, and the Pod was serving a WebSocket the second after.
+ *
+ * Matched by shape rather than by the bare words "not found", which also end a
+ * shell's own `stat: not found` — an error from inside the pod, which must keep
+ * failing immediately.
+ */
+const POD_OBJECT_MISSING = /pods "[^"]*" not found/
 
 /**
  * A pod reports phase Running before its container is exec-able — under gvisor

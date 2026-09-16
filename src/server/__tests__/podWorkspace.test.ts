@@ -38,6 +38,16 @@ describe('pod exec readiness', () => {
     expect(
       isPodNotReadyExecError(1, 'container "scode" in pod "scode-abc" is not created or running'),
     ).toBe(true)
+    // An earlier window than the three above, which all need a Pod that already
+    // exists: here the API server has not admitted the object yet. Seen three
+    // times inside one second on the deployed cluster while the session was
+    // starting; the same pod was serving traffic a second later.
+    expect(
+      isPodNotReadyExecError(
+        1,
+        'Error from server (NotFound): pods "scode-6f5ae77f-59d" not found',
+      ),
+    ).toBe(true)
   })
 
   it('does not retry an error from the command running inside the pod', () => {
