@@ -8,6 +8,7 @@
   "scripts": {
     "build": "bun run scripts/build.js",
     "build:node": "bun run scripts/build.js --target=node",
+    "test:contract": "bun test src/contracts/__tests__/commonV1Boundary.test.ts",
     "postinstall": "bun run scripts/copy-vendor.js",
     "test": "node scripts/test-server.js",
     "typecheck": "node scripts/typecheck-ratchet.js"
@@ -112,7 +113,7 @@
     "xss": "^1.0.15",
     "yaml": "^2.8.3",
     "zod": "*",
-    "@sudo/contracts": "github:sudoprivacy/sudostack#45304cf15d1e8d02814e46b7b2fe0b3c30c1709c"
+    "@sudo/contracts": "github:sudoprivacy/sudostack#65904eb0a0991366767095b707f5a86835089a1e"
   },
   "optionalDependencies": {
     "@img/sharp-darwin-arm64": "*",
