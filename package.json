@@ -121,6 +121,7 @@
     "@img/sharp-win32-x64": "*"
   },
   "devDependencies": {
+    "bun-types": "^1.4.2",
     "tsx": "^4.23.13",
     "typescript": "5.8.3"
   }

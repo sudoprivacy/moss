@@ -79,7 +79,18 @@ if (compiledFiles.length < MIN_EXPECTED_FILES) {
   process.exit(2)
 }
 
-console.log(`compiler examined ${compiledFiles.length} files, ${errorLines.length} error line(s) total`)
+const sourceFiles = compiledFiles.filter(line => !line.includes('node_modules'))
+console.log(
+  `compiler examined ${compiledFiles.length} files (${sourceFiles.length} outside node_modules), ` +
+    `${errorLines.length} error line(s) total`,
+)
+
+// When there are only a handful, print them: a count alone cannot be checked by
+// a reader, and "1 error somewhere" is exactly the case where knowing which one
+// settles whether the environment or the code is at fault.
+if (errorLines.length > 0 && errorLines.length <= 5) {
+  for (const line of errorLines) console.log(`  ${line}`)
+}
 const scoped = errorLines.filter(line => line.includes(SCOPE))
 
 const baseline = JSON.parse(readFileSync(BASELINE_FILE, 'utf8'))
@@ -102,6 +113,22 @@ if (scoped.length > allowed) {
       '  node scripts/typecheck-ratchet.js --update-baseline\n',
   )
   process.exit(1)
+}
+
+// A baseline far above what the run actually finds is not good news — it means
+// the number was recorded somewhere that does not match this environment, and
+// until it is corrected the gate cannot fail: any regression stays comfortably
+// under it. The first baseline committed here was 159, measured on a developer
+// machine whose type resolution differed from CI's; CI found 0 and the gate
+// would have waved everything through. Treat a large gap as a broken baseline.
+const STALE_BASELINE_GAP = 10
+if (allowed - scoped.length >= STALE_BASELINE_GAP) {
+  console.error(
+    `\nbaseline is ${allowed} but this run found ${scoped.length} — the baseline does not describe this environment.`,
+  )
+  console.error('A baseline that high cannot fail, so it is refused rather than trusted. Re-record it with:')
+  console.error('  node scripts/typecheck-ratchet.js --update-baseline')
+  process.exit(2)
 }
 
 if (scoped.length < allowed) {
