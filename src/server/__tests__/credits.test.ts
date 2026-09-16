@@ -255,7 +255,7 @@ describe('reviewing an application', () => {
     // A deployment without a metered gateway must still be able to decline a
     // request it never intended to grant; the gateway is only needed to pay one.
     const store = makeStore()
-    const app = submitApplication(store, POLICY, {
+    const app = await submitApplication(store, POLICY, {
       userId: 'u1', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     const reviewed = await reviewApplication(store, null, {
@@ -263,7 +263,7 @@ describe('reviewing an application', () => {
     })
     expect(reviewed.status).toBe('REJECTED')
 
-    const second = submitApplication(store, POLICY, {
+    const second = await submitApplication(store, POLICY, {
       userId: 'u2', orgId: 'o1', requestedPoints: 500, reason: null,
     })
     await expect(reviewApplication(store, null, {

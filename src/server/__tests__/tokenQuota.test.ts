@@ -55,7 +55,8 @@ describe("token quota is enforced at every door that starts spending", () => {
       (e: unknown) => e instanceof TokenQuotaExceededError,
     );
     // The check sits above store.createSession, so a refusal leaves nothing.
-    assert.equal(store.listSessions({ orgId: "o" }).length, 0);
+    // listSessions is async on the driver-backed store (LB/HA branch).
+    assert.equal((await store.listSessions({ orgId: "o" })).length, 0);
   });
 
   it("over the limit → spawnAttempt refuses (the door resume/WS/cron arrive through)", async () => {

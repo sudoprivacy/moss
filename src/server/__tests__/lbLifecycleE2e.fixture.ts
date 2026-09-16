@@ -36,7 +36,7 @@ const { service: authService } = await createAuthService({
 // entry carries usage 100+50=150 total tokens; the summary entry must be
 // filtered out by the transcript guard; the user entry passes the guard but
 // carries no usage and is skipped by the usage parser.
-const issued = authService.issueTokenFromPassword({
+const issued = await authService.issueTokenFromPassword({
   username: config.bootstrapAdmin.username,
   password: config.bootstrapAdmin.password,
 })
@@ -68,7 +68,7 @@ await writeFile(
   'utf8',
 )
 const runtimeInfo: SessionRuntimeInfo = { type: 'host' }
-store.createSession({
+await store.createSession({
   sessionId: 'lb-e2e-seed-session',
   transcriptSessionId: 'lb-e2e-seed-session',
   transcriptPath,

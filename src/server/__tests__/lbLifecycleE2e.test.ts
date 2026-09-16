@@ -163,17 +163,28 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     const response = await fetch(`${fixture.baseUrl}/readyz`)
 
     expect(response.status, fixture.stderrOutput.join('')).toBe(503)
+    // R13 (LB/HA branch): the anonymous body carries only ok/ready +
+    // instance_id — the checks matrix lives on the super-admin
+    // GET /api/v1/admin/health so anonymous callers behind the LB cannot
+    // enumerate probe states.
     const body = await response.json() as {
       ok: boolean
       instance_id: string
-      checks: { db: boolean; nexus: boolean; runtime: boolean | null; k8s: boolean | null; draining: boolean }
     }
     expect(body.ok).toBe(false)
-    expect(body.checks.db).toBe(true)
-    expect(body.checks.nexus).toBe(false)
-    expect(body.checks.draining).toBe(false)
     expect(body.instance_id).toBe('e2e-inst-1')
     expect(response.headers.get('set-cookie')).toBe('moss_route=e2e-inst-1; Path=/; HttpOnly; SameSite=Lax')
+
+    const healthResponse = await fetch(`${fixture.baseUrl}/api/v1/admin/health`, {
+      headers: { Authorization: `Bearer ${fixture.token}` },
+    })
+    expect(healthResponse.status, fixture.stderrOutput.join('')).toBe(200)
+    const health = await healthResponse.json() as {
+      checks: { db: boolean; nexus: boolean; runtime: boolean | null; k8s: boolean | null; draining: boolean }
+    }
+    expect(health.checks.db).toBe(true)
+    expect(health.checks.nexus).toBe(false)
+    expect(health.checks.draining).toBe(false)
   }, 60_000)
 
   // This case used to assert 200 / nexus:true, which wrote the wrong contract
@@ -204,9 +215,16 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     const response = await fetch(`${fixture.baseUrl}/readyz`)
 
     expect(response.status, fixture.stderrOutput.join('')).toBe(503)
-    const body = await response.json() as { ok: boolean; checks: { nexus: boolean } }
+    const body = await response.json() as { ok: boolean }
     expect(body.ok).toBe(false)
-    expect(body.checks.nexus).toBe(false)
+
+    // checks.nexus lives on the authenticated matrix (R13).
+    const healthResponse = await fetch(`${fixture.baseUrl}/api/v1/admin/health`, {
+      headers: { Authorization: `Bearer ${fixture.token}` },
+    })
+    expect(healthResponse.status, fixture.stderrOutput.join('')).toBe(200)
+    const health = await healthResponse.json() as { checks: { nexus: boolean } }
+    expect(health.checks.nexus).toBe(false)
   }, 60_000)
 
   it('drain via stdin DRAIN → /readyz 503 with draining:true and POST /api/v1/sessions rejected 503 with the draining message', async () => {
@@ -217,15 +235,19 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     let drained = false
     let lastBody = ''
     for (let attempt = 0; attempt < 50 && !drained; attempt++) {
-      const response = await fetch(`${fixture.baseUrl}/readyz`)
+      // Anonymous /readyz no longer carries the checks matrix (R13); drain
+      // state is read from the authenticated health endpoint.
+      const response = await fetch(`${fixture.baseUrl}/api/v1/admin/health`, {
+        headers: { Authorization: `Bearer ${fixture.token}` },
+      })
       lastBody = await response.text()
-      if (response.status === 503 && (JSON.parse(lastBody) as { checks: { draining: boolean } }).checks.draining) {
+      if ((JSON.parse(lastBody) as { ready: boolean; checks: { draining: boolean } }).checks.draining) {
         drained = true
       } else {
         await new Promise(resolveWait => setTimeout(resolveWait, 100))
       }
     }
-    expect(drained, `readyz never reported draining: ${lastBody}`).toBe(true)
+    expect(drained, `admin/health never reported draining: ${lastBody}`).toBe(true)
 
     const createResponse = await fetch(`${fixture.baseUrl}/api/v1/sessions`, {
       method: 'POST',
