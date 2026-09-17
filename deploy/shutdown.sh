@@ -15,6 +15,17 @@ cd "$BASE_DIR"
 
 echo "=== Moss 关闭流程开始 ==="
 
+compose() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "$@"
+    else
+        echo "错误: 未找到 Docker Compose。请安装 docker compose 插件或 docker-compose。"
+        exit 1
+    fi
+}
+
 find_user_containers() {
     {
         docker ps -aq --filter "label=moss.kind=user-container" 2>/dev/null || true
@@ -66,17 +77,17 @@ fi
 CONTAINER_ID=$(docker ps --filter "name=moss-server" --format "{{.ID}}" | head -1)
 echo "发现 Moss Server 容器: $CONTAINER_ID"
 
-# 用户级容器由 Moss 运行时动态创建，不归 docker-compose 管理。
+# 用户级容器由 Moss 运行时动态创建，不归 Docker Compose 管理。
 # 如果它们仍挂在 moss-network 上，compose down 删除网络时会报
 # "network has active endpoints"。
 drain_user_containers
 
-# 使用 docker-compose 优雅关闭
+# 使用 Docker Compose 优雅关闭
 echo "正在停止 Moss Server..."
-if ! docker-compose -p moss-server down; then
-    echo "docker-compose down 失败，尝试清理残留用户容器后重试..."
+if ! compose -p moss-server down; then
+    echo "Docker Compose down 失败，尝试清理残留用户容器后重试..."
     drain_user_containers
-    docker-compose -p moss-server down
+    compose -p moss-server down
 fi
 
 # 等待容器停止

@@ -4,7 +4,7 @@
 # Moss 部署与启动脚本
 # 功能:
 # 1. 加载 Docker 镜像 (runtime + server)
-# 2. 使用 docker-compose 启动 moss-server 容器
+# 2. 使用 Docker Compose 启动 moss-server 容器
 # 3. 支持环境变量配置
 # ---------------------------------------------------------
 
@@ -19,6 +19,17 @@ LOG_FILE="$LOG_DIR/moss-server.log"
 mkdir -p "$LOG_DIR"
 mkdir -p "$BASE_DIR/data"
 mkdir -p "$BASE_DIR/.moss"
+
+compose() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "$@"
+    else
+        echo "  错误: 未找到 Docker Compose。请安装 docker compose 插件或 docker-compose。"
+        exit 1
+    fi
+}
 
 find_user_containers() {
     {
@@ -157,7 +168,7 @@ drain_user_containers
 
 if docker ps -a --format "{{.Names}}" | grep -q "^moss-server$"; then
     echo "  发现已存在的容器，正在停止..."
-    docker-compose -p moss-server down 2>/dev/null || true
+    compose -p moss-server down 2>/dev/null || true
     docker rm -f moss-server 2>/dev/null || true
     sleep 2
 fi
@@ -173,7 +184,7 @@ export ANTHROPIC_API_KEY
 export ANTHROPIC_BASE_URL
 export MOSS_HOST_PATH_MAP
 
-docker-compose -p moss-server up -d
+compose -p moss-server up -d
 
 # 等待启动完成
 sleep 3
@@ -190,6 +201,6 @@ if docker ps --format "{{.Names}}" | grep -q "^moss-server$"; then
     echo "-----------------------------------------------"
 else
     echo "错误: Moss Server 启动失败，请检查日志。"
-    docker-compose -p moss-server logs
+    compose -p moss-server logs
     exit 1
 fi
