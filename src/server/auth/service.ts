@@ -5,7 +5,11 @@ import { isUniqueViolation } from '../db/driver.js'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
 import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
-import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
+import { onlineCommandContext } from '../application/commandContext.js'
+import { IdentityRepository } from '../identity/identityRepository.js'
+import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { OrganizationIdentityService } from '../identity/organizationIdentityService.js'
+import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
   newApplicationNo,
@@ -27,10 +31,56 @@ import {
   createApiKeyRecord,
   createSyntheticUserEmail,
   hashPassword,
+  isLegacyPasswordHash,
   sanitizeApiKey,
   sanitizeUser,
   verifyPassword,
 } from '../authCenter/db.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import { SudoworkIdentityService } from '../api/compat/sudowork/identityService.js'
+import { SudoworkAdministrationService } from '../api/compat/sudowork/adminService.js'
+import { SudoworkCasService } from '../api/compat/sudowork/casService.js'
+import { SudoworkCatalogService } from '../api/compat/sudowork/catalogService.js'
+import { SudoworkConfigService } from '../api/compat/sudowork/configService.js'
+import { createConfigItemsApi } from '../api/configItems.js'
+import type { ManagedImageStore } from '../configuration/managedImageStore.js'
+import { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
+import { PlatformIntegrationSettingsRepository } from '../configuration/platformIntegrationSettingsRepository.js'
+import {
+  SudoworkSystemConfigService,
+  type SudoworkInfrastructureConfig,
+} from '../api/compat/sudowork/systemConfigService.js'
+import type { ConfigStore } from '../configStore/configStore.js'
+import { CatalogRepository } from '../catalog/catalogRepository.js'
+import { CatalogService } from '../catalog/catalogService.js'
+import { CatalogArtifactStore } from '../catalog/catalogArtifactStore.js'
+import { CatalogUploadService } from '../catalog/catalogUploadService.js'
+import type { LegacyKeyValueStore } from '../identity/legacyToken.js'
+import { BillingRepository } from '../billing/billingRepository.js'
+import { WalletService } from '../billing/walletService.js'
+import { BillingCoordinator } from '../billing/billingCoordinator.js'
+import { RechargeService } from '../billing/rechargeService.js'
+import { CreditApplicationService, type CreditApplicationPolicy } from '../billing/creditApplicationService.js'
+import { RefundService, type FuiouRefundPort } from '../billing/refundService.js'
+import {
+  quotaToPoints,
+  type SudorouterPort,
+  type SudorouterAccountPort,
+  type SudorouterUsagePort,
+} from '../billing/sudorouterAdapter.js'
+import { SudorouterAccountService } from '../billing/sudorouterAccountService.js'
+import type { NexusClient } from '../nexus/nexusClient.js'
+import { SudoworkBillingService, type BillingPaymentPort } from '../api/compat/sudowork/billingService.js'
+import { SudoworkLegacyUsageService } from '../api/compat/sudowork/legacyUsageService.js'
+import { SudoworkUserProjectionService } from '../api/compat/sudowork/userProjectionService.js'
+import { DifyHttpAdapter } from '../dify/difyHttpAdapter.js'
+import { DifyConnectionService, type DifySecretPort } from '../dify/difyConnectionService.js'
+import { DifyRuntimeService } from '../dify/difyRuntimeService.js'
+import { DifyEnhancementService } from '../dify/difyEnhancementService.js'
+import { DifyDatasetService } from '../dify/difyDatasetService.js'
+import { DifyAdministrationService, type DifyAdministrationSecretPort } from '../dify/difyAdministrationService.js'
+import { DifyRepository } from '../dify/difyRepository.js'
+import type { QmsOrganizationDirectory } from '../qms/qmsAuthorization.js'
 
 export type AuthRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
 
@@ -78,6 +128,16 @@ export class AuthServiceError extends Error {
     super(message)
     this.name = 'AuthServiceError'
   }
+}
+
+type NativeUserProjection = SanitizedAuthCenterUser & {
+  legacyId: number | null
+  balanceUnits: number
+}
+
+type NativeOrganizationProjection = AuthCenterOrganization & {
+  legacyId: number | null
+  code: string | null
 }
 
 function toAuthServiceError(error: unknown): AuthServiceError {
@@ -205,8 +265,8 @@ function isAuthRole(value: string): value is AuthRole {
   )
 }
 
-function isUserStatus(value: string): value is 'active' | 'disabled' {
-  return value === 'active' || value === 'disabled'
+function isUserStatus(value: string): value is AuthCenterUser['status'] {
+  return value === 'pending' || value === 'active' || value === 'locked' || value === 'disabled'
 }
 
 export async function createAuthService(
@@ -235,6 +295,12 @@ const REVOKED_TOKENS_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 export class AuthService {
   private readonly cleanupTimer: ReturnType<typeof setInterval>
   private readonly oauth2Bridge: OAuth2Bridge
+  private readonly identityRepository: IdentityRepository
+  private readonly unifiedIdentity: UnifiedIdentityService
+  private sudorouterAccounts?: {
+    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits: number
+  }
 
   /**
    * Phone + code auth. Always constructed so the routes can answer "disabled"
@@ -249,6 +315,13 @@ export class AuthService {
     phoneAuthConfig?: PhoneAuthConfig,
     smsSender?: SmsSender,
   ) {
+    this.identityRepository = new IdentityRepository(this.db.db, {
+      legacyClientCronEnabled: getSystemSettings().clientCronEnabled,
+    })
+    this.unifiedIdentity = new UnifiedIdentityService(this.db.db, this.db, this.identityRepository)
+    void this.ensureCompatibilityRecords().catch((error) => {
+      console.warn('[AuthService] Failed to ensure Sudowork compatibility records:', error)
+    })
     this.cleanupTimer = setInterval(() => {
       void this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
@@ -271,6 +344,329 @@ export class AuthService {
       db.getJwtSecret(),
       smsSender,
     )
+  }
+
+  createSudoworkIdentityService(input: {
+    tokenStore: LegacyKeyValueStore
+    legacyJwtSecret: string
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+  }): SudoworkIdentityService {
+    return new SudoworkIdentityService({
+      authDb: this.db,
+      identities: this.identityRepository,
+      tokenStore: input.tokenStore,
+      legacyJwtSecret: input.legacyJwtSecret,
+      accountProvisioner: input.accountProvisioner,
+      nativeActorResolver: token => {
+        const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer())
+        if (!auth) return null
+        const user = this.db.db
+          .prepare('SELECT * FROM users WHERE id = ? AND (org_id = ? OR role = ?) LIMIT 1')
+          .get(auth.userId, auth.orgId, 'super_admin') as unknown as AuthCenterUser | undefined
+        if (!user || user.status !== 'active') return null
+        return { userId: user.id, orgId: auth.orgId, role: user.role }
+      },
+    })
+  }
+
+  createOrganizationIdentityService(): OrganizationIdentityService {
+    return new OrganizationIdentityService(
+      this.db.db,
+      this.db,
+      this.identityRepository,
+      this.unifiedIdentity,
+    )
+  }
+
+  createQmsOrganizationDirectory(): QmsOrganizationDirectory {
+    return {
+      getCode: orgId => this.identityRepository.getOrganizationProfile(orgId)?.code ?? null,
+      hasCode: code => this.identityRepository.getOrganizationProfileByCode(code) !== null,
+    }
+  }
+
+  isOrganizationClientCronEnabled(orgId: string): boolean {
+    return this.identityRepository.getOrganizationProfile(orgId)?.clientCronEnabled
+      ?? getSystemSettings().clientCronEnabled
+  }
+
+  setOrganizationClientCronEnabled(orgId: string, enabled: boolean): void {
+    this.identityRepository.setOrganizationClientCronEnabled(orgId, enabled)
+  }
+
+  createSudoworkAdministrationService(input: {
+    getDifyFeatureFlags?: () => { enabled: boolean; missingEnv: string[] }
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+    defaultInitialQuota?: number
+  } = {}): SudoworkAdministrationService {
+    return new SudoworkAdministrationService(
+      this.createOrganizationIdentityService(),
+      this.identityRepository,
+      this.db,
+      input,
+    )
+  }
+
+  createSudoworkCasService(input: {
+    identity: SudoworkIdentityService
+    tokenStore: LegacyKeyValueStore
+    accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits?: number
+  }): SudoworkCasService {
+    return new SudoworkCasService({
+      authDb: this.db,
+      identities: this.identityRepository,
+      unifiedIdentity: this.unifiedIdentity,
+      identity: input.identity,
+      tokenStore: input.tokenStore,
+      accountProvisioner: input.accountProvisioner,
+      initialQuotaUnits: input.initialQuotaUnits,
+    })
+  }
+
+  createSudorouterAccountService(input: {
+    provider: SudorouterAccountPort
+    secrets: Pick<NexusClient, 'putSecret' | 'getSecret'>
+  }): SudorouterAccountService {
+    return new SudorouterAccountService(
+      this.db.db,
+      new BillingRepository(this.db.db),
+      input.provider,
+      input.secrets,
+    )
+  }
+
+  createSudoworkUserProjectionService(input: {
+    secrets: Pick<NexusClient, 'getSecret'>
+    listModels: () => Promise<Array<{ id: string }>> | Array<{ id: string }>
+    getRuntimeConfig: () => { modelServiceUrl: string; scodeAutoModel: string }
+    quotaReader?: Pick<SudorouterPort, 'getUser'>
+  }): SudoworkUserProjectionService {
+    return new SudoworkUserProjectionService({
+      identities: this.identityRepository,
+      billing: new BillingRepository(this.db.db),
+      ...input,
+    })
+  }
+
+  configureSudorouterAccounts(input: {
+    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
+    initialQuotaUnits: number
+  }): void {
+    this.sudorouterAccounts = input
+  }
+
+  createSudoworkCatalogService(input?: {
+    artifactsRoot?: string
+    publicBaseUrl?: string
+  }): SudoworkCatalogService {
+    const repository = new CatalogRepository(this.db.db)
+    const catalog = new CatalogService(this.db.db, repository)
+    const uploads = input?.artifactsRoot && input.publicBaseUrl
+      ? new CatalogUploadService({
+          db: this.db.db,
+          repository,
+          catalog,
+          artifacts: new CatalogArtifactStore(input.artifactsRoot),
+          publicBaseUrl: input.publicBaseUrl,
+        })
+      : undefined
+    return new SudoworkCatalogService({
+      repository,
+      catalog,
+      identities: this.identityRepository,
+      uploads,
+      buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
+    })
+  }
+
+  createSudoworkDifyServices(input: {
+    baseUrl: string
+    systemToken?: string
+    provisionSecret?: string
+    ssoSecret?: string
+    publicBaseUrl: string
+    artifactsRoot: string
+    secrets: DifySecretPort & DifyAdministrationSecretPort
+  }): {
+    runtime: DifyRuntimeService
+    enhancement: DifyEnhancementService
+    dataset: DifyDatasetService
+    administration: DifyAdministrationService
+    resolveEnterpriseAlias: (legacyId: number) => { resourceId: string; orgId: string } | null
+    buildVisibility: (actor: import('../identity/organizationIdentityService.js').IdentityActor) => import('../visibilityFilter.js').VisibilityFilter
+  } {
+    const catalog = new CatalogRepository(this.db.db)
+    const catalogService = new CatalogService(this.db.db, catalog)
+    const difyRepository = new DifyRepository(this.db.db)
+    const adapter = new DifyHttpAdapter({
+      baseUrl: input.baseUrl,
+      systemToken: input.systemToken,
+      provisionSecret: input.provisionSecret,
+    })
+    const connections = new DifyConnectionService({
+      auth: this.db,
+      identities: this.identityRepository,
+      catalog,
+      secrets: input.secrets,
+    })
+    const artifacts = new CatalogArtifactStore(input.artifactsRoot)
+    const administration = new DifyAdministrationService({
+      db: this.db.db,
+      auth: this.db,
+      identities: this.identityRepository,
+      catalog,
+      difyRepository,
+      catalogService,
+      adapter,
+      secrets: input.secrets,
+      artifacts,
+      publicBaseUrl: input.publicBaseUrl,
+      ssoSecret: input.ssoSecret,
+      difyBaseUrl: input.baseUrl,
+    })
+    return {
+      runtime: new DifyRuntimeService({ adapter, connections }),
+      enhancement: new DifyEnhancementService({ adapter, connections }),
+      dataset: new DifyDatasetService({
+        db: this.db.db,
+        repository: difyRepository,
+        adapter,
+        connections,
+        ensureConnection: (orgId, context) => administration.provision(orgId, context),
+      }),
+      administration,
+      resolveEnterpriseAlias: legacyId => this.identityRepository.resolveNumericAliasGlobal('enterprise', legacyId),
+      buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
+    }
+  }
+
+  createSudoworkConfigService(store: DirectConnectStore, managedImages?: ManagedImageStore): SudoworkConfigService {
+    return new SudoworkConfigService({
+      db: this.db.db,
+      configItems: createConfigItemsApi(store),
+      identities: this.identityRepository,
+      authDb: this.db,
+      managedImages,
+    })
+  }
+
+  createSudoworkSystemConfigService(input: {
+    secrets: ConfigStore
+    loginMethod: 'sms' | 'password' | 'cas'
+    skillhubBaseUrl: string
+    sudorouterBaseUrl?: string
+    smsRuntimeAvailable: boolean
+    smsCredentialsAvailable: boolean
+    sms: SudoworkInfrastructureConfig['sms']
+    billing: SudoworkInfrastructureConfig['billing']
+    productImprovementEncryptionRequired?: boolean
+  }): SudoworkSystemConfigService {
+    return new SudoworkSystemConfigService({
+      db: this.db.db,
+      policies: new ClientPolicyRepository(this.db.db),
+      infrastructureSettings: new PlatformIntegrationSettingsRepository(this.db.db),
+      identities: this.identityRepository,
+      defaults: {
+        loginMethod: input.loginMethod,
+        skillhubBaseUrl: input.skillhubBaseUrl,
+        sudorouterBaseUrl: input.sudorouterBaseUrl,
+        productImprovementEncryptionRequired: input.productImprovementEncryptionRequired,
+        productImprovementApiKey: input.secrets.get('client.product-improvement-api-key'),
+        productImprovementPublicKey: input.secrets.get('client.product-improvement-public-key'),
+        sms: input.sms,
+        billing: input.billing,
+      },
+      smsRuntimeAvailable: input.smsRuntimeAvailable,
+      smsCredentialsAvailable: input.smsCredentialsAvailable,
+      secrets: input.secrets,
+    })
+  }
+
+  createSudoworkBillingService(input: {
+    sudorouter: SudorouterPort
+    payment: BillingPaymentPort & FuiouRefundPort
+    getCreditPolicy(orgId: string): CreditApplicationPolicy
+    testPaymentAmountCents?: number
+  }): SudoworkBillingService {
+    const repository = new BillingRepository(this.db.db)
+    const wallet = new WalletService(this.db.db, repository)
+    const coordinator = new BillingCoordinator(this.db.db, repository, wallet, input.sudorouter)
+    const recharge = new RechargeService(this.db.db, repository, {
+      numericAliasAllocator: (orderId, orgId) => (
+        this.identityRepository.allocateNumericAlias('billing_order', orderId, orgId)
+      ),
+      testPaymentAmountCents: input.testPaymentAmountCents,
+    })
+    const credit = new CreditApplicationService(
+      this.db.db, repository, this.identityRepository, coordinator,
+      { getPolicy: input.getCreditPolicy },
+    )
+    const refund = new RefundService(
+      this.db.db, repository, this.identityRepository, wallet, coordinator, input.payment,
+    )
+    return new SudoworkBillingService({
+      db: this.db.db, auth: this.db, identities: this.identityRepository,
+      repository, wallet, recharge, coordinator, credit, refund, payment: input.payment,
+    })
+  }
+
+  createSudoworkLegacyUsageService(input: {
+    listModels: () => Promise<Array<{ id: string; name?: string }>> | Array<{ id: string; name?: string }>
+    sudorouter?: SudorouterPort & SudorouterUsagePort
+  }): SudoworkLegacyUsageService {
+    const repository = new BillingRepository(this.db.db)
+    return new SudoworkLegacyUsageService({
+      db: this.db.db,
+      auth: this.db,
+      identities: this.identityRepository,
+      repository,
+      wallet: new WalletService(this.db.db, repository),
+      listModels: input.listModels,
+      sudorouter: input.sudorouter,
+    })
+  }
+
+  private async ensureCompatibilityRecords(): Promise<void> {
+    runInTransaction(this.db.db, () => {
+      const organizations = this.db.db
+        .prepare('SELECT id, name, ext_org_id AS extOrgId, created_at AS createdAt FROM organizations ORDER BY created_at ASC')
+        .all() as AuthCenterOrganization[]
+      for (const organization of organizations) {
+        if (!this.identityRepository.getOrganizationProfile(organization.id)) {
+          this.identityRepository.putOrganizationProfile({
+            orgId: organization.id,
+            code: `moss-${organization.id}`,
+            loginMethod: 'password',
+            localEnabled: true,
+            cloudEnabled: true,
+          })
+        }
+        if (this.identityRepository.getNumericAlias('enterprise', organization.id) === null) {
+          this.identityRepository.allocateNumericAlias('enterprise', organization.id, organization.id)
+        }
+        this.identityRepository.ensureWallet('organization', organization.id)
+      }
+      const users = this.db.db
+        .prepare(`SELECT id, org_id AS orgId, email, name, display_name AS displayName, department_id AS departmentId,
+                         role, status, local_auth AS localAuth, token_limit AS tokenLimit, password_hash AS passwordHash,
+                         password_updated_at AS passwordUpdatedAt, last_login_at AS lastLoginAt, created_at AS createdAt,
+                         ext_user_id AS extUserId, phone
+                  FROM users ORDER BY created_at ASC`)
+        .all() as unknown as AuthCenterUser[]
+      for (const user of users) {
+        if (this.identityRepository.getNumericAlias('user', user.id) === null) {
+          this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
+        }
+        this.identityRepository.ensureWallet('user', user.id)
+        if (user.localAuth && !this.identityRepository.findAuthIdentityByUser(user.id, 'password', 'moss')) {
+          this.identityRepository.createAuthIdentity({
+            id: randomUUID(), orgId: user.orgId, userId: user.id,
+            provider: 'password', issuer: 'moss', normalizedSubject: user.name, metadata: {},
+          })
+        }
+      }
+    })
   }
 
   destroy(): void {
@@ -312,8 +708,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
 
@@ -368,8 +764,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const username = input.username?.trim() || ''
@@ -389,6 +785,9 @@ export class AuthService {
       throw new AuthServiceError(401, 'Invalid username/email or password')
     }
 
+    if (isLegacyPasswordHash(user.passwordHash)) {
+      await this.db.updateUserPassword(user.id, hashPassword(input.password), Date.now())
+    }
     await this.db.updateUserLastLogin(user.id)
     return this.issueToken({
       user,
@@ -418,8 +817,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const user = await this.db.getUserByPhone(phone)
@@ -458,8 +857,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const existing = await this.db.getUserByPhone(input.phone)
@@ -568,8 +967,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const value = apiKeyValue.trim()
@@ -971,8 +1370,8 @@ export class AuthService {
   }
 
   async getMe(auth: AuthContext): Promise<{
-    user: SanitizedAuthCenterUser | null
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection | null
+    organization: NativeOrganizationProjection | null
     scopes: string[]
     role: string
     key_id: string
@@ -983,8 +1382,8 @@ export class AuthService {
     // currently-selected org (auth.orgId), which is what the UI should show.
     const actor = await this.db.getUserById(auth.userId)
     return {
-      user: actor ? sanitizeUser(actor) : null,
-      organization: await this.db.getOrganization(auth.orgId),
+      user: actor ? this.projectUser(actor) : null,
+      organization: this.projectOrganization(await this.db.getOrganization(auth.orgId)),
       scopes: auth.scopes,
       role: auth.role,
       key_id: auth.keyId,
@@ -1027,10 +1426,10 @@ export class AuthService {
     orgId: string,
     auth?: AuthContext,
   ): Promise<{
-    users: SanitizedAuthCenterUser[]
+    users: NativeUserProjection[]
   }> {
     return {
-      users: (await this.listVisibleUsers(orgId, auth)).map(user => sanitizeUser(user)),
+      users: (await this.listVisibleUsers(orgId, auth)).map(user => this.projectUser(user)),
     }
   }
 
@@ -1070,7 +1469,7 @@ export class AuthService {
   // we translate that SQLite error into a clean 409 here.
 
   async listAllOrganizations(): Promise<{
-    organizations: Array<AuthCenterOrganization & {
+    organizations: Array<NativeOrganizationProjection & {
       userCount: number
       departmentCount: number
     }>
@@ -1078,7 +1477,7 @@ export class AuthService {
     const orgs = await this.db.listOrganizations()
     return {
       organizations: await Promise.all(orgs.map(async org => ({
-        ...org,
+        ...this.projectOrganization(org)!,
         userCount: await this.db.countUsersByOrg(org.id),
         departmentCount: await this.db.countDepartmentsByOrg(org.id),
       }))),
@@ -1087,9 +1486,11 @@ export class AuthService {
 
   async createOrganization(input: {
     name: string
+    code?: string | null
+    idempotencyKey?: string
     extOrgId?: string | null
   }): Promise<{
-    organization: AuthCenterOrganization & { userCount: number; departmentCount: number }
+    organization: NativeOrganizationProjection & { userCount: number; departmentCount: number }
   }> {
     const name = input.name.trim()
     const extOrgId = input.extOrgId?.trim() || null
@@ -1104,9 +1505,25 @@ export class AuthService {
     }
     const id = randomUUID()
     const createdAt = Date.now()
-    await withExtIdConflict(() => this.db.createOrganization(id, name, createdAt, extOrgId))
+    const code = input.code?.trim() || `moss-${id}`
+    await withExtIdConflict(async () => {
+      await this.db.createOrganization(id, name, createdAt, extOrgId)
+      this.identityRepository.putOrganizationProfile({
+        orgId: id,
+        code,
+        loginMethod: 'password',
+        localEnabled: true,
+        cloudEnabled: true,
+      })
+      this.identityRepository.allocateNumericAlias('enterprise', id, id)
+      this.identityRepository.ensureWallet('organization', id)
+    })
     return {
-      organization: { id, name, extOrgId, createdAt, userCount: 0, departmentCount: 0 },
+      organization: {
+        ...this.projectOrganization({ id, name, extOrgId, createdAt })!,
+        userCount: 0,
+        departmentCount: 0,
+      },
     }
   }
 
@@ -1400,6 +1817,10 @@ export class AuthService {
     role: string
     password: string
     extUserId?: string | null
+    phone?: string
+    status?: AuthCenterUser['status']
+    initialCreditUnits?: number
+    idempotencyKey?: string
   }, auth?: AuthContext): Promise<{
     user: SanitizedAuthCenterUser
   }> {
@@ -1444,28 +1865,63 @@ export class AuthService {
     // extUserId uniqueness is enforced by the partial UNIQUE
     // (users_ext_uniq); the constraint violation is translated to 409 below.
 
-    const createdAt = Date.now()
-    const userId = randomUUID()
-    const user: AuthCenterUser = {
-      id: userId,
+    const result = await withExtIdConflict(async () => this.unifiedIdentity.createUser({
       orgId: input.orgId,
-      email: email || createSyntheticUserEmail(userId),
-      name,
+      email,
+      username: name,
       displayName,
       departmentId,
-      role,
-      status: 'active',
-      localAuth: true,
-      tokenLimit: null,
-      createdAt,
-      passwordHash: hashPassword(input.password),
-      passwordUpdatedAt: createdAt,
-      lastLoginAt: null,
+      role: role as AuthRole,
+      password: input.password,
       extUserId,
-      phone: null,
-    }
-    await withExtIdConflict(() => this.db.createUser(user))
+      phone: input.phone,
+      status: input.status,
+      initialCreditUnits: input.initialCreditUnits,
+    }, onlineCommandContext(input.idempotencyKey ?? `moss-user:${randomUUID()}`)))
+    const user = await this.db.getUserById(result.userId)
+    if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
     return { user: sanitizeUser(user) }
+  }
+
+  async createProvisionedUser(input: Parameters<AuthService['createUser']>[0], auth?: AuthContext): Promise<{
+    user: SanitizedAuthCenterUser
+  }> {
+    if (!this.sudorouterAccounts) return this.createUser(input, auth)
+
+    const idempotencyKey = input.idempotencyKey ?? `moss-user:${randomUUID()}`
+    const previous = this.identityRepository.getCommandResult<{ userId: string }>(
+      'identity.create_user', idempotencyKey,
+    )
+    let user = previous ? await this.db.getUserById(previous.userId) : null
+    if (user && (user.orgId !== input.orgId || user.name !== input.name.trim())) {
+      throw new AuthServiceError(409, 'Idempotency key already used for another user')
+    }
+    if (!user) {
+      const created = await this.createUser({
+        ...input,
+        phone: input.phone?.trim() || input.name.trim(),
+        status: 'pending',
+        initialCreditUnits: quotaToPoints(this.sudorouterAccounts.initialQuotaUnits),
+        idempotencyKey,
+      }, auth)
+      user = await this.db.getUserById(created.user.id)
+    }
+    if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
+
+    await this.sudorouterAccounts.accountProvisioner.ensureAccount({
+      ownerId: user.id,
+      orgId: user.orgId,
+      username: user.name,
+      displayName: resolveDisplayName(user),
+      initialQuotaUnits: this.sudorouterAccounts.initialQuotaUnits,
+    }, onlineCommandContext(idempotencyKey))
+
+    if (user.status === 'pending') {
+      await this.db.updateUser(user.id, { status: 'active' })
+    }
+    const active = await this.db.getUserById(user.id)
+    if (!active) throw new AuthServiceError(500, 'Created user could not be loaded')
+    return { user: sanitizeUser(active) }
   }
 
   async updateUser(input: {
@@ -1491,7 +1947,7 @@ export class AuthService {
       displayName?: string | null
       departmentId?: string | null
       role?: AuthRole
-      status?: 'active' | 'disabled'
+      status?: AuthCenterUser['status']
       extUserId?: string | null
     } = {}
 
@@ -1933,8 +2389,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const orgId = input.orgIdOverride ?? input.user.orgId
@@ -1975,13 +2431,54 @@ export class AuthService {
       refresh_token: refresh.token,
       token_type: 'Bearer',
       expires_in: access.expiresAt - Math.floor(Date.now() / 1000),
-      user: {
-        ...sanitizeUser(input.user),
-        name: resolveDisplayName(input.user),
-        displayName: input.user.displayName ?? null,
-      },
-      organization: await this.db.getOrganization(orgId),
+      user: this.projectUser(input.user),
+      organization: this.projectOrganization(await this.db.getOrganization(orgId)),
       scopes: input.scopes,
+    }
+  }
+
+  private projectUser(user: AuthCenterUser): NativeUserProjection {
+    const wallet = this.identityRepository.getWallet('user', user.id)
+    return {
+      ...sanitizeUser(user),
+      name: resolveDisplayName(user),
+      displayName: user.displayName ?? null,
+      legacyId: this.identityRepository.getNumericAlias('user', user.id),
+      balanceUnits: wallet?.balanceUnits ?? 0,
+    }
+  }
+
+  private projectOrganization(org: AuthCenterOrganization | null): NativeOrganizationProjection | null {
+    if (!org) return null
+    return {
+      ...org,
+      legacyId: this.identityRepository.getNumericAlias('enterprise', org.id),
+      code: this.identityRepository.getOrganizationProfile(org.id)?.code ?? null,
+    }
+  }
+
+  private buildSudoworkVisibilityFilter(
+    actor: import('../identity/organizationIdentityService.js').IdentityActor,
+  ): VisibilityFilter {
+    if (actor.role === 'admin' || actor.role === 'super_admin') {
+      return {
+        isAdmin: true,
+        userId: actor.userId,
+        departmentId: null,
+        role: actor.role,
+        visibleDepartmentIds: null,
+      }
+    }
+    const row = this.db.db
+      .prepare('SELECT department_id FROM users WHERE id = ? AND org_id = ? LIMIT 1')
+      .get(actor.userId, actor.orgId) as { department_id?: string | null } | undefined
+    const departmentId = row?.department_id ?? null
+    return {
+      isAdmin: false,
+      userId: actor.userId,
+      departmentId,
+      role: actor.role,
+      visibleDepartmentIds: departmentId ? new Set([departmentId]) : new Set(),
     }
   }
 

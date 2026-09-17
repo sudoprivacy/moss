@@ -172,7 +172,7 @@ export function createMcpUserConfigApi(deps: McpUserConfigDeps) {
       return { success: true }
     },
 
-    async getResolvedEnvAndHeaders(server: { template_id: string | null; org_id: string }, userId: string): Promise<{ env: Record<string, string>; headers: Record<string, string> }> {
+    async getResolvedEnvAndHeaders(server: { id?: string; template_id: string | null; org_id: string }, userId: string): Promise<{ env: Record<string, string>; headers: Record<string, string> }> {
       const schema = await getSchemaForServer(server)
       if (schema.length === 0) return { env: {}, headers: {} }
 

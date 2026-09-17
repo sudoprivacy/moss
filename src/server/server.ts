@@ -80,11 +80,12 @@ const FUIOU_MERCHANT_PRIVATE_KEY: ConfigKey = 'server.fuiou-merchant-private-key
 const FUIOU_PUBLIC_KEY: ConfigKey = 'server.fuiou-public-key'
 import { initHubConfig } from './hubConfig.js'
 
-/** server.json 侧 10 个 Nexus 字段的凭据页元数据（分组 + 原文件路径标注）。 */
+/** Nexus-backed server credential metadata exposed as masked administration fields. */
 const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   key: ConfigKey
-  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudorouter' | 'fuiou' | 'sms'
+  group: 'hub' | 'wikiIndex' | 'cabin' | 'sudowork' | 'billing' | 'qms'
   path: string
+  restartRequired?: boolean
 }> = [
   { key: 'server.hub-authorization', group: 'hub', path: 'hub.authorization' },
   { key: 'server.wiki-index-resource-token-secret', group: 'wikiIndex', path: 'wikiIndex.resourceTokenSecret' },
@@ -96,11 +97,26 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.cabin-control-auth', group: 'cabin', path: 'cabin.controlAuth' },
   { key: 'server.cabin-broadcast-api-key', group: 'cabin', path: 'cabin.broadcastApiKey' },
   { key: 'server.cabin-broadcast-auth', group: 'cabin', path: 'cabin.broadcastAuth' },
-  { key: 'server.sudorouter-admin-token', group: 'sudorouter', path: 'systemConfig.sudorouterAdminToken' },
-  { key: 'server.fuiou-merchant-private-key', group: 'fuiou', path: 'systemConfig.recharge.fuiou.merchantPrivateKey' },
-  { key: 'server.fuiou-public-key', group: 'fuiou', path: 'systemConfig.recharge.fuiou.publicKey' },
-  { key: 'server.sms-secret-id', group: 'sms', path: 'phoneAuth.tencent.secretId' },
-  { key: 'server.sms-secret-key', group: 'sms', path: 'phoneAuth.tencent.secretKey' },
+  { key: 'server.sudowork-legacy-jwt-secret', group: 'sudowork', path: 'sudoworkCompatibility.legacyJwtSecret', restartRequired: true },
+  { key: 'server.sudowork-redis-url', group: 'sudowork', path: 'sudoworkCompatibility.redisUrl', restartRequired: true },
+  { key: 'server.sms-secret-id', group: 'sudowork', path: 'phoneAuth.tencent.secretId' },
+  { key: 'server.sms-secret-key', group: 'sudowork', path: 'phoneAuth.tencent.secretKey' },
+  { key: 'server.sudowork-tencent-secret-id', group: 'sudowork', path: 'sudoworkCompatibility.sms.secretId', restartRequired: true },
+  { key: 'server.sudowork-tencent-secret-key', group: 'sudowork', path: 'sudoworkCompatibility.sms.secretKey', restartRequired: true },
+  { key: 'dify.system-token', group: 'sudowork', path: 'sudoworkCompatibility.dify.systemToken', restartRequired: true },
+  { key: 'dify.system-secret', group: 'sudowork', path: 'sudoworkCompatibility.dify.provisionSecret', restartRequired: true },
+  { key: 'dify.sso-secret', group: 'sudowork', path: 'sudoworkCompatibility.dify.ssoSecret', restartRequired: true },
+  { key: 'server.sudorouter-admin-token', group: 'billing', path: 'systemConfig.sudorouterAdminToken' },
+  { key: 'server.sudorouter-api-token', group: 'billing', path: 'billing.sudorouter.apiToken' },
+  { key: 'server.fuiou-merchant-private-key', group: 'billing', path: 'systemConfig.recharge.fuiou.merchantPrivateKey' },
+  { key: 'server.fuiou-public-key', group: 'billing', path: 'systemConfig.recharge.fuiou.publicKey' },
+  { key: 'server.qms-postgres-url', group: 'qms', path: 'qms.postgresUrl', restartRequired: true },
+  { key: 'server.qms-redis-url', group: 'qms', path: 'qms.redisUrl', restartRequired: true },
+  { key: 'server.qms-api-key', group: 'qms', path: 'qms.apiKey', restartRequired: true },
+  { key: 'server.qms-telemetry-private-key', group: 'qms', path: 'qms.privateKeyPem', restartRequired: true },
+  { key: 'server.qms-telemetry-public-key', group: 'qms', path: 'qms.publicKeyPem', restartRequired: true },
+  { key: 'server.qms-lark-webhook-url', group: 'qms', path: 'qms.larkWebhookUrl' },
+  { key: 'server.qms-smtp-url', group: 'qms', path: 'qms.smtpUrl' },
 ]
 import {
   createCustomAssistant,
@@ -215,8 +231,11 @@ import { CabinStore } from './cabin/store.js'
 import { CabinFlightAutomation } from './cabin/automation.js'
 import { CabinHealthReportService } from './cabin/healthReports.js'
 import { CabinLogger } from './cabin/logger.js'
+import { createHostDispatch } from './api/compat/sudowork/hostDispatch.js'
 
 type JsonBody = Record<string, unknown>
+
+type HonoFetch = (request: Request) => Response | Promise<Response>
 
 type MossWorkspaceNode = {
   name: string
@@ -2049,6 +2068,14 @@ export function startServer(
   authService: AuthService,
   logger: ServerLogger = createServerLogger(),
   nexusClient?: NexusClient,
+  sudoworkCompatibility?: {
+    hosts: readonly string[]
+    fetch: HonoFetch
+    routes: readonly { method: string; path: string }[]
+  },
+  mossOperations?: {
+    fetch: HonoFetch
+  },
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -2489,7 +2516,7 @@ export function startServer(
   // existing WS/SSE connections are kept alive during the grace window.
   let draining = false
 
-  const server = http.createServer(async (req, res) => {
+  const mossHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
     try {
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
@@ -7845,6 +7872,7 @@ export function startServer(
             path: field.path,
             set: Boolean(value),
             masked: value ? maskConfigValue(value) : null,
+            restart_required: field.restartRequired === true,
           }
         })
         writeJson(res, 200, { items })
@@ -10344,7 +10372,14 @@ export function startServer(
     } catch (error) {
       writeError(logger, res, error)
     }
-  })
+  }
+  const server = http.createServer(createHostDispatch({
+    sudoworkHosts: sudoworkCompatibility?.hosts,
+    sudoworkFetch: sudoworkCompatibility?.fetch,
+    sudoworkRoutes: sudoworkCompatibility?.routes,
+    mossOperationsFetch: mossOperations?.fetch,
+    mossHandler,
+  }))
 
   server.on('upgrade', (req, socket, head) => {
     void (async () => {

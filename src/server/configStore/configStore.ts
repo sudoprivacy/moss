@@ -36,10 +36,30 @@ export const CONFIG_KEYS = [
   'server.cabin-broadcast-api-key',
   'server.cabin-broadcast-auth',
   'server.sudorouter-admin-token',
+  'server.sudorouter-api-token',
   'server.fuiou-merchant-private-key',
   'server.fuiou-public-key',
   'server.sms-secret-id',
   'server.sms-secret-key',
+  'server.sudowork-tencent-secret-id',
+  'server.sudowork-tencent-secret-key',
+  'server.sudowork-legacy-jwt-secret',
+  'server.sudowork-redis-url',
+  'client.log-report-key',
+  'client.product-improvement-api-key',
+  'client.product-improvement-public-key',
+  'dify.sso-secret',
+  'dify.system-secret',
+  'dify.system-token',
+  'qms.default-api-key',
+  'server.qms-postgres-url',
+  'server.qms-redis-url',
+  'server.qms-api-key',
+  'qms.telemetry-private-key',
+  'server.qms-telemetry-private-key',
+  'server.qms-telemetry-public-key',
+  'server.qms-lark-webhook-url',
+  'server.qms-smtp-url',
 ] as const
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number]
@@ -155,6 +175,186 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
     ignoreEnvGate: false,
     apply: (config, value) => {
       config.cabin.broadcastAuth = value || undefined
+    },
+  },
+  {
+    key: 'server.sudorouter-admin-token',
+    envName: 'SUDOROUTER_ADMIN_TOKEN',
+    ignoreEnvGate: false,
+    apply: () => {},
+  },
+  {
+    key: 'server.sudorouter-api-token',
+    envName: 'SUDOROUTER_API_TOKEN',
+    ignoreEnvGate: false,
+    apply: () => {},
+  },
+  {
+    key: 'server.fuiou-merchant-private-key',
+    envName: 'FUIOU_MERCHANT_PRIVATE_KEY',
+    ignoreEnvGate: false,
+    apply: () => {},
+  },
+  {
+    key: 'server.fuiou-public-key',
+    envName: 'FUIOU_PUBLIC_KEY',
+    ignoreEnvGate: false,
+    apply: () => {},
+  },
+  {
+    key: 'server.sms-secret-id',
+    envName: 'TENCENT_SECRET_ID',
+    ignoreEnvGate: false,
+    apply: () => {},
+  },
+  {
+    key: 'server.sms-secret-key',
+    envName: 'TENCENT_SECRET_KEY',
+    ignoreEnvGate: false,
+    apply: () => {},
+  },
+  {
+    key: 'server.sudowork-legacy-jwt-secret',
+    envName: 'SUDOWORK_LEGACY_JWT_SECRET',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.legacyJwtSecret = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-redis-url',
+    envName: 'SUDOWORK_REDIS_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.redisUrl = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-tencent-secret-id',
+    envName: 'SUDOWORK_TENCENT_SECRET_ID',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.sms.secretId = value || undefined
+    },
+  },
+  {
+    key: 'server.sudowork-tencent-secret-key',
+    envName: 'SUDOWORK_TENCENT_SECRET_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.sms.secretKey = value || undefined
+    },
+  },
+  {
+    key: 'dify.system-token',
+    envName: 'DIFY_SYSTEM_TOKEN',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.dify.systemToken = value || undefined
+    },
+  },
+  {
+    key: 'dify.system-secret',
+    envName: 'DIFY_SYSTEM_SECRET',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.dify.provisionSecret = value || undefined
+    },
+  },
+  {
+    key: 'dify.sso-secret',
+    envName: 'DIFY_SSO_SECRET',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.sudoworkCompatibility) return
+      config.sudoworkCompatibility.dify.ssoSecret = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-postgres-url',
+    envName: 'QMS_POSTGRES_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.postgresUrl = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-redis-url',
+    envName: 'QMS_REDIS_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.redisUrl = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-api-key',
+    envName: 'QMS_API_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.apiKey = value || undefined
+    },
+  },
+  {
+    key: 'qms.default-api-key',
+    envName: 'QMS_DEFAULT_API_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      if (!config.qms.secrets.apiKey) config.qms.secrets.apiKey = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-telemetry-private-key',
+    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.privateKeyPem = value || undefined
+    },
+  },
+  {
+    key: 'qms.telemetry-private-key',
+    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      if (!config.qms.secrets.privateKeyPem) config.qms.secrets.privateKeyPem = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-telemetry-public-key',
+    envName: 'QMS_TELEMETRY_PUBLIC_KEY',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.publicKeyPem = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-lark-webhook-url',
+    envName: 'QMS_LARK_WEBHOOK_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.larkWebhookUrl = value || undefined
+    },
+  },
+  {
+    key: 'server.qms-smtp-url',
+    envName: 'QMS_SMTP_URL',
+    ignoreEnvGate: false,
+    apply: (config, value) => {
+      if (!config.qms) return
+      config.qms.secrets.smtpUrl = value || undefined
     },
   },
 ]

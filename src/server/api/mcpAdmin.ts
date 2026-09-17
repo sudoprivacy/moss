@@ -234,13 +234,13 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
       // 补全可枚举字段的默认值(与前端 wizard Select 默认值一致)
       const resolvedInput: McpServerInput = {
+        ...input,
         scope: input.scope ?? 'org',
         owner_type: input.owner_type ?? 'system',
         mcp_type: input.mcp_type ?? 'http',
         risk_level: input.risk_level ?? 'low',
         auth_type: input.auth_type ?? 'none',
         timeout_ms: input.timeout_ms ?? 30000,
-        ...input,
       }
 
       // Auto-fill owner_id when scope=org and owner_type=system

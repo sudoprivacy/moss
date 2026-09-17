@@ -4,12 +4,14 @@ import { hasScope } from './auth/token.js'
 export type VisibleTo = {
   department_ids?: string[] | null
   user_ids?: string[] | null
+  role_ids?: string[] | null
 } | null
 
 export type VisibilityFilter = {
   isAdmin: boolean
   userId: string
   departmentId: string | null
+  role?: string
   visibleDepartmentIds: Set<string> | null
 }
 
@@ -35,7 +37,18 @@ export function isVisibleTo(
     }
   }
 
-  // 4. 检查部门白名单
+  // 4. 检查角色白名单（旧 Sudowork/Dify ACL 兼容字段）
+  const roleIds = visibleTo.role_ids ?? null
+  if (roleIds !== null) {
+    if (roleIds.length === 0) {
+      return false
+    }
+    if (filter.role && roleIds.includes(filter.role)) {
+      return true
+    }
+  }
+
+  // 5. 检查部门白名单
   const departmentIds = visibleTo.department_ids ?? null
   if (departmentIds !== null) {
     if (departmentIds.length === 0) {
@@ -68,7 +81,7 @@ export async function buildVisibilityFilter(
     auth.role === 'super_admin' ||
     hasScope(auth.scopes, '*')
   if (isAdmin) {
-    return { isAdmin: true, userId: auth.userId, departmentId: null, visibleDepartmentIds: null }
+    return { isAdmin: true, userId: auth.userId, departmentId: null, role: auth.role, visibleDepartmentIds: null }
   }
 
   const user = await getUserByIdAndOrg(auth.userId, auth.orgId)
@@ -80,7 +93,7 @@ export async function buildVisibilityFilter(
     listDepartmentsByOrg,
   )
 
-  return { isAdmin: false, userId: auth.userId, departmentId, visibleDepartmentIds }
+  return { isAdmin: false, userId: auth.userId, departmentId, role: auth.role, visibleDepartmentIds }
 }
 
 /**

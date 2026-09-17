@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moss.local/contracts/sudowork/supported-clients.schema.json",
+  "title": "Sudowork supported client matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_status", "clients"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "policy_status": { "enum": ["candidate", "confirmed"] },
+    "clients": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "product_version",
+          "git_ref",
+          "commit",
+          "channel",
+          "targets",
+          "auth_profiles",
+          "capabilities",
+          "support_status"
+        ],
+        "properties": {
+          "product_version": { "type": "string", "minLength": 1 },
+          "git_ref": { "type": "string", "minLength": 1 },
+          "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "channel": { "enum": ["stable", "nightly", "private", "development"] },
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["platform", "architecture"],
+              "properties": {
+                "platform": { "enum": ["darwin", "win32", "linux"] },
+                "architecture": { "enum": ["arm64", "x64"] }
+              }
+            }
+          },
+          "auth_profiles": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": ["password", "sms", "cas", "login_by_config", "refresh_token", "oauth2"]
+            }
+          },
+          "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "enum": ["local", "cloud", "dify", "cron", "channel"] }
+          },
+          "support_status": { "enum": ["candidate", "supported", "unsupported"] }
+        }
+      }
+    }
+  }
+}

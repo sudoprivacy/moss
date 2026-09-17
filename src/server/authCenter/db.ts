@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'crypto'
+import { compareSync as compareBcryptSync } from 'bcryptjs'
 import { mkdirSync } from 'fs'
 import { dirname, join } from 'path'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
@@ -6,6 +7,7 @@ import { SqliteDriver, type DbDriver, type SqlParam } from '../db/driver.js'
 import type { DirectConnectStore } from '../db.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import type { RechargeOrder, RechargeSyncStatus, RefundRecord } from '../credits/recharge.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -25,6 +27,8 @@ export type AuthCenterDepartment = {
   updatedAt: number
 }
 
+export type AuthCenterUserStatus = 'pending' | 'active' | 'locked' | 'disabled'
+
 export type AuthCenterUser = {
   id: string
   orgId: string
@@ -35,7 +39,7 @@ export type AuthCenterUser = {
   displayName: string | null
   departmentId: string | null
   role: string
-  status: 'active' | 'disabled'
+  status: AuthCenterUserStatus
   localAuth: boolean
   tokenLimit: number | null
   createdAt: number
@@ -44,7 +48,7 @@ export type AuthCenterUser = {
   lastLoginAt: number | null
   extUserId: string | null
   /** Phone identity for `login_method: 0`; null for password- and IdP-backed users. */
-  phone: string | null
+  phone?: string | null
 }
 
 /**
@@ -184,7 +188,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     displayName: row.display_name == null ? null : String(row.display_name),
     departmentId: row.department_id == null ? null : String(row.department_id),
     role: String(row.role),
-    status: String(row.status) as 'active' | 'disabled',
+    status: String(row.status) as AuthCenterUserStatus,
     localAuth: Boolean(row.local_auth),
     tokenLimit: row.token_limit == null ? null : Number(row.token_limit),
     createdAt: Number(row.created_at),
@@ -381,7 +385,7 @@ export class AuthCenterDb {
         name TEXT NOT NULL,
         department_id TEXT REFERENCES departments(id),
         role TEXT NOT NULL DEFAULT 'user',
-        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'locked', 'disabled')),
         password_hash TEXT,
         password_updated_at INTEGER,
         last_login_at INTEGER,
@@ -665,6 +669,7 @@ export class AuthCenterDb {
       'sudorouter_key',
       'ALTER TABLE users ADD COLUMN sudorouter_key TEXT',
     )
+    this.ensureUserStatusCompatibility()
     this.ensureColumn(
       'departments',
       'ext_dept_id',
@@ -727,6 +732,55 @@ export class AuthCenterDb {
     if (hasColumn) {
       this.db.exec(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`)
     }
+  }
+
+  private ensureUserStatusCompatibility(): void {
+    const row = this.db.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'users'
+      LIMIT 1
+    `).get() as SqlRow | undefined
+    const sql = typeof row?.sql === 'string' ? row.sql : ''
+    if (!sql || sql.includes("'pending'")) {
+      return
+    }
+    this.db.exec(`
+      PRAGMA foreign_keys=OFF;
+      CREATE TABLE users_status_migration (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        display_name TEXT,
+        department_id TEXT REFERENCES departments(id),
+        role TEXT NOT NULL DEFAULT 'user',
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'locked', 'disabled')),
+        local_auth INTEGER NOT NULL DEFAULT 0,
+        token_limit INTEGER,
+        password_hash TEXT,
+        password_updated_at INTEGER,
+        last_login_at INTEGER,
+        created_at INTEGER NOT NULL,
+        ext_user_id TEXT,
+        phone TEXT,
+        sudorouter_user_id TEXT,
+        sudorouter_key TEXT
+      );
+      INSERT INTO users_status_migration (
+        id, org_id, email, name, display_name, department_id, role, status, local_auth, token_limit,
+        password_hash, password_updated_at, last_login_at, created_at, ext_user_id, phone,
+        sudorouter_user_id, sudorouter_key
+      )
+      SELECT
+        id, org_id, email, name, display_name, department_id, role, status, local_auth, token_limit,
+        password_hash, password_updated_at, last_login_at, created_at, ext_user_id, phone,
+        sudorouter_user_id, sudorouter_key
+      FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_status_migration RENAME TO users;
+      PRAGMA foreign_keys=ON;
+    `)
   }
 
   close(): void {
@@ -909,9 +963,10 @@ export class AuthCenterDb {
   // User operations
   async createUser(user: AuthCenterUser): Promise<void> {
     await this.driver.run(`
-      INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, password_hash,
-                         password_updated_at, last_login_at, created_at, ext_user_id, phone)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, local_auth,
+                         token_limit, password_hash, password_updated_at, last_login_at, created_at,
+                         ext_user_id, phone)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       user.id,
       user.orgId,
@@ -921,6 +976,8 @@ export class AuthCenterDb {
       user.departmentId,
       user.role,
       user.status,
+      user.localAuth ? 1 : 0,
+      user.tokenLimit,
       user.passwordHash,
       user.passwordUpdatedAt,
       user.lastLoginAt,
@@ -928,6 +985,12 @@ export class AuthCenterDb {
       user.extUserId ?? null,
       user.phone ?? null,
     ])
+  }
+
+  async deleteUser(id: string): Promise<void> {
+    await this.driver.run(`
+      DELETE FROM users WHERE id = ?
+    `, [id])
   }
 
   async getUserById(id: string): Promise<AuthCenterUser | null> {
@@ -1440,7 +1503,7 @@ export class AuthCenterDb {
       orgId?: string
       departmentId?: string | null
       role?: string
-      status?: 'active' | 'disabled'
+      status?: AuthCenterUserStatus
       extUserId?: string | null
     },
   ): Promise<void> {
@@ -1921,6 +1984,9 @@ export function verifyPassword(
   if (!passwordHash) {
     return false
   }
+  if (isLegacyPasswordHash(passwordHash)) {
+    return compareBcryptSync(password, passwordHash)
+  }
   const match = passwordHash.match(/^scrypt\$([^$]+)\$([0-9a-f]+)$/)
   if (!match) {
     return false
@@ -1934,6 +2000,10 @@ export function verifyPassword(
   return (
     actual.length === expected.length && timingSafeEqual(actual, expected)
   )
+}
+
+export function isLegacyPasswordHash(passwordHash: string | null | undefined): boolean {
+  return typeof passwordHash === 'string' && /^\$2[aby]\$\d{2}\$/.test(passwordHash)
 }
 
 export function createTemporaryPassword(length = 20): string {
