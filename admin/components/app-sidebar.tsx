@@ -339,16 +339,23 @@ export function AppSidebar() {
             if (open) { next.add(item.title) } else { next.delete(item.title) }
             setExpandedMenus(next)
           }}>
-            <CollapsibleTrigger className={cn(
+            {/* The label navigates to the section's own page; only the chevron
+                toggles. A trigger that covers the whole row makes a parent with
+                a real `url` unreachable by clicking its name. */}
+            <div className={cn(
               'flex items-center gap-3 px-3 py-2 rounded-md text-sm w-full transition-colors text-left',
               isAnyChildActive
                 ? 'bg-primary/10 text-primary font-medium'
                 : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
             )}>
-              <item.icon className="size-4" />
-              <span className="flex-1">{item.title}</span>
-              <ChevronRight className={cn('size-3.5 transition-transform', isExpanded && 'rotate-90')} />
-            </CollapsibleTrigger>
+              <Link to={item.url} className="flex items-center gap-3 flex-1 min-w-0">
+                <item.icon className="size-4" />
+                <span className="flex-1 truncate">{item.title}</span>
+              </Link>
+              <CollapsibleTrigger aria-label={`${item.title} 展开/收起`} className="shrink-0">
+                <ChevronRight className={cn('size-3.5 transition-transform', isExpanded && 'rotate-90')} />
+              </CollapsibleTrigger>
+            </div>
             <CollapsibleContent>
               <ul className="space-y-0.5 mt-1 ml-4">
                 {visibleChildren.map(child => {
