@@ -2203,56 +2203,6 @@ export function startServer(
           // so making the admin name it would be busywork. Resolved
           // lazily so a missing or IP-blocked app costs names, never the
           // transcript itself.
-          if (pull.resolveNames) {
-            /** The same-corp self-built app, resolved lazily per call. */
-            const resolveSiblingApp = async () => {
-              const appRow = runtime.store
-                .listAllCorpAppsByType('wecomapp')
-                .find(
-                  (r) =>
-                    String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
-                    String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
-                      String(JSON.parse(String(row.config_json ?? '{}')).corpId ?? ''),
-                ) as Record<string, unknown> | undefined
-              if (!appRow) return null
-              const { createCorpApp } = await import('./corpapps/types.js')
-              const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
-              const appCreds =
-                typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
-                  ? await readSecret(appRow.credentials_secret_key)
-                  : {}
-              const appConn = createCorpApp(String(appRow.type))
-              await appConn.init(appCfg, appCreds)
-              return appConn
-            }
-
-            // Group names: one request per newly seen room (see
-            // updateRooms), never a scan — a corp can have tens of
-            // thousands of groups, and the archive only ever touches the
-            // handful it has actually recorded.
-            pull.roomNameLookup = async (roomId: string) => {
-              try {
-                const appConn = await resolveSiblingApp()
-                if (!appConn?.getCustomerGroup) return null
-                const r = await appConn.getCustomerGroup(roomId, false)
-                const g = (r.group_chat ?? r.groupChat ?? r) as Record<string, unknown>
-                const name = g?.name
-                return typeof name === 'string' && name ? name : null
-              } catch {
-                // Internal groups answer 90501 here; that is expected, not
-                // an error worth surfacing per room.
-                return null
-              }
-            }
-            pull.nameLookup = async (id: string, external: boolean) => {
-              try {
-                const appConn = await resolveSiblingApp()
-                return appConn?.getUserName ? await appConn.getUserName(id, external) : null
-              } catch {
-                return null
-              }
-            }
-          }
           configs.push(pull)
         }
       } catch (err) {
@@ -5380,6 +5330,56 @@ export function startServer(
             ? body.mentionedList.map((u: unknown) => String(u || '').trim()).filter(Boolean)
             : undefined,
         }))
+        return
+      }
+
+      // Resolve ids to display names on demand.
+      //
+      // Names are deliberately NOT stored in the transcript: filling them
+      // at archive time cost a WeCom round trip (~500ms) per distinct id
+      // per pull — ~11s of blocking for a 20-person group, repeated every
+      // pull forever. Asking here instead means a reader pays only for
+      // the names it actually wants, and `roomId` lets one call name a
+      // whole group at once.
+      const agentCorpAppNamesMatch = pathname.match(
+        /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/names$/,
+      )
+      if (req.method === 'POST' && agentCorpAppNamesMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppNamesMatch[1] || '')
+        if (!row) return
+        const body = await readJsonBody(req)
+        const userIds = Array.isArray(body.userIds)
+          ? (body.userIds as unknown[]).filter((x): x is string => typeof x === 'string')
+          : []
+        const roomIds = Array.isArray(body.roomIds)
+          ? (body.roomIds as unknown[]).filter((x): x is string => typeof x === 'string')
+          : []
+        const roomId = typeof body.roomId === 'string' ? body.roomId : undefined
+        if (userIds.length === 0 && roomIds.length === 0) {
+          writeJson(res, 400, {
+            error: { code: 'invalid_payload', message: 'userIds 或 roomIds 至少要有一个' },
+          })
+          return
+        }
+        try {
+          const connector = await initCorpAppConnector(row)
+          const out: { users?: Record<string, string>; rooms?: Record<string, string> } = {}
+          if (userIds.length > 0) {
+            out.users = connector.resolveNames
+              ? await connector.resolveNames(userIds, roomId)
+              : Object.fromEntries(userIds.map((id) => [id, id]))
+          }
+          if (roomIds.length > 0) {
+            out.rooms = connector.resolveRoomNames
+              ? await connector.resolveRoomNames(roomIds)
+              : Object.fromEntries(roomIds.map((id) => [id, id]))
+          }
+          writeJson(res, 200, out)
+        } catch (err) {
+          writeJson(res, 502, {
+            error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) },
+          })
+        }
         return
       }
 

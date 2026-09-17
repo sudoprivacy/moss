@@ -67,10 +67,6 @@ export type ChatRecord = {
    * already durable, and its outcome lives in media/<day>.index.jsonl
    * keyed by msgid (see mediaIndex.ts).
    */
-  /** Display name of `from`, resolved at archive time (see users.ts). */
-  fromName?: string
-  /** Display names parallel to `to`; an entry is the raw id if unresolved. */
-  toNames?: string[]
 }
 
 /** Bucket name for 1:1 (non-group) conversations, which have no roomid. */
@@ -239,15 +235,6 @@ export type RoomMeta = {
   dir: string
   count: number
   lastSeen: number
-  /**
-   * Group display name, re-resolved on every pull that touches the room.
-   *
-   * Falls back to the roomid when the lookup fails — internal groups
-   * answer 90501 on the customer-group API, so those keep showing the id.
-   * Not cached across pulls: groups get renamed, and a stale name is
-   * worse than one extra request per room per pull.
-   */
-  name?: string
 }
 
 /**
@@ -255,16 +242,7 @@ export type RoomMeta = {
  * and humans: without it, discovering which rooms exist means walking a
  * directory of opaque hashed names.
  */
-export async function updateRooms(
-  corpAppId: string,
-  records: ChatRecord[],
-  /**
-   * Resolves a roomid to a group name. Called only for rooms that have no
-   * name yet, so the cost is one request per newly seen group — not a
-   * scan of the corp's groups, which can number in the tens of thousands.
-   */
-  nameLookup?: (roomId: string) => Promise<string | null>,
-): Promise<void> {
+export async function updateRooms(corpAppId: string, records: ChatRecord[]): Promise<void> {
   if (records.length === 0) return
   const file = path.join(appDir(corpAppId), 'rooms.json')
   let rooms: Record<string, RoomMeta> = {}
@@ -282,21 +260,6 @@ export async function updateRooms(
     rooms[roomid] = cur
   }
 
-  if (nameLookup) {
-    // Only rooms touched by THIS batch, and only real groups — a 1:1 chat
-    // has no roomid and therefore no group name to fetch. Rooms already
-    // carrying a name are refreshed too, since groups get renamed.
-    const touched = new Set(records.map((r) => r.roomid).filter((id) => id && id !== DIRECT_BUCKET))
-    for (const roomid of touched) {
-      const meta = rooms[roomid]
-      if (!meta) continue
-      try {
-        meta.name = (await nameLookup(roomid)) ?? roomid
-      } catch {
-        meta.name = roomid
-      }
-    }
-  }
   await fsp.mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.tmp`
   await fsp.writeFile(tmp, JSON.stringify(rooms, null, 2), 'utf8')

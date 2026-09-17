@@ -156,7 +156,6 @@ export class WeComMsgAuditConnector implements CorpAppConnector {
       roomFilterRaw: this.roomFilterRaw,
       mediaTypesRaw: this.mediaEnabled ? 'all' : '',
       mediaMaxBytes: this.mediaMaxBytes,
-      resolveNames: this.mediaEnabled,
     }
   }
 

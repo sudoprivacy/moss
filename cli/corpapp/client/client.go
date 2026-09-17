@@ -358,6 +358,31 @@ func (c *Client) ListCustomerGroups(id string, owner []string, cursor string, li
 	return raw, nil
 }
 
+// ResolveNames maps userids and/or roomids to display names.
+//
+// Names are not stored in archived transcripts — resolving them at
+// archive time cost one WeCom round trip per id per pull. Passing roomID
+// alongside userIDs lets the server name a whole group roster in a single
+// provider call. Ids that cannot be resolved map to themselves, so the
+// result is always safe to render directly.
+func (c *Client) ResolveNames(id string, userIDs []string, roomIDs []string, roomID string) (json.RawMessage, error) {
+	body := map[string]any{}
+	if len(userIDs) > 0 {
+		body["userIds"] = userIDs
+	}
+	if len(roomIDs) > 0 {
+		body["roomIds"] = roomIDs
+	}
+	if roomID != "" {
+		body["roomId"] = roomID
+	}
+	var raw json.RawMessage
+	if err := c.post(c.PathPrefix+"/"+url.PathEscape(id)+"/names", body, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // GetCustomerGroup returns one customer group's raw detail, including the
 // member list (type 1 = internal staff, 2 = external contact).
 func (c *Client) GetCustomerGroup(id, chatID string, needName bool) (json.RawMessage, error) {

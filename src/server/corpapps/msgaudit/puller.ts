@@ -25,7 +25,6 @@ import {
 } from './store.js'
 import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
 import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
-import { resolveMissing, type NameLookup, type UserDirectory } from './users.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
 const PAGE_LIMIT = 1000
@@ -97,19 +96,6 @@ export type PullConfig = {
   mediaTypesRaw?: string
   /** Skip files larger than this (bytes). 0 = no limit. */
   mediaMaxBytes?: number
-  /** Whether to resolve display names (paired with the media switch). */
-  resolveNames?: boolean
-  /**
-   * Resolves a userid to a display name. Supplied by the caller because
-   * the 会话存档 SDK has no directory API — it comes from a sibling
-   * self-built app, auto-discovered by corpId. Absent = keep raw ids.
-   */
-  nameLookup?: NameLookup
-  /**
-   * Resolves a roomid to a group name. Called once per newly seen room,
-   * so it costs one request per group rather than a scan of the corp.
-   */
-  roomNameLookup?: (roomId: string) => Promise<string | null>
 }
 
 export type PullResult = {
@@ -121,8 +107,6 @@ export type PullResult = {
   media: number
   /** Media downloads that were skipped or failed. */
   mediaFailed: number
-  /** Ids newly resolved to display names this run. */
-  namesResolved: number
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -176,15 +160,10 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let filtered = 0
   let media = 0
   let mediaFailed = 0
-  let namesResolved = 0
   let pages = 0
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
   const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
   const mediaMax = Number(cfg.mediaMaxBytes) > 0 ? Number(cfg.mediaMaxBytes) : 0
-  // Per-run only: names are mutable, so nothing is carried between pulls.
-  // This still deduplicates within a single run, where the same people
-  // appear across many messages.
-  const userDir: UserDirectory = {}
   const pendingMedia: MediaIndexEntry[] = []
 
   const sdk = openSdk(cfg.corpId, cfg.secret)
@@ -213,26 +192,9 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
         )
       }
 
-      // Names are resolved before the write so a transcript line carries
-      // its annotations from the start. Media is NOT: see below.
-      if (cfg.nameLookup) {
-        const ids = new Set<string>()
-        for (const rec of records) {
-          if (rec.from) ids.add(rec.from)
-          for (const id of rec.to) ids.add(id)
-        }
-        const r = await resolveMissing(userDir, ids, cfg.nameLookup)
-        namesResolved += r.resolved
-        for (const rec of records) {
-          // Fall back to the raw id so these fields are never blank.
-          if (rec.from) rec.fromName = userDir[rec.from] ?? rec.from
-          if (rec.to.length > 0) rec.toNames = rec.to.map((id) => userDir[id] ?? id)
-        }
-      }
-
       // Write first, then advance — see ORDERING above.
       const { written: w } = await appendRecords(cfg.corpAppId, records)
-      await updateRooms(cfg.corpAppId, records, cfg.roomNameLookup)
+      await updateRooms(cfg.corpAppId, records)
       written += w
 
       // Media is downloaded AFTER the transcript is durable, and its
@@ -304,5 +266,5 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     })
   }
 
-  return { fetched, written, failed, filtered, media, mediaFailed, namesResolved, cursor, pages }
+  return { fetched, written, failed, filtered, media, mediaFailed, cursor, pages }
 }

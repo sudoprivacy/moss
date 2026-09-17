@@ -181,7 +181,7 @@ wr_l7aCgAAoFEUD7y9cEvqAzpmL-WPWg, wr_l7aCgAAWRF4xBDPJEFfSmwIV3W3Mg
 修改后**下一轮拉取生效**（默认 5 分钟），不影响已归档的记录。日志会显示
 `filtered=N`。
 
-## 十、媒体文件与姓名解析
+## 十、媒体文件、姓名与群名
 
 ### 媒体下载
 
@@ -242,26 +242,33 @@ $MOSS_HOME/msgaudit/<corpAppId>/media/<YYYY-MM-DD>/<msgid>.<ext>
 实现细节：企微分片返回媒体，用 `outindexbuf` 作游标循环直到 `is_finish`。
 注意图片的大小字段是 `filesize`，而表情是 `imagesize`，两者不同。
 
-### 姓名解析
+### 姓名与群名：按需查询，不写进归档
 
-配置 `nameLookupApp` 填同企业下某个「企微自建应用」实例的名称，即可把 userid
-解析为姓名，写入记录的 `fromName` / `toNames`。
+归档记录里**只存 id**（`from`、`to`、`roomid`），不存姓名。
 
-会话存档 SDK 没有通讯录接口，只能借道自建应用的 REST API：内部成员走
-`/cgi-bin/user/get`，外部联系人走 `/cgi-bin/externalcontact/get`。该应用需在
-企微后台配置**可信 IP**，否则解析失败（记录保留原始 id，不影响归档本身）。
+原因是成本：归档时填充意味着每轮拉取都要为每个不同的 id 向企微发一次请求
+（实测 **~500ms/次**，串行）。一个 20 人群就是 ~11 秒的阻塞，而且每轮重复 ——
+5 分钟一轮、一天 288 轮，一个群就是六千多次调用。
 
-**每轮拉取都重新解析，不做跨轮缓存** —— 用户名和群名都可能被改，缓存会让归档
-悄悄停留在第一次看到的旧名字上。成本可控：只解析**当轮记录里出现的** id 与群，
-且同一轮内去重。
+改为**按需查询**，用 `corpapp names`：
 
-**解析不到时一律回退为原始 ID**（`fromName` / `toNames` / `rooms.json` 的 `name`），
-不会留空 —— ID 总比空字段有用。
+```bash
+# 解析用户名；带 --room 时一次调用即可拿到整个群花名册
+corpapp names --app 数牍 --users sunhuimin,wo_abc --room wr_xxx
 
-群名按 chat_id 精确查询（`getCustomerGroup`），**不遍历企业群列表**，
-所以成本是「当轮涉及的群数」而非企业总群数（可达数万）。
-内部群在客户群接口返回 `90501`、在 `appchat/get` 返回 `86008`
-（只能读本应用创建的群），因此**内部群拿不到群名，显示为 roomid**。
+# 解析群名
+corpapp names --app 数牍 --rooms wr_xxx,wr_yyy
+```
+
+对应 API：`POST /api/v1/agent/corp-apps/:id/names`
+（body：`{userIds?, roomIds?, roomId?}`）。
+
+**`--room` 是关键优化**：`externalcontact/groupchat/get` 一次返回整个群成员的
+姓名，所以 20 人群只需 1 次调用而非 20 次。不带 `--room` 时按 id 逐个查。
+
+**解析不到一律回退为原 id**，不会留空 —— 结果可以直接渲染。内部群拿不到群名
+（客户群接口返回 `90501`，`appchat/get` 返回 `86008`，只能读本应用创建的群），
+会保持显示 roomid。
 
 ## 十一、幂等与游标
 
