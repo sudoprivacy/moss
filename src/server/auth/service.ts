@@ -9,7 +9,7 @@ import { onlineCommandContext } from '../application/commandContext.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
 import { OrganizationIdentityService } from '../identity/organizationIdentityService.js'
-import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibleTo } from '../visibilityFilter.js'
+import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
 import {
   newApplicationNo,
@@ -476,16 +476,7 @@ export class AuthService {
       catalog,
       identities: this.identityRepository,
       uploads,
-      buildVisibility: actor => this.buildVisibilityFilter({
-        rawToken: '',
-        userId: actor.userId,
-        orgId: actor.orgId,
-        role: actor.role,
-        scopes: defaultScopesForRole(actor.role),
-        keyId: '',
-        jti: '',
-        exp: Number.MAX_SAFE_INTEGER,
-      }),
+      buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
     })
   }
 
@@ -546,16 +537,7 @@ export class AuthService {
       }),
       administration,
       resolveEnterpriseAlias: legacyId => this.identityRepository.resolveNumericAliasGlobal('enterprise', legacyId),
-      buildVisibility: actor => this.buildVisibilityFilter({
-        rawToken: '',
-        userId: actor.userId,
-        orgId: actor.orgId,
-        role: actor.role,
-        scopes: defaultScopesForRole(actor.role),
-        keyId: '',
-        jti: '',
-        exp: Number.MAX_SAFE_INTEGER,
-      }),
+      buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
     }
   }
 
@@ -671,7 +653,7 @@ export class AuthService {
                          password_updated_at AS passwordUpdatedAt, last_login_at AS lastLoginAt, created_at AS createdAt,
                          ext_user_id AS extUserId, phone
                   FROM users ORDER BY created_at ASC`)
-        .all() as AuthCenterUser[]
+        .all() as unknown as AuthCenterUser[]
       for (const user of users) {
         if (this.identityRepository.getNumericAlias('user', user.id) === null) {
           this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
@@ -835,8 +817,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const user = await this.db.getUserByPhone(phone)
@@ -2472,6 +2454,31 @@ export class AuthService {
       ...org,
       legacyId: this.identityRepository.getNumericAlias('enterprise', org.id),
       code: this.identityRepository.getOrganizationProfile(org.id)?.code ?? null,
+    }
+  }
+
+  private buildSudoworkVisibilityFilter(
+    actor: import('../identity/organizationIdentityService.js').IdentityActor,
+  ): VisibilityFilter {
+    if (actor.role === 'admin' || actor.role === 'super_admin') {
+      return {
+        isAdmin: true,
+        userId: actor.userId,
+        departmentId: null,
+        role: actor.role,
+        visibleDepartmentIds: null,
+      }
+    }
+    const row = this.db.db
+      .prepare('SELECT department_id FROM users WHERE id = ? AND org_id = ? LIMIT 1')
+      .get(actor.userId, actor.orgId) as { department_id?: string | null } | undefined
+    const departmentId = row?.department_id ?? null
+    return {
+      isAdmin: false,
+      userId: actor.userId,
+      departmentId,
+      role: actor.role,
+      visibleDepartmentIds: departmentId ? new Set([departmentId]) : new Set(),
     }
   }
 
