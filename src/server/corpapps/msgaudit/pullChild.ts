@@ -16,6 +16,7 @@
 import { pullOnce, type PullConfig } from './puller.js'
 
 type LookupRequest = { kind: 'lookup'; id: number; userId: string; external: boolean }
+type RoomLookupRequest = { kind: 'roomLookup'; id: number; roomId: string }
 type LookupReply = { kind: 'lookupResult'; id: number; name: string | null }
 type ResultMessage = { ok: boolean; result?: unknown; error?: string }
 
@@ -44,6 +45,25 @@ function askParentForName(userId: string, external: boolean): Promise<string | n
   })
 }
 
+/** Same round-trip as askParentForName, for group display names. */
+function askParentForRoomName(roomId: string): Promise<string | null> {
+  if (!process.send) return Promise.resolve(null)
+  return new Promise((resolve) => {
+    const id = nextLookupId++
+    const timer = setTimeout(() => {
+      pending.delete(id)
+      resolve(null)
+    }, LOOKUP_TIMEOUT_MS)
+    timer.unref()
+    pending.set(id, (name) => {
+      clearTimeout(timer)
+      resolve(name)
+    })
+    const req: RoomLookupRequest = { kind: 'roomLookup', id, roomId }
+    process.send?.(req)
+  })
+}
+
 process.on('message', async (msg: PullConfig | LookupReply) => {
   // Replies to our own lookups arrive on the same channel as the initial
   // config; route them before treating a message as a new pull request.
@@ -63,6 +83,7 @@ process.on('message', async (msg: PullConfig | LookupReply) => {
       ...cfg,
       // Rebuild the lookup on this side, backed by the parent.
       nameLookup: cfg.resolveNames ? askParentForName : undefined,
+      roomNameLookup: cfg.resolveNames ? askParentForRoomName : undefined,
     })
     process.send?.({ ok: true, result } satisfies ResultMessage)
   } catch (err) {

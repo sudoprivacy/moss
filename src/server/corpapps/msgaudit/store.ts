@@ -234,14 +234,38 @@ async function readMsgIds(file: string): Promise<Set<string>> {
 // Room roster (for agent-facing discovery)
 // ============================================================
 
-export type RoomMeta = { roomid: string; dir: string; count: number; lastSeen: number }
+export type RoomMeta = {
+  roomid: string
+  dir: string
+  count: number
+  lastSeen: number
+  /**
+   * Group display name, resolved once when the room is first seen.
+   *
+   * Absent when the lookup is off, the room is an internal group (WeCom's
+   * customer-group API answers 90501 for those), or the name could not be
+   * fetched. Never re-fetched once set: like user names, a group that is
+   * later dissolved stops resolving, and a captured name beats a lookup
+   * that may now fail.
+   */
+  name?: string
+}
 
 /**
  * Update the room index after a batch. This is a convenience for agents
  * and humans: without it, discovering which rooms exist means walking a
  * directory of opaque hashed names.
  */
-export async function updateRooms(corpAppId: string, records: ChatRecord[]): Promise<void> {
+export async function updateRooms(
+  corpAppId: string,
+  records: ChatRecord[],
+  /**
+   * Resolves a roomid to a group name. Called only for rooms that have no
+   * name yet, so the cost is one request per newly seen group — not a
+   * scan of the corp's groups, which can number in the tens of thousands.
+   */
+  nameLookup?: (roomId: string) => Promise<string | null>,
+): Promise<void> {
   if (records.length === 0) return
   const file = path.join(appDir(corpAppId), 'rooms.json')
   let rooms: Record<string, RoomMeta> = {}
@@ -257,6 +281,22 @@ export async function updateRooms(corpAppId: string, records: ChatRecord[]): Pro
     cur.count += 1
     if (r.msgtime > cur.lastSeen) cur.lastSeen = r.msgtime
     rooms[roomid] = cur
+  }
+
+  if (nameLookup) {
+    // Only rooms still missing a name, and only real groups — a 1:1 chat
+    // has no roomid and therefore no group name to fetch.
+    const unnamed = Object.values(rooms).filter(
+      (m) => !m.name && m.roomid && m.roomid !== DIRECT_BUCKET,
+    )
+    for (const meta of unnamed) {
+      try {
+        const name = await nameLookup(meta.roomid)
+        if (name) meta.name = name
+      } catch {
+        // leave unnamed; retried next time this room sees traffic
+      }
+    }
   }
   await fsp.mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.tmp`

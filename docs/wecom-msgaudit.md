@@ -251,6 +251,11 @@ $MOSS_HOME/msgaudit/<corpAppId>/media/<YYYY-MM-DD>/<msgid>.<ext>
 `/cgi-bin/user/get`，外部联系人走 `/cgi-bin/externalcontact/get`。该应用需在
 企微后台配置**可信 IP**，否则解析失败（记录保留原始 id，不影响归档本身）。
 
+**群名**同样在首次见到该群时解析并写入 `rooms.json` 的 `name` 字段 ——
+按 chat_id 精确查询（`getCustomerGroup`），**不遍历企业的群列表**，
+所以成本是「归档里出现过的群数」而非企业总群数（可达数万）。
+内部群在客户群接口上返回 `90501`，属预期情况，保持无名。
+
 **姓名在首次见到该 id 时解析并永久缓存**到 `users.json`，原因是解析能力会过期：
 
 | | 离群后 | 离职 / 解除好友后 |
