@@ -17,6 +17,7 @@ import { normalizeRecord } from './normalize.js'
 import { openSdk, type RawChatRecord, type SdkHandle } from './sdk.js'
 import {
   appendRecords,
+  dayKey,
   readCursor,
   updateRooms,
   writeCursor,
@@ -24,6 +25,14 @@ import {
   type ChatRecord,
 } from './store.js'
 import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
+import {
+  appendLeaves,
+  diffExternalLeaves,
+  previousSnapshot,
+  snapshotExists,
+  writeSnapshot,
+  type LeaveRecord,
+} from './members.js'
 import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
@@ -88,6 +97,12 @@ export type PullConfig = {
   /** Stop after this many pages in one run; 0 = drain fully. */
   maxPages?: number
   /**
+   * Fetches a room's current member userids. Supplied by the caller
+   * because the 会话存档 SDK has no roster API — it comes from a sibling
+   * self-built app. Absent = skip membership snapshots entirely.
+   */
+  rosterLookup?: (roomId: string) => Promise<string[] | null>
+  /**
    * Raw room filter as typed by the admin: room ids separated by commas
    * and/or whitespace. Empty (or absent) archives every conversation.
    */
@@ -107,6 +122,10 @@ export type PullResult = {
   media: number
   /** Media downloads that were skipped or failed. */
   mediaFailed: number
+  /** Rooms whose daily membership snapshot was taken this run. */
+  snapshots: number
+  /** External members observed to have left, across all rooms. */
+  leaves: number
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -160,6 +179,9 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let filtered = 0
   let media = 0
   let mediaFailed = 0
+  let snapshots = 0
+  let leaveCount = 0
+  const roomsSeen = new Set<string>()
   let pages = 0
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
   const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
@@ -242,6 +264,8 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
       // Advance past the whole page, including records we could not
       // decrypt: they will never become readable, and leaving the cursor
       // behind them would block the archive permanently.
+      for (const rec of records) if (rec.roomid) roomsSeen.add(rec.roomid)
+
       const maxSeq = page.reduce((m, r) => (r.seq > m ? r.seq : m), cursor)
       cursor = maxSeq
       await writeCursor(cfg.corpAppId, cursor)
@@ -266,5 +290,39 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     })
   }
 
-  return { fetched, written, failed, filtered, media, mediaFailed, cursor, pages }
+  // Membership snapshots run AFTER the transcript is durable, once per
+  // room per day. WeCom never reports departures, so the only way to see
+  // a customer leave is to photograph the roster daily and diff.
+  if (cfg.rosterLookup) {
+    const pending: LeaveRecord[] = []
+    for (const roomId of roomsSeen) {
+      try {
+        if (await snapshotExists(cfg.corpAppId, roomId)) continue
+        const members = await cfg.rosterLookup(roomId)
+        if (!members) continue
+        const prev = await previousSnapshot(cfg.corpAppId, roomId, dayKey(Date.now()))
+        const snap = await writeSnapshot(cfg.corpAppId, roomId, members)
+        snapshots += 1
+        if (prev) {
+          const gone = diffExternalLeaves(prev, snap)
+          if (gone.length > 0) {
+            // Dated to the EARLIER snapshot: they were present then and
+            // absent now, so they left during that day.
+            pending.push({ roomid: roomId, date: prev.date, leaves: gone, comparedWith: snap.date })
+            leaveCount += gone.length
+          }
+        }
+      } catch (err) {
+        console.error(
+          `[msgaudit] roster snapshot failed for ${roomId}:`,
+          err instanceof Error ? err.message : err,
+        )
+      }
+    }
+    await appendLeaves(cfg.corpAppId, pending).catch(() => {
+      // snapshots are on disk; a lost leaves.json is recomputable
+    })
+  }
+
+  return { fetched, written, failed, filtered, media, mediaFailed, snapshots, leaves: leaveCount, cursor, pages }
 }

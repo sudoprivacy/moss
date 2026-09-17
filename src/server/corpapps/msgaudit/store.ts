@@ -186,7 +186,7 @@ export async function appendRecords(
   let written = 0
   for (const [key, list] of buckets) {
     const [room, day] = key.split('/')
-    const dir = path.join(appDir(corpAppId), 'chat', room)
+    const dir = path.join(appDir(corpAppId), 'chats', room)
     await fsp.mkdir(dir, { recursive: true })
     const file = path.join(dir, `${day}.jsonl`)
 

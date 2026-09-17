@@ -106,7 +106,9 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 $MOSS_HOME/msgaudit/<corpAppId>/
   cursor.json                        {"seq": 12345, "updatedAt": ...}
   rooms.json                         roomId -> {dir, count, lastSeen}
-  chat/<roomId>/<YYYY-MM-DD>.jsonl   每行一条消息
+  chats/<roomId>/<YYYY-MM-DD>.jsonl  每行一条消息
+  members/<roomId>/<YYYY-MM-DD>.json 每日成员快照(每天首轮拉取后)
+  leaves.json                        外部成员离群记录
 ```
 
 `MOSS_HOME` 已在 `deploy/docker-compose.yml` 中挂载到宿主机（`./.moss:/root/.moss`），**无需额外挂载**，容器内写入的记录宿主机直接可读。
@@ -130,11 +132,11 @@ $MOSS_HOME/msgaudit/<corpAppId>/
 
 ```bash
 # 某群某天的全部消息
-cat $MOSS_HOME/msgaudit/<id>/chat/wrABC/2026-03-01.jsonl
+cat $MOSS_HOME/msgaudit/<id>/chats/wrABC/2026-03-01.jsonl
 
 # 该群最近 7 天发言量
 for d in $(seq 0 6); do
-  f=chat/wrABC/$(date -d "-$d day" +%F).jsonl
+  f=chats/wrABC/$(date -d "-$d day" +%F).jsonl
   echo "$f $(wc -l < $f 2>/dev/null || echo 0)"
 done
 
@@ -269,6 +271,34 @@ corpapp names --app 数牍 --rooms wr_xxx,wr_yyy
 **解析不到一律回退为原 id**，不会留空 —— 结果可以直接渲染。内部群拿不到群名
 （客户群接口返回 `90501`，`appchat/get` 返回 `86008`，只能读本应用创建的群），
 会保持显示 roomid。
+
+### 成员快照与离群检测
+
+企微的存档流水里**没有成员进出事件** —— 客户退群不会有任何通知。唯一的办法是
+定期给花名册拍照，再比对相邻两张。
+
+**每天首轮拉取后**（`snapshotExists` 保证一天一次，否则每 5 分钟一轮会拍 288 次）
+为当轮涉及的每个群保存快照：
+
+```
+members/<roomId>/2026-09-10.json   {roomid, date, members[], takenAt}
+```
+
+随后与**上一张快照**比对，把消失的**外部成员**（`wo_`/`wm_` 前缀）记入
+`leaves.json`：
+
+```json
+[{"roomid":"wr_x","date":"2026-09-09","leaves":["wo_cust2"],"comparedWith":"2026-09-10"}]
+```
+
+- **`date` 是较早那张快照的日期** —— 「9/9 在、9/10 不在」记为 `date: 2026-09-09`，
+  因为首轮拉取发生在零点后几分钟，等价于比较 9/9 00:00 与 9/10 00:00
+- **`comparedWith`** 记录对比对象。停机跨天时（如 9/10 直接跳到 9/14）会与最近
+  一张比对，这个字段让窗口跨度可见
+- **只报外部成员** —— 员工退群是日常，客户退群才是信号
+- 同一 room+date 重复计算会**覆盖而非追加**
+
+内部群没有花名册接口（`90501`），不做快照。
 
 ## 十一、幂等与游标
 
