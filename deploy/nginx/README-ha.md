@@ -91,6 +91,42 @@ docker-compose -f docker-compose.ha.yml -p moss-ha down
 - 非 owner 实例 WS upgrade 收 **409**。
 - `ws_url` 遵循 `MOSS_PUBLIC_BASE_URL`（LB 入口）。
 
+### owner-aware 路由测试（Phase C 路由层交付）
+
+前置：Phase B conf（两级 map：`$arg_moss_route` 优先 / `$cookie_moss_route` 兜底），
+a/b 均配置 `MOSS_INSTANCE_ID`。
+
+| 用例 | 步骤 | 预期 |
+|---|---|---|
+| owner 元数据下发 | 经 LB 登录建 session，`GET /api/v1/sessions/:id` | 响应含 `owner_instance_id=<创建实例>`、`owner_live=true`，`ws_url` 含 `?moss_route=<owner>` |
+| create 直连路由 | `POST /api/v1/sessions` 后立即按 `ws_url` 建 WS | 直达创建实例，无 409（create 时 attempt 已同步拉起） |
+| map 优先级 | 带 `Cookie: moss_route=b` 请求 URL 附 `?moss_route=a` | 落实例 a（query 优先）；仅 cookie 时落 b；两者皆无落 pool |
+| failover 全链路 | 桌面端开会话发消息 → `docker kill` owner 容器 | WS 断 → 客户端重拉 metadata（接管完成前 owner_live=false、无 route → pool → CAS 接管）→ 恢复，无 409 死循环 |
+| 首连自愈 | kill owner 后立即从桌面端发起新消息 | 最多 9 次尝试、8 次退避间隔（1/2/4/8/16/30/30/30s）内自动恢复 |
+| 单实例回归 | 不设 `MOSS_INSTANCE_ID` 启动 | 响应无 route cookie、`ws_url` 无 query、行为不变 |
+
+**双侧一致性约束（部署必查）**：nginx map 的键/值（`a`→`moss_a` 等）必须与各实例
+`MOSS_INSTANCE_ID` 一致，且 query/cookie 参数名 = `MOSS_ROUTE_COOKIE_NAME`（默认
+`moss_route`）——任一不一致则静默退化为 pool。HA 集群**所有实例必须配置
+`MOSS_INSTANCE_ID`**（漏配实例不下发 route、其 runner 无 fencing，失败模式静默）。
+
+### 企微回调（43128 双入口）
+
+- compose 已给 a/b 设置 `MOSS_CALLBACK_PORT=43128`，nginx 暴露
+  `${MOSS_CALLBACK_PUBLIC_PORT:-43128}`；两份 conf 均有独立 `moss_callback`
+  upstream（43128 成员，**不得复用主端口 upstream**——主端口无回调路由会 404）。
+- 回调服务无状态（每次请求从共享 DB 读配置），双入口轮询安全；seq 已单语句原子
+  自增 + `(corp_app_id, seq)` 唯一索引，并发回调不产生重复 seq。
+- 企微管理后台回调 URL 填 `http://<LB>:43128/api/v1/corp-apps/callback/<id>`。
+- 不启用企微回调的部署：不暴露 43128 端口即可，零影响。
+
+### 跨实例事件/规则刷新（多实例功能正确性）
+
+- `mcp/events` SSE：本实例变更即时广播；其他实例的变更经 3s 指纹轮询兜底送达
+  （`mcp.changed` / `mcp.policy.changed` 按指纹分组区分）。
+- auth proxy rules：config items 在实例 A 修改后，实例 B 经 5s 常驻指纹轮询自动
+  重载（凭证值在 Nexus 实时取，天然跨实例一致，无需轮询）。
+
 ---
 
 ## 3. /readyz 摘流机制与轮询建议
@@ -123,14 +159,18 @@ docker exec moss-server-a node -e "fetch('http://127.0.0.1:43127/readyz').then(r
 
 ## 4. 已知限制（计划 §八）
 
-1. **桌面客户端 / admin web 无 WS 409 自动重连**（源码在 sudocode 仓库 / 现状行为）：
-   Phase A 配 LB 地址即可用；Phase B 无 cookie 可能 409 循环；failover 后 session
-   恢复依赖 `ws_url` 指向 LB 入口。
+1. **WS 409 重连能力（owner-aware 路由已交付）**：服务端 create/GET/resume 响应含
+   `owner_instance_id`/`owner_live`，且 `ws_url` 多实例下携带 `?moss_route=<owner>`
+   （本 conf 两级 map：query 优先、cookie 兜底）；桌面客户端（Electron）已具备首连/
+   turn 中途失败的有界重试自愈（9 次尝试、退避累计 121s，覆盖最坏接管窗口）。admin
+   web 无 WS 客户端（仅 EventSource SSE），经浏览器 cookie sticky 覆盖。
 2. **Phase B 滚动重启窗口**：实例退出到重新就绪期间，携带该实例 `moss_route` cookie
    的请求得 502（无自动 fallback），且 502 不清除浏览器 cookie，用户持续 502 直至该
    实例恢复（drain 窗口内业务请求正常，502 仅在进程退出后出现；以 T4-④ 实测定稿）。
 3. **Phase B 双活运行在共享 SQLite 上**为受限部署形态（源文档 14.2：SQLite 不建议作为
-   生产 active-active DB）；并发写能力以 T1 压力实测为准；生产级依赖已剔除的 Phase C。
+   生产 active-active DB）；**PostgreSQL 后端已交付（P1）**：设 `MOSS_DATABASE_URL`
+   即切换（同主机 compose 亦可加该 env），跨主机/K8s 形态默认 PG。PG 侧机制（建表/
+   CAS/fencing/seq 唯一约束+重试/advisory lock）已在真库测试覆盖（pgBackend.test.ts）。
 4. **503 摘流为被动计数**：无 `/readyz` 轮询方时 drain 摘流退化为进程退出后连接失败
    摘流；且存在“摘 10s / 试探恢复”振荡（见第 3 节）。
 5. **nexus 共享故障域**：external 模式下双实例的 readyz nexus 探测指向同一 nexus 容器
@@ -139,9 +179,198 @@ docker exec moss-server-a node -e "fetch('http://127.0.0.1:43127/readyz').then(r
    时长）。
 6. **主备同主机为共同故障域**（源文档 22 节定位：入口层 HA，非完整 HA）。
 7. **host runtime 跨实例接管能力有限**（源文档 20 节；T5 记录实际边界）。
-8. **K8s 仅 Ingress 示例**；SQLite 多 pod 部署不在范围。
-9. **failover 后存量 runner 的 auth proxy 指向已死实例**：runner env 在 spawn 时固化
-   `SUDOWORK_AUTH_PROXY_URL` 为原实例地址，user 容器独立存活——切流后 b 收养 a 的
-   session，但存量容器的凭证注入外呼仍指向 `moss-server-a:12013`，a 不可达窗口内失效、
-   a 回归后自愈；session 的 WS/ACP 主链路不经 auth proxy。完整修复属已剔除的
-   owner-aware 范围（T5-③ 记录）。
+8. **K8s 完整清单已交付**（`deploy/k8s/`：StatefulSet + 入口 nginx + Nexus，见第 6
+   节）；`moss-ingress.yaml` 降级为可选 TLS 前置/简化备选（cookie affinity 与 owner
+   路由互斥，无 fencing 语义）。
+9. **failover 后存量 runner 的 auth proxy 指向已死实例**：runner fencing 已交付——
+   接管时旧 runner ≤10s 心跳失配自杀、新 owner respawn 注入新地址，该限制已按设计
+   收敛为「fencing 后自愈」（时间线见第 5.4 节）。
+10. **实例本地 attach socket 残留（P2-1）**：socket 落实例本地 `os.tmpdir()/moss-sock-<instanceId>/`（非共享卷）。实例异常退出后残留的 socket 文件由容器重建 / OS tmp 策略回收；respawn 用新 generation（新文件名），残留文件不同名、不冲突、无正确性影响。
+11. **被禁用用户的存量周期任务停止执行（P2-5，行为变化）**：内部通道经 WS upgrade 的 `isUserActive` 关卡鉴权，用户被禁用后（`status != 'active'`）其名下 session 的 cron / event / 企微消息经内部通道执行时将 401、停止执行（此前直连 socket 无鉴权、会继续执行）。方向合理（禁用用户不应继续消耗资源），但属未显式声明过的行为变化（如离职员工挂着的定时任务会静默停摆）。
+
+---
+
+## 5. 跨主机多实例部署（P3-1，`deploy/docker-compose.ha-crosshost.yml`）
+
+### 5.1 拓扑
+
+```
+                      客户端 / 企微回调服务器
+                              │
+                 ┌──────── keepalived VIP 或云 SLB ────────┐
+                 │            （LB 层冗余，见 5.3）          │
+        ┌────────┴─────────┐                    ┌───────────┴──────┐
+        │ 主机 A            │                    │ 主机 B            │
+        │  nginx(双主机map) │◄── 跨主机 owner ──►│  nginx(同一份conf) │
+        │  moss-server     │      路由可达       │  moss-server     │
+        │  (host-a)        │                    │  (host-b)        │
+        └───────┬──────────┘                    └────────┬─────────┘
+                │            共享数据面（各主机挂载点一致）
+        ┌───────┴──────────────────────────────────────────┴────────┐
+        │  NFS: /data/moss/data（runtime/transcript）               │
+        │  NFS: /data/moss/.moss（secrets/.master_key/kubeconfig）  │
+        │  PostgreSQL（外部/托管实例，MOSS_DATABASE_URL）            │
+        │  Nexus 主机（独立单实例，docker-compose.nexus-host.yml）   │
+        └────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 部署步骤（每台主机）
+
+1. 前置：PG 就绪（14+；首启动自动建全量表）；NFS 两卷挂到**各主机相同路径**；
+   Nexus 主机按 `deploy/docker-compose.nexus-host.yml` 起好并可达。
+2. 拷贝 `deploy/` 目录；生成 `nginx/moss-crosshost.conf`（替换 `<HOST_A>/<HOST_B>`
+   与 `host-a/host-b` 为实际 IP 与 `MOSS_INSTANCE_ID`——**两级 map 键 ==
+   MOSS_INSTANCE_ID == 服务端 route 值**，任一不一致路由静默退化为 pool）。
+3. `.env` 写入 `MOSS_INSTANCE_ID=host-a`（按主机命名，**必填**，漏配实例不下发
+   route、其 runner 无 fencing）、`MOSS_DATABASE_URL`（含密码，仅 env，勿入库/盘）、
+   `MOSS_PUBLIC_BASE_URL=http://<VIP或SLB>`、`MOSS_IMAGE_TAG`。
+4. `docker-compose -f docker-compose.ha-crosshost.yml up -d`；另一台主机重复（仅
+   `MOSS_INSTANCE_ID` 不同）。
+5. 验证：`curl http://<VIP>/readyz`（200）；建 session 后确认响应 `ws_url` 带
+   `?moss_route=<owner>` 且 owner 为创建实例。
+
+### 5.3 LB 层冗余（二选一）
+
+- **keepalived VIP**：两台主机各跑 `keepalived.conf.sample`（MASTER/BACKUP +
+  pgrep nginx 健康检查，VIP 秒级漂移）；
+- **云 SLB**：后端池 = 两主机 80 与 43128，健康检查 `GET /healthz`，**不需要**
+  SLB 层会话保持（粘滞由 nginx 两级 map 完成）。
+
+### 5.4 fencing 时间线与冷恢复预期
+
+owner 主机故障的完整恢复链（默认 `heartbeatTimeoutMs=30000`，配于 `server.json` 的 `recovery.heartbeatTimeoutMs`；无对应环境变量）：
+
+```
+owner 主机死 ──► 存量 runner 心跳失配（≤10s，fencing 自杀）──► 实例心跳过期
+（≤30s，DB 判死）──► 幸存实例 claim CAS 接管 ──► respawn（共享 transcript 续接）
+```
+
+- 运行中 turn **中断后冷恢复**（总窗口 ≈40-105s），长连接不无损迁移（与源设计
+  文档 20 节一致）；客户端由首连/turn 兜底重试自愈（退避预算 121s 覆盖窗口）。
+  turn 中途自愈为**重连+重发**，服务端据此**重做 turn**（生成新消息、内容可能与
+  中断前重复，等价于用户手动重发；已验证栈实测为此形态）——重复属冷恢复固有边界，
+  不做客户端去重（有意取舍：重做本质无法靠隐藏 UI 重复消除）。
+- 在 `server.json` 的 `recovery.heartbeatTimeoutMs` 调大时上述时间线**等比拉长**（该配置项无对应环境变量）。
+- 源设计文档 6 节“明确提示用户 session 需恢复/重启”在本方案中被自动 fencing +
+  冷恢复 + 客户端重试**自愈替代**（有意偏离，验收按 E2E 无 409 死循环为准）。
+
+### 5.5 跨主机特有约束
+
+- **NFS 挂载点路径字符串必须各主机一致**：attemptDir/transcriptPath/manifest 等
+  被固化进共享文件与 PG，路径不同 = 接管方找不到文件。
+- `MOSS_INSTANCE_ID` 必填（漏配 = 僵尸双写，见 compose 文头）。
+- PG 是全新路径：不做 SQLite→PG 数据迁移（首版范围）。
+
+## 6. K8s 部署（P3-2，`deploy/k8s/`）
+
+清单与次序：
+
+0. **ConfigMap 准备（statefulset 引用但不自带，必须先创建）**：
+   - `moss-server-json` —— 提供 `/app/server.json`：
+     `kubectl -n moss-control create configmap moss-server-json --from-file=server.json=deploy/server.json`
+   - `moss-server-config` —— 注入非敏感 env（`envFrom`）：
+     `kubectl -n moss-control create configmap moss-server-config --from-literal=<KEY>=<VALUE> ...`
+   缺任一 → pod `CreateContainerConfigError` 或缺配启动。
+1. `moss-nexus.yaml` —— Nexus 单实例（vault 单写者，**replicas 必须为 1**，
+   单点边界见文件头）；
+2. `moss-server-statefulset.yaml` —— headless service（`publishNotReadyAddresses:
+   true`，未就绪 pod 也可被解析，接管期不黑洞）+ StatefulSet
+   （`MOSS_INSTANCE_ID` 由 fieldRef 取 pod name）+ RWX PVC（runtime 与 MOSS_HOME
+   两个卷，NFS StorageClass）+ PG 连接经 Secret `moss-pg`（key `url`）注入 +
+   kubeconfig 经 Secret `moss-k8s-kubeconfig` 挂载（仅 k8s runtime 会话需要；
+   moss 当前经 `kubectl --kubeconfig` 访问集群，in-cluster ServiceAccount 直连为
+   后续优化项，届时该挂载可移除）；
+3. `moss-nginx-route.yaml` —— 入口 nginx（ConfigMap 两级 map，upstream 指向
+   `moss-server-<i>.moss-server-headless.<ns>.svc`）+ Service（80/43128）。
+
+**扩缩容同步义务**：`replicas` 变化后必须同步 `moss-nginx-conf` 的三组 upstream
+与两级 map 键（= pod name），再滚动重启 nginx Deployment——不同步则新 pod 不参与
+owner 路由（WS 409 风暴）。
+
+**pod 重建（IP 漂移）SOP（重要）**：nginx 的 upstream 是静态 upstream 组，nginx
+在启动/reload 时解析一次 pod DNS 并缓存 IP。**任何 pod 重建**（滚动更新、崩溃重启、
+节点驱逐——即使 `replicas` 不变、pod name 不变）都会让该 pod 拿到新 IP，而 nginx 仍
+打旧 IP → 路由黑洞。因此 **pod 重建后必须滚动重启 `moss-nginx` Deployment**
+（`kubectl -n moss-control rollout restart deploy/moss-nginx`）令其重新解析。
+未采用 resolver 变量路由：非 upstream 组名的变量 `proxy_pass` 需 `resolver` 且丢失
+keepalive/max_fails，重构 conf 结构风险大于收益，故以本 SOP 兜底。
+
+**TLS**：`moss-ingress.yaml` 作为可选前置挂 `moss-nginx` Service（此时删除其
+affinity annotation，与两级 map 互斥；该文件头部注释已更新）。
+
+**为什么不 Ingress 直连**：ingress-nginx 不支持按 query 路由到特定 pod，owner
+精确路由（`?moss_route=`）必须由自管 nginx 完成。
+
+## 7. 运维 SOP（P3-3）
+
+### 7.1 升级 SOP
+
+- 升级前对实例逐台 drain（`/readyz` 503 → nginx 摘流）并**终止活跃会话**，或明确
+  声明升级窗口内 failover 需人工介入。理由：**detached runner 是长命进程**——
+  升级重启后被复用的旧 runner 跑旧代码：旧心跳无条件 UPDATE 会覆写 fencing 条件
+  （`runtime_state` 写回 running），fencing 对它失效、terminate 的停止标记被覆写，
+  触发条件下（多实例 + 升级窗口附近 owner failover 且旧 runner 存活）会话僵死，
+  只能登机清理（kill 旧 runner 进程 + 手工 `UPDATE session_attempts SET
+  runtime_state='stopped'`）。
+- 同版本卡死形态（一并登机清理）：runner 收到 shutdown 且 SIGTERM 已发但
+  `handle.destroy(true)` 挂起——进程不退出、心跳继续成功 → 前台不阻塞但接管永不
+  推进。触发面窄，登机 kill 即可。
+- 滚动顺序：A drain → A 升级 → A ready → B drain → B 升级（保持任一时刻至少一
+  实例接流量；跨主机/VIP 形态天然满足）。
+
+### 7.2 首次部署：.master_key 首生成竞态
+
+`.master_key` 是 loadOrCreate 语义（文件不存在则本地生成写回）。全新跨主机部署
+若双主机并发首次执行 secret 操作，存在首生成竞态（后写者覆盖致先写者密文不可解）。
+**SOP：首个 corp-app/secret 配置在单实例接流量状态下完成后再全量接流量**（一次性
+动作，之后只读）。
+
+### 7.3 低概率已知竞态（声明即可）
+
+- `$MOSS_HOME/settings.json` 落共享 NFS 且 `writeFileSync` 非原子、模块级写串行化
+  仅进程内：两实例并发保存系统设置存在丢失更新/读到半写文件的低概率竞态（低频管理
+  场景；后续可改 tmp+rename 原子写）。
+- Electron create 请求在 failover 切换瞬间若服务端实际成功而响应丢失，客户端重试
+  会再次 create 产生孤儿 session（idle timeout 兜底回收；现状手动重试同样发生，
+  自动重试仅略升频率）。
+- 内部通道与跨实例 token 吊销转发优先走 `MOSS_PUBLIC_BASE_URL`（公网 LB）：该地址
+  为 `http://` 时 120s TTL 的 Bearer token 明文过网。**HA 部署要求 HTTPS 入口**
+  （`publicBaseUrl` 配置为 `https://`）；服务端检测到明文 LB 时会输出一次性告警。
+- 跨主机双活依赖各主机时钟一致（NTP/chrony）：runner/实例心跳的新鲜度判定使用
+  各进程本地 `Date.now()` 对比他机写入的时间戳（30s 阈值）。时钟偏差过大只会导致
+  多余 fencing 或延迟接管（90s 超时兜底保证不死锁），不会脑裂；生产环境请确保
+  主机时钟同步在秒级以内。
+
+### 7.4 形态语义与一次性窗口（如实声明）
+
+- **Phase A SQLite 备援语义**：`docker-compose.ha.yml` 的方案 A 是双实例共享
+  SQLite（单写者形态）。B-9 启动守卫（sqlite 后端 + 已设 instanceId + 检测到活
+  peer 即拒绝启动）使备实例以 crash-loop 方式待援：主实例心跳过期（约 30s）后
+  备实例下一次 `restart: always` 重启才接管——这与源设计文档 §14.1"同一时间只
+  有一个实例写入，backup 只在主失败时接管"一致。**Phase B/C（双活）必须使用
+  PostgreSQL 后端**（源设计文档 §14.2；sqlite 的 advisory lock 为 no-op，无跨进
+  程互斥）。
+- **内部通道断连语义**：internal session channel 建立成功后若断线，不自动重连
+  ——消费方（channels gateway / cron / event trigger）在下一次消息发送时按需重
+  建连接（上层补偿），通道对象本身无状态需要恢复。
+- **advisory lock 升级备注**：PG 后端的互斥锁 key 算法为 `hashtextextended`
+  （64 位）。**仅当**曾部署过本分支早期使用 `hashtext`（32 位）的中间版本时，
+  升级到当前版本须停齐所有实例后统一升级（两代算法对同一 key 产生不同的锁，
+  滚动升级窗口不互斥）；从 dev/无 HA 状态直接部署当前版本无此问题。
+- **PG v2 迁移窗口**：首次在已有 v1 数据的 PG 库上执行 schema 迁移时，v2 的
+  wikis 表 `ALTER COLUMN ... SET NOT NULL` 会短暂阻塞该表写入（时长与表行数相
+  关），建议低峰执行（迁移幂等，重跑无副作用）。
+
+## 8. 单点边界汇总（如实声明）
+
+moss 交付边界是**正确消费**下列共享组件；其自身 HA 属基础设施选型：
+
+| 组件 | 边界 | 建议 |
+|---|---|---|
+| Nexus | 计划内单点（vault 单写者） | 独立主机 + `restart: always`；故障窗口内新建/轮换 secret 不可用（存量缓存不受影响） |
+| LB/VIP | keepalived 抢主为计划内单点 | 云 SLB（多可用区）可消除 |
+| NFS server | 自建 NFS 单点 | 云文件存储（多可用区）；自建分布式存储（Ceph 等）不在范围 |
+| PostgreSQL | 自建 PG 单点 | 托管 PG / 多可用区；PG 集群（patroni 等）不在范围 |
+
+owner 主机故障的会话级恢复见 5.4（fencing 冷恢复）；**运行中 turn 不无损迁移**是
+设计边界（源文档 20 节）。

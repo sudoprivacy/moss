@@ -5,8 +5,9 @@
  */
 
 import type { DirectConnectStore } from '../../server/db.js';
+import type { SqlRow } from '../../server/db/driver.js';
 import type { NexusClient } from '../../server/nexus/nexusClient.js';
-import type { SessionManager } from './SessionManager.js';
+import type { SessionManager } from '../core/SessionManager.js';
 import type { BasePlugin, PluginMessageHandler, PluginConfirmHandler } from '../plugins/BasePlugin.js';
 import type { IChannelPluginConfig, IChannelPluginStatus, IUnifiedIncomingMessage, PluginType } from '../types.js';
 import { hasPluginCredentials } from '../types.js';
@@ -79,10 +80,21 @@ export class PluginManager {
   // Runtime error cache: pluginId -> error message
   private pluginErrors: Map<string, string> = new Map();
 
-  constructor(sessionManager: SessionManager, db: DirectConnectStore, nexus?: NexusClient | null) {
+  // HA lease: this server instance's id (undefined = single instance → no
+  // lease, original start-all behaviour) and the periodic claim/renew timer.
+  private instanceId?: string;
+  private leaseTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Lease TTL and renew/takeover cadence. TTL > tick so a live holder keeps
+   * renewing; a dead holder's lease expires within TTL and a peer takes over. */
+  private static readonly LEASE_TTL_MS = 60_000;
+  private static readonly LEASE_TICK_MS = 20_000;
+
+  constructor(sessionManager: SessionManager, db: DirectConnectStore, nexus?: NexusClient | null, instanceId?: string) {
     this.sessionManager = sessionManager;
     this.db = db;
     this.nexus = nexus ?? null;
+    this.instanceId = instanceId;
   }
 
   /**
@@ -184,7 +196,7 @@ export class PluginManager {
       console.error(`[PluginManager] ${errorMsg}`, error);
       this.pluginErrors.set(key, errorMsg);
 
-      this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
+      await this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
       throw error;
     }
@@ -204,14 +216,14 @@ export class PluginManager {
       console.error(`[PluginManager] ${errorMsg}`, error);
       this.pluginErrors.set(key, errorMsg);
 
-      this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
+      await this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
       throw error;
     }
 
     this.plugins.set(key, plugin);
 
-    this.db.updateChannelPluginStatus(config.id, 'running', Date.now(), userId);
+    await this.db.updateChannelPluginStatus(config.id, 'running', Date.now(), userId);
 
     console.log(`[PluginManager] Plugin ${key} started successfully`);
   }
@@ -233,25 +245,55 @@ export class PluginManager {
     const userId = pluginId.includes(':') ? pluginId.split(':').pop() : undefined;
     // Extract bare pluginId from composite key
     const barePluginId = pluginId.includes(':') ? pluginId.split(':')[0] : pluginId;
-    this.db.updateChannelPluginStatus(barePluginId, 'stopped', undefined, userId);
+    await this.db.updateChannelPluginStatus(barePluginId, 'stopped', undefined, userId);
 
     console.log(`[PluginManager] Plugin ${pluginId} stopped`);
+  }
+
+  /** Stop a plugin whose lease row is now owned by a peer. Local-process only:
+   *  plugin.stop() + map removal, deliberately NO DB status write — the row's
+   *  lease owner (the peer now running it) owns its status. */
+  private async stopPluginLocally(instanceKey: string): Promise<void> {
+    const plugin = this.plugins.get(instanceKey);
+    if (!plugin) return;
+    // M-11: remove the map entry even when stop() throws — the lease is gone
+    // (a peer owns it), so keeping the entry makes every leaseTick retry the
+    // same failing stop forever while the peer and this process both poll the
+    // bot. An un-stoppable plugin object is abandoned either way; the entry
+    // must not be.
+    try {
+      await plugin.stop();
+    } catch (err) {
+      console.error(`[PluginManager] failed to stop lost-lease plugin ${instanceKey}:`, err);
+    }
+    this.plugins.delete(instanceKey);
   }
 
   /**
    * Stop all plugins
    */
   async stopAll(): Promise<void> {
+    if (this.leaseTimer) {
+      clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
+    }
     const stopPromises = Array.from(this.plugins.keys()).map((id) => this.stopPlugin(id));
     await Promise.allSettled(stopPromises);
+    // Release our leases so a peer can take these plugins over immediately on a
+    // graceful stop, rather than waiting out the lease TTL.
+    if (this.instanceId) {
+      await this.db.releaseAllChannelPluginLeases(this.instanceId).catch(err =>
+        console.error('[PluginManager] releasing plugin leases failed:', err),
+      );
+    }
     console.log('[PluginManager] All plugins stopped');
   }
 
   /**
    * Get status for all plugins
    */
-  getPluginStatuses(userId?: string): IChannelPluginStatus[] {
-    const rows = this.db.listChannelPlugins(userId);
+  async getPluginStatuses(userId?: string): Promise<IChannelPluginStatus[]> {
+    const rows = await this.db.listChannelPlugins(userId);
 
     return rows.map((row) => this.buildPluginStatus({
       id: String(row.id),
@@ -299,7 +341,7 @@ export class PluginManager {
    * Handle incoming message from a plugin
    */
   private async handleIncomingMessage(message: IUnifiedIncomingMessage): Promise<void> {
-    this.sessionManager.updateSessionActivity(message.user.id);
+    await this.sessionManager.updateSessionActivity(message.user.id);
 
     if (this.messageHandler) {
       await this.messageHandler(message);
@@ -344,43 +386,112 @@ export class PluginManager {
   }
 
   /**
-   * Start all enabled plugins from database
+   * Start enabled plugins from the database.
+   *
+   * Single instance (no instanceId): start every enabled row, as before.
+   * HA (instanceId set): claim a per-row DB lease first and start only the rows
+   * this instance won, then run a periodic tick that renews held leases, takes
+   * over a crashed peer's rows once their lease expires, and retries this
+   * instance's own failed rows.
    */
   async startEnabledPlugins(): Promise<void> {
-    const rows = this.db.listChannelPlugins();
+    const rows = await this.db.listChannelPlugins();
     console.log(`[PluginManager] Starting enabled plugins, found ${rows.length} rows`);
 
-    for (const row of rows) {
-      if (Boolean(row.enabled)) {
-        const userId = row.user_id ? String(row.user_id) : undefined;
-        const config: IChannelPluginConfig = {
-          id: String(row.id),
-          type: String(row.type) as PluginType,
-          name: String(row.name),
-          enabled: true,
-          status: String(row.status) as IChannelPluginStatus['status'],
-          credentials: row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined,
-          config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
-          lastConnected: row.last_connected ? Number(row.last_connected) : undefined,
-          createdAt: Number(row.created_at),
-          updatedAt: Number(row.updated_at),
-        };
-
-        try {
-          const instanceKey = userId ? `${config.id}:${userId}` : config.id;
-          if (this.nexus && userId) {
-            // Sensitive fields live only in Nexus; hydrate before starting. Inside this
-            // per-plugin try so one hydrate failure never aborts the whole startup loop.
-            config.credentials = (await hydrateChannelSecrets(
-              this.nexus, userId, config.id, config.type, config.credentials,
-            )) as typeof config.credentials;
-          }
-          console.log(`[PluginManager] Starting plugin ${config.id} with instanceKey=${instanceKey}`);
-          await this.startPlugin(config, instanceKey);
-        } catch (error) {
-          console.error(`[PluginManager] Failed to start plugin ${config.id}:`, error);
-        }
+    if (!this.instanceId) {
+      for (const row of rows) {
+        if (Boolean(row.enabled)) await this.startFromRow(row);
       }
+      return;
+    }
+
+    // HA: initial lease-gated pass, then start the renew/takeover tick.
+    await this.leaseTick();
+    this.startLeaseTick();
+  }
+
+  /** Build a plugin config from a DB row and start it (hydrating secrets). */
+  private async startFromRow(row: SqlRow): Promise<void> {
+    const userId = row.user_id ? String(row.user_id) : undefined;
+    const config: IChannelPluginConfig = {
+      id: String(row.id),
+      type: String(row.type) as PluginType,
+      name: String(row.name),
+      enabled: true,
+      status: String(row.status) as IChannelPluginStatus['status'],
+      credentials: row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined,
+      config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
+      lastConnected: row.last_connected ? Number(row.last_connected) : undefined,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+    try {
+      const instanceKey = userId ? `${config.id}:${userId}` : config.id;
+      if (this.nexus && userId) {
+        // Sensitive fields live only in Nexus; hydrate before starting. Inside this
+        // per-plugin try so one hydrate failure never aborts the whole startup loop.
+        config.credentials = (await hydrateChannelSecrets(
+          this.nexus, userId, config.id, config.type, config.credentials,
+        )) as typeof config.credentials;
+      }
+      console.log(`[PluginManager] Starting plugin ${config.id} with instanceKey=${instanceKey}`);
+      await this.startPlugin(config, instanceKey);
+    } catch (error) {
+      console.error(`[PluginManager] Failed to start plugin ${config.id}:`, error);
+    }
+  }
+
+  private startLeaseTick(): void {
+    if (this.leaseTimer) return;
+    this.leaseTimer = setInterval(() => {
+      this.leaseTick().catch(err => console.error('[PluginManager] lease tick failed:', err));
+    }, PluginManager.LEASE_TICK_MS);
+    this.leaseTimer.unref?.();
+  }
+
+  /**
+   * One HA lease pass: for every enabled row, claim/renew its lease. A row we
+   * win but have not started yet (new acquire, peer takeover, or our own failed
+   * start still in 'error') is (re)started; a peer's fresh lease is skipped. If
+   * any new row started, reload the session cache so a lease taken over from a
+   * dead peer does not miss the sessions that peer created (duplicate rows).
+   */
+  private async leaseTick(): Promise<void> {
+    if (!this.instanceId) return;
+    const now = Date.now();
+    const leaseUntil = now + PluginManager.LEASE_TTL_MS;
+    let acquiredNew = false;
+    const rows = await this.db.listChannelPlugins();
+    for (const row of rows) {
+      if (!Boolean(row.enabled)) continue;
+      const userId = row.user_id ? String(row.user_id) : undefined;
+      if (!userId) continue; // enterprise rows are always keyed by user_id
+      const id = String(row.id);
+      const claimed = await this.db.claimChannelPluginLease(id, userId, this.instanceId, leaseUntil, now);
+      if (!claimed) {
+        // Lease lost to a peer (or never held): stop any local plugin for this
+        // row so two instances never poll the same bot concurrently.
+        const lostKey = `${id}:${userId}`;
+        if (this.plugins.has(lostKey)) {
+          await this.stopPluginLocally(lostKey).catch(err =>
+            console.error(`[PluginManager] failed to stop lost-lease plugin ${lostKey}:`, err),
+          );
+        }
+        continue; // a live peer holds this row
+      }
+      const instanceKey = `${id}:${userId}`;
+      // Not currently running here → new acquire / takeover / self error-retry.
+      // (A failed start is never added to this.plugins, so it retries here.)
+      if (!this.plugins.has(instanceKey)) {
+        await this.startFromRow(row);
+        acquiredNew = true;
+      }
+    }
+    if (acquiredNew) {
+      // Sessions created by a previous lease holder predate our snapshot.
+      await this.sessionManager.reload().catch(err =>
+        console.error('[PluginManager] session reload after lease acquire failed:', err),
+      );
     }
   }
 }

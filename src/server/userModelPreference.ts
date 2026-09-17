@@ -3,41 +3,46 @@
  * Stores user's preferred model selection for sessions
  */
 
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from './db/driver.js'
 
 // In-memory fallback storage
 const memoryStore = new Map<string, { modelId: string; updatedAt: number }>()
 
-let db: DatabaseSync | null = null
+let driver: DbDriver | null = null
 
 /**
- * Initialize the user model preference store with a database instance
+ * Initialize the user model preference store with a shared DB driver.
+ * Async because the postgres driver builds its table over a pooled connection;
+ * sqlite resolves synchronously under the hood (unchanged behavior).
  */
-export function initUserModelPreferenceStore(database: DatabaseSync): void {
-  db = database
+export async function initUserModelPreferenceStore(database: DbDriver): Promise<void> {
+  driver = database
 
-  // Create table if not exists
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user_model_preferences (
-      user_id TEXT PRIMARY KEY,
-      model_id TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    )
-  `)
+  // Create table if not exists (sqlite only — the postgres backend gets this
+  // table from pg_schema.ts, applied by openStoreAsync before any call here).
+  if (driver.kind === 'sqlite') {
+    await driver.exec(`
+      CREATE TABLE IF NOT EXISTS user_model_preferences (
+        user_id TEXT PRIMARY KEY,
+        model_id TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
+  }
 }
 
 /**
  * Get user's model preference
  */
-export function getUserModelPreference(userId: string): { modelId: string; updatedAt: number } | null {
+export async function getUserModelPreference(userId: string): Promise<{ modelId: string; updatedAt: number } | null> {
   process.stderr.write(`[ModelPreference] getUserModelPreference called for userId: ${userId}\n`)
-  if (db) {
+  if (driver) {
     try {
-      const row = db.prepare(`
+      const row = await driver.get<{ model_id: string; updated_at: number }>(`
         SELECT model_id, updated_at
         FROM user_model_preferences
         WHERE user_id = ?
-      `).get(userId) as { model_id: string; updated_at: number } | undefined
+      `, [userId])
 
       process.stderr.write(`[ModelPreference] Database query result: ${row ? JSON.stringify(row) : 'null'}\n`)
       if (row) {
@@ -63,15 +68,21 @@ export function getUserModelPreference(userId: string): { modelId: string; updat
 /**
  * Set user's model preference
  */
-export function setUserModelPreference(userId: string, modelId: string): void {
+export async function setUserModelPreference(userId: string, modelId: string): Promise<void> {
   const updatedAt = Date.now()
 
-  if (db) {
+  if (driver) {
     try {
-      db.prepare(`
-        INSERT OR REPLACE INTO user_model_preferences (user_id, model_id, updated_at)
+      // INSERT OR REPLACE (SQLite/MySQL dialect) → ON CONFLICT DO UPDATE, which
+      // both SQLite and PostgreSQL support and which updates in place (no
+      // delete+reinsert), keeping the upsert portable across backends.
+      await driver.run(`
+        INSERT INTO user_model_preferences (user_id, model_id, updated_at)
         VALUES (?, ?, ?)
-      `).run(userId, modelId, updatedAt)
+        ON CONFLICT (user_id) DO UPDATE SET
+          model_id = excluded.model_id,
+          updated_at = excluded.updated_at
+      `, [userId, modelId, updatedAt])
       return
     } catch {
       // Fall back to memory store on error
@@ -85,10 +96,10 @@ export function setUserModelPreference(userId: string, modelId: string): void {
 /**
  * Clear user's model preference
  */
-export function clearUserModelPreference(userId: string): void {
-  if (db) {
+export async function clearUserModelPreference(userId: string): Promise<void> {
+  if (driver) {
     try {
-      db.prepare(`DELETE FROM user_model_preferences WHERE user_id = ?`).run(userId)
+      await driver.run(`DELETE FROM user_model_preferences WHERE user_id = ?`, [userId])
       return
     } catch {
       // Fall back to memory store on error

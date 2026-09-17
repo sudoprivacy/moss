@@ -115,22 +115,7 @@ Authorization: Bearer <access_token>
 
 ### GET `/healthz`
 
-存活检查。
-
-示例响应：
-
-```json
-{
-  "ok": true,
-  "ready": true,
-  "sessions": 2,
-  "auth_mode": "local"
-}
-```
-
-### GET `/readyz`
-
-就绪检查。
+存活检查（匿名，LB 可达）。仅返回存活标志，不暴露全局会话数或 auth_mode。
 
 示例响应：
 
@@ -140,6 +125,51 @@ Authorization: Bearer <access_token>
   "ready": true
 }
 ```
+
+### GET `/readyz`
+
+就绪检查（LB 摘流依据，匿名）：并行探测 db / nexus / runtime，draining 时返回 `503`。
+匿名响应体仅含 `ok`/`ready`/`instance_id`（LB 粘性与冒烟脚本消费 `instance_id`）；完整
+健康矩阵已移到鉴权端点 `GET /api/v1/admin/health`。
+
+示例响应：
+
+```json
+{
+  "ok": true,
+  "ready": true,
+  "instance_id": "a"
+}
+```
+
+- 任一检查失败或 `draining=true` 时整体 `ready=false` 并返回 `503`。
+
+### GET `/api/v1/admin/health`
+
+就绪明细（**super_admin** 鉴权）。返回完整健康矩阵 + 全局会话数 + auth_mode——即从匿名
+`/healthz`、`/readyz` 收窄掉的细节（R13）。
+
+示例响应：
+
+```json
+{
+  "ok": true,
+  "ready": true,
+  "instance_id": "a",
+  "checks": {
+    "db": true,
+    "nexus": true,
+    "runtime": true,
+    "k8s": null,
+    "draining": false
+  },
+  "sessions": 2,
+  "auth_mode": "local"
+}
+```
+
+- `runtime` 仅在 default runtime 为 docker/k8s 时参与判定（`host` 时为 `null`）。
+- `k8s` 仅在 default runtime 为 k8s 时有值。
 
 ## Auth Proxy
 
@@ -605,9 +635,23 @@ unique email, so a phone-only account gets the platform's synthetic form, which
     "type": "host",
     "hostMode": "user",
     "configDir": "/abs/path/config"
-  }
+  },
+  "owner_instance_id": "a",
+  "owner_live": true
 }
 ```
+
+多实例（LB）部署说明（create / GET `:sessionId` / resume 三个端点一致，list 与
+`/context` 不含这些字段）：
+
+- `owner_instance_id` / `owner_live`：当前 attempt 的归属实例及其存活状态
+  （`server_instances` 心跳判定）。create 响应时 attempt 已由本实例同步拉起，
+  故 owner 恒为本实例。
+- `ws_url` 在多实例形态下携带路由参数 `?moss_route=<owner>`（参数名 =
+  `MOSS_ROUTE_COOKIE_NAME`，须与 nginx map 的键一致；owner 不存活时不携带，
+  由接收实例在 upgrade 时 CAS 接管）。单实例形态无该参数。
+- WebSocket 连到非 owner 的存活实例时返回 `409 Conflict`（客户端应重拉
+  metadata 获取新路由后重连）。
 
 ### GET `/api/v1/sessions`
 
@@ -683,6 +727,10 @@ unique email, so a phone-only account gets the platform's synthetic form, which
 会话 WebSocket attach 路径。
 
 需要 `Authorization: Bearer <token>` header。
+
+多实例语义：当 attempt 归属其他存活实例时返回 `409 Conflict`（客户端重拉
+session metadata 获取带 owner 路由的 `ws_url` 后重连）；实例 draining 时返回
+`503`。
 
 ## Cron Job Workspace Files
 

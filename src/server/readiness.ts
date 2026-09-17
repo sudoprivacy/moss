@@ -119,7 +119,9 @@ export async function computeReadiness(
     probes?.probeDb ??
     (async () => {
       try {
-        runtime.store.db.prepare('SELECT 1').get()
+        // Driver seam, not the raw sqlite handle: on the postgres construction
+        // form `store.db` is undefined (the schema lives in pg_schema.ts).
+        await runtime.store.driver.get('SELECT 1 AS ok')
         return true
       } catch {
         return false

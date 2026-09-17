@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
 import { DatabaseSync } from 'node:sqlite'
+import { PgDriver, SqliteDriver, isUniqueViolation, escapeLike, type DbDriver, type PgPoolLike, type SqlParam } from './db/driver.js'
+import { applyPgSchema } from './db/pg_schema.js'
 import { McpStore } from './mcp/db.js'
 import { ensureCabinTables } from './cabin/store.js'
 import type {
@@ -21,6 +23,7 @@ import type {
 import type { SessionRuntimeInfo } from './sessionManager.js'
 import { channelCredentialIdentity } from '../channels/types.js'
 import { resolveRuntimeScodePath } from './runtimeScodePath.js'
+import { ALIVE_ATTEMPT_STATES } from './attemptLiveness.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -135,10 +138,28 @@ function mapAttempt(row: SqlRow): AttemptRecord {
 
 export class DirectConnectStore {
   readonly db: DatabaseSync
+  /**
+   * Async driver seam (HA PG support). For sqlite this wraps `db` with async
+   * signatures — zero behaviour change. Method bodies migrate from
+   * `this.db.prepare(...)` to `await this.driver.*` incrementally (P1-2d);
+   * the postgres backend becomes runnable once that migration completes.
+   */
+  readonly driver: DbDriver
 
-  constructor(public readonly dbPath: string) {
+  constructor(public readonly dbPath: string, pgDriver?: DbDriver) {
+    // PostgreSQL construction form (reached via DirectConnectStore.forPostgres,
+    // never directly): no sqlite handle exists, schema comes from pg_schema.ts
+    // (applied by openStoreAsync before this constructor runs). `db` is left
+    // undefined on purpose — sqlite-only consumers (tests, schema migration
+    // code) never run on this form.
+    if (pgDriver) {
+      this.db = undefined as unknown as DatabaseSync
+      this.driver = pgDriver
+      return
+    }
     mkdirSync(dirname(dbPath), { recursive: true })
     this.db = new DatabaseSync(dbPath)
+    this.driver = new SqliteDriver(this.db)
     this.db.exec(`
       PRAGMA journal_mode=WAL;
       PRAGMA synchronous=FULL;
@@ -291,8 +312,9 @@ export class DirectConnectStore {
 
     const nowTs = now()
     this.db.prepare(`
-      INSERT OR IGNORE INTO enterprises (id, created_at, updated_at)
+      INSERT INTO enterprises (id, created_at, updated_at)
       VALUES ('default', ?, ?)
+      ON CONFLICT(id) DO NOTHING
     `).run(nowTs, nowTs)
 
     // Migration: add assistant_name column if it doesn't exist
@@ -323,6 +345,16 @@ export class DirectConnectStore {
     if (!channelPluginsColumns.some(col => col.name === 'org_id')) {
       this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN org_id TEXT`)
       console.log('[DB] Added org_id column to channel_plugins')
+    }
+    // Migration: per-(id,user_id) plugin lease (HA). One instance holds a
+    // plugin row's lease while it runs, so two instances sharing the DB never
+    // both start the same plugin (e.g. double Telegram polling on one token).
+    // PG side is v2.
+    if (!channelPluginsColumns.some(col => col.name === 'lease_owner')) {
+      this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN lease_owner TEXT`)
+    }
+    if (!channelPluginsColumns.some(col => col.name === 'lease_until')) {
+      this.db.exec(`ALTER TABLE channel_plugins ADD COLUMN lease_until INTEGER`)
     }
 
     // Migration: add client_cron_enabled to enterprises (null = enabled by default)
@@ -458,6 +490,12 @@ export class DirectConnectStore {
       if (!channelSessionColumns.some(c => String(c.name) === 'turn_count')) {
         this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`)
         console.log('[DB] Added channel_sessions.turn_count for IM turn-cap rotation')
+      }
+      // E-2: agent/model snapshot for settings-change rotation (nullable,
+      // read by getChannelSessionAgentConfig; PG side: MIGRATION_0003).
+      if (!channelSessionColumns.some(c => String(c.name) === 'last_agent_config')) {
+        this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN last_agent_config TEXT`)
+        console.log('[DB] Added channel_sessions.last_agent_config for settings-change rotation')
       }
     } catch (error) {
       console.error('[DB] Failed to add channel_sessions.turn_count:', error)
@@ -717,6 +755,23 @@ export class DirectConnectStore {
         ON wiki_build_jobs (status, queued_at);
     `)
 
+    // Incremental migration: wiki build-job claim ownership (HA). claimed_by
+    // records which server instance atomically claimed the job (queued→running
+    // CAS); claimed_at is its claim timestamp, used by the stale-job reaper and
+    // by sweepStaging to leave another live instance's in-flight artifacts
+    // alone. Existing rows read NULL (unclaimed / pre-HA). PG side is v2.
+    try {
+      const wikiBuildJobColumns = this.db.prepare(`PRAGMA table_info(wiki_build_jobs)`).all() as SqlRow[]
+      if (!wikiBuildJobColumns.some(c => String(c.name) === 'claimed_by')) {
+        this.db.exec(`ALTER TABLE wiki_build_jobs ADD COLUMN claimed_by TEXT`)
+      }
+      if (!wikiBuildJobColumns.some(c => String(c.name) === 'claimed_at')) {
+        this.db.exec(`ALTER TABLE wiki_build_jobs ADD COLUMN claimed_at INTEGER`)
+      }
+    } catch (error) {
+      console.error('[DB] Failed to add wiki_build_jobs claim columns:', error)
+    }
+
     // ============================================================
     // Document Center v2: external sources + connector abstraction
     // Adds support for pulling documents from external systems
@@ -793,8 +848,19 @@ export class DirectConnectStore {
         payload_json TEXT
       );
 
-      CREATE INDEX IF NOT EXISTS corp_app_inbound_seq_idx
+      CREATE UNIQUE INDEX IF NOT EXISTS corp_app_inbound_seq_uniq
         ON corp_app_inbound (corp_app_id, seq);
+      DROP INDEX IF EXISTS corp_app_inbound_seq_idx;
+
+      -- HA: per-corpApp msgaudit pull lease. One live instance holds a
+      -- corpApp's lease while it pulls (forked child), so two instances behind
+      -- an LB never pull the same instance concurrently (which would race the
+      -- cursor and the JSONL read-modify-write). PG side is in v2.
+      CREATE TABLE IF NOT EXISTS msgaudit_leases (
+        corp_app_id  TEXT PRIMARY KEY,
+        instance_id  TEXT,
+        lease_until  INTEGER
+      );
     `)
 
     // Incremental migration: add v2 columns to existing P0 tables.
@@ -1282,53 +1348,65 @@ export class DirectConnectStore {
    * default org; user-scope definitions stay global (org_id NULL). Idempotent —
    * only touches NULL org_id rows. `defaultOrgId` is the org to assign.
    */
-  backfillOrgScoping(defaultOrgId: string): void {
+  async backfillOrgScoping(defaultOrgId: string): Promise<void> {
     if (!defaultOrgId) return
     try {
-      this.db.prepare(
+      await this.driver.run(
         `UPDATE config_items SET org_id = ? WHERE org_id IS NULL AND scope != 'user'`,
-      ).run(defaultOrgId)
+        [defaultOrgId],
+      )
       // secret_metadata inherits its config item's org.
-      this.db.exec(`
+      await this.driver.exec(`
         UPDATE secret_metadata
         SET org_id = (SELECT ci.org_id FROM config_items ci WHERE ci.id = secret_metadata.config_item_id)
         WHERE org_id IS NULL
       `)
-      this.db.prepare(
+      await this.driver.run(
         `UPDATE department_secret_policies SET org_id = ? WHERE org_id IS NULL`,
-      ).run(defaultOrgId)
-      this.db.prepare(
+        [defaultOrgId],
+      )
+      await this.driver.run(
         `UPDATE secret_audit_log SET org_id = ? WHERE org_id IS NULL`,
-      ).run(defaultOrgId)
+        [defaultOrgId],
+      )
       // Tenant skills/assistants: stranded global rows go to the default org.
-      this.db.prepare(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`).run(defaultOrgId)
-      this.db.prepare(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`).run(defaultOrgId)
+      await this.driver.run(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
+      await this.driver.run(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
       // Channels: backfill from the owning user's org where resolvable, else default.
-      this.db.exec(`
-        UPDATE channel_plugins
-        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id), '${defaultOrgId}')
-        WHERE org_id IS NULL OR org_id = ''
-      `)
-      this.db.exec(`
-        UPDATE channel_users
-        SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id), '${defaultOrgId}')
-        WHERE org_id IS NULL OR org_id = ''
-      `)
+      // C-5: parameterized run, not string-interpolated exec — the exec
+      // interface has no parameter slots, which is what forced the template
+      // interpolation. org ids are UUIDs today, but interpolation is a
+      // standing injection surface for zero benefit.
+      await this.driver.run(
+        `UPDATE channel_plugins
+         SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_plugins.user_id), ?)
+         WHERE org_id IS NULL OR org_id = ''`,
+        [defaultOrgId],
+      )
+      await this.driver.run(
+        `UPDATE channel_users
+         SET org_id = COALESCE((SELECT u.org_id FROM users u WHERE u.id = channel_users.user_id), ?)
+         WHERE org_id IS NULL OR org_id = ''`,
+        [defaultOrgId],
+      )
     } catch (error) {
       console.error('[DB] backfillOrgScoping failed:', error)
     }
   }
 
-  close(): void {
-    (this as any)._closed = true
-    this.db.close()
+  async close(): Promise<void> {
+    ;(this as any)._closed = true
+    // Driver-polymorphic: sqlite closes its handle, postgres ends the pool.
+    // The postgres construction form leaves `db` undefined, so the old
+    // `this.db.close()` crashed there and never released the connections.
+    await this.driver.close()
   }
 
   isOpen(): boolean {
     return !(this as any)._closed
   }
 
-  registerServerInstance(host: string, pid = process.pid, instanceId?: string): ServerInstanceRecord {
+  async registerServerInstance(host: string, pid = process.pid, instanceId?: string): Promise<ServerInstanceRecord> {
     // With a stable MOSS_INSTANCE_ID the row survives restarts (stop only
     // marks it stopped), so a fixed id must UPSERT over its own previous
     // incarnation instead of INSERT — otherwise the second start crashes on
@@ -1336,7 +1414,33 @@ export class DirectConnectStore {
     // conflict (single-instance behavior unchanged).
     const resolvedInstanceId = instanceId ?? randomUUID()
     const ts = now()
-    this.db.prepare(`
+    // B-7: same-id dual-process detection (warn, don't block). A still-fresh
+    // row under the SAME id means either a peer incarnation is alive (normal
+    // k8s StatefulSet same-name re-registration after clean shutdown leaves
+    // the row stale — no warn) or two processes are running with one id — an
+    // ops misconfiguration (two deployments sharing MOSS_INSTANCE_ID, or
+    // start-before-stop) that silently defeats ALL owner-based fencing
+    // (heartbeats refresh each other, claimAttempt short-circuits on same
+    // id). We warn loudly and let startup proceed: blocking would turn a
+    // benign overlap into an outage window.
+    try {
+      const existing = await this.driver.get<{ host: string; pid: number; heartbeat_at: number }>(
+        `SELECT host, pid, heartbeat_at FROM server_instances
+         WHERE instance_id = ? AND status = 'running' AND heartbeat_at >= ?`,
+        [resolvedInstanceId, now() - 30_000],
+      )
+      if (existing) {
+        console.warn(
+          `[DB] server_instances: instance_id ${resolvedInstanceId} is ALREADY live ` +
+            `(host=${existing.host} pid=${existing.pid}, heartbeat ${Date.now() - Number(existing.heartbeat_at)}ms ago) — ` +
+            `two processes sharing one instance id defeat owner fencing (claim short-circuit + mutual heartbeat refresh). ` +
+            `If this is not a start-before-stop overlap, check for duplicated MOSS_INSTANCE_ID deployments.`,
+        )
+      }
+    } catch {
+      // Detection is best-effort — never block registration on it.
+    }
+    await this.driver.run(`
       INSERT INTO server_instances (
         instance_id, host, pid, started_at, heartbeat_at, status
       ) VALUES (?, ?, ?, ?, ?, 'running')
@@ -1347,7 +1451,7 @@ export class DirectConnectStore {
         heartbeat_at = excluded.heartbeat_at,
         status = 'running',
         stopped_at = NULL
-    `).run(resolvedInstanceId, host, pid, ts, ts)
+    `, [resolvedInstanceId, host, pid, ts, ts])
     return {
       instanceId: resolvedInstanceId,
       host,
@@ -1359,24 +1463,62 @@ export class DirectConnectStore {
     }
   }
 
-  heartbeatServerInstance(instanceId: string): void {
-    this.db.prepare(`
+  /**
+   * B-3 cluster awareness: how many OTHER live instances are registered.
+   * Same liveness predicate claimAttempt/getAttemptOwnerStatus use. Callers
+   * deciding "was the cluster offline" (cron's markMissedJobsOnStartup) must
+   * skip their offline-recovery logic while peers are alive — a rolling
+   * restart is not an outage, and an online peer's poll will run the due
+   * job without this instance rewriting next_run_at out from under it.
+   * selfInstanceId must be the RESOLVED id (registerServerInstance's return
+   * value — a random UUID when MOSS_INSTANCE_ID is unset); passing undefined
+   * either throws in the driver bind or fails to exclude self under SQL
+   * three-valued logic.
+   */
+  async countLiveOtherInstances(selfInstanceId: string, heartbeatTimeoutMs: number): Promise<number> {
+    const row = await this.driver.get<{ n: number | string }>(`
+      SELECT COUNT(*) AS n FROM server_instances
+      WHERE instance_id != ? AND status = 'running' AND heartbeat_at >= ?
+    `, [selfInstanceId, now() - heartbeatTimeoutMs])
+    return Number(row?.n ?? 0)
+  }
+
+  /**
+   * B-8 cabin arbitration: the (started_at, instance_id)-smallest live
+   * instance's id, or null when no live instance is registered. Consumers
+   * compare against their own resolved id to decide leadership — the
+   * instance_id tiebreak makes simultaneous starts produce exactly one
+   * winner. ORDER BY ... LIMIT 1 rather than a NOT EXISTS form so no
+   * self-started_at parameter is needed.
+   */
+  async getOldestLiveInstanceId(heartbeatTimeoutMs: number): Promise<string | null> {
+    const row = await this.driver.get<{ instance_id: string }>(`
+      SELECT instance_id FROM server_instances
+      WHERE status = 'running' AND heartbeat_at >= ?
+      ORDER BY started_at ASC, instance_id ASC
+      LIMIT 1
+    `, [now() - heartbeatTimeoutMs])
+    return row?.instance_id ?? null
+  }
+
+  async heartbeatServerInstance(instanceId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE server_instances
       SET heartbeat_at = ?, status = 'running'
       WHERE instance_id = ?
-    `).run(now(), instanceId)
+    `, [now(), instanceId])
   }
 
-  stopServerInstance(instanceId: string): void {
+  async stopServerInstance(instanceId: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE server_instances
       SET heartbeat_at = ?, stopped_at = ?, status = 'stopped'
       WHERE instance_id = ?
-    `).run(ts, ts, instanceId)
+    `, [ts, ts, instanceId])
   }
 
-  createSession(input: {
+  async createSession(input: {
     sessionId: string
     transcriptSessionId: string
     transcriptPath: string
@@ -1391,9 +1533,9 @@ export class DirectConnectStore {
     assistantName?: string
     source?: string
     channelChatId?: string
-  }): SessionRecord {
+  }): Promise<SessionRecord> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO sessions (
         session_id, transcript_session_id, org_id, user_id, role, scopes_json,
         cwd, runtime_type, docker_image, docker_mode, config_dir, container_name,
@@ -1401,7 +1543,7 @@ export class DirectConnectStore {
         source, channel_chat_id,
         created_at, last_active_at, ended_at, deleted_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL)
-    `).run(
+    `, [
       input.sessionId,
       input.transcriptSessionId,
       input.orgId,
@@ -1426,16 +1568,16 @@ export class DirectConnectStore {
       input.channelChatId ?? null,
       ts,
       ts,
-    )
-    this.addEvent(input.sessionId, null, 'session_created', {
+    ])
+    await this.addEvent(input.sessionId, null, 'session_created', {
       runtime: input.runtime,
       cwd: input.cwd,
       assistantName: input.assistantName,
     })
-    return this.getSession(input.sessionId)!
+    return (await this.getSession(input.sessionId))!
   }
 
-  createAttempt(input: {
+  async createAttempt(input: {
     sessionId: string
     generation: number
     backendType: 'host' | 'docker' | 'k8s'
@@ -1443,16 +1585,16 @@ export class DirectConnectStore {
     serverInstanceId: string
     containerName?: string
     attachPath?: string
-  }): AttemptRecord {
+  }): Promise<AttemptRecord> {
     const attemptId = randomUUID()
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO session_attempts (
         attempt_id, session_id, generation, backend_type, runtime_state,
         server_instance_id, runner_pid, container_name, attach_path,
         resume_transcript_session_id, started_at, last_heartbeat_at
       ) VALUES (?, ?, ?, ?, 'starting', ?, NULL, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       attemptId,
       input.sessionId,
       input.generation,
@@ -1463,22 +1605,22 @@ export class DirectConnectStore {
       input.resumeTranscriptSessionId,
       ts,
       ts,
-    )
-    this.addEvent(input.sessionId, attemptId, 'attempt_created', {
+    ])
+    await this.addEvent(input.sessionId, attemptId, 'attempt_created', {
       generation: input.generation,
       backendType: input.backendType,
       attachPath: input.attachPath,
       containerName: input.containerName,
     })
-    return this.getAttempt(attemptId)!
+    return (await this.getAttempt(attemptId))!
   }
 
-  setCurrentAttempt(sessionId: string, attemptId: string | null): void {
-    this.db.prepare(`
+  async setCurrentAttempt(sessionId: string, attemptId: string | null): Promise<void> {
+    await this.driver.run(`
       UPDATE sessions
       SET current_attempt_id = ?
       WHERE session_id = ?
-    `).run(attemptId, sessionId)
+    `, [attemptId, sessionId])
   }
 
   /**
@@ -1490,17 +1632,17 @@ export class DirectConnectStore {
    * statement, so SQLite (WAL) / any transactional store serialises the CAS and
    * exactly one contending instance wins (`changes === 1`).
    */
-  claimAttempt(attemptId: string, selfInstanceId: string, heartbeatTimeoutMs: number): boolean {
+  async claimAttempt(attemptId: string, selfInstanceId: string, heartbeatTimeoutMs: number): Promise<boolean> {
     // The common WebSocket path checks an attempt already owned by this process.
     // Avoid rewriting that row: besides being unnecessary, a write here can wait
     // behind another SQLite writer and delay the HTTP upgrade even though no
     // ownership transfer is needed.
-    const current = this.getAttempt(attemptId)
+    const current = await this.getAttempt(attemptId)
     if (!current) return false
     if (current.serverInstanceId === selfInstanceId) return true
 
     const deadBefore = now() - heartbeatTimeoutMs
-    const res = this.db.prepare(`
+    const changes = await this.driver.run(`
       UPDATE session_attempts
       SET server_instance_id = ?
       WHERE attempt_id = ?
@@ -1514,21 +1656,54 @@ export class DirectConnectStore {
               AND si.heartbeat_at >= ?
           )
         )
-    `).run(selfInstanceId, attemptId, selfInstanceId, deadBefore)
-    return res.changes > 0
+    `, [selfInstanceId, attemptId, selfInstanceId, deadBefore])
+    return changes > 0
   }
 
-  setSessionLifecycle(
+  /**
+   * Owner-aware LB (HA design §9.1): resolve the owning instance of an attempt
+   * plus whether it is live (running + heartbeat fresh) — the same liveness
+   * predicate claimAttempt uses for its CAS, exposed read-only for API
+   * serialization. Single JOIN so per-request calls stay one query.
+   */
+  async getAttemptOwnerStatus(
+    attemptId: string,
+    heartbeatTimeoutMs: number,
+  ): Promise<{ ownerInstanceId: string | null; ownerLive: boolean }> {
+    const row = await this.driver.get<SqlRow>(`
+      SELECT a.server_instance_id AS owner,
+        EXISTS (
+          SELECT 1 FROM server_instances si
+          WHERE si.instance_id = a.server_instance_id
+            AND si.status = 'running'
+            AND si.heartbeat_at >= ?
+        ) AS live
+      FROM session_attempts a
+      WHERE a.attempt_id = ?
+    `, [now() - heartbeatTimeoutMs, attemptId])
+    if (!row) return { ownerInstanceId: null, ownerLive: false }
+    return {
+      ownerInstanceId: typeof row.owner === 'string' ? row.owner : null,
+      ownerLive: Boolean(row.live),
+    }
+  }
+
+  async setSessionLifecycle(
     sessionId: string,
     status: SessionStatus,
     desiredState: DesiredSessionState,
-  ): void {
+    onlyWhenDesiredActive?: boolean,
+  ): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    // A2: optional predicate for callers that must never overwrite a user
+    // terminate — the spawn-complete write (runtimeService.spawnAttempt) races
+    // a concurrent terminateSession; the conditional UPDATE lands only while
+    // desired_state is still 'active', so the terminated row survives.
+    await this.driver.run(`
       UPDATE sessions
       SET status = ?, desired_state = ?, last_active_at = ?
-      WHERE session_id = ?
-    `).run(status, desiredState, ts, sessionId)
+      WHERE session_id = ?${onlyWhenDesiredActive ? ` AND desired_state = 'active'` : ''}
+    `, [status, desiredState, ts, sessionId])
   }
 
   /**
@@ -1536,35 +1711,35 @@ export class DirectConnectStore {
    * desired=active, ended_at set). Clears ended_at and resets status/desired
    * to 'active' so the row reads as a live session again after respawn.
    */
-  reactivateSession(sessionId: string): void {
+  async reactivateSession(sessionId: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE sessions
       SET status = 'active', desired_state = 'active', ended_at = NULL,
           last_active_at = ?
       WHERE session_id = ?
-    `).run(ts, sessionId)
+    `, [ts, sessionId])
   }
 
-  markSessionEnded(
+  async markSessionEnded(
     sessionId: string,
     status: SessionStatus,
     desiredState: DesiredSessionState,
-  ): void {
+  ): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE sessions
       SET status = ?, desired_state = ?, ended_at = ?, last_active_at = ?
       WHERE session_id = ?
-    `).run(status, desiredState, ts, ts, sessionId)
+    `, [status, desiredState, ts, ts, sessionId])
   }
 
-  touchSessionActivity(sessionId: string): void {
-    this.db.prepare(`
+  async touchSessionActivity(sessionId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE sessions
       SET last_active_at = ?
       WHERE session_id = ?
-    `).run(now(), sessionId)
+    `, [now(), sessionId])
   }
 
   /**
@@ -1576,50 +1751,50 @@ export class DirectConnectStore {
    * bot A, mixing two conversations into one. `source` stays the bare platform because the
    * sessions UI renders it as the platform label.
    */
-  findChannelSession(source: string, chatId: string, userId: string): SessionRecord | null {
-    const row = this.db.prepare(`
+  async findChannelSession(source: string, chatId: string, userId: string): Promise<SessionRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT *
       FROM sessions
       WHERE source = ? AND channel_chat_id = ? AND user_id = ? AND deleted_at IS NULL
       ORDER BY last_active_at DESC
       LIMIT 1
-    `).get(source, chatId, userId) as SqlRow | undefined
+    `, [source, chatId, userId])
     return row ? mapSession(row) : null
   }
 
-  updateSessionTranscript(
+  async updateSessionTranscript(
     sessionId: string,
     patch: {
       transcriptSessionId: string
       transcriptPath: string
     },
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    await this.driver.run(`
       UPDATE sessions
       SET transcript_session_id = ?,
           transcript_path = ?
       WHERE session_id = ?
-    `).run(
+    `, [
       patch.transcriptSessionId,
       patch.transcriptPath,
       sessionId,
-    )
+    ])
   }
 
-  updateSessionMetadata(
+  async updateSessionMetadata(
     sessionId: string,
     patch: { title?: string | null; summary?: string | null },
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    await this.driver.run(`
       UPDATE sessions
       SET title = COALESCE(?, title),
           summary = COALESCE(?, summary)
       WHERE session_id = ?
-    `).run(
+    `, [
       patch.title === undefined ? null : patch.title,
       patch.summary === undefined ? null : patch.summary,
       sessionId,
-    )
+    ])
   }
 
   /**
@@ -1628,13 +1803,14 @@ export class DirectConnectStore {
    * (including `null`) overwrites it. Read-merge-write, so callers only send the
    * keys they want to change. Missing session or empty result collapses to NULL.
    */
-  updateSessionClientMetadata(
+  async updateSessionClientMetadata(
     sessionId: string,
     patch: Record<string, unknown>,
-  ): void {
-    const row = this.db.prepare(
+  ): Promise<void> {
+    const row = await this.driver.get<SqlRow>(
       `SELECT client_metadata FROM sessions WHERE session_id = ?`,
-    ).get(sessionId) as SqlRow | undefined
+      [sessionId],
+    )
     if (!row) return
     const current = parseJsonObject(row.client_metadata) ?? {}
     for (const [key, value] of Object.entries(patch)) {
@@ -1645,50 +1821,84 @@ export class DirectConnectStore {
       }
     }
     const serialized = Object.keys(current).length > 0 ? JSON.stringify(current) : null
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE sessions
       SET client_metadata = ?
       WHERE session_id = ?
-    `).run(serialized, sessionId)
+    `, [serialized, sessionId])
   }
 
-  updateSessionRuntimeImage(sessionId: string, dockerImage: string): void {
-    this.db.prepare(`
+  async updateSessionRuntimeImage(sessionId: string, dockerImage: string): Promise<void> {
+    await this.driver.run(`
       UPDATE sessions
       SET docker_image = ?
       WHERE session_id = ?
-    `).run(dockerImage, sessionId)
+    `, [dockerImage, sessionId])
   }
 
-  deleteSession(sessionId: string): void {
-    this.db.prepare(`
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.driver.run(`
       UPDATE sessions
       SET deleted_at = ?
       WHERE session_id = ?
-    `).run(now(), sessionId)
+    `, [now(), sessionId])
   }
 
-  updateAttemptRunner(attemptId: string, runnerPid: number): void {
+  async updateAttemptRunner(attemptId: string, runnerPid: number): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE session_attempts
       SET runner_pid = ?, runtime_state = 'running', last_heartbeat_at = ?
       WHERE attempt_id = ?
-    `).run(runnerPid, ts, attemptId)
+    `, [runnerPid, ts, attemptId])
   }
 
-  touchAttemptHeartbeat(
+  /**
+   * Runner heartbeat. With `ownerInstanceId` (multi-instance mode,
+   * MOSS_INSTANCE_ID configured) this doubles as fencing: the UPDATE only
+   * lands while the attempt still belongs to that owner and is still
+   * 'running'. Returns false when another instance claimed the attempt or it
+   * reached a terminal state — the caller (runner daemon) must then exit so
+   * a new owner can respawn cleanly. Without `ownerInstanceId` (single
+   * instance — manifest carries no instanceId to match the resolved UUID
+   * anyway) the unconditional legacy UPDATE applies and this always returns
+   * true.
+   */
+  async touchAttemptHeartbeat(
     attemptId: string,
     state: AttemptRuntimeState = 'running',
-  ): void {
-    this.db.prepare(`
+    ownerInstanceId?: string,
+  ): Promise<boolean> {
+    if (ownerInstanceId) {
+      // A-9: keep this IN list generated from attemptLiveness's single
+      // ALIVE_ATTEMPT_STATES whitelist (hand-maintained copies had drifted).
+      const changes = await this.driver.run(`
+        UPDATE session_attempts
+        SET last_heartbeat_at = ?, runtime_state = ?
+        WHERE attempt_id = ?
+          AND server_instance_id = ?
+          AND runtime_state IN (${ALIVE_ATTEMPT_STATES.map(s => `'${s}'`).join(', ')})
+      `, [now(), state, attemptId, ownerInstanceId])
+      return changes > 0
+    }
+    await this.driver.run(`
       UPDATE session_attempts
       SET last_heartbeat_at = ?, runtime_state = ?
       WHERE attempt_id = ?
-    `).run(now(), state, attemptId)
+    `, [now(), state, attemptId])
+    return true
   }
 
-  markAttemptStopped(
+  /**
+   * Write an attempt terminal. With `ownerInstanceId` (fencing-aware exit
+   * chain — mirrors touchAttemptHeartbeat's owner mode) the UPDATE only lands
+   * while this instance still owns the attempt AND it is still starting/running,
+   * returning false when a new owner already claimed it: a fenced old daemon
+   * must NOT clobber the takeover owner's live session. Without it the
+   * unconditional legacy UPDATE applies and this returns true (single-instance
+   * / markAttemptLost / reconcile paths unchanged).
+   */
+  async markAttemptStopped(
     attemptId: string,
     input: {
       runtimeState: AttemptRuntimeState
@@ -1697,14 +1907,13 @@ export class DirectConnectStore {
       stopReason?: string | null
       errorText?: string | null
     },
-  ): void {
+    ownerInstanceId?: string,
+  ): Promise<boolean> {
     const ts = now()
-    this.db.prepare(`
-      UPDATE session_attempts
+    const setClause = `
       SET runtime_state = ?, stopped_at = ?, last_heartbeat_at = ?,
-          exit_code = ?, exit_signal = ?, stop_reason = ?, error_text = ?
-      WHERE attempt_id = ?
-    `).run(
+          exit_code = ?, exit_signal = ?, stop_reason = ?, error_text = ?`
+    const setParams = [
       input.runtimeState,
       ts,
       ts,
@@ -1712,16 +1921,32 @@ export class DirectConnectStore {
       input.exitSignal ?? null,
       input.stopReason ?? null,
       input.errorText ?? null,
-      attemptId,
-    )
+    ]
+    if (ownerInstanceId) {
+      // A-9: see touchAttemptHeartbeat's note — whitelist from the constant.
+      const changes = await this.driver.run(`
+        UPDATE session_attempts
+        ${setClause}
+        WHERE attempt_id = ?
+          AND server_instance_id = ?
+          AND runtime_state IN (${ALIVE_ATTEMPT_STATES.map(s => `'${s}'`).join(', ')})
+      `, [...setParams, attemptId, ownerInstanceId])
+      return changes > 0
+    }
+    await this.driver.run(`
+      UPDATE session_attempts
+      ${setClause}
+      WHERE attempt_id = ?
+    `, [...setParams, attemptId])
+    return true
   }
 
-  markAttemptLost(attemptId: string, errorText: string): void {
-    this.markAttemptStopped(attemptId, {
+  async markAttemptLost(attemptId: string, errorText: string, ownerInstanceId?: string): Promise<void> {
+    await this.markAttemptStopped(attemptId, {
       runtimeState: 'lost',
       stopReason: 'runner_unavailable',
       errorText,
-    })
+    }, ownerInstanceId)
   }
 
   /**
@@ -1730,17 +1955,17 @@ export class DirectConnectStore {
    * Used by reconcileOnStartup to clean stale rows whose runner_pid is no
    * longer alive on the host.
    */
-  listAttemptsByRuntimeState(states: AttemptRuntimeState[]): AttemptRecord[] {
+  async listAttemptsByRuntimeState(states: AttemptRuntimeState[]): Promise<AttemptRecord[]> {
     if (states.length === 0) return []
     const placeholders = states.map(() => '?').join(',')
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM session_attempts
       WHERE runtime_state IN (${placeholders})
-    `).all(...states) as SqlRow[]
+    `, states)
     return rows.map(mapAttempt)
   }
 
-  listSessionRecords(filter: SessionListFilter): SessionRecord[] {
+  async listSessionRecords(filter: SessionListFilter): Promise<SessionRecord[]> {
     const clauses = ['org_id = ?']
     const values: Array<string | number> = [filter.orgId]
     if (filter.userId) {
@@ -1753,44 +1978,44 @@ export class DirectConnectStore {
     if (filter.activeOnly) {
       clauses.push(`status IN ('creating', 'active', 'detached')`)
     }
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT *
       FROM sessions
       WHERE ${clauses.join(' AND ')}
       ORDER BY last_active_at DESC
-    `).all(...values) as SqlRow[]
+    `, values)
     return rows.map(mapSession)
   }
 
-  listSessions(filter: SessionListFilter): SessionSummary[] {
-    return this.listSessionRecords(filter).map(toSessionSummary)
+  async listSessions(filter: SessionListFilter): Promise<SessionSummary[]> {
+    return (await this.listSessionRecords(filter)).map(toSessionSummary)
   }
 
-  listUserSessions(orgId: string, userId: string): SessionRecord[] {
-    const rows = this.db.prepare(`
+  async listUserSessions(orgId: string, userId: string): Promise<SessionRecord[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT *
       FROM sessions
       WHERE org_id = ? AND user_id = ? AND deleted_at IS NULL
       ORDER BY last_active_at DESC
-    `).all(orgId, userId) as SqlRow[]
+    `, [orgId, userId])
     return rows.map(mapSession)
   }
 
   /** Look up a user's org_id from the users table */
-  getUserOrgId(userId: string): string | null {
-    const row = this.db.prepare(`SELECT org_id FROM users WHERE id = ?`).get(userId) as SqlRow | undefined
+  async getUserOrgId(userId: string): Promise<string | null> {
+    const row = await this.driver.get<SqlRow>(`SELECT org_id FROM users WHERE id = ?`, [userId])
     return row?.org_id ? String(row.org_id) : null
   }
 
-  listSessionsToRecover(): SessionRecord[] {
-    const rows = this.db.prepare(`
+  async listSessionsToRecover(): Promise<SessionRecord[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT *
       FROM sessions
       WHERE desired_state = 'active'
         AND deleted_at IS NULL
         AND status IN ('creating', 'active', 'detached', 'lost', 'failed')
       ORDER BY last_active_at DESC
-    `).all() as SqlRow[]
+    `)
     return rows.map(mapSession)
   }
 
@@ -1801,9 +2026,12 @@ export class DirectConnectStore {
    * recover. Our own sessions are excluded — we already run them, so a periodic
    * adoption pass never re-probes healthy local sessions.
    */
-  listOrphanedActiveSessions(selfInstanceId: string, heartbeatTimeoutMs: number): SessionRecord[] {
+  async listOrphanedActiveSessions(selfInstanceId: string, heartbeatTimeoutMs: number): Promise<SessionRecord[]> {
     const deadBefore = now() - heartbeatTimeoutMs
-    const rows = this.db.prepare(`
+    // M-3: bounded — the 30s adoptionTimer re-queries each round, so a mass
+    // orphan event (DC failure across many sessions) drains in batches of
+    // 100 instead of materialising unbounded rows per tick.
+    const rows = await this.driver.all<SqlRow>(`
       SELECT s.*
       FROM sessions s
       JOIN session_attempts a ON a.attempt_id = s.current_attempt_id
@@ -1819,80 +2047,81 @@ export class DirectConnectStore {
             AND si.heartbeat_at >= ?
         )
       ORDER BY s.last_active_at DESC
-    `).all(selfInstanceId, deadBefore) as SqlRow[]
+      LIMIT 100
+    `, [selfInstanceId, deadBefore])
     return rows.map(mapSession)
   }
 
-  countActiveSessions(): number {
-    const row = this.db.prepare(`
+  async countActiveSessions(): Promise<number> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS count
       FROM sessions
       WHERE deleted_at IS NULL
         AND status IN ('creating', 'active', 'detached')
-    `).get() as SqlRow | undefined
+    `)
     return Number(row?.count ?? 0)
   }
 
-  getSession(sessionId: string): SessionRecord | null {
-    const row = this.db.prepare(`
+  async getSession(sessionId: string): Promise<SessionRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT *
       FROM sessions
       WHERE session_id = ? AND deleted_at IS NULL
       LIMIT 1
-    `).get(sessionId) as SqlRow | undefined
+    `, [sessionId])
     return row ? mapSession(row) : null
   }
 
-  getAttempt(attemptId: string): AttemptRecord | null {
-    const row = this.db.prepare(`
+  async getAttempt(attemptId: string): Promise<AttemptRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT *
       FROM session_attempts
       WHERE attempt_id = ?
       LIMIT 1
-    `).get(attemptId) as SqlRow | undefined
+    `, [attemptId])
     return row ? mapAttempt(row) : null
   }
 
-  getCurrentAttempt(sessionId: string): AttemptRecord | null {
-    const row = this.db.prepare(`
+  async getCurrentAttempt(sessionId: string): Promise<AttemptRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT a.*
       FROM session_attempts a
       JOIN sessions s ON s.current_attempt_id = a.attempt_id
       WHERE s.session_id = ? AND s.deleted_at IS NULL
       LIMIT 1
-    `).get(sessionId) as SqlRow | undefined
+    `, [sessionId])
     return row ? mapAttempt(row) : null
   }
 
-  getNextGeneration(sessionId: string): number {
-    const row = this.db.prepare(`
+  async getNextGeneration(sessionId: string): Promise<number> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT COALESCE(MAX(generation), 0) AS max_generation
       FROM session_attempts
       WHERE session_id = ?
-    `).get(sessionId) as SqlRow | undefined
+    `, [sessionId])
     return Number(row?.max_generation ?? 0) + 1
   }
 
-  addEvent(
+  async addEvent(
     sessionId: string,
     attemptId: string | null,
     eventType: string,
     payload: Record<string, unknown>,
-  ): SessionEventRecord {
+  ): Promise<SessionEventRecord> {
     const eventId = randomUUID()
     const createdAt = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO session_events (
         event_id, session_id, attempt_id, event_type, payload_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       eventId,
       sessionId,
       attemptId,
       eventType,
       JSON.stringify(payload),
       createdAt,
-    )
+    ])
     return {
       eventId,
       sessionId,
@@ -1903,14 +2132,14 @@ export class DirectConnectStore {
     }
   }
 
-  latestEvent(sessionId: string, eventType: string): SessionEventRecord | null {
-    const row = this.db.prepare(`
+  async latestEvent(sessionId: string, eventType: string): Promise<SessionEventRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT *
       FROM session_events
       WHERE session_id = ? AND event_type = ?
       ORDER BY created_at DESC
       LIMIT 1
-    `).get(sessionId, eventType) as SqlRow | undefined
+    `, [sessionId, eventType])
     if (!row) {
       return null
     }
@@ -1927,10 +2156,10 @@ export class DirectConnectStore {
     }
   }
 
-  getEnterprise(): EnterpriseRecord {
-    const row = this.db.prepare(`
+  async getEnterprise(): Promise<EnterpriseRecord> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM enterprises WHERE id = 'default' LIMIT 1
-    `).get() as SqlRow | undefined
+    `)
 
     if (!row) {
       throw new Error('Default enterprise record not found')
@@ -1955,7 +2184,7 @@ export class DirectConnectStore {
     }
   }
 
-  updateEnterprise(patch: Partial<Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>>): void {
+  async updateEnterprise(patch: Partial<Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>>): Promise<void> {
     const entries = Object.entries(patch)
     if (entries.length === 0) return
 
@@ -1967,20 +2196,45 @@ export class DirectConnectStore {
     )
     const ts = now()
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE enterprises
       SET ${sets}, updated_at = ?
       WHERE id = 'default'
-    `).run(...values, ts)
+    `, [...values, ts])
   }
 
   // ==================== Channel Plugins ====================
 
-  listChannelPlugins(userId?: string): SqlRow[] {
+  async listChannelPlugins(userId?: string): Promise<SqlRow[]> {
     if (userId) {
-      return this.db.prepare(`SELECT * FROM channel_plugins WHERE user_id = ? ORDER BY created_at DESC`).all(userId) as SqlRow[]
+      return this.driver.all<SqlRow>(`SELECT * FROM channel_plugins WHERE user_id = ? ORDER BY created_at DESC`, [userId])
     }
-    return this.db.prepare(`SELECT * FROM channel_plugins ORDER BY created_at DESC`).all() as SqlRow[]
+    return this.driver.all<SqlRow>(`SELECT * FROM channel_plugins ORDER BY created_at DESC`)
+  }
+
+  /**
+   * Claim (or renew) the lease on one plugin row for `owner` (HA). Takes the
+   * lease when it is unheld, already ours, or expired; renews lease_until when
+   * already ours. A peer's fresh lease is left untouched. changes > 0 iff this
+   * instance now holds it. Per (id, user_id) so multi-user rows of one plugin
+   * id lease independently.
+   */
+  async claimChannelPluginLease(id: string, userId: string, owner: string, leaseUntil: number, now: number): Promise<boolean> {
+    const changes = await this.driver.run(`
+      UPDATE channel_plugins
+      SET lease_owner = ?, lease_until = ?
+      WHERE id = ? AND user_id = ? AND enabled = 1
+        AND (lease_owner IS NULL OR lease_owner = ? OR lease_until < ?)
+    `, [owner, leaseUntil, id, userId, owner, now])
+    return changes > 0
+  }
+
+  /** Release every plugin lease this instance holds (graceful shutdown). */
+  async releaseAllChannelPluginLeases(owner: string): Promise<void> {
+    await this.driver.run(
+      `UPDATE channel_plugins SET lease_owner = NULL WHERE lease_owner = ?`,
+      [owner],
+    )
   }
 
   /**
@@ -1995,21 +2249,22 @@ export class DirectConnectStore {
    *
    * Returns the conflicting owner (id + display name) or null when the identity is free.
    */
-  findChannelPluginCredentialOwner(params: {
+  async findChannelPluginCredentialOwner(params: {
     type: string
     identity: string
     orgId: string | null
     excludeUserId: string
-  }): { userId: string; name: string } | null {
+  }): Promise<{ userId: string; name: string } | null> {
     const { type, identity, orgId, excludeUserId } = params
     if (!identity) return null
-    const rows = this.db.prepare(
+    const rows = await this.driver.all<SqlRow>(
       `SELECT p.user_id AS user_id, p.org_id AS org_id, p.credentials_json AS credentials_json,
               u.display_name AS display_name, u.name AS name, u.email AS email
          FROM channel_plugins p
          LEFT JOIN users u ON u.id = p.user_id
         WHERE p.type = ? AND p.user_id != ? AND p.enabled = 1`,
-    ).all(type, excludeUserId) as SqlRow[]
+      [type, excludeUserId],
+    )
 
     for (const row of rows) {
       // Only conflict within the same org; rows with no org are treated as global.
@@ -2038,18 +2293,19 @@ export class DirectConnectStore {
    * connections and the chat would see a duplicate reply, so the second one is rejected —
    * the same rule findChannelPluginCredentialOwner enforces across users.
    */
-  findOwnChannelPluginWithIdentity(params: {
+  async findOwnChannelPluginWithIdentity(params: {
     type: string
     identity: string
     userId: string
     excludePluginId: string
-  }): string | null {
+  }): Promise<string | null> {
     const { type, identity, userId, excludePluginId } = params
     if (!identity) return null
-    const rows = this.db.prepare(
+    const rows = await this.driver.all<SqlRow>(
       `SELECT id, name, credentials_json FROM channel_plugins
         WHERE type = ? AND user_id = ? AND id != ? AND enabled = 1`,
-    ).all(type, userId, excludePluginId) as SqlRow[]
+      [type, userId, excludePluginId],
+    )
 
     for (const row of rows) {
       if (!row.credentials_json) continue
@@ -2065,14 +2321,14 @@ export class DirectConnectStore {
     return null
   }
 
-  getChannelPlugin(id: string, userId?: string): SqlRow | null {
+  async getChannelPlugin(id: string, userId?: string): Promise<SqlRow | null> {
     if (userId) {
-      return (this.db.prepare(`SELECT * FROM channel_plugins WHERE id = ? AND user_id = ?`).get(id, userId) as SqlRow) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM channel_plugins WHERE id = ? AND user_id = ?`, [id, userId])) ?? null
     }
-    return (this.db.prepare(`SELECT * FROM channel_plugins WHERE id = ?`).get(id) as SqlRow) ?? null
+    return (await this.driver.get<SqlRow>(`SELECT * FROM channel_plugins WHERE id = ?`, [id])) ?? null
   }
 
-  upsertChannelPlugin(row: {
+  async upsertChannelPlugin(row: {
     id: string
     type: string
     name: string
@@ -2083,9 +2339,9 @@ export class DirectConnectStore {
     last_connected?: number | null
     user_id: string
     org_id?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO channel_plugins (
         id, type, name, enabled, credentials_json, config_json, status, last_connected, user_id, org_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2098,7 +2354,7 @@ export class DirectConnectStore {
         last_connected = COALESCE(excluded.last_connected, last_connected),
         org_id = COALESCE(excluded.org_id, org_id),
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       row.id,
       row.type,
       row.name,
@@ -2111,38 +2367,38 @@ export class DirectConnectStore {
       row.org_id ?? null,
       ts,
       ts,
-    )
+    ])
   }
 
-  updateChannelPluginStatus(id: string, status: string, lastConnected?: number, userId?: string): void {
+  async updateChannelPluginStatus(id: string, status: string, lastConnected?: number, userId?: string): Promise<void> {
     const ts = now()
     if (userId) {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE channel_plugins
         SET status = ?, last_connected = COALESCE(?, last_connected), updated_at = ?
         WHERE id = ? AND user_id = ?
-      `).run(status, lastConnected ?? null, ts, id, userId)
+      `, [status, lastConnected ?? null, ts, id, userId])
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         UPDATE channel_plugins
         SET status = ?, last_connected = COALESCE(?, last_connected), updated_at = ?
         WHERE id = ?
-      `).run(status, lastConnected ?? null, ts, id)
+      `, [status, lastConnected ?? null, ts, id])
     }
   }
 
   /** Remove one connection row. Used when a user deletes a channel connection. */
-  deleteChannelPlugin(id: string, userId: string): void {
-    this.db.prepare(`DELETE FROM channel_plugins WHERE id = ? AND user_id = ?`).run(id, userId)
+  async deleteChannelPlugin(id: string, userId: string): Promise<void> {
+    await this.driver.run(`DELETE FROM channel_plugins WHERE id = ? AND user_id = ?`, [id, userId])
   }
 
   // ==================== Channel Users ====================
 
-  listChannelUsers(userId?: string): SqlRow[] {
+  async listChannelUsers(userId?: string): Promise<SqlRow[]> {
     if (userId) {
-      return this.db.prepare(`SELECT * FROM channel_users WHERE user_id = ? ORDER BY authorized_at DESC`).all(userId) as SqlRow[]
+      return this.driver.all<SqlRow>(`SELECT * FROM channel_users WHERE user_id = ? ORDER BY authorized_at DESC`, [userId])
     }
-    return this.db.prepare(`SELECT * FROM channel_users ORDER BY authorized_at DESC`).all() as SqlRow[]
+    return this.driver.all<SqlRow>(`SELECT * FROM channel_users ORDER BY authorized_at DESC`)
   }
 
   /**
@@ -2152,18 +2408,20 @@ export class DirectConnectStore {
    * connection, the plugin id for any additional one. Matching on the platform instead
    * would let a user paired with one bot talk to every other bot of that type.
    */
-  getChannelUserByPlatform(platformUserId: string, scope: string, userId?: string): SqlRow | null {
+  async getChannelUserByPlatform(platformUserId: string, scope: string, userId?: string): Promise<SqlRow | null> {
     if (userId) {
-      return (this.db.prepare(
+      return (await this.driver.get<SqlRow>(
         `SELECT * FROM channel_users WHERE platform_user_id = ? AND plugin_scope = ? AND user_id = ?`,
-      ).get(platformUserId, scope, userId) as SqlRow) ?? null
+        [platformUserId, scope, userId],
+      )) ?? null
     }
-    return (this.db.prepare(
+    return (await this.driver.get<SqlRow>(
       `SELECT * FROM channel_users WHERE platform_user_id = ? AND plugin_scope = ?`,
-    ).get(platformUserId, scope) as SqlRow) ?? null
+      [platformUserId, scope],
+    )) ?? null
   }
 
-  upsertChannelUser(row: {
+  async upsertChannelUser(row: {
     id: string
     platform_user_id: string
     platform_type: string
@@ -2174,8 +2432,8 @@ export class DirectConnectStore {
     session_id?: string | null
     org_id?: string | null
     user_id?: string | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    await this.driver.run(`
       INSERT INTO channel_users (
         id, platform_user_id, platform_type, plugin_scope, display_name, authorized_at, last_active, session_id, org_id, user_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2185,7 +2443,7 @@ export class DirectConnectStore {
         session_id = excluded.session_id,
         org_id = excluded.org_id,
         user_id = excluded.user_id
-    `).run(
+    `, [
       row.id,
       row.platform_user_id,
       row.platform_type,
@@ -2196,37 +2454,35 @@ export class DirectConnectStore {
       row.session_id ?? null,
       row.org_id ?? null,
       row.user_id ?? null,
-    )
+    ])
   }
 
-  getChannelUserById(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM channel_users WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getChannelUserById(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM channel_users WHERE id = ?`, [id])) ?? null
   }
 
-  deleteChannelUser(id: string): void {
-    this.db.prepare(`DELETE FROM channel_users WHERE id = ?`).run(id)
+  async deleteChannelUser(id: string): Promise<void> {
+    await this.driver.run(`DELETE FROM channel_users WHERE id = ?`, [id])
   }
 
   /**
    * Drop authorized users for ONE connection (scope), not the whole platform:
    * disabling one bot must not deauthorize everyone paired with its siblings.
    */
-  deleteChannelUsersByPlatform(scope: string, userId?: string): number {
+  async deleteChannelUsersByPlatform(scope: string, userId?: string): Promise<number> {
     if (userId) {
-      const result = this.db.prepare(`DELETE FROM channel_users WHERE plugin_scope = ? AND user_id = ?`).run(scope, userId)
-      return result.changes
+      return this.driver.run(`DELETE FROM channel_users WHERE plugin_scope = ? AND user_id = ?`, [scope, userId])
     }
-    const result = this.db.prepare(`DELETE FROM channel_users WHERE plugin_scope = ?`).run(scope)
-    return result.changes
+    return this.driver.run(`DELETE FROM channel_users WHERE plugin_scope = ?`, [scope])
   }
 
   // ==================== Channel Sessions ====================
 
-  listChannelSessions(): SqlRow[] {
-    return this.db.prepare(`SELECT * FROM channel_sessions ORDER BY last_activity DESC`).all() as SqlRow[]
+  async listChannelSessions(): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(`SELECT * FROM channel_sessions ORDER BY last_activity DESC`)
   }
 
-  upsertChannelSession(row: {
+  async upsertChannelSession(row: {
     id: string
     user_id: string
     agent_type: string
@@ -2235,8 +2491,8 @@ export class DirectConnectStore {
     chat_id?: string | null
     created_at: number
     last_activity: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    await this.driver.run(`
       INSERT INTO channel_sessions (
         id, user_id, agent_type, conversation_id, workspace, chat_id, created_at, last_activity
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -2245,7 +2501,7 @@ export class DirectConnectStore {
         workspace = excluded.workspace,
         chat_id = excluded.chat_id,
         last_activity = excluded.last_activity
-    `).run(
+    `, [
       row.id,
       row.user_id,
       row.agent_type,
@@ -2254,7 +2510,7 @@ export class DirectConnectStore {
       row.chat_id ?? null,
       row.created_at,
       row.last_activity,
-    )
+    ])
   }
 
   /**
@@ -2268,59 +2524,116 @@ export class DirectConnectStore {
    * compaction growth it exists to bound would go unchecked — the failure
    * would only surface months later as [single_request_too_large].
    */
-  getChannelSessionTurnCount(userId: string, chatId?: string): number {
-    const row = this.db.prepare(
+  async getChannelSessionTurnCount(userId: string, chatId?: string): Promise<number> {
+    const row = await this.driver.get<SqlRow>(
       `SELECT MAX(COALESCE(turn_count, 0)) AS tc FROM channel_sessions
-       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
-    ).get(userId, chatId ?? null) as SqlRow | undefined
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
+      [userId, chatId ?? null],
+    )
     return row ? Number(row.tc ?? 0) : 0
   }
 
-  /** Increment a chat's conversation depth by one turn; returns the new value. */
-  incrementChannelSessionTurnCount(userId: string, chatId?: string): number {
-    this.db.prepare(
-      `UPDATE channel_sessions SET turn_count = COALESCE(turn_count, 0) + 1
-       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
-    ).run(userId, chatId ?? null)
+  /** Increment a chat's conversation depth by one turn; returns the new value.
+   *  E-1: also refreshes last_activity — with this, every message keeps the
+   *  shared-DB freshness signal current, so a non-holding instance's stale
+   *  sweep (which judges by the DB, not its frozen in-memory copy) never
+   *  deletes a chat that is actively exchanging messages. */
+  async incrementChannelSessionTurnCount(userId: string, chatId?: string): Promise<number> {
+    await this.driver.run(
+      `UPDATE channel_sessions SET turn_count = COALESCE(turn_count, 0) + 1, last_activity = ?
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
+      [now(), userId, chatId ?? null],
+    )
     return this.getChannelSessionTurnCount(userId, chatId)
+  }
+
+  /**
+   * E-1: delete channel sessions whose last_activity (per the SHARED DB, not
+   * any instance's in-memory copy) is older than maxAgeMs. Returns the ids
+   * removed so the caller can sync its in-memory map. Two statements instead
+   * of RETURNING — identical across dialects, matching the store's
+   * conservative SQL style.
+   */
+  async deleteStaleChannelSessions(maxAgeMs: number): Promise<string[]> {
+    const rows = await this.driver.all<{ id: string }>(
+      `SELECT id FROM channel_sessions WHERE last_activity < ?`,
+      [now() - maxAgeMs],
+    )
+    if (rows.length === 0) return []
+    const ids = rows.map(r => String(r.id))
+    const placeholders = ids.map(() => '?').join(', ')
+    await this.driver.run(
+      `DELETE FROM channel_sessions WHERE id IN (${placeholders})`,
+      ids,
+    )
+    return ids
+  }
+
+  /**
+   * E-2: the agent/model snapshot a chat's CURRENT runtime session was built
+   * with ({agent, defaultModel} JSON, same keys as channel_plugins.config_json).
+   * planRotation compares it against the plugin's live config so a settings
+   * change rotates the chat to a new session on the NEXT message — evaluated
+   * on the lease-holding instance from shared data, no cross-instance
+   * invalidation needed.
+   */
+  async getChannelSessionAgentConfig(userId: string, chatId?: string): Promise<string | null> {
+    const row = await this.driver.get<{ cfg: string | null }>(
+      `SELECT last_agent_config AS cfg FROM channel_sessions
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')
+       ORDER BY last_activity DESC LIMIT 1`,
+      [userId, chatId ?? null],
+    )
+    return row?.cfg ?? null
+  }
+
+  /** E-2: stamp the agent/model snapshot onto the chat's session row(s). */
+  async setChannelSessionAgentConfig(userId: string, chatId: string | undefined, configJson: string): Promise<void> {
+    await this.driver.run(
+      `UPDATE channel_sessions SET last_agent_config = ?
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
+      [configJson, userId, chatId ?? null],
+    )
   }
 
   /** Seed a freshly-inserted row's depth, used by SessionManager to carry the
    *  count across a channel_sessions row rebuild. Keyed by row id because the
    *  new row is the only one for that chat at call time. */
-  setChannelSessionTurnCount(id: string, turnCount: number): void {
-    this.db.prepare(
+  async setChannelSessionTurnCount(id: string, turnCount: number): Promise<void> {
+    await this.driver.run(
       `UPDATE channel_sessions SET turn_count = ? WHERE id = ?`,
-    ).run(Math.max(0, Math.trunc(turnCount)), id)
+      [Math.max(0, Math.trunc(turnCount)), id],
+    )
   }
 
   /** Reset depth to zero. Called ONLY after a rotation actually replaced the
    *  runtime session — never on an idle revive. */
-  resetChannelSessionTurnCount(userId: string, chatId?: string): void {
-    this.db.prepare(
+  async resetChannelSessionTurnCount(userId: string, chatId?: string): Promise<void> {
+    await this.driver.run(
       `UPDATE channel_sessions SET turn_count = 0
-       WHERE user_id = ? AND IFNULL(chat_id, '') = IFNULL(?, '')`,
-    ).run(userId, chatId ?? null)
+       WHERE user_id = ? AND COALESCE(chat_id, '') = COALESCE(?, '')`,
+      [userId, chatId ?? null],
+    )
   }
 
-  deleteChannelSession(id: string): void {
-    this.db.prepare(`DELETE FROM channel_sessions WHERE id = ?`).run(id)
+  async deleteChannelSession(id: string): Promise<void> {
+    await this.driver.run(`DELETE FROM channel_sessions WHERE id = ?`, [id])
   }
 
   // ==================== Channel Pairings ====================
 
-  listPendingPairingRequests(userId?: string): SqlRow[] {
+  async listPendingPairingRequests(userId?: string): Promise<SqlRow[]> {
     if (userId) {
-      return this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ? AND (user_id = ? OR user_id IS NULL)`).all(now(), userId) as SqlRow[]
+      return this.driver.all<SqlRow>(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ? AND (user_id = ? OR user_id IS NULL)`, [now(), userId])
     }
-    return this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ?`).all(now()) as SqlRow[]
+    return this.driver.all<SqlRow>(`SELECT * FROM channel_pairing_requests WHERE status = 'pending' AND expires_at > ?`, [now()])
   }
 
-  getPairingRequest(code: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM channel_pairing_requests WHERE code = ?`).get(code) as SqlRow) ?? null
+  async getPairingRequest(code: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM channel_pairing_requests WHERE code = ?`, [code])) ?? null
   }
 
-  upsertPairingRequest(row: {
+  async upsertPairingRequest(row: {
     code: string
     platform_user_id: string
     platform_type: string
@@ -2330,8 +2643,8 @@ export class DirectConnectStore {
     expires_at: number
     status: string
     user_id?: string | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    await this.driver.run(`
       INSERT INTO channel_pairing_requests (
         code, platform_user_id, platform_type, plugin_scope, display_name, requested_at, expires_at, status, user_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2343,7 +2656,7 @@ export class DirectConnectStore {
         display_name = excluded.display_name,
         requested_at = excluded.requested_at,
         expires_at = excluded.expires_at
-    `).run(
+    `, [
       row.code,
       row.platform_user_id,
       row.platform_type,
@@ -2353,42 +2666,42 @@ export class DirectConnectStore {
       row.expires_at,
       row.status,
       row.user_id ?? null,
-    )
+    ])
   }
 
-  updatePairingRequestStatus(code: string, status: string): void {
-    this.db.prepare(`UPDATE channel_pairing_requests SET status = ? WHERE code = ?`).run(status, code)
+  async updatePairingRequestStatus(code: string, status: string): Promise<void> {
+    await this.driver.run(`UPDATE channel_pairing_requests SET status = ? WHERE code = ?`, [status, code])
   }
 
   /** Drop pending pairing codes for ONE connection (scope), not the whole platform. */
-  deletePairingRequestsByUserAndPlatform(userId: string, scope: string): void {
-    this.db.prepare(`DELETE FROM channel_pairing_requests WHERE user_id = ? AND plugin_scope = ?`).run(userId, scope)
+  async deletePairingRequestsByUserAndPlatform(userId: string, scope: string): Promise<void> {
+    await this.driver.run(`DELETE FROM channel_pairing_requests WHERE user_id = ? AND plugin_scope = ?`, [userId, scope])
   }
 
   // ==================== Tenant Skills ====================
 
-  listTenantSkills(status?: string, orgId?: string): SqlRow[] {
+  async listTenantSkills(status?: string, orgId?: string): Promise<SqlRow[]> {
     const conds: string[] = []
     const params: unknown[] = []
     if (status) { conds.push('status = ?'); params.push(status) }
     // Org isolation: a NULL org_id row is legacy/global and stays visible.
     if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
-    return this.db.prepare(`SELECT * FROM tenant_skills ${where} ORDER BY created_at DESC`).all(...params) as SqlRow[]
+    return this.driver.all<SqlRow>(`SELECT * FROM tenant_skills ${where} ORDER BY created_at DESC`, params as SqlParam[])
   }
 
-  getTenantSkill(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM tenant_skills WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getTenantSkill(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE id = ?`, [id])) ?? null
   }
 
-  getTenantSkillByName(name: string, orgId?: string): SqlRow | null {
+  async getTenantSkillByName(name: string, orgId?: string): Promise<SqlRow | null> {
     if (orgId) {
-      return (this.db.prepare(`SELECT * FROM tenant_skills WHERE name = ? AND (org_id = ? OR org_id IS NULL)`).get(name, orgId) as SqlRow) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ? AND (org_id = ? OR org_id IS NULL)`, [name, orgId])) ?? null
     }
-    return (this.db.prepare(`SELECT * FROM tenant_skills WHERE name = ?`).get(name) as SqlRow) ?? null
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ?`, [name])) ?? null
   }
 
-  createTenantSkill(row: {
+  async createTenantSkill(row: {
     id: string
     name: string
     display_name?: string | null
@@ -2404,14 +2717,14 @@ export class DirectConnectStore {
     enabled?: number
     visible_to?: string | null
     org_id?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO tenant_skills (
         id, name, display_name, description, version, author_id, author_name, status,
         source_url, checksum, file_path, publish_note, enabled, visible_to, org_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.name,
       row.display_name ?? null,
@@ -2429,26 +2742,26 @@ export class DirectConnectStore {
       row.org_id ?? null,
       ts,
       ts,
-    )
+    ])
   }
 
-  updateTenantSkillStatus(id: string, status: string, reviewedBy: string, reviewNote?: string): void {
+  async updateTenantSkillStatus(id: string, status: string, reviewedBy: string, reviewNote?: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_skills
       SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ?, updated_at = ?
       WHERE id = ?
-    `).run(status, reviewedBy, ts, reviewNote ?? null, ts, id)
+    `, [status, reviewedBy, ts, reviewNote ?? null, ts, id])
   }
 
-  updateTenantSkillMeta(id: string, updates: {
+  async updateTenantSkillMeta(id: string, updates: {
     display_name?: string
     description?: string
     enabled?: number
     visible_to?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    const existing = this.getTenantSkill(id)
+    const existing = await this.getTenantSkill(id)
     if (!existing) return
 
     const displayName = updates.display_name ?? existing.display_name
@@ -2456,49 +2769,49 @@ export class DirectConnectStore {
     const enabled = updates.enabled ?? existing.enabled
     const visibleTo = updates.visible_to !== undefined ? updates.visible_to : existing.visible_to
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_skills
       SET display_name = ?, description = ?, enabled = ?, visible_to = ?, updated_at = ?
       WHERE id = ?
-    `).run(displayName as string, description as string, enabled as number, visibleTo as string | null, ts, id)
+    `, [displayName as string, description as string, enabled as number, visibleTo as string | null, ts, id])
   }
 
-  updateTenantSkillFilePath(id: string, filePath: string, sourceUrl: string, checksum: string): void {
+  async updateTenantSkillFilePath(id: string, filePath: string, sourceUrl: string, checksum: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_skills
       SET file_path = ?, source_url = ?, checksum = ?, updated_at = ?
       WHERE id = ?
-    `).run(filePath, sourceUrl, checksum, ts, id)
+    `, [filePath, sourceUrl, checksum, ts, id])
   }
 
-  deleteTenantSkill(id: string): void {
-    this.db.prepare(`DELETE FROM tenant_skills WHERE id = ?`).run(id)
+  async deleteTenantSkill(id: string): Promise<void> {
+    await this.driver.run(`DELETE FROM tenant_skills WHERE id = ?`, [id])
   }
 
   // ==================== Tenant Assistants ====================
 
-  listTenantAssistants(status?: string, orgId?: string): SqlRow[] {
+  async listTenantAssistants(status?: string, orgId?: string): Promise<SqlRow[]> {
     const conds: string[] = []
     const params: unknown[] = []
     if (status) { conds.push('status = ?'); params.push(status) }
     if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
-    return this.db.prepare(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`).all(...params) as SqlRow[]
+    return this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
   }
 
-  getTenantAssistant(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM tenant_assistants WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getTenantAssistant(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?`, [id])) ?? null
   }
 
-  getTenantAssistantByName(name: string, orgId?: string): SqlRow | null {
+  async getTenantAssistantByName(name: string, orgId?: string): Promise<SqlRow | null> {
     if (orgId) {
-      return (this.db.prepare(`SELECT * FROM tenant_assistants WHERE name = ? AND (org_id = ? OR org_id IS NULL)`).get(name, orgId) as SqlRow) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ? AND (org_id = ? OR org_id IS NULL)`, [name, orgId])) ?? null
     }
-    return (this.db.prepare(`SELECT * FROM tenant_assistants WHERE name = ?`).get(name) as SqlRow) ?? null
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ?`, [name])) ?? null
   }
 
-  createTenantAssistant(row: {
+  async createTenantAssistant(row: {
     id: string
     name: string
     display_name?: string | null
@@ -2526,14 +2839,14 @@ export class DirectConnectStore {
     visible_to?: string | null
     workflow?: string | null
     org_id?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO tenant_assistants (
         id, name, display_name, description, default_init_prompt, prompts_i18n, categories, avatar, emoji, version, author_id, author_name, status,
         source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, enabled_corp_apps, workflow, org_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.name,
       row.display_name ?? null,
@@ -2563,19 +2876,19 @@ export class DirectConnectStore {
       row.org_id ?? null,
       ts,
       ts,
-    )
+    ])
   }
 
-  updateTenantAssistantStatus(id: string, status: string, reviewedBy: string, reviewNote?: string): void {
+  async updateTenantAssistantStatus(id: string, status: string, reviewedBy: string, reviewNote?: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_assistants
       SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ?, updated_at = ?
       WHERE id = ?
-    `).run(status, reviewedBy, ts, reviewNote ?? null, ts, id)
+    `, [status, reviewedBy, ts, reviewNote ?? null, ts, id])
   }
 
-  updateTenantAssistantMeta(id: string, updates: {
+  async updateTenantAssistantMeta(id: string, updates: {
     display_name?: string
     description?: string
     default_init_prompt?: string | null
@@ -2592,9 +2905,9 @@ export class DirectConnectStore {
     enabled_corp_apps?: string | null
     skills?: string | null
     workflow?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    const existing = this.getTenantAssistant(id)
+    const existing = await this.getTenantAssistant(id)
     if (!existing) return
 
     const displayName = updates.display_name ?? existing.display_name
@@ -2614,13 +2927,13 @@ export class DirectConnectStore {
     const skills = updates.skills !== undefined ? updates.skills : (existing.skills as string | null)
     const workflow = updates.workflow !== undefined ? updates.workflow : (existing.workflow as string | null)
 
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_assistants
       SET display_name = ?, description = ?, default_init_prompt = ?, prompts_i18n = ?, categories = ?, enabled = ?, visible_to = ?, enabled_skills = ?,
           avatar = ?, emoji = ?, agent_type = ?, memory_mode = ?, enabled_wikis = ?, enabled_corp_apps = ?, skills = ?, workflow = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       displayName as string,
       description as string,
       defaultInitPrompt,
@@ -2639,47 +2952,48 @@ export class DirectConnectStore {
       workflow,
       ts,
       id
-    )
+    ])
   }
 
-  updateTenantAssistantFilePath(id: string, filePath: string, sourceUrl: string, checksum: string): void {
+  async updateTenantAssistantFilePath(id: string, filePath: string, sourceUrl: string, checksum: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_assistants
       SET file_path = ?, source_url = ?, checksum = ?, updated_at = ?
       WHERE id = ?
-    `).run(filePath, sourceUrl, checksum, ts, id)
+    `, [filePath, sourceUrl, checksum, ts, id])
   }
 
   /**
    * Update tenant agent file_path only (used after approval to point to tenant directory)
    */
-  updateTenantAssistantPath(id: string, filePath: string): void {
+  async updateTenantAssistantPath(id: string, filePath: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_assistants
       SET file_path = ?, updated_at = ?
       WHERE id = ?
-    `).run(filePath, ts, id)
+    `, [filePath, ts, id])
   }
 
-  deleteTenantAssistant(id: string): void {
-    this.db.prepare(`DELETE FROM tenant_assistants WHERE id = ?`).run(id)
+  async deleteTenantAssistant(id: string): Promise<void> {
+    await this.driver.run(`DELETE FROM tenant_assistants WHERE id = ?`, [id])
   }
 
   // ==================== Document Center: Tree Nodes ====================
 
-  listDocumentTreeNodes(orgId: string): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM document_tree_nodes WHERE org_id = ? ORDER BY sort_order, created_at`)
-      .all(orgId) as SqlRow[]
+  async listDocumentTreeNodes(orgId: string): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM document_tree_nodes WHERE org_id = ? ORDER BY sort_order, created_at`,
+      [orgId],
+    )
   }
 
-  getDocumentTreeNode(id: string, orgId: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM document_tree_nodes WHERE id = ? AND org_id = ?`).get(id, orgId) as SqlRow) ?? null
+  async getDocumentTreeNode(id: string, orgId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM document_tree_nodes WHERE id = ? AND org_id = ?`, [id, orgId])) ?? null
   }
 
-  createDocumentTreeNode(row: {
+  async createDocumentTreeNode(row: {
     id: string
     org_id: string
     parent_id: string | null
@@ -2691,15 +3005,15 @@ export class DirectConnectStore {
     auto_managed?: number
     alias?: string | null
     last_synced_at?: number | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO document_tree_nodes (
         id, org_id, parent_id, name, description, sort_order, created_at, updated_at,
         source_id, source_path, auto_managed, alias, last_synced_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.org_id,
       row.parent_id ?? null,
@@ -2713,23 +3027,23 @@ export class DirectConnectStore {
       row.auto_managed ?? 0,
       row.alias ?? null,
       row.last_synced_at ?? null,
-    )
+    ])
   }
 
-  updateDocumentTreeNode(id: string, orgId: string, updates: {
+  async updateDocumentTreeNode(id: string, orgId: string, updates: {
     parent_id?: string | null
     name?: string
     description?: string | null
     sort_order?: number
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    const existing = this.getDocumentTreeNode(id, orgId)
+    const existing = await this.getDocumentTreeNode(id, orgId)
     if (!existing) return
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE document_tree_nodes
       SET parent_id = ?, name = ?, description = ?, sort_order = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       updates.parent_id !== undefined ? updates.parent_id : (existing.parent_id as string | null),
       updates.name ?? (existing.name as string),
       updates.description !== undefined ? updates.description : (existing.description as string | null),
@@ -2737,27 +3051,28 @@ export class DirectConnectStore {
       ts,
       id,
       orgId,
-    )
+    ])
   }
 
-  deleteDocumentTreeNode(id: string, orgId: string): void {
+  async deleteDocumentTreeNode(id: string, orgId: string): Promise<void> {
     // ON DELETE CASCADE will remove child nodes and their documents
-    this.db.prepare(`DELETE FROM document_tree_nodes WHERE id = ? AND org_id = ?`).run(id, orgId)
+    await this.driver.run(`DELETE FROM document_tree_nodes WHERE id = ? AND org_id = ?`, [id, orgId])
   }
 
   // ==================== Document Center: Documents ====================
 
-  listDocumentsByNode(nodeId: string, orgId: string): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM documents WHERE node_id = ? AND org_id = ? ORDER BY uploaded_at DESC`)
-      .all(nodeId, orgId) as SqlRow[]
+  async listDocumentsByNode(nodeId: string, orgId: string): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM documents WHERE node_id = ? AND org_id = ? ORDER BY uploaded_at DESC`,
+      [nodeId, orgId],
+    )
   }
 
-  getDocument(id: string, orgId: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM documents WHERE id = ? AND org_id = ?`).get(id, orgId) as SqlRow) ?? null
+  async getDocument(id: string, orgId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM documents WHERE id = ? AND org_id = ?`, [id, orgId])) ?? null
   }
 
-  createDocument(row: {
+  async createDocument(row: {
     id: string
     org_id: string
     node_id: string
@@ -2770,16 +3085,16 @@ export class DirectConnectStore {
     external_id?: string | null
     external_etag?: string | null
     content_sha256?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO documents (
         id, org_id, node_id, file_name, mime_type, size_bytes, storage_path,
         uploaded_by, uploaded_at,
         source_id, external_id, external_etag, content_sha256
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.org_id,
       row.node_id,
@@ -2793,16 +3108,16 @@ export class DirectConnectStore {
       row.external_id ?? null,
       row.external_etag ?? null,
       row.content_sha256 ?? null,
-    )
+    ])
   }
 
-  deleteDocument(id: string, orgId: string): void {
-    this.db.prepare(`DELETE FROM documents WHERE id = ? AND org_id = ?`).run(id, orgId)
+  async deleteDocument(id: string, orgId: string): Promise<void> {
+    await this.driver.run(`DELETE FROM documents WHERE id = ? AND org_id = ?`, [id, orgId])
   }
 
   // ==================== Document Center: Wikis ====================
 
-  listWikis(orgId: string, filter?: { nodeId?: string; buildStatus?: string }): SqlRow[] {
+  async listWikis(orgId: string, filter?: { nodeId?: string; buildStatus?: string }): Promise<SqlRow[]> {
     const conditions = ['org_id = ?']
     const params: unknown[] = [orgId]
     if (filter?.nodeId) {
@@ -2813,21 +3128,22 @@ export class DirectConnectStore {
       conditions.push('build_status = ?')
       params.push(filter.buildStatus)
     }
-    return this.db
-      .prepare(`SELECT * FROM wikis WHERE ${conditions.join(' AND ')} ORDER BY updated_at DESC`)
-      .all(...params) as SqlRow[]
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM wikis WHERE ${conditions.join(' AND ')} ORDER BY updated_at DESC`,
+      params as SqlParam[],
+    )
   }
 
-  getWiki(id: string, orgId: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM wikis WHERE id = ? AND org_id = ?`).get(id, orgId) as SqlRow) ?? null
+  async getWiki(id: string, orgId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM wikis WHERE id = ? AND org_id = ?`, [id, orgId])) ?? null
   }
 
   /** Cross-org getter for runtime / build worker use. */
-  getWikiById(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM wikis WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getWikiById(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM wikis WHERE id = ?`, [id])) ?? null
   }
 
-  createWiki(row: {
+  async createWiki(row: {
     id: string
     org_id: string
     node_id?: string | null
@@ -2841,16 +3157,16 @@ export class DirectConnectStore {
     source_exclude_node_ids?: string[]
     auto_rebuild?: boolean
     created_by: string
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO wikis (
         id, org_id, node_id, name, description, storage_path,
         build_status, source_document_ids, source_mode, source_node_id, auto_rebuild,
         source_node_ids, source_exclude_node_ids,
         created_by, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.org_id,
       row.node_id ?? null,
@@ -2866,10 +3182,10 @@ export class DirectConnectStore {
       row.created_by,
       ts,
       ts,
-    )
+    ])
   }
 
-  updateWiki(id: string, orgId: string, updates: {
+  async updateWiki(id: string, orgId: string, updates: {
     name?: string
     description?: string | null
     node_id?: string | null
@@ -2879,17 +3195,17 @@ export class DirectConnectStore {
     source_node_ids?: string[]
     source_exclude_node_ids?: string[]
     auto_rebuild?: boolean
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    const existing = this.getWiki(id, orgId)
+    const existing = await this.getWiki(id, orgId)
     if (!existing) return
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE wikis
       SET name = ?, description = ?, node_id = ?, source_document_ids = ?,
           source_mode = ?, source_node_id = ?, auto_rebuild = ?,
           source_node_ids = ?, source_exclude_node_ids = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       updates.name ?? (existing.name as string),
       updates.description !== undefined ? updates.description : (existing.description as string | null),
       updates.node_id !== undefined ? updates.node_id : (existing.node_id as string | null),
@@ -2910,46 +3226,47 @@ export class DirectConnectStore {
       ts,
       id,
       orgId,
-    )
+    ])
   }
 
-  updateWikiBuildResult(id: string, result: {
+  async updateWikiBuildResult(id: string, result: {
     build_status: 'pending' | 'running' | 'succeeded' | 'failed'
     last_built_at?: number
     last_build_error?: string | null
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE wikis
       SET build_status = ?, last_built_at = ?, last_build_error = ?, updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       result.build_status,
       result.last_built_at ?? null,
       result.last_build_error ?? null,
       ts,
       id,
-    )
+    ])
   }
 
-  deleteWiki(id: string, orgId: string): void {
-    this.db.prepare(`DELETE FROM wikis WHERE id = ? AND org_id = ?`).run(id, orgId)
+  async deleteWiki(id: string, orgId: string): Promise<void> {
+    await this.driver.run(`DELETE FROM wikis WHERE id = ? AND org_id = ?`, [id, orgId])
   }
 
   // ==================== Document Center: Build Jobs ====================
 
-  listWikiBuildJobs(wikiId: string, limit = 20): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM wiki_build_jobs WHERE wiki_id = ? ORDER BY queued_at DESC LIMIT ?`)
-      .all(wikiId, limit) as SqlRow[]
+  async listWikiBuildJobs(wikiId: string, limit = 20): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM wiki_build_jobs WHERE wiki_id = ? ORDER BY queued_at DESC LIMIT ?`,
+      [wikiId, limit],
+    )
   }
 
-  listWikiBuildJobsForOrg(orgId: string, opts?: {
+  async listWikiBuildJobsForOrg(orgId: string, opts?: {
     status?: string
     wikiId?: string
     limit?: number
     offset?: number
-  }): { items: SqlRow[]; total: number } {
+  }): Promise<{ items: SqlRow[]; total: number }> {
     const where = ['w.org_id = ?']
     const params: Array<string | number> = [orgId]
     if (opts?.status) {
@@ -2961,18 +3278,15 @@ export class DirectConnectStore {
       params.push(opts.wikiId)
     }
     const whereSql = where.join(' AND ')
-    const totalRow = this.db
-      .prepare(`
+    const totalRow = await this.driver.get<{ c: number }>(`
         SELECT COUNT(*) AS c
         FROM wiki_build_jobs j
         JOIN wikis w ON w.id = j.wiki_id
         WHERE ${whereSql}
-      `)
-      .get(...params) as { c: number } | undefined
+      `, params)
     const limit = Math.min(Math.max(Math.floor(opts?.limit ?? 50), 1), 200)
     const offset = Math.max(Math.floor(opts?.offset ?? 0), 0)
-    const items = this.db
-      .prepare(`
+    const items = await this.driver.all<SqlRow>(`
         SELECT
           j.*,
           w.name AS wiki_name,
@@ -2984,14 +3298,12 @@ export class DirectConnectStore {
         WHERE ${whereSql}
         ORDER BY j.queued_at DESC
         LIMIT ? OFFSET ?
-      `)
-      .all(...params, limit, offset) as SqlRow[]
+      `, [...params, limit, offset])
     return { items, total: totalRow ? Number(totalRow.c) : 0 }
   }
 
-  getWikiBuildJobForOrg(id: string, orgId: string): SqlRow | null {
-    return (this.db
-      .prepare(`
+  async getWikiBuildJobForOrg(id: string, orgId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`
         SELECT
           j.*,
           w.name AS wiki_name,
@@ -3001,46 +3313,83 @@ export class DirectConnectStore {
         FROM wiki_build_jobs j
         JOIN wikis w ON w.id = j.wiki_id
         WHERE j.id = ? AND w.org_id = ?
-      `)
-      .get(id, orgId) as SqlRow) ?? null
+      `, [id, orgId])) ?? null
   }
 
-  getWikiBuildJob(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM wiki_build_jobs WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getWikiBuildJob(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM wiki_build_jobs WHERE id = ?`, [id])) ?? null
   }
 
-  getLatestWikiBuildJob(wikiId: string): SqlRow | null {
-    return (this.db
-      .prepare(`SELECT * FROM wiki_build_jobs WHERE wiki_id = ? ORDER BY queued_at DESC LIMIT 1`)
-      .get(wikiId) as SqlRow) ?? null
+  async getLatestWikiBuildJob(wikiId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(
+      `SELECT * FROM wiki_build_jobs WHERE wiki_id = ? ORDER BY queued_at DESC LIMIT 1`,
+      [wikiId],
+    )) ?? null
   }
 
-  countRunningWikiBuildJobs(): number {
-    const row = this.db
-      .prepare(`SELECT COUNT(*) AS c FROM wiki_build_jobs WHERE status IN ('queued', 'running')`)
-      .get() as { c: number } | undefined
+  async countRunningWikiBuildJobs(): Promise<number> {
+    const row = await this.driver.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM wiki_build_jobs WHERE status IN ('queued', 'running')`,
+    )
     return row ? Number(row.c) : 0
   }
 
-  listQueuedWikiBuildJobs(limit = 10): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM wiki_build_jobs WHERE status = 'queued' ORDER BY queued_at LIMIT ?`)
-      .all(limit) as SqlRow[]
+  async listQueuedWikiBuildJobs(limit = 10): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM wiki_build_jobs WHERE status = 'queued' ORDER BY queued_at LIMIT ?`,
+      [limit],
+    )
   }
 
-  createWikiBuildJob(row: {
+  /**
+   * Atomically claim up to `limit` queued jobs, flipping them to 'running' and
+   * stamping the owning instance in the SAME statement (CAS). The inner SELECT
+   * picks candidates; the outer `AND status = 'queued'` re-checks under the row
+   * lock (PG EvalPlanQual / SQLite writer serialization) so two instances polling
+   * concurrently never both claim the same job and double-run the build. Only the
+   * rows this call actually flipped come back via RETURNING.
+   */
+  async claimQueuedWikiBuildJobs(limit: number, instanceId: string | undefined, now: number): Promise<SqlRow[]> {
+    if (limit <= 0) return []
+    return this.driver.all<SqlRow>(`
+      UPDATE wiki_build_jobs
+      SET status = 'running', claimed_by = ?, claimed_at = ?, started_at = COALESCE(started_at, ?)
+      WHERE id IN (
+        SELECT id FROM wiki_build_jobs
+        WHERE status = 'queued'
+        ORDER BY queued_at
+        LIMIT ?
+      )
+      AND status = 'queued'
+      RETURNING *
+    `, [instanceId ?? null, now, now, limit])
+  }
+
+  /**
+   * Jobs still 'running' whose claim/start stamp is older than `before` — i.e.
+   * the owning instance crashed or wedged mid-build. The reaper fails these so
+   * they stop occupying the wiki's build slot forever.
+   */
+  async listStaleRunningWikiBuildJobs(before: number): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM wiki_build_jobs WHERE status = 'running' AND COALESCE(claimed_at, started_at) < ?`,
+      [before],
+    )
+  }
+
+  async createWikiBuildJob(row: {
     id: string
     wiki_id: string
     triggered_by: string
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO wiki_build_jobs (id, wiki_id, status, progress, triggered_by, queued_at)
       VALUES (?, ?, 'queued', 0, ?, ?)
-    `).run(row.id, row.wiki_id, row.triggered_by, ts)
+    `, [row.id, row.wiki_id, row.triggered_by, ts])
   }
 
-  updateWikiBuildJob(id: string, updates: {
+  async updateWikiBuildJob(id: string, updates: {
     status?: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
     progress?: number
     current_step?: string | null
@@ -3048,56 +3397,85 @@ export class DirectConnectStore {
     session_id?: string | null
     started_at?: number
     finished_at?: number
-  }): void {
-    const existing = this.getWikiBuildJob(id)
-    if (!existing) return
-    this.db.prepare(`
-      UPDATE wiki_build_jobs
-      SET status = ?, progress = ?, current_step = ?, error_message = ?,
-          session_id = ?, started_at = ?, finished_at = ?
-      WHERE id = ?
-    `).run(
-      updates.status ?? (existing.status as string),
-      updates.progress !== undefined ? updates.progress : (existing.progress as number),
-      updates.current_step !== undefined ? updates.current_step : (existing.current_step as string | null),
-      updates.error_message !== undefined ? updates.error_message : (existing.error_message as string | null),
-      updates.session_id !== undefined ? updates.session_id : (existing.session_id as string | null),
-      updates.started_at ?? (existing.started_at as number | null),
-      updates.finished_at ?? (existing.finished_at as number | null),
-      id,
+  }, opts?: {
+    /**
+     * B-6 fencing predicates, by caller class. Status-carrying writes are the
+     * terminal-state battles this guards: (a) the owner's success write must
+     * only land while the job is still running AND still claimed by it — a
+     * reaper's 'failed' or a cancel's 'cancelled' wins and the late success
+     * write is rejected; (b) the cross-instance reaper's 'failed' write must
+     * only carry the status predicate (NOT claimed_by=self — it reaps OTHER
+     * instances' jobs); (c) the cancel fallback accepts both queued and
+     * running rows. Status-free progress writes pass untouched (dynamic SET
+     * keeps them from resurrecting anything).
+     */
+    expectedStatuses?: string[]
+    ownerInstanceId?: string
+  }): Promise<void> {
+    // Dynamic SET: only the columns explicitly provided are written. Read-then-
+    // write-all would let a slow owner's progress update (which carries no
+    // status) re-write existing.status='running' back over a value the stale
+    // reaper just set to 'failed', resurrecting a dead job and making the reaper
+    // useless. Touching only provided columns keeps status changes authoritative.
+    const sets: string[] = []
+    const params: SqlParam[] = []
+    if (updates.status !== undefined) { sets.push('status = ?'); params.push(updates.status) }
+    if (updates.progress !== undefined) { sets.push('progress = ?'); params.push(updates.progress) }
+    if (updates.current_step !== undefined) { sets.push('current_step = ?'); params.push(updates.current_step) }
+    if (updates.error_message !== undefined) { sets.push('error_message = ?'); params.push(updates.error_message) }
+    if (updates.session_id !== undefined) { sets.push('session_id = ?'); params.push(updates.session_id) }
+    if (updates.started_at !== undefined) { sets.push('started_at = ?'); params.push(updates.started_at) }
+    if (updates.finished_at !== undefined) { sets.push('finished_at = ?'); params.push(updates.finished_at) }
+    if (sets.length === 0) return
+    let where = 'id = ?'
+    if (updates.status !== undefined && opts?.expectedStatuses?.length) {
+      const placeholders = opts.expectedStatuses.map(() => '?').join(', ')
+      where += ` AND status IN (${placeholders})`
+      params.push(...opts.expectedStatuses)
+      if (opts.ownerInstanceId !== undefined) {
+        where += ' AND claimed_by = ?'
+        params.push(opts.ownerInstanceId)
+      }
+    }
+    params.push(id)
+    await this.driver.run(
+      `UPDATE wiki_build_jobs SET ${sets.join(', ')} WHERE ${where}`,
+      params,
     )
   }
 
   // ==================== Document Center v2: External Sources ====================
 
-  listExternalSources(orgId: string, opts?: { enabledOnly?: boolean }): SqlRow[] {
+  async listExternalSources(orgId: string, opts?: { enabledOnly?: boolean }): Promise<SqlRow[]> {
     if (opts?.enabledOnly) {
-      return this.db
-        .prepare(`SELECT * FROM external_sources WHERE org_id = ? AND enabled = 1 ORDER BY created_at`)
-        .all(orgId) as SqlRow[]
+      return this.driver.all<SqlRow>(
+        `SELECT * FROM external_sources WHERE org_id = ? AND enabled = 1 ORDER BY created_at`,
+        [orgId],
+      )
     }
-    return this.db
-      .prepare(`SELECT * FROM external_sources WHERE org_id = ? ORDER BY created_at`)
-      .all(orgId) as SqlRow[]
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM external_sources WHERE org_id = ? ORDER BY created_at`,
+      [orgId],
+    )
   }
 
   /** Cross-org: used by the sync worker which has no caller context. */
-  listAllEnabledExternalSources(): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM external_sources WHERE enabled = 1 ORDER BY last_sync_at`)
-      .all() as SqlRow[]
+  async listAllEnabledExternalSources(): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM external_sources WHERE enabled = 1 ORDER BY last_sync_at NULLS LAST`,
+    )
   }
 
-  getExternalSource(id: string, orgId: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM external_sources WHERE id = ? AND org_id = ?`).get(id, orgId) as SqlRow) ?? null
+  async getExternalSource(id: string, orgId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM external_sources WHERE id = ? AND org_id = ?`, [id, orgId])) ?? null
   }
 
   /** Cross-org getter for the sync worker. */
-  getExternalSourceById(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM external_sources WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getExternalSourceById(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM external_sources WHERE id = ?`, [id])) ?? null
   }
 
-  createExternalSource(row: {
+  async createExternalSource(row: {
     id: string
     org_id: string
     type: string
@@ -3107,14 +3485,14 @@ export class DirectConnectStore {
     sync_interval_sec?: number
     auto_build_enabled?: number
     created_by: string
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO external_sources (
         id, org_id, type, name, config_json, credentials_secret_key,
         sync_interval_sec, auto_build_enabled, enabled, created_by, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.org_id,
       row.type,
@@ -3126,26 +3504,26 @@ export class DirectConnectStore {
       row.created_by,
       ts,
       ts,
-    )
+    ])
   }
 
-  updateExternalSource(id: string, orgId: string, updates: {
+  async updateExternalSource(id: string, orgId: string, updates: {
     name?: string
     config_json?: string
     credentials_secret_key?: string | null
     sync_interval_sec?: number
     auto_build_enabled?: number
     enabled?: number
-  }): void {
-    const existing = this.getExternalSource(id, orgId)
+  }): Promise<void> {
+    const existing = await this.getExternalSource(id, orgId)
     if (!existing) return
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE external_sources
       SET name = ?, config_json = ?, credentials_secret_key = ?,
           sync_interval_sec = ?, auto_build_enabled = ?, enabled = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       updates.name ?? (existing.name as string),
       updates.config_json ?? (existing.config_json as string),
       updates.credentials_secret_key !== undefined
@@ -3157,29 +3535,29 @@ export class DirectConnectStore {
       ts,
       id,
       orgId,
-    )
+    ])
   }
 
-  updateExternalSourceSyncStatus(id: string, status: {
+  async updateExternalSourceSyncStatus(id: string, status: {
     last_sync_at?: number
     last_sync_status?: 'success' | 'failed' | 'running'
     last_sync_error?: string | null
-  }): void {
-    const existing = this.getExternalSourceById(id)
+  }): Promise<void> {
+    const existing = await this.getExternalSourceById(id)
     if (!existing) return
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE external_sources
       SET last_sync_at = ?, last_sync_status = ?, last_sync_error = ?
       WHERE id = ?
-    `).run(
+    `, [
       status.last_sync_at ?? (existing.last_sync_at as number | null),
       status.last_sync_status ?? (existing.last_sync_status as string | null),
       status.last_sync_error !== undefined ? status.last_sync_error : (existing.last_sync_error as string | null),
       id,
-    )
+    ])
   }
 
-  deleteExternalSource(id: string, orgId: string, opts?: { cascadeTree?: boolean }): void {
+  async deleteExternalSource(id: string, orgId: string, opts?: { cascadeTree?: boolean }): Promise<void> {
     // The auto-managed knowledge tree this source created (document_tree_nodes with
     // source_id = <id>) is handled per the caller's choice:
     //   - cascadeTree: remove those nodes too. documents under them cascade
@@ -3189,31 +3567,33 @@ export class DirectConnectStore {
     //     and no future sync will ever sweep it, so it stays until an admin deletes
     //     the orphaned node manually (allowed once its source is gone).
     if (opts?.cascadeTree) {
-      this.db.prepare(`DELETE FROM document_tree_nodes WHERE source_id = ? AND org_id = ?`).run(id, orgId)
+      await this.driver.run(`DELETE FROM document_tree_nodes WHERE source_id = ? AND org_id = ?`, [id, orgId])
     }
-    this.db.prepare(`DELETE FROM external_sources WHERE id = ? AND org_id = ?`).run(id, orgId)
+    await this.driver.run(`DELETE FROM external_sources WHERE id = ? AND org_id = ?`, [id, orgId])
   }
 
   // ==================== 企业应用管理 (Corp Apps) ====================
 
-  listCorpApps(orgId: string, opts?: { enabledOnly?: boolean }): SqlRow[] {
+  async listCorpApps(orgId: string, opts?: { enabledOnly?: boolean }): Promise<SqlRow[]> {
     if (opts?.enabledOnly) {
-      return this.db
-        .prepare(`SELECT * FROM corp_apps WHERE org_id = ? AND enabled = 1 ORDER BY created_at`)
-        .all(orgId) as SqlRow[]
+      return this.driver.all<SqlRow>(
+        `SELECT * FROM corp_apps WHERE org_id = ? AND enabled = 1 ORDER BY created_at`,
+        [orgId],
+      )
     }
-    return this.db
-      .prepare(`SELECT * FROM corp_apps WHERE org_id = ? ORDER BY created_at`)
-      .all(orgId) as SqlRow[]
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM corp_apps WHERE org_id = ? ORDER BY created_at`,
+      [orgId],
+    )
   }
 
-  getCorpApp(id: string, orgId: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM corp_apps WHERE id = ? AND org_id = ?`).get(id, orgId) as SqlRow) ?? null
+  async getCorpApp(id: string, orgId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM corp_apps WHERE id = ? AND org_id = ?`, [id, orgId])) ?? null
   }
 
   /** Cross-org getter (callback listener has no caller org context). */
-  getCorpAppById(id: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM corp_apps WHERE id = ?`).get(id) as SqlRow) ?? null
+  async getCorpAppById(id: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM corp_apps WHERE id = ?`, [id])) ?? null
   }
 
   /**
@@ -3221,26 +3601,56 @@ export class DirectConnectStore {
    * 会话存档 pull worker, which is a background loop with no caller org
    * context (like the callback listener above).
    */
-  listAllCorpAppsByType(type: string): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM corp_apps WHERE type = ? AND enabled = 1 ORDER BY created_at`)
-      .all(type) as SqlRow[]
+  async listAllCorpAppsByType(type: string): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM corp_apps WHERE type = ? AND enabled = 1 ORDER BY created_at`,
+      [type],
+    )
   }
 
-  getCorpAppByName(orgId: string, name: string): SqlRow | null {
-    return (this.db.prepare(`SELECT * FROM corp_apps WHERE org_id = ? AND name = ?`).get(orgId, name) as SqlRow) ?? null
+  /**
+   * Claim the msgaudit pull lease for one corpApp. Single-statement UPSERT: the
+   * INSERT wins when no row exists; on conflict the DO UPDATE runs ONLY when the
+   * existing lease has expired (`lease_until < now`), so a live holder is never
+   * displaced. Returns true iff this call took/renewed the lease (changes > 0).
+   * Verified: the conflict-with-unmet-WHERE reports 0 affected rows on both
+   * SQLite and PG (see msgAuditLease.test.ts).
+   */
+  async claimMsgAuditLease(corpAppId: string, instanceId: string, leaseUntil: number, now: number): Promise<boolean> {
+    const changes = await this.driver.run(`
+      INSERT INTO msgaudit_leases (corp_app_id, instance_id, lease_until)
+      VALUES (?, ?, ?)
+      ON CONFLICT(corp_app_id) DO UPDATE SET
+        instance_id = excluded.instance_id,
+        lease_until = excluded.lease_until
+      WHERE msgaudit_leases.lease_until < ?
+    `, [corpAppId, instanceId, leaseUntil, now])
+    return changes > 0
   }
 
-  getCorpAppByKey(orgId: string, type: string, appKey: string): SqlRow | null {
+  /** Release a lease this instance holds (no-op if another instance owns it). */
+  async releaseMsgAuditLease(corpAppId: string, instanceId: string): Promise<void> {
+    await this.driver.run(
+      `DELETE FROM msgaudit_leases WHERE corp_app_id = ? AND instance_id = ?`,
+      [corpAppId, instanceId],
+    )
+  }
+
+  async getCorpAppByName(orgId: string, name: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM corp_apps WHERE org_id = ? AND name = ?`, [orgId, name])) ?? null
+  }
+
+  async getCorpAppByKey(orgId: string, type: string, appKey: string): Promise<SqlRow | null> {
     return (
-      (this.db
-        .prepare(`SELECT * FROM corp_apps WHERE org_id = ? AND type = ? AND app_key = ?`)
-        .get(orgId, type, appKey) as SqlRow) ?? null
+      (await this.driver.get<SqlRow>(
+        `SELECT * FROM corp_apps WHERE org_id = ? AND type = ? AND app_key = ?`,
+        [orgId, type, appKey],
+      )) ?? null
     )
   }
 
   /** Insert a corp app. Throws on (org_id, name) or (org_id, type, app_key) collision. */
-  createCorpApp(row: {
+  async createCorpApp(row: {
     id: string
     org_id: string
     type: string
@@ -3249,14 +3659,14 @@ export class DirectConnectStore {
     config_json: string
     credentials_secret_key?: string | null
     created_by: string
-  }): void {
+  }): Promise<void> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO corp_apps (
         id, org_id, type, name, app_key, config_json, credentials_secret_key,
         enabled, created_by, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-    `).run(
+    `, [
       row.id,
       row.org_id,
       row.type,
@@ -3267,25 +3677,25 @@ export class DirectConnectStore {
       row.created_by,
       ts,
       ts,
-    )
+    ])
   }
 
-  updateCorpApp(id: string, orgId: string, updates: {
+  async updateCorpApp(id: string, orgId: string, updates: {
     name?: string
     app_key?: string
     config_json?: string
     credentials_secret_key?: string | null
     enabled?: number
-  }): void {
-    const existing = this.getCorpApp(id, orgId)
+  }): Promise<void> {
+    const existing = await this.getCorpApp(id, orgId)
     if (!existing) return
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE corp_apps
       SET name = ?, app_key = ?, config_json = ?, credentials_secret_key = ?,
           enabled = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       updates.name ?? (existing.name as string),
       updates.app_key ?? (existing.app_key as string),
       updates.config_json ?? (existing.config_json as string),
@@ -3296,17 +3706,17 @@ export class DirectConnectStore {
       ts,
       id,
       orgId,
-    )
+    ])
   }
 
-  deleteCorpApp(id: string, orgId: string): void {
-    this.db.prepare(`DELETE FROM corp_apps WHERE id = ? AND org_id = ?`).run(id, orgId)
+  async deleteCorpApp(id: string, orgId: string): Promise<void> {
+    await this.driver.run(`DELETE FROM corp_apps WHERE id = ? AND org_id = ?`, [id, orgId])
   }
 
   // ---- Inbound message buffer ----
 
   /** Append an inbound message, assigning the next per-app sequence number. */
-  appendCorpAppInbound(msg: {
+  async appendCorpAppInbound(msg: {
     corp_app_id: string
     org_id: string
     from_user?: string | null
@@ -3316,21 +3726,25 @@ export class DirectConnectStore {
     file_name?: string | null
     received_at?: number
     payload_json?: string | null
-  }): number {
-    const r = this.db
-      .prepare(`SELECT COALESCE(MAX(seq), 0) AS m FROM corp_app_inbound WHERE corp_app_id = ?`)
-      .get(msg.corp_app_id) as { m: number }
-    const seq = (r?.m ?? 0) + 1
-    this.db.prepare(`
-      INSERT INTO corp_app_inbound (
-        id, corp_app_id, org_id, seq, from_user, msg_type, text,
-        media_id, file_name, received_at, payload_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      randomUUID(),
+  }): Promise<number> {
+    // seq is the per-corp-app monotonic poll cursor for consumers
+    // (`seq > sinceSeq`). Single-statement atomic increment: with multiple
+    // instances receiving callbacks behind an LB, the old two-step
+    // SELECT MAX → INSERT let two concurrent inserts pick the same seq (the
+    // consumer cursor then skips the later row — silent message loss). As
+    // ONE statement SQLite (WAL, single writer) serialises the self-read
+    // under the write lock. On PostgreSQL (P1) READ COMMITTED snapshots
+    // still race: the (corp_app_id, seq) unique index rejects the duplicate
+    // (SQLSTATE 23505) and the loop below re-runs the statement — the new
+    // snapshot sees the winner's committed row and picks MAX+1, so the
+    // cursor never skips a message. Deliberately NOT ON CONFLICT DO NOTHING:
+    // a silently skipped row (rowCount 0) is exactly the message-loss bug.
+    const id = randomUUID()
+    const params = [
+      id,
       msg.corp_app_id,
       msg.org_id,
-      seq,
+      msg.corp_app_id,
       msg.from_user ?? null,
       msg.msg_type ?? null,
       msg.text ?? null,
@@ -3338,161 +3752,192 @@ export class DirectConnectStore {
       msg.file_name ?? null,
       msg.received_at ?? now(),
       msg.payload_json ?? null,
+    ]
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.driver.run(`
+          INSERT INTO corp_app_inbound (
+            id, corp_app_id, org_id, seq, from_user, msg_type, text,
+            media_id, file_name, received_at, payload_json
+          ) VALUES (
+            ?, ?, ?,
+            (SELECT COALESCE(MAX(seq), 0) + 1 FROM corp_app_inbound WHERE corp_app_id = ?),
+            ?, ?, ?, ?, ?, ?, ?
+          )
+        `, params)
+        break
+      } catch (err) {
+        // SQLite never reaches here (single-writer serialisation); this is
+        // the PostgreSQL concurrent-callback race resolved by retry.
+        if (attempt < 8 && isUniqueViolation(err)) continue
+        throw err
+      }
+    }
+    const r = await this.driver.get<{ seq: number }>(
+      `SELECT seq FROM corp_app_inbound WHERE id = ?`,
+      [id],
     )
-    return seq
+    return r?.seq ?? 0
   }
 
   /** List inbound messages with seq > sinceSeq, oldest first. */
-  listCorpAppInbound(corpAppId: string, sinceSeq: number, limit: number): SqlRow[] {
-    return this.db
-      .prepare(
-        `SELECT * FROM corp_app_inbound WHERE corp_app_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
-      )
-      .all(corpAppId, sinceSeq, Math.max(1, Math.min(limit, 500))) as SqlRow[]
+  async listCorpAppInbound(corpAppId: string, sinceSeq: number, limit: number): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM corp_app_inbound WHERE corp_app_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+      [corpAppId, sinceSeq, Math.max(1, Math.min(limit, 500))],
+    )
   }
 
   // ==================== Document Center v2: Soft-delete helpers ====================
 
   /** Soft-delete a document by setting deleted_at. */
-  softDeleteDocument(id: string): void {
+  async softDeleteDocument(id: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`UPDATE documents SET deleted_at = ? WHERE id = ?`).run(ts, id)
+    await this.driver.run(`UPDATE documents SET deleted_at = ? WHERE id = ?`, [ts, id])
   }
 
   /** Undelete (restore from soft-delete). */
-  undeleteDocument(id: string): void {
-    this.db.prepare(`UPDATE documents SET deleted_at = NULL WHERE id = ?`).run(id)
+  async undeleteDocument(id: string): Promise<void> {
+    await this.driver.run(`UPDATE documents SET deleted_at = NULL WHERE id = ?`, [id])
   }
 
-  softDeleteTreeNode(id: string): void {
+  async softDeleteTreeNode(id: string): Promise<void> {
     const ts = now()
-    this.db.prepare(`UPDATE document_tree_nodes SET deleted_at = ? WHERE id = ?`).run(ts, id)
+    await this.driver.run(`UPDATE document_tree_nodes SET deleted_at = ? WHERE id = ?`, [ts, id])
   }
 
-  undeleteTreeNode(id: string): void {
-    this.db.prepare(`UPDATE document_tree_nodes SET deleted_at = NULL WHERE id = ?`).run(id)
+  async undeleteTreeNode(id: string): Promise<void> {
+    await this.driver.run(`UPDATE document_tree_nodes SET deleted_at = NULL WHERE id = ?`, [id])
   }
 
   /** Hard-delete docs/nodes that have been soft-deleted for longer than `cutoffTs`. */
-  purgeOldSoftDeletes(cutoffTs: number): { documents: number; nodes: number } {
-    const docResult = this.db
-      .prepare(`DELETE FROM documents WHERE deleted_at IS NOT NULL AND deleted_at < ?`)
-      .run(cutoffTs)
-    const nodeResult = this.db
-      .prepare(`DELETE FROM document_tree_nodes WHERE deleted_at IS NOT NULL AND deleted_at < ?`)
-      .run(cutoffTs)
+  async purgeOldSoftDeletes(cutoffTs: number): Promise<{ documents: number; nodes: number }> {
+    const documents = await this.driver.run(
+      `DELETE FROM documents WHERE deleted_at IS NOT NULL AND deleted_at < ?`,
+      [cutoffTs],
+    )
+    const nodes = await this.driver.run(
+      `DELETE FROM document_tree_nodes WHERE deleted_at IS NOT NULL AND deleted_at < ?`,
+      [cutoffTs],
+    )
     return {
-      documents: Number(docResult.changes ?? 0),
-      nodes: Number(nodeResult.changes ?? 0),
+      documents: Number(documents ?? 0),
+      nodes: Number(nodes ?? 0),
     }
   }
 
   // ==================== Document Center v2: Source-aware lookups ====================
 
   /** Find a tree node by (source_id, source_path). Used by the sync diff. */
-  findTreeNodeBySource(sourceId: string, sourcePath: string): SqlRow | null {
-    return (this.db
-      .prepare(`SELECT * FROM document_tree_nodes WHERE source_id = ? AND source_path = ? LIMIT 1`)
-      .get(sourceId, sourcePath) as SqlRow) ?? null
+  async findTreeNodeBySource(sourceId: string, sourcePath: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(
+      `SELECT * FROM document_tree_nodes WHERE source_id = ? AND source_path = ? LIMIT 1`,
+      [sourceId, sourcePath],
+    )) ?? null
   }
 
   /** Find a document by (source_id, external_id). Used by the sync diff. */
-  findDocumentBySource(sourceId: string, externalId: string): SqlRow | null {
-    return (this.db
-      .prepare(`SELECT * FROM documents WHERE source_id = ? AND external_id = ? LIMIT 1`)
-      .get(sourceId, externalId) as SqlRow) ?? null
+  async findDocumentBySource(sourceId: string, externalId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(
+      `SELECT * FROM documents WHERE source_id = ? AND external_id = ? LIMIT 1`,
+      [sourceId, externalId],
+    )) ?? null
   }
 
   /** Find a non-deleted document by content hash within an org (for dedup). */
-  findDocumentByHash(orgId: string, sha256: string): SqlRow | null {
-    return (this.db
-      .prepare(`SELECT * FROM documents WHERE org_id = ? AND content_sha256 = ? AND deleted_at IS NULL LIMIT 1`)
-      .get(orgId, sha256) as SqlRow) ?? null
+  async findDocumentByHash(orgId: string, sha256: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(
+      `SELECT * FROM documents WHERE org_id = ? AND content_sha256 = ? AND deleted_at IS NULL LIMIT 1`,
+      [orgId, sha256],
+    )) ?? null
   }
 
   /** All non-deleted documents/nodes for a source, for the reverse sweep. */
-  listDocumentsBySource(sourceId: string): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM documents WHERE source_id = ? AND deleted_at IS NULL`)
-      .all(sourceId) as SqlRow[]
+  async listDocumentsBySource(sourceId: string): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM documents WHERE source_id = ? AND deleted_at IS NULL`,
+      [sourceId],
+    )
   }
 
-  listTreeNodesBySource(sourceId: string): SqlRow[] {
-    return this.db
-      .prepare(`SELECT * FROM document_tree_nodes WHERE source_id = ? AND deleted_at IS NULL`)
-      .all(sourceId) as SqlRow[]
+  async listTreeNodesBySource(sourceId: string): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM document_tree_nodes WHERE source_id = ? AND deleted_at IS NULL`,
+      [sourceId],
+    )
   }
 
   /** The top-level (parent_id IS NULL) node that is the source's auto-created root. */
-  findSourceRootNode(sourceId: string): SqlRow | null {
-    return (this.db
-      .prepare(
-        `SELECT * FROM document_tree_nodes
-         WHERE source_id = ? AND parent_id IS NULL AND deleted_at IS NULL LIMIT 1`,
-      )
-      .get(sourceId) as SqlRow) ?? null
+  async findSourceRootNode(sourceId: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(
+      `SELECT * FROM document_tree_nodes
+       WHERE source_id = ? AND parent_id IS NULL AND deleted_at IS NULL LIMIT 1`,
+      [sourceId],
+    )) ?? null
   }
 
   /** Rename a tree node (used to keep the source root node named after the source). */
-  renameTreeNode(id: string, name: string): void {
-    this.db
-      .prepare(`UPDATE document_tree_nodes SET name = ?, updated_at = ? WHERE id = ?`)
-      .run(name, now(), id)
+  async renameTreeNode(id: string, name: string): Promise<void> {
+    await this.driver.run(
+      `UPDATE document_tree_nodes SET name = ?, updated_at = ? WHERE id = ?`,
+      [name, now(), id],
+    )
   }
 
   /** Document Center v2: update an existing document row's content (sha/etag/path). */
-  updateDocumentContent(id: string, updates: {
+  async updateDocumentContent(id: string, updates: {
     external_etag?: string | null
     content_sha256?: string | null
     storage_path?: string
     size_bytes?: number
-  }): void {
-    const existing = this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as SqlRow | undefined
+  }): Promise<void> {
+    const existing = await this.driver.get<SqlRow>(`SELECT * FROM documents WHERE id = ?`, [id])
     if (!existing) return
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE documents
       SET external_etag = ?, content_sha256 = ?, storage_path = ?, size_bytes = ?
       WHERE id = ?
-    `).run(
+    `, [
       updates.external_etag !== undefined ? updates.external_etag : (existing.external_etag as string | null),
       updates.content_sha256 !== undefined ? updates.content_sha256 : (existing.content_sha256 as string | null),
       updates.storage_path ?? (existing.storage_path as string),
       updates.size_bytes ?? (existing.size_bytes as number),
       id,
-    )
+    ])
   }
 
   /** Update tree node position/name (used by sync diff on rename/move). */
-  updateTreeNodeSourceLocation(id: string, updates: {
+  async updateTreeNodeSourceLocation(id: string, updates: {
     parent_id?: string | null
     name?: string
     source_path?: string
     last_synced_at?: number
-  }): void {
-    const existing = this.db.prepare(`SELECT * FROM document_tree_nodes WHERE id = ?`).get(id) as SqlRow | undefined
+  }): Promise<void> {
+    const existing = await this.driver.get<SqlRow>(`SELECT * FROM document_tree_nodes WHERE id = ?`, [id])
     if (!existing) return
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE document_tree_nodes
       SET parent_id = ?, name = ?, source_path = ?, last_synced_at = ?, updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       updates.parent_id !== undefined ? updates.parent_id : (existing.parent_id as string | null),
       updates.name ?? (existing.name as string),
       updates.source_path ?? (existing.source_path as string | null),
       updates.last_synced_at ?? ts,
       ts,
       id,
-    )
+    ])
   }
 
   /** Document Center v2: list wikis whose source_document_ids contains this doc id. */
-  findWikisReferencingDocument(docId: string): SqlRow[] {
+  async findWikisReferencingDocument(docId: string): Promise<SqlRow[]> {
     // SQLite has no native JSON contains; use LIKE on the canonical JSON form.
     // source_document_ids is stored as JSON array of strings, e.g. ["abc","def"]
-    return this.db
-      .prepare(`SELECT * FROM wikis WHERE source_document_ids LIKE ?`)
-      .all(`%"${docId}"%`) as SqlRow[]
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM wikis WHERE source_document_ids LIKE ?`,
+      [`%"${docId}"%`],
+    )
   }
 
   /**
@@ -3502,8 +3947,8 @@ export class DirectConnectStore {
    * parent_id from the org's node list, then selects documents in that set.
    */
   /** Build a parent→children adjacency map for the org's tree once. */
-  private childrenByParentMap(orgId: string): Map<string | null, string[]> {
-    const nodes = this.listDocumentTreeNodes(orgId)
+  private async childrenByParentMap(orgId: string): Promise<Map<string | null, string[]>> {
+    const nodes = await this.listDocumentTreeNodes(orgId)
     const m = new Map<string | null, string[]>()
     for (const n of nodes) {
       const parent = (n.parent_id as string | null) ?? null
@@ -3527,7 +3972,7 @@ export class DirectConnectStore {
     return out
   }
 
-  listDocumentsUnderNode(rootNodeId: string, orgId: string): SqlRow[] {
+  async listDocumentsUnderNode(rootNodeId: string, orgId: string): Promise<SqlRow[]> {
     return this.listDocumentsUnderNodes([rootNodeId], [], orgId)
   }
 
@@ -3537,22 +3982,21 @@ export class DirectConnectStore {
    * materialize a dir-mode wiki's inputs (multi-dir with persistent exclusions)
    * at build time.
    */
-  listDocumentsUnderNodes(includeIds: string[], excludeIds: string[], orgId: string): SqlRow[] {
+  async listDocumentsUnderNodes(includeIds: string[], excludeIds: string[], orgId: string): Promise<SqlRow[]> {
     if (includeIds.length === 0) return []
-    const childrenByParent = this.childrenByParentMap(orgId)
+    const childrenByParent = await this.childrenByParentMap(orgId)
     const included = new Set<string>()
     for (const id of includeIds) for (const n of this.subtreeNodeIds(id, childrenByParent)) included.add(n)
     for (const id of excludeIds) for (const n of this.subtreeNodeIds(id, childrenByParent)) included.delete(n)
     const ids = [...included]
     if (ids.length === 0) return []
     const placeholders = ids.map(() => '?').join(',')
-    return this.db
-      .prepare(
-        `SELECT * FROM documents
-         WHERE org_id = ? AND deleted_at IS NULL AND node_id IN (${placeholders})
-         ORDER BY node_id, file_name`,
-      )
-      .all(orgId, ...ids) as SqlRow[]
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM documents
+       WHERE org_id = ? AND deleted_at IS NULL AND node_id IN (${placeholders})
+       ORDER BY node_id, file_name`,
+      [orgId, ...ids],
+    )
   }
 
   /**
@@ -3562,12 +4006,10 @@ export class DirectConnectStore {
    * of its excluded nodes is the changed node or an ancestor (i.e. the change
    * isn't inside an excluded subtree). `nodeIdChain` = changed node + ancestors.
    */
-  findDirWikisForNode(nodeIdChain: string[]): SqlRow[] {
+  async findDirWikisForNode(nodeIdChain: string[]): Promise<SqlRow[]> {
     if (nodeIdChain.length === 0) return []
     const chain = new Set(nodeIdChain)
-    const dirWikis = this.db
-      .prepare(`SELECT * FROM wikis WHERE source_mode = 'dir'`)
-      .all() as SqlRow[]
+    const dirWikis = await this.driver.all<SqlRow>(`SELECT * FROM wikis WHERE source_mode = 'dir'`)
     const parseIds = (v: unknown): string[] => {
       if (typeof v !== 'string' || !v.trim()) return []
       try { const a = JSON.parse(v); return Array.isArray(a) ? a.filter(x => typeof x === 'string') : [] } catch { return [] }
@@ -3585,22 +4027,23 @@ export class DirectConnectStore {
     })
   }
 
-  markWikiNeedsRebuild(wikiId: string, needs: boolean): void {
-    this.db.prepare(`UPDATE wikis SET needs_rebuild = ? WHERE id = ?`).run(needs ? 1 : 0, wikiId)
+  async markWikiNeedsRebuild(wikiId: string, needs: boolean): Promise<void> {
+    await this.driver.run(`UPDATE wikis SET needs_rebuild = ? WHERE id = ?`, [needs ? 1 : 0, wikiId])
   }
 
   /** Set node alias (Q2: source-managed nodes can't be renamed, but admins can set a display alias). */
-  setTreeNodeAlias(id: string, orgId: string, alias: string | null): void {
-    this.db
-      .prepare(`UPDATE document_tree_nodes SET alias = ?, updated_at = ? WHERE id = ? AND org_id = ?`)
-      .run(alias, now(), id, orgId)
+  async setTreeNodeAlias(id: string, orgId: string, alias: string | null): Promise<void> {
+    await this.driver.run(
+      `UPDATE document_tree_nodes SET alias = ?, updated_at = ? WHERE id = ? AND org_id = ?`,
+      [alias, now(), id, orgId],
+    )
   }
 
   // ==================== Secrets Management ====================
 
   // --- Config Items ---
 
-  listConfigItems(opts: {
+  async listConfigItems(opts: {
     name?: string
     scope?: string
     status?: string
@@ -3609,7 +4052,7 @@ export class DirectConnectStore {
     /** When set, restrict non-user-scope items to this org; user-scope
      *  definitions are global and always included. */
     orgId?: string
-  }): { items: SqlRow[]; total: number } {
+  }): Promise<{ items: SqlRow[]; total: number }> {
     const conditions: string[] = []
     const params: unknown[] = []
     if (opts.orgId) {
@@ -3617,8 +4060,11 @@ export class DirectConnectStore {
       params.push(opts.orgId)
     }
     if (opts.name) {
-      conditions.push('(name LIKE ? OR pinyin LIKE ?)')
-      params.push(`%${opts.name}%`, `%${opts.name}%`)
+      // C-7: escapeLike + ESCAPE — a literal %/_/\ in the search term must
+      // match itself, and both dialects must treat backslashes alike.
+      conditions.push("(name LIKE ? ESCAPE '\\' OR pinyin LIKE ? ESCAPE '\\')")
+      const term = `%${escapeLike(opts.name)}%`
+      params.push(term, term)
     }
     if (opts.scope) {
       conditions.push('scope = ?')
@@ -3629,19 +4075,22 @@ export class DirectConnectStore {
       params.push(Number(opts.status))
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-    const countRow = this.db.prepare(`SELECT COUNT(*) AS c FROM config_items ${where}`).get(...params) as { c: number }
-    const total = countRow.c
-    const page = opts.page ?? 1
-    const pageSize = opts.pageSize ?? 20
+    const countRow = await this.driver.get<{ c: number }>(`SELECT COUNT(*) AS c FROM config_items ${where}`, params as SqlParam[])
+    const total = countRow?.c ?? 0
+    // Normalize page/pageSize: entry points pass raw strings (?page=abc / ?page=-5),
+    // which would crash SQLite (datatype mismatch) or PG (OFFSET -N → 500).
+    const page = Number.isFinite(Number(opts.page)) ? Math.max(1, Number(opts.page)) : 1
+    const pageSize = Number.isFinite(Number(opts.pageSize)) ? Math.min(100, Math.max(1, Number(opts.pageSize))) : 20
     const offset = (page - 1) * pageSize
-    const items = this.db.prepare(
+    const items = await this.driver.all<SqlRow>(
       `SELECT * FROM config_items ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
-    ).all(...params, pageSize, offset) as SqlRow[]
+      [...params, pageSize, offset] as SqlParam[],
+    )
     return { items, total }
   }
 
-  getConfigItem(id: number, orgId?: string): SqlRow | null {
-    const row = (this.db.prepare('SELECT * FROM config_items WHERE id = ?').get(id) as SqlRow) ?? null
+  async getConfigItem(id: number, orgId?: string): Promise<SqlRow | null> {
+    const row = (await this.driver.get<SqlRow>('SELECT * FROM config_items WHERE id = ?', [id])) ?? null
     // Org guard: a non-user-scope item only resolves within its own org.
     if (row && orgId && row.scope !== 'user' && row.org_id !== orgId) {
       return null
@@ -3649,24 +4098,26 @@ export class DirectConnectStore {
     return row
   }
 
-  getConfigItemByPinyin(pinyin: string, orgId?: string): SqlRow | null {
+  async getConfigItemByPinyin(pinyin: string, orgId?: string): Promise<SqlRow | null> {
     // User-scope definitions are global and globally unique by pinyin. Non-user
     // pinyins are unique per org, so resolve within the caller's org.
     if (orgId) {
-      const scoped = this.db
-        .prepare(`SELECT * FROM config_items WHERE pinyin = ? AND scope != 'user' AND org_id = ?`)
-        .get(pinyin, orgId) as SqlRow | undefined
+      const scoped = await this.driver.get<SqlRow>(
+        `SELECT * FROM config_items WHERE pinyin = ? AND scope != 'user' AND org_id = ?`,
+        [pinyin, orgId],
+      )
       if (scoped) return scoped
       return (
-        (this.db
-          .prepare(`SELECT * FROM config_items WHERE pinyin = ? AND scope = 'user'`)
-          .get(pinyin) as SqlRow) ?? null
+        (await this.driver.get<SqlRow>(
+          `SELECT * FROM config_items WHERE pinyin = ? AND scope = 'user'`,
+          [pinyin],
+        )) ?? null
       )
     }
-    return (this.db.prepare('SELECT * FROM config_items WHERE pinyin = ?').get(pinyin) as SqlRow) ?? null
+    return (await this.driver.get<SqlRow>('SELECT * FROM config_items WHERE pinyin = ?', [pinyin])) ?? null
   }
 
-  getConfigItemsByScope(scope: string, status?: number, orgId?: string): SqlRow[] {
+  async getConfigItemsByScope(scope: string, status?: number, orgId?: string): Promise<SqlRow[]> {
     const conds = ['scope = ?']
     const params: unknown[] = [scope]
     if (status !== undefined) {
@@ -3678,33 +4129,56 @@ export class DirectConnectStore {
       conds.push('org_id = ?')
       params.push(orgId)
     }
-    return this.db
-      .prepare(`SELECT * FROM config_items WHERE ${conds.join(' AND ')}`)
-      .all(...params) as SqlRow[]
+    return this.driver.all<SqlRow>(
+      `SELECT * FROM config_items WHERE ${conds.join(' AND ')}`,
+      params as SqlParam[],
+    )
   }
 
-  getAllActiveConfigItems(orgId?: string): SqlRow[] {
+  async getAllActiveConfigItems(orgId?: string): Promise<SqlRow[]> {
     if (orgId) {
-      return this.db
-        .prepare(`SELECT * FROM config_items WHERE status = 1 AND (scope = 'user' OR org_id = ?)`)
-        .all(orgId) as SqlRow[]
+      return this.driver.all<SqlRow>(
+        `SELECT * FROM config_items WHERE status = 1 AND (scope = 'user' OR org_id = ?)`,
+        [orgId],
+      )
     }
-    return this.db.prepare('SELECT * FROM config_items WHERE status = 1').all() as SqlRow[]
+    return this.driver.all<SqlRow>('SELECT * FROM config_items WHERE status = 1')
+  }
+
+  /**
+   * Cross-instance auth-proxy rules refresh (HA): fingerprint over
+   * config_items + config_entries. Per the call-chain audit every current
+   * mutation path bumps config_items (create/delete → COUNT change,
+   * update/updateStatus → updated_at, both precede replaceConfigEntries);
+   * config_entries is included defensively in case a future path bypasses
+   * the config_items timestamp. Secret VALUES live in Nexus (fetched per
+   * request by the proxy) and need no fingerprint.
+   */
+  async getConfigRulesFingerprint(): Promise<string> {
+    // CAST(...) AS TEXT keeps the || concatenation valid on both dialects:
+    // SQLite's || coerces anything to text, PostgreSQL refuses integer || text.
+    const row = await this.driver.get<SqlRow>(`
+      SELECT
+        (SELECT CAST(COUNT(*) AS TEXT) || ':' || CAST(COALESCE(MAX(updated_at), 0) AS TEXT) FROM config_items) || '|' ||
+        (SELECT CAST(COUNT(*) AS TEXT) || ':' || CAST(COALESCE(MAX(updated_at), 0) AS TEXT) FROM config_entries) AS fp
+    `)
+    return String(row?.fp ?? '')
   }
 
   /**
    * Ensure default config items exist (e.g., ShareOne for user-level key storage)
    */
-  ensureDefaultConfigItems(): void {
+  async ensureDefaultConfigItems(): Promise<void> {
     const ts = now()
 
     // ShareOne config item for user-level API key storage
-    const shareoneExists = this.getConfigItemByPinyin('shareone')
+    const shareoneExists = await this.getConfigItemByPinyin('shareone')
     if (!shareoneExists) {
-      const result = this.db.prepare(`
+      const rows = await this.driver.all<{ id: number }>(`
         INSERT INTO config_items (name, description, icon, pinyin, scope, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+        RETURNING id
+      `, [
         'ShareOne',
         'ShareOne 分享服务 API Key，用于发布分享内容',
         null,
@@ -3713,20 +4187,20 @@ export class DirectConnectStore {
         1,
         ts,
         ts,
-      )
-      const configItemId = Number(result.lastInsertRowid)
+      ])
+      const configItemId = Number(rows[0]?.id ?? 0)
 
       // Add the shareone_key entry
-      this.db.prepare(`
+      await this.driver.run(`
         INSERT INTO config_entries (config_item_id, config_key, name, config_desc, required, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(configItemId, 'shareone_key', 'ShareOne Key', 'ShareOne API Key 用于认证分享发布', 1, ts, ts)
+      `, [configItemId, 'shareone_key', 'ShareOne Key', 'ShareOne API Key 用于认证分享发布', 1, ts, ts])
 
       console.log('[DB] Created default ShareOne config item')
     }
   }
 
-  createConfigItem(row: {
+  async createConfigItem(row: {
     name: string
     description?: string
     icon?: string
@@ -3749,11 +4223,11 @@ export class DirectConnectStore {
     token_request_json?: string
     mint_script?: string
     body_auth_check?: string
-  }): number {
+  }): Promise<number> {
     const ts = now()
     // User-scope definitions stay global regardless of any org passed in.
     const orgId = row.scope === 'user' ? null : (row.org_id ?? null)
-    const result = this.db.prepare(`
+    const rows = await this.driver.all<{ id: number }>(`
       INSERT INTO config_items (
         name, description, icon, pinyin, scope, url_pattern, scheme, bearer_prefix, status, org_id,
         auth_type, auth_url, token_url, client_id, client_secret_key, refresh_token_key, default_scopes,
@@ -3761,7 +4235,8 @@ export class DirectConnectStore {
         created_at, updated_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      RETURNING id
+    `, [
       row.name,
       row.description ?? null,
       row.icon ?? null,
@@ -3783,11 +4258,11 @@ export class DirectConnectStore {
       row.mint_script ?? null,
       row.body_auth_check ?? null,
       ts, ts,
-    )
-    return Number(result.lastInsertRowid)
+    ])
+    return Number(rows[0]?.id ?? 0)
   }
 
-  updateConfigItem(id: number, updates: {
+  async updateConfigItem(id: number, updates: {
     name?: string
     description?: string
     icon?: string
@@ -3807,12 +4282,12 @@ export class DirectConnectStore {
     token_request_json?: string | null
     mint_script?: string | null
     body_auth_check?: string | null
-  }, orgId?: string): void {
+  }, orgId?: string): Promise<void> {
     // Org guard: a non-user-scope item can only be updated within its own org.
-    const existing = this.getConfigItem(id, orgId)
+    const existing = await this.getConfigItem(id, orgId)
     if (!existing) return
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE config_items
       SET name = ?, description = ?, icon = ?, pinyin = ?, scope = ?,
           url_pattern = ?, scheme = ?, bearer_prefix = ?, status = ?,
@@ -3821,7 +4296,7 @@ export class DirectConnectStore {
           token_request_json = ?, mint_script = ?, body_auth_check = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       updates.name ?? (existing.name as string),
       updates.description !== undefined ? updates.description : (existing.description as string | null),
       updates.icon !== undefined ? updates.icon : (existing.icon as string | null),
@@ -3842,138 +4317,141 @@ export class DirectConnectStore {
       updates.mint_script !== undefined ? updates.mint_script : (existing.mint_script as string | null),
       updates.body_auth_check !== undefined ? updates.body_auth_check : (existing.body_auth_check as string | null),
       ts, id,
-    )
+    ])
   }
 
-  deleteConfigItem(id: number, orgId?: string): void {
+  async deleteConfigItem(id: number, orgId?: string): Promise<void> {
     // Org guard: don't let one org delete another org's config item.
     if (orgId) {
-      const existing = this.getConfigItem(id, orgId)
+      const existing = await this.getConfigItem(id, orgId)
       if (!existing) return
     }
-    this.db.prepare('DELETE FROM config_items WHERE id = ?').run(id)
+    await this.driver.run('DELETE FROM config_items WHERE id = ?', [id])
   }
 
   // --- Config Entries ---
 
-  getConfigEntries(configItemId: number): SqlRow[] {
-    return this.db.prepare('SELECT * FROM config_entries WHERE config_item_id = ?').all(configItemId) as SqlRow[]
+  async getConfigEntries(configItemId: number): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>('SELECT * FROM config_entries WHERE config_item_id = ?', [configItemId])
   }
 
-  replaceConfigEntries(configItemId: number, entries: {
+  async replaceConfigEntries(configItemId: number, entries: {
     config_key: string
     name: string
     config_desc?: string
     required?: boolean
-  }[]): void {
+  }[]): Promise<void> {
     const ts = now()
-    this.db.prepare('DELETE FROM config_entries WHERE config_item_id = ?').run(configItemId)
-    const stmt = this.db.prepare(`
-      INSERT INTO config_entries (config_item_id, config_key, name, config_desc, required, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
+    await this.driver.run('DELETE FROM config_entries WHERE config_item_id = ?', [configItemId])
     for (const e of entries) {
-      stmt.run(configItemId, e.config_key, e.name, e.config_desc ?? null, e.required ? 1 : 0, ts, ts)
+      await this.driver.run(`
+        INSERT INTO config_entries (config_item_id, config_key, name, config_desc, required, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [configItemId, e.config_key, e.name, e.config_desc ?? null, e.required ? 1 : 0, ts, ts])
     }
   }
 
   // --- Secret Metadata ---
 
-  getSecretMetadata(configItemId: number): SqlRow | null {
-    return (this.db.prepare('SELECT * FROM secret_metadata WHERE config_item_id = ?').get(configItemId) as SqlRow) ?? null
+  async getSecretMetadata(configItemId: number): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>('SELECT * FROM secret_metadata WHERE config_item_id = ?', [configItemId])) ?? null
   }
 
-  getAllSecretMetadata(orgId?: string): SqlRow[] {
+  async getAllSecretMetadata(orgId?: string): Promise<SqlRow[]> {
     if (orgId) {
-      return this.db
-        .prepare('SELECT * FROM secret_metadata WHERE org_id = ? OR org_id IS NULL')
-        .all(orgId) as SqlRow[]
+      return this.driver.all<SqlRow>(
+        'SELECT * FROM secret_metadata WHERE org_id = ? OR org_id IS NULL',
+        [orgId],
+      )
     }
-    return this.db.prepare('SELECT * FROM secret_metadata').all() as SqlRow[]
+    return this.driver.all<SqlRow>('SELECT * FROM secret_metadata')
   }
 
-  upsertSecretMetadata(configItemId: number, expiresAt: number | null, orgId?: string | null): void {
+  async upsertSecretMetadata(configItemId: number, expiresAt: number | null, orgId?: string | null): Promise<void> {
     const ts = now()
     // Denormalize the owning org from the config item when not supplied.
     const resolvedOrg =
-      orgId !== undefined ? orgId : ((this.getConfigItem(configItemId)?.org_id as string | null) ?? null)
-    const existing = this.getSecretMetadata(configItemId)
+      orgId !== undefined ? orgId : (((await this.getConfigItem(configItemId))?.org_id as string | null) ?? null)
+    const existing = await this.getSecretMetadata(configItemId)
     if (existing) {
-      this.db.prepare('UPDATE secret_metadata SET expires_at = ?, org_id = ?, updated_at = ? WHERE config_item_id = ?')
-        .run(expiresAt, resolvedOrg, ts, configItemId)
+      await this.driver.run('UPDATE secret_metadata SET expires_at = ?, org_id = ?, updated_at = ? WHERE config_item_id = ?',
+        [expiresAt, resolvedOrg, ts, configItemId])
     } else {
-      this.db.prepare(`
+      await this.driver.run(`
         INSERT INTO secret_metadata (id, config_item_id, org_id, expires_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(randomUUID(), configItemId, resolvedOrg, expiresAt, ts, ts)
+      `, [randomUUID(), configItemId, resolvedOrg, expiresAt, ts, ts])
     }
   }
 
-  getExpiringSecretMetadata(beforeTs: number, orgId?: string): SqlRow[] {
+  async getExpiringSecretMetadata(beforeTs: number, orgId?: string): Promise<SqlRow[]> {
     if (orgId) {
-      return this.db.prepare(
+      return this.driver.all<SqlRow>(
         'SELECT * FROM secret_metadata WHERE expires_at IS NOT NULL AND expires_at < ? AND (org_id = ? OR org_id IS NULL)',
-      ).all(beforeTs, orgId) as SqlRow[]
+        [beforeTs, orgId],
+      )
     }
-    return this.db.prepare(
+    return this.driver.all<SqlRow>(
       'SELECT * FROM secret_metadata WHERE expires_at IS NOT NULL AND expires_at < ?',
-    ).all(beforeTs) as SqlRow[]
+      [beforeTs],
+    )
   }
 
   // --- Department Secret Policies ---
 
-  getDepartmentPolicies(departmentId: string, orgId?: string): SqlRow[] {
+  async getDepartmentPolicies(departmentId: string, orgId?: string): Promise<SqlRow[]> {
     // department_id is globally unique, but filter by org for defense-in-depth.
     if (orgId) {
-      return this.db.prepare(
+      return this.driver.all<SqlRow>(
         'SELECT * FROM department_secret_policies WHERE department_id = ? AND org_id = ?',
-      ).all(departmentId, orgId) as SqlRow[]
+        [departmentId, orgId],
+      )
     }
-    return this.db.prepare(
+    return this.driver.all<SqlRow>(
       'SELECT * FROM department_secret_policies WHERE department_id = ?',
-    ).all(departmentId) as SqlRow[]
+      [departmentId],
+    )
   }
 
-  replaceDepartmentPolicies(departmentId: string, configItemIds: number[], orgId?: string | null): void {
+  async replaceDepartmentPolicies(departmentId: string, configItemIds: number[], orgId?: string | null): Promise<void> {
     const ts = now()
-    this.db.prepare('DELETE FROM department_secret_policies WHERE department_id = ?').run(departmentId)
-    const stmt = this.db.prepare(`
-      INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)
-      VALUES (?, ?, ?, ?)
-    `)
+    await this.driver.run('DELETE FROM department_secret_policies WHERE department_id = ?', [departmentId])
     for (const cid of configItemIds) {
-      stmt.run(departmentId, cid, orgId ?? null, ts)
+      await this.driver.run(`
+        INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)
+        VALUES (?, ?, ?, ?)
+      `, [departmentId, cid, orgId ?? null, ts])
     }
   }
 
-  getConfigItemAuthorizedDepartments(configItemId: number): SqlRow[] {
-    return this.db.prepare(
+  async getConfigItemAuthorizedDepartments(configItemId: number): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(
       'SELECT * FROM department_secret_policies WHERE config_item_id = ?',
-    ).all(configItemId) as SqlRow[]
+      [configItemId],
+    )
   }
 
-  deleteDepartmentPoliciesByConfigItem(configItemId: number): void {
-    this.db.prepare('DELETE FROM department_secret_policies WHERE config_item_id = ?').run(configItemId)
+  async deleteDepartmentPoliciesByConfigItem(configItemId: number): Promise<void> {
+    await this.driver.run('DELETE FROM department_secret_policies WHERE config_item_id = ?', [configItemId])
   }
 
-  replaceConfigItemDepartments(configItemId: number, departmentIds: string[], orgId?: string | null): void {
+  async replaceConfigItemDepartments(configItemId: number, departmentIds: string[], orgId?: string | null): Promise<void> {
     const ts = now()
-    this.db.prepare('DELETE FROM department_secret_policies WHERE config_item_id = ?').run(configItemId)
+    await this.driver.run('DELETE FROM department_secret_policies WHERE config_item_id = ?', [configItemId])
     // org_id must be persisted: the org-scoped readers (getDepartmentPolicies
     // with an orgId, used by config-item visibility and credential-usage gates)
     // filter WHERE org_id = ?, so a NULL here makes the policy invisible.
-    const stmt = this.db.prepare(`
-      INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)
-      VALUES (?, ?, ?, ?)
-    `)
     for (const deptId of departmentIds) {
-      stmt.run(deptId, configItemId, orgId ?? null, ts)
+      await this.driver.run(`
+        INSERT INTO department_secret_policies (department_id, config_item_id, org_id, created_at)
+        VALUES (?, ?, ?, ?)
+      `, [deptId, configItemId, orgId ?? null, ts])
     }
   }
 
   // --- Secret Audit Log ---
 
-  insertAuditLog(row: {
+  async insertAuditLog(row: {
     id: string
     actor_id: string
     actor_name?: string
@@ -3984,18 +4462,18 @@ export class DirectConnectStore {
     key: string
     detail?: string
     ip_address?: string
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    await this.driver.run(`
       INSERT INTO secret_audit_log (id, actor_id, actor_name, action, config_item_id, org_id, namespace, key, detail, ip_address, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       row.id, row.actor_id, row.actor_name ?? null, row.action,
       row.config_item_id ?? null, row.org_id ?? null, row.namespace, row.key,
       row.detail ?? null, row.ip_address ?? null, now(),
-    )
+    ])
   }
 
-  queryAuditLog(opts: {
+  async queryAuditLog(opts: {
     actor_id?: string
     /** Restrict to this set of actor ids (credential audit subtree/self gate).
      *  An empty array matches nothing (fail-closed). Applied in addition to
@@ -4013,7 +4491,7 @@ export class DirectConnectStore {
     page?: number
     pageSize?: number
     orgId?: string
-  }): { items: SqlRow[]; total: number } {
+  }): Promise<{ items: SqlRow[]; total: number }> {
     const conditions: string[] = []
     const params: unknown[] = []
     // Org filter: a NULL org_id row is legacy/global and remains visible so
@@ -4066,20 +4544,82 @@ export class DirectConnectStore {
       params.push(opts.until)
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-    const countRow = this.db.prepare(`SELECT COUNT(*) AS c FROM secret_audit_log ${where}`).get(...params) as { c: number }
-    const total = countRow.c
-    const page = opts.page ?? 1
-    const pageSize = opts.pageSize ?? 20
+    const countRow = await this.driver.get<{ c: number }>(`SELECT COUNT(*) AS c FROM secret_audit_log ${where}`, params as SqlParam[])
+    const total = countRow?.c ?? 0
+    const page = Number.isFinite(Number(opts.page)) ? Math.max(1, Number(opts.page)) : 1
+    const pageSize = Number.isFinite(Number(opts.pageSize)) ? Math.min(100, Math.max(1, Number(opts.pageSize))) : 20
     const offset = (page - 1) * pageSize
-    const items = this.db.prepare(
+    const items = await this.driver.all<SqlRow>(
       `SELECT * FROM secret_audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    ).all(...params, pageSize, offset) as SqlRow[]
+      [...params, pageSize, offset] as SqlParam[],
+    )
     return { items, total }
   }
 }
 
 export function openDirectConnectStore(config: ServerConfig): DirectConnectStore {
   return new DirectConnectStore(config.dbPath)
+}
+
+/**
+ * PostgreSQL construction form of DirectConnectStore. The schema must already
+ * exist (applyPgSchema in openStoreAsync); the sqlite constructor path
+ * (file open, PRAGMAs, ad-hoc DDL, column migrations) never runs.
+ */
+export function forPostgresDirectConnectStore(driver: DbDriver): DirectConnectStore {
+  return new DirectConnectStore(':postgresql:', driver)
+}
+
+/**
+ * Async store factory (HA). SQLite resolves synchronously under the hood
+ * (zero behaviour change vs openDirectConnectStore); postgres builds a
+ * node-postgres Pool wrapped in PgDriver, applies the versioned pg_schema
+ * DDL, and returns a driver-backed store. This is the single async entry the
+ * server and runner funnel through so switching the backend is a one-line
+ * config change (MOSS_DATABASE_URL).
+ */
+export async function openStoreAsync(config: ServerConfig): Promise<DirectConnectStore> {
+  if (config.dbBackend === 'postgres') {
+    // The connection string normally arrives via ServerConfig (env
+    // MOSS_DATABASE_URL > settings file). Runner children get a manifest
+    // whose config has the secret stripped, so fall back to the inherited
+    // env here rather than ever persisting the URL (it contains credentials).
+    const databaseUrl = config.databaseUrl || process.env.MOSS_DATABASE_URL?.trim()
+    if (!databaseUrl) {
+      throw new Error(
+        'postgres backend requires a connection string: set MOSS_DATABASE_URL (or storage.databaseUrl)',
+      )
+    }
+    const { Pool, types } = await import('pg')
+    // int8 (BIGINT columns, COUNT(*)) arrives as string by default in
+    // node-postgres; moss's integer domain is well below 2^53, so parse every
+    // int8 as a JS number globally (P1 type-normalisation rule).
+    types.setTypeParser(20, Number)
+    // F-05: one pool backs every consumer (HTTP/WS/cron/channels/msgaudit/SSE
+    // + advisory-lock clients); pg's default max of 10 can queue under HA load.
+    // Tunable via env, default unchanged.
+    const poolMax = Number(process.env.MOSS_PG_POOL_MAX ?? 10)
+    const pool = new Pool({ connectionString: databaseUrl, max: Number.isFinite(poolMax) && poolMax > 0 ? poolMax : 10 })
+    // pg.Pool satisfies PgPoolLike structurally at runtime (query/connect/
+    // on/end); @types/pg's overloaded query signatures just don't line up with
+    // the seam's single-signature view, hence the cast.
+    const driver = new PgDriver(
+      pool as unknown as PgPoolLike,
+      err => process.stderr.write(`[PgDriver] idle client error: ${err.message}\n`),
+    )
+    await applyPgSchema(driver)
+    // Seed the default enterprise row (the sqlite constructor does this
+    // inline); same statement text on both dialects.
+    const ts = Date.now()
+    await driver.run(
+      `INSERT INTO enterprises (id, created_at, updated_at)
+       VALUES ('default', ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      [ts, ts],
+    )
+    return forPostgresDirectConnectStore(driver)
+  }
+  return openDirectConnectStore(config)
 }
 
 export function toSessionSummary(session: SessionRecord): SessionSummary {

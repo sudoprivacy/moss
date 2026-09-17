@@ -68,14 +68,27 @@ function key(orgId: string, userId: string): string {
   return `${orgId}:${userId}`
 }
 
-/** moss-user-<hash12> avoids leaking orgId/userId into the docker container
- * name and stays within Docker's 63-char limit. */
-export function buildUserContainerName(orgId: string, userId: string): string {
+/** moss-user-<hash12>-<inst≤40> avoids leaking orgId/userId into the docker
+ * container name and stays within Docker's 63-char limit. The instance suffix
+ * (HA) keeps two instances sharing one docker.sock from colliding on / killing
+ * each other's containers; undefined (single instance) falls back to 'default'
+ * (mirrors runtimePaths' instanceId || 'default'), never the literal
+ * "undefined". */
+export function buildUserContainerName(orgId: string, userId: string, instanceId?: string): string {
   const hash = createHash('sha1')
     .update(`${orgId}:${userId}`)
     .digest('hex')
     .slice(0, 12)
-  return `moss-user-${hash}`
+  const suffix = instanceId ? instanceSuffix(instanceId) : 'default'
+  return `moss-user-${hash}-${suffix}`
+}
+
+/** Suffix 预算 = 63 - len('moss-user-') - hash12 - 1 = 40。与容器 label（完整
+ * instanceId）同源：≤40 原样保留；更长时前 31 位保可读 + sha1 前 8 位保证
+ * 不同实例必不同名（同前缀截断撞名的回归防护）。 */
+function instanceSuffix(instanceId: string): string {
+  if (instanceId.length <= 40) return instanceId
+  return `${instanceId.slice(0, 31)}-${createHash('sha1').update(instanceId).digest('hex').slice(0, 8)}`
 }
 
 function configHash(input: {
@@ -222,6 +235,7 @@ async function doCreate(
     '--security-opt', 'apparmor=unconfined',
     '--cap-add', 'SYS_ADMIN',
     '--label', 'moss.kind=user-container',
+    '--label', `moss.instance=${config.instanceId ?? 'default'}`,
     '--label', `moss.org=${ctx.orgId}`,
     '--label', `moss.user=${ctx.userId}`,
     '--label', `moss.image=${image}`,
@@ -386,7 +400,7 @@ export async function ensureUserContainer(
     }
 
     if (!rec) {
-      const containerName = buildUserContainerName(ctx.orgId, ctx.userId)
+      const containerName = buildUserContainerName(ctx.orgId, ctx.userId, config.instanceId)
       rec = {
         key: k,
         containerName,
@@ -583,10 +597,17 @@ export function _getMutexForTests(): PerKeyMutex {
  * Reconcile registry against `docker ps`. Called once on moss-server startup.
  * Does not acquire any sessions — refcounts get rebuilt as runners reconnect.
  */
-export async function reconcile(): Promise<void> {
+export async function reconcile(config: ServerConfig): Promise<void> {
+  // HA: only adopt THIS instance's own containers. Without the instance filter,
+  // two instances sharing a docker.sock would each reconcile the other's
+  // containers into their registry and then stop them on rolling restart /
+  // idle reap (mutual kill). Cost: a crashed peer's containers become orphans
+  // until that instance restarts or they are cleaned manually — accepted, per
+  // the report's "only stop your own" direction.
   const result = await runDocker([
     'ps',
     '--filter', 'label=moss.kind=user-container',
+    '--filter', `label=moss.instance=${config.instanceId ?? 'default'}`,
     '--format', '{{.ID}}\t{{.Names}}\t{{.Labels}}',
   ])
   if (result.code !== 0) return

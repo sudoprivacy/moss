@@ -3,7 +3,7 @@ import { startServer } from './server.js'
 import { printBanner } from './serverBanner.js'
 import { createServerLogger } from './serverLog.js'
 import { ensureServerDirectories } from './config.js'
-import { openDirectConnectStore } from './db.js'
+import { openStoreAsync } from './db.js'
 import { RuntimeService } from './runtimeService.js'
 import { createAuthService } from './auth/service.js'
 import { enableConfigs } from '../utils/config.js'
@@ -13,7 +13,7 @@ import { NexusClient } from './nexus/nexusClient.js'
 import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
-import { AuthProxyServer, configItemToRule } from './authProxy/authProxyServer.js'
+import { AuthProxyServer, loadAuthProxyRules } from './authProxy/authProxyServer.js'
 import { TokenMinter } from './authProxy/tokenMinter.js'
 import { setSecretsApiDependencies } from './authProxy/secretsApi.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
@@ -98,6 +98,24 @@ async function finishStandaloneServerStartup(
   const configStore = initConfigStore(nexusClient)
   await configStore.loadAll()
   configStore.hydrateConfig(config)
+  // Cross-instance refresh (R20): another instance editing a Nexus-backed
+  // sensitive config is picked up within one poll and hydrated in place, so a
+  // peer's new sessions use the new value instead of staying stale until
+  // restart. Stopped in server.stop.
+  configStore.startRefreshPolling(config)
+  // HA misconfig guard (R8): with a multi-instance id but no public base URL,
+  // the internal channel loops back to itself and owner routing loses its route
+  // params — cron/events/channels to non-local sessions fail 100%. ha.yml's
+  // `:?` already refuses to start on a missing value; this is the belt for a
+  // hand-set instanceId that bypassed compose. Not fail-fast: a single instance
+  // legitimately setting instanceId must not be blocked.
+  if (config.instanceId && !config.publicBaseUrl) {
+    console.warn(
+      '[Startup] MOSS_INSTANCE_ID is set but MOSS_PUBLIC_BASE_URL is not — under HA the ' +
+      'internal channel loops back to this instance and owner routing fails for sessions ' +
+      'owned by other instances. Set MOSS_PUBLIC_BASE_URL to the LB entry (http://<LB-VIP>).',
+    )
+  }
   initHubConfig({
     hubApiBaseUrl: config.hubApiBaseUrl,
     hubAuthorization: config.hubAuthorization,
@@ -105,8 +123,64 @@ async function finishStandaloneServerStartup(
   })
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
-  const store = openDirectConnectStore(config)
-  store.ensureDefaultConfigItems()
+  const store = await openStoreAsync(config)
+  await store.ensureDefaultConfigItems()
+
+  // E-5: HA-shaped deployment without MOSS_INSTANCE_ID → refuse to start.
+  // The container-name suffix, docker label filter and wiki claim column all
+  // collapse to the 'default' fallback when instanceId is unset, which makes
+  // two such instances claim-kill each other's containers and stage dirs.
+  // We cannot know our own row yet (registration happens below), so the
+  // live-peer count uses an empty-string sentinel — before registration
+  // there is no self row to exclude, and `instance_id != ''` holds for every
+  // real UUID row. (Never pass config.instanceId here: undefined bind values
+  // throw in the driver.)
+  if (!config.instanceId) {
+    const haShaped = Boolean(config.publicBaseUrl)
+      || (await store.countLiveOtherInstances('', config.heartbeatTimeoutMs)) > 0
+    if (haShaped) {
+      throw new Error(
+        '[Startup] Refusing to start: this deployment is HA-shaped (publicBaseUrl set, or live peer instances found) ' +
+          'but MOSS_INSTANCE_ID is not set. Without a per-instance id, container names, docker labels and wiki job ' +
+          'claims collapse to the shared "default" suffix and two instances will destroy each other\'s state. ' +
+          'Set a unique MOSS_INSTANCE_ID per instance.',
+      )
+    }
+  }
+  // B-9: sqlite backend + instanceId set + live peers sharing the file →
+  // refuse: the advisory-lock seam is a no-op passthrough on sqlite, so
+  // cross-instance mutual exclusion (source sync etc.) silently degrades to
+  // double-runs. (The unset-id HA case is already caught by the guard above.)
+  if (store.driver.kind === 'sqlite' && config.instanceId) {
+    const peers = await store.countLiveOtherInstances(config.instanceId, config.heartbeatTimeoutMs)
+    if (peers > 0) {
+      throw new Error(
+        `[Startup] Refusing to start: ${peers} live instance(s) are registered against the shared SQLite file, ` +
+          'but the sqlite backend has no cross-process mutual exclusion (advisory locks are a no-op there) — ' +
+          'two processes would double-run source syncs and races. Use the postgres backend for multi-instance HA.',
+      )
+    }
+  }
+
+  // A-10: cross-host clock-skew visibility. Liveness judgements compare
+  // heartbeats written by OTHER hosts against this host's Date.now() (30s
+  // threshold; the 90s fencing watchdog bounds the damage), so HA hosts are
+  // expected to be NTP-synced — see deploy/nginx/README-ha.md. Advisory
+  // only: compare our clock against the DB's once at boot and warn on skew.
+  try {
+    const row = store.driver.kind === 'postgres'
+      ? await store.driver.get<{ ts: number | string }>(`SELECT (extract(epoch from now()) * 1000) AS ts`)
+      : await store.driver.get<{ ts: number | string }>(`SELECT (CAST(strftime('%s','now') AS INTEGER) * 1000) AS ts`)
+    const dbNow = Number(row?.ts ?? 0)
+    if (dbNow > 0 && Math.abs(Date.now() - dbNow) > 5_000) {
+      console.warn(
+        `[Startup] Host clock differs from the database clock by ${Math.round((Date.now() - dbNow) / 1000)}s — ` +
+          'liveness thresholds assume NTP-synced hosts; large skew causes spurious fences or delayed takeovers.',
+      )
+    }
+  } catch {
+    // Advisory only — never block startup on it.
+  }
 
   // Start Auth Proxy (create instance, will load rules after DB is ready)
   const authProxy = new AuthProxyServer()
@@ -126,7 +200,7 @@ async function finishStandaloneServerStartup(
   const smsSender = buildSmsSender(config, nexusClient)
 
   const { service: authService, bootstrap } = await createAuthService({
-    db: store.db,
+    db: store,
     dbPath: config.dbPath,
     tokenTtlSec: config.tokenTtlSec,
     bootstrapAdmin: config.bootstrapAdmin,
@@ -143,14 +217,14 @@ async function finishStandaloneServerStartup(
       'Development and single-operator use only.',
     )
   }
-  const instance = store.registerServerInstance(config.host, undefined, config.instanceId)
+  const instance = await store.registerServerInstance(config.host, undefined, config.instanceId)
 
   // Multi-org backfill: now that organizations exist (auth bootstrap ran), assign
   // a default org to any pre-existing credential/secret/channel rows so they
   // aren't stranded global. Idempotent (only NULL org_id rows are touched).
-  const defaultOrgId = authService.listAllOrganizations().organizations[0]?.id
+  const defaultOrgId = (await authService.listAllOrganizations()).organizations[0]?.id
   if (defaultOrgId) {
-    store.backfillOrgScoping(defaultOrgId)
+    await store.backfillOrgScoping(defaultOrgId)
   }
 
   // Token minter for login-type 凭据 (mints + caches a per-user access_token
@@ -159,13 +233,16 @@ async function finishStandaloneServerStartup(
   authProxy.setTokenMinter(new TokenMinter(authService.getMintedTokenStore()))
 
   // Load config item rules into Auth Proxy now that DB is available
-  const activeItems = store.getAllActiveConfigItems()
-  authProxy.updateRules(
-    activeItems.map(item => configItemToRule(item, id => store.getConfigEntries(id))),
+  await loadAuthProxyRules(store, authProxy)
+  // HA: pick up config-items changes made on OTHER instances (this instance's
+  // rules are process-local memory; the API callback only fires locally).
+  authProxy.startRulesChangePolling(
+    () => store.getConfigRulesFingerprint(),
+    () => loadAuthProxyRules(store, authProxy),
   )
   const policyProvider = {
-    getAuthorizedConfigItemIds(departmentId: string): number[] {
-      return store.getDepartmentPolicies(departmentId).map(r => r.config_item_id as number)
+    async getAuthorizedConfigItemIds(departmentId: string): Promise<number[]> {
+      return (await store.getDepartmentPolicies(departmentId)).map(r => r.config_item_id as number)
     },
   }
   authProxy.setPolicyProvider(policyProvider)
@@ -178,7 +255,7 @@ async function finishStandaloneServerStartup(
   setSecretsApiDependencies(
     nexusClient,
     policyProvider,
-    () => store.getAllActiveConfigItems() as unknown as Array<{ id: number; scope: string; pinyin: string }>,
+    async () => (await store.getAllActiveConfigItems()) as unknown as Array<{ id: number; scope: string; pinyin: string }>,
     (orgId, departmentId) => authService.getDepartmentAncestorChain(orgId, departmentId),
   )
   const runtime = new RuntimeService({
@@ -207,7 +284,7 @@ async function finishStandaloneServerStartup(
   )
 
   const heartbeatTimer = setInterval(() => {
-    store.heartbeatServerInstance(instance.instanceId)
+    void store.heartbeatServerInstance(instance.instanceId)
   }, Math.max(5_000, Math.floor(config.heartbeatTimeoutMs / 2)))
   heartbeatTimer.unref?.()
 
@@ -264,8 +341,18 @@ async function finishStandaloneServerStartup(
     await server.stop()
     await authProxy.stop()
     await nexusManager.stop()
-    store.stopServerInstance(instance.instanceId)
-    store.close()
+    // M-13: a transient DB error here used to reject the whole stop() chain,
+    // skipping store.close(); the peer heartbeat timeout reaps the stale row
+    // either way, so just log it and keep closing.
+    try {
+      await store.stopServerInstance(instance.instanceId)
+    } catch (err) {
+      console.error(
+        '[Shutdown] failed to mark server instance stopped (peer heartbeat timeout will reap it):',
+        err,
+      )
+    }
+    await store.close()
   }
 
   return {

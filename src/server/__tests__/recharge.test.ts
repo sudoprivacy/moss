@@ -32,7 +32,7 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
   return {
     rows,
     refunds,
-    create(input) {
+    async create(input) {
       const now = Date.now()
       const order: RechargeOrder = {
         ...input,
@@ -51,24 +51,24 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
       rows.push(order)
       return order
     },
-    getByOrderNo: orderNo => rows.find(order => order.orderNo === orderNo) ?? null,
-    getById: id => rows.find(order => order.id === id) ?? null,
-    listForUser(userId, page, pageSize) {
+    getByOrderNo: async orderNo => rows.find(order => order.orderNo === orderNo) ?? null,
+    getById: async id => rows.find(order => order.id === id) ?? null,
+    async listForUser(userId, page, pageSize) {
       const mine = rows.filter(order => order.userId === userId)
       return { list: mine.slice((page - 1) * pageSize, page * pageSize), total: mine.length }
     },
-    listForAdmin(input) {
+    async listForAdmin(input) {
       let list = rows.slice()
       if (input.orgId) list = list.filter(order => order.orgId === input.orgId)
       if (input.status !== undefined) list = list.filter(order => order.status === input.status)
       if (input.syncStatus) list = list.filter(order => order.syncStatus === input.syncStatus)
       return { list: list.slice((input.page - 1) * input.pageSize, input.page * input.pageSize), total: list.length }
     },
-    update(id, patch) {
+    async update(id, patch) {
       const order = rows.find(item => item.id === id)
       if (order) Object.assign(order, patch, { updatedAt: Date.now() })
     },
-    claimRefund(id, reason) {
+    async claimRefund(id, reason) {
       const order = rows.find(item => item.id === id)
       if (!order || order.status !== ORDER_STATUS.SUCCESS) return false
       Object.assign(order, {
@@ -78,12 +78,12 @@ function makeStore(): RechargeOrderStore & { rows: RechargeOrder[]; refunds: Ref
       })
       return true
     },
-    createRefund(input) {
+    async createRefund(input) {
       const row: RefundRecord = { ...input, id: refunds.length + 1, createdAt: Date.now() }
       refunds.push(row)
       return row
     },
-    listRefundsForAdmin(input) {
+    async listRefundsForAdmin(input) {
       let list = refunds.slice()
       if (input.orgId) list = list.filter(refund => refund.orgId === input.orgId)
       if (input.orderNo) list = list.filter(refund => refund.orderNo.includes(input.orderNo!))
@@ -160,9 +160,9 @@ describe('recharge packages and orders', () => {
     })
   })
 
-  it('creates an order using points plus package bonus', () => {
+  it('creates an order using points plus package bonus', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       userPhone: '13800138000',
       orgId: 'org-1',
@@ -172,7 +172,7 @@ describe('recharge packages and orders', () => {
     expect(order.amountCents).toBe(3650)
     expect(order.pointsAmount).toBe(5500)
     expect(order.quotaAmount).toBe(2_750_000)
-    expect(queryRechargeOrder(store, 'user-1', order.orderNo)).toMatchObject({
+    expect(await queryRechargeOrder(store, 'user-1', order.orderNo)).toMatchObject({
       order_no: order.orderNo,
       status: ORDER_STATUS.PENDING,
     })
@@ -180,7 +180,7 @@ describe('recharge packages and orders', () => {
 
   it('moves an order to paying after Fuiou returns a QR code', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
@@ -188,26 +188,26 @@ describe('recharge packages and orders', () => {
     })
     const result = await payRechargeOrder(store, fuiou(), 'user-1', order.orderNo)
     expect(result.qr_code_url).toBe('qr-url')
-    expect(store.getByOrderNo(order.orderNo)?.status).toBe(ORDER_STATUS.PAYING)
+    expect((await store.getByOrderNo(order.orderNo))?.status).toBe(ORDER_STATUS.PAYING)
   })
 
-  it('cancels only open orders', () => {
+  it('cancels only open orders', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'WECHAT',
     })
-    cancelRechargeOrder(store, 'user-1', order.orderNo)
-    expect(store.getByOrderNo(order.orderNo)?.status).toBe(ORDER_STATUS.CANCELLED)
+    await cancelRechargeOrder(store, 'user-1', order.orderNo)
+    expect((await store.getByOrderNo(order.orderNo))?.status).toBe(ORDER_STATUS.CANCELLED)
   })
 })
 
 describe('recharge callback settlement', () => {
   it('credits SudoRouter once and marks success', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
@@ -219,10 +219,10 @@ describe('recharge callback settlement', () => {
       fuiou(),
       gateway(async (_id, points) => { credited += points }),
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )
     expect(credited).toBe(1000)
-    expect(store.getByOrderNo(order.orderNo)).toMatchObject({
+    expect(await store.getByOrderNo(order.orderNo)).toMatchObject({
       status: ORDER_STATUS.SUCCESS,
       syncStatus: 'SYNCED',
     })
@@ -232,14 +232,14 @@ describe('recharge callback settlement', () => {
       fuiou(),
       gateway(async (_id, points) => { credited += points }),
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )
     expect(credited).toBe(1000)
   })
 
   it('records a safe retry state when SudoRouter refuses', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
@@ -250,9 +250,9 @@ describe('recharge callback settlement', () => {
       fuiou(),
       gateway(async () => { throw new SudorouterError('quota limit', 400) }),
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )).rejects.toThrow(/quota limit/)
-    expect(store.getByOrderNo(order.orderNo)).toMatchObject({
+    expect(await store.getByOrderNo(order.orderNo)).toMatchObject({
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_FAILED',
     })
@@ -260,7 +260,7 @@ describe('recharge callback settlement', () => {
 
   it('records an unsafe retry state when the gateway answer is lost', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
@@ -275,9 +275,9 @@ describe('recharge callback settlement', () => {
         throw new SudorouterError('SudoRouter unreachable: timeout')
       }),
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )).rejects.toThrow(/timeout/)
-    expect(store.getByOrderNo(order.orderNo)).toMatchObject({
+    expect(await store.getByOrderNo(order.orderNo)).toMatchObject({
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_UNKNOWN',
     })
@@ -289,14 +289,14 @@ describe('recharge callback settlement', () => {
         calls += 1
       }),
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )
     expect(calls).toBe(1)
   })
 
   it('marks amount mismatches as invalid and not retryable', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
@@ -314,13 +314,13 @@ describe('recharge callback settlement', () => {
       }),
       gateway(async () => {}),
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )).rejects.toThrow(/金额不一致/)
-    expect(store.getByOrderNo(order.orderNo)?.syncStatus).toBe('SYNC_INVALID')
+    expect((await store.getByOrderNo(order.orderNo))?.syncStatus).toBe('SYNC_INVALID')
     await expect(retryRechargeOrderSync(
       store,
       gateway(async () => {}),
-      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, getGatewayUserId: async () => '42' },
     )).rejects.toThrow(/不支持重试/)
   })
 })
@@ -328,13 +328,13 @@ describe('recharge callback settlement', () => {
 describe('manual recharge reconciliation', () => {
   it('retries a safe failed SudoRouter sync once', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'ALIPAY',
     })
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_FAILED',
       syncError: 'gateway refused',
@@ -343,10 +343,10 @@ describe('manual recharge reconciliation', () => {
     await retryRechargeOrderSync(
       store,
       gateway(async (_id, points) => { credited += points }),
-      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, getGatewayUserId: async () => '42' },
     )
     expect(credited).toBe(1000)
-    expect(store.getByOrderNo(order.orderNo)).toMatchObject({
+    expect(await store.getByOrderNo(order.orderNo)).toMatchObject({
       status: ORDER_STATUS.SUCCESS,
       syncStatus: 'SYNCED',
     })
@@ -354,13 +354,13 @@ describe('manual recharge reconciliation', () => {
 
   it('does not retry an unknown SudoRouter sync', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'ALIPAY',
     })
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_UNKNOWN',
       syncError: 'timeout',
@@ -369,20 +369,20 @@ describe('manual recharge reconciliation', () => {
     await expect(retryRechargeOrderSync(
       store,
       gateway(async (_id, points) => { credited += points }),
-      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, getGatewayUserId: async () => '42' },
     )).rejects.toThrow(/人工核对/)
     expect(credited).toBe(0)
   })
 
   it('syncs a paid Fuiou order and settles it through SudoRouter', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'ALIPAY',
     })
-    store.update(order.id, { status: ORDER_STATUS.PAYING })
+    await store.update(order.id, { status: ORDER_STATUS.PAYING })
     let credited = 0
     await syncRechargeOrderStatus(
       store,
@@ -401,21 +401,21 @@ describe('manual recharge reconciliation', () => {
         }),
       }),
       gateway(async (_id, points) => { credited += points }),
-      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, getGatewayUserId: async () => '42' },
     )
     expect(credited).toBe(1000)
-    expect(store.getByOrderNo(order.orderNo)?.syncStatus).toBe('SYNCED')
+    expect((await store.getByOrderNo(order.orderNo))?.syncStatus).toBe('SYNCED')
   })
 
   it('does not double credit when a callback settles during a manual sync', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'ALIPAY',
     })
-    store.update(order.id, { status: ORDER_STATUS.PAYING })
+    await store.update(order.id, { status: ORDER_STATUS.PAYING })
     let credited = 0
     const client = gateway(async (_id, points) => { credited += points })
     await handleRechargeCallback(
@@ -423,7 +423,7 @@ describe('manual recharge reconciliation', () => {
       fuiou(),
       client,
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )
     await syncRechargeOrderStatus(
       store,
@@ -442,7 +442,7 @@ describe('manual recharge reconciliation', () => {
         }),
       }),
       client,
-      { orderNo: order.orderNo, getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, getGatewayUserId: async () => '42' },
     )
     expect(credited).toBe(1000)
   })
@@ -486,13 +486,13 @@ describe('refund reconciliation', () => {
 
   it('claims an order before refund side effects so a second refund cannot run', async () => {
     const store = makeStore()
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId: 'user-1',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'ALIPAY',
     })
-    store.update(order.id, { status: ORDER_STATUS.SUCCESS, syncStatus: 'SYNCED' })
+    await store.update(order.id, { status: ORDER_STATUS.SUCCESS, syncStatus: 'SYNCED' })
     let deductions = 0
     const debitGateway: SudorouterClient = {
       ...gateway(async (_id, points) => {
@@ -504,13 +504,13 @@ describe('refund reconciliation', () => {
       store,
       fuiou({ isTestMode: () => true }),
       debitGateway,
-      { orderNo: order.orderNo, reason: 'test', adminId: 'admin-1', getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, reason: 'test', adminId: 'admin-1', getGatewayUserId: async () => '42' },
     )
     await expect(refundRechargeOrder(
       store,
       fuiou({ isTestMode: () => true }),
       debitGateway,
-      { orderNo: order.orderNo, reason: 'test', adminId: 'admin-2', getGatewayUserId: () => '42' },
+      { orderNo: order.orderNo, reason: 'test', adminId: 'admin-2', getGatewayUserId: async () => '42' },
     )).rejects.toThrow(/订单状态不支持退款/)
     expect(deductions).toBe(1)
     expect(store.refunds[0]?.adminId).toBe('admin-1')

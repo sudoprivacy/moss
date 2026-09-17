@@ -28,7 +28,7 @@
 // keystore only) which moss does not use — all message/field numbers used
 // here are identical. Regenerate with protoc-gen-es (buf) if the proto
 // evolves.
-/* eslint-disable */
+ 
 
 import type { GenFile, GenMessage, GenService } from '@bufbuild/protobuf/codegenv2';
 import { fileDesc, messageDesc, serviceDesc } from '@bufbuild/protobuf/codegenv2';

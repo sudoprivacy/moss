@@ -16,7 +16,6 @@ import type {
   SessionRuntimeInfo,
 } from '../sessionManager.js'
 import { getSystemSettings } from '../systemSettings.js'
-import { getUserModelPreference } from '../userModelPreference.js'
 import { readSkillMeta } from '../skillStore.js'
 import type { WorkspaceSkillLink } from '../../utils/scodeBridge.js'
 
@@ -98,20 +97,16 @@ export function buildSessionEnv(
       || (settings as { serverUrl?: string }).serverUrl
       || ''
 
-  // Get user model preference if available
-  // Model priority: user preference > system settings > default
-  // NOTE: In session runner process, userPref is null (no DB access)
-  // The main process passes user preference via MOSS_DEFAULT_MODEL env var
-  // So we prioritize process.env.MOSS_DEFAULT_MODEL over settings.model
-  const userPref = options.userId ? getUserModelPreference(options.userId) : null
-  const defaultModel = userPref?.modelId
-    || process.env.MOSS_DEFAULT_MODEL  // From main process (includes user preference)
+  // Model priority in the runner process: MOSS_DEFAULT_MODEL (injected by the
+  // main process, which already resolved the user preference against the DB in
+  // RuntimeService) > system settings > default. The runner has no DB access,
+  // so the user preference is never read here — it always arrives via env.
+  const defaultModel = process.env.MOSS_DEFAULT_MODEL
     || settings.model
     || 'gemini-3-flash-preview'
 
   process.stderr.write(`\n[buildSessionEnv] Model selection for session ${options.sessionId}:\n`)
   process.stderr.write(`  - userId: ${options.userId || 'undefined'}\n`)
-  process.stderr.write(`  - userPref: ${JSON.stringify(userPref)}\n`)
   process.stderr.write(`  - settings.model: ${settings.model || 'undefined'}\n`)
   process.stderr.write(`  - MOSS_DEFAULT_MODEL env: ${process.env.MOSS_DEFAULT_MODEL || 'undefined'}\n`)
   process.stderr.write(`  - selected defaultModel: ${defaultModel}\n`)

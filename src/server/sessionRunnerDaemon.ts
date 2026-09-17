@@ -63,6 +63,24 @@ function extractTranscriptSessionCandidate(value: unknown): {
   return null
 }
 
+/**
+ * A-6/A4: whether the daemon may stamp session lifecycle. Both guards
+ * (#onClient's 'active' stamp and the idle timer's 'detached' stamp) require
+ * a non-terminal status AND the user's desired state to still be 'active' —
+ * desiredState is the authoritative user intent, so a session terminated by
+ * the user (even with status raced to 'failed'/'lost') is never revived here.
+ */
+export function mayStampDaemonLifecycle(
+  session: { status: string; desiredState: string } | null | undefined,
+): boolean {
+  return Boolean(
+    session
+    && session.status !== 'terminated'
+    && session.status !== 'ended'
+    && session.desiredState === 'active',
+  )
+}
+
 export class SessionRunnerDaemon {
   readonly #store: DirectConnectStore
   readonly #backend: RuntimeBackend
@@ -71,9 +89,20 @@ export class SessionRunnerDaemon {
   readonly #heartbeatTimer: NodeJS.Timeout
   #server: net.Server | null = null
   #handle: BackendHandle | null = null
+  #lastOutputTouchAt = 0
   #state: 'starting' | 'running' | 'stopped' | 'failed' = 'starting'
   #stopping = false
-  #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' = 'runtime_exit'
+  #heartbeatFailures = 0
+  #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' | 'fenced' = 'runtime_exit'
+  /**
+   * A-5: set when a path explicitly chose #stopReason (fenced / idle_*).
+   * The generic SIGTERM/SIGINT handlers must not overwrite that choice with
+   * 'terminated' — without this guard the fenced reason is unreachable at
+   * onExit time (both handlers fire on the self-SIGTERM the fenced path
+   * sends). The DB never sees 'fenced' either way (the fenced writer's own
+   * predicate already fails — by design), so this is audit-visibility only.
+   */
+  #stopReasonExplicit = false
   #idleTimer: NodeJS.Timeout | null = null
   #busyCeilingTimer: NodeJS.Timeout | null = null
   #busyUnsubscribe: (() => void) | null = null
@@ -85,8 +114,8 @@ export class SessionRunnerDaemon {
   #recentStderr: string[] = []
   #pendingStdin: string[] = []  // Buffer for messages arriving before handle is ready
 
-  constructor(private readonly manifest: RunnerManifest) {
-    this.#store = new DirectConnectStore(manifest.config.dbPath)
+  constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore) {
+    this.#store = store
     this.#applicationHello = new ApplicationHelloReplayBuffer(
       manifest.session.sessionId,
     )
@@ -117,7 +146,7 @@ export class SessionRunnerDaemon {
       },
     })
     this.#heartbeatTimer = setInterval(() => {
-      this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)
+      void this.#heartbeat()
     }, Math.max(5_000, Math.floor(this.manifest.config.heartbeatTimeoutMs / 3)))
     this.#heartbeatTimer.unref?.()
   }
@@ -142,7 +171,7 @@ export class SessionRunnerDaemon {
           resolve()
         })
       })
-      this.#store.updateAttemptRunner(this.manifest.attempt.attemptId, process.pid)
+      await this.#store.updateAttemptRunner(this.manifest.attempt.attemptId, process.pid)
 
       const handle = await this.#backend.spawn({
         sessionId: this.manifest.session.sessionId,
@@ -217,7 +246,7 @@ export class SessionRunnerDaemon {
       if (handle.isBusy) {
         this.#busy = handle.isBusy()
       }
-      this.#store.addEvent(
+      await this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
         'available_skills_snapshot',
@@ -237,13 +266,13 @@ export class SessionRunnerDaemon {
       }
 
       this.#state = 'running'
-      this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId, 'running')
-      this.#store.setSessionLifecycle(
+      await this.#heartbeat('running')
+      await this.#store.setSessionLifecycle(
         this.manifest.session.sessionId,
         'active',
         'active',
       )
-      this.#store.addEvent(
+      await this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
         'attempt_started',
@@ -264,8 +293,7 @@ export class SessionRunnerDaemon {
       handle.onStdoutLine(line => {
         process.stderr.write(`[SessionRunnerDaemon] ON STDOUT: ${line}`)
         this.#maybeUpdateTranscriptSession(line)
-        this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)
-        this.#store.touchSessionActivity(this.manifest.session.sessionId)
+        this.#touchFromOutput()
         void appendFile(this.manifest.attempt.stdoutLogPath, line, 'utf8').catch(() => {})
         this.#applicationHello.forward(line, message => this.#broadcast(message))
       })
@@ -276,7 +304,7 @@ export class SessionRunnerDaemon {
         this.#broadcast({ type: 'stderr', line })
       })
 
-      handle.onExit((code, signal) => {
+      handle.onExit(async (code, signal) => {
         if (this.#finalized) {
           return
         }
@@ -301,13 +329,17 @@ export class SessionRunnerDaemon {
           )
         }
         this.#state = code === 0 ? 'stopped' : 'failed'
-        this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
+        // Owner-scoped terminal write: if this daemon was fenced (a new owner
+        // claimed the attempt), the UPDATE does not land and stillOwner is
+        // false — we must then skip the session terminal write so we don't
+        // clobber the takeover owner's live session.
+        const stillOwner = await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
           runtimeState,
           exitCode: code,
           exitSignal: signal,
           stopReason: this.#stopping ? this.#stopReason : 'runtime_exit',
           errorText,
-        })
+        }, this.manifest.config.instanceId)
         // Lifecycle marks:
         //   terminate (client-initiated delete)    -> status=terminated, desired=terminated
         //   idle / busy-ceiling kill (server-side) -> status=ended, desired=ACTIVE
@@ -341,12 +373,19 @@ export class SessionRunnerDaemon {
           nextStatus = 'failed'
           nextDesired = 'active'
         }
-        this.#store.markSessionEnded(
-          this.manifest.session.sessionId,
-          nextStatus,
-          nextDesired,
-        )
-        this.#store.addEvent(
+        if (stillOwner) {
+          await this.#store.markSessionEnded(
+            this.manifest.session.sessionId,
+            nextStatus,
+            nextDesired,
+          )
+        } else {
+          process.stderr.write(
+            `[SessionRunnerDaemon] session ${this.manifest.session.sessionId} attempt ${this.manifest.attempt.attemptId} fenced (owner changed); skipping terminal session write\n`,
+          )
+        }
+        // Event log is written regardless — it carries no ownership semantics.
+        await this.#store.addEvent(
           this.manifest.session.sessionId,
           this.manifest.attempt.attemptId,
           'attempt_exited',
@@ -364,12 +403,12 @@ export class SessionRunnerDaemon {
 
       process.once('SIGTERM', () => {
         this.#stopping = true
-        this.#stopReason = 'terminated'
+        if (!this.#stopReasonExplicit) this.#stopReason = 'terminated'
         void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
       process.once('SIGINT', () => {
         this.#stopping = true
-        this.#stopReason = 'terminated'
+        if (!this.#stopReasonExplicit) this.#stopReason = 'terminated'
         void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
     } catch (error) {
@@ -406,17 +445,25 @@ export class SessionRunnerDaemon {
       this.#server = null
     }
     await safeUnlink(this.manifest.attempt.attachPath)
-    this.#store.close()
+    await this.#store.close()
   }
 
   #onClient(socket: SocketWithBuffer): void {
     this.#clients.add(socket)
     this.#clearIdleTimer()
-    this.#store.setSessionLifecycle(
-      this.manifest.session.sessionId,
-      'active',
-      'active',
-    )
+    // A-6: only stamp lifecycle while the session is genuinely live — a
+    // fenced/terminated session's late client attach must not flip the row
+    // back to active over whatever the takeover side wrote.
+    void this.#store.getSession(this.manifest.session.sessionId).then(session => {
+      if (mayStampDaemonLifecycle(session)) {
+        return this.#store.setSessionLifecycle(
+          this.manifest.session.sessionId,
+          'active',
+          'active',
+        )
+      }
+      return undefined
+    }).catch(() => {})
     this.#send(socket, {
       type: 'hello',
       attemptId: this.manifest.attempt.attemptId,
@@ -464,7 +511,7 @@ export class SessionRunnerDaemon {
     if (parsed.type === 'shutdown') {
       this.#stopping = true
       this.#stopReason = 'terminated'
-      this.#store.addEvent(
+      void this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
         'attempt_shutdown_requested',
@@ -483,6 +530,71 @@ export class SessionRunnerDaemon {
       }
       this.#send(socket, { type: 'stdin_ack' })
     }
+  }
+
+  /**
+   * Heartbeat + fencing check. In multi-instance mode (MOSS_INSTANCE_ID
+   * configured → manifest.config.instanceId set) the conditional UPDATE only
+   * lands while this attempt still belongs to THIS owner and is 'running';
+   * false means another instance claimed it (failover) or it was stopped —
+   * exit via the same SIGTERM path the shutdown message uses so the onExit
+   * chain records terminal state. Single-instance mode (no instanceId in the
+   * manifest) keeps the unconditional legacy update and never fences.
+   */
+  async #heartbeat(state: 'running' = 'running'): Promise<void> {
+    // A-3: a DB hiccup (e.g. a PG blip) must reject here WITHOUT crashing the
+    // runner process — the interval timer retries within one period anyway.
+    // Only a definitive negative answer (ok=false, the fencing predicate
+    // failed) is an exit condition; transport errors are not.
+    let ok: boolean
+    try {
+      ok = await this.#store.touchAttemptHeartbeat(
+        this.manifest.attempt.attemptId,
+        state,
+        this.manifest.config.instanceId,
+      )
+    } catch (err) {
+      this.#heartbeatFailures++
+      process.stderr.write(
+        `[SessionRunnerDaemon] Heartbeat write failed (${this.#heartbeatFailures} consecutive): ` +
+          `${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return
+    }
+    this.#heartbeatFailures = 0
+    if (!ok && !this.#stopping) {
+      this.#stopping = true
+      this.#stopReason = 'fenced'
+      this.#stopReasonExplicit = true
+      process.stderr.write(
+        '[SessionRunnerDaemon] Heartbeat fenced (owner changed or attempt no longer running); exiting\n',
+      )
+      process.kill(process.pid, 'SIGTERM')
+    }
+  }
+
+  /**
+   * Coalesce the per-stdout-line DB touches (heartbeat + session activity):
+   * at most once per second. The liveness signal the server consumes runs on
+   * the heartbeatTimeoutMs timescale and the interval timer (≥5s, set in the
+   * constructor) keeps it fresh between output bursts, so 1s throttling does
+   * not change fencing/liveness semantics — it only stops one DB round-trip
+   * per output line (a network RTT on the postgres backend).
+   */
+  #touchFromOutput(): void {
+    const now = Date.now()
+    if (now - this.#lastOutputTouchAt < 1_000) return
+    this.#lastOutputTouchAt = now
+    // #heartbeat swallows its own transport errors (A-3); touchSessionActivity
+    // is a best-effort liveness touch and gets the same treatment — neither
+    // may turn an output line into an unhandled rejection.
+    void this.#heartbeat()
+    void this.#store.touchSessionActivity(this.manifest.session.sessionId).catch(err => {
+      process.stderr.write(
+        `[SessionRunnerDaemon] Session activity touch failed: ` +
+          `${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
   }
 
   #broadcast(message: RunnerServerMessage): void {
@@ -547,11 +659,17 @@ export class SessionRunnerDaemon {
       this.#detachedSince = now
       if (this.#busy) this.#detachedBusySince = now
     }
-    this.#store.setSessionLifecycle(
-      this.manifest.session.sessionId,
-      'detached',
-      'active',
-    )
+    // A-6: guarded the same way as #onClient's write — see the note there.
+    void this.#store.getSession(this.manifest.session.sessionId).then(session => {
+      if (mayStampDaemonLifecycle(session)) {
+        return this.#store.setSessionLifecycle(
+          this.manifest.session.sessionId,
+          'detached',
+          'active',
+        )
+      }
+      return undefined
+    }).catch(() => {})
 
     if (!this.#busy) {
       if (idleMs <= 0) return
@@ -563,7 +681,8 @@ export class SessionRunnerDaemon {
       this.#idleTimer = setTimeout(() => {
         this.#stopping = true
         this.#stopReason = 'idle_timeout'
-        this.#store.addEvent(
+        this.#stopReasonExplicit = true
+        void this.#store.addEvent(
           this.manifest.session.sessionId,
           this.manifest.attempt.attemptId,
           'attempt_idle_timeout',
@@ -582,7 +701,8 @@ export class SessionRunnerDaemon {
     this.#busyCeilingTimer = setTimeout(() => {
       this.#stopping = true
       this.#stopReason = 'idle_busy_timeout'
-      this.#store.addEvent(
+      this.#stopReasonExplicit = true
+      void this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
         'attempt_idle_busy_timeout',
@@ -663,13 +783,13 @@ export class SessionRunnerDaemon {
           nextTranscriptSessionId,
         )
       : currentTranscriptPath
-    this.#store.updateSessionTranscript(this.manifest.session.sessionId, {
+    void this.#store.updateSessionTranscript(this.manifest.session.sessionId, {
       transcriptSessionId: nextTranscriptSessionId,
       transcriptPath: nextTranscriptPath,
     })
     this.manifest.session.transcriptSessionId = nextTranscriptSessionId
     this.manifest.session.transcriptPath = nextTranscriptPath
-    this.#store.addEvent(
+    void this.#store.addEvent(
       this.manifest.session.sessionId,
       this.manifest.attempt.attemptId,
       'transcript_session_updated',
@@ -704,22 +824,32 @@ export class SessionRunnerDaemon {
     this.#broadcast({ type: 'exit', code: 1, signal: null })
     // Each DB write is best-effort: if the store is unwritable, we still want
     // to finish shutting the runner down cleanly rather than crash mid-#fail.
+    // Default true so single-instance (undefined instanceId) and store-write
+    // failures keep the original best-effort terminal write; only a successful
+    // owner-scoped UPDATE that matched nothing (we were fenced) skips it.
+    let stillOwner = true
     try {
-      this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
+      stillOwner = await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
         runtimeState: 'failed',
         stopReason,
         errorText: message,
-      })
+      }, this.manifest.config.instanceId)
     } catch (dbErr) {
       process.stderr.write(`[SessionRunnerDaemon] #fail markAttemptStopped failed: ${dbErr}\n`)
     }
-    try {
-      this.#store.markSessionEnded(this.manifest.session.sessionId, 'failed', 'active')
-    } catch (dbErr) {
-      process.stderr.write(`[SessionRunnerDaemon] #fail markSessionEnded failed: ${dbErr}\n`)
+    if (stillOwner) {
+      try {
+        await this.#store.markSessionEnded(this.manifest.session.sessionId, 'failed', 'active')
+      } catch (dbErr) {
+        process.stderr.write(`[SessionRunnerDaemon] #fail markSessionEnded failed: ${dbErr}\n`)
+      }
+    } else {
+      process.stderr.write(
+        `[SessionRunnerDaemon] session ${this.manifest.session.sessionId} attempt ${this.manifest.attempt.attemptId} fenced (owner changed); skipping terminal session write\n`,
+      )
     }
     try {
-      this.#store.addEvent(
+      await this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,
         'attempt_failed',

@@ -414,8 +414,12 @@ export class SessionManager {
 
     socket.on('message', (data) => {
       record.lastActiveAt = Date.now()
-      const text =
-        typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
+      // ws delivers Buffers in practice; the narrowing keeps RawData honest.
+      const text = Buffer.isBuffer(data)
+        ? data.toString('utf8')
+        : Array.isArray(data)
+          ? Buffer.concat(data as Buffer[]).toString('utf8')
+          : Buffer.from(data as ArrayBuffer).toString('utf8')
       record.handle.writeStdin(text.endsWith('\n') ? text : `${text}\n`)
     })
 
@@ -434,7 +438,7 @@ export class SessionManager {
     }
 
     this.#clearTimeout(record)
-    record.handle.destroy(force)
+    void record.handle.destroy(force)
   }
 
   async destroyAll(force = true): Promise<void> {

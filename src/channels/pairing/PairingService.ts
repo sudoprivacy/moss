@@ -35,7 +35,7 @@ class PairingService {
   /**
    * Get pending pairing requests
    */
-  getPendingRequests(): Array<{
+  async getPendingRequests(): Promise<Array<{
     code: string;
     platform_user_id: string;
     platform_type: string;
@@ -43,7 +43,7 @@ class PairingService {
     requested_at: number;
     expires_at: number;
     status: string;
-  }> {
+  }>> {
     if (!this.db) return [];
     return this.db.listPendingPairingRequests();
   }
@@ -57,18 +57,18 @@ class PairingService {
    * `scope` is the connection scope, not the platform: with several bots of a type
    * connected, checking the platform would let anyone paired with one bot use them all.
    */
-  isUserAuthorized(platformUserId: string, scope: string, mossUserId?: string): boolean {
+  async isUserAuthorized(platformUserId: string, scope: string, mossUserId?: string): Promise<boolean> {
     if (!this.db) return false;
-    const user = this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
+    const user = await this.db.getChannelUserByPlatform(platformUserId, scope, mossUserId);
     return !!user;
   }
 
   /**
    * Get pending request for user
    */
-  getPendingRequestForUser(platformUserId: string, scope: string): any {
+  async getPendingRequestForUser(platformUserId: string, scope: string): Promise<any> {
     if (!this.db) return null;
-    const requests = this.db.listPendingPairingRequests();
+    const requests = await this.db.listPendingPairingRequests();
     const request = requests.find(
       (r) => String(r.platform_user_id) === platformUserId &&
         String(r.plugin_scope || r.platform_type) === scope
@@ -103,13 +103,13 @@ class PairingService {
     const effectiveScope = scope || platformType;
 
     // Invalidate existing pending requests for this user on this connection
-    const existing = this.getPendingRequestForUser(platformUserId, effectiveScope);
+    const existing = await this.getPendingRequestForUser(platformUserId, effectiveScope);
     if (existing) {
-      this.db.updatePairingRequestStatus(existing.code, 'expired');
+      await this.db.updatePairingRequestStatus(existing.code, 'expired');
     }
 
     const ttlMs = 10 * 60 * 1000;
-    const code = this.generatePairingCode(platformUserId, platformType, displayName, ttlMs, userId, effectiveScope);
+    const code = await this.generatePairingCode(platformUserId, platformType, displayName, ttlMs, userId, effectiveScope);
     return { code, expiresAt: Date.now() + ttlMs };
   }
 
@@ -121,7 +121,7 @@ class PairingService {
       return { success: false, error: 'Database not initialized' };
     }
 
-    const row = this.db.getPairingRequest(code);
+    const row = await this.db.getPairingRequest(code);
     if (!row) {
       return { success: false, error: 'Invalid pairing code' };
     }
@@ -147,7 +147,7 @@ class PairingService {
     };
 
     // Update pairing status first
-    this.db.updatePairingRequestStatus(code, 'approved');
+    await this.db.updatePairingRequestStatus(code, 'approved');
 
     // Emit user authorized event
     getChannelEventEmitter().emitUserAuthorized(user);
@@ -163,12 +163,12 @@ class PairingService {
       return { success: false, error: 'Database not initialized' };
     }
 
-    const row = this.db.getPairingRequest(code);
+    const row = await this.db.getPairingRequest(code);
     if (!row) {
       return { success: false, error: 'Invalid pairing code' };
     }
 
-    this.db.updatePairingRequestStatus(code, 'rejected');
+    await this.db.updatePairingRequestStatus(code, 'rejected');
 
     // Emit pairing rejected event
     getChannelEventEmitter().emitPairingRejected(code);
@@ -179,14 +179,14 @@ class PairingService {
   /**
    * Generate a new pairing code
    */
-  generatePairingCode(
+  async generatePairingCode(
     platformUserId: string,
     platformType: string,
     displayName?: string,
     ttlMs: number = 10 * 60 * 1000, // 10 minutes default
     userId?: string,
     scope?: string,
-  ): string {
+  ): Promise<string> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -194,7 +194,7 @@ class PairingService {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const now = Date.now();
 
-    this.db.upsertPairingRequest({
+    await this.db.upsertPairingRequest({
       code,
       platform_user_id: platformUserId,
       platform_type: platformType,

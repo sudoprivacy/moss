@@ -226,6 +226,17 @@ export function hasScope(scopes: string[], requiredScope: string): boolean {
 }
 
 /**
+ * Exact-scope membership (no wildcard expansion). For gates where the mere
+ * possession of a broad wildcard — notably the `['*']` every admin/super_admin
+ * login token carries — must NOT grant access (e.g. the internal runner
+ * channel scope, minted only by issueInternalChannelToken). hasScope's
+ * `'*'`/prefix expansion is right for capability checks and wrong here.
+ */
+export function hasExactScope(scopes: string[], requiredScope: string): boolean {
+  return scopes.includes(requiredScope)
+}
+
+/**
  * Admin capability for cron gating: admin/super_admin roles or the admin:cron
  * scope. clientCronEnabled gates client-issued cron actions only — actors with
  * this capability bypass the gate on both the API routes and the scheduler's
@@ -292,18 +303,18 @@ export function isStoreAdmin(auth: { role: string; scopes?: string[] }): boolean
  * isolation. Mirrors the requireAuthUser pattern. Lives here (not service.ts)
  * so it is unit-testable under bun:test, which cannot load node:sqlite.
  */
-export function resolveUserPinnedOrSuperAdmin<U extends { role: string }>(
+export async function resolveUserPinnedOrSuperAdmin<U extends { role: string }>(
   userId: string,
   orgId: string,
   db: {
-    getUserByIdAndOrg(id: string, orgId: string): U | null
-    getUserById(id: string): U | null
+    getUserByIdAndOrg(id: string, orgId: string): Promise<U | null>
+    getUserById(id: string): Promise<U | null>
   },
-): U | null {
-  const user = db.getUserByIdAndOrg(userId, orgId)
+): Promise<U | null> {
+  const user = await db.getUserByIdAndOrg(userId, orgId)
   if (user) {
     return user
   }
-  const byId = db.getUserById(userId)
+  const byId = await db.getUserById(userId)
   return byId && byId.role === 'super_admin' ? byId : null
 }

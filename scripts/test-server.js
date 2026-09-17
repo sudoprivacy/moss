@@ -49,11 +49,18 @@ const BUN = [
   'recharge.test.ts',
   'runtimeScodePaths.test.ts',
   'smsTencent.test.ts',
+  // LB/HA branch suites whose chains carry bun:-protocol transitives (Node
+  // rejects the scheme) but never reach node:sqlite — verified green under bun.
+  'reviewFixesDaemon.test.ts',
 ]
 
 /** Need Node: either they reach `node:sqlite` (Bun lacks it), or they pin the
  * Node runtime path on purpose — jsonlParse exercises parseJSONL's non-Bun
- * fallback, the branch the production (node) bundle actually executes. */
+ * fallback, the branch the production (node) bundle actually executes.
+ * The lb-, ha-, and pg-prefixed block from the LB/HA branch constructs
+ * RuntimeService / DirectConnectStore / server surfaces, all of which reach
+ * node:sqlite or the driver seam — verified green under `npx tsx --test` on
+ * that branch. */
 const NODE = [
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
@@ -65,6 +72,27 @@ const NODE = [
   'rechargeDb.test.ts',
   'tokenQuota.test.ts',
   'transcriptGuard.test.ts',
+  // LB/HA branch suites (node:sqlite / driver seam reach-through)
+  'attemptLiveness.test.ts',
+  'channelPluginLease.test.ts',
+  'configRefresh.test.ts',
+  'haClaimReap.test.ts',
+  'internalChannelToken.test.ts',
+  'lbAuthProxyRulesPoll.test.ts',
+  'lbCorpAppSeq.test.ts',
+  'lbFencing.test.ts',
+  'lbInternalChannel.test.ts',
+  'lbLivenessLayering.test.ts',
+  'mcpEventsCrossInstance.test.ts',
+  'msgAuditLease.test.ts',
+  'pgBackend.test.ts',
+  'reviewFixes.test.ts',
+  'runtimePaths.test.ts',
+  'sessionManagerReload.test.ts',
+  'sqlDialect.test.ts',
+  'sqliteTransaction.test.ts',
+  'syncWorkerInflight.test.ts',
+  'userContainerName.test.ts',
 ]
 
 /**
@@ -76,6 +104,16 @@ const NODE = [
 const EXCLUDED = {
   // Asserts on the contents of the packaged E2E script; fails on dev checkouts.
   'releaseE2eSmoke.test.ts': 'asserts packaged release artifacts absent from a dev tree',
+  // Declared "runnable under Bun only" by its own header, but bun cannot load
+  // runtimeService.ts (transitive node:sqlite), and under node its mock.timers
+  // / #scheduleFencingWait private-access shape plus real-clock heartbeat
+  // windows fail.
+  'runtimeServiceFencing.test.ts': 'loads under neither runner: bun lacks node:sqlite transitively, node lacks the bun mock/timer semantics it relies on',
+  // Imports server.ts for buildWsUrl/wsRouteHint, and that chain reaches both
+  // bun:bundle (src/utils/log.ts — Node rejects the scheme) and node:sqlite
+  // (src/server/db.ts — Bun lacks the module). Verified equally unrunnable on
+  // the pre-rebase LB/HA branch tip, so this is not a rebase regression.
+  'lbOwnerRoute.test.ts': 'server.ts import chain is unloadable under both runners (bun:bundle blocks Node, node:sqlite blocks Bun)',
 }
 
 const present = SUITES.flatMap(dir =>

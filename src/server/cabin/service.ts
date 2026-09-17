@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto'
-import { createInterface } from 'readline'
-import type net from 'net'
+import type { InternalSessionChannel } from '../internalSessionChannel.js'
 import type { CabinConfig, CabinMessage, CabinPassengerContext, CabinToolCall } from './types.js'
 import { buildConversationKey } from './auth.js'
 import { CabinStore } from './store.js'
@@ -39,15 +38,15 @@ export class CabinServices {
 
   async ensureConversation(context: CabinPassengerContext) {
     const key = buildConversationKey(context)
-    const existing = this.options.store.getConversationByKey(key)
+    const existing = await this.options.store.getConversationByKey(key)
     if (existing) {
-      this.options.store.upsertManagedSeatFromContext(context)
+      await this.options.store.upsertManagedSeatFromContext(context)
       return existing
     }
     const mossSessionId = this.options.createMossSession
       ? await this.options.createMossSession(context)
       : randomUUID()
-    return this.options.store.createConversation({ ...context, mossSessionId })
+    return await this.options.store.createConversation({ ...context, mossSessionId })
   }
 
   inferToolCall(input: {
@@ -492,7 +491,7 @@ export class CabinServices {
     // Never inserts a reset marker or new conversation row — history stays intact.
     const replaceSession = async (fromSessionId: string, classification: string, reason: string): Promise<void> => {
       const newId = await this.options.createMossSession!(input.context)
-      this.options.store.rebindMossSession(input.conversationId!, newId)
+      await this.options.store.rebindMossSession(input.conversationId!, newId)
       this.logOutbound({
         ...input.logContext,
         upstream: 'moss-session-recovery',
@@ -515,14 +514,15 @@ export class CabinServices {
     const attemptOnce = async (
       sessionId: string,
     ): Promise<{ reply: string; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> => {
-      const ready = await runtime.ensureSessionReady(sessionId)
-      const socket = await runtime.connectToAttempt(ready.attempt)
+      // Internal channel (HA): the attach socket lives on the owning
+      // instance; cabin conversations may be served from any instance.
+      const socket = await runtime.connectInternalChannel(sessionId)
       const start = Date.now()
       // On a recovered session the scode transcript is empty, so prepend a read-only
       // history summary (excluding this turn's just-written user message) — background
       // only, not to be executed or replied to.
       const historyBlock = seededHistory
-        ? this.buildContextReplayBlock(input.conversationId!, input.currentUserMessageId)
+        ? await this.buildContextReplayBlock(input.conversationId!, input.currentUserMessageId)
         : ''
       const prompt = formatCabinSessionPrompt(input.context, input.text, historyBlock)
       try {
@@ -608,7 +608,7 @@ export class CabinServices {
     // to them. reuse/recover both proceed to attemptOnce (ensureSessionReady respawns
     // a lost attach); a pre-flight recover that can't be readied falls through to replace.
     if (recoveryEnabled) {
-      const snapshot = runtime.getSessionSnapshot(currentSessionId)
+      const snapshot = await runtime.getSessionSnapshot(currentSessionId)
       const classification = classifyMossSession(snapshot)
       const reason = snapshot ? snapshot.status : 'session-not-found'
       if (classification === 'replace') {
@@ -639,11 +639,11 @@ export class CabinServices {
   // Read-only history summary for a recovered session's seed prompt. Excludes system
   // markers, this turn's just-written user message, and server-authored hardware
   // confirmations (which would echo "已下发" noise into the new session's context).
-  private buildContextReplayBlock(conversationId: string, currentUserMessageId?: string): string {
+  private async buildContextReplayBlock(conversationId: string, currentUserMessageId?: string): Promise<string> {
     const turns = this.options.config.contextReplayTurns ?? 20
     if (turns <= 0) return ''
-    const messages = this.options.store
-      .listMessages(conversationId, turns + 1)
+    const messages = (await this.options.store
+      .listMessages(conversationId, turns + 1))
       .filter(message => message.role !== 'system')
       .filter(message => message.id !== currentUserMessageId)
       .filter(message => !isHardwareTemplateReply(message))
@@ -1896,7 +1896,7 @@ export function normalizeCabinHardwareReply(input: {
 }
 
 function sendPromptToRunnerSocket(
-  socket: net.Socket,
+  socket: InternalSessionChannel,
   text: string,
   timeoutMs: number,
   onDelta?: (text: string) => void,
@@ -1909,10 +1909,14 @@ function sendPromptToRunnerSocket(
     let hardwareResult: HardwareToolResult | null = null
     let commandSpec: HardwareCommandSpec | null = null
     let releasedDeltas = !suppressPreToolText
-    const rl = createInterface({ input: socket })
+    // The internal channel already delivers one runner-protocol line per
+    // 'data' event (each ending in \n), so no readline wrapper is needed.
+    const onLine = (chunk: string | Buffer): void => {
+      const line = String(chunk).replace(/\r?\n$/, '')
+      handleRunnerLine(line)
+    }
 
     const cleanup = (): void => {
-      rl.close()
       socket.destroy()
     }
     const finish = (fn: () => void): void => {
@@ -1926,7 +1930,7 @@ function sendPromptToRunnerSocket(
       finish(() => reject(new MossReplyTimeoutError(timeoutMs)))
     }, timeoutMs)
 
-    rl.on('line', line => {
+    const handleRunnerLine = (line: string): void => {
       let envelope: unknown
       try {
         envelope = JSON.parse(line)
@@ -2011,10 +2015,11 @@ function sendPromptToRunnerSocket(
       } catch {
         // ignore non-JSON stdout
       }
-    })
+    }
 
-    socket.once('error', error => {
-      finish(() => reject(error))
+    socket.on('data', onLine)
+    socket.once('error', (error: unknown) => {
+      finish(() => reject(error instanceof Error ? error : new Error(String(error))))
     })
     socket.once('close', () => {
       if (!settled) {

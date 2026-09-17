@@ -1,0 +1,33 @@
+name: lint
+
+# PR/push lint gate for src/server (no-floating-promises, see eslint.config.js).
+# Deliberately a separate workflow from ci.yml: the release pipeline there
+# (build-mac/build-win installers) is tag-only by design and must not run on
+# every PR. Toolchain mirrors ci.yml's convention: bun installs dependencies,
+# Node runs the JS tooling.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install root dependencies
+        run: bun install
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Lint src/server
+        run: npx eslint src/server

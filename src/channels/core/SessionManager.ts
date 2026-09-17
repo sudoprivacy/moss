@@ -26,9 +26,50 @@ export class SessionManager {
 
   private db: DirectConnectStore;
 
+  // Tracks the initial (and latest reload) load so consumers can await it.
+  private readyPromise: Promise<void>;
+
+  /**
+   * E-3: serializes map-rebuilding mutations (reload) with row-creating
+   * mutations (createSessionWithConversation). Their async interleaving could
+   * double-insert the same (user_id, chat_id) — createSession's delete+insert
+   * completes, then reload's earlier snapshot (taken before the insert) swaps
+   * in and hides the new row, so the next getSession miss creates a SECOND
+   * row (the table has no UNIQUE on that pair). A promise chain keeps the
+   * critical sections ordered without blocking reads.
+   */
+  private mutationQueue: Promise<unknown> = Promise.resolve();
+
   constructor(db: DirectConnectStore) {
     this.db = db;
-    this.loadActiveSessions();
+    // Store the load promise (previously fire-and-forget). Under PG the first
+    // load is a network round-trip; a message arriving in that window would
+    // otherwise miss the cache and take the "new session" branch, creating a
+    // duplicate channel_sessions row. Consumers await whenReady() first.
+    this.readyPromise = this.loadActiveSessions();
+  }
+
+  /** Resolves once the initial load (or latest reload) has completed. */
+  whenReady(): Promise<void> {
+    return this.readyPromise;
+  }
+
+  /**
+   * Rebuild the in-memory cache from the DB and re-arm whenReady(). Called
+   * after a channel-plugin lease transfers to this instance (B8 failover): the
+   * new holder's startup snapshot predates the sessions the previous holder
+   * created, so without a reload getSession would miss them and create
+   * duplicate channel_sessions rows. loadActiveSessions swaps a freshly-built
+   * map in atomically, so a concurrent read never observes a half-empty cache.
+   */
+  reload(): Promise<void> {
+    const run = this.mutationQueue.then(
+      () => this.loadActiveSessions(),
+      () => this.loadActiveSessions(),
+    )
+    this.readyPromise = run
+    this.mutationQueue = run
+    return run
   }
 
   /**
@@ -41,12 +82,15 @@ export class SessionManager {
   /**
    * Load active sessions from database into memory
    */
-  private loadActiveSessions(): void {
-    const rows = this.db.listChannelSessions();
+  private async loadActiveSessions(): Promise<void> {
+    const rows = await this.db.listChannelSessions();
 
+    // Build into a fresh map and swap it in atomically at the end, so a reload
+    // never exposes a partially-populated cache to a concurrent reader.
+    const next = new Map<string, IChannelSession>();
     for (const session of rows) {
       const key = this.buildKey(String(session.user_id), session.chat_id ? String(session.chat_id) : undefined);
-      this.activeSessions.set(key, {
+      next.set(key, {
         id: String(session.id),
         userId: String(session.user_id),
         agentType: String(session.agent_type) as IChannelSession['agentType'],
@@ -57,6 +101,7 @@ export class SessionManager {
         lastActivity: Number(session.last_activity),
       });
     }
+    this.activeSessions = next;
   }
 
   /**
@@ -73,8 +118,8 @@ export class SessionManager {
    * `platformType` is the connection scope (see pluginScope) — the bare platform for a
    * type's first connection, the plugin id for additional ones.
    */
-  getSessionByPlatformUser(platformUserId: string, platformType: PluginType, chatId?: string): IChannelSession | null {
-    const row = this.db.getChannelUserByPlatform(platformUserId, platformType);
+  async getSessionByPlatformUser(platformUserId: string, platformType: PluginType, chatId?: string): Promise<IChannelSession | null> {
+    const row = await this.db.getChannelUserByPlatform(platformUserId, platformType);
 
     if (!row) {
       return null;
@@ -86,14 +131,26 @@ export class SessionManager {
   /**
    * Create a new session for a user
    */
-  createSession(user: IChannelUser, agentType: IChannelSession['agentType'] = 'acp', workspace?: string, chatId?: string): IChannelSession {
+  async createSession(user: IChannelUser, agentType: IChannelSession['agentType'] = 'acp', workspace?: string, chatId?: string): Promise<IChannelSession> {
     return this.createSessionWithConversation(user, uuid(), agentType, workspace, chatId);
   }
 
   /**
    * Create a new session with a specific conversation ID
    */
-  createSessionWithConversation(user: IChannelUser, conversationId: string, agentType: IChannelSession['agentType'] = 'acp', workspace?: string, chatId?: string): IChannelSession {
+  async createSessionWithConversation(user: IChannelUser, conversationId: string, agentType: IChannelSession['agentType'] = 'acp', workspace?: string, chatId?: string): Promise<IChannelSession> {
+    // E-3: run inside the same mutation queue as reload() — see the field's
+    // note. The awaited DB round-trips below are exactly the windows across
+    // which a concurrent reload's stale snapshot would hide this row.
+    const run = this.mutationQueue.then(
+      () => this.createSessionWithConversationLocked(user, conversationId, agentType, workspace, chatId),
+      () => this.createSessionWithConversationLocked(user, conversationId, agentType, workspace, chatId),
+    )
+    this.mutationQueue = run.catch(() => {})
+    return run
+  }
+
+  private async createSessionWithConversationLocked(user: IChannelUser, conversationId: string, agentType: IChannelSession['agentType'], workspace: string | undefined, chatId: string | undefined): Promise<IChannelSession> {
     const key = this.buildKey(user.id, chatId);
 
     // Clear existing session if any. Carry the chat's conversation depth across
@@ -103,8 +160,8 @@ export class SessionManager {
     const existingSession = this.activeSessions.get(key);
     let carriedTurnCount = 0;
     if (existingSession) {
-      carriedTurnCount = this.db.getChannelSessionTurnCount(user.id, chatId);
-      this.db.deleteChannelSession(existingSession.id);
+      carriedTurnCount = await this.db.getChannelSessionTurnCount(user.id, chatId);
+      await this.db.deleteChannelSession(existingSession.id);
     }
 
     // Create new session
@@ -121,7 +178,7 @@ export class SessionManager {
     };
 
     // Save to database
-    this.db.upsertChannelSession({
+    await this.db.upsertChannelSession({
       id: session.id,
       user_id: session.userId,
       agent_type: session.agentType,
@@ -136,7 +193,7 @@ export class SessionManager {
     this.activeSessions.set(key, session);
 
     if (carriedTurnCount > 0) {
-      this.db.setChannelSessionTurnCount(session.id, carriedTurnCount);
+      await this.db.setChannelSessionTurnCount(session.id, carriedTurnCount);
     }
 
     return session;
@@ -145,7 +202,7 @@ export class SessionManager {
   /**
    * Update session's conversation ID
    */
-  updateSessionConversation(sessionId: string, conversationId: string): boolean {
+  async updateSessionConversation(sessionId: string, conversationId: string): Promise<boolean> {
     let foundKey: string | null = null;
     let foundSession: IChannelSession | null = null;
     for (const [key, s] of this.activeSessions.entries()) {
@@ -167,7 +224,7 @@ export class SessionManager {
       lastActivity: Date.now(),
     };
 
-    this.db.upsertChannelSession({
+    await this.db.upsertChannelSession({
       id: updated.id,
       user_id: updated.userId,
       agent_type: updated.agentType,
@@ -185,7 +242,7 @@ export class SessionManager {
   /**
    * Update session's last activity timestamp
    */
-  updateSessionActivity(userId: string, chatId?: string): void {
+  async updateSessionActivity(userId: string, chatId?: string): Promise<void> {
     const key = this.buildKey(userId, chatId);
     const session = this.activeSessions.get(key);
     if (!session) return;
@@ -193,7 +250,7 @@ export class SessionManager {
     const updated: IChannelSession = { ...session, lastActivity: Date.now() };
     this.activeSessions.set(key, updated);
 
-    this.db.upsertChannelSession({
+    await this.db.upsertChannelSession({
       id: updated.id,
       user_id: updated.userId,
       agent_type: updated.agentType,
@@ -208,14 +265,14 @@ export class SessionManager {
   /**
    * Clear session for a user
    */
-  clearSession(userId: string, chatId?: string): boolean {
+  async clearSession(userId: string, chatId?: string): Promise<boolean> {
     const key = this.buildKey(userId, chatId);
     const session = this.activeSessions.get(key);
     if (!session) {
       return false;
     }
 
-    this.db.deleteChannelSession(session.id);
+    await this.db.deleteChannelSession(session.id);
     this.activeSessions.delete(key);
 
     return true;
@@ -224,10 +281,10 @@ export class SessionManager {
   /**
    * Clear all sessions
    */
-  clearAllSessions(): number {
+  async clearAllSessions(): Promise<number> {
     let cleared = 0;
     for (const [key, session] of this.activeSessions.entries()) {
-      this.db.deleteChannelSession(session.id);
+      await this.db.deleteChannelSession(session.id);
       this.activeSessions.delete(key);
       cleared++;
     }
@@ -237,7 +294,7 @@ export class SessionManager {
   /**
    * Clear session by conversation ID
    */
-  clearSessionByConversationId(conversationId: string): IChannelSession | null {
+  async clearSessionByConversationId(conversationId: string): Promise<IChannelSession | null> {
     let foundSession: IChannelSession | null = null;
     let foundKey: string | null = null;
 
@@ -253,7 +310,7 @@ export class SessionManager {
       return null;
     }
 
-    this.db.deleteChannelSession(foundSession.id);
+    await this.db.deleteChannelSession(foundSession.id);
     this.activeSessions.delete(foundKey);
 
     return foundSession;
@@ -274,24 +331,28 @@ export class SessionManager {
   }
 
   /**
-   * Cleanup stale sessions
+   * Cleanup stale sessions.
+   *
+   * E-1: the freshness judgement comes from the SHARED DB, never from this
+   * instance's in-memory copy. In multi-instance deployments only the
+   * lease-holding instance exchanges messages for a plugin, so any OTHER
+   * instance's in-memory lastActivity for that chat is frozen at load time —
+   * judging by it (the old code) deleted rows that were actively exchanging
+   * messages on the peer (their IM turn cap then reset on row revival).
+   * Deleting by DB predicate is safe from every instance; the deleted ids
+   * sync the local map.
    */
-  cleanupStaleSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
-    const now = Date.now();
-    let cleaned = 0;
-
-    for (const [key, session] of this.activeSessions.entries()) {
-      if (now - session.lastActivity > maxAgeMs) {
-        this.db.deleteChannelSession(session.id);
-        this.activeSessions.delete(key);
-        cleaned++;
+  async cleanupStaleSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<number> {
+    const deletedIds = await this.db.deleteStaleChannelSessions(maxAgeMs);
+    if (deletedIds.length > 0) {
+      const deleted = new Set(deletedIds);
+      for (const [key, session] of this.activeSessions.entries()) {
+        if (deleted.has(session.id)) {
+          this.activeSessions.delete(key);
+        }
       }
+      console.log(`[SessionManager] Cleaned up ${deletedIds.length} stale session(s)`);
     }
-
-    if (cleaned > 0) {
-      console.log(`[SessionManager] Cleaned up ${cleaned} stale session(s)`);
-    }
-
-    return cleaned;
+    return deletedIds.length;
   }
 }

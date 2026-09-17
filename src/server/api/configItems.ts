@@ -4,6 +4,7 @@ import { textToPinyin } from '../utils/pinyin.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 import { hasScope } from '../auth/token.js'
 import { parseBodyAuthCheck } from '../authProxy/bodyAuthCheck.js'
+import { isUniqueViolation } from '../db/driver.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -134,26 +135,26 @@ function mapConfigEntry(row: SqlRow) {
 }
 
 export function createConfigItemsApi(db: {
-  listConfigItems: (opts: { name?: string; scope?: string; status?: string; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
-  getConfigItem: (id: number, orgId?: string) => SqlRow | null
-  getConfigItemByPinyin: (pinyin: string, orgId?: string) => SqlRow | null
-  createConfigItem: (row: { name: string; description?: string; icon?: string; pinyin: string; scope: string; url_pattern?: string; scheme?: string; bearer_prefix?: string; status?: number; org_id?: string | null; auth_type?: string; token_url?: string; token_request_json?: string; mint_script?: string; body_auth_check?: string }) => number
-  updateConfigItem: (id: number, updates: Record<string, unknown>, orgId?: string) => void
-  deleteConfigItem: (id: number, orgId?: string) => void
-  getConfigEntries: (configItemId: number) => SqlRow[]
-  replaceConfigEntries: (configItemId: number, entries: { config_key: string; name: string; config_desc?: string; required?: boolean }[]) => void
-  getAllActiveConfigItems: (orgId?: string) => SqlRow[]
-  getDepartmentPolicies: (departmentId: string, orgId?: string) => SqlRow[]
+  listConfigItems: (opts: { name?: string; scope?: string; status?: string; page?: number; pageSize?: number; orgId?: string }) => Promise<{ items: SqlRow[]; total: number }>
+  getConfigItem: (id: number, orgId?: string) => Promise<SqlRow | null>
+  getConfigItemByPinyin: (pinyin: string, orgId?: string) => Promise<SqlRow | null>
+  createConfigItem: (row: { name: string; description?: string; icon?: string; pinyin: string; scope: string; url_pattern?: string; scheme?: string; bearer_prefix?: string; status?: number; org_id?: string | null; auth_type?: string; token_url?: string; token_request_json?: string; mint_script?: string; body_auth_check?: string }) => Promise<number>
+  updateConfigItem: (id: number, updates: Record<string, unknown>, orgId?: string) => Promise<void>
+  deleteConfigItem: (id: number, orgId?: string) => Promise<void>
+  getConfigEntries: (configItemId: number) => Promise<SqlRow[]>
+  replaceConfigEntries: (configItemId: number, entries: { config_key: string; name: string; config_desc?: string; required?: boolean }[]) => Promise<void>
+  getAllActiveConfigItems: (orgId?: string) => Promise<SqlRow[]>
+  getDepartmentPolicies: (departmentId: string, orgId?: string) => Promise<SqlRow[]>
 }) {
   const api = {
-    list(orgId: string, userId: string, params: {
+    async list(orgId: string, userId: string, params: {
       page?: number
       page_size?: number
       name?: string
       scope?: string
       status?: string
     }) {
-      const { items, total } = db.listConfigItems({
+      const { items, total } = await db.listConfigItems({
         name: params.name,
         scope: params.scope,
         status: params.status,
@@ -161,10 +162,11 @@ export function createConfigItemsApi(db: {
         pageSize: params.page_size,
         orgId,
       })
-      const mapped = items.map(item => {
-        const entries = db.getConfigEntries(item.id as number)
-        return { ...mapConfigItem(item), entries: entries.map(mapConfigEntry) }
-      })
+      const mapped = []
+      for (const item of items) {
+        const entries = await db.getConfigEntries(item.id as number)
+        mapped.push({ ...mapConfigItem(item), entries: entries.map(mapConfigEntry) })
+      }
       return {
         success: true,
         data: mapped,
@@ -174,14 +176,14 @@ export function createConfigItemsApi(db: {
       }
     },
 
-    get(orgId: string, userId: string, id: number) {
-      const item = db.getConfigItem(id, orgId)
+    async get(orgId: string, userId: string, id: number) {
+      const item = await db.getConfigItem(id, orgId)
       if (!item) return { success: false, error: { code: 'not_found', message: '配置项不存在' } }
-      const entries = db.getConfigEntries(id)
+      const entries = await db.getConfigEntries(id)
       return { success: true, data: { ...mapConfigItem(item), entries: entries.map(mapConfigEntry) } }
     },
 
-    create(orgId: string, userId: string, body: {
+    async create(orgId: string, userId: string, body: {
       name: string
       pinyin?: string
       description?: string
@@ -235,14 +237,14 @@ export function createConfigItemsApi(db: {
       // items (so two orgs may reuse a pinyin), global for user-scope defs.
       let suffix = 0
       let candidate = pinyin
-      while (db.getConfigItemByPinyin(candidate, itemOrgId ?? undefined)) {
+      while (await db.getConfigItemByPinyin(candidate, itemOrgId ?? undefined)) {
         suffix++
         candidate = `${pinyin}_${suffix}`
       }
       pinyin = candidate
 
       try {
-        const id = db.createConfigItem({
+        const id = await db.createConfigItem({
           name: body.name.trim(),
           description: body.description,
           icon: body.icon,
@@ -259,20 +261,19 @@ export function createConfigItemsApi(db: {
         })
 
         if (body.entries?.length > 0) {
-          db.replaceConfigEntries(id, body.entries)
+          await db.replaceConfigEntries(id, body.entries)
         }
 
-        return api.get(orgId, userId, id)
+        return await api.get(orgId, userId, id)
       } catch (error: unknown) {
-        const msg = error instanceof Error ? error.message : String(error)
-        if (msg.includes('UNIQUE')) {
+        if (isUniqueViolation(error)) {
           return { success: false, error: { code: 'conflict', message: '配置项名称已存在' } }
         }
         throw error
       }
     },
 
-    update(orgId: string, userId: string, id: number, body: {
+    async update(orgId: string, userId: string, id: number, body: {
       name?: string
       description?: string
       icon?: string
@@ -287,7 +288,7 @@ export function createConfigItemsApi(db: {
       body_auth_check?: string | null
       entries?: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
-      const existing = db.getConfigItem(id, orgId)
+      const existing = await db.getConfigItem(id, orgId)
       if (!existing) return { success: false, error: { code: 'not_found', message: '配置项不存在' } }
 
       if (body.url_pattern?.trim() && !isValidUrlPattern(body.url_pattern.trim())) {
@@ -308,7 +309,7 @@ export function createConfigItemsApi(db: {
           return { success: false, error: { code: 'validation_error', message: '拼音标识不能超过 128 个字符' } }
         }
         const conflictOrg = (existing.scope as string) === 'user' ? undefined : orgId
-        const conflict = db.getConfigItemByPinyin(body.pinyin, conflictOrg)
+        const conflict = await db.getConfigItemByPinyin(body.pinyin, conflictOrg)
         if (conflict && (conflict.id as number) !== id) {
           return { success: false, error: { code: 'conflict', message: '拼音标识已被占用' } }
         }
@@ -333,33 +334,32 @@ export function createConfigItemsApi(db: {
       updates.updated_at = now()
 
       try {
-        db.updateConfigItem(id, updates, orgId)
+        await db.updateConfigItem(id, updates, orgId)
       } catch (error: unknown) {
-        const msg = error instanceof Error ? error.message : String(error)
-        if (msg.includes('UNIQUE')) {
+        if (isUniqueViolation(error)) {
           return { success: false, error: { code: 'conflict', message: '名称或拼音标识冲突' } }
         }
         throw error
       }
 
       if (body.entries) {
-        db.replaceConfigEntries(id, body.entries)
+        await db.replaceConfigEntries(id, body.entries)
       }
 
-      return api.get(orgId, userId, id)
+      return await api.get(orgId, userId, id)
     },
 
-    updateStatus(orgId: string, userId: string, id: number, status: number) {
-      const existing = db.getConfigItem(id, orgId)
+    async updateStatus(orgId: string, userId: string, id: number, status: number) {
+      const existing = await db.getConfigItem(id, orgId)
       if (!existing) return { success: false, error: { code: 'not_found', message: '配置项不存在' } }
-      db.updateConfigItem(id, { status, updated_at: now() }, orgId)
+      await db.updateConfigItem(id, { status, updated_at: now() }, orgId)
       return { success: true, data: { id, status } }
     },
 
-    delete(orgId: string, userId: string, id: number) {
-      const existing = db.getConfigItem(id, orgId)
+    async delete(orgId: string, userId: string, id: number) {
+      const existing = await db.getConfigItem(id, orgId)
       if (!existing) return { success: false, error: { code: 'not_found', message: '配置项不存在' } }
-      db.deleteConfigItem(id, orgId)
+      await db.deleteConfigItem(id, orgId)
       return { success: true }
     },
 
@@ -368,16 +368,16 @@ export function createConfigItemsApi(db: {
      *  - non-admin: scope=system items (all) + scope=user items (all) + scope=department items (department-authorized only)
      *  - non-admin without department: scope=system items (all) + scope=user items (all)
      */
-    listPublic(
+    async listPublic(
       auth: { role: string; scopes: string[]; userId: string; orgId: string },
-      getUserById: (userId: string) => { status: string; departmentId: string | null } | null,
+      getUserById: (userId: string) => Promise<{ status: string; departmentId: string | null } | null>,
     ) {
       // Org-scope: only this org's non-user items (+ global user-scope defs).
-      const allItems = db.getAllActiveConfigItems(auth.orgId)
+      const allItems = await db.getAllActiveConfigItems(auth.orgId)
 
       // Helper: map a raw item row to the public DTO
-      const mapItem = (item: SqlRow) => {
-        const entries = db.getConfigEntries(item.id as number)
+      const mapItem = async (item: SqlRow) => {
+        const entries = await db.getConfigEntries(item.id as number)
         return {
           id: item.id as number,
           name: item.name as string,
@@ -395,15 +395,16 @@ export function createConfigItemsApi(db: {
 
       // Rule 1: admin sees everything in their org (excluding items with no entries)
       if (auth.role === 'admin' || auth.role === 'super_admin' || hasScope(auth.scopes, '*')) {
-        return { success: true, data: allItems.map(mapItem).filter(item => item.entries.length > 0) }
+        const adminData = await Promise.all(allItems.map(mapItem))
+        return { success: true, data: adminData.filter(item => item.entries.length > 0) }
       }
 
       // Rule 2: non-admin — determine department-authorized config item IDs
       let authorizedDeptIds: Set<number> = new Set()
-      const user = getUserById(auth.userId)
+      const user = await getUserById(auth.userId)
       const deptId = user?.departmentId ?? null
       if (deptId) {
-        const policies = db.getDepartmentPolicies(deptId, auth.orgId)
+        const policies = await db.getDepartmentPolicies(deptId, auth.orgId)
         authorizedDeptIds = new Set(policies.map(p => p.config_item_id as number))
       }
 
@@ -416,7 +417,8 @@ export function createConfigItemsApi(db: {
         return false
       })
 
-      return { success: true, data: filtered.map(mapItem).filter(item => item.entries.length > 0) }
+      const publicData = await Promise.all(filtered.map(mapItem))
+      return { success: true, data: publicData.filter(item => item.entries.length > 0) }
     },
   }
   return api

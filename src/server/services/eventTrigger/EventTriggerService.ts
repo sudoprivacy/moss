@@ -6,7 +6,7 @@
 
 import path from 'path'
 import type net from 'net'
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../../db/driver.js'
 import { EventTriggerStore, type EventTrigger, type EventTriggerRun } from './EventTriggerStore.js'
 import type { RuntimeService } from '../../runtimeService.js'
 import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
@@ -120,7 +120,7 @@ export class EventTriggerService {
   /** Runs in flight in THIS process, used for the slot calculation. */
   private inFlight = new Set<string>()
 
-  constructor(db: DatabaseSync, config: EventTriggerServiceConfig) {
+  constructor(driver: DbDriver, config: EventTriggerServiceConfig) {
     // Fail loud on missing config: the project has no type-check step (the
     // build only strips types), so an omitted required field would otherwise
     // surface much later as a cryptic path.join(undefined, ...) error.
@@ -130,7 +130,7 @@ export class EventTriggerService {
     if (!config.runtimeService) {
       throw new Error('EventTriggerService misconfigured: runtimeService is required')
     }
-    this.store = new EventTriggerStore(db)
+    this.store = new EventTriggerStore(driver)
     this.config = config
   }
 
@@ -138,13 +138,22 @@ export class EventTriggerService {
     return this.store
   }
 
-  start(): void {
+  async start(): Promise<void> {
     if (!this.stopped) return
     this.stopped = false
 
-    // Any run still 'running' at boot was orphaned by a restart — it can
-    // never complete, and would otherwise hold a slot forever.
-    const reaped = this.store.reapStaleRuns(Date.now(), 'Server restarted while run was in progress')
+    // Only reap runs older than their trigger's timeout + margin — NOT every
+    // in-flight run. Under HA a rolling restart brings up a new instance while
+    // the other is still serving; reaping all in-flight runs at boot would
+    // erase the peer's in-progress runs and lose those events forever. A
+    // genuinely orphaned run is older than its timeout and still gets reaped;
+    // the threshold is per-trigger (B-4), with the default as fallback for
+    // triggers without an explicit timeout.
+    const reaped = await this.store.reapStaleRuns(
+      Date.now(),
+      DEFAULT_RUN_TIMEOUT_MS,
+      'Run did not complete within the timeout (reaped as stale)',
+    )
     if (reaped > 0) {
       console.log(`[EventTriggerService] reaped ${reaped} orphaned run(s) at startup`)
     }
@@ -176,7 +185,7 @@ export class EventTriggerService {
     const slots = MAX_CONCURRENT_RUNS - this.inFlight.size
     if (slots <= 0) return
 
-    const claimed = this.store.claimQueuedRuns(slots)
+    const claimed = await this.store.claimQueuedRuns(slots)
     for (const run of claimed) {
       this.inFlight.add(run.id)
       // Fire-and-forget: executeRun owns its own status transitions.
@@ -185,13 +194,13 @@ export class EventTriggerService {
   }
 
   private async executeRun(run: EventTriggerRun): Promise<void> {
-    const trigger = this.store.getById(run.triggerId)
+    const trigger = await this.store.getById(run.triggerId)
     if (!trigger) {
-      this.store.updateRunStatus(run.id, { status: 'skipped', summary: 'Trigger no longer exists' })
+      await this.store.updateRunStatus(run.id, { status: 'skipped', summary: 'Trigger no longer exists' })
       return
     }
     if (!trigger.enabled) {
-      this.store.updateRunStatus(run.id, { status: 'skipped', summary: 'Trigger is disabled' })
+      await this.store.updateRunStatus(run.id, { status: 'skipped', summary: 'Trigger is disabled' })
       return
     }
 
@@ -206,8 +215,8 @@ export class EventTriggerService {
       const resolved = await this.resolveSession(trigger, run, userAuth)
       sessionId = resolved.sessionId
       sessionIsDisposable = resolved.created
-      this.store.updateRunStatus(run.id, { status: 'running', sessionId })
-      this.store.updateLastSession(trigger.id, sessionId)
+      await this.store.updateRunStatus(run.id, { status: 'running', sessionId })
+      await this.store.updateLastSession(trigger.id, sessionId)
 
       const prompt = buildPrompt(trigger.promptTemplate, run.payloadJson)
       // `??` alone would let a stored 0 through (rows written before the API
@@ -217,14 +226,14 @@ export class EventTriggerService {
         trigger.timeoutMs && trigger.timeoutMs > 0 ? trigger.timeoutMs : DEFAULT_RUN_TIMEOUT_MS
       await this.driveSession(sessionId, prompt, timeoutMs)
 
-      this.store.updateRunStatus(run.id, {
+      await this.store.updateRunStatus(run.id, {
         status: 'ok',
         sessionId,
         summary: `Event trigger "${trigger.name}" completed`,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.store.updateRunStatus(run.id, { status: 'error', sessionId, error: message })
+      await this.store.updateRunStatus(run.id, { status: 'error', sessionId, error: message })
       console.error(`[EventTriggerService] run ${run.id} failed: ${message}`)
     } finally {
       // Release a single-use session as soon as the run settles. Without this
@@ -268,10 +277,10 @@ export class EventTriggerService {
     if (trigger.conversationMode === 'reuse') {
       const candidate = trigger.boundSessionId ?? trigger.lastSessionId
       if (candidate) {
-        // getSession is synchronous (returns SessionRecord | null). Allowlist
+        // getSession returns SessionRecord | null (async). Allowlist
         // the live states rather than denylisting 'terminated' — 'ended' is
         // equally unusable and would otherwise be treated as reusable.
-        const existing = this.config.runtimeService.getSession(candidate)
+        const existing = await this.config.runtimeService.getSession(candidate)
         const isLive =
           existing != null &&
           !existing.deletedAt &&
@@ -343,8 +352,9 @@ export class EventTriggerService {
    *     abandons a wedged one after MAX_UNPRODUCTIVE_NUDGES.
    */
   private async driveSession(sessionId: string, prompt: string, timeoutMs: number): Promise<void> {
-    const ready = await this.config.runtimeService.ensureSessionReady(sessionId)
-    const socket: net.Socket = await this.config.runtimeService.connectToAttempt(ready.attempt)
+    // Internal channel (HA): the attach socket lives on the owning instance;
+    // trigger execution lands wherever the DB claim wins, so route like a client.
+    const socket = await this.config.runtimeService.connectInternalChannel(sessionId)
 
     await new Promise<void>((resolve, reject) => {
       let buffer = ''
@@ -469,8 +479,8 @@ export class EventTriggerService {
       socket.on('close', onClose)
       socket.write(
         `${JSON.stringify({ type: 'stdin', data: prompt.endsWith('\n') ? prompt : `${prompt}\n` })}\n`,
-        error => {
-          if (error) finish(error)
+        (error: unknown) => {
+          if (error) finish(error instanceof Error ? error : new Error(String(error)))
         },
       )
     })

@@ -6,7 +6,7 @@
 // already needs node:sqlite for DirectConnectStore and therefore runs under
 // `tsx --test`).
 import type http from 'http'
-import { ServerDrainingError, TokenQuotaExceededError } from './runtimeService.js'
+import { ServerDrainingError, TokenQuotaExceededError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { AuthServiceError } from './auth/service.js'
 import type { ServerLogger } from './serverLog.js'
 
@@ -45,6 +45,13 @@ export function writeError(
   // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
   // matches every other writeError branch.
   if (error instanceof ServerDrainingError) {
+    writeJson(res, 503, { error: error.message })
+    return
+  }
+  // Takeover in progress (previous owner died, its detached runner's
+  // heartbeat still fresh — fencing needs a moment). Retryable 503; a
+  // background task drives the respawn.
+  if (error instanceof AttemptTakeoverPendingError) {
     writeJson(res, 503, { error: error.message })
     return
   }

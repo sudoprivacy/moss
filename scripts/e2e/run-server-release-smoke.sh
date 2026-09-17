@@ -170,6 +170,7 @@ sudo env \
   MOSS_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   ANTHROPIC_BASE_URL="$MOCK_URL" \
   ANTHROPIC_API_KEY="$MOCK_API_KEY" \
+  MOSS_INSTANCE_ID="e2e-$VERSION" \
   "$OFFLINE_DIR/install.sh" --offline
 
 # Keep model discovery and the agent/skill Hub hermetic too. Session runners

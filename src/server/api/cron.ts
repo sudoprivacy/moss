@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../db/driver.js'
 import { CronStore, type CronJob, type CronJobRun, type CronJobRunWithSession, type CreateCronJobInput, type UpdateCronJobInput } from '../services/cron/CronStore.js'
 import { CronService } from '../services/cron/CronService.js'
 import { hasScope, isCronAdminCapable } from '../auth/token.js'
@@ -54,7 +54,7 @@ function parseCoOwnerIdsRow(raw: unknown): string[] {
   }
 }
 
-function mapJobToResponse(job: CronJob, getUserName?: (userId: string) => string | undefined) {
+async function mapJobToResponse(job: CronJob, getUserName?: (userId: string) => Promise<string | undefined>) {
   const executorUserId = job.executorUserId ?? job.userId
   return {
     id: job.id,
@@ -63,12 +63,12 @@ function mapJobToResponse(job: CronJob, getUserName?: (userId: string) => string
     // Resolved server-side (org-agnostic) so owners outside the viewer's org
     // roster — e.g. a super_admin who created the job while switched into this
     // org — still display by name instead of falling back to the raw id.
-    userName: getUserName?.(job.userId),
+    userName: await getUserName?.(job.userId),
     coOwnerIds: job.coOwnerIds,
-    coOwnerNames: job.coOwnerIds.map(id => getUserName?.(id) ?? id),
+    coOwnerNames: await Promise.all(job.coOwnerIds.map(async id => (await getUserName?.(id)) ?? id)),
     // Executor for scheduled runs; defaults to the creator when unset.
     executorUserId,
-    executorName: getUserName?.(executorUserId),
+    executorName: await getUserName?.(executorUserId),
     name: job.name,
     enabled: job.enabled,
     schedule: {
@@ -176,27 +176,27 @@ export function canManageJob(
  * (membership check skipped) so unit tests can exercise the constraint logic
  * without a user store.
  */
-export function validateCoOwnersAndExecutor(params: {
+export async function validateCoOwnersAndExecutor(params: {
   orgId: string
   creatorUserId: string
   coOwnerIds?: string[]
   executorUserId?: string | null
-  isOrgUser?: (userId: string, orgId: string) => boolean
-}): string | null {
+  isOrgUser?: (userId: string, orgId: string) => Promise<boolean>
+}): Promise<string | null> {
   const { orgId, creatorUserId, coOwnerIds, executorUserId, isOrgUser } = params
 
   const normalizedCoOwners = coOwnerIds ? Array.from(new Set(coOwnerIds)) : undefined
 
   if (normalizedCoOwners && isOrgUser) {
     for (const id of normalizedCoOwners) {
-      if (!isOrgUser(id, orgId)) {
+      if (!(await isOrgUser(id, orgId))) {
         return `Co-owner ${id} is not a member of this organization`
       }
     }
   }
 
   if (executorUserId != null) {
-    if (isOrgUser && !isOrgUser(executorUserId, orgId)) {
+    if (isOrgUser && !(await isOrgUser(executorUserId, orgId))) {
       return `Executor ${executorUserId} is not a member of this organization`
     }
     // The effective co-owner set for the constraint is the proposed set when
@@ -215,17 +215,17 @@ export function validateCoOwnersAndExecutor(params: {
 export interface CronApiConfig {
   cronService: CronService
   /** Resolve a user id to a display name for job responses (org-agnostic). */
-  getUserName?: (userId: string) => string | undefined
+  getUserName?: (userId: string) => Promise<string | undefined>
   /**
    * True when `userId` is a member of `orgId` (so it may be a co-owner or
    * executor). Backed by authService.getUserOrNull. When omitted, membership
    * validation is skipped (tests may pass a stub or leave it unset).
    */
-  isOrgUser?: (userId: string, orgId: string) => boolean
+  isOrgUser?: (userId: string, orgId: string) => Promise<boolean>
 }
 
-export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
-  const store = new CronStore(db)
+export function createCronApi(driver: DbDriver, config: CronApiConfig) {
+  const store = new CronStore(driver)
   const mapJob = (job: CronJob) => mapJobToResponse(job, config.getUserName)
 
   return {
@@ -243,11 +243,11 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         const canListSubtree =
           !!subtreeUserIds && subtreeUserIds.size > 0 && hasScope(auth.scopes ?? [], 'cron:list:subtree')
         const jobs = canListSubtree
-          ? store.listBySubtree(auth.orgId, Array.from(subtreeUserIds))
-          : store.listByUser(auth.orgId, auth.userId)
+          ? await store.listBySubtree(auth.orgId, Array.from(subtreeUserIds))
+          : await store.listByUser(auth.orgId, auth.userId)
         return {
           success: true,
-          data: jobs.map(mapJob),
+          data: await Promise.all(jobs.map(mapJob)),
         }
       } catch (err) {
         console.error('[CronApi] Failed to list jobs:', err)
@@ -274,12 +274,12 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      * Gated on canManageJob rather than canReadJob: writing into the workspace
      * changes what the job does on its next run, which is an edit, not a read.
      */
-    resolveJobWorkspace: (
+    resolveJobWorkspace: async (
       auth: { orgId: string; userId: string; scopes?: string[] },
       jobId: string,
       subtreeUserIds?: Set<string> | null,
-    ): { success: boolean; message?: string; workspace?: string } => {
-      const job = store.getById(jobId)
+    ): Promise<{ success: boolean; message?: string; workspace?: string }> => {
+      const job = await store.getById(jobId)
       if (!job) return { success: false, message: 'Job not found' }
       if (!canManageJob(auth, job, subtreeUserIds)) {
         return { success: false, message: 'Access denied' }
@@ -300,7 +300,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
       subtreeUserIds?: Set<string> | null,
     ) => {
       try {
-        const job = store.getById(jobId)
+        const job = await store.getById(jobId)
         if (!job) {
           return { success: false, message: 'Job not found' }
         }
@@ -309,7 +309,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         }
         return {
           success: true,
-          data: mapJob(job),
+          data: await mapJob(job),
         }
       } catch (err) {
         console.error('[CronApi] Failed to get job:', err)
@@ -329,7 +329,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         if (blocked) return blocked
         // Executor defaults to the creator; validate any co-owners/executor the
         // caller supplied (org membership + executor ∈ {creator} ∪ co_owners).
-        const validationError = validateCoOwnersAndExecutor({
+        const validationError = await validateCoOwnersAndExecutor({
           orgId: auth.orgId,
           creatorUserId: auth.userId,
           coOwnerIds: input.coOwnerIds,
@@ -337,16 +337,16 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
           isOrgUser: config.isOrgUser,
         })
         if (validationError) return { success: false, message: validationError }
-        const job = store.insert({
+        const job = await store.insert({
           ...input,
           orgId: auth.orgId,
           userId: auth.userId,
           executorUserId: input.executorUserId ?? auth.userId,
         })
-        config.cronService.addJob(job)
+        await config.cronService.addJob(job)
         return {
           success: true,
-          data: mapJob(job),
+          data: await mapJob(job),
         }
       } catch (err) {
         console.error('[CronApi] Failed to create job:', err)
@@ -362,7 +362,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     updateJob: async (auth: CronAuth, jobId: string, updates: UpdateCronJobInput, subtreeUserIds?: Set<string> | null) => {
       try {
-        const existing = store.getById(jobId)
+        const existing = await store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
@@ -405,7 +405,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
           ) {
             nextExecutor = existing.userId
           }
-          const validationError = validateCoOwnersAndExecutor({
+          const validationError = await validateCoOwnersAndExecutor({
             orgId: existing.orgId,
             creatorUserId: existing.userId,
             coOwnerIds: nextCoOwners,
@@ -416,14 +416,14 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
           updates = { ...updates, coOwnerIds: nextCoOwners, executorUserId: nextExecutor }
         }
 
-        const job = store.update(jobId, updates)
+        const job = await store.update(jobId, updates)
         if (!job) {
           return { success: false, message: 'Failed to update job' }
         }
-        config.cronService.updateJob(job)
+        await config.cronService.updateJob(job)
         return {
           success: true,
-          data: mapJob(job),
+          data: await mapJob(job),
         }
       } catch (err) {
         console.error('[CronApi] Failed to update job:', err)
@@ -439,7 +439,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     deleteJob: async (auth: CronAuth, jobId: string, subtreeUserIds?: Set<string> | null) => {
       try {
-        const existing = store.getById(jobId)
+        const existing = await store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
@@ -449,7 +449,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
         // cron_disabled_by_org (#83) gates creation, not management of an
         // existing job — owner/co-owner/admin may delete regardless of the flag.
 
-        store.softDelete(jobId)
+        await store.softDelete(jobId)
         config.cronService.removeJob(jobId)
         return { success: true }
       } catch (err) {
@@ -466,7 +466,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     triggerJob: async (auth: CronAuth, jobId: string, subtreeUserIds?: Set<string> | null) => {
       try {
-        const existing = store.getById(jobId)
+        const existing = await store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
@@ -501,7 +501,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     listRuns: async (auth: { orgId: string; userId: string; scopes?: string[] }, jobId: string, limit = 50, subtreeUserIds?: Set<string> | null) => {
       try {
-        const existing = store.getById(jobId)
+        const existing = await store.getById(jobId)
         if (!existing) {
           return { success: false, message: 'Job not found' }
         }
@@ -509,7 +509,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
           return { success: false, message: 'Access denied' }
         }
 
-        const runs = store.listRunsWithSessionByJob(jobId, limit)
+        const runs = await store.listRunsWithSessionByJob(jobId, limit)
         return {
           success: true,
           data: runs.map(mapRunWithSessionToResponse),
@@ -528,14 +528,14 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
      */
     adminListJobs: async (auth: { orgId: string }) => {
       try {
-        const rows = db.prepare(`
+        const rows = await driver.all<SqlRow>(`
           SELECT * FROM cron_jobs
           WHERE org_id = ? AND deleted_at IS NULL
           ORDER BY created_at DESC
-        `).all(auth.orgId) as SqlRow[]
+        `, [auth.orgId])
 
         // We need to use the store to map properly
-        const jobs = rows.map(row => {
+        const jobs = await Promise.all(rows.map(row => {
           return mapJob({
             id: String(row.id),
             orgId: String(row.org_id),
@@ -570,7 +570,7 @@ export function createCronApi(db: DatabaseSync, config: CronApiConfig) {
             createdAt: Number(row.created_at),
             updatedAt: Number(row.updated_at),
           })
-        })
+        }))
 
         return {
           success: true,

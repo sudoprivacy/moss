@@ -120,6 +120,9 @@ export class WikiJobExecutor {
       modelId: 'Xenova/multilingual-e5-small',
       maxPassagesPerWiki: 20_000,
     },
+    /** This server instance's id (HA). Stamped on claimed jobs so peers leave
+     * each other's in-flight staging artifacts alone; undefined = single instance. */
+    private instanceId?: string,
   ) {}
 
   /** Start polling for queued jobs. Idempotent. */
@@ -157,21 +160,43 @@ export class WikiJobExecutor {
   }
 
   private async tickOnce(): Promise<void> {
-    // Reap timed-out jobs
     const now = Date.now()
+    // Local reap: this instance's own in-memory builds that blew the timeout.
     for (const [jobId, state] of this.running.entries()) {
       if (now - state.startedAt > BUILD_TIMEOUT_MS) {
-        this.failJob(jobId, state.wikiId, 'build exceeded timeout')
+        await this.failJob(jobId, state.wikiId, 'build exceeded timeout')
         this.running.delete(jobId)
       }
     }
 
-    // Pull queued jobs up to the concurrency cap
+    // DB reap: jobs left 'running' by a crashed/wedged instance (or by this one
+    // before a restart) past the timeout. Fail them so the wiki's build slot is
+    // freed and a "永卡 running" job cannot block re-builds forever. A fresh
+    // build re-enqueues a NEW job row. failJob's status write is authoritative
+    // (updateWikiBuildJob only writes provided columns), so a slow owner's later
+    // progress update cannot resurrect a reaped job.
+    try {
+      const stale = await this.docStore.listStaleRunningBuildJobs(now - BUILD_TIMEOUT_MS)
+      for (const job of stale) {
+        if (this.running.has(job.id)) continue // covered by the local reap above
+        await this.failJob(job.id, job.wikiId, 'build owner unavailable (reaped as stale)')
+        // B-6: the dead/wedged owner's finally never ran, so its stage dir is
+        // orphaned on the shared volume — reclaim it here (best-effort).
+        await rm(path.join(STAGE_DIR, `${job.wikiId}.${job.id}`), { recursive: true, force: true }).catch(e => {
+          console.error(`[WikiJobExecutor] failed to clean reaped job stage dir for ${job.id}:`, e)
+        })
+      }
+    } catch (err) {
+      console.error('[WikiJobExecutor] stale-job reap failed:', err)
+    }
+
+    // Pull queued jobs up to the concurrency cap via an atomic CAS claim, so two
+    // instances polling the shared DB never both run the same job.
     const slotsAvailable = MAX_CONCURRENT_BUILDS - this.running.size
     if (slotsAvailable <= 0) return
 
-    const queued = this.docStore.listQueuedBuildJobs(slotsAvailable)
-    for (const job of queued) {
+    const claimed = await this.docStore.claimQueuedBuildJobs(slotsAvailable, this.instanceId, Date.now())
+    for (const job of claimed) {
       // Fire-and-forget — runJob handles its own state updates.
       this.running.set(job.id, { jobId: job.id, wikiId: job.wikiId, startedAt: Date.now() })
       void this.runJob(job).finally(() => {
@@ -183,20 +208,32 @@ export class WikiJobExecutor {
   private async runJob(job: WikiBuildJob): Promise<void> {
     console.log(`[WikiJobExecutor] picking up job ${job.id} (wiki=${job.wikiId})`)
 
+    // B-5: cross-instance cancel checkpoint. The cancel API can be routed to
+    // a non-owner instance, whose fallback writes 'cancelled' straight to the
+    // DB row — our in-memory cancelRequested set never sees it. Each stage
+    // boundary re-reads the row so a cancelled (or reaped) job unwinds before
+    // the next expensive stage instead of publishing over the cancellation.
+    const assertStillRunning = async (): Promise<void> => {
+      const fresh = await this.docStore.getBuildJob(job.id)
+      if (!fresh || fresh.status !== 'running') {
+        throw new BuildCancelledError()
+      }
+    }
+
     // Recency marker for last-started-wins on publish. Sourced from the
     // running-state stamp set in tickOnce (falls back to now). Recorded in
     // _moss_meta.json.startedAt and compared in publishStaged so a slow,
     // earlier-started build cannot clobber a newer one's output.
     const startedAt = this.running.get(job.id)?.startedAt ?? Date.now()
 
-    // Mark job + wiki as running
-    this.docStore.updateBuildJob(job.id, {
-      status: 'running',
+    // The claim (claimQueuedWikiBuildJobs) already flipped status→'running' and
+    // stamped started_at; here we only advance the progress/step (dynamic SET
+    // leaves status untouched, so a concurrent stale-reap stays authoritative).
+    await this.docStore.updateBuildJob(job.id, {
       progress: 5,
       currentStep: '准备工作目录',
-      startedAt: Date.now(),
     })
-    this.docStore.setWikiBuildResult(job.wikiId, { status: 'running' })
+    await this.docStore.setWikiBuildResult(job.wikiId, { status: 'running' })
 
     let wiki: WikiRecord | null = null
     // The document IDs actually staged for this build. For 'files' mode this
@@ -209,7 +246,7 @@ export class WikiJobExecutor {
     // every exit path (success swap consumes it; failure rm -rf's it).
     const stageDir = path.join(STAGE_DIR, `${job.wikiId}.${job.id}`)
     try {
-      wiki = this.docStore.getWikiById(job.wikiId)
+      wiki = await this.docStore.getWikiById(job.wikiId)
       if (!wiki) throw new Error(`wiki ${job.wikiId} not found`)
 
       // Stage 1: prepare cwd/input with predigested markdown. Capture the
@@ -217,7 +254,8 @@ export class WikiJobExecutor {
       // exactly what was built.
       await mkdir(stageDir, { recursive: true })
       builtDocIds = await this.prepareInputs(wiki, stageDir)
-      this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
+      await assertStillRunning()
+      await this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
 
       // Stage 2: spawn agent session
       const created = await this.runtime.createSession({
@@ -241,13 +279,14 @@ export class WikiJobExecutor {
       const state = this.running.get(job.id)
       if (state) state.sessionId = created.sessionId
 
-      this.docStore.updateBuildJob(job.id, {
+      await this.docStore.updateBuildJob(job.id, {
         sessionId: created.sessionId,
         progress: 40,
         currentStep: 'Agent 正在阅读文档',
       })
 
       // Stage 3: attach + send prompt + wait for completion
+      await assertStillRunning()
       const ready = await this.runtime.ensureSessionReady(created.sessionId)
       const socket = await this.runtime.connectToAttempt(ready.attempt)
 
@@ -268,10 +307,10 @@ export class WikiJobExecutor {
         let reason = result.error ?? 'build session failed'
         try {
           const attemptId = created.sessionId
-            ? this.db.getSession(created.sessionId)?.currentAttemptId ?? null
+            ? ((await this.db.getSession(created.sessionId))?.currentAttemptId ?? null)
             : null
           const errorText = attemptId
-            ? this.db.getAttempt(attemptId)?.errorText ?? null
+            ? ((await this.db.getAttempt(attemptId))?.errorText ?? null)
             : null
           if (errorText) reason = `${reason}: ${errorText}`
         } catch {
@@ -283,6 +322,7 @@ export class WikiJobExecutor {
 
       // Stage 4: verify output presence (in the staging dir — the live
       // wiki dir is untouched until the swap below).
+      await assertStillRunning()
       const wikiIndexPath = path.join(stageDir, 'WIKI.md')
       try {
         await readFile(wikiIndexPath, 'utf-8')
@@ -302,7 +342,7 @@ export class WikiJobExecutor {
             `[WikiJobExecutor] job ${job.id}: ${uncaptioned.length} image(s) ` +
               `referenced without a caption entry in _moss_images.md: ${uncaptioned.join(', ')}`,
           )
-          this.docStore.updateBuildJob(job.id, {
+          await this.docStore.updateBuildJob(job.id, {
             currentStep: `构建完成(${uncaptioned.length} 张图片未配文)`,
           })
         }
@@ -327,14 +367,14 @@ export class WikiJobExecutor {
             console.warn(
               `[WikiJobExecutor] vector index skipped for wiki=${wiki.id}: ${result.reason}`,
             )
-            this.docStore.updateBuildJob(job.id, {
+            await this.docStore.updateBuildJob(job.id, {
               currentStep: '向量索引降级（grep-only）',
             })
           } else {
             console.log(
               `[WikiJobExecutor] vector index built for wiki=${wiki.id}: ${result.count} passages`,
             )
-            this.docStore.updateBuildJob(job.id, {
+            await this.docStore.updateBuildJob(job.id, {
               currentStep: `向量索引已建（${result.count} 段）`,
             })
           }
@@ -350,34 +390,43 @@ export class WikiJobExecutor {
       // `startedAt`, which publishStaged uses to avoid clobbering a newer
       // build. If it fails, fail the whole build rather than publish a wiki
       // with no recency marker.
+      await assertStillRunning()
       await this.writeWikiMeta(wiki, stageDir, startedAt, builtDocIds)
 
       // Stage 6: atomically publish the staging dir into the live wiki dir.
       // Fail-safe against concurrent same-wiki swaps (see publishStaged).
+      // B-5/B-6 fence: the DB row must still be running AND still claimed by
+      // us — a peer's cancel fallback or a stale-reap 'failed' means this
+      // build lost its mandate and must not publish.
+      await assertStillRunning()
+      const prePublish = await this.docStore.getBuildJob(job.id)
+      if (prePublish?.claimedBy !== this.instanceId) {
+        throw new BuildCancelledError()
+      }
       await this.publishStaged(wiki, stageDir, startedAt)
 
-      this.docStore.updateBuildJob(job.id, {
+      await this.docStore.updateBuildJob(job.id, {
         status: 'succeeded',
         progress: 100,
         currentStep: '构建完成',
         finishedAt: Date.now(),
-      })
-      this.docStore.setWikiBuildResult(job.wikiId, {
+      }, { expectedStatuses: ['running'], ownerInstanceId: this.instanceId })
+      await this.docStore.setWikiBuildResult(job.wikiId, {
         status: 'succeeded',
         lastBuiltAt: Date.now(),
         lastBuildError: null,
       })
       // Document Center v2: clear needs_rebuild on successful build.
-      this.db.markWikiNeedsRebuild(job.wikiId, false)
+      await this.db.markWikiNeedsRebuild(job.wikiId, false)
       console.log(`[WikiJobExecutor] job ${job.id} succeeded`)
     } catch (err) {
       if (err instanceof BuildCancelledError || this.cancelRequested.has(job.id)) {
         console.log(`[WikiJobExecutor] job ${job.id} cancelled`)
-        this.cancelJobRecord(job.id, job.wikiId)
+        await this.cancelJobRecord(job.id, job.wikiId)
       } else {
         const message = err instanceof Error ? err.message : String(err)
         console.error(`[WikiJobExecutor] job ${job.id} failed:`, message)
-        this.failJob(job.id, job.wikiId, message)
+        await this.failJob(job.id, job.wikiId, message)
       }
     } finally {
       this.cancelRequested.delete(job.id)
@@ -602,6 +651,43 @@ export class WikiJobExecutor {
   }
 
   /**
+   * Staging entry names are "<wikiId>.<jobId>" (build dir) or
+   * "<wikiId>.<jobId>.old" (published-swap leftover). wikiId/jobId are dotless
+   * ids, so the jobId is the last dot-segment of the base.
+   */
+  private jobIdFromStagingName(name: string): string | null {
+    const base = name.endsWith('.old') ? name.slice(0, -'.old'.length) : name
+    const dotIdx = base.lastIndexOf('.')
+    if (dotIdx <= 0) return null
+    return base.slice(dotIdx + 1)
+  }
+
+  /**
+   * True when the staging artifact for `jobId` belongs to a DIFFERENT live
+   * instance's in-flight build — such artifacts must not be recovered or
+   * deleted by this instance's sweep (the peer may be mid-publish). A job with
+   * no record, not 'running', stale past the timeout, or owned by this instance
+   * is reclaimable. On a DB read error we err on the safe side (treat as foreign
+   * / leave it) rather than risk clobbering a peer's build.
+   */
+  private async isForeignActiveJob(jobId: string, now: number): Promise<boolean> {
+    try {
+      const job = await this.docStore.getBuildJob(jobId)
+      if (!job) return false // no record → orphan, reclaimable
+      if (job.status !== 'running') return false // terminal/queued → not actively building
+      const stampedAt = job.claimedAt ?? job.startedAt ?? 0
+      if (now - stampedAt > BUILD_TIMEOUT_MS) return false // stale → reclaimable
+      // B-10: a NULL claimed_by on a fresh 'running' row means a pre-CAS
+      // version's owner (mixed-version rolling upgrade window) — protect it
+      // the same as a peer's claimed row; the timeout branch above still
+      // reclaims genuinely dead ones.
+      return job.claimedBy !== this.instanceId
+    } catch {
+      return true // DB hiccup: don't risk deleting a possibly-active peer artifact
+    }
+  }
+
+  /**
    * Reclaim orphaned staging artifacts left by a crash mid-build or
    * mid-swap. Called once on start().
    *
@@ -619,6 +705,8 @@ export class WikiJobExecutor {
       return // .stage/ doesn't exist yet — nothing to sweep
     }
 
+    const now = Date.now()
+
     // Pass 1: recover any interrupted swaps from `<wikiId>.<jobId>.old`.
     for (const name of entries) {
       if (!name.endsWith('.old')) continue
@@ -628,6 +716,12 @@ export class WikiJobExecutor {
       const dotIdx = base.lastIndexOf('.')
       if (dotIdx <= 0) continue
       const wikiId = base.slice(0, dotIdx)
+      const jobId = base.slice(dotIdx + 1)
+      // Another live instance's in-flight job may be mid-publish (its live dir
+      // renamed to this .old between swap step 1 and 2). Recovering it here
+      // would rename the .old back over the peer's swap and break its step 2.
+      // Leave it to its owner.
+      if (await this.isForeignActiveJob(jobId, now)) continue
       const liveDir = path.join(MOSS_WIKIS_DIR, wikiId)
       const oldPath = path.join(STAGE_DIR, name)
       if (!(await this.pathExists(liveDir))) {
@@ -644,7 +738,9 @@ export class WikiJobExecutor {
       await rm(oldPath, { recursive: true, force: true }).catch(() => {})
     }
 
-    // Pass 2: drop everything else still under .stage/ (abandoned builds).
+    // Pass 2: drop remaining staging entries (abandoned builds) — EXCEPT those
+    // owned by another live instance's in-flight job (its build dir, or an .old
+    // it is still swapping). Those belong to a peer and must be left alone.
     let remaining: string[]
     try {
       remaining = await readdir(STAGE_DIR)
@@ -652,6 +748,8 @@ export class WikiJobExecutor {
       return
     }
     for (const name of remaining) {
+      const jobId = this.jobIdFromStagingName(name)
+      if (jobId && (await this.isForeignActiveJob(jobId, now))) continue
       await rm(path.join(STAGE_DIR, name), { recursive: true, force: true }).catch((e) => {
         console.error(`[WikiJobExecutor] failed to sweep staging entry ${name}:`, e)
       })
@@ -694,7 +792,7 @@ export class WikiJobExecutor {
     if (wiki.sourceMode === 'dir' && wiki.sourceNodeIds.length > 0) {
       // Multi-dir with persistent exclusions: union of included subtrees minus
       // excluded subtrees, resolved live so new files auto-join / deleted drop.
-      const rows = this.db.listDocumentsUnderNodes(
+      const rows = await this.db.listDocumentsUnderNodes(
         wiki.sourceNodeIds,
         wiki.sourceExcludeNodeIds,
         wiki.orgId,
@@ -707,7 +805,7 @@ export class WikiJobExecutor {
     const staged: string[] = []
     for (const docId of docIds) {
       // Cross-org lookup: build runs as system, document still has org_id
-      const docRow = this.db.getDocument(docId, wiki.orgId)
+      const docRow = await this.db.getDocument(docId, wiki.orgId)
       if (!docRow) {
         console.warn(`[WikiJobExecutor] source doc ${docId} not found, skipping`)
         continue
@@ -846,7 +944,7 @@ export class WikiJobExecutor {
               markProgress()
               this.handleAgentLine(parsed.line, jobId, (step) => {
                 lastProgress = Math.min(lastProgress + 5, 90)
-                this.docStore.updateBuildJob(jobId, {
+                void this.docStore.updateBuildJob(jobId, {
                   progress: lastProgress,
                   currentStep: step,
                 })
@@ -953,7 +1051,7 @@ export class WikiJobExecutor {
     this.cancelRequested.add(jobId)
     // Best-effort progress hint; the terminal `cancelled` status is written
     // when runJob unwinds.
-    this.docStore.updateBuildJob(jobId, { currentStep: '正在终止…' })
+    await this.docStore.updateBuildJob(jobId, { currentStep: '正在终止…' })
     if (state.sessionId) {
       try {
         await this.runtime.terminateSession(state.sessionId)
@@ -964,8 +1062,8 @@ export class WikiJobExecutor {
     return true
   }
 
-  private cancelJobRecord(jobId: string, wikiId: string): void {
-    this.docStore.updateBuildJob(jobId, {
+  private async cancelJobRecord(jobId: string, wikiId: string): Promise<void> {
+    await this.docStore.updateBuildJob(jobId, {
       status: 'cancelled',
       currentStep: '已终止',
       finishedAt: Date.now(),
@@ -975,21 +1073,25 @@ export class WikiJobExecutor {
     // the previously published build (if any) is still intact and serving.
     // Restore 'succeeded' when a prior good build exists, else 'pending' —
     // never leave it stuck on 'running' or imply an error.
-    const wiki = this.docStore.getWikiById(wikiId)
-    this.docStore.setWikiBuildResult(wikiId, {
+    const wiki = await this.docStore.getWikiById(wikiId)
+    await this.docStore.setWikiBuildResult(wikiId, {
       status: wiki?.lastBuiltAt != null ? 'succeeded' : 'pending',
       lastBuildError: null,
     })
   }
 
-  private failJob(jobId: string, wikiId: string, message: string): void {
-    this.docStore.updateBuildJob(jobId, {
+  private async failJob(jobId: string, wikiId: string, message: string): Promise<void> {
+    // B-6: only flip a still-running job to failed — a job already terminal
+    // (cancelled by a peer's cancel API, or succeeded by a recovering owner)
+    // keeps its terminal state. No claimed_by predicate here: the DB reaper
+    // legitimately fails OTHER instances' stale jobs.
+    await this.docStore.updateBuildJob(jobId, {
       status: 'failed',
       currentStep: '构建失败',
       errorMessage: message,
       finishedAt: Date.now(),
-    })
-    this.docStore.setWikiBuildResult(wikiId, {
+    }, { expectedStatuses: ['running'] })
+    await this.docStore.setWikiBuildResult(wikiId, {
       status: 'failed',
       lastBuildError: message,
     })

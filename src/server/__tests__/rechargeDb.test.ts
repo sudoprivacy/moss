@@ -52,11 +52,11 @@ const gateway: SudorouterClient = {
   addPoints: async () => {},
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   raw = new DatabaseSync(':memory:')
   const db = new AuthCenterDb(raw, ':memory:')
   auth = new AuthService(db, 3600)
-  const result = auth.provisionPhoneUser({
+  const result = await auth.provisionPhoneUser({
     phone: '13800138000',
     nickname: 'Tester',
     autoCreateOrg: true,
@@ -72,7 +72,7 @@ afterEach(() => {
 describe('recharge orders on the real table', () => {
   it('stores, lists, and settles an order', async () => {
     const store: RechargeOrderStore = auth.rechargeOrders
-    const order = createRechargeOrder(store, POLICY, {
+    const order = await createRechargeOrder(store, POLICY, {
       userId,
       userPhone: '13800138000',
       orgId: 'org-1',
@@ -80,7 +80,7 @@ describe('recharge orders on the real table', () => {
       paymentMethod: 'ALIPAY',
     })
 
-    const listed = store.listForUser(userId, 1, 20)
+    const listed = await store.listForUser(userId, 1, 20)
     assert.equal(listed.total, 1)
     assert.equal(listed.list[0]?.orderNo, order.orderNo)
     assert.equal(listed.list[0]?.status, ORDER_STATUS.PENDING)
@@ -90,25 +90,25 @@ describe('recharge orders on the real table', () => {
       fuiou,
       gateway,
       { mchnt_cd: 'mch', message: order.orderNo, resp_code: '0000', resp_desc: 'ok' },
-      () => '42',
+      async () => '42',
     )
 
-    const settled = store.getByOrderNo(order.orderNo)
+    const settled = await store.getByOrderNo(order.orderNo)
     assert.equal(settled?.status, ORDER_STATUS.SUCCESS)
     assert.equal(settled?.syncStatus, 'SYNCED')
     assert.equal(settled?.callbackAmountCents, 730)
   })
 
-  it('scopes admin order listing by org', () => {
+  it('scopes admin order listing by org', async () => {
     const store: RechargeOrderStore = auth.rechargeOrders
-    createRechargeOrder(store, POLICY, {
+    await createRechargeOrder(store, POLICY, {
       userId,
       userPhone: '13800138000',
       orgId: 'org-1',
       amount: 1,
       paymentMethod: 'WECHAT',
     })
-    createRechargeOrder(store, POLICY, {
+    await createRechargeOrder(store, POLICY, {
       userId,
       userPhone: '13800138000',
       orgId: 'org-2',
@@ -116,8 +116,8 @@ describe('recharge orders on the real table', () => {
       paymentMethod: 'ALIPAY',
     })
 
-    assert.equal(store.listForAdmin({ orgId: 'org-1', page: 1, pageSize: 20 }).total, 1)
-    assert.equal(store.listForAdmin({ orgId: 'org-2', page: 1, pageSize: 20 }).total, 1)
-    assert.equal(store.listForAdmin({ page: 1, pageSize: 20 }).total, 2)
+    assert.equal((await store.listForAdmin({ orgId: 'org-1', page: 1, pageSize: 20 })).total, 1)
+    assert.equal((await store.listForAdmin({ orgId: 'org-2', page: 1, pageSize: 20 })).total, 1)
+    assert.equal((await store.listForAdmin({ page: 1, pageSize: 20 })).total, 2)
   })
 })

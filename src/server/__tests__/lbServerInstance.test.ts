@@ -8,9 +8,9 @@ function setup() {
 }
 
 describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)", () => {
-  it("uses the provided instanceId when given", () => {
+  it("uses the provided instanceId when given", async () => {
     const store = setup();
-    const rec = store.registerServerInstance("hostA", 101, "a");
+    const rec = await store.registerServerInstance("hostA", 101, "a");
     assert.equal(rec.instanceId, "a");
     assert.equal(rec.status, "running");
     const row = store.db
@@ -19,19 +19,19 @@ describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)
     assert.equal(row.status, "running");
   });
 
-  it("falls back to a random UUID when no instanceId is passed (single-instance behavior)", () => {
+  it("falls back to a random UUID when no instanceId is passed (single-instance behavior)", async () => {
     const store = setup();
-    const rec = store.registerServerInstance("hostA", 101);
+    const rec = await store.registerServerInstance("hostA", 101);
     // Shape check only: UUIDv4 format, differs between calls.
     assert.match(rec.instanceId, /^[0-9a-f-]{36}$/);
-    const rec2 = store.registerServerInstance("hostA", 102);
+    const rec2 = await store.registerServerInstance("hostA", 102);
     assert.notEqual(rec.instanceId, rec2.instanceId);
   });
 
-  it("re-registering a fixed id after a stop UPSERTs instead of failing on the PRIMARY KEY (H1)", () => {
+  it("re-registering a fixed id after a stop UPSERTs instead of failing on the PRIMARY KEY (H1)", async () => {
     const store = setup();
-    store.registerServerInstance("hostA", 101, "a");
-    store.stopServerInstance("a");
+    await store.registerServerInstance("hostA", 101, "a");
+    await store.stopServerInstance("a");
 
     const stoppedRow = store.db
       .prepare("SELECT status, stopped_at FROM server_instances WHERE instance_id = ?")
@@ -40,7 +40,7 @@ describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)
     assert.ok(stoppedRow.stopped_at !== null);
 
     // Second start of the same fixed id — must not throw UNIQUE constraint.
-    const rec = store.registerServerInstance("hostB", 202, "a");
+    const rec = await store.registerServerInstance("hostB", 202, "a");
     assert.equal(rec.instanceId, "a");
     assert.equal(rec.status, "running");
 

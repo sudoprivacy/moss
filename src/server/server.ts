@@ -12,11 +12,11 @@ import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
 import { readTenantAssistantMultipart, type TenantAssistantMultipartFile } from './utils/tenantAssistantMultipart.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
-import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
+import { hasScope, hasExactScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
-import { RuntimeService, ServerDrainingError } from './runtimeService.js'
+import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
@@ -184,7 +184,7 @@ import { MediaPurgeWorker, type RetentionTarget } from './corpapps/msgaudit/purg
 import type { PullConfig as MsgAuditPullConfig } from './corpapps/msgaudit/puller.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
-import { configItemToRule } from './authProxy/authProxyServer.js'
+import { loadAuthProxyRules } from './authProxy/authProxyServer.js'
 import { createSecretsApi } from './api/secrets.js'
 import { createCronApi } from './api/cron.js'
 import { CronService } from './services/cron/CronService.js'
@@ -193,7 +193,7 @@ import { EventTriggerService } from './services/eventTrigger/EventTriggerService
 import { createMcpAdminApi } from './api/mcpAdmin.js'
 import { createMcpUserApi } from './api/mcpUser.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
-import { handleMcpSseConnection, broadcastMcpEvent } from './api/mcpEvents.js'
+import { handleMcpSseConnection, broadcastMcpEvent, configureMcpChangeDetection } from './api/mcpEvents.js'
 import { McpStore } from './mcp/db.js'
 import type { McpTemplateListFilter } from './mcp/types.js'
 import type { NexusClient } from './nexus/nexusClient.js'
@@ -378,14 +378,16 @@ function serializeSession(session: {
  * collapses repeated owners in a list to a single DB lookup each (avoids N+1).
  */
 function makeUserNameResolver(
-  getUserName: (userId: string) => string | undefined,
-): (userId: string) => string | undefined {
-  const cache = new Map<string, string | undefined>()
-  return (userId: string) => {
-    if (cache.has(userId)) return cache.get(userId)
-    const name = getUserName(userId)
-    cache.set(userId, name)
-    return name
+  getUserName: (userId: string) => Promise<string | undefined>,
+): (userId: string) => Promise<string | undefined> {
+  const cache = new Map<string, Promise<string | undefined>>()
+  return async (userId: string) => {
+    let p = cache.get(userId)
+    if (!p) {
+      p = getUserName(userId)
+      cache.set(userId, p)
+    }
+    return p
   }
 }
 
@@ -1078,16 +1080,16 @@ function getBearerToken(req: http.IncomingMessage): string | null {
   return match?.[1] ?? null
 }
 
-function authenticateRequest(
+async function authenticateRequest(
   req: http.IncomingMessage,
   authService: AuthService,
-): AuthContext | null {
+): Promise<AuthContext | null> {
   const token = getBearerToken(req)
-  const auth = token ? authService.verifyAccessToken(token) : null
+  const auth = token ? await authService.verifyAccessToken(token) : null
   if (token && !auth) {
     process.stderr.write(`[authenticateRequest] Verification failed for token: ${token.slice(0, 10)}...\n`)
   }
-  if (auth && !isUserActive(auth.userId, authService)) return null
+  if (auth && !(await isUserActive(auth.userId, authService))) return null
   return auth
 }
 
@@ -1216,7 +1218,14 @@ function parseRuntimeOptions(body: JsonBody) {
   }
 }
 
-function buildWsUrl(server: http.Server, config: ServerConfig, sessionId: string): string {
+// Exported for unit testing ws_url routing (same test-only export convention
+// as writeError / computeReadiness / setRouteCookieHeader).
+export function buildWsUrl(
+  server: http.Server,
+  config: ServerConfig,
+  sessionId: string,
+  routeInstance?: string | null,
+): string {
   const path = `/ws/sessions/${sessionId}`
 
   // `publicBaseUrl` is the single source of truth for how clients reach this
@@ -1225,30 +1234,62 @@ function buildWsUrl(server: http.Server, config: ServerConfig, sessionId: string
   // socket, not the reachable URL — deriving from them yields `ws://host:43127`,
   // which is plaintext and bypasses the proxy. `advertisedHost` cannot express
   // this on its own because it carries no scheme or port.
-  if (config.publicBaseUrl) {
-    const publicUrl = tryParseUrl(config.publicBaseUrl)
-    if (publicUrl) {
-      const scheme = publicUrl.protocol === 'https:' ? 'wss' : 'ws'
-      const basePath = publicUrl.pathname.replace(/\/+$/, '')
-      return `${scheme}://${publicUrl.host}${basePath}${path}`
-    }
-  }
-
-  const address = server.address()
-  const actualPort =
-    typeof address === 'object' && address ? address.port : config.port
-
-  // Use advertisedHost if configured, otherwise derive from bind host
-  let host: string
-  if (config.advertisedHost) {
-    host = config.advertisedHost
-  } else if (config.host === '0.0.0.0' || config.host === '::') {
-    host = '127.0.0.1'
+  let base: string
+  const publicUrl = config.publicBaseUrl ? tryParseUrl(config.publicBaseUrl) : null
+  if (publicUrl) {
+    const scheme = publicUrl.protocol === 'https:' ? 'wss' : 'ws'
+    const basePath = publicUrl.pathname.replace(/\/+$/, '')
+    base = `${scheme}://${publicUrl.host}${basePath}${path}`
   } else {
-    host = config.host
+    const address = server.address()
+    const actualPort =
+      typeof address === 'object' && address ? address.port : config.port
+
+    // Use advertisedHost if configured, otherwise derive from bind host
+    let host: string
+    if (config.advertisedHost) {
+      host = config.advertisedHost
+    } else if (config.host === '0.0.0.0' || config.host === '::') {
+      host = '127.0.0.1'
+    } else {
+      host = config.host
+    }
+
+    base = `ws://${host}:${actualPort}${path}`
   }
 
-  return `ws://${host}:${actualPort}${path}`
+  // Owner-aware routing: stick this WS to the owning instance behind the LB
+  // (nginx `map $arg_moss_route`). WS auth travels in the Authorization header
+  // and the upgrade handler only reads `refresh_token` from the query, so the
+  // extra parameter is inert for single-instance deployments.
+  return routeInstance
+    ? `${base}?${config.routeCookieName}=${encodeURIComponent(routeInstance)}`
+    : base
+}
+
+/**
+ * Route hint for ws_url: only behind an LB (publicBaseUrl) in multi-instance
+ * mode (instanceId), and only for a LIVE owner — a dead owner must fall to
+ * the pool so the receiving instance's upgrade path (tryOwnAttempt CAS)
+ * adopts it. Owner == self also routes explicitly (deterministic; avoids a
+ * pool round-trip 409).
+ */
+export function wsRouteHint(
+  config: ServerConfig,
+  owner: { ownerInstanceId: string | null; ownerLive: boolean },
+): string | null {
+  return config.instanceId && config.publicBaseUrl && owner.ownerLive
+    ? owner.ownerInstanceId
+    : null
+}
+
+/** Normalize a 'ws' message payload (RawData: Buffer | ArrayBuffer | Buffer[])
+ * to text. Node 'ws' delivers Buffers in practice; the other branches keep
+ * the narrowing honest without casts. */
+function wsDataToText(data: unknown): string {
+  if (Buffer.isBuffer(data)) return data.toString('utf8')
+  if (Array.isArray(data)) return Buffer.concat(data as Buffer[]).toString('utf8')
+  return Buffer.from(data as ArrayBuffer).toString('utf8')
 }
 
 function canAccessSession(
@@ -1260,6 +1301,29 @@ function canAccessSession(
     session.orgId === auth.orgId &&
     (session.userId === auth.userId || hasScope(auth.scopes, anyScope))
   )
+}
+
+/**
+ * D-5: redact credential-bearing query values before a URL reaches the log.
+ * The WS upgrade path accepts refresh_token as a query fallback (7-day TTL
+ * token) and upgrade logging used to dump req.url verbatim — anyone able to
+ * read the log could mint a fresh 7-day session. Path is kept; only known
+ * auth-parameter VALUES are masked.
+ */
+const REDACTED_QUERY_KEYS = new Set(['refresh_token', 'token', 'access_token'])
+function redactWsUrl(rawUrl: string | undefined): string {
+  if (!rawUrl) return ''
+  try {
+    const url = new URL(rawUrl, 'http://localhost')
+    for (const key of url.searchParams.keys()) {
+      if (REDACTED_QUERY_KEYS.has(key)) {
+        url.searchParams.set(key, '***')
+      }
+    }
+    return `${url.pathname}${url.search}`
+  } catch {
+    return '<unparseable-url>'
+  }
 }
 
 function normalizeWorkspaceRelativePath(value: string | null): string {
@@ -1469,7 +1533,7 @@ async function ensureGatewayAccount(
   config: ServerConfig,
   input: { userId: string; username: string; displayName?: string },
 ): Promise<void> {
-  if (authService.getUserModelCredential(input.userId)) return
+  if (await authService.getUserModelCredential(input.userId)) return
   const client = buildSudorouterClient(config)
   if (!client) return
   try {
@@ -1478,7 +1542,7 @@ async function ensureGatewayAccount(
       displayName: input.displayName,
       initialPoints: config.systemConfig.initialPoints ?? 0,
     })
-    authService.setUserModelCredential(input.userId, {
+    await authService.setUserModelCredential(input.userId, {
       sudorouterUserId: account.gatewayUserId,
       sudorouterKey: account.gatewayKey,
     })
@@ -1563,7 +1627,7 @@ async function readUserCredits(
     points: { total: 0, used: 0, remaining: 0, bonus: 0 },
     usage_today: { tokens: 0, cost_points: 0, requests: 0 },
   }
-  const gatewayUserId = authService.getUserModelCredential(userId)?.sudorouterUserId
+  const gatewayUserId = (await authService.getUserModelCredential(userId))?.sudorouterUserId
   if (!gatewayUserId) return empty
   const client = buildSudorouterClient(config)
   if (!client) return empty
@@ -1873,8 +1937,8 @@ function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
   })
 }
 
-function getSessionAvailableSkills(runtime: RuntimeService, sessionId: string): MossSessionAvailableSkill[] {
-  const event = runtime.store.latestEvent(sessionId, 'available_skills_snapshot')
+async function getSessionAvailableSkills(runtime: RuntimeService, sessionId: string): Promise<MossSessionAvailableSkill[]> {
+  const event = await runtime.store.latestEvent(sessionId, 'available_skills_snapshot')
   return normalizeAvailableSkills(event?.payload.skills)
 }
 
@@ -2000,22 +2064,23 @@ export function startServer(
     cabinEnabled: config.cabin.enabled,
   })
   const configItemsApi = createConfigItemsApi(runtime.store)
-  const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, (userId: string) => {
+  const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, async (userId: string) => {
     try {
-      return authService.getUserName(userId)
+      return await authService.getUserName(userId)
     } catch { return undefined }
   }) : null
 
   // Cron Service - scheduled task execution engine
-  const cronService = new CronService(runtime.store.db, {
+  const cronService = new CronService(runtime.store.driver, {
     runtimeService: runtime,
     runtimeDir: config.runtimeDir,
     defaultRuntime: config.defaultRuntime,
     dockerContainerMode: config.docker?.containerMode ?? 'session',
     workspace: config.workspace,
+    countLiveOtherInstances: () => runtime.countLiveOtherInstances(),
     getUserAuth: async (userId: string, orgId: string) => {
       try {
-        const user = authService.getUserOrNull(userId, orgId)
+        const user = await authService.getUserOrNull(userId, orgId)
         if (!user) return null
         return {
           role: user.role,
@@ -2029,23 +2094,23 @@ export function startServer(
 
   // Org-agnostic user-id -> display-name resolver, shared by the API modules
   // below (cron, mcp admin/user) that surface resource-owner names.
-  const resolveUserName = (userId: string): string | undefined => {
-    try { return authService.getUserName(userId) } catch { return undefined }
+  const resolveUserName = async (userId: string): Promise<string | undefined> => {
+    try { return await authService.getUserName(userId) } catch { return undefined }
   }
 
   // Cron API - for scheduled tasks management
-  const cronApi = createCronApi(runtime.store.db, {
+  const cronApi = createCronApi(runtime.store.driver, {
     cronService,
     getUserName: resolveUserName,
     // A user may be a co-owner/executor only if they belong to the job's org.
     // getUserOrNull (no auth arg) resolves org membership without a viewer check.
-    isOrgUser: (userId: string, orgId: string) => authService.getUserOrNull(userId, orgId) != null,
+    isOrgUser: async (userId: string, orgId: string) => (await authService.getUserOrNull(userId, orgId)) != null,
   })
 
   // Event Triggers - external systems POST an event to start an agent run.
   // Shares cron's runtime/workspace configuration; differs in being
   // push-driven and queue-drained rather than schedule-driven.
-  const eventTriggerService = new EventTriggerService(runtime.store.db, {
+  const eventTriggerService = new EventTriggerService(runtime.store.driver, {
     runtimeService: runtime,
     runtimeDir: config.runtimeDir,
     defaultRuntime: config.defaultRuntime,
@@ -2053,7 +2118,7 @@ export function startServer(
     workspace: config.workspace,
     getUserAuth: async (userId: string, orgId: string) => {
       try {
-        const user = authService.getUserOrNull(userId, orgId)
+        const user = await authService.getUserOrNull(userId, orgId)
         if (!user) return null
         return { role: user.role, scopes: user.scopes || [] }
       } catch {
@@ -2067,62 +2132,71 @@ export function startServer(
     getUserName: resolveUserName,
   })
 
-  const mcpStore = new McpStore(runtime.store.db)
+  const mcpStore = new McpStore(runtime.store.driver)
+  // HA: cross-instance mcp/events — poll per-org fingerprints so changes made
+  // on other instances reach this instance's SSE clients too (local changes
+  // stay instant via broadcastMcpEvent).
+  configureMcpChangeDetection((orgId) => mcpStore.getOrgChangeFingerprints(orgId))
   const mcpUserConfigApi = nexusClient ? createMcpUserConfigApi({
     nexusClient,
     mcpStore,
-    getUserByIdAndOrg: (userId: string, _orgId: string) => {
+    getUserByIdAndOrg: async (userId: string, _orgId: string) => {
       try {
-        const u = authService.getUserById(userId)
+        const u = await authService.getUserById(userId)
         if (!u) return null
         return { role: 'user', departmentId: u.departmentId }
       } catch { return null }
     },
-    listDepartmentsByOrg: (orgId: string) => {
-      try { return authService.listDepartments(orgId).departments } catch { return [] }
+    listDepartmentsByOrg: async (orgId: string) => {
+      try { return (await authService.listDepartments(orgId)).departments } catch { return [] }
     },
   }) : null
   const mcpAdminApi = createMcpAdminApi({
     mcpStore,
     authService,
     getUserName: resolveUserName,
-    getUserDepartmentId: (userId: string) => {
-      try { const u = authService.getUserById(userId); return u?.departmentId ?? null } catch { return null }
+    getUserDepartmentId: async (userId: string) => {
+      try { const u = await authService.getUserById(userId); return u?.departmentId ?? null } catch { return null }
     },
   })
   const mcpUserApi = createMcpUserApi({
     mcpStore,
     authService,
     getUserName: resolveUserName,
-    getUserDepartmentId: (userId: string) => {
-      try { const u = authService.getUserById(userId); return u?.departmentId ?? null } catch { return null }
+    getUserDepartmentId: async (userId: string) => {
+      try { const u = await authService.getUserById(userId); return u?.departmentId ?? null } catch { return null }
     },
-    getUserByIdAndOrg: (userId: string, _orgId: string) => {
+    getUserByIdAndOrg: async (userId: string, _orgId: string) => {
       try {
-        const u = authService.getUserById(userId)
+        const u = await authService.getUserById(userId)
         if (!u) return null
         // For visibility filter we need role; use auth.role if querying self
         return { role: 'user', departmentId: u.departmentId }
       } catch { return null }
     },
-    listDepartmentsByOrg: (orgId: string) => {
-      try { return authService.listDepartments(orgId).departments } catch { return [] }
+    listDepartmentsByOrg: async (orgId: string) => {
+      try { return (await authService.listDepartments(orgId)).departments } catch { return [] }
     },
     nexusClient: nexusClient ?? undefined,
   })
 
 
-  function refreshAuthProxyRules() {
+  async function refreshAuthProxyRules(): Promise<void> {
     const ap = runtime.authProxy
     if (!ap) return
-    const items = runtime.store.getAllActiveConfigItems()
-    ap.updateRules(items.map(item => configItemToRule(item, id => runtime.store.getConfigEntries(id))))
+    await loadAuthProxyRules(runtime.store, ap)
   }
 
   const documentStore = new DocumentStore(runtime.store)
 
-  // Initialize user model preference store with the database
-  initUserModelPreferenceStore(runtime.store.db)
+  // Initialize user model preference store with the shared DB driver. An async
+  // init's synchronous throw also becomes a rejected promise, so a DDL failure
+  // must be surfaced loudly at startup, not dropped (aligns with the PG path,
+  // where openStoreAsync throws on DDL failure).
+  void initUserModelPreferenceStore(runtime.store.driver).catch(err => {
+    console.error('[startup] user model preference store init failed:', err)
+    process.exit(1)
+  })
 
   // Document Center v2: seed builtin system assistants (wiki-builder etc.)
   // from the repo into $MOSS_HOME/assistants/system/ if not already present.
@@ -2149,7 +2223,7 @@ export function startServer(
     modelId: config.wikiIndex.modelId,
     modelMirror: config.wikiIndex.modelMirror,
     maxPassagesPerWiki: config.wikiIndex.maxPassagesPerWiki,
-  })
+  }, config.instanceId)
   wikiJobExecutor.start()
 
   // Document Center v2: start the external source sync worker. Polls
@@ -2159,14 +2233,14 @@ export function startServer(
   const sourceSyncWorker = new SourceSyncWorker(
     runtime.store,
     documentStore,
-    (wikiId, _orgId, _sourceId) => {
+    async (wikiId, _orgId, _sourceId) => {
       // Auto-build path: enqueue a build job. The WikiJobExecutor will
       // pick it up on its next tick. The sync worker only calls this hook
       // when the affected wiki's own `auto_rebuild` toggle is on.
       try {
-        const wiki = documentStore.getWikiById(wikiId)
+        const wiki = await documentStore.getWikiById(wikiId)
         if (!wiki) return
-        runtime.store.createWikiBuildJob({
+        await runtime.store.createWikiBuildJob({
           id: randomUUID(),
           wiki_id: wikiId,
           triggered_by: 'source-sync',
@@ -2185,7 +2259,7 @@ export function startServer(
   const msgAuditWorker = new MsgAuditWorker(async () => {
     const configs: MsgAuditPullConfig[] = []
     const { readSecret } = await import('./sources/secrets.js')
-    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+    for (const row of await runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
       try {
         const cfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
         const creds =
@@ -2206,8 +2280,8 @@ export function startServer(
           if (pull.resolveNames) {
             pull.nameLookup = async (id: string, external: boolean) => {
               try {
-                const appRow = runtime.store
-                  .listAllCorpAppsByType('wecomapp')
+                const appRow = (await runtime.store
+                  .listAllCorpAppsByType('wecomapp'))
                   .find(
                     (r) =>
                       String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
@@ -2236,7 +2310,12 @@ export function startServer(
       }
     }
     return configs
-  })
+  }, config.instanceId ? {
+    // HA: gate each corpApp pull behind a DB lease keyed by this instance id.
+    claimLease: (corpAppId, leaseUntil, now) =>
+      runtime.store.claimMsgAuditLease(corpAppId, config.instanceId!, leaseUntil, now),
+    releaseLease: (corpAppId) => runtime.store.releaseMsgAuditLease(corpAppId, config.instanceId!),
+  } : undefined)
   msgAuditWorker.start()
 
   // 企微会话存档: daily retention sweep for downloaded media. Separate
@@ -2245,7 +2324,7 @@ export function startServer(
   const msgAuditPurgeWorker = new MediaPurgeWorker(async () => {
     const targets: RetentionTarget[] = []
     const { readSecret } = await import('./sources/secrets.js')
-    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+    for (const row of await runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
       try {
         const cfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
         const creds =
@@ -2271,7 +2350,9 @@ export function startServer(
   })
 
   // Start the event trigger executor (drains externally-POSTed events)
-  eventTriggerService.start()
+  eventTriggerService.start().catch(err => {
+    console.error('[server] Failed to start event trigger service:', err)
+  })
 
   // Startup integrity check: approved tenant skills must have their files on
   // disk. The DB row is the source of truth for "this skill exists", but the
@@ -2280,39 +2361,41 @@ export function startServer(
   // Warn loudly so the drift is visible rather than failing at use time. Rows
   // with a null file_path are legacy (created before file_path was persisted)
   // and are reported separately since their location can't be verified.
-  try {
-    const approvedTenantSkills = runtime.store.listTenantSkills('approved')
-    const missing: string[] = []
-    const unknownPath: string[] = []
-    for (const row of approvedTenantSkills) {
-      const filePath = typeof row.file_path === 'string' ? row.file_path.trim() : ''
-      const name = typeof row.name === 'string' ? row.name : String(row.id)
-      if (!filePath) {
-        unknownPath.push(name)
-      } else if (!existsSync(filePath)) {
-        missing.push(`${name} (${filePath})`)
+  void (async () => {
+    try {
+      const approvedTenantSkills = await runtime.store.listTenantSkills('approved')
+      const missing: string[] = []
+      const unknownPath: string[] = []
+      for (const row of approvedTenantSkills) {
+        const filePath = typeof row.file_path === 'string' ? row.file_path.trim() : ''
+        const name = typeof row.name === 'string' ? row.name : String(row.id)
+        if (!filePath) {
+          unknownPath.push(name)
+        } else if (!existsSync(filePath)) {
+          missing.push(`${name} (${filePath})`)
+        }
       }
+      if (missing.length) {
+        console.warn(
+          `[server] ${missing.length} approved tenant skill(s) have a file_path that no longer exists on disk; ` +
+            `they will not load until re-uploaded: ${missing.join(', ')}`,
+        )
+      }
+      if (unknownPath.length) {
+        console.warn(
+          `[server] ${unknownPath.length} approved tenant skill(s) have no recorded file_path (legacy rows); ` +
+            `disk presence can't be verified: ${unknownPath.join(', ')}`,
+        )
+      }
+    } catch (err) {
+      console.error('[server] tenant skill disk reconcile failed:', err)
     }
-    if (missing.length) {
-      console.warn(
-        `[server] ${missing.length} approved tenant skill(s) have a file_path that no longer exists on disk; ` +
-          `they will not load until re-uploaded: ${missing.join(', ')}`,
-      )
-    }
-    if (unknownPath.length) {
-      console.warn(
-        `[server] ${unknownPath.length} approved tenant skill(s) have no recorded file_path (legacy rows); ` +
-          `disk presence can't be verified: ${unknownPath.join(', ')}`,
-      )
-    }
-  } catch (err) {
-    console.error('[server] tenant skill disk reconcile failed:', err)
-  }
+  })()
 
   // Initialize ChannelManager and PairingService with database
   // 初始化 ChannelManager 和 PairingService
   const channelManager = getChannelManager()
-  channelManager.initialize(runtime.store, nexusClient)
+  channelManager.initialize(runtime.store, nexusClient, config.instanceId)
   getPairingService().initialize(runtime.store)
 
   // Agents an IM chat may switch to = those visible to the moss user who owns the
@@ -2320,10 +2403,10 @@ export function startServer(
   // (global / tenant / custom, with user + department whitelists). Declared here (not
   // inside the plugin-wiring block) because the channel agent HTTP routes use it too.
   const listAgentsVisibleToUserImpl = async (ownerUserId: string) => {
-      const owner = authService.getUserById(ownerUserId)
-      const ownerOrgId = runtime.store.getUserOrgId(ownerUserId)
+      const owner = await authService.getUserById(ownerUserId)
+      const ownerOrgId = await runtime.store.getUserOrgId(ownerUserId)
       if (!owner || !ownerOrgId) return []
-      const filter = authService.buildVisibilityFilter({
+      const filter = await authService.buildVisibilityFilter({
         rawToken: '',
         userId: ownerUserId,
         orgId: ownerOrgId,
@@ -2375,15 +2458,29 @@ export function startServer(
     console.error('[Server] Failed to start enabled plugins:', error)
   })
 
-  const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.db) : null
+  const cabinAdminStore = config.cabin.enabled ? new CabinStore(runtime.store.driver, runtime.store.db) : null
   const cabinLogger = config.cabin.enabled ? new CabinLogger(config) : undefined
   const cabinHealthReports = config.cabin.enabled && config.cabin.healthReportEnabled && cabinAdminStore
     ? new CabinHealthReportService({ config: config.cabin, store: cabinAdminStore, logger: cabinLogger })
     : undefined
   const channelsApi = createChannelsApi(runtime.store)
   const cabinApi = config.cabin.enabled ? createCabinApi({ config, runtime, healthReports: cabinHealthReports }) : null
+  // M-18: wrap the leadership probe so transitions are logged — without this
+  // there is no "became/stopped being leader" event to trace a dual-active or
+  // missed-broadcast incident back to its switching moment.
+  let lastCabinLeader: boolean | null = null
+  const cabinLeaderProbe = async (): Promise<boolean> => {
+    const isLeader = await runtime.isCabinLeader()
+    if (isLeader !== lastCabinLeader) {
+      process.stderr.write(
+        `[Cabin] leadership changed: ${lastCabinLeader === null ? 'unknown' : lastCabinLeader} -> ${isLeader}\n`,
+      )
+      lastCabinLeader = isLeader
+    }
+    return isLeader
+  }
   const cabinFlightAutomation = config.cabin.enabled && cabinAdminStore
-    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports)
+    ? new CabinFlightAutomation(config, cabinAdminStore, cabinHealthReports, cabinLeaderProbe)
     : null
   cabinFlightAutomation?.start()
 
@@ -2432,12 +2529,10 @@ export function startServer(
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/healthz') {
-        writeJson(res, 200, {
-          ok: true,
-          ready: true,
-          sessions: runtime.countActiveSessions(),
-          auth_mode: config.authMode,
-        })
+        // Anonymous behind the LB: expose only liveness, never the global
+        // session count or auth_mode (R13). No DB touch, so /healthz stays a
+        // pure liveness signal (k8s liveness best practice).
+        writeJson(res, 200, { ok: true, ready: true })
         return
       }
 
@@ -2445,10 +2540,14 @@ export function startServer(
         const readiness = await computeReadiness(config, runtime, {
           isDraining: () => draining,
         })
-        // httpStatus is an internal carrier for the status code; the body itself
-        // stays { ok, ready, instance_id, checks } per the HA design doc §10.
-        const { httpStatus, ...body } = readiness
-        writeJson(res, httpStatus, body)
+        // Anonymous body carries only ok/ready + instance_id (LB stickiness /
+        // ha-p0p2-smoke consume instance_id). The full checks matrix moved to
+        // the authenticated GET /api/v1/admin/health (R13).
+        writeJson(res, readiness.httpStatus, {
+          ok: readiness.ok,
+          ready: readiness.ready,
+          instance_id: readiness.instance_id,
+        })
         return
       }
 
@@ -2478,7 +2577,7 @@ export function startServer(
             buildFuiouClient(config),
             buildSudorouterClient(config),
             await readJsonBody(req) as unknown as FuiouCallbackPayload,
-            userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
           )
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
           res.end('success')
@@ -2572,16 +2671,16 @@ export function startServer(
           writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
           return
         }
-        if (authService.findUserByPhone(username)) {
+        if (await authService.findUserByPhone(username)) {
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
-        const { user } = authService.provisionPhoneUser({
+        const { user } = await authService.provisionPhoneUser({
           phone: username,
           nickname,
           autoCreateOrg: authService.phoneAuth.autoCreateOrg,
         })
-        authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
+        await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
         await ensureGatewayAccount(authService, config, {
           userId: user.id,
           username,
@@ -2610,7 +2709,7 @@ export function startServer(
           return
         }
         const nickname = typeof body.nickname === 'string' ? body.nickname : undefined
-        const result = authService.registerWithPhone({
+        const result = await authService.registerWithPhone({
           phone,
           nickname,
           autoCreateOrg: phoneAuth.autoCreateOrg,
@@ -2646,7 +2745,7 @@ export function startServer(
           }
           let verified: boolean
           try {
-            verified = phoneAuth.verifyCode(phone, body.code)
+            verified = await phoneAuth.verifyCode(phone, body.code)
           } catch (error) {
             if (error instanceof PhoneAuthError) {
               writeJson(res, error.status, { success: false, msg: error.message })
@@ -2659,7 +2758,7 @@ export function startServer(
             return
           }
 
-          const existing = authService.findUserByPhone(phone)
+          const existing = await authService.findUserByPhone(phone)
           if (!existing) {
             // Not an error: a first-time number is the normal start of signup.
             // The client shows its register form and comes back to
@@ -2675,7 +2774,7 @@ export function startServer(
             return
           }
 
-          const result = authService.issueTokenFromPhone(phone)
+          const result = await authService.issueTokenFromPhone(phone)
           // Self-heal: covers accounts created before provisioning existed, and
           // any sign-up whose provisioning attempt did not land.
           await ensureGatewayAccount(authService, config, {
@@ -2693,7 +2792,7 @@ export function startServer(
               ? 'api_key'
               : 'password'
         if (grantType === 'api_key') {
-          const result = authService.issueTokenFromApiKey(
+          const result = await authService.issueTokenFromApiKey(
             typeof body.api_key === 'string' ? body.api_key : '',
           )
           writeJson(res, 200, attachSudocodeFields(result))
@@ -2701,7 +2800,7 @@ export function startServer(
         }
 
         if (grantType === 'password') {
-          const result = authService.issueTokenFromPassword({
+          const result = await authService.issueTokenFromPassword({
             username: typeof body.username === 'string' ? body.username : '',
             email: typeof body.email === 'string' ? body.email : '',
             password: typeof body.password === 'string' ? body.password : '',
@@ -2718,7 +2817,7 @@ export function startServer(
           if (!refreshToken) {
             throw new HttpError(400, 'Missing refresh_token')
           }
-          const result = authService.refreshToken(refreshToken)
+          const result = await authService.refreshToken(refreshToken)
           writeJson(res, 200, attachSudocodeFields(result))
           return
         }
@@ -2747,7 +2846,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/auth/logout') {
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) {
           throw new HttpError(401, 'Unauthorized')
         }
@@ -2757,7 +2856,7 @@ export function startServer(
           typeof body.refresh_token === 'string'
             ? body.refresh_token.trim()
             : undefined
-        authService.logout(accessToken, refreshToken)
+        await authService.logout(accessToken, refreshToken)
         writeJson(res, 200, { ok: true })
         return
       }
@@ -2789,19 +2888,19 @@ export function startServer(
         if (!token) {
           throw new HttpError(401, 'Missing bearer token')
         }
-        const auth = authService.verifyAccessToken(token)
+        const auth = await authService.verifyAccessToken(token)
         if (!auth) {
           throw new HttpError(401, 'Invalid access token')
         }
-        if (!isUserActive(auth.userId, authService)) {
+        if (!(await isUserActive(auth.userId, authService))) {
           throw new HttpError(401, 'User account is disabled')
         }
-        writeJson(res, 200, authService.getMe(auth))
+        writeJson(res, 200, await authService.getMe(auth))
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/auth/switch-org') {
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) {
           throw new HttpError(401, 'Unauthorized')
         }
@@ -2812,12 +2911,12 @@ export function startServer(
           throw new HttpError(400, 'Missing org_id')
         }
         // switchOrg self-gates on super_admin and validates the target org.
-        writeJson(res, 200, authService.switchOrg(auth, targetOrgId))
+        writeJson(res, 200, await authService.switchOrg(auth, targetOrgId))
         return
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/user/profile') {
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) {
           throw new HttpError(401, 'Unauthorized')
         }
@@ -2827,7 +2926,7 @@ export function startServer(
       }
 
       if (pathname.startsWith('/api/v1/channels/')) {
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) {
           throw new HttpError(401, 'Unauthorized')
         }
@@ -3026,7 +3125,7 @@ export function startServer(
         if (!token) {
           throw new HttpError(400, 'Missing token')
         }
-        writeJson(res, 200, authService.introspect(token))
+        writeJson(res, 200, await authService.introspect(token))
         return
       }
 
@@ -3037,13 +3136,13 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/cabin/conversations') {
         if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
         authService.requireScope(auth, 'admin:settings')
         const limit = Number.parseInt(url.searchParams.get('limit') || '50', 10)
         const offset = Number.parseInt(url.searchParams.get('offset') || '0', 10)
         const statusParam = url.searchParams.get('status') || undefined
-        const result = cabinAdminStore.listConversations({
+        const result = await cabinAdminStore.listConversations({
           flightId: url.searchParams.get('flight_id') || undefined,
           flightDate: url.searchParams.get('flight_date') || undefined,
           seatId: url.searchParams.get('seat_id') || undefined,
@@ -3077,13 +3176,13 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/cabin/alerts') {
         if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
         authService.requireScope(auth, 'admin:settings')
         const limit = Number.parseInt(url.searchParams.get('limit') || '50', 10)
         const offset = Number.parseInt(url.searchParams.get('offset') || '0', 10)
         const statusParam = url.searchParams.get('status') || undefined
-        const result = cabinAdminStore.listAlerts({
+        const result = await cabinAdminStore.listAlerts({
           flightId: url.searchParams.get('flight_id') || undefined,
           flightDate: url.searchParams.get('flight_date') || undefined,
           seatNo: url.searchParams.get('seat_no') || undefined,
@@ -3118,10 +3217,10 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/cabin/managed-seats') {
         if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
         authService.requireScope(auth, 'admin:settings')
-        const seats = cabinAdminStore.listManagedSeats({
+        const seats = await cabinAdminStore.listManagedSeats({
           aircraftNo: url.searchParams.get('aircraft_no') || undefined,
           flightId: url.searchParams.get('flight_id') || undefined,
           flightDate: url.searchParams.get('flight_date') || undefined,
@@ -3151,13 +3250,13 @@ export function startServer(
       const cabinConversationMatch = pathname.match(/^\/api\/v1\/cabin\/conversations\/([^/]+)$/)
       if (req.method === 'GET' && cabinConversationMatch) {
         if (!cabinAdminStore) throw new HttpError(404, 'Cabin is disabled')
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
         authService.requireScope(auth, 'admin:settings')
         const conversationId = decodeURIComponent(cabinConversationMatch[1] || '')
-        const conversation = cabinAdminStore.getConversationById(conversationId)
+        const conversation = await cabinAdminStore.getConversationById(conversationId)
         if (!conversation) throw new HttpError(404, 'Cabin conversation not found')
-        const messages = cabinAdminStore.listMessages(conversation.id, 200)
+        const messages = await cabinAdminStore.listMessages(conversation.id, 200)
         writeJson(res, 200, {
           conversation: {
             id: conversation.id,
@@ -3296,7 +3395,7 @@ export function startServer(
         if (!decoded) throw new HttpError(404, 'Not found')
 
         // Cross-org getter: the token is the gate, not org membership.
-        const wiki = documentStore.getWikiById(decoded.wikiId)
+        const wiki = await documentStore.getWikiById(decoded.wikiId)
         if (!wiki) throw new HttpError(404, 'Not found')
 
         const root = resolve(wiki.storagePath)
@@ -3328,9 +3427,9 @@ export function startServer(
 
       // Public: Config Items (JWT auth, no admin scope)
       if (req.method === 'GET' && pathname === '/api/v1/config/items') {
-        const auth = authenticateRequest(req, authService)
+        const auth = await authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
-        const result = configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId))
+        const result = await configItemsApi.listPublic(auth, (userId) => authService.getUserById(userId))
         if (result.success && nexusClient) {
           try {
             const configuredNs = await nexusClient.listConfiguredNamespaces()
@@ -3360,7 +3459,7 @@ export function startServer(
       // a fallback because browser EventSource can't send custom headers.
       // Scope: only this single route; getBearerToken stays header-only
       // everywhere else.
-      let auth = authenticateRequest(req, authService)
+      let auth = await authenticateRequest(req, authService)
       if (!auth && req.method === 'GET') {
         const isSseBuildEvents = /^\/api\/v1\/wikis\/[^/]+\/build-events$/.test(pathname)
         const isSseMcpEvents = pathname === '/api/v1/mcp/events'
@@ -3368,7 +3467,7 @@ export function startServer(
           const queryToken = url.searchParams.get('token')
           if (queryToken) {
             try {
-              auth = authService.verifyAccessToken(queryToken)
+              auth = await authService.verifyAccessToken(queryToken)
             } catch {
               // fall through to 401 below
             }
@@ -3381,6 +3480,38 @@ export function startServer(
 
       const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || undefined
 
+      // Internal (HA): token-revoke forward target. Terminate is a REST op
+      // the LB may route to a non-owner instance; the auth-proxy token
+      // registry lives in the owner's process, so the non-owner forwards the
+      // revoke here over the owner-aware route (same mechanism as the
+      // internal WS channel). Scope-gated to the short-lived tokens minted
+      // by issueInternalChannelToken — regular user/admin tokens 403
+      // (hasExactScope: the admin `*` wildcard must not satisfy the gate).
+      const internalRevokeMatch = pathname.match(/^\/api\/v1\/internal\/sessions\/([^/]+)\/revoke-token$/)
+      if (req.method === 'POST' && internalRevokeMatch) {
+        if (!hasExactScope(auth.scopes, 'internal:channel')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const sessionId = decodeURIComponent(internalRevokeMatch[1] || '')
+        const session = await runtime.getSession(sessionId)
+        if (!session) throw new HttpError(404, 'Not Found')
+        // Subject ownership (org/user), aligned with the /ws/internal gate:
+        // ownsAttempt below only proves the attempt lives on THIS instance —
+        // it says nothing about the caller, and the LB route param lets any
+        // client aim the request at the owner instance.
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        // Scope the forwarded revoke to attempts this instance actually owns —
+        // aligns with the /ws/internal ownership gate; a peer's session 403s.
+        if (!session.currentAttemptId || !(await runtime.ownsAttempt(session.currentAttemptId))) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const revoked = runtime.revokeSessionTokenLocally(sessionId)
+        writeJson(res, 200, { ok: true, revoked })
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/roles') {
         authService.requireScope(auth, 'admin:users')
         writeJson(res, 200, authService.listRoles())
@@ -3389,7 +3520,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/departments') {
         authService.requireScope(auth, 'admin:users')
-        writeJson(res, 200, authService.listDepartments(auth.orgId, auth))
+        writeJson(res, 200, await authService.listDepartments(auth.orgId, auth))
         return
       }
 
@@ -3400,7 +3531,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createDepartment({
+          await authService.createDepartment({
             orgId: auth.orgId,
             name: typeof body.name === 'string' ? body.name : '',
             parentId:
@@ -3424,7 +3555,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.updateDepartment({
+          await authService.updateDepartment({
             orgId: auth.orgId,
             departmentId,
             name: typeof body.name === 'string' ? body.name : undefined,
@@ -3447,7 +3578,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.deleteDepartment({
+          await authService.deleteDepartment({
             orgId: auth.orgId,
             departmentId,
           }, auth),
@@ -3462,21 +3593,38 @@ export function startServer(
       // (translated to HTTP 409 by the service).
       // ============================================================
 
+      if (req.method === 'GET' && pathname === '/api/v1/admin/health') {
+        // Super-admin-only detailed readiness (R13): the full checks matrix plus
+        // the global session count and auth_mode that were removed from the
+        // anonymous /healthz & /readyz. Anonymous callers behind the LB cannot
+        // reach this.
+        await authService.requireSuperAdmin(auth)
+        const readiness = await computeReadiness(config, runtime, { isDraining: () => draining })
+        const { httpStatus: _httpStatus, ...readinessBody } = readiness
+        void _httpStatus
+        writeJson(res, 200, {
+          ...readinessBody,
+          sessions: await runtime.countActiveSessions(),
+          auth_mode: config.authMode,
+        })
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/organizations') {
         // Cross-org: only super_admin may enumerate all organizations (powers
         // the org switcher). A normal admin is confined to its own org.
-        authService.requireSuperAdmin(auth)
-        writeJson(res, 200, authService.listAllOrganizations())
+        await authService.requireSuperAdmin(auth)
+        writeJson(res, 200, await authService.listAllOrganizations())
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/organizations') {
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         writeJson(
           res,
           200,
-          authService.createOrganization({
+          await authService.createOrganization({
             name: typeof body.name === 'string' ? body.name : '',
             extOrgId:
               body.ext_org_id === null || typeof body.ext_org_id === 'string'
@@ -3489,13 +3637,13 @@ export function startServer(
 
       const organizationMatch = pathname.match(/^\/api\/v1\/organizations\/([^/]+)$/)
       if (req.method === 'PATCH' && organizationMatch) {
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const orgId = organizationMatch[1] || ''
         const body = await readJsonBody(req)
         writeJson(
           res,
           200,
-          authService.updateOrganization({
+          await authService.updateOrganization({
             orgId,
             name: typeof body.name === 'string' ? body.name : undefined,
             extOrgId:
@@ -3508,9 +3656,9 @@ export function startServer(
       }
 
       if (req.method === 'DELETE' && organizationMatch) {
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const orgId = organizationMatch[1] || ''
-        writeJson(res, 200, authService.deleteOrganization({ orgId }))
+        writeJson(res, 200, await authService.deleteOrganization({ orgId }))
         return
       }
 
@@ -3521,7 +3669,7 @@ export function startServer(
       // ---- Tree nodes ----
       if (req.method === 'GET' && pathname === '/api/v1/documents/tree') {
         authService.requireScope(auth, 'admin:documents')
-        writeJson(res, 200, { nodes: documentStore.listTree(auth.orgId) })
+        writeJson(res, 200, { nodes: await documentStore.listTree(auth.orgId) })
         return
       }
 
@@ -3531,7 +3679,7 @@ export function startServer(
         // Can't add manual children under a source-managed node — the whole
         // synced subtree is owned by the external source.
         if (typeof body.parent_id === 'string' && body.parent_id) {
-          const parent = documentStore.getNode(body.parent_id, auth.orgId)
+          const parent = await documentStore.getNode(body.parent_id, auth.orgId)
           if (parent?.autoManaged) {
             writeJson(res, 400, {
               error: { code: 'auto_managed', message: '该节点由外部数据源管理,无法在其下新建子节点。' },
@@ -3540,7 +3688,7 @@ export function startServer(
           }
         }
         try {
-          const node = documentStore.createNode({
+          const node = await documentStore.createNode({
             orgId: auth.orgId,
             parentId:
               body.parent_id === null
@@ -3570,7 +3718,7 @@ export function startServer(
         const body = await readJsonBody(req)
         // v2: auto_managed nodes cannot be renamed/moved/described by admins —
         // only their alias (via /alias endpoint below). Sync worker owns name.
-        const existingNode = documentStore.getNode(nodeId, auth.orgId)
+        const existingNode = await documentStore.getNode(nodeId, auth.orgId)
         if (existingNode?.autoManaged) {
           writeJson(res, 400, {
             error: {
@@ -3581,7 +3729,7 @@ export function startServer(
           return
         }
         try {
-          const updated = documentStore.updateNode(nodeId, auth.orgId, {
+          const updated = await documentStore.updateNode(nodeId, auth.orgId, {
             parentId:
               body.parent_id === undefined
                 ? undefined
@@ -3615,10 +3763,10 @@ export function startServer(
         // source is gone (deleted), the node is an orphaned tree with no owner and
         // no future sync to sweep it; allow deleting it directly so admins can clean
         // up stale trees left behind by pre-cascade source deletions.
-        const existing = documentStore.getNode(nodeId, auth.orgId)
+        const existing = await documentStore.getNode(nodeId, auth.orgId)
         if (existing?.autoManaged) {
           const sourceStillExists =
-            !!existing.sourceId && !!runtime.store.getExternalSource(existing.sourceId, auth.orgId)
+            !!existing.sourceId && !!await runtime.store.getExternalSource(existing.sourceId, auth.orgId)
           if (sourceStillExists) {
             writeJson(res, 400, {
               error: {
@@ -3646,8 +3794,8 @@ export function startServer(
           : body.alias === null
             ? null
             : null
-        runtime.store.setTreeNodeAlias(nodeId, auth.orgId, alias)
-        const updated = documentStore.getNode(nodeId, auth.orgId)
+        await runtime.store.setTreeNodeAlias(nodeId, auth.orgId, alias)
+        const updated = await documentStore.getNode(nodeId, auth.orgId)
         writeJson(res, 200, updated ?? { ok: true })
         return
       }
@@ -3661,8 +3809,8 @@ export function startServer(
         // files picker); default lists this node's direct documents.
         const recursive = new URL(req.url ?? '', 'http://localhost').searchParams.get('recursive') === '1'
         const docs = recursive
-          ? documentStore.listDocumentsUnderNode(nodeId, auth.orgId)
-          : documentStore.listDocumentsForNode(nodeId, auth.orgId)
+          ? await documentStore.listDocumentsUnderNode(nodeId, auth.orgId)
+          : await documentStore.listDocumentsForNode(nodeId, auth.orgId)
         writeJson(res, 200, { documents: docs })
         return
       }
@@ -3672,7 +3820,7 @@ export function startServer(
         const nodeId = documentsByNodeMatch[1] || ''
         // Can't upload into a source-managed node — content there is owned by
         // the external source (synced only).
-        const targetNode = documentStore.getNode(nodeId, auth.orgId)
+        const targetNode = await documentStore.getNode(nodeId, auth.orgId)
         if (targetNode?.autoManaged) {
           writeJson(res, 400, {
             error: { code: 'auto_managed', message: '该节点由外部数据源管理,无法手动上传文档。' },
@@ -3831,7 +3979,7 @@ export function startServer(
           return
         }
         try {
-          const wiki = documentStore.updateWiki(wikiId, auth.orgId, {
+          const wiki = await documentStore.updateWiki(wikiId, auth.orgId, {
             name: typeof body.name === 'string' ? body.name : undefined,
             description:
               body.description === null
@@ -3879,7 +4027,7 @@ export function startServer(
         const wikiId = url.searchParams.get('wiki_id') ?? undefined
         const limitParam = Number(url.searchParams.get('limit') ?? '50')
         const offsetParam = Number(url.searchParams.get('offset') ?? '0')
-        const result = documentStore.listBuildJobsForOrg(auth.orgId, {
+        const result = await documentStore.listBuildJobsForOrg(auth.orgId, {
           status,
           wikiId,
           limit: Number.isFinite(limitParam) ? limitParam : 50,
@@ -3893,7 +4041,7 @@ export function startServer(
       if (req.method === 'GET' && wikiBuildJobItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const jobId = wikiBuildJobItemMatch[1] || ''
-        const job = documentStore.getBuildJobForOrg(jobId, auth.orgId)
+        const job = await documentStore.getBuildJobForOrg(jobId, auth.orgId)
         if (!job) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'build job not found' } })
           return
@@ -3906,13 +4054,13 @@ export function startServer(
       if (req.method === 'POST' && wikiBuildJobRetryMatch) {
         authService.requireScope(auth, 'admin:documents')
         const jobId = wikiBuildJobRetryMatch[1] || ''
-        const job = documentStore.getBuildJobForOrg(jobId, auth.orgId)
+        const job = await documentStore.getBuildJobForOrg(jobId, auth.orgId)
         if (!job) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'build job not found' } })
           return
         }
-        const newJob = documentStore.createBuildJob({ wikiId: job.wikiId, triggeredBy: auth.userId })
-        documentStore.setWikiBuildResult(job.wikiId, { status: 'pending' })
+        const newJob = await documentStore.createBuildJob({ wikiId: job.wikiId, triggeredBy: auth.userId })
+        await documentStore.setWikiBuildResult(job.wikiId, { status: 'pending' })
         writeJson(res, 200, { job_id: newJob.id, wiki_id: job.wikiId })
         return
       }
@@ -3921,7 +4069,7 @@ export function startServer(
       if (req.method === 'POST' && wikiBuildJobCancelMatch) {
         authService.requireScope(auth, 'admin:documents')
         const jobId = wikiBuildJobCancelMatch[1] || ''
-        const job = documentStore.getBuildJobForOrg(jobId, auth.orgId)
+        const job = await documentStore.getBuildJobForOrg(jobId, auth.orgId)
         if (!job) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'build job not found' } })
           return
@@ -3935,13 +4083,16 @@ export function startServer(
         // Running job: signal the executor to terminate its session and unwind.
         // Not in the running set (queued, or owned by another instance): mark
         // it cancelled directly so the executor skips it when a slot frees.
+        // Predicate accepts queued|running only — with the runJob stage
+        // checkpoints (B-5) the remote owner now notices this cancelled row at
+        // its next stage boundary and unwinds instead of publishing over it.
         const signalled = await wikiJobExecutor.cancelJob(jobId)
         if (!signalled) {
-          documentStore.updateBuildJob(jobId, {
+          await documentStore.updateBuildJob(jobId, {
             status: 'cancelled',
             currentStep: '已终止',
             finishedAt: Date.now(),
-          })
+          }, { expectedStatuses: ['queued', 'running'] })
         }
         writeJson(res, 200, { job_id: jobId, status: 'cancelling' })
         return
@@ -3951,7 +4102,7 @@ export function startServer(
       if (req.method === 'GET' && wikiBuildJobsByWikiMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiBuildJobsByWikiMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -3959,7 +4110,7 @@ export function startServer(
         const url = new URL(req.url ?? '', 'http://localhost')
         const limitParam = Number(url.searchParams.get('limit') ?? '20')
         writeJson(res, 200, {
-          jobs: documentStore.listBuildJobs(wikiId, Number.isFinite(limitParam) ? limitParam : 20),
+          jobs: await documentStore.listBuildJobs(wikiId, Math.max(1, Math.min(Number.isFinite(limitParam) ? limitParam : 20, 100))),
         })
         return
       }
@@ -3968,7 +4119,7 @@ export function startServer(
       if (req.method === 'POST' && wikiBuildMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiBuildMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -3976,11 +4127,11 @@ export function startServer(
         // P0: queue a build job. The actual worker (D5) will pick it up
         // and call RuntimeService.createSession. For now we just persist
         // the job; the placeholder build worker will be wired in next step.
-        const job = documentStore.createBuildJob({
+        const job = await documentStore.createBuildJob({
           wikiId,
           triggeredBy: auth.userId,
         })
-        documentStore.setWikiBuildResult(wikiId, { status: 'pending' })
+        await documentStore.setWikiBuildResult(wikiId, { status: 'pending' })
         writeJson(res, 200, { job_id: job.id, wiki_id: wikiId })
         return
       }
@@ -3989,12 +4140,12 @@ export function startServer(
       if (req.method === 'GET' && wikiBuildStatusMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiBuildStatusMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
         }
-        const latestJob = documentStore.getLatestBuildJob(wikiId)
+        const latestJob = await documentStore.getLatestBuildJob(wikiId)
         writeJson(res, 200, {
           wiki_build_status: wiki.buildStatus,
           last_built_at: wiki.lastBuiltAt,
@@ -4013,7 +4164,7 @@ export function startServer(
       if (req.method === 'GET' && wikiBuildEventsMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiBuildEventsMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -4035,9 +4186,9 @@ export function startServer(
             // socket gone
           }
         }
-        const tick = () => {
-          const w = documentStore.getWiki(wikiId, auth.orgId)
-          const latestJob = documentStore.getLatestBuildJob(wikiId)
+        const tick = async () => {
+          const w = await documentStore.getWiki(wikiId, auth.orgId)
+          const latestJob = await documentStore.getLatestBuildJob(wikiId)
           const payload = {
             wiki_build_status: w?.buildStatus ?? 'unknown',
             last_built_at: w?.lastBuiltAt ?? null,
@@ -4062,7 +4213,7 @@ export function startServer(
             res.end()
           }
         }
-        tick()
+        void tick()
         const timer = setInterval(tick, 2_000)
         req.on('close', () => {
           clearInterval(timer)
@@ -4077,7 +4228,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/external-sources') {
         authService.requireScope(auth, 'admin:documents')
-        const rows = runtime.store.listExternalSources(auth.orgId)
+        const rows = await runtime.store.listExternalSources(auth.orgId)
         writeJson(res, 200, {
           sources: await Promise.all(
             rows.map(async (r) =>
@@ -4128,7 +4279,7 @@ export function startServer(
 
         const id = randomUUID()
         try {
-          runtime.store.createExternalSource({
+          await runtime.store.createExternalSource({
             id,
             org_id: auth.orgId,
             type,
@@ -4139,7 +4290,7 @@ export function startServer(
             auto_build_enabled: autoBuildEnabled,
             created_by: auth.userId,
           })
-          const row = runtime.store.getExternalSource(id, auth.orgId)
+          const row = await runtime.store.getExternalSource(id, auth.orgId)
           writeJson(
             res,
             200,
@@ -4160,7 +4311,7 @@ export function startServer(
       if (req.method === 'GET' && externalSourceItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const id = externalSourceItemMatch[1] || ''
-        const row = runtime.store.getExternalSource(id, auth.orgId)
+        const row = await runtime.store.getExternalSource(id, auth.orgId)
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'external source not found' } })
           return
@@ -4176,7 +4327,7 @@ export function startServer(
       if (req.method === 'PATCH' && externalSourceItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const id = externalSourceItemMatch[1] || ''
-        const existing = runtime.store.getExternalSource(id, auth.orgId)
+        const existing = await runtime.store.getExternalSource(id, auth.orgId)
         if (!existing) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'external source not found' } })
           return
@@ -4215,8 +4366,8 @@ export function startServer(
             }
           }
         }
-        runtime.store.updateExternalSource(id, auth.orgId, updates)
-        const row = runtime.store.getExternalSource(id, auth.orgId)
+        await runtime.store.updateExternalSource(id, auth.orgId, updates)
+        const row = await runtime.store.getExternalSource(id, auth.orgId)
         writeJson(
           res,
           200,
@@ -4234,13 +4385,13 @@ export function startServer(
         // created; otherwise the tree is kept (orphaned, but manually deletable).
         // Default is keep — the non-destructive choice for callers that omit it.
         const cascadeTree = url.searchParams.get('cascade_tree') === 'true'
-        const existing = runtime.store.getExternalSource(id, auth.orgId)
+        const existing = await runtime.store.getExternalSource(id, auth.orgId)
         if (existing) {
           const oldKey = (existing as Record<string, unknown>).credentials_secret_key
           if (typeof oldKey === 'string' && oldKey) {
             await deleteSecret(oldKey).catch(() => {})
           }
-          runtime.store.deleteExternalSource(id, auth.orgId, { cascadeTree })
+          await runtime.store.deleteExternalSource(id, auth.orgId, { cascadeTree })
         }
         writeJson(res, 200, { ok: true })
         return
@@ -4250,7 +4401,7 @@ export function startServer(
       if (req.method === 'POST' && externalSourceTestMatch) {
         authService.requireScope(auth, 'admin:documents')
         const id = externalSourceTestMatch[1] || ''
-        const row = runtime.store.getExternalSource(id, auth.orgId)
+        const row = await runtime.store.getExternalSource(id, auth.orgId)
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'external source not found' } })
           return
@@ -4280,7 +4431,7 @@ export function startServer(
       if (req.method === 'POST' && externalSourceSyncMatch) {
         authService.requireScope(auth, 'admin:documents')
         const id = externalSourceSyncMatch[1] || ''
-        const row = runtime.store.getExternalSource(id, auth.orgId)
+        const row = await runtime.store.getExternalSource(id, auth.orgId)
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'external source not found' } })
           return
@@ -4299,7 +4450,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/corp-apps') {
         authService.requireScope(auth, 'admin:settings')
-        const rows = runtime.store.listCorpApps(auth.orgId)
+        const rows = await runtime.store.listCorpApps(auth.orgId)
         const { getCorpAppCapabilities } = await import('./corpapps/types.js')
         writeJson(res, 200, {
           apps: await Promise.all(
@@ -4356,7 +4507,7 @@ export function startServer(
 
         const id = randomUUID()
         try {
-          runtime.store.createCorpApp({
+          await runtime.store.createCorpApp({
             id,
             org_id: auth.orgId,
             type,
@@ -4366,7 +4517,7 @@ export function startServer(
             credentials_secret_key: secretKey,
             created_by: auth.userId,
           })
-          const row = runtime.store.getCorpApp(id, auth.orgId)
+          const row = await runtime.store.getCorpApp(id, auth.orgId)
           writeJson(
             res,
             200,
@@ -4391,7 +4542,7 @@ export function startServer(
       if (req.method === 'GET' && corpAppItemMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppItemMatch[1] || ''
-        const row = runtime.store.getCorpApp(id, auth.orgId)
+        const row = await runtime.store.getCorpApp(id, auth.orgId)
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -4407,7 +4558,7 @@ export function startServer(
       if (req.method === 'PATCH' && corpAppItemMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppItemMatch[1] || ''
-        const existing = runtime.store.getCorpApp(id, auth.orgId)
+        const existing = await runtime.store.getCorpApp(id, auth.orgId)
         if (!existing) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -4457,7 +4608,7 @@ export function startServer(
           }
         }
         try {
-          runtime.store.updateCorpApp(id, auth.orgId, updates)
+          await runtime.store.updateCorpApp(id, auth.orgId, updates)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (/UNIQUE constraint/i.test(msg)) {
@@ -4467,7 +4618,7 @@ export function startServer(
           }
           throw err
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId)
+        const row = await runtime.store.getCorpApp(id, auth.orgId)
         writeJson(
           res,
           200,
@@ -4481,11 +4632,11 @@ export function startServer(
       if (req.method === 'DELETE' && corpAppItemMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppItemMatch[1] || ''
-        const existing = runtime.store.getCorpApp(id, auth.orgId)
+        const existing = await runtime.store.getCorpApp(id, auth.orgId)
         if (existing) {
           const oldKey = (existing as Record<string, unknown>).credentials_secret_key
           if (typeof oldKey === 'string' && oldKey) await deleteSecret(oldKey).catch(() => {})
-          runtime.store.deleteCorpApp(id, auth.orgId)
+          await runtime.store.deleteCorpApp(id, auth.orgId)
         }
         writeJson(res, 200, { ok: true })
         return
@@ -4495,7 +4646,7 @@ export function startServer(
       if (req.method === 'POST' && corpAppTestMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppTestMatch[1] || ''
-        const row = runtime.store.getCorpApp(id, auth.orgId)
+        const row = await runtime.store.getCorpApp(id, auth.orgId)
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -4535,7 +4686,7 @@ export function startServer(
       if (req.method === 'POST' && corpAppKeygenMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppKeygenMatch[1] || ''
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -4583,7 +4734,7 @@ export function startServer(
           publicKeys[String(nextVer)] = publicKey
           config.publicKeys = publicKeys
 
-          runtime.store.updateCorpApp(id, auth.orgId, {
+          await runtime.store.updateCorpApp(id, auth.orgId, {
             config_json: JSON.stringify(config),
             credentials_secret_key: newSecretKey,
           })
@@ -4616,7 +4767,7 @@ export function startServer(
       if (req.method === 'POST' && corpAppImportKeyMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppImportKeyMatch[1] || ''
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -4684,7 +4835,7 @@ export function startServer(
           publicKeys[String(version)] = publicKey
           config.publicKeys = publicKeys
 
-          runtime.store.updateCorpApp(id, auth.orgId, {
+          await runtime.store.updateCorpApp(id, auth.orgId, {
             config_json: JSON.stringify(config),
             credentials_secret_key: newSecretKey,
           })
@@ -4721,7 +4872,7 @@ export function startServer(
       if (req.method === 'POST' && corpAppRelabelMatch) {
         authService.requireScope(auth, 'admin:settings')
         const id = corpAppRelabelMatch[1] || ''
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -4780,7 +4931,7 @@ export function startServer(
             config.publicKeys = publicKeys
           }
 
-          runtime.store.updateCorpApp(id, auth.orgId, {
+          await runtime.store.updateCorpApp(id, auth.orgId, {
             config_json: JSON.stringify(config),
             credentials_secret_key: newSecretKey,
           })
@@ -4842,7 +4993,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
           return
         }
-        const all = documentStore.listWikis(auth.orgId)
+        const all = await documentStore.listWikis(auth.orgId)
         const filtered = access === null ? all : all.filter(w => access.has(w.id))
         writeJson(res, 200, { wikis: filtered })
         return
@@ -4860,7 +5011,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'wiki not authorised for this assistant' } })
           return
         }
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -4891,7 +5042,7 @@ export function startServer(
           return
         }
         const filePath = agentWikiFileMatch[2] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -4940,7 +5091,7 @@ export function startServer(
           writeJson(res, 400, { error: { code: 'invalid_payload', message: 'q is required' } })
           return
         }
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -5011,7 +5162,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'wiki not authorised for this assistant' } })
           return
         }
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        const wiki = await documentStore.getWiki(wikiId, auth.orgId)
         if (!wiki) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
@@ -5069,7 +5220,7 @@ export function startServer(
           })
           return
         }
-        const tok = authService.getProviderTokenForUser(auth.userId)
+        const tok = await authService.getProviderTokenForUser(auth.userId)
         if (!tok) {
           writeJson(res, 200, { access_token: null })
           return
@@ -5137,7 +5288,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
           return
         }
-        const all = runtime.store.listCorpApps(auth.orgId, { enabledOnly: true })
+        const all = await runtime.store.listCorpApps(auth.orgId, { enabledOnly: true })
         const filtered = access === null ? all : all.filter((r) => access.has(String((r as Record<string, unknown>).id)))
         const apps = await Promise.all(filtered.map((r) => agentCorpAppView(r as Record<string, unknown>)))
         writeJson(res, 200, { apps })
@@ -5155,9 +5306,9 @@ export function startServer(
         const type = url.searchParams.get('type') ?? 'wecomapp'
         let row: Record<string, unknown> | null = null
         if (name) {
-          row = runtime.store.getCorpAppByName(auth.orgId, name) as Record<string, unknown> | null
+          row = await runtime.store.getCorpAppByName(auth.orgId, name) as Record<string, unknown> | null
         } else if (key) {
-          row = runtime.store.getCorpAppByKey(auth.orgId, type, key) as Record<string, unknown> | null
+          row = await runtime.store.getCorpAppByKey(auth.orgId, type, key) as Record<string, unknown> | null
         } else {
           writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name or key is required' } })
           return
@@ -5186,7 +5337,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -5225,7 +5376,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -5270,7 +5421,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return null
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return null
@@ -5784,14 +5935,14 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId)
+        const row = await runtime.store.getCorpApp(id, auth.orgId)
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
         }
         const since = Number.parseInt(url.searchParams.get('since') ?? '0', 10) || 0
         const limit = Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50
-        const rows = runtime.store.listCorpAppInbound(id, since, limit)
+        const rows = await runtime.store.listCorpAppInbound(id, since, limit)
         let nextCursor = since
         const messages = rows.map((r) => {
           const m = r as Record<string, unknown>
@@ -5823,7 +5974,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -5871,7 +6022,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -5929,7 +6080,7 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
         if (!row) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
           return
@@ -5955,7 +6106,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
-        writeJson(res, 200, authService.listUsers(auth.orgId, auth))
+        writeJson(res, 200, await authService.listUsers(auth.orgId, auth))
         return
       }
 
@@ -5968,7 +6119,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createUser({
+          await authService.createUser({
             orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6037,7 +6188,7 @@ export function startServer(
         }
         // The display name, not the login name: `name` holds the phone, which
         // is the stable handle and must not move when someone renames himself.
-        authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
+        await authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
         writeJson(res, 200, { success: true, msg: 'nickname updated' })
         return
       }
@@ -6087,15 +6238,15 @@ export function startServer(
         // already authenticated: a token left behind on a shared machine must
         // not be enough to take the account over.
         try {
-          authService.issueTokenFromPassword({
-            username: authService.getUserName(auth.userId) ?? '',
+          await authService.issueTokenFromPassword({
+            username: (await authService.getUserName(auth.userId)) ?? '',
             password: oldPassword,
           })
         } catch {
           writeJson(res, 403, { success: false, msg: 'Current password is incorrect' })
           return
         }
-        authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
+        await authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
         writeJson(res, 200, { success: true, msg: 'password updated' })
         return
       }
@@ -6119,13 +6270,13 @@ export function startServer(
           return
         }
         const body = await readJsonBody(req)
-        const user = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const user = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         if (!user) {
           writeJson(res, 404, { success: false, msg: '用户不存在' })
           return
         }
         try {
-          const order = createRechargeOrder(
+          const order = await createRechargeOrder(
             authService.rechargeOrders,
             buildRechargePolicy(config),
             {
@@ -6179,7 +6330,7 @@ export function startServer(
       const rechargeQueryMatch = pathname.match(/^\/api\/v1\/recharge\/query\/([^/]+)$/)
       if (req.method === 'GET' && rechargeQueryMatch) {
         const orderNo = decodeURIComponent(rechargeQueryMatch[1] || '')
-        const order = queryRechargeOrder(authService.rechargeOrders, auth.userId, orderNo)
+        const order = await queryRechargeOrder(authService.rechargeOrders, auth.userId, orderNo)
         if (!order) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6193,7 +6344,7 @@ export function startServer(
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || 20)))
         writeJson(res, 200, {
           success: true,
-          data: listRechargeOrders(authService.rechargeOrders, auth.userId, page, pageSize),
+          data: await listRechargeOrders(authService.rechargeOrders, auth.userId, page, pageSize),
         })
         return
       }
@@ -6201,7 +6352,7 @@ export function startServer(
       const rechargeCancelMatch = pathname.match(/^\/api\/v1\/recharge\/cancel\/([^/]+)$/)
       if (req.method === 'POST' && rechargeCancelMatch) {
         try {
-          cancelRechargeOrder(
+          await cancelRechargeOrder(
             authService.rechargeOrders,
             auth.userId,
             decodeURIComponent(rechargeCancelMatch[1] || ''),
@@ -6218,7 +6369,7 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/user/model-usage-stats') {
-        const gatewayUserId = authService.getUserModelCredential(auth.userId)?.sudorouterUserId
+        const gatewayUserId = (await authService.getUserModelCredential(auth.userId))?.sudorouterUserId
         if (!gatewayUserId) {
           writeJson(res, 200, { success: true, data: [] })
           return
@@ -6250,7 +6401,7 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/credit-applications') {
         const page = Math.max(1, Number(url.searchParams.get('page') || 1))
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || 20)))
-        const result = authService.creditApplications.listForUser(auth.userId, page, pageSize)
+        const result = await authService.creditApplications.listForUser(auth.userId, page, pageSize)
         writeJson(res, 200, {
           success: true,
           data: { list: result.list.map(app => toPayload(app, pointsToQuota)), total: result.total },
@@ -6265,7 +6416,7 @@ export function startServer(
         }
         const body = await readJsonBody(req)
         try {
-          const app = submitApplication(
+          const app = await submitApplication(
             authService.creditApplications,
             config.systemConfig.creditApplication,
             {
@@ -6290,7 +6441,7 @@ export function startServer(
       if (req.method === 'POST' && creditReviewMatch) {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
-        const application = authService.creditApplications.getById(Number(creditReviewMatch[1]))
+        const application = await authService.creditApplications.getById(Number(creditReviewMatch[1]))
         if (!application) {
           writeJson(res, 404, { success: false, msg: 'Application not found' })
           return
@@ -6308,7 +6459,7 @@ export function startServer(
               typeof body.approved_points === 'number' ? body.approved_points : undefined,
             adminComment: typeof body.admin_comment === 'string' ? body.admin_comment : undefined,
             gatewayUserId:
-              authService.getUserModelCredential(application.userId)?.sudorouterUserId ?? null,
+              (await authService.getUserModelCredential(application.userId))?.sudorouterUserId ?? null,
           })
           writeJson(res, 200, { success: true, data: toPayload(reviewed, pointsToQuota) })
         } catch (err) {
@@ -6327,7 +6478,7 @@ export function startServer(
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
         const statusParam = url.searchParams.get('status')
         const syncStatusParam = url.searchParams.get('sync_status')?.trim()
-        const result = authService.rechargeOrders.listForAdmin({
+        const result = await authService.rechargeOrders.listForAdmin({
           orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
           status: statusParam == null || statusParam === '' ? undefined : Number(statusParam),
           syncStatus: syncStatusParam ? syncStatusParam as never : undefined,
@@ -6356,7 +6507,7 @@ export function startServer(
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
         writeJson(res, 200, {
           success: true,
-          data: listAdminRechargeRecords(authService.rechargeOrders, {
+          data: await listAdminRechargeRecords(authService.rechargeOrders, {
             orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
             orderNo: url.searchParams.get('order_no')?.trim() || undefined,
             userPhone: url.searchParams.get('user_phone')?.trim() || undefined,
@@ -6371,7 +6522,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/admin/recharge/stats') {
         authService.requireScope(auth, 'admin:users')
-        const result = authService.rechargeOrders.listForAdmin({
+        const result = await authService.rechargeOrders.listForAdmin({
           orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
           page: 1,
           pageSize: 100000,
@@ -6422,8 +6573,8 @@ export function startServer(
       if (req.method === 'POST' && adminRechargeRetryMatch) {
         authService.requireScope(auth, 'admin:users')
         const raw = decodeURIComponent(adminRechargeRetryMatch[1] || '')
-        const byId = /^\d+$/.test(raw) ? authService.rechargeOrders.getById(Number(raw)) : null
-        const existing = byId ?? authService.rechargeOrders.getByOrderNo(raw)
+        const byId = /^\d+$/.test(raw) ? await authService.rechargeOrders.getById(Number(raw)) : null
+        const existing = byId ?? await authService.rechargeOrders.getByOrderNo(raw)
         if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6435,7 +6586,7 @@ export function startServer(
             {
               orderId: byId ? existing.id : undefined,
               orderNo: byId ? undefined : existing.orderNo,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单同步重试成功', data })
@@ -6453,7 +6604,7 @@ export function startServer(
       if (req.method === 'POST' && adminRechargeSyncMatch) {
         authService.requireScope(auth, 'admin:users')
         const orderNo = decodeURIComponent(adminRechargeSyncMatch[1] || '')
-        const existing = authService.rechargeOrders.getByOrderNo(orderNo)
+        const existing = await authService.rechargeOrders.getByOrderNo(orderNo)
         if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6465,7 +6616,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orderNo,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单状态同步完成', data })
@@ -6488,7 +6639,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '待处理订单同步完成', data })
@@ -6505,7 +6656,7 @@ export function startServer(
       const adminRechargeDetailMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)$/)
       if (req.method === 'GET' && adminRechargeDetailMatch) {
         authService.requireScope(auth, 'admin:users')
-        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(adminRechargeDetailMatch[1] || ''))
+        const order = await authService.rechargeOrders.getByOrderNo(decodeURIComponent(adminRechargeDetailMatch[1] || ''))
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6520,7 +6671,7 @@ export function startServer(
       const refundCalcMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/refund-calc\/([^/]+)$/)
       if (req.method === 'GET' && refundCalcMatch) {
         authService.requireScope(auth, 'admin:users')
-        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(refundCalcMatch[1] || ''))
+        const order = await authService.rechargeOrders.getByOrderNo(decodeURIComponent(refundCalcMatch[1] || ''))
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6529,7 +6680,7 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '订单状态不支持退款' })
           return
         }
-        const gatewayUserId = authService.getUserModelCredential(order.userId)?.sudorouterUserId
+        const gatewayUserId = (await authService.getUserModelCredential(order.userId))?.sudorouterUserId
         const client = buildSudorouterClient(config)
         if (!gatewayUserId || !client) {
           writeJson(res, 409, { success: false, msg: '用户信息异常' })
@@ -6558,7 +6709,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req).catch(() => ({}))
         const orderNo = decodeURIComponent(refundMatch[1] || '')
-        const order = authService.rechargeOrders.getByOrderNo(orderNo)
+        const order = await authService.rechargeOrders.getByOrderNo(orderNo)
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6575,7 +6726,7 @@ export function startServer(
               orderNo,
               reason,
               adminId: auth.userId,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '退款成功', data: result })
@@ -6597,7 +6748,7 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '仅在测试模式下可用' })
           return
         }
-        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(simulateMatch[1] || ''))
+        const order = await authService.rechargeOrders.getByOrderNo(decodeURIComponent(simulateMatch[1] || ''))
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6612,7 +6763,7 @@ export function startServer(
             buildSudorouterClient(config),
             order,
             {
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '模拟支付成功', data: { order_no: order.orderNo } })
@@ -6632,10 +6783,10 @@ export function startServer(
         // cannot reach into another org; a migration import creates orgs and
         // places users across them, so it is exactly the cross-org write that
         // guard exists to stop. Only a deployment-wide role may perform it.
-        authService.requireSuperAdmin(auth)
+        await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         try {
-          writeJson(res, 200, importPhoneUsers(authService, parsePhoneImportRequest(body)))
+          writeJson(res, 200, await importPhoneUsers(authService, parsePhoneImportRequest(body)))
         } catch (err) {
           writeJson(res, 400, {
             error: {
@@ -6688,7 +6839,7 @@ export function startServer(
           }
           // Terminate all active sessions for this user
           try {
-            const sessions = runtime.listSessionRecords({ orgId: auth.orgId, userId, activeOnly: true })
+            const sessions = await runtime.listSessionRecords({ orgId: auth.orgId, userId, activeOnly: true })
             for (const session of sessions) {
               try { await runtime.terminateSession(session.sessionId) } catch { /* best effort */ }
             }
@@ -6711,7 +6862,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setUserPassword({
+          await authService.setUserPassword({
             orgId: auth.orgId,
             userId,
             password: typeof body.password === 'string' ? body.password : '',
@@ -6729,7 +6880,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setUserTokenLimit({
+          await authService.setUserTokenLimit({
             orgId: auth.orgId,
             userId,
             tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
@@ -6747,7 +6898,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setLocalAuth({
+          await authService.setLocalAuth({
             orgId: auth.orgId,
             userId,
             localAuth,
@@ -6765,7 +6916,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.setDepartmentTokenLimit({
+          await authService.setDepartmentTokenLimit({
             orgId: auth.orgId,
             departmentId,
             tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
@@ -6778,14 +6929,13 @@ export function startServer(
       if (req.method === 'GET' && userSessionsMatch) {
         authService.requireScope(auth, 'admin:users')
         const userId = userSessionsMatch[1] || ''
-        const user = authService.getUserOrNull(userId, auth.orgId, auth)
+        const user = await authService.getUserOrNull(userId, auth.orgId, auth)
         if (!user) {
           throw new HttpError(404, 'Unknown user_id')
         }
         writeJson(res, 200, {
           user,
-          sessions: runtime.store
-            .listUserSessions(auth.orgId, userId)
+          sessions: (await runtime.store.listUserSessions(auth.orgId, userId))
             .map(session => serializeSession(session)),
         })
         return
@@ -6805,7 +6955,7 @@ export function startServer(
         }
 
         if (req.method === 'GET') {
-          const preference = getUserModelPreference(userId)
+          const preference = await getUserModelPreference(userId)
           const systemSettings = getSystemSettings()
           console.log(`[ModelPreference] GET /api/v1/users/${userId}/model - userPref: ${JSON.stringify(preference)}, systemDefault: ${systemSettings.model}`)
           writeJson(res, 200, {
@@ -6824,7 +6974,7 @@ export function startServer(
           if (!modelId) {
             throw new HttpError(400, 'modelId is required')
           }
-          setUserModelPreference(userId, modelId)
+          await setUserModelPreference(userId, modelId)
           console.log(`[ModelPreference] Saved preference for user ${userId}: ${modelId}`)
           writeJson(res, 200, {
             success: true,
@@ -6868,7 +7018,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/api-keys') {
         authService.requireScope(auth, 'admin:api_keys')
-        writeJson(res, 200, authService.listApiKeys(auth.orgId, auth))
+        writeJson(res, 200, await authService.listApiKeys(auth.orgId, auth))
         return
       }
 
@@ -6878,7 +7028,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          authService.createApiKey({
+          await authService.createApiKey({
             orgId: auth.orgId,
             userId: typeof body.user_id === 'string' ? body.user_id : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6894,7 +7044,7 @@ export function startServer(
       if (req.method === 'DELETE' && apiKeyMatch) {
         authService.requireScope(auth, 'admin:api_keys')
         const keyId = apiKeyMatch[1] || ''
-        writeJson(res, 200, authService.revokeApiKey({ orgId: auth.orgId, keyId }, auth))
+        writeJson(res, 200, await authService.revokeApiKey({ orgId: auth.orgId, keyId }, auth))
         return
       }
 
@@ -6903,7 +7053,7 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/config-items') {
         authService.requireScope(auth, 'admin:secrets')
         const urlObj = new URL(req.url as string, `http://${req.headers.host}`)
-        writeJson(res, 200, configItemsApi.list(auth.orgId, auth.userId, {
+        writeJson(res, 200, await configItemsApi.list(auth.orgId, auth.userId, {
           page: Number(urlObj.searchParams.get('page')) || undefined,
           page_size: Number(urlObj.searchParams.get('page_size')) || undefined,
           name: urlObj.searchParams.get('name') || undefined,
@@ -6916,8 +7066,8 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/config-items') {
         authService.requireScope(auth, 'admin:secrets:write')
         const body = await readJsonBody(req)
-        const result = configItemsApi.create(auth.orgId, auth.userId, body)
-        if (result.success) refreshAuthProxyRules()
+        const result = await configItemsApi.create(auth.orgId, auth.userId, body)
+        if (result.success) await refreshAuthProxyRules()
         writeJson(res, result.success ? 201 : 400, result)
         return
       }
@@ -6927,21 +7077,21 @@ export function startServer(
         const itemId = Number(configItemMatch[1])
         if (req.method === 'GET') {
           authService.requireScope(auth, 'admin:secrets')
-          writeJson(res, 200, configItemsApi.get(auth.orgId, auth.userId, itemId))
+          writeJson(res, 200, await configItemsApi.get(auth.orgId, auth.userId, itemId))
           return
         }
         if (req.method === 'PUT') {
           authService.requireScope(auth, 'admin:secrets:write')
           const body = await readJsonBody(req)
-          const result = configItemsApi.update(auth.orgId, auth.userId, itemId, body)
-          refreshAuthProxyRules()
+          const result = await configItemsApi.update(auth.orgId, auth.userId, itemId, body)
+          await refreshAuthProxyRules()
           writeJson(res, 200, result)
           return
         }
         if (req.method === 'DELETE') {
           authService.requireScope(auth, 'admin:secrets:write')
-          const result = configItemsApi.delete(auth.orgId, auth.userId, itemId)
-          refreshAuthProxyRules()
+          const result = await configItemsApi.delete(auth.orgId, auth.userId, itemId)
+          await refreshAuthProxyRules()
           writeJson(res, 200, result)
           return
         }
@@ -6952,8 +7102,8 @@ export function startServer(
         authService.requireScope(auth, 'admin:secrets:write')
         const itemId = Number(configItemStatusMatch[1])
         const body = await readJsonBody(req)
-        const result = configItemsApi.updateStatus(auth.orgId, auth.userId, itemId, Number(body.status))
-        refreshAuthProxyRules()
+        const result = await configItemsApi.updateStatus(auth.orgId, auth.userId, itemId, Number(body.status))
+        await refreshAuthProxyRules()
         writeJson(res, 200, result)
         return
       }
@@ -6963,7 +7113,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:secrets:write')
         const itemId = Number(configItemEntriesMatch[1])
         const body = await readJsonBody(req)
-        writeJson(res, 200, configItemsApi.update(auth.orgId, auth.userId, itemId, { entries: body.entries }))
+        writeJson(res, 200, await configItemsApi.update(auth.orgId, auth.userId, itemId, { entries: body.entries }))
         return
       }
 
@@ -6973,7 +7123,7 @@ export function startServer(
         const itemId = Number(configItemDeptsMatch[1])
         if (req.method === 'GET') {
           authService.requireScope(auth, 'admin:secrets')
-          const rows = runtime.store.getConfigItemAuthorizedDepartments(itemId)
+          const rows = await runtime.store.getConfigItemAuthorizedDepartments(itemId)
           const deptIds = rows.map((r: Record<string, unknown>) => r.department_id as string)
           writeJson(res, 200, { success: true, data: deptIds })
           return
@@ -6981,7 +7131,7 @@ export function startServer(
         if (req.method === 'PUT') {
           authService.requireScope(auth, 'admin:secrets:write')
           const body = await readJsonBody(req)
-          runtime.store.replaceConfigItemDepartments(itemId, body.department_ids ?? [], auth.orgId)
+          await runtime.store.replaceConfigItemDepartments(itemId, body.department_ids ?? [], auth.orgId)
           writeJson(res, 200, { success: true })
           return
         }
@@ -7028,7 +7178,7 @@ export function startServer(
             authService.requireScope(auth, 'admin:secrets')
           }
           const deptId = decodeURIComponent(deptSecretListMatch[1] || '')
-          authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+          await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
           writeJson(res, 200, await secretsApi.listDepartmentSecretsForDept(auth.orgId, auth.userId, deptId))
           return
         }
@@ -7040,9 +7190,9 @@ export function startServer(
           if (!canReadDepartmentSecrets(auth)) {
             authService.requireScope(auth, 'admin:secrets')
           }
-          authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+          await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
           if (req.method === 'GET') {
-            const ancestorChain = authService.getDepartmentAncestorChain(auth.orgId, deptId)
+            const ancestorChain = await authService.getDepartmentAncestorChain(auth.orgId, deptId)
             writeJson(res, 200, await secretsApi.getDepartmentSecret(auth.orgId, auth.userId, deptId, pinyin, key, clientIp, ancestorChain))
             return
           }
@@ -7064,7 +7214,7 @@ export function startServer(
           if (!canReadSecretAudit(auth)) {
             authService.requireScope(auth, 'admin:secrets')
           }
-          writeJson(res, 200, secretsApi.listMetadata(auth.orgId, auth.userId))
+          writeJson(res, 200, await secretsApi.listMetadata(auth.orgId, auth.userId))
           return
         }
         const metadataMatch = pathname.match(/^\/api\/v1\/secret-metadata\/(\d+)$/)
@@ -7074,13 +7224,13 @@ export function startServer(
           // (dept_admin/user) may set expiry only on user-scope config items —
           // the same items whose values they own.
           if (!hasScope(auth.scopes, 'admin:secrets:write') && !hasScope(auth.scopes, '*')) {
-            const item = runtime.store.getConfigItem(itemId, auth.orgId)
+            const item = await runtime.store.getConfigItem(itemId, auth.orgId)
             if (!item || (item.scope as string) !== 'user' || !canWriteUserSecrets(auth)) {
               throw new HttpError(403, 'Missing scope: admin:secrets:write')
             }
           }
           const body = await readJsonBody(req)
-          writeJson(res, 200, secretsApi.updateMetadata(auth.orgId, auth.userId, itemId, body.expires_at ?? null))
+          writeJson(res, 200, await secretsApi.updateMetadata(auth.orgId, auth.userId, itemId, body.expires_at ?? null))
           return
         }
 
@@ -7092,15 +7242,15 @@ export function startServer(
             authService.requireScope(auth, 'admin:secrets')
             // A dept_admin may only read policies for departments in their
             // subtree; admins are unrestricted within the org.
-            authService.requireDepartmentInScope(auth.orgId, deptId, auth)
-            writeJson(res, 200, secretsApi.getDepartmentPolicies(auth.orgId, auth.userId, deptId))
+            await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+            writeJson(res, 200, await secretsApi.getDepartmentPolicies(auth.orgId, auth.userId, deptId))
             return
           }
           if (req.method === 'PUT') {
             authService.requireScope(auth, 'admin:secrets:write')
-            authService.requireDepartmentInScope(auth.orgId, deptId, auth)
+            await authService.requireDepartmentInScope(auth.orgId, deptId, auth)
             const body = await readJsonBody(req)
-            writeJson(res, 200, secretsApi.updateDepartmentPolicies(auth.orgId, auth.userId, deptId, body.config_item_ids ?? []))
+            writeJson(res, 200, await secretsApi.updateDepartmentPolicies(auth.orgId, auth.userId, deptId, body.config_item_ids ?? []))
             return
           }
         }
@@ -7114,7 +7264,7 @@ export function startServer(
             authService.requireScope(auth, 'admin:secrets')
           }
           const actorIds = canReadDepartmentSecrets(auth)
-            ? authService.listSubtreeUserIds(auth.orgId, auth) ?? undefined
+            ? (await authService.listSubtreeUserIds(auth.orgId, auth)) ?? undefined
             : new Set<string>([auth.userId])
           // Config-item scope gate: admins see every scope; a dept_admin sees
           // department + user credential audit rows; a normal user only user.
@@ -7125,7 +7275,7 @@ export function startServer(
               ? ['department', 'user']
               : ['user']
           const urlObj = new URL(req.url as string, `http://${req.headers.host}`)
-          writeJson(res, 200, secretsApi.listAuditLog(auth.orgId, auth.userId, {
+          writeJson(res, 200, await secretsApi.listAuditLog(auth.orgId, auth.userId, {
             actorIds: actorIds ? Array.from(actorIds) : undefined,
             scopes,
             actor_id: urlObj.searchParams.get('actor_id') || undefined,
@@ -7151,7 +7301,7 @@ export function startServer(
             : canReadDepartmentSecrets(auth)
               ? new Set<'system' | 'department' | 'user'>(['department', 'user'])
               : new Set<'system' | 'department' | 'user'>(['user'])
-          writeJson(res, 200, secretsApi.listRotationAlerts(auth.orgId, auth.userId, scopeFilter))
+          writeJson(res, 200, await secretsApi.listRotationAlerts(auth.orgId, auth.userId, scopeFilter))
           return
         }
 
@@ -7220,7 +7370,7 @@ export function startServer(
         if (req.method === 'GET' && pathname === '/api/v1/me/authorized-system-configs') {
           try {
             // Org-scope: only this org's system/department config items.
-            const orgActiveItems = runtime.store.getAllActiveConfigItems(auth.orgId)
+            const orgActiveItems = await runtime.store.getAllActiveConfigItems(auth.orgId)
             const allSystemItems = orgActiveItems.filter(i => (i.scope as string) === 'system')
             const allDeptItems = orgActiveItems.filter(i => (i.scope as string) === 'department')
             // Admins/super_admins hold all privileges within the org, so they
@@ -7228,11 +7378,11 @@ export function startServer(
             // department membership — matching the auth-proxy department gate.
             const isAdmin =
               auth.role === 'admin' || auth.role === 'super_admin' || hasScope(auth.scopes, '*')
-            const user = authService.getUserById(auth.userId)
+            const user = await authService.getUserById(auth.userId)
             const deptId = user?.departmentId ?? null
             let authorizedDeptIds: Set<number> = new Set()
             if (deptId) {
-              const policies = runtime.store.getDepartmentPolicies(deptId, auth.orgId)
+              const policies = await runtime.store.getDepartmentPolicies(deptId, auth.orgId)
               authorizedDeptIds = new Set(policies.map(p => p.config_item_id as number))
             }
             let visible = [
@@ -7245,7 +7395,7 @@ export function startServer(
               // The user's department chain (self-first) for hierarchical
               // inheritance: an item is usable if the user's own dept OR any
               // ancestor OR the legacy org-wide value is configured.
-              const deptChain = authService.getDepartmentAncestorChain(auth.orgId, deptId)
+              const deptChain = await authService.getDepartmentAncestorChain(auth.orgId, deptId)
               visible = visible.filter(i => {
                 if ((i.scope as string) === 'department') {
                   const legacy = `${orgPrefix}role:${i.pinyin}`
@@ -7312,7 +7462,7 @@ export function startServer(
 
       // Admin: list MCP servers
       if (req.method === 'GET' && pathname === '/api/v1/admin/mcp-servers') {
-        const result = mcpAdminApi.listMcpServers(auth, {
+        const result = await mcpAdminApi.listMcpServers(auth, {
           scope: url.searchParams.get('scope') as any || undefined,
           department_id: url.searchParams.get('department_id') || undefined,
           status: url.searchParams.get('status') as any || undefined,
@@ -7333,7 +7483,7 @@ export function startServer(
       // Admin: create MCP server
       if (req.method === 'POST' && pathname === '/api/v1/admin/mcp-servers') {
         const body = await readJsonBody(req)
-        const result = mcpAdminApi.createMcpServer(auth, body, clientIp)
+        const result = await mcpAdminApi.createMcpServer(auth, body, clientIp)
         writeJson(res, result.success ? 201 : 400, result)
         return
       }
@@ -7343,7 +7493,7 @@ export function startServer(
       if (mcpServerMatch) {
         const serverId = mcpServerMatch[1]
         if (req.method === 'GET') {
-          const result = mcpAdminApi.getMcpServer(auth, serverId)
+          const result = await mcpAdminApi.getMcpServer(auth, serverId)
           writeJson(res, result.success ? 200 : 404, result)
           return
         }
@@ -7351,16 +7501,16 @@ export function startServer(
           const body = await readJsonBody(req)
           // Handle enable/disable via dedicated method
           if (body.enabled !== undefined && Object.keys(body).length === 1) {
-            const result = mcpAdminApi.setMcpServerEnabled(auth, serverId, !!body.enabled, clientIp)
+            const result = await mcpAdminApi.setMcpServerEnabled(auth, serverId, !!body.enabled, clientIp)
             writeJson(res, result.success ? 200 : 404, result)
           } else {
-            const result = mcpAdminApi.updateMcpServer(auth, serverId, body, clientIp)
+            const result = await mcpAdminApi.updateMcpServer(auth, serverId, body, clientIp)
             writeJson(res, result.success ? 200 : 400, result)
           }
           return
         }
         if (req.method === 'DELETE') {
-          const result = mcpAdminApi.deleteMcpServer(auth, serverId, clientIp)
+          const result = await mcpAdminApi.deleteMcpServer(auth, serverId, clientIp)
           writeJson(res, result.success ? 200 : 404, result)
           return
         }
@@ -7385,7 +7535,7 @@ export function startServer(
       // Admin: MCP server audit logs
       const mcpAuditMatch = pathname.match(/^\/api\/v1\/admin\/mcp-servers\/([^/]+)\/audit-logs$/)
       if (mcpAuditMatch && req.method === 'GET') {
-        const result = mcpAdminApi.getServerAuditLogs(auth, mcpAuditMatch[1], {
+        const result = await mcpAdminApi.getServerAuditLogs(auth, mcpAuditMatch[1], {
           page: Number(url.searchParams.get('page')) || undefined,
           page_size: Number(url.searchParams.get('page_size')) || undefined,
         })
@@ -7395,7 +7545,7 @@ export function startServer(
 
       // Admin: get MCP policy
       if (req.method === 'GET' && pathname === '/api/v1/tenant/mcp-policy') {
-        const result = mcpAdminApi.getMcpPolicy(auth)
+        const result = await mcpAdminApi.getMcpPolicy(auth)
         writeJson(res, 200, result)
         return
       }
@@ -7403,7 +7553,7 @@ export function startServer(
       // Admin: update MCP policy
       if (req.method === 'PATCH' && pathname === '/api/v1/admin/mcp-policy') {
         const body = await readJsonBody(req)
-        const result = mcpAdminApi.updateMcpPolicy(auth, body, clientIp)
+        const result = await mcpAdminApi.updateMcpPolicy(auth, body, clientIp)
         writeJson(res, 200, result)
         return
       }
@@ -7412,7 +7562,7 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/admin/mcp-audit-logs') {
         const statusParam = url.searchParams.get('status') || undefined
         const status = statusParam === 'success' || statusParam === 'error' ? statusParam : undefined
-        const result = mcpAdminApi.getAuditLogs(auth, {
+        const result = await mcpAdminApi.getAuditLogs(auth, {
           mcp_server_id: url.searchParams.get('mcp_server_id') || undefined,
           mcp_server_name: url.searchParams.get('mcp_server_name') || undefined,
           user_id: url.searchParams.get('user_id') || undefined,
@@ -7429,14 +7579,14 @@ export function startServer(
 
       // Admin: list/approve/reject approval requests (Phase 2)
       if (req.method === 'GET' && pathname === '/api/v1/admin/mcp-approvals') {
-        const result = mcpAdminApi.listApprovalRequests(auth, url.searchParams.get('status') || undefined)
+        const result = await mcpAdminApi.listApprovalRequests(auth, url.searchParams.get('status') || undefined)
         writeJson(res, 200, result)
         return
       }
 
       const mcpApproveMatch = pathname.match(/^\/api\/v1\/admin\/mcp-approvals\/([^/]+)\/approve$/)
       if (mcpApproveMatch && req.method === 'POST') {
-        const result = mcpAdminApi.approveRequest(auth, mcpApproveMatch[1], clientIp)
+        const result = await mcpAdminApi.approveRequest(auth, mcpApproveMatch[1], clientIp)
         writeJson(res, 200, result)
         return
       }
@@ -7444,7 +7594,7 @@ export function startServer(
       const mcpRejectMatch = pathname.match(/^\/api\/v1\/admin\/mcp-approvals\/([^/]+)\/reject$/)
       if (mcpRejectMatch && req.method === 'POST') {
         const body = await readJsonBody(req)
-        const result = mcpAdminApi.rejectRequest(auth, mcpRejectMatch[1], body.review_note || '', clientIp)
+        const result = await mcpAdminApi.rejectRequest(auth, mcpRejectMatch[1], body.review_note || '', clientIp)
         writeJson(res, 200, result)
         return
       }
@@ -7457,7 +7607,7 @@ export function startServer(
         if (params.get('search')) filter.search = params.get('search')!
         if (params.get('page')) filter.page = params.get('page')!
         if (params.get('page_size')) filter.page_size = params.get('page_size')!
-        const result = mcpAdminApi.listTemplates(auth, filter)
+        const result = await mcpAdminApi.listTemplates(auth, filter)
         writeJson(res, 200, result)
         return
       }
@@ -7465,7 +7615,7 @@ export function startServer(
       // MCP Templates: get single
       const mcpTemplateMatch = pathname.match(/^\/api\/v1\/admin\/mcp-templates\/([^/]+)$/)
       if (mcpTemplateMatch && req.method === 'GET') {
-        const result = mcpAdminApi.getTemplate(auth, mcpTemplateMatch[1])
+        const result = await mcpAdminApi.getTemplate(auth, mcpTemplateMatch[1])
         writeJson(res, result.success ? 200 : 404, result)
         return
       }
@@ -7473,7 +7623,7 @@ export function startServer(
       // Template CRUD: create
       if (req.method === 'POST' && pathname === '/api/v1/admin/mcp-templates') {
         const body = await readJsonBody(req)
-        const result = mcpAdminApi.createTemplate(auth, body as any, clientIp)
+        const result = await mcpAdminApi.createTemplate(auth, body as any, clientIp)
         writeJson(res, result.success ? 201 : 400, result)
         return
       }
@@ -7484,12 +7634,12 @@ export function startServer(
         const templateId = mcpTemplateUpdateMatch[1]
         if (req.method === 'PATCH') {
           const body = await readJsonBody(req)
-          const result = mcpAdminApi.updateTemplate(auth, templateId, body as any, clientIp)
+          const result = await mcpAdminApi.updateTemplate(auth, templateId, body as any, clientIp)
           writeJson(res, 200, result)
           return
         }
         if (req.method === 'DELETE') {
-          const result = mcpAdminApi.deleteTemplate(auth, templateId, clientIp)
+          const result = await mcpAdminApi.deleteTemplate(auth, templateId, clientIp)
           writeJson(res, 200, result)
           return
         }
@@ -7499,7 +7649,7 @@ export function startServer(
       const mcpTemplateInstallMatch = pathname.match(/^\/api\/v1\/admin\/mcp-templates\/([^/]+)\/install$/)
       if (mcpTemplateInstallMatch && req.method === 'POST') {
         const body = await readJsonBody(req)
-        const result = mcpAdminApi.installTemplate(auth, mcpTemplateInstallMatch[1], body, clientIp)
+        const result = await mcpAdminApi.installTemplate(auth, mcpTemplateInstallMatch[1], body, clientIp)
         writeJson(res, result.success ? 201 : 400, result)
         return
       }
@@ -7518,7 +7668,7 @@ export function startServer(
         if (url.searchParams.get('search')) filter.search = url.searchParams.get('search')!
         if (url.searchParams.get('page')) filter.page = Number(url.searchParams.get('page')) || undefined
         if (url.searchParams.get('page_size')) filter.page_size = Number(url.searchParams.get('page_size')) || undefined
-        const result = mcpUserApi.listAvailableTemplates(auth, filter)
+        const result = await mcpUserApi.listAvailableTemplates(auth, filter)
         writeJson(res, 200, result)
         return
       }
@@ -7748,7 +7898,7 @@ export function startServer(
       // Department subtree of user ids whose jobs a dept_admin may read/manage,
       // resolved on the fly from current membership (null for admins, [self] for
       // a plain user). Shared by every per-job route below.
-      const cronSubtreeUserIds = authService.listSubtreeUserIds(auth.orgId, auth)
+      const cronSubtreeUserIds = await authService.listSubtreeUserIds(auth.orgId, auth)
 
       // List all cron jobs for current user (or subtree, for a dept_admin)
       if (req.method === 'GET' && pathname === '/api/v1/cron/jobs') {
@@ -7795,7 +7945,7 @@ export function startServer(
       const cronJobFileMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/workspace\/file$/)
       if (cronJobFileMatch && (req.method === 'POST' || req.method === 'DELETE')) {
         const jobId = cronJobFileMatch[1] || ''
-        const resolved = cronApi.resolveJobWorkspace(auth, jobId, cronSubtreeUserIds)
+        const resolved = await cronApi.resolveJobWorkspace(auth, jobId, cronSubtreeUserIds)
         if (!resolved.success || !resolved.workspace) {
           const msg = resolved.message ?? 'Job not found'
           throw new HttpError(msg === 'Access denied' ? 403 : msg === 'Job not found' ? 404 : 400, msg)
@@ -7825,7 +7975,7 @@ export function startServer(
       const cronJobTreeMatch = pathname.match(/^\/api\/v1\/cron\/jobs\/([^/]+)\/workspace\/tree$/)
       if (req.method === 'GET' && cronJobTreeMatch) {
         const jobId = cronJobTreeMatch[1] || ''
-        const resolved = cronApi.resolveJobWorkspace(auth, jobId, cronSubtreeUserIds)
+        const resolved = await cronApi.resolveJobWorkspace(auth, jobId, cronSubtreeUserIds)
         if (!resolved.success || !resolved.workspace) {
           const msg = resolved.message ?? 'Job not found'
           throw new HttpError(msg === 'Access denied' ? 403 : msg === 'Job not found' ? 404 : 400, msg)
@@ -7914,7 +8064,7 @@ export function startServer(
         const jobId = cronRunsMatch[1]
         const limitRaw = url.searchParams.get('limit')
         const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
-        const result = await cronApi.listRuns(auth, jobId, Number.isFinite(limit) ? limit : 50, cronSubtreeUserIds)
+        const result = await cronApi.listRuns(auth, jobId, Math.max(1, Math.min(Number.isFinite(limit) ? limit : 50, 100)), cronSubtreeUserIds)
         writeJson(res, 200, result)
         return
       }
@@ -7935,13 +8085,13 @@ export function startServer(
       if (pathname === '/api/v1/triggers') {
         if (req.method === 'GET') {
           authService.requireScope(auth, 'admin:triggers')
-          writeJson(res, 200, eventTriggerApi.listTriggers(auth))
+          writeJson(res, 200, await eventTriggerApi.listTriggers(auth))
           return
         }
         if (req.method === 'POST') {
           authService.requireScope(auth, 'admin:triggers')
           const body = await readJsonBody(req)
-          const result = eventTriggerApi.createTrigger(auth, body)
+          const result = await eventTriggerApi.createTrigger(auth, body)
           writeJson(res, result.success ? 201 : 400, result)
           return
         }
@@ -7950,7 +8100,7 @@ export function startServer(
       const triggerRunMatch = pathname.match(/^\/api\/v1\/triggers\/([^/]+)\/runs\/([^/]+)$/)
       if (req.method === 'GET' && triggerRunMatch) {
         authService.requireScope(auth, 'admin:triggers')
-        const result = eventTriggerApi.getRun(auth, triggerRunMatch[1], triggerRunMatch[2])
+        const result = await eventTriggerApi.getRun(auth, triggerRunMatch[1], triggerRunMatch[2])
         if (!result) throw new HttpError(404, 'Run not found')
         writeJson(res, 200, result)
         return
@@ -7961,7 +8111,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:triggers')
         const limitRaw = url.searchParams.get('limit')
         const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50
-        const result = eventTriggerApi.listRuns(auth, triggerRunsMatch[1], Number.isFinite(limit) ? limit : 50)
+        const result = await eventTriggerApi.listRuns(auth, triggerRunsMatch[1], Math.max(1, Math.min(Number.isFinite(limit) ? limit : 50, 100)))
         if (!result) throw new HttpError(404, 'Trigger not found')
         writeJson(res, 200, result)
         return
@@ -7970,7 +8120,7 @@ export function startServer(
       const triggerRotateMatch = pathname.match(/^\/api\/v1\/triggers\/([^/]+)\/rotate-secret$/)
       if (req.method === 'POST' && triggerRotateMatch) {
         authService.requireScope(auth, 'admin:triggers')
-        const result = eventTriggerApi.rotateSecret(auth, triggerRotateMatch[1])
+        const result = await eventTriggerApi.rotateSecret(auth, triggerRotateMatch[1])
         if (!result) throw new HttpError(404, 'Trigger not found')
         writeJson(res, 200, result)
         return
@@ -7981,7 +8131,7 @@ export function startServer(
         const triggerId = triggerMatch[1]
         if (req.method === 'GET') {
           authService.requireScope(auth, 'admin:triggers')
-          const result = eventTriggerApi.getTrigger(auth, triggerId)
+          const result = await eventTriggerApi.getTrigger(auth, triggerId)
           if (!result) throw new HttpError(404, 'Trigger not found')
           writeJson(res, 200, result)
           return
@@ -7989,14 +8139,14 @@ export function startServer(
         if (req.method === 'PATCH' || req.method === 'PUT') {
           authService.requireScope(auth, 'admin:triggers')
           const body = await readJsonBody(req)
-          const result = eventTriggerApi.updateTrigger(auth, triggerId, body)
+          const result = await eventTriggerApi.updateTrigger(auth, triggerId, body)
           if (!result) throw new HttpError(404, 'Trigger not found')
           writeJson(res, 200, result)
           return
         }
         if (req.method === 'DELETE') {
           authService.requireScope(auth, 'admin:triggers')
-          const result = eventTriggerApi.deleteTrigger(auth, triggerId)
+          const result = await eventTriggerApi.deleteTrigger(auth, triggerId)
           if (!result) throw new HttpError(404, 'Trigger not found')
           writeJson(res, 200, result)
           return
@@ -8091,7 +8241,7 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/agents/installed') {
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         // Return all installed assistants: hub, tenant, and custom
         const all = await getInstalledAssistants()
         writeJson(
@@ -8401,15 +8551,24 @@ export function startServer(
       // GET /api/v1/agents/tenant - List tenant assistants
       if (req.method === 'GET' && pathname === '/api/v1/agents/tenant') {
         const status = url.searchParams.get('status') || undefined
-        const allRows = runtime.store.listTenantAssistants(status, auth.orgId)
+        const allRows = await runtime.store.listTenantAssistants(status, auth.orgId)
         // Filter by visibility for non-admin users
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         const isAdmin = hasScope(auth.scopes, 'admin:settings')
+        // Pre-resolve author-in-scope once per distinct author (isCreatorInScope
+        // is async now); the sync filter/map below read from this map.
+        const canManageByAuthor = new Map<string, boolean>()
+        for (const row of allRows as Array<Record<string, unknown>>) {
+          const authorId = row.author_id as string
+          if (!canManageByAuthor.has(authorId)) {
+            canManageByAuthor.set(authorId, await authService.isCreatorInScope(auth.orgId, authorId, auth))
+          }
+        }
         const rows = allRows.filter((row: Record<string, unknown>) => {
           // A caller can always see items they may manage (author in scope),
           // even if visibility wouldn't otherwise match — the "or created by
           // himself/subtree" clause of the spec.
-          const canManage = authService.isCreatorInScope(auth.orgId, row.author_id as string, auth)
+          const canManage = canManageByAuthor.get(row.author_id as string) ?? false
           if (row.status === 'pending') return isAdmin || canManage
           if (row.status === 'approved') {
             if (canManage) return true
@@ -8449,7 +8608,7 @@ export function startServer(
             workflow: parseObject(row.workflow, null),
             visible_to: parseObject(row.visible_to, null),
             // Lets the frontend show edit/delete without re-deriving subtree math.
-            can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
+            can_manage: isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false),
           }
         })
         writeJson(res, 200, rows)
@@ -8520,7 +8679,7 @@ export function startServer(
           throw new HttpError(400, 'name is required')
         }
         // Check if name already exists (within this org)
-        const existingAssistant = runtime.store.getTenantAssistantByName(name, auth.orgId)
+        const existingAssistant = await runtime.store.getTenantAssistantByName(name, auth.orgId)
         if (existingAssistant) {
           throw new HttpError(400, `智能体名称 "${name}" 已存在，请使用其他名称`)
         }
@@ -8529,7 +8688,7 @@ export function startServer(
         const assistantId = randomUUID()
 
         // Get author info
-        const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
         // Admin → tenant dir (live now). Non-admin → tenant-pending staging dir
@@ -8555,11 +8714,11 @@ export function startServer(
         //    what was submitted (they have no picker; the roster is admin-only).
         const requestedVisibleTo = storeAdmin
           ? (body.visible_to ?? null)
-          : authService.isDeptAdmin(auth)
+          : (await authService.isDeptAdmin(auth))
             ? (body.visible_to !== undefined
                 ? body.visible_to
-                : (authService.defaultTenantVisibility(auth) ?? null))
-            : (authService.defaultTenantVisibility(auth) ?? null)
+                : ((await authService.defaultTenantVisibility(auth)) ?? null))
+            : ((await authService.defaultTenantVisibility(auth)) ?? null)
 
         // Create metadata
         const rules = typeof body.rules === 'string' ? body.rules : ''
@@ -8603,7 +8762,7 @@ export function startServer(
 
         // Admin → approved (live). Non-admin → pending (awaits approval).
         try {
-          runtime.store.createTenantAssistant({
+          await runtime.store.createTenantAssistant({
           id: assistantId,
           name,
           display_name: displayName,
@@ -8634,7 +8793,7 @@ export function startServer(
           throw error
         }
 
-        const result = runtime.store.getTenantAssistant(assistantId)
+        const result = await runtime.store.getTenantAssistant(assistantId)
         writeJson(res, 200, {
           success: true,
           data: result
@@ -8661,7 +8820,7 @@ export function startServer(
         // `can_edit` so the client can render read-only instead of guessing.
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(tenantAgentRulesMatch[1] || '')
-        const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
@@ -8672,7 +8831,7 @@ export function startServer(
         }
         const canEditRules =
           rulesStoreAdmin ||
-          authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth)
+          (await authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth))
         if (!canEditRules) {
           // Not the owner: only an approved agent that is visible to this
           // caller may be read. Pending/rejected items stay private to their
@@ -8683,7 +8842,7 @@ export function startServer(
               : null
           const visible =
             tenantAssistant.status === 'approved' &&
-            isVisibleTo(rulesVisibleTo, authService.buildVisibilityFilter(auth))
+            isVisibleTo(rulesVisibleTo, await authService.buildVisibilityFilter(auth))
           if (!visible) {
             throw new HttpError(403, 'You cannot view this tenant assistant')
           }
@@ -8726,14 +8885,14 @@ export function startServer(
         const actualAssistantName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : assistantId
 
         // Get author name from user info
-        const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
         // Stamp the publisher's default visibility (dept_admin → own department,
         // user → self) so it survives approval instead of defaulting to global.
-        const publishVisibility = authService.defaultTenantVisibility(auth)
+        const publishVisibility = await authService.defaultTenantVisibility(auth)
         // Create tenant agent record with UUID as id
-        runtime.store.createTenantAssistant({
+        await runtime.store.createTenantAssistant({
           id: assistantId, // Use UUID as id
           name: actualAssistantName,
           display_name: meta?.display_name || actualAssistantName,
@@ -8764,23 +8923,23 @@ export function startServer(
         const approved = body.approved === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
-        const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
 
         if (approved) {
           // Update status to approved
-          runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
+          await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
           // Preserve the publisher's default visibility (dept/self) through
           // approval. An admin may override via visible_to in the approve body;
           // a legacy record without one falls back to global (null).
           if (body.visible_to !== undefined) {
-            runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
+            await runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
               visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
             })
           } else if (tenantAssistant.visible_to == null) {
-            runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
+            await runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
           }
           // Copy agent to tenant directory using stored file_path
           const sourcePath = tenantAssistant.file_path as string | undefined
@@ -8790,7 +8949,7 @@ export function startServer(
             const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
             const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
             const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', basename(sourcePath))
-            runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
+            await runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
             // MOVE semantics for non-admin-created pending items: remove the
             // staged source so it lives only in the tenant dir. Items published
             // from a real custom/ item keep their custom original (copy).
@@ -8801,7 +8960,7 @@ export function startServer(
             throw new HttpError(404, `Source assistant directory not found: ${sourcePath}`)
           }
         } else {
-          runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
+          await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
           await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
           // Clean up staged files for a rejected non-admin submission.
           const sourcePath = tenantAssistant.file_path as string | undefined
@@ -8821,7 +8980,7 @@ export function startServer(
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
-        const existingAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        const existingAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
         if (!existingAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
@@ -8832,7 +8991,7 @@ export function startServer(
           if (existingAssistant.org_id != null && existingAssistant.org_id !== auth.orgId) {
             throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
           }
-          if (!authService.isCreatorInScope(auth.orgId, existingAssistant.author_id as string, auth)) {
+          if (!(await authService.isCreatorInScope(auth.orgId, existingAssistant.author_id as string, auth))) {
             throw new HttpError(403, 'You cannot manage this tenant assistant')
           }
         }
@@ -8860,7 +9019,7 @@ export function startServer(
         // admin set are dropped — the client warns before this happens). This
         // no longer overwrites a legitimate in-scope choice with their default.
         if (!agentStoreAdmin && body.visible_to !== undefined) {
-          body.visible_to = authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+          body.visible_to = await authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
         }
 
         const updates: Record<string, unknown> = {}
@@ -8924,7 +9083,7 @@ export function startServer(
           updates.workflow = body.workflow ? JSON.stringify(body.workflow) : null
         }
 
-        const tenantAssistantBeforeUpdate = runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistantBeforeUpdate = await runtime.store.getTenantAssistant(tenantAssistantId)
         const assistantDirBeforeUpdate = tenantAssistantBeforeUpdate?.file_path as string | undefined
         const metaBeforeUpdate = assistantDirBeforeUpdate && existsSync(assistantDirBeforeUpdate)
           ? await readAssistantMeta(assistantDirBeforeUpdate)
@@ -8937,14 +9096,14 @@ export function startServer(
         }
 
         try {
-          runtime.store.updateTenantAssistantMeta(tenantAssistantId, updates)
+          await runtime.store.updateTenantAssistantMeta(tenantAssistantId, updates)
         } catch (error) {
           if (updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, updates.avatar as string)
           throw error
         }
 
         // Sync the metadata in the record's current approved or pending directory.
-        const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
         if (tenantAssistant) {
           const assistantDir = tenantAssistant.file_path as string | undefined
           if (assistantDir && existsSync(assistantDir)) {
@@ -8988,14 +9147,14 @@ export function startServer(
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
-        const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
         // Non-admins may only delete tenant assistants authored by someone
         // currently in their scope, within their own org.
         if (tenantAssistant && !isStoreAdmin(auth)) {
           if (tenantAssistant.org_id != null && tenantAssistant.org_id !== auth.orgId) {
             throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
           }
-          if (!authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth)) {
+          if (!(await authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth))) {
             throw new HttpError(403, 'You cannot manage this tenant assistant')
           }
         }
@@ -9010,7 +9169,7 @@ export function startServer(
             rmSync(assistantDir, { recursive: true, force: true })
           }
         }
-        runtime.store.deleteTenantAssistant(tenantAssistantId)
+        await runtime.store.deleteTenantAssistant(tenantAssistantId)
         writeJson(res, 200, { ok: true })
         return
       }
@@ -9019,7 +9178,7 @@ export function startServer(
       const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantAgentDownloadMatch) {
         const tenantAssistantId = decodeURIComponent(tenantAgentDownloadMatch[1] || '')
-        const tenantAssistant = runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
         if (!tenantAssistant || tenantAssistant.status !== 'approved') {
           throw new HttpError(404, `Tenant assistant not found or not approved: ${tenantAssistantId}`)
         }
@@ -9088,7 +9247,7 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/skills/installed') {
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         // Scan all managed skill dirs (hub/system/custom/tenant), not just hub,
         // so tenant + custom skills are linkable by assistants and appear in the
         // Skills page's custom/local groups. Visibility is still enforced below.
@@ -9295,16 +9454,25 @@ export function startServer(
       // GET /api/v1/skills/tenant - List tenant skills
       if (req.method === 'GET' && pathname === '/api/v1/skills/tenant') {
         const status = url.searchParams.get('status') || undefined
-        const allRows = runtime.store.listTenantSkills(status, auth.orgId)
+        const allRows = await runtime.store.listTenantSkills(status, auth.orgId)
         // Filter by visibility for non-admin users
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         const isAdmin = hasScope(auth.scopes, 'admin:settings')
+        // Pre-resolve author-in-scope once per distinct author (isCreatorInScope
+        // is async now); the sync filter/map below read from this map.
+        const canManageByAuthor = new Map<string, boolean>()
+        for (const row of allRows as Array<Record<string, unknown>>) {
+          const authorId = row.author_id as string
+          if (!canManageByAuthor.has(authorId)) {
+            canManageByAuthor.set(authorId, await authService.isCreatorInScope(auth.orgId, authorId, auth))
+          }
+        }
         const rows = allRows
           .filter((row: Record<string, unknown>) => {
             // A caller can always see items they may manage (author in scope),
             // even if the item's visibility wouldn't otherwise match — this is
             // the "or created by himself/subtree" clause of the spec.
-            const canManage = authService.isCreatorInScope(auth.orgId, row.author_id as string, auth)
+            const canManage = canManageByAuthor.get(row.author_id as string) ?? false
             if (row.status === 'pending') return isAdmin || canManage
             if (row.status === 'approved') {
               if (canManage) return true
@@ -9319,7 +9487,7 @@ export function startServer(
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
             // Lets the frontend show edit/delete without re-deriving subtree math.
-            can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
+            can_manage: isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false),
           }))
         writeJson(res, 200, rows)
         return
@@ -9360,7 +9528,7 @@ export function startServer(
         const body = await readJsonBody(req)
 
         // Get author name from user info
-        const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
         // Visibility policy (same as agent create): admin as submitted;
         // dept_admin as submitted (default own dept when unset); normal user
@@ -9368,11 +9536,11 @@ export function startServer(
         const skillStatus = storeAdmin ? 'approved' : 'pending'
         const requestedVisibleTo = storeAdmin
           ? (body.visible_to ?? null)
-          : authService.isDeptAdmin(auth)
+          : (await authService.isDeptAdmin(auth))
             ? (body.visible_to !== undefined
                 ? body.visible_to
-                : (authService.defaultTenantVisibility(auth) ?? null))
-            : (authService.defaultTenantVisibility(auth) ?? null)
+                : ((await authService.defaultTenantVisibility(auth)) ?? null))
+            : ((await authService.defaultTenantVisibility(auth)) ?? null)
         const skillResponse = (result: unknown) =>
           storeAdmin
             ? result
@@ -9388,7 +9556,7 @@ export function startServer(
             pending: !storeAdmin,
           })
 
-          runtime.store.createTenantSkill({
+          await runtime.store.createTenantSkill({
             id: result.id,
             name: result.skillName,
             display_name: result.displayName,
@@ -9424,7 +9592,7 @@ export function startServer(
             pending: !storeAdmin,
           })
 
-          runtime.store.createTenantSkill({
+          await runtime.store.createTenantSkill({
             id: result.id,
             name: result.skillName,
             display_name: result.displayName,
@@ -9468,16 +9636,16 @@ export function startServer(
         const actualSkillName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : dirName
 
         // Get author name from user info
-        const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
         // Create tenant skill record with metadata from source skill. Stamp the
         // publisher's default visibility (dept_admin → own department, user →
         // self) at publish time so it survives approval instead of defaulting to
         // global. Admins get null (global), unchanged.
-        const publishVisibility = authService.defaultTenantVisibility(auth)
+        const publishVisibility = await authService.defaultTenantVisibility(auth)
         const id = `tenant-skill-${Date.now()}`
-        runtime.store.createTenantSkill({
+        await runtime.store.createTenantSkill({
           id,
           name: actualSkillName,
           display_name: meta?.display_name || actualSkillName,
@@ -9503,24 +9671,24 @@ export function startServer(
         const approved = body.approved === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
-        const tenantSkill = runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
         if (!tenantSkill) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
 
         if (approved) {
           // Update status to approved
-          runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
+          await runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
           // Preserve the publisher's default visibility (dept/self) through
           // approval. An admin may still override it by passing visible_to in the
           // approve body; a record published before this change (no visible_to)
           // falls back to global (null), the prior behavior.
           if (body.visible_to !== undefined) {
-            runtime.store.updateTenantSkillMeta(tenantSkillId, {
+            await runtime.store.updateTenantSkillMeta(tenantSkillId, {
               visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
             })
           } else if (tenantSkill.visible_to == null) {
-            runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
+            await runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
           }
           // Copy skill to tenant directory using the record's staged file_path
           // (tenant-pending for non-admin submissions), falling back to the
@@ -9531,7 +9699,7 @@ export function startServer(
           // Point file_path at the tenant copy, and MOVE (remove the staged
           // source) for tenant-pending items so the skill lives only in tenant.
           const tenantSkillPath = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          runtime.store.updateTenantSkillFilePath(
+          await runtime.store.updateTenantSkillFilePath(
             tenantSkillId,
             tenantSkillPath,
             typeof tenantSkill.source_url === 'string' ? tenantSkill.source_url : '',
@@ -9541,7 +9709,7 @@ export function startServer(
             rmSync(sourcePath, { recursive: true, force: true })
           }
         } else {
-          runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
+          await runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
           // Clean up staged files for a rejected non-admin submission.
           const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
           if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
@@ -9558,7 +9726,7 @@ export function startServer(
       if (req.method === 'PATCH' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
-        const existing = runtime.store.getTenantSkill(tenantSkillId)
+        const existing = await runtime.store.getTenantSkill(tenantSkillId)
         if (!existing) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
@@ -9570,7 +9738,7 @@ export function startServer(
           if (existing.org_id != null && existing.org_id !== auth.orgId) {
             throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
           }
-          if (!authService.isCreatorInScope(auth.orgId, existing.author_id as string, auth)) {
+          if (!(await authService.isCreatorInScope(auth.orgId, existing.author_id as string, auth))) {
             throw new HttpError(403, 'You cannot manage this tenant skill')
           }
         }
@@ -9587,14 +9755,14 @@ export function startServer(
           // longer overwrites a legitimate in-scope choice with their default.
           const clamped = skillStoreAdmin
             ? (body.visible_to as VisibleTo)
-            : authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+            : await authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
           updates.visible_to = clamped ? JSON.stringify(clamped) : null
         }
 
-        runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
+        await runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
 
         // Sync enabled/visible_to to file metadata
-        const tenantSkill = runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
         if (tenantSkill && tenantSkill.status === 'approved') {
           const skillName = tenantSkill.name as string
           const skillDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
@@ -9622,14 +9790,14 @@ export function startServer(
       if (req.method === 'DELETE' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
-        const tenantSkill = runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
         // Non-admins may only delete tenant skills authored by someone currently
         // in their scope, within their own org.
         if (tenantSkill && !isStoreAdmin(auth)) {
           if (tenantSkill.org_id != null && tenantSkill.org_id !== auth.orgId) {
             throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
           }
-          if (!authService.isCreatorInScope(auth.orgId, tenantSkill.author_id as string, auth)) {
+          if (!(await authService.isCreatorInScope(auth.orgId, tenantSkill.author_id as string, auth))) {
             throw new HttpError(403, 'You cannot manage this tenant skill')
           }
         }
@@ -9641,7 +9809,7 @@ export function startServer(
             rmSync(skillDir, { recursive: true, force: true })
           }
         }
-        runtime.store.deleteTenantSkill(tenantSkillId)
+        await runtime.store.deleteTenantSkill(tenantSkillId)
         writeJson(res, 200, { ok: true })
         return
       }
@@ -9650,7 +9818,7 @@ export function startServer(
       const tenantSkillDownloadMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantSkillDownloadMatch) {
         const tenantSkillId = decodeURIComponent(tenantSkillDownloadMatch[1] || '')
-        const tenantSkill = runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
         if (!tenantSkill || tenantSkill.status !== 'approved') {
           throw new HttpError(404, `Tenant skill not found or not approved: ${tenantSkillId}`)
         }
@@ -9830,17 +9998,16 @@ export function startServer(
         // dept_admins included); everyone else → their own only.
         const sessionSubtree = hasScope(auth.scopes, 'sessions:list:any')
           ? null
-          : authService.listSubtreeUserIds(auth.orgId, auth)
-        let sessions: ReturnType<typeof runtime.listSessions>
+          : await authService.listSubtreeUserIds(auth.orgId, auth)
+        let sessions: Awaited<ReturnType<typeof runtime.listSessions>>
         if (hasScope(auth.scopes, 'sessions:list:any')) {
-          sessions = runtime.listSessions({ orgId: auth.orgId, activeOnly })
+          sessions = await runtime.listSessions({ orgId: auth.orgId, activeOnly })
         } else if (sessionSubtree && sessionSubtree.size > 1) {
           // dept_admin: list the whole org, then narrow to the subtree set.
-          sessions = runtime
-            .listSessions({ orgId: auth.orgId, activeOnly })
+          sessions = (await runtime.listSessions({ orgId: auth.orgId, activeOnly }))
             .filter(session => sessionSubtree.has(session.userId))
         } else {
-          sessions = runtime.listSessions({ orgId: auth.orgId, userId: auth.userId, activeOnly })
+          sessions = await runtime.listSessions({ orgId: auth.orgId, userId: auth.userId, activeOnly })
         }
 
         // Filter by source if provided
@@ -9859,10 +10026,10 @@ export function startServer(
         // Attach an org-agnostic owner name so the admin UI can display owners
         // outside this org's roster (e.g. a switched super_admin) by name.
         const resolveName = makeUserNameResolver(resolveUserName)
-        const sessionsWithOwner = sessions.map(session => ({
+        const sessionsWithOwner = await Promise.all(sessions.map(async session => ({
           ...session,
-          userName: resolveName(session.userId),
-        }))
+          userName: await resolveName(session.userId),
+        })))
 
         writeJson(res, 200, { sessions: sessionsWithOwner })
         return
@@ -9879,13 +10046,13 @@ export function startServer(
           throw new HttpError(400, 'Invalid dashboard stats range')
         }
 
-        const sessions = runtime
+        const sessions = (await runtime
           .listSessionRecords({
             orgId: auth.orgId,
             userId: hasScope(auth.scopes, 'sessions:list:any')
               ? undefined
               : auth.userId,
-          })
+          }))
           .filter(session => {
             if (from !== null && session.createdAt < from) {
               return false
@@ -9907,16 +10074,15 @@ export function startServer(
         // own only. Budget is derived from sessions, so it follows the same rule.
         const budgetSubtree = hasScope(auth.scopes, 'sessions:list:any')
           ? null
-          : authService.listSubtreeUserIds(auth.orgId, auth)
-        let sessions: ReturnType<typeof runtime.listSessionRecords>
+          : await authService.listSubtreeUserIds(auth.orgId, auth)
+        let sessions: Awaited<ReturnType<typeof runtime.listSessionRecords>>
         if (hasScope(auth.scopes, 'sessions:list:any')) {
-          sessions = runtime.listSessionRecords({ orgId: auth.orgId })
+          sessions = await runtime.listSessionRecords({ orgId: auth.orgId })
         } else if (budgetSubtree && budgetSubtree.size > 1) {
-          sessions = runtime
-            .listSessionRecords({ orgId: auth.orgId })
+          sessions = (await runtime.listSessionRecords({ orgId: auth.orgId }))
             .filter(session => budgetSubtree.has(session.userId))
         } else {
-          sessions = runtime.listSessionRecords({ orgId: auth.orgId, userId: auth.userId })
+          sessions = await runtime.listSessionRecords({ orgId: auth.orgId, userId: auth.userId })
         }
 
         const stats = await loadBudgetStats(sessions)
@@ -9926,7 +10092,7 @@ export function startServer(
         const resolveName = makeUserNameResolver(resolveUserName)
         const statsWithNames = {
           ...stats,
-          users: stats.users.map(u => ({ ...u, userName: resolveName(u.userId) })),
+          users: await Promise.all(stats.users.map(async u => ({ ...u, userName: await resolveName(u.userId) }))),
         }
         writeJson(res, 200, statsWithNames)
         return
@@ -9935,7 +10101,7 @@ export function startServer(
       const sessionContextMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/context$/)
       if (req.method === 'GET' && sessionContextMatch) {
         const sessionId = sessionContextMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
@@ -9949,7 +10115,7 @@ export function startServer(
         writeJson(res, 200, {
           session: {
             ...serializeSession(session),
-            userName: resolveUserName(session.userId),
+            userName: await resolveUserName(session.userId),
           },
           usage: context.usage,
           context: {
@@ -9965,7 +10131,7 @@ export function startServer(
       const sessionResumeMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/resume$/)
       if (req.method === 'POST' && sessionResumeMatch) {
         const sessionId = sessionResumeMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
@@ -9973,9 +10139,14 @@ export function startServer(
           throw new HttpError(403, 'Forbidden')
         }
         const ready = await runtime.ensureSessionReady(sessionId)
+        const owner = ready.session.currentAttemptId
+          ? await runtime.store.getAttemptOwnerStatus(ready.session.currentAttemptId, config.heartbeatTimeoutMs)
+          : { ownerInstanceId: null, ownerLive: false }
         writeJson(res, 200, {
           session: serializeSession(ready.session),
-          ws_url: buildWsUrl(server, config, sessionId),
+          ws_url: buildWsUrl(server, config, sessionId, wsRouteHint(config, owner)),
+          owner_instance_id: owner.ownerInstanceId,
+          owner_live: owner.ownerLive,
         })
         return
       }
@@ -9983,7 +10154,7 @@ export function startServer(
       const sessionTerminateMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/terminate$/)
       if (req.method === 'POST' && sessionTerminateMatch) {
         const sessionId = sessionTerminateMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
@@ -9998,7 +10169,7 @@ export function startServer(
       const sessionWorkspaceTreeMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/workspace\/tree$/)
       if (req.method === 'GET' && sessionWorkspaceTreeMatch) {
         const sessionId = sessionWorkspaceTreeMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
@@ -10014,7 +10185,7 @@ export function startServer(
       const sessionWorkspaceFileMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/workspace\/file$/)
       if (req.method === 'GET' && sessionWorkspaceFileMatch) {
         const sessionId = sessionWorkspaceFileMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
@@ -10029,7 +10200,7 @@ export function startServer(
 
       if (req.method === 'POST' && sessionWorkspaceFileMatch) {
         const sessionId = sessionWorkspaceFileMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
@@ -10046,19 +10217,19 @@ export function startServer(
       const sessionAvailableSkillsMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/skills\/available$/)
       if (req.method === 'GET' && sessionAvailableSkillsMatch) {
         const sessionId = sessionAvailableSkillsMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
-        writeJson(res, 200, { skills: getSessionAvailableSkills(runtime, sessionId) })
+        writeJson(res, 200, { skills: await getSessionAvailableSkills(runtime, sessionId) })
         return
       }
 
       const sessionIdMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)$/)
       if (req.method === 'GET' && sessionIdMatch) {
         const sessionId = sessionIdMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
@@ -10073,16 +10244,21 @@ export function startServer(
           session.desiredState === 'active'
             ? await runtime.ensureSessionReadyNonBlocking(sessionId)
             : { session }
+        const owner = ready.session.currentAttemptId
+          ? await runtime.store.getAttemptOwnerStatus(ready.session.currentAttemptId, config.heartbeatTimeoutMs)
+          : { ownerInstanceId: null, ownerLive: false }
         writeJson(res, 200, {
           session: serializeSession(ready.session),
-          ws_url: buildWsUrl(server, config, ready.session.sessionId),
+          ws_url: buildWsUrl(server, config, ready.session.sessionId, wsRouteHint(config, owner)),
+          owner_instance_id: owner.ownerInstanceId,
+          owner_live: owner.ownerLive,
         })
         return
       }
 
       if (req.method === 'PATCH' && sessionIdMatch) {
         const sessionId = sessionIdMatch[1] || ''
-        const session = runtime.getSession(sessionId)
+        const session = await runtime.getSession(sessionId)
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
@@ -10091,7 +10267,7 @@ export function startServer(
         }
         const body = await readJsonBody(req)
         if (typeof body.title === 'string') {
-          runtime.store.updateSessionMetadata(sessionId, { title: body.title })
+          await runtime.store.updateSessionMetadata(sessionId, { title: body.title })
         }
         // Shallow-merge opaque per-session client metadata. A key set to null
         // (JSON has no undefined) deletes it; the store treats undefined as
@@ -10101,9 +10277,9 @@ export function startServer(
           for (const [key, value] of Object.entries(body.client_metadata as Record<string, unknown>)) {
             patch[key] = value === null ? undefined : value
           }
-          runtime.store.updateSessionClientMetadata(sessionId, patch)
+          await runtime.store.updateSessionClientMetadata(sessionId, patch)
         }
-        const updated = runtime.getSession(sessionId) ?? session
+        const updated = await runtime.getSession(sessionId) ?? session
         writeJson(res, 200, { session: serializeSession(updated) })
         return
       }
@@ -10147,11 +10323,19 @@ export function startServer(
             ? body.enabled_skills.filter((s: unknown) => typeof s === 'string')
             : undefined,
         })
+        // createSession awaits spawnAttempt internally (runtimeService.ts
+        // createSession), so the attempt exists and is owned by THIS instance
+        // here — deterministic routing to self, no pool round-trip 409.
+        const owner = created.currentAttemptId
+          ? await runtime.store.getAttemptOwnerStatus(created.currentAttemptId, config.heartbeatTimeoutMs)
+          : { ownerInstanceId: null, ownerLive: false }
         writeJson(res, 200, {
           session_id: created.sessionId,
-          ws_url: buildWsUrl(server, config, created.sessionId),
+          ws_url: buildWsUrl(server, config, created.sessionId, wsRouteHint(config, owner)),
           work_dir: created.cwd,
           runtime: created.runtime,
+          owner_instance_id: owner.ownerInstanceId,
+          owner_live: owner.ownerLive,
         })
         return
       }
@@ -10165,9 +10349,9 @@ export function startServer(
   server.on('upgrade', (req, socket, head) => {
     void (async () => {
       try {
-        process.stderr.write(`[WS Upgrade] Incoming request: ${req.url}\n`)
+        process.stderr.write(`[WS Upgrade] Incoming request: ${redactWsUrl(req.url)}\n`)
         let token = getBearerToken(req)
-        let auth = token ? authService.verifyAccessToken(token) : null
+        let auth = token ? await authService.verifyAccessToken(token) : null
 
         // If access_token is expired, try refreshing with refresh_token from query param
         if (token && !auth) {
@@ -10175,8 +10359,8 @@ export function startServer(
           const refreshToken = url.searchParams.get('refresh_token')
           if (refreshToken) {
             try {
-              const refreshed = authService.refreshToken(refreshToken)
-              auth = authService.verifyAccessToken(refreshed.access_token)
+              const refreshed = await authService.refreshToken(refreshToken)
+              auth = await authService.verifyAccessToken(refreshed.access_token)
               if (auth) {
                 token = refreshed.access_token
                 process.stderr.write(`[WS Upgrade] Token refreshed successfully for user: ${auth.userId}\n`)
@@ -10188,13 +10372,13 @@ export function startServer(
         }
 
         if (!auth) {
-          process.stderr.write(`[WS Upgrade Auth Failed v2] Token: ${token ? (token.slice(0, 10) + '...') : 'MISSING'}, URL: ${req.url}\n`)
+          process.stderr.write(`[WS Upgrade Auth Failed v2] Token: ${token ? (token.slice(0, 10) + '...') : 'MISSING'}, URL: ${redactWsUrl(req.url)}\n`)
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
           socket.destroy()
           return
         }
 
-        if (!isUserActive(auth.userId, authService)) {
+        if (!(await isUserActive(auth.userId, authService))) {
           process.stderr.write(`[WS Upgrade] User ${auth.userId} is disabled\n`)
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
           socket.destroy()
@@ -10206,6 +10390,102 @@ export function startServer(
         const url = new URL(req.url || '/', 'http://localhost')
         const pathname = url.pathname
 
+        // Internal server-side channel (HA): bare newline-delimited
+        // runnerProtocol passthrough in BOTH directions — unlike the
+        // Electron-facing /ws/sessions endpoint (which wraps any message as
+        // stdin and only relays stdout lines). CronService/EventTrigger
+        // depend on stdin_ack, stderr/state must flow: no type filtering
+        // here, every line goes through verbatim.
+        const internalMatch = pathname.match(/^\/ws\/internal\/sessions\/([^/]+)$/)
+        if (internalMatch) {
+          const sessionId = decodeURIComponent(internalMatch[1] || '')
+          const session = await runtime.getSession(sessionId)
+          if (!session) {
+            socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          // Server-side consumers only (CronService/EventTrigger/channels):
+          // their short-lived tokens carry the 'internal:channel' scope from
+          // issueInternalChannelToken. A regular user/admin token — which
+          // passes canAccessSession via the self/attach-any branch — must not
+          // reach the raw runner-protocol passthrough below (arbitrary
+          // protocol frames both ways, e.g. shutdown). hasExactScope, NOT
+          // hasScope: admin/super_admin logins carry the `*` wildcard, which
+          // would satisfy hasScope's expansion and defeat this gate entirely.
+          if (!hasExactScope(auth.scopes, 'internal:channel')) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          const locallyOwned = session.currentAttemptId
+            ? await runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
+            : null
+          if (runtime.draining && !locallyOwned) {
+            socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          if (
+            session.currentAttemptId &&
+            !locallyOwned &&
+            !await runtime.tryOwnAttempt(session.currentAttemptId)
+          ) {
+            process.stderr.write(
+              `[WS Upgrade internal] session ${sessionId} is owned by a live other instance — not bridging here\n`,
+            )
+            socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          try {
+            const ready = await runtime.ensureSessionReady(sessionId)
+            const runnerSocket = await runtime.connectToAttempt(ready.attempt)
+            wss.handleUpgrade(req, socket, head, ws => {
+              let buffer = ''
+              ws.on('message', data => {
+                const text = wsDataToText(data)
+                if (!runnerSocket.destroyed) {
+                  runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
+                }
+              })
+              ws.on('close', () => runnerSocket.destroy())
+              ws.on('error', () => runnerSocket.destroy())
+              runnerSocket.on('data', chunk => {
+                buffer += Buffer.from(chunk).toString('utf8')
+                while (true) {
+                  const idx = buffer.indexOf('\n')
+                  if (idx < 0) break
+                  const line = buffer.slice(0, idx)
+                  buffer = buffer.slice(idx + 1)
+                  if (!line.trim()) continue
+                  if (ws.readyState === ws.OPEN) ws.send(line)
+                }
+              })
+              runnerSocket.on('close', () => {
+                if (ws.readyState === ws.OPEN) ws.close()
+              })
+              runnerSocket.on('error', () => {
+                if (ws.readyState === ws.OPEN) ws.close()
+              })
+            })
+          } catch (error) {
+            if (error instanceof AttemptTakeoverPendingError) {
+              socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+              socket.destroy()
+              return
+            }
+            logger.error(error instanceof Error ? error.message : String(error))
+            socket.destroy()
+          }
+          return
+        }
+
         // Handle /ws/sessions/:sessionId for session WebSocket
         const match = pathname.match(/^\/ws\/sessions\/([^/]+)$/)
         if (!match) {
@@ -10214,8 +10494,8 @@ export function startServer(
           return
         }
 
-        const sessionId = match[1] || ''
-        const session = runtime.getSession(sessionId)
+        const sessionId = decodeURIComponent(match[1] || '')
+        const session = await runtime.getSession(sessionId)
         if (!session) {
           socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
           socket.destroy()
@@ -10233,8 +10513,8 @@ export function startServer(
         // instance owns it (the LB routed us the wrong backend, or a failover is
         // mid-flight), reject with 409 so the client re-fetches ws_url / re-routes
         // to the owner rather than us proxying a runner we do not hold.
-        const locallyOwnedAttempt = session.currentAttemptId
-          ? runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
+        let locallyOwnedAttempt = session.currentAttemptId
+          ? await runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
           : null
         // Graceful drain: reject WS handshakes that would cold-start a runner
         // here (no locally-owned running attempt). Placed before tryOwnAttempt so
@@ -10245,15 +10525,32 @@ export function startServer(
           socket.destroy()
           return
         }
+        if (session.currentAttemptId && !locallyOwnedAttempt) {
+          if (!await runtime.tryOwnAttempt(session.currentAttemptId)) {
+            process.stderr.write(
+              `[WS Upgrade] session ${sessionId} is owned by a live other instance — not bridging here\n`,
+            )
+            socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+            socket.destroy()
+            return
+          }
+          // M-3: the claim just flipped DB ownership to self — re-read so the
+          // A-2 guard below (ownsAttemptRunner fast path) actually runs instead
+          // of being skipped by the stale pre-claim null snapshot.
+          locallyOwnedAttempt = await runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
+        }
+
+        // A-2: the fast path below bridges without ensureSessionReady's
+        // manifest guard. After a same-host adopt, DB ownership says "self"
+        // but the live socket may still be served by the OLD instance's
+        // daemon (its manifest carries the old instanceId) — fencing kills
+        // it within one heartbeat interval. 503 so the client retries after
+        // the fence instead of being handed a runner that is about to die.
         if (
-          session.currentAttemptId &&
-          !locallyOwnedAttempt &&
-          !runtime.tryOwnAttempt(session.currentAttemptId)
+          locallyOwnedAttempt &&
+          !await runtime.ownsAttemptRunner(locallyOwnedAttempt.attemptId)
         ) {
-          process.stderr.write(
-            `[WS Upgrade] session ${sessionId} is owned by a live other instance — not bridging here\n`,
-          )
-          socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
           socket.destroy()
           return
         }
@@ -10278,10 +10575,7 @@ export function startServer(
             }
 
             ws.on('message', data => {
-              const text =
-                typeof data === 'string'
-                  ? data
-                  : Buffer.from(data).toString('utf8')
+              const text = wsDataToText(data)
               process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
               sendToRunner({
                 type: 'stdin',
@@ -10345,6 +10639,13 @@ export function startServer(
         })
       } catch (error) {
         logger.error(error instanceof Error ? error.message : String(error))
+        // Takeover in progress: fail the handshake with 503 (retryable) so
+        // LB-side consumers and clients converge once fencing completes.
+        if (error instanceof AttemptTakeoverPendingError) {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+          socket.destroy()
+          return
+        }
         socket.destroy()
       }
     })()
@@ -10398,7 +10699,7 @@ export function startServer(
           return
         }
         const id = m[1] || ''
-        const row = runtime.store.getCorpAppById(id) as Record<string, unknown> | null
+        const row = await runtime.store.getCorpAppById(id) as Record<string, unknown> | null
         if (!row) {
           res.writeHead(404, { 'Content-Type': 'text/plain' })
           res.end('not found')
@@ -10448,7 +10749,7 @@ export function startServer(
                 body: bodyText,
               })
               for (const msg of messages) {
-                runtime.store.appendCorpAppInbound({
+                await runtime.store.appendCorpAppInbound({
                   corp_app_id: id,
                   org_id: String(row.org_id),
                   from_user: msg.from,
@@ -10497,7 +10798,18 @@ export function startServer(
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()
+      // B-2: event triggers must stop claiming runs during the drain window
+      // too — otherwise the ≤2s tick keeps claimQueuedRuns'ing runs that die
+      // with the process (stuck 'running' until the next instance's startup
+      // reap marks them error). stop() exists but had no caller.
+      eventTriggerService.stop()
       msgAuditPurgeWorker.stop()
+      getConfigStore().stopRefreshPolling()
+      // Stop channel plugins (and release their HA leases) on graceful shutdown
+      // so a peer can take them over immediately instead of waiting the TTL.
+      await channelManager.stopAllPlugins().catch(err =>
+        console.error('[server] stopAllPlugins failed:', err),
+      )
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())
