@@ -169,10 +169,6 @@ export function getDefaultServerConfig(): ServerFileConfig {
     },
     systemConfig: {
       loginMethod: 1,
-      thirdPartyAuth: {
-        enabled: true,
-        providers: [],
-      },
       rechargeMode: 'disabled',
       initialPoints: 0,
       creditApplication: {
