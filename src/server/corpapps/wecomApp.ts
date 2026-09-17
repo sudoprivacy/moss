@@ -66,6 +66,8 @@ export class WeComAppConnector implements CorpAppConnector {
     'info',
     'downloadMedia',
     'getUserName',
+    'resolveNames',
+    'resolveRoomNames',
     'listApprovals',
     'getApproval',
     'listCustomerGroups',
@@ -220,6 +222,73 @@ export class WeComAppConnector implements CorpAppConnector {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Resolve many userids to display names in one call.
+   *
+   * WeCom has no batch user endpoint, so internal ids cost one request
+   * each (~500ms). Supplying `roomId` avoids that entirely for group
+   * members: `externalcontact/groupchat/get` returns the whole member
+   * roster with names in a SINGLE call, which is why on-demand lookup is
+   * cheap where filling names at archive time was not.
+   *
+   * Unresolved ids map to themselves, so callers can render the result
+   * directly without a second fallback pass.
+   */
+  async resolveNames(
+    userIds: string[],
+    roomId?: string,
+  ): Promise<Record<string, string>> {
+    const wanted = [...new Set(userIds.filter(id => id))]
+    const out: Record<string, string> = {}
+    for (const id of wanted) out[id] = id
+
+    // Fast path: one call names every member of the group.
+    if (roomId) {
+      try {
+        const r = await this.getCustomerGroup(roomId, true)
+        const g = (r.group_chat ?? r) as Record<string, unknown>
+        for (const m of (g.member_list as Record<string, unknown>[] | undefined) ?? []) {
+          const uid = typeof m.userid === 'string' ? m.userid : ''
+          const nm = typeof m.name === 'string' ? m.name : ''
+          if (uid && nm && Object.prototype.hasOwnProperty.call(out, uid)) out[uid] = nm
+        }
+      } catch {
+        // Not an external group (90501) or no access — fall through to
+        // per-id lookups below for whatever is still unresolved.
+      }
+    }
+
+    // Anything still unnamed needs an individual directory call.
+    for (const id of wanted) {
+      if (out[id] !== id) continue
+      const nm = await this.getUserName(id, /^(wo|wm)_/.test(id))
+      if (nm) out[id] = nm
+    }
+    return out
+  }
+
+  /**
+   * Resolve many roomids to group names. One call per room — WeCom has no
+   * batch group endpoint — but a room is asked about once, not once per
+   * message. Unresolved ids (internal groups answer 90501) map to
+   * themselves.
+   */
+  async resolveRoomNames(roomIds: string[]): Promise<Record<string, string>> {
+    const out: Record<string, string> = {}
+    for (const id of [...new Set(roomIds.filter(id => id))]) {
+      out[id] = id
+      try {
+        const r = await this.getCustomerGroup(id, false)
+        const g = (r.group_chat ?? r) as Record<string, unknown>
+        const nm = g?.name
+        if (typeof nm === 'string' && nm) out[id] = nm
+      } catch {
+        // internal group or no access — keep the id
+      }
+    }
+    return out
   }
 
   /**

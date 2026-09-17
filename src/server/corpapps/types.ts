@@ -225,6 +225,16 @@ export interface CorpAppConnector {
    */
   getUserName?(userId: string, external: boolean): Promise<string | null>
 
+  /**
+   * Optional: resolve many userids to display names at once. Passing the
+   * room they belong to lets a provider name the whole roster in one
+   * call. Unresolved ids map to themselves.
+   */
+  resolveNames?(userIds: string[], roomId?: string): Promise<Record<string, string>>
+
+  /** Optional: resolve many roomids to group names; unresolved map to themselves. */
+  resolveRoomNames?(roomIds: string[]): Promise<Record<string, string>>
+
   /** Optional: identity/info about the connected app. */
   getInfo?(): Promise<CorpAppInfo>
 

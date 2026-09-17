@@ -94,6 +94,8 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runApprovals(rest, c, opts)
 	case "approval":
 		err = runApproval(rest, c, opts)
+	case "names":
+		err = runNames(rest, c, opts)
 	case "groups":
 		err = runGroups(rest, c, opts)
 	case "group":
@@ -586,6 +588,45 @@ func runApproval(args []string, c *Client, opts RunOptions) error {
 // ============================================================
 // customer groups (客户群) + group broadcast (群发)
 // ============================================================
+
+// runNames resolves ids to display names on demand.
+//
+// Archived transcripts store ids only: filling names in at archive time
+// meant a WeCom round trip (~500ms) per distinct id per pull, which for a
+// 20-person group was ~11s of blocking on every pull, repeated forever.
+// Resolving here means a reader pays once, for exactly the ids it cares
+// about — and --room names the entire roster in one provider call.
+func runNames(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("names", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	users := fs.String("users", "", "userid(s) to resolve, comma-separated")
+	rooms := fs.String("rooms", "", "roomid(s) to resolve to group names, comma-separated")
+	room := fs.String("room", "", "resolve --users as members of this room (one call for the whole roster)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || (*users == "" && *rooms == "") {
+		return errors.New("usage: corpapp names --app <name> [--users <userid,...>] [--rooms <roomid,...>] [--room <roomid>]")
+	}
+	split := func(v string) []string {
+		var out []string
+		for _, p := range strings.Split(v, ",") {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	raw, err := c.ResolveNames(resolved.ID, split(*users), split(*rooms), *room)
+	if err != nil {
+		return err
+	}
+	return FormatRawJSON(opts.Stdout, raw)
+}
 
 func runGroups(args []string, c *Client, opts RunOptions) error {
 	fs := flag.NewFlagSet("groups", flag.ContinueOnError)

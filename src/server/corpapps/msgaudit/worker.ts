@@ -19,11 +19,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PullConfig, PullResult } from './puller.js'
 
-/** A name lookup the child needs us to perform (see pullChild.ts). */
-type LookupRequest = { kind: 'lookup'; id: number; userId: string; external: boolean }
-type RoomLookupRequest = { kind: 'roomLookup'; id: number; roomId: string }
 type ResultMessage = { ok: boolean; result?: PullResult; error?: string }
-type ChildMessage = LookupRequest | RoomLookupRequest | ResultMessage
+type ChildMessage = ResultMessage
 
 /**
  * Locate the forked child's entrypoint.
@@ -108,49 +105,6 @@ export function pullInChild(cfg: PullConfig): Promise<PullResult> {
     timer.unref()
 
     child.on('message', (msg: ChildMessage) => {
-      // The child cannot be handed cfg.nameLookup directly — IPC is JSON,
-      // so a function arrives as undefined. It asks us instead, and we
-      // answer here where the connector and its credentials live.
-      if (msg && (msg as LookupRequest).kind === 'lookup') {
-        const req = msg as LookupRequest
-        const answer = (name: string | null) => {
-          try {
-            child.send({ kind: 'lookupResult', id: req.id, name })
-          } catch {
-            // child already gone; its own timeout will unblock it
-          }
-        }
-        if (!cfg.nameLookup) {
-          answer(null)
-          return
-        }
-        cfg
-          .nameLookup(req.userId, req.external)
-          .then(answer)
-          .catch(() => answer(null))
-        return
-      }
-
-      if (msg && (msg as RoomLookupRequest).kind === 'roomLookup') {
-        const req = msg as RoomLookupRequest
-        const answer = (name: string | null) => {
-          try {
-            child.send({ kind: 'lookupResult', id: req.id, name })
-          } catch {
-            // child already gone; its own timeout will unblock it
-          }
-        }
-        if (!cfg.roomNameLookup) {
-          answer(null)
-          return
-        }
-        cfg
-          .roomNameLookup(req.roomId)
-          .then(answer)
-          .catch(() => answer(null))
-        return
-      }
-
       const done = msg as ResultMessage
       finish(() => {
         child.kill()
@@ -237,7 +191,6 @@ export class MsgAuditWorker {
               (r.filtered > 0 ? ` filtered=${r.filtered}` : '') +
               (r.media > 0 ? ` media=${r.media}` : '') +
               (r.mediaFailed > 0 ? ` mediaFailed=${r.mediaFailed}` : '') +
-              (r.namesResolved > 0 ? ` names=${r.namesResolved}` : '') +
               ` cursor=${r.cursor}` +
               (capped ? ` (page cap reached; resuming next tick)` : ''),
           )

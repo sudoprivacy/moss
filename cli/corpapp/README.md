@@ -23,6 +23,9 @@ corpapp download --app <name> --media-id <id> [--out <path>]             # fetch
 corpapp approvals --app <name> --start <ts> --end <ts> [filters]         # list 审批单号
 corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]    # one approval's detail
 
+corpapp names --app <name> --users <id,...> [--room <roomid>]             # ids -> names
+corpapp names --app <name> --rooms <roomid,...>                          # roomids -> group names
+
 corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]  # list 客户群
 corpapp group --app <name> --chat-id <id> [--no-name]                    # one group + members
 corpapp send-group --app <name> --sender <userid> --chat-id <id> ...     # create a 群发 task

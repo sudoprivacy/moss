@@ -17,6 +17,9 @@
 //	corpapp approvals ... --status <n> --template <id>       # filter by status / type
 //	corpapp approval --app <name> --sp-no <spNo>              # get one approval's full detail
 //	corpapp approval --app <name> --sp-no <spNo> --attachments # list its downloadable files (id/source/label)
+//	corpapp names --app <name> --users <id,...> [--room <roomid>]
+//	                                                          # resolve ids -> display names
+//	corpapp names --app <name> --rooms <roomid,...>           # resolve roomids -> group names
 //	corpapp groups --app <name> [--owner <userid,...>]        # list customer groups (客户群)
 //	corpapp group --app <name> --chat-id <id>                 # one group's detail + members
 //	corpapp send-group --app <name> --sender <userid> --chat-id <id> --text <msg>
@@ -59,6 +62,8 @@ Usage:
   corpapp download --app <name> --media-id <id> [--out <path>]
   corpapp approvals --app <name> --start <ts> --end <ts> [--status <n>] [--template <id>] [--cursor <c>] [--size <n>] [--filter key:value ...]
   corpapp approval --app <name> --sp-no <spNo> [--attachments] [--json]
+  corpapp names --app <name> --users <id,...> [--room <roomid>]
+  corpapp names --app <name> --rooms <roomid,...>
   corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]
   corpapp group --app <name> --chat-id <id> [--no-name]
   corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...]
@@ -92,6 +97,15 @@ Colored / styled messages:
   Example:
     corpapp send --app myapp --to zhangsan --format markdown \
       --text '<font color="info">通过</font> <font color="warning">2 项告警</font>'
+
+Display names (WeCom):
+  Archived chat records store ids, not names. The names command resolves them
+  on demand:
+  one call with --room names an entire group roster at once, which is why this
+  is far cheaper than storing names on every message. Ids that cannot be
+  resolved map to themselves, so output is always safe to render. Internal
+  groups have no name available (the customer-group API rejects them), so a
+  roomid may come back unchanged.
 
 Customer groups and 群发 (WeCom):
   groups/group read 客户群. Visibility is decided by the GROUP OWNER: a group
