@@ -1727,10 +1727,25 @@ export class DirectConnectStore {
     desiredState: DesiredSessionState,
   ): Promise<void> {
     const ts = now()
+    // A user terminate is final. desired_state is the authoritative record of
+    // that intent (the same reasoning behind setSessionLifecycle's
+    // onlyWhenDesiredActive and mayStampDaemonLifecycle), so once it reads
+    // 'terminated' no exit path may rewrite the terminal status.
+    //
+    // Without this the runner's own exit overwrites it: terminateSession
+    // stamps 'terminated', then the runner dies un-gracefully (its pod already
+    // deleted, so #stopping is false and the exit code is non-zero) and the
+    // onExit branch writes 'failed'. Observed on the deployed cluster — of 37
+    // terminated sessions 23 settled on 'terminated' and 14 came back as
+    // 'failed'/'detached', which left them listed forever as sessions the user
+    // had already deleted.
+    //
+    // The guard lives here rather than at the four call sites so that every
+    // path inherits it, including ones added later.
     await this.driver.run(`
       UPDATE sessions
       SET status = ?, desired_state = ?, ended_at = ?, last_active_at = ?
-      WHERE session_id = ?
+      WHERE session_id = ? AND desired_state <> 'terminated'
     `, [status, desiredState, ts, ts, sessionId])
   }
 

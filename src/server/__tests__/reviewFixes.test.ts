@@ -89,6 +89,44 @@ describe("A2: setSessionLifecycle onlyWhenDesiredActive", () => {
   });
 });
 
+describe("markSessionEnded respects a user terminate", () => {
+  it("still records a normal end while the user has not terminated", async () => {
+    const store = newStore();
+    await seedSession(store, "s-me-1", "active");
+    await store.markSessionEnded("s-me-1", "ended", "ended");
+    const row = await store.getSession("s-me-1");
+    assert.equal(row!.status, "ended");
+    assert.equal(row!.desiredState, "ended");
+    store.db.close();
+  });
+
+  it("does NOT let a runner exit overwrite a terminate with 'failed'", async () => {
+    const store = newStore();
+    await seedSession(store, "s-me-2", "active");
+    // terminateSession stamps the terminal state first:
+    await store.setSessionLifecycle("s-me-2", "terminated", "terminated");
+    // ... then the runner dies un-gracefully (pod already gone, non-zero exit),
+    // and the daemon's onExit branch reports 'failed'. On the deployed cluster
+    // this is what left 14 of 37 terminated sessions listed forever.
+    await store.markSessionEnded("s-me-2", "failed", "active");
+    const row = await store.getSession("s-me-2");
+    assert.equal(row!.status, "terminated", "status must stay terminated");
+    assert.equal(row!.desiredState, "terminated", "desired_state must stay terminated");
+    store.db.close();
+  });
+
+  it("does not block the terminate path's own write", async () => {
+    const store = newStore();
+    await seedSession(store, "s-me-3", "active");
+    // The daemon reports a graceful stop for a session the user asked to end;
+    // desired_state is still 'active' at that point, so the write lands.
+    await store.markSessionEnded("s-me-3", "terminated", "terminated");
+    const row = await store.getSession("s-me-3");
+    assert.equal(row!.status, "terminated");
+    store.db.close();
+  });
+});
+
 describe("A6: markAttemptLost owner predicate", () => {
   it("does not write 'lost' over an attempt another instance now owns", async () => {
     const store = newStore();
