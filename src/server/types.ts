@@ -557,17 +557,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       }).optional(),
     }).default({
       loginMethod: 1,
-      thirdPartyAuth: {
-        enabled: true,
-        providers: [],
-      },
       rechargeMode: 'disabled',
       initialPoints: 0,
-      creditApplication: {
-        minPoints: 100,
-        maxPoints: 1000000,
-        allowDuplicatePending: false,
-      },
       recharge: {
         minAmountUsd: 1,
         maxAmountUsd: 10000,
