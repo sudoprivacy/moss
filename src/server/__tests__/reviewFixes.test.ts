@@ -11,6 +11,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DirectConnectStore } from "../db.js";
+import { assertSafeInstanceIdentity } from "../startupGuards.js";
 
 function newStore() {
   return new DirectConnectStore(":memory:");
@@ -165,5 +166,36 @@ describe("F-25: concurrent registerServerInstance", () => {
       .get() as { n: number };
     assert.equal(Number(rows.n), 1, "stable id UPSERTs over itself — exactly one row");
     store.db.close();
+  });
+});
+
+describe("E-5: missing instance identity startup guard", () => {
+  it("allows a legacy single-node install with publicBaseUrl and no instance id", () => {
+    assert.doesNotThrow(() =>
+      assertSafeInstanceIdentity(
+        { instanceId: undefined, publicBaseUrl: "http://10.0.1.206:43127" },
+        0,
+      ),
+    );
+  });
+
+  it("rejects an unidentified process when a live peer already exists", () => {
+    assert.throws(
+      () =>
+        assertSafeInstanceIdentity(
+          { instanceId: undefined, publicBaseUrl: "http://moss.example.test" },
+          1,
+        ),
+      /1 live peer instance\(s\) found but MOSS_INSTANCE_ID is not set/,
+    );
+  });
+
+  it("allows an identified instance and leaves shared-SQLite checks to the next guard", () => {
+    assert.doesNotThrow(() =>
+      assertSafeInstanceIdentity(
+        { instanceId: "moss-206", publicBaseUrl: "http://10.0.1.206:43127" },
+        1,
+      ),
+    );
   });
 });

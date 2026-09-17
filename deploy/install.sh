@@ -56,9 +56,9 @@ Configuration environment variables:
   MOSS_ROLE, MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
   MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_RUNTIME (docker|k8s),
   MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY,
-  MOSS_INSTANCE_ID (optional per-instance id; required once publicBaseUrl is set
-  or peers are expected — the server refuses to start an HA-shaped deployment
-  without it, so multi-instance installs must pass a unique value per node).
+  MOSS_INSTANCE_ID (optional stable per-instance id; required for multi-instance
+  deployments — the server refuses to join a live peer without it, so each HA
+  node must pass a unique value).
 
 Compute-node environment variables:
   MOSS_K8S_NAMESPACE, MOSS_K8S_RUNTIME_CLASS, MOSS_K8S_SA_NAME, MOSS_K8S_OUTPUT_DIR,
@@ -1417,8 +1417,8 @@ fi
 
 ENV_PATH="$INSTALL_DIR/moss-server.env"
 # Optional per-instance id (HA): written through verbatim when provided, absent
-# for plain single-instance installs. The server side refuses to start an
-# HA-shaped deployment without one, so multi-node installs set it per host.
+# for plain single-instance installs. The server side refuses to join a live
+# peer without one, so multi-node installs set it per host.
 # On upgrade the env file is regenerated — inherit an existing id so a restart
 # never strips it from a deployment that was counting on it.
 if [ -z "${MOSS_INSTANCE_ID:-}" ] && [ -f "$ENV_PATH" ]; then
