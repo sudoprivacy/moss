@@ -25,7 +25,7 @@ import {
 } from './store.js'
 import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
 import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
-import { readUserCache, resolveMissing, writeUserCache, type NameLookup } from './users.js'
+import { resolveMissing, type NameLookup, type UserDirectory } from './users.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
 const PAGE_LIMIT = 1000
@@ -181,8 +181,10 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
   const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
   const mediaMax = Number(cfg.mediaMaxBytes) > 0 ? Number(cfg.mediaMaxBytes) : 0
-  const userDir = cfg.nameLookup ? await readUserCache(cfg.corpAppId) : {}
-  let userDirDirty = false
+  // Per-run only: names are mutable, so nothing is carried between pulls.
+  // This still deduplicates within a single run, where the same people
+  // appear across many messages.
+  const userDir: UserDirectory = {}
   const pendingMedia: MediaIndexEntry[] = []
 
   const sdk = openSdk(cfg.corpId, cfg.secret)
@@ -220,12 +222,10 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
           for (const id of rec.to) ids.add(id)
         }
         const r = await resolveMissing(userDir, ids, cfg.nameLookup)
-        if (r.resolved > 0) {
-          namesResolved += r.resolved
-          userDirDirty = true
-        }
+        namesResolved += r.resolved
         for (const rec of records) {
-          if (rec.from && userDir[rec.from]) rec.fromName = userDir[rec.from]
+          // Fall back to the raw id so these fields are never blank.
+          if (rec.from) rec.fromName = userDir[rec.from] ?? rec.from
           if (rec.to.length > 0) rec.toNames = rec.to.map((id) => userDir[id] ?? id)
         }
       }
@@ -301,12 +301,6 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   if (pendingMedia.length > 0) {
     await appendMediaIndex(cfg.corpAppId, pendingMedia).catch(() => {
       // the files are already on disk; a lost index entry is cosmetic
-    })
-  }
-
-  if (userDirDirty) {
-    await writeUserCache(cfg.corpAppId, userDir).catch(() => {
-      // a lost cache costs re-lookups next run, not data
     })
   }
 
