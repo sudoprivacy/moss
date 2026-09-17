@@ -2324,7 +2324,7 @@ export function startServer(
   const msgAuditPurgeWorker = new MediaPurgeWorker(async () => {
     const targets: RetentionTarget[] = []
     const { readSecret } = await import('./sources/secrets.js')
-    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+    for (const row of await runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
       try {
         const cfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
         const creds =
@@ -10115,7 +10115,7 @@ export function startServer(
         writeJson(res, 200, {
           session: {
             ...serializeSession(session),
-            userName: resolveUserName(session.userId),
+            userName: await resolveUserName(session.userId),
           },
           usage: context.usage,
           context: {
