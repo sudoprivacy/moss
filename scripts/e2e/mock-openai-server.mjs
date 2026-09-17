@@ -126,6 +126,86 @@ function sendStreamingResponse(response, model, content) {
   response.end("data: [DONE]\n\n");
 }
 
+/**
+ * Anthropic Messages streaming, shaped to scode's `StreamEvent` enum
+ * (`api/src/types.rs`, `#[serde(tag = "type", rename_all = "snake_case")]`).
+ *
+ * scode reaches a claude model through its Anthropic provider, which posts to
+ * `{base}/v1/messages` rather than `/chat/completions`. The `event:` line is
+ * advisory — the parser reads the type out of the data JSON — but real
+ * Anthropic sends it, and the truncation check in `api/src/sse.rs` looks for
+ * it, so both are emitted. No `[DONE]` sentinel: Anthropic does not send one.
+ */
+function sendAnthropicStreamingResponse(response, model, content) {
+  const id = `msg_moss_e2e_${Date.now()}`;
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+    "x-request-id": id,
+  });
+  const frames = [
+    [
+      "message_start",
+      {
+        type: "message_start",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 8, output_tokens: 0 },
+        },
+      },
+    ],
+    [
+      "content_block_start",
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      },
+    ],
+    [
+      "content_block_delta",
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: content },
+      },
+    ],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    [
+      "message_delta",
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { input_tokens: 8, output_tokens: 4 },
+      },
+    ],
+    ["message_stop", { type: "message_stop" }],
+  ];
+  for (const [name, frame] of frames) {
+    response.write(`event: ${name}\ndata: ${JSON.stringify(frame)}\n\n`);
+  }
+  response.end();
+}
+
+/**
+ * A proxy account resolves to `Credential::ApiKey`, which the Anthropic
+ * provider sends as `x-api-key` and the OpenAI one as a Bearer header. Accept
+ * either, so this gate tests reachability rather than header style.
+ */
+function isAuthorized(request) {
+  return (
+    request.headers.authorization === `Bearer ${options.apiKey}` ||
+    request.headers["x-api-key"] === options.apiKey
+  );
+}
+
 const server = http.createServer(async (request, response) => {
   const pathname = new URL(request.url || "/", "http://localhost").pathname;
   if (request.method === "GET" && pathname === "/healthz") {
@@ -207,14 +287,28 @@ const server = http.createServer(async (request, response) => {
     });
     return;
   }
-  if (request.method !== "POST" || !pathname.endsWith("/chat/completions")) {
+  const isChatCompletions =
+    request.method === "POST" && pathname.endsWith("/chat/completions");
+  // scode picks the wire format from the model id, so a claude model arrives
+  // here on the Anthropic path even though moss configures one proxy account.
+  const isAnthropicMessages =
+    request.method === "POST" && pathname.endsWith("/v1/messages");
+
+  if (!isChatCompletions && !isAnthropicMessages) {
+    // Logged because it was not: an unmatched request used to 404 silently,
+    // which is what turned one endpoint mismatch into a long diagnosis.
+    appendRecord({
+      timestamp: new Date().toISOString(),
+      path: pathname,
+      method: request.method,
+      matched: false,
+    });
     writeJson(response, 404, { error: { message: "not found" } });
     return;
   }
 
   try {
-    const expectedAuthorization = `Bearer ${options.apiKey}`;
-    if (request.headers.authorization !== expectedAuthorization) {
+    if (!isAuthorized(request)) {
       appendRecord({
         timestamp: new Date().toISOString(),
         path: pathname,
@@ -233,10 +327,29 @@ const server = http.createServer(async (request, response) => {
       timestamp: new Date().toISOString(),
       path: pathname,
       authorized: true,
+      api: isAnthropicMessages ? "anthropic-messages" : "openai-completions",
       stream: body.stream === true,
       model,
       response: content,
     });
+
+    if (isAnthropicMessages) {
+      if (body.stream === true) {
+        sendAnthropicStreamingResponse(response, model, content);
+        return;
+      }
+      writeJson(response, 200, {
+        id: `msg_moss_e2e_${Date.now()}`,
+        type: "message",
+        role: "assistant",
+        model,
+        content: [{ type: "text", text: content }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 8, output_tokens: 4 },
+      });
+      return;
+    }
 
     if (body.stream === true) {
       sendStreamingResponse(response, model, content);
