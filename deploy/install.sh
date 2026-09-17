@@ -55,7 +55,10 @@ Options:
 Configuration environment variables:
   MOSS_ROLE, MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
   MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_RUNTIME (docker|k8s),
-  MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY.
+  MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY,
+  MOSS_INSTANCE_ID (optional per-instance id; required once publicBaseUrl is set
+  or peers are expected — the server refuses to start an HA-shaped deployment
+  without it, so multi-instance installs must pass a unique value per node).
 
 Compute-node environment variables:
   MOSS_K8S_NAMESPACE, MOSS_K8S_RUNTIME_CLASS, MOSS_K8S_SA_NAME, MOSS_K8S_OUTPUT_DIR,
@@ -1413,6 +1416,18 @@ NODE
 fi
 
 ENV_PATH="$INSTALL_DIR/moss-server.env"
+# Optional per-instance id (HA): written through verbatim when provided, absent
+# for plain single-instance installs. The server side refuses to start an
+# HA-shaped deployment without one, so multi-node installs set it per host.
+# On upgrade the env file is regenerated — inherit an existing id so a restart
+# never strips it from a deployment that was counting on it.
+if [ -z "${MOSS_INSTANCE_ID:-}" ] && [ -f "$ENV_PATH" ]; then
+  MOSS_INSTANCE_ID="$(awk -F= '$1 == "MOSS_INSTANCE_ID" { print substr($0, index($0, "=") + 1); exit }' "$ENV_PATH")"
+fi
+MOSS_INSTANCE_ID_LINE=""
+if [ -n "${MOSS_INSTANCE_ID:-}" ]; then
+  MOSS_INSTANCE_ID_LINE="MOSS_INSTANCE_ID=$MOSS_INSTANCE_ID"
+fi
 cat > "$ENV_PATH" <<EOF
 HOME=$INSTALL_DIR
 MOSS_SERVER_CONFIG=$INSTALL_DIR/server.json
@@ -1422,6 +1437,7 @@ MOSS_NODE_PATH=$INSTALL_DIR/current/node/bin/node
 MOSS_AUTH_PROXY_HOST=$AUTH_PROXY_BIND_HOST
 MOSS_AUTH_PROXY_URL=http://$SESSION_REACHABLE_HOST:12013
 MOSS_SERVER_URL=http://$SESSION_REACHABLE_HOST:$MOSS_PORT_VALUE
+$MOSS_INSTANCE_ID_LINE
 PATH=$INSTALL_DIR/current/node/bin:$INSTALL_DIR/current/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
 chmod 600 "$ENV_PATH"
