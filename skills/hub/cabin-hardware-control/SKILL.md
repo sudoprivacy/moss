@@ -122,6 +122,9 @@ The script reads:
 - 小桌板关闭/收起: `--command seat.tray.close`。例如：收起小桌板、合上桌板、把桌子收起来、桌板不用了收好、把托盘收回去、fold the tray。
 - 阅读灯打开/关闭: `--command seat.light --on true|false`; if brightness is requested together, add `--pwm 0-1000`。例如：打开阅读灯、开个灯我看书、关闭阅读灯、灯太亮关掉、把灯关了、reading light on/off。
 - 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-1000`。`pwm=0` 最暗，`pwm=1000` 最亮。乘客未给具体数值时，按固定默认值选择：灯太刺眼/柔和一点/暗一点/不要太亮 → `--pwm 300`；正常/中等亮度 → `--pwm 500`；亮一点/看不清/调亮/再亮一些 → `--pwm 700`。例如：阅读灯调亮、把灯调暗、灯光柔和一点、亮度调到70%、灯太刺眼暗一点、再亮一些。
+- 模糊灯光表达也是控制请求，不是闲聊或必须澄清的状态描述。若乘客说“舱里有点暗”“座舱光线太暗”“客舱太暗”“这里太暗”“光线不够”“有点看不清”“看书看不清”等，且没有明确指定“顶灯/舱灯/客舱灯/氛围灯”，默认控制乘客个人阅读灯：`--command seat.light.brightness --pwm 700`。不要先询问是否需要调亮，也不要输出面向乘客的确认话术。
+- 若同类模糊灯光表达明确提到“顶灯/舱灯/客舱灯/氛围灯”，默认控制客舱顶灯白光亮度：`--command cabin.ceiling.color --r 255 --g 255 --b 255 --brightness 80`。例如：顶灯太暗、客舱灯太暗、舱灯亮一点。
+- 若乘客说“灯太刺眼”“灯太亮”“光线晃眼”“不要这么亮”，且没有明确指定“顶灯/舱灯/客舱灯/氛围灯”，默认控制个人阅读灯：`--command seat.light.brightness --pwm 300`。若明确指定顶灯或舱灯，使用 `--command cabin.ceiling.color --r 255 --g 255 --b 255 --brightness 40`。
 - 座椅靠背/坐垫位置百分比: `--command seat.cushion --position 0-100`。例如：靠背调到40%、座椅放到一半、后仰70。
 - 座椅靠背/backrest/recline: always use `--command seat.cushion --position 0-100`; never use `seat.recline`。
 - 放倒座椅/躺下/往后躺/后仰/调舒服一点: use `--command seat.cushion`. If the passenger does not provide a percentage, use `--position 60`。例如：放倒座椅、往后躺、把椅子放平、座椅调舒服一点、recline my seat。（注意：仅当乘客给出明确控制动作时才发射；若只是“我想躺一会/我困了/想睡”等状态表达，按状态反问处理，不要直接发射。）

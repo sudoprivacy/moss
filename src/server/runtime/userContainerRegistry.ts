@@ -57,6 +57,16 @@ export type DockerExecResult = {
   stderr: string
 }
 
+type DockerUserContainerInfo = {
+  running: boolean
+  containerId: string
+  kind: string
+  orgId: string
+  userId: string
+  image: string
+  configHash: string
+}
+
 // Module-level singleton so the registry is shared across imports in the
 // main process. The dynamic import from runtimeService picks this up.
 const mutex = new PerKeyMutex()
@@ -140,6 +150,38 @@ async function dockerInspectAlive(name: string): Promise<boolean> {
   const result = await runDocker(['inspect', '--format', '{{.State.Running}}', name])
   if (result.code !== 0) return false
   return result.stdout.trim() === 'true'
+}
+
+async function dockerInspectUserContainer(name: string): Promise<DockerUserContainerInfo | null> {
+  const result = await runDocker([
+    'inspect',
+    '--format',
+    '{{.State.Running}}\t{{.Id}}\t{{index .Config.Labels "moss.kind"}}\t{{index .Config.Labels "moss.org"}}\t{{index .Config.Labels "moss.user"}}\t{{index .Config.Labels "moss.image"}}\t{{index .Config.Labels "moss.runtime.config.hash"}}',
+    name,
+  ])
+  if (result.code !== 0) return null
+  const [running, containerId, kind, orgId, userId, image, hash] = result.stdout.trim().split('\t')
+  return {
+    running: running === 'true',
+    containerId: containerId || '',
+    kind: kind || '',
+    orgId: orgId || '',
+    userId: userId || '',
+    image: image || '',
+    configHash: hash || '',
+  }
+}
+
+function isDockerNameConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('Conflict.') && message.includes('container name') && message.includes('already in use')
+}
+
+async function removeContainerByName(name: string): Promise<void> {
+  const rm = await runDocker(['rm', '-f', name])
+  if (rm.code !== 0 && !rm.stderr.includes('No such container')) {
+    throw new Error(`docker rm failed for ${name}: ${rm.stderr.trim()}`)
+  }
 }
 
 const CONTAINER_ENV_KEYS = [
@@ -233,6 +275,58 @@ async function doCreate(
     runtimeDirHost,
     mossHomeHost,
   })
+}
+
+async function recoverCreateNameConflict(
+  config: ServerConfig,
+  ctx: EnsureContext,
+  rec: UserContainerRecord,
+  desired: { image: string; configHash: string },
+): Promise<UserContainerRecord> {
+  const info = await dockerInspectUserContainer(rec.containerName)
+  if (!info) {
+    throw new Error(`docker container name conflict for ${rec.containerName}, but inspect returned no container`)
+  }
+  if (info.kind !== 'user-container' || info.orgId !== ctx.orgId || info.userId !== ctx.userId) {
+    throw new Error(
+      `docker container name conflict for ${rec.containerName}; existing container is not the expected Moss user container`,
+    )
+  }
+
+  rec.containerId = info.containerId
+  rec.imageDigest = info.image
+  rec.configHash = info.configHash
+  rec.createdAt = Date.now()
+  rec.lastActiveAt = rec.createdAt
+
+  if (info.running && info.image === desired.image && info.configHash === desired.configHash) {
+    rec.state = 'running'
+    logRuntimeMetric('user_container_reused', { org: ctx.orgId })
+    logRuntimeEvent('user_container_conflict_adopted', {
+      org: ctx.orgId,
+      userId: ctx.userId,
+      containerName: rec.containerName,
+      containerId: rec.containerId,
+    })
+    return rec
+  }
+
+  logRuntimeMetric('user_container_conflict_reclaimed', {
+    org: ctx.orgId,
+    reason: info.running ? 'running_config_mismatch' : 'stopped_existing',
+  })
+  logRuntimeEvent('user_container_conflict_reclaimed', {
+    org: ctx.orgId,
+    userId: ctx.userId,
+    containerName: rec.containerName,
+    containerId: info.containerId,
+    running: info.running,
+  })
+  await removeContainerByName(rec.containerName)
+  rec.state = 'starting'
+  await doCreate(config, ctx, rec)
+  rec.state = 'running'
+  return rec
 }
 
 async function reclaimRecordAssumingLocked(
@@ -349,6 +443,24 @@ export async function ensureUserContainer(
         await doCreate(config, ctx, rec)
         rec.state = 'running'
       } catch (err) {
+        if (isDockerNameConflict(err)) {
+          try {
+            return await recoverCreateNameConflict(config, ctx, rec, desired)
+          } catch (recoverErr) {
+            rec.state = 'dead'
+            registry.delete(k)
+            logRuntimeMetric('user_container_ensure_failed', {
+              org: ctx.orgId,
+              reason: 'docker_name_conflict',
+            })
+            logRuntimeEvent('user_container_ensure_failed', {
+              org: ctx.orgId,
+              userId: ctx.userId,
+              error: recoverErr instanceof Error ? recoverErr.message : String(recoverErr),
+            })
+            throw recoverErr
+          }
+        }
         rec.state = 'dead'
         registry.delete(k)
         logRuntimeMetric('user_container_ensure_failed', {
@@ -528,15 +640,15 @@ export function _getMutexForTests(): PerKeyMutex {
  */
 export async function reconcile(): Promise<void> {
   const result = await runDocker([
-    'ps',
+    'ps', '-a',
     '--filter', 'label=moss.kind=user-container',
-    '--format', '{{.ID}}\t{{.Names}}\t{{.Labels}}',
+    '--format', '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Labels}}',
   ])
   if (result.code !== 0) return
 
   for (const line of result.stdout.split('\n')) {
     if (!line.trim()) continue
-    const [id, name, labelStr] = line.split('\t')
+    const [id, name, state, labelStr] = line.split('\t')
     const labels: Record<string, string> = {}
     for (const kv of (labelStr || '').split(',')) {
       const eq = kv.indexOf('=')
@@ -545,6 +657,18 @@ export async function reconcile(): Promise<void> {
     const orgId = labels['moss.org']
     const userId = labels['moss.user']
     if (!orgId || !userId) continue
+    if (state !== 'running') {
+      await removeContainerByName(name)
+      logRuntimeMetric('reconcile_user_container_removed', { reason: 'not_running' })
+      logRuntimeEvent('reconcile_user_container_removed', {
+        org: orgId,
+        userId,
+        containerName: name,
+        containerId: id,
+        state,
+      })
+      continue
+    }
     const k = key(orgId, userId)
     if (registry.has(k)) continue
     registry.set(k, {

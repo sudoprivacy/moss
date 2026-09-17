@@ -99,7 +99,13 @@ export class SessionRunnerDaemon {
       },
     })
     this.#heartbeatTimer = setInterval(() => {
-      this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)
+      try {
+        this.#store.touchAttemptHeartbeat(this.manifest.attempt.attemptId)
+      } catch (error) {
+        process.stderr.write(
+          `[SessionRunnerDaemon] attempt heartbeat failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        )
+      }
     }, Math.max(5_000, Math.floor(this.manifest.config.heartbeatTimeoutMs / 3)))
     this.#heartbeatTimer.unref?.()
   }

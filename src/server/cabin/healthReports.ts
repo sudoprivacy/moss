@@ -258,8 +258,16 @@ export class CabinHealthReportService {
 
   private flushActiveReport(active: ActiveReport): void {
     if (active.samples.length === active.lastFlushedCount) return
-    const updated = this.options.store.updateHealthReportSamples(active.reportId, active.samples)
-    if (updated) active.lastFlushedCount = active.samples.length
+    try {
+      const updated = this.options.store.updateHealthReportSamples(active.reportId, active.samples)
+      if (updated) active.lastFlushedCount = active.samples.length
+    } catch (error) {
+      this.log('health_report.sample.flush_failed', {
+        report_id: active.reportId,
+        seat_no: active.seatNo,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   private clearActiveTimers(active: ActiveReport): void {

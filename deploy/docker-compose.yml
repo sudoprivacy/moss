@@ -9,6 +9,7 @@ services:
       - "${MOSS_PORT:-43127}:43127"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - moss-db:/app/db
       - ./.moss:/root/.moss
       - ./data:/app/data
       - ./server.json:/app/server.json:ro
@@ -20,7 +21,7 @@ services:
     environment:
       - MOSS_SERVER_CONFIG=/app/server.json
       - MOSS_HOME=/root/.moss
-      - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
+      - MOSS_HOST_PATH_MAP=${MOSS_HOST_PATH_MAP:-}
       # Auth proxy must bind all interfaces so session containers can reach it by
       # container name over moss-network (it injects per-user credentials into
       # outbound calls; still gated by the per-session bearer token). The URL
@@ -33,3 +34,7 @@ services:
 networks:
   moss-network:
     name: moss-network
+
+volumes:
+  moss-db:
+    name: moss-db

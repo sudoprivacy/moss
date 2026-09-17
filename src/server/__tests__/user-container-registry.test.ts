@@ -9,6 +9,7 @@ import {
   acquireSession,
   buildUserContainerName,
   ensureUserContainer,
+  reconcile,
   releaseSession,
 } from '../runtime/userContainerRegistry.js'
 import type { ServerConfig } from '../types.js'
@@ -32,17 +33,34 @@ async function setupFakeDocker(): Promise<{
   // different container IDs.
   const counterFile = path.join(dir, 'counter')
   await writeFile(counterFile, '0')
+  const runErrorOnceFile = path.join(dir, 'run-error-once')
+  const inspectOutputFile = path.join(dir, 'inspect-output')
+  const psOutputFile = path.join(dir, 'ps-output')
 
   const script = `#!/bin/sh
 echo "$@" >> "${logFile}"
 case "$1" in
   run)
+    if [ -f "${runErrorOnceFile}" ]; then
+      cat "${runErrorOnceFile}" >&2
+      rm -f "${runErrorOnceFile}"
+      exit 125
+    fi
     n=$(cat "${counterFile}")
     echo $((n + 1)) > "${counterFile}"
     echo "fake-container-id-$n"
     ;;
   inspect)
+    if [ -f "${inspectOutputFile}" ]; then
+      cat "${inspectOutputFile}"
+      exit 0
+    fi
     echo "true"
+    ;;
+  ps)
+    if [ -f "${psOutputFile}" ]; then
+      cat "${psOutputFile}"
+    fi
     ;;
   stop|rm|ps|exec)
     ;;
@@ -138,6 +156,29 @@ describe('UserContainerRegistry', () => {
     const runs = log.split('\n').filter(line => line.startsWith('run '))
     expect(runs.length).toBe(1)
     expect(runs[0]).toContain('--init')
+  })
+
+  it('removes an exited same-name Moss user container after docker name conflict', async () => {
+    const config = makeConfig()
+    const ctx = { orgId: 'org', userId: 'u', role: 'user', scopes: [] as string[], image: 'fake:test' }
+    const containerName = buildUserContainerName(ctx.orgId, ctx.userId)
+    await writeFile(
+      path.join(docker.dir, 'run-error-once'),
+      `docker: Error response from daemon: Conflict. The container name "/${containerName}" is already in use by container "old-id".`,
+    )
+    await writeFile(
+      path.join(docker.dir, 'inspect-output'),
+      `false\told-id\tuser-container\torg\tu\tfake:test\toldhash\n`,
+    )
+
+    const rec = await ensureUserContainer(config, ctx)
+    expect(rec.state).toBe('running')
+    expect(rec.containerId).toBe('fake-container-id-0')
+
+    const log = await readFile(docker.logFile, 'utf8')
+    const runs = log.split('\n').filter(line => line.startsWith('run '))
+    expect(runs.length).toBe(2)
+    expect(log).toContain(`rm -f ${containerName}`)
   })
 
   it('reclaims and recreates an idle user container when image changes', async () => {
@@ -263,6 +304,20 @@ describe('UserContainerRegistry', () => {
     const rec = _getRecordForTests('org', 'u')
     expect(rec).toBeDefined()
     expect(rec?.activeSessionIds.has('s2')).toBe(true)
+  })
+
+  it('reconcile removes non-running persisted user containers on startup', async () => {
+    await writeFile(
+      path.join(docker.dir, 'ps-output'),
+      'old-id\tmoss-user-old\texited\tmoss.kind=user-container,moss.org=org,moss.user=u,moss.image=fake:test,moss.runtime.config.hash=abc\n',
+    )
+
+    await reconcile()
+
+    const log = await readFile(docker.logFile, 'utf8')
+    expect(log).toContain('ps -a --filter label=moss.kind=user-container')
+    expect(log).toContain('rm -f moss-user-old')
+    expect(_getRecordForTests('org', 'u')).toBeUndefined()
   })
 })
 

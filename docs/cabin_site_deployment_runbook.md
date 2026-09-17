@@ -6,11 +6,11 @@
 
 ## 1. 容器挂载与日志目录
 
-当前容器路径映射：
+当前容器路径映射由 `deploy/start.sh` 根据部署目录自动生成：
 
 ```text
-宿主机 /data/yin/moss-cabin-gateway/moss/data  -> 容器 /app/data
-宿主机 /data/yin/moss-cabin-gateway/moss/.moss -> 容器 /root/.moss
+宿主机 <部署目录>/data  -> 容器 /app/data
+宿主机 <部署目录>/.moss -> 容器 /root/.moss
 ```
 
 推荐将 Moss 数据根目录配置为：
@@ -19,7 +19,7 @@
 {
   "storage": {
     "rootDir": "/app/data",
-    "dbPath": "/app/data/moss.db",
+    "dbPath": "/app/db/moss.db",
     "transcriptDir": "/app/data/transcripts",
     "runtimeDir": "/app/data/runtime"
   }
@@ -283,10 +283,10 @@ grep '"event":"phase.task.summary"' cabin-automation.jsonl | tail -1 | jq .
 
 ### 6.1 基础检查
 
-1. 确认容器挂载包含：
+1. 确认容器挂载和 `MOSS_HOST_PATH_MAP` 都指向当前部署目录：
 
 ```text
-/data/yin/moss-cabin-gateway/moss/data -> /app/data
+<部署目录>/data -> /app/data
 ```
 
 2. 确认 `server.json` 中：
@@ -294,7 +294,8 @@ grep '"event":"phase.task.summary"' cabin-automation.jsonl | tail -1 | jq .
 ```json
 {
   "storage": {
-    "rootDir": "/app/data"
+    "rootDir": "/app/data",
+    "dbPath": "/app/db/moss.db"
   },
   "cabin": {
     "enabled": true,

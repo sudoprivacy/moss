@@ -4,6 +4,7 @@
 
 - Docker 20.10+
 - Docker Compose 2.0+
+- Python 3（仅首次从旧版 `data/moss.db` 迁移到 Docker volume 时使用）
 - Linux x64 或 Linux ARM64 操作系统。DGX Spark 使用 ARM64 部署包。
 
 ## 快速开始
@@ -93,7 +94,8 @@ curl http://localhost:43127/healthz
 | `bootstrapAdmin.password` | 管理员密码 | **建议修改** |
 | `runtimeDefaults.dockerImage` | 会话容器镜像 | 否（自动匹配） |
 | `runtimeDefaults.scodePath` | scode 路径 | 否 |
-| `storage.rootDir` | 数据存储目录 | 否 |
+| `storage.rootDir` | 运行时/日志数据目录，默认 `/app/data` | 否 |
+| `storage.dbPath` | SQLite 数据库路径，默认 `/app/db/moss.db`，由 Docker volume `moss-db` 持久化 | 否 |
 
 ### docker-compose.yml 环境变量
 
@@ -109,6 +111,7 @@ curl http://localhost:43127/healthz
 | `CABIN_ASR_URL` | ASR 服务 OpenAI 兼容接口 | http://asr-proxy:8002/v1/audio/transcriptions |
 | `CABIN_TTS_URL` | TTS 服务 OpenAI 兼容接口 | http://qwen3-tts:8004/v1/audio/speech |
 | `CABIN_LLM_BASE_URL` | LLM OpenAI 兼容接口 base URL | http://vllm-qwen-llm:8000/v1 |
+| `MOSS_HOST_PATH_MAP` | moss-server 容器内路径到宿主机路径的映射，供用户级 runtime 容器挂载使用 | `start.sh` 根据当前部署目录自动生成 |
 
 ## 目录结构
 
@@ -121,12 +124,23 @@ moss/
 ├── start.sh                  # 启动脚本
 ├── shutdown.sh               # 关闭脚本
 ├── README.md                 # 本说明文件
-├── data/                     # 数据目录（启动后自动创建）
-│   ├── moss.db              # SQLite 数据库
+├── data/                     # 运行时与日志目录（启动后自动创建）
 │   ├── transcripts/         # 会话记录
-│   └── runtime/             # 运行时数据
+│   ├── runtime/             # 运行时数据
+│   └── logs/                # 服务日志
 └── logs/                     # 日志目录（启动后自动创建）
 ```
+
+SQLite 数据库不再放在宿主机 bind mount 的 `data/` 下，而是放在 Docker
+named volume `moss-db` 的 `/app/db/moss.db`。这可以避免 macOS Docker Desktop
+文件共享层下 SQLite WAL 多进程访问导致的数据库损坏。首次启动新版部署包时，
+如果检测到旧版 `data/moss.db` 且 `moss-db` 里还没有数据库，`start.sh` 会用
+SQLite backup API 自动迁移旧库。
+
+`MOSS_HOST_PATH_MAP` 不要写死成某台服务器的路径。通过 `start.sh` 启动时会按
+当前部署目录生成，例如部署在 `/Users/a1234/Desktop/moss` 时会映射
+`/Users/a1234/Desktop/moss/data -> /app/data` 和
+`/Users/a1234/Desktop/moss/.moss -> /root/.moss`。
 
 ## 常见问题
 

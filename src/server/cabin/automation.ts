@@ -291,7 +291,16 @@ export class CabinFlightAutomation {
       return
     }
     this.logWsMessage(envelope, raw, requestId)
-    this.healthReports?.handleWsEnvelope(envelope)
+    try {
+      this.healthReports?.handleWsEnvelope(envelope)
+    } catch (error) {
+      this.log({
+        event: 'health_report.ws_handler_failed',
+        requestId,
+        ok: false,
+        error: stringifyError(error),
+      })
+    }
     const type = String((envelope as Record<string, unknown>).type || '')
     if (type !== 'flight_data') {
       this.log({ event: 'ws.message.ignored', requestId, ok: true, details: { type } })

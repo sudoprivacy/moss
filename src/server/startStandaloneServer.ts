@@ -138,7 +138,13 @@ export async function startStandaloneDirectConnectServer(
   )
 
   const heartbeatTimer = setInterval(() => {
-    store.heartbeatServerInstance(instance.instanceId)
+    try {
+      store.heartbeatServerInstance(instance.instanceId)
+    } catch (error) {
+      process.stderr.write(
+        `[Startup] server heartbeat failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      )
+    }
   }, Math.max(5_000, Math.floor(config.heartbeatTimeoutMs / 2)))
   heartbeatTimer.unref?.()
 

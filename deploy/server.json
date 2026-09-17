@@ -24,10 +24,10 @@
     "maxSessions": 32
   },
   "storage": {
-    "rootDir": "./data",
-    "dbPath": "./data/moss.db",
-    "transcriptDir": "./data/transcripts",
-    "runtimeDir": "./data/runtime"
+    "rootDir": "/app/data",
+    "dbPath": "/app/db/moss.db",
+    "transcriptDir": "/app/data/transcripts",
+    "runtimeDir": "/app/data/runtime"
   },
   "docker": {
     "stopTimeoutSec": 10,

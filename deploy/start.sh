@@ -18,6 +18,72 @@ LOG_FILE="$LOG_DIR/moss-server.log"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$BASE_DIR/data"
+mkdir -p "$BASE_DIR/.moss"
+
+find_user_containers() {
+    {
+        docker ps -aq --filter "label=moss.kind=user-container" 2>/dev/null || true
+        docker ps -aq --filter "name=^/moss-user-" 2>/dev/null || true
+    } | sort -u | grep -v '^$' || true
+}
+
+drain_user_containers() {
+    USER_CONTAINERS=$(find_user_containers)
+    if [ -z "$USER_CONTAINERS" ]; then
+        return 0
+    fi
+
+    echo "  发现 Moss 用户级运行容器，正在清理..."
+    echo "$USER_CONTAINERS" | while read -r CONTAINER_ID; do
+        [ -z "$CONTAINER_ID" ] && continue
+        CONTAINER_NAME=$(docker inspect --format '{{.Name}}' "$CONTAINER_ID" 2>/dev/null | sed 's#^/##' || echo "$CONTAINER_ID")
+        echo "  清理用户容器: $CONTAINER_NAME"
+        docker rm -f "$CONTAINER_ID" 2>/dev/null || true
+    done
+}
+
+migrate_legacy_db_to_volume() {
+    local legacy_db="$BASE_DIR/data/moss.db"
+    local migrated_db="$BASE_DIR/data/moss.db.migrated-for-volume"
+
+    if [ ! -f "$legacy_db" ]; then
+        return 0
+    fi
+
+    if docker run --rm -v moss-db:/app/db "$SERVER_IMAGE" sh -c 'test -f /app/db/moss.db' >/dev/null 2>&1; then
+        echo "  moss-db volume 已存在数据库，跳过旧库迁移。"
+        return 0
+    fi
+
+    echo "  检测到旧数据库 $legacy_db，正在迁移到 Docker volume moss-db..."
+    python3 - "$legacy_db" "$migrated_db" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+if dst.exists():
+    dst.unlink()
+
+source = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+target = sqlite3.connect(dst)
+source.backup(target)
+check = target.execute("PRAGMA integrity_check").fetchone()
+target.close()
+source.close()
+if not check or check[0] != "ok":
+    raise SystemExit(f"migrated database integrity_check failed: {check}")
+PY
+
+    docker run --rm \
+        -v moss-db:/app/db \
+        -v "$BASE_DIR/data:/host-data" \
+        "$SERVER_IMAGE" \
+        sh -c 'cp /host-data/moss.db.migrated-for-volume /app/db/moss.db'
+    rm -f "$migrated_db"
+    echo "  数据库迁移完成：moss-db:/app/db/moss.db"
+}
 
 echo "=== Moss 部署启动流程开始 ==="
 echo "工作目录: $BASE_DIR"
@@ -79,8 +145,15 @@ if [ -z "$ANTHROPIC_BASE_URL" ]; then
 fi
 echo "  ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL"
 
+if [ -z "$MOSS_HOST_PATH_MAP" ]; then
+    MOSS_HOST_PATH_MAP="{\"$BASE_DIR/data\":\"/app/data\",\"$BASE_DIR/.moss\":\"/root/.moss\"}"
+fi
+echo "  MOSS_HOST_PATH_MAP=$MOSS_HOST_PATH_MAP"
+
 # 3. 停止已有容器
 echo "[3/4] 检查并停止已有容器..."
+
+drain_user_containers
 
 if docker ps -a --format "{{.Names}}" | grep -q "^moss-server$"; then
     echo "  发现已存在的容器，正在停止..."
@@ -89,6 +162,8 @@ if docker ps -a --format "{{.Names}}" | grep -q "^moss-server$"; then
     sleep 2
 fi
 
+migrate_legacy_db_to_volume
+
 # 4. 启动 Moss Server
 echo "[4/4] 正在启动 Moss Server..."
 
@@ -96,6 +171,7 @@ export MOSS_IMAGE_TAG="$IMAGE_TAG"
 export MOSS_PORT
 export ANTHROPIC_API_KEY
 export ANTHROPIC_BASE_URL
+export MOSS_HOST_PATH_MAP
 
 docker-compose -p moss-server up -d
 
