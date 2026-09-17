@@ -24,6 +24,10 @@ ADMIN_PASSWORD="moss-e2e-admin-password"
 SERVER_ARCHIVE="moss-server-$VERSION-linux-$ARCH.tar.gz"
 RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
 RUNTIME_IMAGE="my-moss-runtime:$VERSION-$ARCH"
+# Release versions may contain dots, while instance IDs are used in cookies and
+# nginx map keys and therefore accept only ASCII letters, digits, underscores,
+# and hyphens.
+E2E_INSTANCE_ID="e2e-${VERSION//./-}"
 MOCK_PID=""
 DIAGNOSTICS_COLLECTED=0
 
@@ -170,7 +174,7 @@ sudo env \
   MOSS_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   ANTHROPIC_BASE_URL="$MOCK_URL" \
   ANTHROPIC_API_KEY="$MOCK_API_KEY" \
-  MOSS_INSTANCE_ID="e2e-$VERSION" \
+  MOSS_INSTANCE_ID="$E2E_INSTANCE_ID" \
   "$OFFLINE_DIR/install.sh" --offline
 
 # Keep model discovery and the agent/skill Hub hermetic too. Session runners
