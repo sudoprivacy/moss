@@ -12,8 +12,8 @@ const organizations = {
   },
 }
 
-describe('QMS authorization', () => {
-  it('preserves distinct API key failures and accepts the configured header value', () => {
+void describe('QMS authorization', () => {
+  void it('preserves distinct API key failures and accepts the configured header value', () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
 
     assert.throws(() => auth.requireApiKey(undefined), (error: unknown) =>
@@ -23,13 +23,13 @@ describe('QMS authorization', () => {
     assert.doesNotThrow(() => auth.requireApiKey('secret-key'))
   })
 
-  it('fails explicitly when ingestion authentication is not configured', () => {
+  void it('fails explicitly when ingestion authentication is not configured', () => {
     const auth = new QmsAuthorizationService({ organizations })
     assert.throws(() => auth.requireApiKey('anything'), (error: unknown) =>
       error instanceof QmsAuthorizationError && error.status === 500 && error.code === 'API_KEY_NOT_CONFIGURED')
   })
 
-  it('maps organization administrators to their permanent tenant code', () => {
+  void it('maps organization administrators to their permanent tenant code', () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
 
     assert.deepEqual(auth.adminScope({ userId: 'u1', orgId: 'org-a', role: 'admin' }, 'tenant-b'), {
@@ -41,7 +41,7 @@ describe('QMS authorization', () => {
     })
   })
 
-  it('allows super administrators to select a known tenant or query globally', () => {
+  void it('allows super administrators to select a known tenant or query globally', () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
     const actor = { userId: 'root', orgId: 'root-org', role: 'super_admin' }
 
@@ -51,7 +51,7 @@ describe('QMS authorization', () => {
       error instanceof QmsAuthorizationError && error.code === 'TENANT_NOT_FOUND')
   })
 
-  it('scopes a Moss operations super administrator to the selected organization tenant', () => {
+  void it('scopes a Moss operations super administrator to the selected organization tenant', () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
     const actor = {
       userId: 'root', orgId: 'org-b', role: 'super_admin', organizationScoped: true,
@@ -66,7 +66,7 @@ describe('QMS authorization', () => {
     })
   })
 
-  it('rejects ordinary users and administrators without an organization mapping', () => {
+  void it('rejects ordinary users and administrators without an organization mapping', () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
     assert.throws(() => auth.adminScope({ userId: 'u2', orgId: 'org-a', role: 'user' }), /Insufficient permissions/)
     assert.throws(() => auth.adminScope({ userId: 'u3', orgId: 'missing', role: 'admin' }), (error: unknown) =>

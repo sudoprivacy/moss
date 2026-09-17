@@ -8,8 +8,8 @@ interface RouteManifest {
   routes: Array<{ method: string; path: string }>
 }
 
-describe('Sudowork compatibility implementation inventory', () => {
-  test('registers every frozen legacy route and only approved additions', () => {
+void describe('Sudowork compatibility implementation inventory', () => {
+  void test('registers every frozen legacy route and only approved additions', async () => {
     const inert = {} as never
     const app = createSudoworkCompatibilityApp({
       identity: inert,

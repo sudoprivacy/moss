@@ -3,8 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { PostCutoverChangeLog, PostCutoverChangeLogError } from './postCutoverChangeLog.js'
 
-describe('PostCutoverChangeLog', () => {
-  test('appends one immutable sanitized change per original event', () => {
+void describe('PostCutoverChangeLog', () => {
+  void test('appends one immutable sanitized change per original event', () => {
     const db = new DatabaseSync(':memory:')
     const log = new PostCutoverChangeLog(db, { clock: () => 1_800_000_000_000 })
     try {
@@ -26,7 +26,7 @@ describe('PostCutoverChangeLog', () => {
     }
   })
 
-  test('rejects secret material instead of persisting it in rollback records', () => {
+  void test('rejects secret material instead of persisting it in rollback records', () => {
     const db = new DatabaseSync(':memory:')
     const log = new PostCutoverChangeLog(db)
     try {

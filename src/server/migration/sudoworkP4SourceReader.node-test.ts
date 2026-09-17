@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { SudoworkP4SourceReader } from './sudoworkP4SourceReader.js'
 
-test('只读提取 Dify 连接、App、Dataset、ACL 与元数据并生成稳定校验和', async () => {
+void test('只读提取 Dify 连接、App、Dataset、ACL 与元数据并生成稳定校验和', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sudowork-p4-source-'))
   const path = join(dir, 'sudowork.sqlite')
   const db = new DatabaseSync(path)

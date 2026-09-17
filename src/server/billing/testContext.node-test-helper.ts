@@ -5,13 +5,13 @@ import { BillingRepository } from './billingRepository.js'
 import { ensureBillingSchema } from './billingSchema.js'
 import { WalletService } from './walletService.js'
 
-export function setupBillingTestContext() {
+export async function setupBillingTestContext() {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org1', 'Org 1', 1)
-  auth.createUser({
+  await auth.createOrganization('org1', 'Org 1', 1)
+  await auth.createUser({
     id: 'u1', orgId: 'org1', email: 'u1@example.test', name: 'u1', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,

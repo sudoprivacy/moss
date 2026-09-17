@@ -53,8 +53,8 @@ class MemoryQueue implements TelemetryQueueBackend {
   }
 }
 
-describe('ReliableTelemetryQueue', () => {
-  it('does not acknowledge a claimed batch when PostgreSQL persistence fails', async () => {
+void describe('ReliableTelemetryQueue', () => {
+  void it('does not acknowledge a claimed batch when PostgreSQL persistence fails', async () => {
     const backend = new MemoryQueue()
     let fail = true
     const persisted: string[] = []
@@ -79,7 +79,7 @@ describe('ReliableTelemetryQueue', () => {
     assert.deepEqual(await backend.depths(), { pending: 0, processing: 0 })
   })
 
-  it('preserves a caller event id and generates one when the old payload has none', async () => {
+  void it('preserves a caller event id and generates one when the old payload has none', async () => {
     const backend = new MemoryQueue()
     const queue = new ReliableTelemetryQueue({
       backend,
@@ -97,7 +97,7 @@ describe('ReliableTelemetryQueue', () => {
     assert.equal((await backend.depths()).pending, 2)
   })
 
-  it('rejects an empty event id before touching Redis', async () => {
+  void it('rejects an empty event id before touching Redis', async () => {
     const backend = new MemoryQueue()
     const queue = new ReliableTelemetryQueue({
       backend,
@@ -110,7 +110,7 @@ describe('ReliableTelemetryQueue', () => {
     assert.equal((await backend.depths()).pending, 0)
   })
 
-  it('enqueues a complete batch through one backend operation', async () => {
+  void it('enqueues a complete batch through one backend operation', async () => {
     const backend = new MemoryQueue()
     const queue = new ReliableTelemetryQueue({
       backend,

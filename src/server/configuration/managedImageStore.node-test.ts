@@ -12,8 +12,8 @@ async function png(width: number, height: number): Promise<Buffer> {
   }).png().toBuffer()
 }
 
-describe('统一配置图片存储', () => {
-  test('配置图标要求正方形并以不可预测文件名原子保存', async () => {
+void describe('统一配置图片存储', () => {
+  void test('配置图标要求正方形并以不可预测文件名原子保存', async () => {
     const root = mkdtempSync(join(tmpdir(), 'moss-managed-images-'))
     try {
       const store = new ManagedImageStore(root)
@@ -41,7 +41,7 @@ describe('统一配置图片存储', () => {
     }
   })
 
-  test('企业 Logo 保持旧格式并拒绝伪造类型、超限文件和主动 SVG', async () => {
+  void test('企业 Logo 保持旧格式并拒绝伪造类型、超限文件和主动 SVG', async () => {
     const root = mkdtempSync(join(tmpdir(), 'moss-managed-images-'))
     try {
       const store = new ManagedImageStore(root)
@@ -79,7 +79,7 @@ describe('统一配置图片存储', () => {
     }
   })
 
-  test('迁移保留旧 UUID 文件名且只允许同字节幂等重放', async () => {
+  void test('迁移保留旧 UUID 文件名且只允许同字节幂等重放', async () => {
     const root = mkdtempSync(join(tmpdir(), 'moss-managed-images-'))
     try {
       const store = new ManagedImageStore(root)

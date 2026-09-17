@@ -37,7 +37,7 @@ async function setup(
   const authDb = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
   const unified = new UnifiedIdentityService(db, authDb, identities)
-  const org = unified.createOrganization(
+  const org = await unified.createOrganization(
     { name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 1 },
     migrationCommandContext('identity', 'org-a'),
   )
@@ -74,8 +74,8 @@ async function setup(
   return { db, identities, org, policies, secrets, service, migration }
 }
 
-describe('P2 系统配置迁移', () => {
-  test('把旧平台策略与 CAS 投影到统一模型，日志密钥只进入 Nexus 且可重复执行', async () => {
+void describe('P2 系统配置迁移', () => {
+  void test('把旧平台策略与 CAS 投影到统一模型，日志密钥只进入 Nexus 且可重复执行', async () => {
     const encrypted = await encryptLegacyLogReportKeyForTest('legacy-log-secret')
     const raw = {
       login_method: '2',
@@ -128,7 +128,7 @@ describe('P2 系统配置迁移', () => {
     }
   })
 
-  test('无效 JSON、未知 CAS 企业或 Nexus 失败均不会留下平台策略', async () => {
+  void test('无效 JSON、未知 CAS 企业或 Nexus 失败均不会留下平台策略', async () => {
     const malformed = await setup({ log_report: '{broken' })
     try {
       const plan = await malformed.migration.plan()
@@ -170,7 +170,7 @@ describe('P2 系统配置迁移', () => {
     }
   })
 
-  test('预检复用在线命令校验并在缺少 QMS 凭据时阻断且零写入', async () => {
+  void test('预检复用在线命令校验并在缺少 QMS 凭据时阻断且零写入', async () => {
     const fixture = await setup({
       product_improvement: JSON.stringify({ enabled: 1 }),
     }, false, {})

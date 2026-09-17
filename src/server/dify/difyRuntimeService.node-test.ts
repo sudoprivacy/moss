@@ -42,8 +42,8 @@ function setup(responseFor?: (url: string) => Response) {
   return { service, calls, contexts }
 }
 
-describe('DifyRuntimeService', () => {
-  test('chat forces the authenticated legacy user and returns upstream SSE bytes unchanged', async () => {
+void describe('DifyRuntimeService', () => {
+  void test('chat forces the authenticated legacy user and returns upstream SSE bytes unchanged', async () => {
     const upstream = new Response('data: {"event":"message"}\n\n', {
       headers: { 'Content-Type': 'text/event-stream' },
     })
@@ -63,7 +63,7 @@ describe('DifyRuntimeService', () => {
     })
   })
 
-  test('conversation reads preserve legacy defaults and URL encoding', async () => {
+  void test('conversation reads preserve legacy defaults and URL encoding', async () => {
     const { service, calls } = setup()
 
     await service.listConversations({
@@ -77,7 +77,7 @@ describe('DifyRuntimeService', () => {
     assert.equal(calls[1]?.url, 'https://dify.example.test/v1/messages?conversation_id=conv%2Fa&user=sudowork%3A9%3A17&limit=7')
   })
 
-  test('all mutation methods overwrite user ownership with the authenticated EndUser', async () => {
+  void test('all mutation methods overwrite user ownership with the authenticated EndUser', async () => {
     const { service, calls } = setup()
 
     await service.stopChat({ actor, visibility, assistantId: 'agent-a', taskId: 'task-1' })
@@ -97,7 +97,7 @@ describe('DifyRuntimeService', () => {
     ])
   })
 
-  test('supports app metadata, file, speech-to-text and raw text-to-audio contracts', async () => {
+  void test('supports app metadata, file, speech-to-text and raw text-to-audio contracts', async () => {
     const audio = new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'audio/mpeg' } })
     const { service, calls } = setup(url => url.endsWith('/v1/text-to-audio') ? audio : Response.json({ ok: true }))
 

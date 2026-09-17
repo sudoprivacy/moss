@@ -9,20 +9,20 @@ import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { SudoworkLegacyUsageService } from './legacyUsageService.js'
 import type { SudorouterPort, SudorouterUsagePort } from '../../../billing/sudorouterAdapter.js'
 
-function setup(initialBalance = 10, sudorouter?: SudorouterPort & SudorouterUsagePort) {
+async function setup(initialBalance = 10, sudorouter?: SudorouterPort & SudorouterUsagePort) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org-1', '企业一', 1)
-  auth.createOrganization('org-2', '企业二', 1)
+  await auth.createOrganization('org-1', '企业一', 1)
+  await auth.createOrganization('org-2', '企业二', 1)
   for (const [id, orgId, role] of [
     ['user-1', 'org-1', 'user'],
     ['admin-1', 'org-1', 'admin'],
     ['admin-2', 'org-2', 'admin'],
     ['root-1', 'org-1', 'super_admin'],
   ] as const) {
-    auth.createUser({
+    await auth.createUser({
       id, orgId, email: `${id}@example.test`, name: id, displayName: id,
       departmentId: null, role, status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -54,15 +54,15 @@ function setup(initialBalance = 10, sudorouter?: SudorouterPort & SudorouterUsag
 
 const userActor = { userId: 'user-1', orgId: 'org-1', role: 'user' } as const
 
-describe('SudoworkLegacyUsageService', () => {
-  test('模型列表来自 Moss 统一模型源而不是兼容层硬编码', async () => {
-    const { db, service } = setup()
+void describe('SudoworkLegacyUsageService', () => {
+  void test('模型列表来自 Moss 统一模型源而不是兼容层硬编码', async () => {
+    const { db, service } = await setup()
     assert.deepEqual(await service.listModels(), [{ label: '模型一', value: 'model-1' }])
     db.close()
   })
 
-  test('用量上报按百分之一积分精确扣费且相同幂等键只记一次', async () => {
-    const { db, repository, service } = setup()
+  void test('用量上报按百分之一积分精确扣费且相同幂等键只记一次', async () => {
+    const { db, repository, service } = await setup()
     const input = {
       actor: userActor, inputTokens: 1, outputTokens: 0, model: 'model-1', idempotencyKey: 'usage-1',
     }
@@ -74,8 +74,8 @@ describe('SudoworkLegacyUsageService', () => {
     db.close()
   })
 
-  test('余额不足不写用量记录', async () => {
-    const { db, repository, service } = setup(0)
+  void test('余额不足不写用量记录', async () => {
+    const { db, repository, service } = await setup(0)
     await assert.rejects(
       service.reportUsage({ actor: userActor, inputTokens: 1, outputTokens: 0, idempotencyKey: 'usage-low' }),
       /积分不足/,
@@ -84,8 +84,8 @@ describe('SudoworkLegacyUsageService', () => {
     db.close()
   })
 
-  test('仪表盘、流水和模型统计来自同一用量与钱包记录', async () => {
-    const { db, service, setNow } = setup()
+  void test('仪表盘、流水和模型统计来自同一用量与钱包记录', async () => {
+    const { db, service, setNow } = await setup()
     await service.reportUsage({ actor: userActor, inputTokens: 600, outputTokens: 400, model: 'model-1', idempotencyKey: 'usage-a' })
     setNow(Date.parse('2026-09-07T11:00:00Z'))
     await service.reportUsage({ actor: userActor, inputTokens: 200, outputTokens: 300, model: 'model-2', idempotencyKey: 'usage-b' })
@@ -108,7 +108,7 @@ describe('SudoworkLegacyUsageService', () => {
     db.close()
   })
 
-  test('绑定 Sudorouter 时从实时额度和模型日志构造用户查询', async () => {
+  void test('绑定 Sudorouter 时从实时额度和模型日志构造用户查询', async () => {
     const createdAtSeconds = Math.floor(Date.parse('2026-09-07T09:00:00Z') / 1000)
     const sudorouter: SudorouterPort & SudorouterUsagePort = {
       async getUser(externalUserId) {
@@ -125,7 +125,7 @@ describe('SudoworkLegacyUsageService', () => {
         }
       },
     }
-    const { db, service } = setup(10, sudorouter)
+    const { db, service } = await setup(10, sudorouter)
     const dashboard = await service.getDashboard(userActor) as any
     assert.deepEqual(dashboard.points, { total: 10, used: 2, remaining: 8, bonus: 0 })
     assert.deepEqual(dashboard.usage_today, { tokens: 50, cost_points: 1, requests: 1 })
@@ -146,8 +146,8 @@ describe('SudoworkLegacyUsageService', () => {
     db.close()
   })
 
-  test('企业管理员不能读取其他组织用户流水，超级管理员可以', async () => {
-    const { db, service } = setup()
+  void test('企业管理员不能读取其他组织用户流水，超级管理员可以', async () => {
+    const { db, service } = await setup()
     await service.reportUsage({ actor: userActor, inputTokens: 1000, outputTokens: 0, idempotencyKey: 'usage-org' })
     await assert.rejects(
       Promise.resolve().then(() => service.listAdminUserLedger({

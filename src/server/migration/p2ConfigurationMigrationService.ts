@@ -12,7 +12,7 @@ interface P2ConfigurationSource {
 }
 
 interface P2ConfigurationImporter {
-  importConfigItem(actor: IdentityActor, input: ImportedConfigItem, context: ReturnType<typeof migrationCommandContext>): { id: number }
+  importConfigItem(actor: IdentityActor, input: ImportedConfigItem, context: ReturnType<typeof migrationCommandContext>): Promise<{ id: number }>
 }
 
 export interface P2ConfigurationMigrationIssue {
@@ -144,7 +144,7 @@ export class P2ConfigurationMigrationService {
     }
   }
 
-  execute(migrationRunId: string): P2ConfigurationMigrationExecution {
+  async execute(migrationRunId: string): Promise<P2ConfigurationMigrationExecution> {
     const plan = this.plan()
     if (plan.status === 'blocked') throw new P2ConfigurationMigrationBlockedError(plan)
     const actor: IdentityActor = {
@@ -159,7 +159,7 @@ export class P2ConfigurationMigrationService {
         reused += 1
         continue
       }
-      this.options.config.importConfigItem(actor, {
+      await this.options.config.importConfigItem(actor, {
         legacyId: item.source.id,
         ownerOrgId: item.ownerOrgId,
         assignedOrgIds: item.assignedOrgIds,

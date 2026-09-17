@@ -708,8 +708,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
 
@@ -967,8 +967,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const value = apiKeyValue.trim()
@@ -2389,8 +2389,8 @@ export class AuthService {
     refresh_token: string
     token_type: 'Bearer'
     expires_in: number
-    user: SanitizedAuthCenterUser
-    organization: { id: string; name: string; createdAt: number } | null
+    user: NativeUserProjection
+    organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
     const orgId = input.orgIdOverride ?? input.user.orgId

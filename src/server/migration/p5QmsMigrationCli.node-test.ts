@@ -3,8 +3,8 @@ import { describe, it } from 'node:test'
 
 import { parseP5QmsMigrationArgs } from './p5QmsMigrationCli.js'
 
-describe('P5 QMS 迁移命令参数', () => {
-  it('要求显式提供两个不同数据库、Moss 数据库和执行确认摘要', () => {
+void describe('P5 QMS 迁移命令参数', () => {
+  void it('要求显式提供两个不同数据库、Moss 数据库和执行确认摘要', () => {
     const base = [
       '--source-url', 'postgres://old/qms',
       '--target-url', 'postgres://new/qms',
@@ -23,7 +23,7 @@ describe('P5 QMS 迁移命令参数', () => {
     assert.throws(() => parseP5QmsMigrationArgs(['--mode', 'execute', ...base]), /confirm-source-checksum/)
   })
 
-  it('拒绝未知参数、非法模式和不安全批次大小', () => {
+  void it('拒绝未知参数、非法模式和不安全批次大小', () => {
     assert.throws(() => parseP5QmsMigrationArgs(['--wat']), /未知参数/)
     assert.throws(() => parseP5QmsMigrationArgs([
       '--mode', 'drop', '--source-url', 'a', '--target-url', 'b', '--moss-db', 'c',

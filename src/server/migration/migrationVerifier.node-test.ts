@@ -29,8 +29,8 @@ function completedRun() {
   return { db, runs }
 }
 
-describe('MigrationVerifier', () => {
-  test('requires every release-gate check exactly once', () => {
+void describe('MigrationVerifier', () => {
+  void test('requires every release-gate check exactly once', () => {
     const fixture = completedRun()
     try {
       const checks = REQUIRED_MIGRATION_CHECKS.slice(0, -1).map(name => ({
@@ -42,7 +42,7 @@ describe('MigrationVerifier', () => {
     }
   })
 
-  test('runs every check and blocks verification on mismatch or deliverable migration effects', async () => {
+  void test('runs every check and blocks verification on mismatch or deliverable migration effects', async () => {
     const fixture = completedRun()
     const calls: string[] = []
     try {
@@ -70,7 +70,7 @@ describe('MigrationVerifier', () => {
     }
   })
 
-  test('rejects a changed source fingerprint before running domain checks', async () => {
+  void test('rejects a changed source fingerprint before running domain checks', async () => {
     const fixture = completedRun()
     let calls = 0
     try {

@@ -41,8 +41,8 @@ const casProvider: CasProvider = {
   autoProvision: true,
 }
 
-describe('HTTP CAS ticket validator', () => {
-  test('parses namespaced XML and decoded attributes with component encoding', async () => {
+void describe('HTTP CAS ticket validator', () => {
+  void test('parses namespaced XML and decoded attributes with component encoding', async () => {
     let requestedUrl = ''
     const validator = new HttpCasTicketValidator(async (input) => {
       requestedUrl = String(input)
@@ -75,7 +75,7 @@ describe('HTTP CAS ticket validator', () => {
     })
   })
 
-  test('preserves raw service values and rejects CAS authentication failures', async () => {
+  void test('preserves raw service values and rejects CAS authentication failures', async () => {
     let requestedUrl = ''
     const validator = new HttpCasTicketValidator(async (input) => {
       requestedUrl = String(input)
@@ -98,13 +98,13 @@ describe('HTTP CAS ticket validator', () => {
   })
 })
 
-describe('Sudowork CAS compatibility service', () => {
-  test('auto-provisions one canonical user and atomically exchanges a handoff code', async () => {
+void describe('Sudowork CAS compatibility service', () => {
+  void test('auto-provisions one canonical user and atomically exchanges a handoff code', async () => {
     const db = new DatabaseSync(':memory:')
     const authDb = new AuthCenterDb(db)
     const identities = new IdentityRepository(db)
     const unified = new UnifiedIdentityService(db, authDb, identities)
-    const organization = unified.createOrganization({
+    const organization = await unified.createOrganization({
       name: '企业 A', code: 'ENT-A', loginMethod: 'cas',
     }, onlineCommandContext('org-a'))
     identities.putIntegrationConnection({
@@ -152,7 +152,7 @@ describe('Sudowork CAS compatibility service', () => {
     assert(identities.findAuthIdentity('cas', 'cas-main', 'external-1'))
     assert.equal(accountCalls.length, 1)
     assert.equal(accountCalls[0]?.input.initialQuotaUnits, 500_000)
-    assert.equal(authDb.getUserById(accountCalls[0]!.input.ownerId)?.status, 'active')
+    assert.equal((await authDb.getUserById(accountCalls[0]!.input.ownerId))?.status, 'active')
     assert.equal(identities.getWallet('user', accountCalls[0]!.input.ownerId)?.balanceUnits, 1_000)
     await assert.rejects(() => service.exchange({
       providerId: 'cas-main', code: 'handoff-code', deviceId: 'desktop-a',

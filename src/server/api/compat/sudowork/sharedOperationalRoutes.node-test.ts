@@ -5,7 +5,7 @@ import {
   mapMossOperationsPath,
 } from './sharedOperationalRoutes.js'
 
-test('Moss 运营命名空间覆盖全部内部旧协议投影', () => {
+void test('Moss 运营命名空间覆盖全部内部旧协议投影', async () => {
   const keys = new Set(MOSS_OPERATIONS_LEGACY_ROUTES.map(route => `${route.method} ${route.path}`))
   for (const key of [
     'POST /api/v1/admin/approve',
@@ -28,7 +28,7 @@ test('Moss 运营命名空间覆盖全部内部旧协议投影', () => {
   assert.equal(keys.has('POST /api/v1/users'), false)
 })
 
-test('Moss 原生运营命名空间映射到内部旧协议投影且不接受近似路径', () => {
+void test('Moss 原生运营命名空间映射到内部旧协议投影且不接受近似路径', async () => {
   assert.equal(
     mapMossOperationsPath('/api/moss/v1/operations/stats'),
     '/api/v1/admin/stats',

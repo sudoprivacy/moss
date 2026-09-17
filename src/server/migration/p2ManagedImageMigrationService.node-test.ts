@@ -16,8 +16,8 @@ async function png(width: number, height: number): Promise<Buffer> {
   }).png().toBuffer()
 }
 
-describe('P2 配置图片迁移', () => {
-  test('预检零写入并原名幂等迁移配置图标和企业 Logo', async () => {
+void describe('P2 配置图片迁移', () => {
+  void test('预检零写入并原名幂等迁移配置图标和企业 Logo', async () => {
     const root = mkdtempSync(join(tmpdir(), 'moss-p2-images-'))
     try {
       const target = new ManagedImageStore(root)
@@ -51,7 +51,7 @@ describe('P2 配置图片迁移', () => {
     }
   })
 
-  test('任一图片不安全时阻断整批且不复制其他文件', async () => {
+  void test('任一图片不安全时阻断整批且不复制其他文件', async () => {
     const root = mkdtempSync(join(tmpdir(), 'moss-p2-images-'))
     try {
       const target = new ManagedImageStore(root)

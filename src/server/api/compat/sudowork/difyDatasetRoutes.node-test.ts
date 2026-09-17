@@ -26,8 +26,8 @@ function setup(actor: IdentityActor | null = { userId: 'admin-a', orgId: 'org-a'
   return { app, calls }
 }
 
-describe('Sudowork admin dataset compatibility routes', () => {
-  test('registers all nine frozen routes', () => {
+void describe('Sudowork admin dataset compatibility routes', () => {
+  void test('registers all nine frozen routes', async () => {
     const { app } = setup()
     const routes = app.routes.map(route => `${route.method} ${route.path}`)
     assert.deepEqual(routes, [
@@ -43,7 +43,7 @@ describe('Sudowork admin dataset compatibility routes', () => {
     ])
   })
 
-  test('distinguishes unauthenticated users from non-admin users', async () => {
+  void test('distinguishes unauthenticated users from non-admin users', async () => {
     const unauthorized = setup(null).app
     const forbidden = setup({ userId: 'user-a', orgId: 'org-a', role: 'user' }).app
     const missing = await unauthorized.request('/api/v1/admin/datasets')
@@ -54,7 +54,7 @@ describe('Sudowork admin dataset compatibility routes', () => {
     assert.deepEqual(await denied.json(), { success: false, msg: '权限不足' })
   })
 
-  test('preserves enterprise scoping and paging rules', async () => {
+  void test('preserves enterprise scoping and paging rules', async () => {
     const regular = setup()
     const response = await regular.app.request('/api/v1/admin/datasets?enterprise_id=9&page=0&limit=1000&keyword=文档')
     assert.equal(response.status, 200)
@@ -74,7 +74,7 @@ describe('Sudowork admin dataset compatibility routes', () => {
     assert.deepEqual([unknown.status, await unknown.json()], [400, { success: false, msg: 'enterprise 10 not found' }])
   })
 
-  test('Moss 组织作用域下的超级管理员固定使用当前组织', async () => {
+  void test('Moss 组织作用域下的超级管理员固定使用当前组织', async () => {
     const scoped = setup({
       userId: 'root', orgId: 'org-a', role: 'super_admin', organizationScoped: true,
     })
@@ -88,7 +88,7 @@ describe('Sudowork admin dataset compatibility routes', () => {
     }])
   })
 
-  test('preserves JSON writes and validation messages', async () => {
+  void test('preserves JSON writes and validation messages', async () => {
     const { app, calls } = setup()
     const missing = await app.request('/api/v1/admin/datasets', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
@@ -113,7 +113,7 @@ describe('Sudowork admin dataset compatibility routes', () => {
     }, assertCommandContext('client-key'))
   })
 
-  test('preserves text and multipart document uploads', async () => {
+  void test('preserves text and multipart document uploads', async () => {
     const textSetup = setup()
     const textResponse = await textSetup.app.request('/api/v1/admin/datasets/ds%2F1/documents', {
       method: 'POST', headers: { 'content-type': 'application/json' },

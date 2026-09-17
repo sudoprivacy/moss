@@ -9,8 +9,8 @@ import {
   SqliteFileComponentReader,
 } from './sourceComponentReaders.js'
 
-describe('migration source component readers', () => {
-  test('SQLite 文件摘要包含内容并检测读取期间变化', async () => {
+void describe('migration source component readers', () => {
+  void test('SQLite 文件摘要包含内容并检测读取期间变化', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'moss-sqlite-component-'))
     const path = join(directory, 'sudowork.sqlite')
     writeFileSync(path, 'snapshot-a')
@@ -27,7 +27,7 @@ describe('migration source component readers', () => {
     }
   })
 
-  test('Redis 摘要只包含需迁移的登录态且不受 TTL 自然递减影响', async () => {
+  void test('Redis 摘要只包含需迁移的登录态且不受 TTL 自然递减影响', async () => {
     let ttl = 100
     const values = new Map([
       ['refresh_token:1:d:t', 'refresh'],
@@ -50,7 +50,7 @@ describe('migration source component readers', () => {
     assert.deepEqual(first.metadata.keys, ['refresh_token:1:d:t', 'register_token:r'])
   })
 
-  test('QMS 摘要由每张表的校验和与行数构成', async () => {
+  void test('QMS 摘要由每张表的校验和与行数构成', async () => {
     const source = {
       async inspect(batchSize: number) {
         assert.equal(batchSize, 500)

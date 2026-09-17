@@ -106,12 +106,12 @@ export class DifyConnectionService {
     }
   }
 
-  describeEnhancement(
+  async describeEnhancement(
     actor: IdentityActor,
     assistantId: string,
     visibility: VisibilityFilter,
-  ): { enabled: boolean; mode: 'agent-chat' | 'workflow' | 'rag-only' | null } {
-    const user = this.options.auth.getUserByIdAndOrg(actor.userId, actor.orgId)
+  ): Promise<{ enabled: boolean; mode: 'agent-chat' | 'workflow' | 'rag-only' | null }> {
+    const user = await this.options.auth.getUserByIdAndOrg(actor.userId, actor.orgId)
     if (!user || user.status !== 'active') throw new DifyDomainError(401, 'USER_NOT_ACTIVE', 'unauthorized')
     const agent = this.options.catalog.findAgent(assistantId)
     const available = agent && this.options.catalog.isAvailableToOrganization('agent', assistantId, actor.orgId)
@@ -168,7 +168,7 @@ export class DifyConnectionService {
     context: Omit<DifyRuntimeContext, 'appId' | 'mode'>
     binding: Record<string, unknown>
   }> {
-    const user = this.options.auth.getUserByIdAndOrg(actor.userId, actor.orgId)
+    const user = await this.options.auth.getUserByIdAndOrg(actor.userId, actor.orgId)
     if (!user || user.status !== 'active') {
       throw new DifyDomainError(401, 'USER_NOT_ACTIVE', 'unauthorized')
     }

@@ -24,8 +24,8 @@ class Notifications implements QmsNotificationPort {
   }
 }
 
-describe('QmsAlertService', () => {
-  it('creates tenant-scoped config and audit in one transaction', async () => {
+void describe('QmsAlertService', () => {
+  void it('creates tenant-scoped config and audit in one transaction', async () => {
     const db = new AlertSql()
     const service = new QmsAlertService({ db, notifications: new Notifications(), createId: () => 'alert-1' })
 
@@ -40,7 +40,7 @@ describe('QmsAlertService', () => {
     assert.match(db.statements[1]!.sql, /INSERT INTO audit_logs/)
   })
 
-  it('suppresses external notification for migration and replay contexts', async () => {
+  void it('suppresses external notification for migration and replay contexts', async () => {
     const db = new AlertSql()
     const notifications = new Notifications()
     const service = new QmsAlertService({ db, notifications })
@@ -52,7 +52,7 @@ describe('QmsAlertService', () => {
     assert.deepEqual(notifications.sent.map(item => item.channel), ['lark'])
   })
 
-  it('updates and deletes only a tenant-scoped config with an audit record', async () => {
+  void it('updates and deletes only a tenant-scoped config with an audit record', async () => {
     const db = new AlertSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })
@@ -74,7 +74,7 @@ describe('QmsAlertService', () => {
     assert.equal(db.statements.filter(item => item.sql.includes('INSERT INTO audit_logs')).length, 2)
   })
 
-  it('rejects an empty config update before opening a transaction', async () => {
+  void it('rejects an empty config update before opening a transaction', async () => {
     const db = new AlertSql()
     const service = new QmsAlertService({ db, notifications: new Notifications() })
 
@@ -85,7 +85,7 @@ describe('QmsAlertService', () => {
     assert.equal(db.statements.length, 0)
   })
 
-  it('evaluates a tenant metric, sends configured channels, and records delivery', async () => {
+  void it('evaluates a tenant metric, sends configured channels, and records delivery', async () => {
     const db = new AlertSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })
@@ -113,7 +113,7 @@ describe('QmsAlertService', () => {
     assert.ok(db.statements.some(item => item.sql.includes('INSERT INTO alert_history')))
   })
 
-  it('honors cooldown and suppresses migration evaluation side effects', async () => {
+  void it('honors cooldown and suppresses migration evaluation side effects', async () => {
     const db = new AlertSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })
@@ -141,7 +141,7 @@ describe('QmsAlertService', () => {
     assert.equal(notifications.sent.length, 0)
   })
 
-  it('applies every legacy history filter and keeps pagination separate from filter parameters', async () => {
+  void it('applies every legacy history filter and keeps pagination separate from filter parameters', async () => {
     const db = new AlertSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })
@@ -166,7 +166,7 @@ describe('QmsAlertService', () => {
     assert.deepEqual(list.parameters.slice(-4), [new Date(1_000), new Date(2_000), 20, 5])
   })
 
-  it('distinguishes missing and already acknowledged alerts', async () => {
+  void it('distinguishes missing and already acknowledged alerts', async () => {
     const db = new AlertSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })
@@ -181,7 +181,7 @@ describe('QmsAlertService', () => {
     assert.equal(db.statements.some(item => item.sql.includes('UPDATE alert_history')), false)
   })
 
-  it('audits and records a test alert while sending the legacy payload', async () => {
+  void it('audits and records a test alert while sending the legacy payload', async () => {
     const db = new AlertSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })

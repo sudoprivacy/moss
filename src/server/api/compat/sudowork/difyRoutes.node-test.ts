@@ -54,8 +54,8 @@ function setup(runtime = createRuntime(), enhancement = createEnhancement()) {
   return app
 }
 
-describe('Sudowork Dify runtime compatibility routes', () => {
-  test('registers all 16 Dify runtime and enhancement routes', () => {
+void describe('Sudowork Dify runtime compatibility routes', () => {
+  void test('registers all 16 Dify runtime and enhancement routes', async () => {
     const app = setup()
     const actual = new Set(app.routes.map(route => `${route.method} ${route.path}`))
     const expected = [
@@ -80,7 +80,7 @@ describe('Sudowork Dify runtime compatibility routes', () => {
     for (const route of expected) assert(actual.has(route), `missing route: ${route}`)
   })
 
-  test('keeps enhancement probe, blocking result and encoded SSE events', async () => {
+  void test('keeps enhancement probe, blocking result and encoded SSE events', async () => {
     const app = setup()
     const headers = { authorization: 'Bearer access-token' }
     const probe = await app.request('/api/v1/agents/agent-a/enhancement', { headers })
@@ -109,7 +109,7 @@ describe('Sudowork Dify runtime compatibility routes', () => {
     ].join(''))
   })
 
-  test('keeps Dify authentication and request validation errors', async () => {
+  void test('keeps Dify authentication and request validation errors', async () => {
     const app = setup()
     const unauthorized = await app.request('/api/v1/agents/agent-a/meta')
     assert.equal(unauthorized.status, 401)
@@ -122,7 +122,7 @@ describe('Sudowork Dify runtime compatibility routes', () => {
     assert.deepEqual(await invalidChat.json(), { success: false, msg: 'query is required' })
   })
 
-  test('forwards chat bytes and legacy SSE headers without buffering', async () => {
+  void test('forwards chat bytes and legacy SSE headers without buffering', async () => {
     const received: Array<Record<string, unknown>> = []
     const upstream = new Response('data: first\n\ndata: second\n\n')
     const app = setup(createRuntime({ chat: async input => {
@@ -147,7 +147,7 @@ describe('Sudowork Dify runtime compatibility routes', () => {
     assert.equal('user' in (received[0] ?? {}), false)
   })
 
-  test('keeps upstream chat failures in the old status and body shape', async () => {
+  void test('keeps upstream chat failures in the old status and body shape', async () => {
     const app = setup(createRuntime({
       chat: async () => new Response('rate limited', { status: 429 }),
     }))
@@ -159,7 +159,7 @@ describe('Sudowork Dify runtime compatibility routes', () => {
     assert.deepEqual(await response.json(), { success: false, status: 429, msg: 'rate limited' })
   })
 
-  test('wraps JSON operations and preserves multipart and binary media', async () => {
+  void test('wraps JSON operations and preserves multipart and binary media', async () => {
     const calls: Array<Record<string, unknown>> = []
     const app = setup(createRuntime({
       listConversations: async input => { calls.push(input); return { data: [{ id: 'conv-1' }] } },

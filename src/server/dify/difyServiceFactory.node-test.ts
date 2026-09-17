@@ -8,10 +8,10 @@ import { DifyDatasetService } from './difyDatasetService.js'
 import { DifyEnhancementService } from './difyEnhancementService.js'
 import { DifyRuntimeService } from './difyRuntimeService.js'
 
-test('AuthService creates one unified Dify service graph for Sudowork compatibility', () => {
+void test('AuthService creates one unified Dify service graph for Sudowork compatibility', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('org-a', 'Organization A', Date.now())
+  await authDb.createOrganization('org-a', 'Organization A', Date.now())
   db.exec(`
     CREATE TABLE tenant_assistants (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,

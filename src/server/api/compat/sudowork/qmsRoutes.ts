@@ -94,7 +94,7 @@ async function requestBody(context: { req: { text(): Promise<string> } }): Promi
 export function createSudoworkQmsRoutes(options: {
   apiKeyHeader: string
   authorization: QmsAuthorizationService
-  getActor(authorization: string | undefined): IdentityActor | null
+  getActor(authorization: string | undefined): Promise<IdentityActor | null> | IdentityActor | null
   encryption: { encryptionRequired: boolean; privateKeyPem?: string }
   operations: QmsLegacyOperationPort
 }): Hono {
@@ -108,7 +108,7 @@ export function createSudoworkQmsRoutes(options: {
         if (API_KEY_ROUTES.has(key)) {
           options.authorization.requireApiKey(context.req.header(options.apiKeyHeader))
         } else {
-          const actor = options.getActor(bearer(context.req.header('Authorization')) ?? undefined)
+          const actor = await options.getActor(bearer(context.req.header('Authorization')) ?? undefined)
           scope = options.authorization.adminScope(actor, context.req.query('tenant_id'))
           if (requiresAdmin(key) && scope.qmsRole !== 'admin') {
             throw new QmsAuthorizationError(403, 'FORBIDDEN', 'Insufficient permissions')

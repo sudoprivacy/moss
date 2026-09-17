@@ -30,8 +30,8 @@ function setup() {
   return { db, repository, service: new CatalogService(db, repository) }
 }
 
-describe('统一 Agent/Skill Catalog Service', () => {
-  test('创建资源与外部身份原子提交，别名冲突时完整回滚', () => {
+void describe('统一 Agent/Skill Catalog Service', () => {
+  void test('创建资源与外部身份原子提交，别名冲突时完整回滚', () => {
     const { db, repository, service } = setup()
     const actor = { userId: 'admin-a', orgId: 'org-a', role: 'admin' }
     const context = onlineCommandContext('create-agent-a')
@@ -54,7 +54,7 @@ describe('统一 Agent/Skill Catalog Service', () => {
     db.close()
   })
 
-  test('Skill 创建复用统一幂等命令并保留 Hub 元数据', () => {
+  void test('Skill 创建复用统一幂等命令并保留 Hub 元数据', () => {
     const { db, service } = setup()
     const actor = { userId: 'user-a', orgId: 'org-a', role: 'user' }
     const context = onlineCommandContext('create-skill-a')
@@ -76,7 +76,7 @@ describe('统一 Agent/Skill Catalog Service', () => {
     db.close()
   })
 
-  test('迁移命令保留历史资源身份、状态、作者和时间且拒绝在线伪装', () => {
+  void test('迁移命令保留历史资源身份、状态、作者和时间且拒绝在线伪装', () => {
     const { db, repository, service } = setup()
     const actor = { userId: 'migration-admin', orgId: 'org-a', role: 'super_admin' }
     const context = migrationCommandContext('run-p2', 'catalog:skill:legacy-skill-7')
@@ -121,7 +121,7 @@ describe('统一 Agent/Skill Catalog Service', () => {
     db.close()
   })
 
-  test('组织管理员不能管理其他组织，超级管理员可以显式管理目标组织', () => {
+  void test('组织管理员不能管理其他组织，超级管理员可以显式管理目标组织', () => {
     const { db, repository, service } = setup()
     repository.createSkill({ id: 's1', orgId: 'org-b', name: 'Skill', authorId: 'owner' })
 
@@ -140,7 +140,7 @@ describe('统一 Agent/Skill Catalog Service', () => {
     db.close()
   })
 
-  test('用户目录仅返回已审批且对当前用户可见的资源', () => {
+  void test('用户目录仅返回已审批且对当前用户可见的资源', () => {
     const { db, repository, service } = setup()
     repository.createAgent({
       id: 'visible', orgId: 'org-a', name: 'Visible', authorId: 'u2', status: 'approved',

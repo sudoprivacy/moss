@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { SudorouterAdapter, pointsToQuota, quotaToPoints } from './sudorouterAdapter.js'
 
-describe('SudorouterAdapter', () => {
-  test('按旧协议分页读取用户模型用量', async () => {
+void describe('SudorouterAdapter', () => {
+  void test('按旧协议分页读取用户模型用量', async () => {
     let requestUrl = ''
     const adapter = new SudorouterAdapter({
       baseUrl: 'https://router.example.test', apiToken: 'admin-token', adminUserId: '76',
@@ -37,12 +37,12 @@ describe('SudorouterAdapter', () => {
     )
   })
 
-  test('保持旧服务 0.002 的积分额度换算', () => {
+  void test('保持旧服务 0.002 的积分额度换算', () => {
     assert.equal(pointsToQuota(1_000), 500_000)
     assert.equal(quotaToPoints(500_000), 1_000)
   })
 
-  test('按旧协议查询用户并更新额度，同时发送稳定幂等键', async () => {
+  void test('按旧协议查询用户并更新额度，同时发送稳定幂等键', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = []
     const adapter = new SudorouterAdapter({
       baseUrl: 'https://router.example.test/',
@@ -66,7 +66,7 @@ describe('SudorouterAdapter', () => {
     assert.deepEqual(JSON.parse(String(requests[1]?.init?.body)), { id: 9, quota: 500, comment: 'test' })
   })
 
-  test('按旧协议精确查找、创建用户并创建无限额度 Token', async () => {
+  void test('按旧协议精确查找、创建用户并创建无限额度 Token', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = []
     const responses = [
       { success: true, data: { items: [
@@ -111,7 +111,7 @@ describe('SudorouterAdapter', () => {
     }
   })
 
-  test('查找只接受可用的精确用户名且 Provider 错误明确失败', async () => {
+  void test('查找只接受可用的精确用户名且 Provider 错误明确失败', async () => {
     const fuzzy = new SudorouterAdapter({
       baseUrl: 'https://router.example.test', apiToken: 'secret',
       fetch: async () => new Response(JSON.stringify({

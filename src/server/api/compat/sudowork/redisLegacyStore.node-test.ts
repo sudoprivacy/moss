@@ -49,8 +49,8 @@ class FakeRedis implements RedisCommands {
   }
 }
 
-describe('Redis legacy token store', () => {
-  test('delegates ordinary commands and atomically rotates only the expected value', async () => {
+void describe('Redis legacy token store', () => {
+  void test('delegates ordinary commands and atomically rotates only the expected value', async () => {
     const client = new FakeRedis()
     const store = new RedisLegacyTokenStore(client)
     await store.setex('old', 60, 'claims')

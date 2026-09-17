@@ -11,15 +11,15 @@ import {
   SudoworkUserProjectionService,
 } from './userProjectionService.js'
 
-function setup(
+async function setup(
   tokenSecretRef: string | null = 'nexus://moss:sudorouter-users/user-1',
   quotaReader?: Pick<SudorouterPort, 'getUser'>,
 ) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org-1', '企业一', 1)
-  auth.createUser({
+  await auth.createOrganization('org-1', '企业一', 1)
+  await auth.createUser({
     id: 'user-1', orgId: 'org-1', email: 'user@example.test', name: '13800000000',
     displayName: '测试用户', departmentId: null, role: 'user', status: 'active', localAuth: true,
     tokenLimit: null, createdAt: 1, passwordHash: null, passwordUpdatedAt: null,
@@ -73,9 +73,9 @@ const user = {
   status: 1 as const, enterpriseId: 3, enterpriseCode: 'ENT-A',
 }
 
-describe('SudoworkUserProjectionService', () => {
-  test('从统一账户、Nexus、钱包、用量和模型配置构造旧登录投影', async () => {
-    const { db, service } = setup()
+void describe('SudoworkUserProjectionService', () => {
+  void test('从统一账户、Nexus、钱包、用量和模型配置构造旧登录投影', async () => {
+    const { db, service } = await setup()
     assert.deepEqual(await service.project(user), {
       sudorouterKey: 'sk-router-token',
       modelServiceUrl: 'https://router.test/v1',
@@ -91,8 +91,8 @@ describe('SudoworkUserProjectionService', () => {
     db.close()
   })
 
-  test('缺少 Token 引用时返回明确错误而不是空凭据', async () => {
-    const { db, service } = setup(null)
+  void test('缺少 Token 引用时返回明确错误而不是空凭据', async () => {
+    const { db, service } = await setup(null)
     await assert.rejects(service.project(user), (error: unknown) => (
       error instanceof SudoworkUserProjectionError
       && error.statusCode === 500
@@ -101,8 +101,8 @@ describe('SudoworkUserProjectionService', () => {
     db.close()
   })
 
-  test('登录时优先使用 Sudorouter 实时额度并刷新本地快照', async () => {
-    const { db, service, billing } = setup(undefined, {
+  void test('登录时优先使用 Sudorouter 实时额度并刷新本地快照', async () => {
+    const { db, service, billing } = await setup(undefined, {
       async getUser(externalUserId) {
         return { externalUserId, quotaUnits: 4_000, usedQuotaUnits: 1_000 }
       },

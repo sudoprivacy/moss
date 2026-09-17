@@ -3,8 +3,8 @@ import { describe, it } from 'node:test'
 
 import { QmsConfigurationError, resolveQmsConfig } from './config.js'
 
-describe('QMS runtime configuration', () => {
-  it('keeps external stores optional while QMS is disabled', () => {
+void describe('QMS runtime configuration', () => {
+  void it('keeps external stores optional while QMS is disabled', () => {
     const config = resolveQmsConfig({ enabled: false }, {})
 
     assert.equal(config.enabled, false)
@@ -13,7 +13,7 @@ describe('QMS runtime configuration', () => {
     assert.equal(config.retention.conversationDays, 180)
   })
 
-  it('requires PostgreSQL, Redis and API key when QMS is enabled', () => {
+  void it('requires PostgreSQL, Redis and API key when QMS is enabled', () => {
     assert.throws(
       () => resolveQmsConfig({ enabled: true }, {}),
       (error: unknown) => error instanceof QmsConfigurationError
@@ -21,7 +21,7 @@ describe('QMS runtime configuration', () => {
     )
   })
 
-  it('rejects the legacy postgres/postgres default credential', () => {
+  void it('rejects the legacy postgres/postgres default credential', () => {
     assert.throws(
       () => resolveQmsConfig({ enabled: true }, {
         QMS_POSTGRES_URL: 'postgres://postgres:postgres@localhost:5432/sudowork',
@@ -32,7 +32,7 @@ describe('QMS runtime configuration', () => {
     )
   })
 
-  it('requires both RSA keys when encrypted ingestion is mandatory', () => {
+  void it('requires both RSA keys when encrypted ingestion is mandatory', () => {
     assert.throws(
       () => resolveQmsConfig({ enabled: true, encryptionRequired: true }, {
         QMS_POSTGRES_URL: 'postgres://qms:strong@db.internal:5432/qms',
@@ -45,7 +45,7 @@ describe('QMS runtime configuration', () => {
     )
   })
 
-  it('resolves non-secret policy with secrets supplied only by runtime providers', () => {
+  void it('resolves non-secret policy with secrets supplied only by runtime providers', () => {
     const config = resolveQmsConfig({
       enabled: true,
       apiKeyHeader: 'X-Custom-Key',

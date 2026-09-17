@@ -14,8 +14,8 @@ function component(name: SourceComponentSnapshot['name'], checksum: string, meta
   return { name, checksum, itemCount: 1, readOnly: true, metadata }
 }
 
-describe('SudoworkSourceSnapshotReader', () => {
-  test('produces one deterministic fingerprint independent of metadata key order', async () => {
+void describe('SudoworkSourceSnapshotReader', () => {
+  void test('produces one deterministic fingerprint independent of metadata key order', async () => {
     const first = new SudoworkSourceSnapshotReader({
       sqlite: { capture: async () => component('sqlite', 'sqlite-a', { z: 1, a: { y: 2, x: 1 } }) },
       redis: { capture: async () => component('redis', 'redis-a') },
@@ -37,7 +37,7 @@ describe('SudoworkSourceSnapshotReader', () => {
     assert.equal(left.includedDomains.length, 10)
   })
 
-  test('changes the aggregate fingerprint when any source component changes', async () => {
+  void test('changes the aggregate fingerprint when any source component changes', async () => {
     let redisChecksum = 'redis-a'
     const reader = new SudoworkSourceSnapshotReader({
       sqlite: { capture: async () => component('sqlite', 'sqlite-a') },
@@ -55,7 +55,7 @@ describe('SudoworkSourceSnapshotReader', () => {
     )
   })
 
-  test('rejects a missing or writable source component', async () => {
+  void test('rejects a missing or writable source component', async () => {
     const missing = new SudoworkSourceSnapshotReader({
       sqlite: { capture: async () => component('sqlite', '') },
       redis: { capture: async () => component('redis', 'redis') },
@@ -80,8 +80,8 @@ describe('SudoworkSourceSnapshotReader', () => {
   })
 })
 
-describe('FileTreeSnapshotReader', () => {
-  test('hashes only allowlisted regular files in stable relative-path order', async () => {
+void describe('FileTreeSnapshotReader', () => {
+  void test('hashes only allowlisted regular files in stable relative-path order', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-source-files-'))
     try {
       await mkdir(join(root, 'uploads', 'agents'), { recursive: true })
@@ -104,7 +104,7 @@ describe('FileTreeSnapshotReader', () => {
     }
   })
 
-  test('rejects traversal, missing roots and symbolic links', async () => {
+  void test('rejects traversal, missing roots and symbolic links', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-source-files-'))
     try {
       await mkdir(join(root, 'uploads'), { recursive: true })

@@ -46,38 +46,38 @@ function setup(snapshot: LegacyIdentitySnapshot = source) {
   return { db, auth, identities, runs, service }
 }
 
-describe('IdentityMigrationService', () => {
-  test('组织与用户阶段可独立执行并分别形成恢复边界', () => {
+void describe('IdentityMigrationService', () => {
+  void test('组织与用户阶段可独立执行并分别形成恢复边界', async () => {
     const fixture = setup()
     try {
       const plan = fixture.service.plan([])
-      const organization = fixture.service.executeOrganizations(
+      const organization = await fixture.service.executeOrganizations(
         plan,
         migrationCommandContext('run-identity', 'organizations-phase'),
       )
       assert.equal(organization.organizationsCreated, 1)
-      assert.equal(fixture.auth.listOrganizations().length, 1)
-      assert.equal(fixture.auth.listUsersByOrg(organization.organizationIds[0]!).length, 0)
+      assert.equal((await fixture.auth.listOrganizations()).length, 1)
+      assert.equal((await fixture.auth.listUsersByOrg(organization.organizationIds[0]!)).length, 0)
 
-      const identities = fixture.service.executeUsers(
+      const identities = await fixture.service.executeUsers(
         plan,
         migrationCommandContext('run-identity', 'identities-phase'),
       )
       assert.equal(identities.usersCreated, 1)
-      assert.equal(fixture.auth.listUsersByOrg(organization.organizationIds[0]!).length, 1)
+      assert.equal((await fixture.auth.listUsersByOrg(organization.organizationIds[0]!)).length, 1)
     } finally {
       fixture.db.close()
     }
   })
 
-  test('imports organizations and users through unified commands with stable aliases and suppressed effects', () => {
+  void test('imports organizations and users through unified commands with stable aliases and suppressed effects', async () => {
     const fixture = setup()
     try {
       const plan = fixture.service.plan([])
       assert.equal(plan.status, 'ready')
       const context = migrationCommandContext('run-identity', 'identity-phase')
-      const first = fixture.service.execute(plan, context)
-      const replay = fixture.service.execute(plan, context)
+      const first = await fixture.service.execute(plan, context)
+      const replay = await fixture.service.execute(plan, context)
 
       assert.equal(first.organizationsCreated, 1)
       assert.equal(first.usersCreated, 1)
@@ -87,30 +87,30 @@ describe('IdentityMigrationService', () => {
       assert(org)
       assert(user)
       assert.equal(user.orgId, org.resourceId)
-      assert.equal(fixture.auth.getUserById(user.resourceId)?.passwordHash, '$2b$10$legacy-hash')
-      assert.equal(fixture.auth.getUserById(user.resourceId)?.role, 'admin')
+      assert.equal((await fixture.auth.getUserById(user.resourceId))?.passwordHash, '$2b$10$legacy-hash')
+      assert.equal((await fixture.auth.getUserById(user.resourceId))?.role, 'admin')
       assert.equal(fixture.identities.findAuthIdentity('cas', 'cas-main', 'subject-a')?.userId, user.resourceId)
       assert.equal(fixture.identities.findAuthIdentity('cas', 'cas-other', 'subject-b')?.userId, user.resourceId)
       assert.equal(fixture.identities.getOutboxEvent('welcome:migration:identity:user:17')?.status, 'suppressed')
       assert.equal(fixture.runs.listSuppressedEffects('run-identity').length, 1)
       assert.equal(first.deliverableExternalOutboxCount, 0)
-      assert.equal(fixture.auth.listOrganizations().length, 1)
-      assert.equal(fixture.auth.listUsersByOrg(org.resourceId).length, 1)
+      assert.equal((await fixture.auth.listOrganizations()).length, 1)
+      assert.equal((await fixture.auth.listUsersByOrg(org.resourceId)).length, 1)
     } finally {
       fixture.db.close()
     }
   })
 
-  test('reuses mapped Moss identities and only assigns permanent legacy aliases', () => {
+  void test('reuses mapped Moss identities and only assigns permanent legacy aliases', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
     const identities = new IdentityRepository(db)
     const unified = new UnifiedIdentityService(db, auth, identities)
-    const existingOrg = unified.createOrganization(
+    const existingOrg = await unified.createOrganization(
       { name: 'Moss 企业', code: 'NEWCO', legacyEnterpriseId: 7 },
       migrationCommandContext('bootstrap', 'bootstrap-org'),
     )
-    const existingUser = unified.createUser({
+    const existingUser = await unified.createUser({
       orgId: existingOrg.organizationId,
       username: 'existing-user',
       email: 'legacy@example.test',
@@ -136,28 +136,28 @@ describe('IdentityMigrationService', () => {
       db, auth, identities, unified, runs, source: { readSnapshot: () => withProvider }, planner,
     })
     try {
-      const report = service.execute(service.plan([]), migrationCommandContext('run-identity', 'identity-phase'))
+      const report = await service.execute(service.plan([]), migrationCommandContext('run-identity', 'identity-phase'))
       assert.equal(report.organizationsReused, 1)
       assert.equal(report.usersReused, 1)
       assert.equal(identities.resolveNumericAliasGlobal('enterprise', 7)?.resourceId, existingOrg.organizationId)
       assert.equal(identities.resolveNumericAliasGlobal('user', 17)?.resourceId, existingUser.userId)
-      assert.equal(auth.listOrganizations().length, 1)
-      assert.equal(auth.listUsersByOrg(existingOrg.organizationId).length, 1)
+      assert.equal((await auth.listOrganizations()).length, 1)
+      assert.equal((await auth.listUsersByOrg(existingOrg.organizationId)).length, 1)
     } finally {
       db.close()
     }
   })
 
-  test('blocks execution when merge planning contains unresolved conflicts', () => {
+  void test('blocks execution when merge planning contains unresolved conflicts', async () => {
     const fixture = setup()
     try {
       const blocked = fixture.service.plan([{ kind: 'organization', sourceId: '7', targetId: 'missing' }])
       assert.equal(blocked.status, 'blocked')
-      assert.throws(
+      await assert.rejects(
         () => fixture.service.execute(blocked, migrationCommandContext('run-identity', 'identity-phase')),
         IdentityMigrationBlockedError,
       )
-      assert.equal(fixture.auth.listOrganizations().length, 0)
+      assert.equal((await fixture.auth.listOrganizations()).length, 0)
     } finally {
       fixture.db.close()
     }

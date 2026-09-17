@@ -42,8 +42,8 @@ class FakeRedis {
   async rpush() { return 1 }
 }
 
-describe('QMS runtime lifecycle', () => {
-  it('prefers tenant source maps and falls back to migrated global source maps', async () => {
+void describe('QMS runtime lifecycle', () => {
+  void it('prefers tenant source maps and falls back to migrated global source maps', async () => {
     const statements: string[] = []
     const repository = new PostgresSourceMapRepository({
       execute: async sql => { statements.push(sql); return [{ map_content: '{}' }] },
@@ -54,7 +54,7 @@ describe('QMS runtime lifecycle', () => {
     assert.match(statements[0]!, /ORDER BY tenant_id NULLS LAST/)
   })
 
-  it('does not create external resources while QMS is disabled', async () => {
+  void it('does not create external resources while QMS is disabled', async () => {
     let created = false
     const result = await startQmsRuntime({
       config: { ...config(), enabled: false }, ownerId: 'instance-1',
@@ -69,7 +69,7 @@ describe('QMS runtime lifecycle', () => {
     assert.equal(created, false)
   })
 
-  it('starts one unified service graph and stops external resources idempotently', async () => {
+  void it('starts one unified service graph and stops external resources idempotently', async () => {
     const store = new FakeStore()
     const redis = new FakeRedis()
     const runtime = await startQmsRuntime({
@@ -92,7 +92,7 @@ describe('QMS runtime lifecycle', () => {
     assert.equal(store.stops, 1)
   })
 
-  it('closes PostgreSQL and Redis when startup fails after connecting', async () => {
+  void it('closes PostgreSQL and Redis when startup fails after connecting', async () => {
     const store = new FakeStore()
     const redis = new FakeRedis()
     redis.failPing = true

@@ -129,8 +129,8 @@ export class SudoworkCasService {
     return parseProvider(connection)
   }
 
-  listPublicProviders(): Array<Record<string, unknown>> {
-    return this.options.authDb.listOrganizations().flatMap((org) =>
+  async listPublicProviders(): Promise<Array<Record<string, unknown>>> {
+    return (await this.options.authDb.listOrganizations()).flatMap((org) =>
       this.options.identities.listIntegrationConnections(org.id, 'cas')
         .filter((connection) => connection.enabled)
         .map((connection) => toLegacyProvider(parseProvider(connection))),
@@ -212,17 +212,17 @@ export class SudoworkCasService {
     const profile = await this.validator.validate(provider, service, ticket)
     if (!profile.active) throw new SudoworkCasError(403, 'CAS 用户已被禁用')
     const existingIdentity = this.options.identities.findAuthIdentity('cas', provider.id, profile.subject)
-    let user = existingIdentity ? this.options.authDb.getUserById(existingIdentity.userId) : null
+    let user = existingIdentity ? await this.options.authDb.getUserById(existingIdentity.userId) : null
     if (!user) {
       const accountIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', profile.account)
         ?? this.options.identities.findAuthIdentity('password', 'moss', profile.account)
-      user = accountIdentity ? this.options.authDb.getUserById(accountIdentity.userId) : null
+      user = accountIdentity ? await this.options.authDb.getUserById(accountIdentity.userId) : null
       if (user && user.orgId !== provider.orgId) {
         throw new SudoworkCasError(409, 'CAS 账号对应的本地用户已存在但登录方式或企业不匹配，请联系管理员处理')
       }
       if (!user) {
         if (!provider.autoProvision) throw new SudoworkCasError(403, '当前 Provider 未开启自动创建用户')
-        const created = this.options.unifiedIdentity.createUser({
+        const created = await this.options.unifiedIdentity.createUser({
           orgId: provider.orgId,
           username: profile.account,
           displayName: profile.nickname,
@@ -236,7 +236,7 @@ export class SudoworkCasService {
             metadata: profile.attributes,
           },
         }, onlineCommandContext(`cas-user:${provider.id}:${profile.subject}`))
-        user = this.options.authDb.getUserById(created.userId)
+        user = await this.options.authDb.getUserById(created.userId)
       } else {
         this.options.identities.createAuthIdentity({
           id: randomUUID(), orgId: provider.orgId, userId: user.id,
@@ -254,8 +254,8 @@ export class SudoworkCasService {
           initialQuotaUnits: this.options.initialQuotaUnits ?? 100_000,
         }, onlineCommandContext(`sudorouter:cas-user:${provider.id}:${profile.subject}`))
         if (user.status === 'pending') {
-          this.options.authDb.updateUser(user.id, { status: 'active' })
-          user = this.options.authDb.getUserById(user.id)
+          await this.options.authDb.updateUser(user.id, { status: 'active' })
+          user = await this.options.authDb.getUserById(user.id)
         }
       } catch {
         throw new SudoworkCasError(500, 'Sudorouter 用户初始化失败，请稍后重试')

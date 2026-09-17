@@ -2,7 +2,7 @@ import type { Hono } from 'hono'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
 import { SudoworkBillingError, type SudoworkBillingPort } from './billingService.js'
 
-type ActorResolver = (authorization: string | undefined) => IdentityActor | null
+type ActorResolver = (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
 
 export function registerSudoworkBillingRoutes(
   app: Hono,
@@ -28,7 +28,7 @@ export function registerSudoworkBillingRoutes(
   ))
 
   app.post('/api/v1/recharge/create', async context => {
-    const actor = user(context.req.header('Authorization'))
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     if (!value.amount || !value.payment_method) {
@@ -37,14 +37,14 @@ export function registerSudoworkBillingRoutes(
     if (value.payment_method !== 'ALIPAY' && value.payment_method !== 'WECHAT') {
       return context.json({ success: false, msg: '支付方式无效' }, 400)
     }
-    return context.json({ success: true, data: billing().createOrder({
+    return context.json({ success: true, data: await billing().createOrder({
       actor, amount: Number(value.amount), paymentMethod: value.payment_method,
       idempotencyKey: idempotencyKey(context),
     }) })
   })
 
   app.post('/api/v1/recharge/pay', async context => {
-    const actor = user(context.req.header('Authorization'))
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     const orderNo = typeof value.order_no === 'string' ? value.order_no : ''
@@ -63,49 +63,49 @@ export function registerSudoworkBillingRoutes(
     }
   })
 
-  app.get('/api/v1/recharge/query/:orderNo', context => {
-    const actor = user(context.req.header('Authorization'))
+  app.get('/api/v1/recharge/query/:orderNo', async context => {
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: billing().queryOrder(actor, context.req.param('orderNo')) })
   })
 
-  app.get('/api/v1/recharge/list', context => {
-    const actor = user(context.req.header('Authorization'))
+  app.get('/api/v1/recharge/list', async context => {
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: billing().listUserOrders({
       actor, page: page(context.req.query('page'), 1), pageSize: page(context.req.query('pageSize'), 20),
     }) })
   })
 
-  app.post('/api/v1/recharge/cancel/:orderNo', context => {
-    const actor = user(context.req.header('Authorization'))
+  app.post('/api/v1/recharge/cancel/:orderNo', async context => {
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     billing().cancelOrder({ actor, orderNo: context.req.param('orderNo'), idempotencyKey: idempotencyKey(context) })
     return context.json({ success: true, msg: '订单已取消' })
   })
 
-  app.get('/api/v1/admin/recharge/orders', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/recharge/orders', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().listAdminOrders({ actor, query: queryRecord(context) }) })
+    return context.json({ success: true, data: await billing().listAdminOrders({ actor, query: queryRecord(context) }) })
   })
-  app.get('/api/v1/admin/recharge/orders/:orderNo', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/recharge/orders/:orderNo', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().getAdminOrder(actor, context.req.param('orderNo')) })
+    return context.json({ success: true, data: await billing().getAdminOrder(actor, context.req.param('orderNo')) })
   })
-  app.get('/api/v1/admin/recharge/stats', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/recharge/stats', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: billing().getRechargeStats(actor) })
   })
-  app.get('/api/v1/admin/recharge/refund-calc/:orderNo', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/recharge/refund-calc/:orderNo', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: billing().calculateRefund(actor, context.req.param('orderNo')) })
   })
   app.post('/api/v1/admin/recharge/orders/:orderNo/refund', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     const result = await billing().requestRefund({
@@ -116,20 +116,20 @@ export function registerSudoworkBillingRoutes(
     return context.json({ success: true, msg: '退款成功', data: result })
   })
   app.post('/api/v1/admin/recharge/simulate-payment/:orderNo', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const result = await billing().simulatePayment({
       actor, orderNo: context.req.param('orderNo'), idempotencyKey: idempotencyKey(context),
     })
     return context.json({ success: true, msg: '模拟支付成功', data: result })
   })
-  app.get('/api/v1/admin/recharge-records', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/recharge-records', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().listRechargeRecords({ actor, query: queryRecord(context) }) })
+    return context.json({ success: true, data: await billing().listRechargeRecords({ actor, query: queryRecord(context) }) })
   })
   app.post('/api/v1/admin/recharge/orders/:id/retry', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     await billing().retryOrder({
       actor, legacyOrderId: Number(context.req.param('id')), idempotencyKey: idempotencyKey(context),
@@ -137,12 +137,12 @@ export function registerSudoworkBillingRoutes(
     return context.json({ success: true, msg: '订单重试成功' })
   })
   app.post('/api/v1/admin/recharge/sync', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: await billing().syncPendingOrders({ actor, idempotencyKey: idempotencyKey(context) }) })
   })
   app.post('/api/v1/admin/recharge/orders/:orderNo/sync', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: await billing().syncOrder({
       actor, orderNo: context.req.param('orderNo'), idempotencyKey: idempotencyKey(context),
@@ -150,7 +150,7 @@ export function registerSudoworkBillingRoutes(
   })
 
   app.post('/api/v1/admin/users/:id/points', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     if (!value.amount || Number(value.amount) <= 0) {
@@ -164,7 +164,7 @@ export function registerSudoworkBillingRoutes(
     return context.json({ success: true, msg: '积分调整成功', data })
   })
   app.post('/api/v1/admin/users/:id/recharge', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     if (actor.role !== 'super_admin') return context.json({ success: false, msg: '只有超级管理员可以为用户充值' }, 403)
     const value = await body(context)
@@ -180,7 +180,7 @@ export function registerSudoworkBillingRoutes(
     return context.json({ success: true, msg: '充值成功', data })
   })
   app.post('/api/v1/admin/users/:id/sync-quota', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const data = await billing().syncUserQuota({
       actor, legacyUserId: Number(context.req.param('id')), idempotencyKey: idempotencyKey(context),
@@ -189,7 +189,7 @@ export function registerSudoworkBillingRoutes(
   })
 
   app.post('/api/v1/credit-applications/', async context => {
-    const actor = user(context.req.header('Authorization'))
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     return context.json({ success: true, data: billing().createCreditApplication({
@@ -197,30 +197,30 @@ export function registerSudoworkBillingRoutes(
       idempotencyKey: idempotencyKey(context),
     }) })
   })
-  app.get('/api/v1/credit-applications/', context => {
-    const actor = user(context.req.header('Authorization'))
+  app.get('/api/v1/credit-applications/', async context => {
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().listUserCreditApplications({
+    return context.json({ success: true, data: await billing().listUserCreditApplications({
       actor, page: page(context.req.query('page'), 1), pageSize: page(context.req.query('pageSize'), 20),
     }) })
   })
-  app.get('/api/v1/credit-applications/:id', context => {
-    const actor = user(context.req.header('Authorization'))
+  app.get('/api/v1/credit-applications/:id', async context => {
+    const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().getUserCreditApplication(actor, Number(context.req.param('id'))) })
+    return context.json({ success: true, data: await billing().getUserCreditApplication(actor, Number(context.req.param('id'))) })
   })
-  app.get('/api/v1/admin/credit-applications', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/credit-applications', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().listAdminCreditApplications({ actor, query: queryRecord(context) }) })
+    return context.json({ success: true, data: await billing().listAdminCreditApplications({ actor, query: queryRecord(context) }) })
   })
-  app.get('/api/v1/admin/credit-applications/:id', context => {
-    const actor = admin(context.req.header('Authorization'))
+  app.get('/api/v1/admin/credit-applications/:id', async context => {
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().getAdminCreditApplication(actor, Number(context.req.param('id'))) })
+    return context.json({ success: true, data: await billing().getAdminCreditApplication(actor, Number(context.req.param('id'))) })
   })
   app.post('/api/v1/admin/credit-applications/:id/approve', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     const data = await billing().approveCreditApplication({
@@ -232,7 +232,7 @@ export function registerSudoworkBillingRoutes(
     return context.json({ success: true, msg: '审批通过', data })
   })
   app.post('/api/v1/admin/credit-applications/:id/reject', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
     billing().rejectCreditApplication({
@@ -242,7 +242,7 @@ export function registerSudoworkBillingRoutes(
     return context.json({ success: true, msg: '已拒绝' })
   })
   app.post('/api/v1/admin/credit-applications/:id/retry-sync', async context => {
-    const actor = admin(context.req.header('Authorization'))
+    const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const data = await billing().retryCreditApplication({
       actor, legacyApplicationId: Number(context.req.param('id')), idempotencyKey: idempotencyKey(context),

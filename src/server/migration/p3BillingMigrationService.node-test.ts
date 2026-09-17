@@ -58,13 +58,13 @@ function snapshot(): SudoworkP3Snapshot {
   }
 }
 
-function setup(initialBalance = 100) {
+async function setup(initialBalance = 100) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org-3', '企业 3', 1)
-  auth.createUser({
+  await auth.createOrganization('org-3', '企业 3', 1)
+  await auth.createUser({
     id: 'user-17', orgId: 'org-3', email: 'u17@example.test', name: 'u17', displayName: '用户 17',
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -91,9 +91,9 @@ function setup(initialBalance = 100) {
   return { db, identities, repository, wallet, service, secretValues }
 }
 
-describe('P3BillingMigrationService', () => {
-  test('保留旧 ID、订单号和 Nexus Token，以可重建账本导入且不产生外部投递', async () => {
-    const { db, identities, repository, wallet, service, secretValues } = setup()
+void describe('P3BillingMigrationService', () => {
+  void test('保留旧 ID、订单号和 Nexus Token，以可重建账本导入且不产生外部投递', async () => {
+    const { db, identities, repository, wallet, service, secretValues } = await setup()
     const source = snapshot()
     const plan = service.plan(source)
     assert.equal(plan.status, 'ready')
@@ -129,8 +129,8 @@ describe('P3BillingMigrationService', () => {
     db.close()
   })
 
-  test('目标钱包为空时从已验证流水原子构建余额', async () => {
-    const { db, repository, service } = setup(0)
+  void test('目标钱包为空时从已验证流水原子构建余额', async () => {
+    const { db, repository, service } = await setup(0)
     const plan = service.plan(snapshot())
     const report = await service.execute(plan, migrationCommandContext('batch-zero', 'batch-zero-execute'))
     assert.equal(report.financialDifferenceUnits, 0)
@@ -138,8 +138,8 @@ describe('P3BillingMigrationService', () => {
     db.close()
   })
 
-  test('Nexus Token 缺失会阻断历史用户校验', async () => {
-    const { db, service, secretValues } = setup()
+  void test('Nexus Token 缺失会阻断历史用户校验', async () => {
+    const { db, service, secretValues } = await setup()
     const source = snapshot()
     await service.execute(service.plan(source), migrationCommandContext('batch-token', 'batch-token-execute'))
     secretValues.clear()
@@ -149,8 +149,8 @@ describe('P3BillingMigrationService', () => {
     db.close()
   })
 
-  test('预检阻断余额矛盾、进行中业务和未完成的身份映射', async () => {
-    const mismatchSetup = setup()
+  void test('预检阻断余额矛盾、进行中业务和未完成的身份映射', async () => {
+    const mismatchSetup = await setup()
     const mismatch = snapshot()
     mismatch.users[0]!.balanceUnits = 101
     const mismatchPlan = mismatchSetup.service.plan(mismatch)
@@ -162,7 +162,7 @@ describe('P3BillingMigrationService', () => {
     )
     mismatchSetup.db.close()
 
-    const pendingSetup = setup()
+    const pendingSetup = await setup()
     const pending = snapshot()
     pending.orders[0]!.status = 1
     pending.creditApplications[0]!.status = 'PROCESSING'
@@ -171,7 +171,7 @@ describe('P3BillingMigrationService', () => {
     assert(pendingPlan.issues.filter(issue => issue.code === 'IN_PROGRESS').length >= 3)
     pendingSetup.db.close()
 
-    const orphanSetup = setup()
+    const orphanSetup = await setup()
     orphanSetup.db.prepare("DELETE FROM resource_numeric_aliases WHERE namespace = 'user'").run()
     const orphanPlan = orphanSetup.service.plan(snapshot())
     assert(orphanPlan.issues.some(issue => issue.code === 'IDENTITY_MAPPING_MISSING'))

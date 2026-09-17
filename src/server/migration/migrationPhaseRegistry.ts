@@ -21,6 +21,11 @@ export type MigrationPhaseResult = object
 export interface MigrationPhaseVerification {
   status: 'matched' | 'mismatch'
   issues: string[]
+  sourceChecksum?: string
+  counts?: unknown
+  migrated?: number
+  detectedTables?: unknown
+  excludedLocalData?: string[]
 }
 
 export interface MigrationPlanningContext {

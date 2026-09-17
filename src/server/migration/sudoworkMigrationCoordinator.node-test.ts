@@ -77,8 +77,8 @@ function setup(options: {
   return { db, runs, calls, coordinator, setSnapshot: (value: SudoworkSourceSnapshot) => { current = value } }
 }
 
-describe('SudoworkMigrationCoordinator', () => {
-  test('plans every phase in fixed order and does not create a run when any phase is blocked', async () => {
+void describe('SudoworkMigrationCoordinator', () => {
+  void test('plans every phase in fixed order and does not create a run when any phase is blocked', async () => {
     const fixture = setup({ blockedPhase: 'billing' })
     try {
       const dryRun = await fixture.coordinator.dryRun()
@@ -92,7 +92,7 @@ describe('SudoworkMigrationCoordinator', () => {
     }
   })
 
-  test('executes all phases in order with trusted migration contexts and verifies the run', async () => {
+  void test('executes all phases in order with trusted migration contexts and verifies the run', async () => {
     const fixture = setup()
     try {
       const report = await fixture.coordinator.execute()
@@ -111,7 +111,7 @@ describe('SudoworkMigrationCoordinator', () => {
     }
   })
 
-  test('最终门禁 mismatch 时不得把批次标记为 verified', async () => {
+  void test('最终门禁 mismatch 时不得把批次标记为 verified', async () => {
     const fixture = setup({ finalVerificationStatus: 'mismatch' })
     try {
       await fixture.coordinator.execute()
@@ -124,7 +124,7 @@ describe('SudoworkMigrationCoordinator', () => {
     }
   })
 
-  test('persists a failed checkpoint, skips completed phases on resume, and never starts later phases early', async () => {
+  void test('persists a failed checkpoint, skips completed phases on resume, and never starts later phases early', async () => {
     const fixture = setup({ failingPhase: 'configuration' })
     try {
       await assert.rejects(fixture.coordinator.execute(), /failed:configuration/)
@@ -152,7 +152,7 @@ describe('SudoworkMigrationCoordinator', () => {
     }
   })
 
-  test('refuses resume and verify when the frozen source fingerprint changed', async () => {
+  void test('refuses resume and verify when the frozen source fingerprint changed', async () => {
     const fixture = setup({ failingPhase: 'organizations' })
     try {
       await assert.rejects(fixture.coordinator.execute(), /failed:organizations/)
@@ -165,8 +165,8 @@ describe('SudoworkMigrationCoordinator', () => {
   })
 })
 
-describe('MigrationPhaseRegistry', () => {
-  test('rejects missing, duplicate, unknown, or reordered phases', () => {
+void describe('MigrationPhaseRegistry', () => {
+  void test('rejects missing, duplicate, unknown, or reordered phases', () => {
     const phase = (name: string) => ({ name, plan: async () => ({ status: 'ready' as const, issues: [] }), execute: async () => ({}), verify: async () => ({ status: 'matched' as const, issues: [] }) })
     assert.throws(() => new MigrationPhaseRegistry(MIGRATION_PHASES.slice(0, -1).map(phase) as MigrationPhase[]), /阶段清单/)
     assert.throws(() => new MigrationPhaseRegistry([...MIGRATION_PHASES.slice(0, -1), 'organizations'].map(phase) as MigrationPhase[]), /阶段清单/)

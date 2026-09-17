@@ -4,8 +4,8 @@ import { describe, test } from 'node:test'
 import { PostCutoverChangeLog } from './postCutoverChangeLog.js'
 import { ReplayService, ReplayServiceError } from './replayService.js'
 
-describe('ReplayService', () => {
-  test('replays internal state once with a stable suppressed replay context', async () => {
+void describe('ReplayService', () => {
+  void test('replays internal state once with a stable suppressed replay context', async () => {
     const db = new DatabaseSync(':memory:')
     const log = new PostCutoverChangeLog(db)
     const change = log.append({
@@ -39,7 +39,7 @@ describe('ReplayService', () => {
     }
   })
 
-  test('redelivers an approved allowlisted effect at most once', async () => {
+  void test('redelivers an approved allowlisted effect at most once', async () => {
     const db = new DatabaseSync(':memory:')
     const log = new PostCutoverChangeLog(db)
     let deliveries = 0
@@ -70,7 +70,7 @@ describe('ReplayService', () => {
     }
   })
 
-  test('rejects missing approval, non-allowlisted targets, and idempotency-key reuse with another payload', async () => {
+  void test('rejects missing approval, non-allowlisted targets, and idempotency-key reuse with another payload', async () => {
     const db = new DatabaseSync(':memory:')
     const log = new PostCutoverChangeLog(db)
     const service = new ReplayService({

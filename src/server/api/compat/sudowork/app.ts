@@ -49,8 +49,8 @@ export interface SudoworkIdentityPort {
     newPassword: string
     oldPasswordError?: string
   }): Promise<void>
-  getActor(accessToken: string): IdentityActor | null
-  updateProfile(accessToken: string, nickname: string): SudoworkLegacyUser
+  getActor(accessToken: string): Promise<IdentityActor | null> | IdentityActor | null
+  updateProfile(accessToken: string, nickname: string): Promise<SudoworkLegacyUser> | SudoworkLegacyUser
   loginByVerifiedPhone(input: {
     phone: string
     deviceId?: string
@@ -77,7 +77,7 @@ export interface SudoworkIdentityPort {
     refreshToken: string
     deviceId?: string
   }): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }>
-  getProfile(accessToken: string): SudoworkLegacyUser | null
+  getProfile(accessToken: string): Promise<SudoworkLegacyUser | null> | SudoworkLegacyUser | null
   logout(input: {
     refreshToken?: string
     deviceId?: string
@@ -87,7 +87,7 @@ export interface SudoworkIdentityPort {
 }
 
 export interface SudoworkAdministrationPort {
-  listEnterprises(actor: IdentityActor): LegacyEnterpriseDto[]
+  listEnterprises(actor: IdentityActor): Promise<LegacyEnterpriseDto[]> | LegacyEnterpriseDto[]
   createEnterprise(input: {
     actor: IdentityActor
     name: string
@@ -100,7 +100,7 @@ export interface SudoworkAdministrationPort {
     appCompanyName?: string | null
     loginDescription?: string | null
     idempotencyKey?: string
-  }): Pick<LegacyEnterpriseDto, 'id'>
+  }): Promise<Pick<LegacyEnterpriseDto, 'id'>> | Pick<LegacyEnterpriseDto, 'id'>
   updateEnterprise(input: {
     actor: IdentityActor
     enterpriseId: number
@@ -111,21 +111,21 @@ export interface SudoworkAdministrationPort {
     aboutName?: string | null
     appCompanyName?: string | null
     loginDescription?: string | null
-  }): void
-  deleteEnterprise(actor: IdentityActor, enterpriseId: number): void
+  }): Promise<void> | void
+  deleteEnterprise(actor: IdentityActor, enterpriseId: number): Promise<void> | void
   listInvitationCodes(input: {
     actor: IdentityActor
     enterpriseId?: number
     status?: 0 | 1 | 2
     page?: number
     pageSize?: number
-  }): { items: LegacyInvitationDto[] | Array<Record<string, unknown>>; total: number; page: number; page_size: number }
+  }): Promise<{ items: LegacyInvitationDto[] | Array<Record<string, unknown>>; total: number; page: number; page_size: number }> | { items: LegacyInvitationDto[] | Array<Record<string, unknown>>; total: number; page: number; page_size: number }
   createInvitationCodes(input: {
     actor: IdentityActor
     enterpriseId?: number
     count: number
     initialQuotaUsd?: number | null
-  }): { codes: string[]; count: number }
+  }): Promise<{ codes: string[]; count: number }> | { codes: string[]; count: number }
   deleteInvitationCode(actor: IdentityActor, legacyId: number): boolean
   listUsers(input: {
     actor: IdentityActor
@@ -133,7 +133,7 @@ export interface SudoworkAdministrationPort {
     status?: 0 | 1 | 2
     role?: 'SUPER_ADMIN' | 'ENTERPRISE_ADMIN' | 'USER'
     keyword?: string
-  }): LegacyManagedUserDto[]
+  }): Promise<LegacyManagedUserDto[]> | LegacyManagedUserDto[]
   createPasswordUser(input: {
     actor: IdentityActor
     phone: string
@@ -157,14 +157,14 @@ export interface SudoworkAdministrationPort {
     nickname?: string | null
     status?: 0 | 1 | 2
     enterpriseId?: number
-  }): void
+  }): Promise<void> | void
   setUserRole(input: {
     actor: IdentityActor
     userId: number
     role: 'ENTERPRISE_ADMIN' | 'USER'
-  }): void
-  manageUser(input: { actor: IdentityActor; userId: number; action: 'enable' | 'disable' }): 1 | 2
-  deleteUser(actor: IdentityActor, legacyId: number): void
+  }): Promise<void> | void
+  manageUser(input: { actor: IdentityActor; userId: number; action: 'enable' | 'disable' }): Promise<1 | 2> | 1 | 2
+  deleteUser(actor: IdentityActor, legacyId: number): Promise<void> | void
   updatePasswordUser(input: {
     actor: IdentityActor
     userId: number
@@ -172,7 +172,7 @@ export interface SudoworkAdministrationPort {
     status?: 0 | 1 | 2
     enterpriseId?: number
     password?: string
-  }): void
+  }): Promise<void> | void
 }
 
 export interface SudoworkCasPort {
@@ -180,7 +180,7 @@ export interface SudoworkCasPort {
   createHandoff(input: { providerId: string; ticket: string }): Promise<{ redirectUrl: string }>
   exchange(input: { providerId: string; code: string; deviceId?: string }): Promise<SudoworkLegacySession>
   logoutCallbackUrl(providerId: string): string
-  listPublicProviders(): Array<Record<string, unknown>>
+  listPublicProviders(): Promise<Array<Record<string, unknown>>> | Array<Record<string, unknown>>
 }
 
 export interface SudoworkUserProjection {
@@ -228,10 +228,10 @@ export interface SudoworkConfigPort {
   list(input: Parameters<SudoworkConfigService['list']>[0]): ReturnType<SudoworkConfigService['list']>
   create(actor: IdentityActor, body: Record<string, unknown>): ReturnType<SudoworkConfigService['create']>
   get(actor: IdentityActor, id: number): ReturnType<SudoworkConfigService['get']>
-  update(actor: IdentityActor, id: number, body: Record<string, unknown>): void
-  updateStatus(actor: IdentityActor, id: number, status: number): void
+  update(actor: IdentityActor, id: number, body: Record<string, unknown>): ReturnType<SudoworkConfigService['update']>
+  updateStatus(actor: IdentityActor, id: number, status: number): ReturnType<SudoworkConfigService['updateStatus']>
   entriesFor(actor: IdentityActor, id: number): ReturnType<SudoworkConfigService['entriesFor']>
-  replaceEntries(actor: IdentityActor, id: number, entries: unknown): void
+  replaceEntries(actor: IdentityActor, id: number, entries: unknown): ReturnType<SudoworkConfigService['replaceEntries']>
   listEnterprises(actor: IdentityActor, id: number, page?: number, pageSize?: number): ReturnType<SudoworkConfigService['listEnterprises']>
   associate(actor: IdentityActor, id: number, legacyEnterpriseId: number): void
   dissociate(actor: IdentityActor, id: number, legacyEnterpriseId: number): void
@@ -354,7 +354,7 @@ export function createSudoworkCompatibilityApp(options: {
   const app = new Hono()
   const loginMethod = () => options.systemConfiguration?.getLoginMethod() ?? options.loginMethod ?? 'password'
   const getProjection = options.getUserProjection ?? (async () => EMPTY_PROJECTION)
-  const publicCasProviders = () => loginMethod() === 'cas' ? options.cas?.listPublicProviders() ?? [] : []
+  const publicCasProviders = async () => loginMethod() === 'cas' ? await options.cas?.listPublicProviders() ?? [] : []
   const skillhubBaseUrl = options.systemConfig?.skillhubBaseUrl?.replace(/\/+$/, '') ?? ''
 
   app.use('*', cors())
@@ -628,17 +628,17 @@ export function createSudoworkCompatibilityApp(options: {
     return changePassword(context, '原始密码')
   })
 
-  const getAuthenticatedActor = (authorization: string | undefined): IdentityActor | null => {
+  const getAuthenticatedActor = async (authorization: string | undefined): Promise<IdentityActor | null> => {
     const token = bearerToken(authorization)
     if (!token) return null
-    const actor = options.identity.getActor(token)
+    const actor = await options.identity.getActor(token)
     return actor && options.organizationScopedAdmin
       ? { ...actor, organizationScoped: true }
       : actor
   }
 
-  const getAdminActor = (authorization: string | undefined): IdentityActor | null => {
-    const actor = getAuthenticatedActor(authorization)
+  const getAdminActor = async (authorization: string | undefined): Promise<IdentityActor | null> => {
+    const actor = await getAuthenticatedActor(authorization)
     return actor && (actor.role === 'super_admin' || actor.role === 'admin') ? actor : null
   }
 
@@ -648,8 +648,8 @@ export function createSudoworkCompatibilityApp(options: {
     return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 100) : undefined
   }
 
-  app.get('/api/assistants/cursor', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/assistants/cursor', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.listAgents({
@@ -662,15 +662,15 @@ export function createSudoworkCompatibilityApp(options: {
     }))
   })
 
-  app.get('/api/assistants/:assistantId', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/assistants/:assistantId', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.getAgentDetail(actor, context.req.param('assistantId')))
   })
 
   app.post('/api/assistants', async (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const form = await context.req.formData()
@@ -691,24 +691,24 @@ export function createSudoworkCompatibilityApp(options: {
     }))
   })
 
-  app.post('/api/assistants/:assistantId/approve', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.post('/api/assistants/:assistantId/approve', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     options.catalog.reviewAgent(actor, context.req.param('assistantId'))
     return context.json({ success: true, message: 'success' })
   })
 
-  app.delete('/api/assistants/:assistantId', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.delete('/api/assistants/:assistantId', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     options.catalog.deleteAgent(actor, context.req.param('assistantId'))
     return context.json({ success: true, message: 'success' })
   })
 
-  app.get('/api/skills', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/skills', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.listSkills({
@@ -719,8 +719,8 @@ export function createSudoworkCompatibilityApp(options: {
     }))
   })
 
-  app.get('/api/skills/cursor', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/skills/cursor', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.listSkills({
@@ -733,15 +733,15 @@ export function createSudoworkCompatibilityApp(options: {
     }))
   })
 
-  app.get('/api/skills/:skillId', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/skills/:skillId', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.getSkillDetail(actor, context.req.param('skillId')))
   })
 
   app.post('/api/skills', async (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const form = await context.req.formData()
@@ -765,38 +765,38 @@ export function createSudoworkCompatibilityApp(options: {
     }))
   })
 
-  app.post('/api/skills/:skillId/approve', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.post('/api/skills/:skillId/approve', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     options.catalog.reviewSkill(actor, context.req.param('skillId'))
     return context.json({ success: true, message: 'success' })
   })
 
-  app.delete('/api/skills/:skillId', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.delete('/api/skills/:skillId', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     options.catalog.deleteSkill(actor, context.req.param('skillId'))
     return context.json({ success: true, message: 'success' })
   })
 
-  app.get('/api/v1/agents/visible/bindings', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/v1/agents/visible/bindings', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.listVisibleBindings(actor))
   })
 
-  app.get('/api/v1/agents/visible', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/v1/agents/visible', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.listVisibleAgents(actor))
   })
 
-  app.get('/api/categories', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/categories', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(options.catalog.listCategories(actor, context.req.query('type') === '1' ? 'agent' : 'skill'))
@@ -818,7 +818,7 @@ export function createSudoworkCompatibilityApp(options: {
     context: Context,
     kind: 'config-item' | 'enterprise',
   ) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.managedImages) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const form = await context.req.formData()
@@ -862,22 +862,22 @@ export function createSudoworkCompatibilityApp(options: {
   app.get('/uploads/config-items/:filename', context => serveManagedImage(context, 'config-item'))
   app.get('/uploads/enterprises/:filename', context => serveManagedImage(context, 'enterprise'))
 
-  app.get('/api/v1/admin/enterprises', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/enterprises', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json({ success: true, data: options.administration.listEnterprises(actor) })
+    return context.json({ success: true, data: await options.administration.listEnterprises(actor) })
   })
 
   app.post('/api/v1/admin/enterprises', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
     const name = typeof body.name === 'string' ? body.name : ''
     const code = typeof body.code === 'string' ? body.code : ''
     if (!name || !code) return context.json({ success: false, msg: '企业名称和企业码不能为空' }, 400)
-    options.administration.createEnterprise({
+    await options.administration.createEnterprise({
       actor, name, code,
       creditPool: typeof body.credit_pool === 'number' ? body.credit_pool : undefined,
       logo: typeof body.logo === 'string' ? body.logo : null,
@@ -892,13 +892,13 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.put('/api/v1/admin/enterprises/:id', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
     const name = typeof body.name === 'string' ? body.name : ''
     if (!name) return context.json({ success: false, msg: '企业名称不能为空' }, 400)
-    options.administration.updateEnterprise({
+    await options.administration.updateEnterprise({
       actor, enterpriseId: Number(context.req.param('id')), name,
       logo: typeof body.logo === 'string' ? body.logo : null,
       appName: typeof body.app_name === 'string' ? body.app_name : null,
@@ -910,23 +910,23 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json({ success: true, msg: '企业更新成功' })
   })
 
-  app.delete('/api/v1/admin/enterprises/:id', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.delete('/api/v1/admin/enterprises/:id', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.administration.deleteEnterprise(actor, Number(context.req.param('id')))
+    await options.administration.deleteEnterprise(actor, Number(context.req.param('id')))
     return context.json({ success: true, msg: '企业删除成功' })
   })
 
-  app.get('/api/v1/admin/invitation-codes/available', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/invitation-codes/available', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const enterpriseId = Number(context.req.query('enterprise_id'))
     if (!Number.isInteger(enterpriseId) || enterpriseId <= 0) {
       return context.json({ success: false, msg: '请指定企业ID' }, 400)
     }
-    const result = options.administration.listInvitationCodes({
+    const result = await options.administration.listInvitationCodes({
       actor, enterpriseId, status: 0, page: 1, pageSize: 100,
     })
     return context.json({
@@ -935,13 +935,13 @@ export function createSudoworkCompatibilityApp(options: {
     })
   })
 
-  app.get('/api/v1/admin/invitation-codes', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/invitation-codes', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const enterpriseIdValue = context.req.query('enterprise_id')
     const statusValue = context.req.query('status')
-    const result = options.administration.listInvitationCodes({
+    const result = await options.administration.listInvitationCodes({
       actor,
       enterpriseId: enterpriseIdValue ? Number.parseInt(enterpriseIdValue, 10) : undefined,
       status: statusValue ? Number.parseInt(statusValue, 10) as 0 | 1 | 2 : undefined,
@@ -952,7 +952,7 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.post('/api/v1/admin/invitation-codes', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
@@ -965,7 +965,7 @@ export function createSudoworkCompatibilityApp(options: {
     if (initialQuotaUsd !== null && (!Number.isFinite(initialQuotaUsd) || initialQuotaUsd < 0)) {
       return context.json({ success: false, msg: '注册赠送额度必须是大于等于 0 的数字' }, 400)
     }
-    const result = options.administration.createInvitationCodes({
+    const result = await options.administration.createInvitationCodes({
       actor,
       enterpriseId,
       count: Number(body.count) || 1,
@@ -978,8 +978,8 @@ export function createSudoworkCompatibilityApp(options: {
     })
   })
 
-  app.delete('/api/v1/admin/invitation-codes/:id', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.delete('/api/v1/admin/invitation-codes/:id', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const deleted = options.administration.deleteInvitationCode(actor, Number(context.req.param('id')))
@@ -987,14 +987,14 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json({ success: true, msg: '邀请码删除成功' })
   })
 
-  app.get('/api/v1/admin/users', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/users', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const enterpriseId = context.req.query('enterprise_id')
     const status = context.req.query('status')
     const role = context.req.query('role') as 'SUPER_ADMIN' | 'ENTERPRISE_ADMIN' | 'USER' | undefined
-    const users = options.administration.listUsers({
+    const users = await options.administration.listUsers({
       actor,
       enterpriseId: enterpriseId ? Number.parseInt(enterpriseId, 10) : undefined,
       status: status ? Number.parseInt(status, 10) as 0 | 1 | 2 : undefined,
@@ -1005,7 +1005,7 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.post('/api/v1/admin/users-password', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (actor.role !== 'super_admin') {
       return context.json({ success: false, msg: '只有超级管理员可以创建用户' }, 403)
@@ -1035,7 +1035,7 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.post('/api/v1/admin/users', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (actor.role !== 'super_admin') {
       return context.json({ success: false, msg: '只有超级管理员可以创建用户' }, 403)
@@ -1066,7 +1066,7 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.put('/api/v1/admin/users-password/:id', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (actor.role !== 'super_admin') {
       return context.json({ success: false, msg: '只有超级管理员可以编辑用户' }, 403)
@@ -1078,7 +1078,7 @@ export function createSudoworkCompatibilityApp(options: {
       const error = validatePassword(password)
       if (error) return context.json({ success: false, msg: error }, 400)
     }
-    options.administration.updatePasswordUser({
+    await options.administration.updatePasswordUser({
       actor,
       userId: Number(context.req.param('id')),
       nickname: typeof body.nickname === 'string' ? body.nickname : undefined,
@@ -1090,14 +1090,14 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.put('/api/v1/admin/users/:id', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (actor.role !== 'super_admin') {
       return context.json({ success: false, msg: '只有超级管理员可以编辑用户' }, 403)
     }
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
-    options.administration.updateUser({
+    await options.administration.updateUser({
       actor,
       userId: Number(context.req.param('id')),
       nickname: typeof body.nickname === 'string' ? body.nickname : undefined,
@@ -1108,7 +1108,7 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.post('/api/v1/admin/users/:id/role', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
@@ -1119,12 +1119,12 @@ export function createSudoworkCompatibilityApp(options: {
     if (role !== 'USER' && role !== 'ENTERPRISE_ADMIN') {
       return context.json({ success: false, msg: '无效的角色' }, 400)
     }
-    options.administration.setUserRole({ actor, userId: Number(context.req.param('id')), role })
+    await options.administration.setUserRole({ actor, userId: Number(context.req.param('id')), role })
     return context.json({ success: true, msg: '角色更新成功' })
   })
 
   app.post('/api/v1/admin/users/:id/manage', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
@@ -1132,7 +1132,7 @@ export function createSudoworkCompatibilityApp(options: {
     if (action !== 'enable' && action !== 'disable') {
       return context.json({ success: false, msg: '无效的操作，请使用 enable 或 disable' }, 400)
     }
-    const status = options.administration.manageUser({
+    const status = await options.administration.manageUser({
       actor, userId: Number(context.req.param('id')), action,
     })
     return context.json({
@@ -1142,22 +1142,22 @@ export function createSudoworkCompatibilityApp(options: {
     })
   })
 
-  app.delete('/api/v1/admin/users/:id', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.delete('/api/v1/admin/users/:id', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (actor.role !== 'super_admin') {
       return context.json({ success: false, msg: '只有超级管理员可以删除用户' }, 403)
     }
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.administration.deleteUser(actor, Number(context.req.param('id')))
+    await options.administration.deleteUser(actor, Number(context.req.param('id')))
     return context.json({ success: true, msg: '用户删除成功，所有关联数据已清除' })
   })
 
-  app.get('/api/v1/admin/config-items', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/config-items', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json({ success: true, data: options.configuration.list({
+    return context.json({ success: true, data: await options.configuration.list({
       actor,
       name: context.req.query('name'),
       status: context.req.query('status'),
@@ -1167,59 +1167,59 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.post('/api/v1/admin/config-items', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    const result = options.configuration.create(actor, await context.req.json<Record<string, unknown>>())
+    const result = await options.configuration.create(actor, await context.req.json<Record<string, unknown>>())
     return context.json({ success: true, msg: '配置项创建成功', data: result })
   })
 
-  app.get('/api/v1/admin/config-items/:id', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/config-items/:id', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json({ success: true, data: options.configuration.get(actor, Number(context.req.param('id'))) })
+    return context.json({ success: true, data: await options.configuration.get(actor, Number(context.req.param('id'))) })
   })
 
   app.put('/api/v1/admin/config-items/:id', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.configuration.update(actor, Number(context.req.param('id')), await context.req.json<Record<string, unknown>>())
+    await options.configuration.update(actor, Number(context.req.param('id')), await context.req.json<Record<string, unknown>>())
     return context.json({ success: true, msg: '配置项更新成功' })
   })
 
   app.put('/api/v1/admin/config-items/:id/status', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
     const status = Number(body.status)
-    options.configuration.updateStatus(actor, Number(context.req.param('id')), status)
+    await options.configuration.updateStatus(actor, Number(context.req.param('id')), status)
     return context.json({ success: true, msg: status === 0 ? '配置项已禁用' : '配置项已恢复' })
   })
 
-  app.get('/api/v1/admin/config-items/:id/entries', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/config-items/:id/entries', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json({ success: true, data: options.configuration.entriesFor(actor, Number(context.req.param('id'))) })
   })
 
   app.put('/api/v1/admin/config-items/:id/entries', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
-    options.configuration.replaceEntries(actor, Number(context.req.param('id')), body.entries)
+    await options.configuration.replaceEntries(actor, Number(context.req.param('id')), body.entries)
     return context.json({ success: true, msg: '配置列表保存成功' })
   })
 
-  app.get('/api/v1/admin/config-items/:id/enterprises', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/config-items/:id/enterprises', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    const result = options.configuration.listEnterprises(
+    const result = await options.configuration.listEnterprises(
       actor,
       Number(context.req.param('id')),
       Number.parseInt(context.req.query('page') || '1', 10),
@@ -1228,31 +1228,31 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json({ success: true, data: result })
   })
 
-  app.post('/api/v1/admin/config-items/:id/enterprises/:enterpriseId', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.post('/api/v1/admin/config-items/:id/enterprises/:enterpriseId', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     options.configuration.associate(actor, Number(context.req.param('id')), Number(context.req.param('enterpriseId')))
     return context.json({ success: true, msg: '企业关联成功' })
   })
 
-  app.delete('/api/v1/admin/config-items/:id/enterprises/:enterpriseId', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.delete('/api/v1/admin/config-items/:id/enterprises/:enterpriseId', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     options.configuration.dissociate(actor, Number(context.req.param('id')), Number(context.req.param('enterpriseId')))
     return context.json({ success: true, msg: '企业取消关联成功' })
   })
 
-  app.get('/api/v1/config/items', (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+  app.get('/api/v1/config/items', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json({ success: true, data: options.configuration.listForUser(actor) })
+    return context.json({ success: true, data: await options.configuration.listForUser(actor) })
   })
 
   app.get('/api/v1/tenant/config', async (context) => {
-    const actor = getAuthenticatedActor(context.req.header('Authorization'))
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const code = context.req.query('code')?.trim()
@@ -1260,38 +1260,41 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json({ success: true, data: await options.configuration.getTenantConfig(actor, code) })
   })
 
-  app.get('/api/v1/admin/system-config', (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+  app.get('/api/v1/admin/system-config', async (context) => {
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json({ success: true, data: options.systemConfiguration.getAdminConfig(actor) })
   })
 
   app.put('/api/v1/admin/system-config', async (context) => {
-    const actor = getAdminActor(context.req.header('Authorization'))
+    const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     await options.systemConfiguration.update(actor, await context.req.json<Record<string, unknown>>())
     return context.json({ success: true, msg: '系统配置更新成功' })
   })
 
-  app.get('/api/v1/system-config', (context) => context.json({
-    success: true,
-    data: options.systemConfiguration?.getPublicConfig() ?? {
+  app.get('/api/v1/system-config', async (context) => {
+    const casProviders = await publicCasProviders()
+    return context.json({
+      success: true,
+      data: options.systemConfiguration?.getPublicConfig() ?? {
       login_method: loginMethod() === 'sms' ? 0 : loginMethod() === 'password' ? 1 : 2,
       log_report: { enabled: 0 }, version_update: { enabled: 0 }, product_improvement: { enabled: 0 },
       sudorouter_baseurl: '', skillhub_baseurl: skillhubBaseUrl, scode_auto_model: '',
       third_party_auth: {
         enabled: loginMethod() === 'cas' && options.cas ? 1 : 0,
-        default_provider: publicCasProviders()[0]?.id ?? '', providers: publicCasProviders(),
+        default_provider: casProviders[0]?.id ?? '', providers: casProviders,
       },
       recharge_mode: 'disabled', credit_application: { enabled: 0 },
     },
-  }))
+    })
+  })
 
-  app.get('/api/v1/system-config/credentials', (context) => {
+  app.get('/api/v1/system-config/credentials', async (context) => {
     const token = bearerToken(context.req.header('Authorization'))
-    const actor = token ? options.identity.getActor(token) : null
+    const actor = token ? await options.identity.getActor(token) : null
     if (!token || !actor) {
       return context.json({ success: false, msg: '未授权' }, 401)
     }
@@ -1415,7 +1418,7 @@ export function createSudoworkCompatibilityApp(options: {
 
   app.get('/api/v1/user/profile', async (context) => {
     const token = bearerToken(context.req.header('Authorization'))
-    const user = token ? options.identity.getProfile(token) : null
+    const user = token ? await options.identity.getProfile(token) : null
     if (!user) return context.json({ success: false, msg: '未授权' }, 401)
     const projection = await getProjection(user)
     return context.json({
@@ -1443,7 +1446,7 @@ export function createSudoworkCompatibilityApp(options: {
     const body = await context.req.json<Record<string, unknown>>()
     const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
     if (!nickname) return context.json({ success: false, msg: '昵称不能为空' }, 400)
-    options.identity.updateProfile(token, nickname)
+    await options.identity.updateProfile(token, nickname)
     return context.json({ success: true, msg: '昵称已更新' })
   })
 
@@ -1493,8 +1496,8 @@ export function createSudoworkCompatibilityApp(options: {
   if (options.qms) {
     app.route('/', createSudoworkQmsRoutes({
       ...options.qms,
-      getActor: authorization => {
-        const actor = options.identity.getActor(authorization ?? '')
+      getActor: async authorization => {
+        const actor = await options.identity.getActor(authorization ?? '')
         return actor && options.organizationScopedAdmin
           ? { ...actor, organizationScoped: true }
           : actor

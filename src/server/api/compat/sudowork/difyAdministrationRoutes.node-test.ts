@@ -33,8 +33,8 @@ function setup(role = 'admin', organizationScoped = false) {
   return { app, calls }
 }
 
-describe('Sudowork Dify administration compatibility routes', () => {
-  test('registers all 18 frozen administration routes', () => {
+void describe('Sudowork Dify administration compatibility routes', () => {
+  void test('registers all 18 frozen administration routes', async () => {
     const { app } = setup()
     assert.deepEqual(app.routes.map(route => `${route.method} ${route.path}`), [
       'GET /api/v1/admin/dify/sso',
@@ -58,7 +58,7 @@ describe('Sudowork Dify administration compatibility routes', () => {
     ])
   })
 
-  test('keeps agent create, detail, acl and dataset envelopes', async () => {
+  void test('keeps agent create, detail, acl and dataset envelopes', async () => {
     const { app, calls } = setup()
     const created = await app.request('/api/v1/admin/dify/agents', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -84,7 +84,7 @@ describe('Sudowork Dify administration compatibility routes', () => {
     assert.deepEqual([invalidDatasets.status, await invalidDatasets.json()], [400, { success: false, msg: 'dataset_ids is required' }])
   })
 
-  test('Moss 组织作用域下的超级管理员固定使用当前组织', async () => {
+  void test('Moss 组织作用域下的超级管理员固定使用当前组织', async () => {
     const { app, calls } = setup('super_admin', true)
 
     const current = await app.request('/api/v1/admin/dify/binding')
@@ -96,7 +96,7 @@ describe('Sudowork Dify administration compatibility routes', () => {
     }])
   })
 
-  test('keeps multipart validation and immutable enhancement method', async () => {
+  void test('keeps multipart validation and immutable enhancement method', async () => {
     const { app } = setup()
     const invalidForm = new FormData()
     invalidForm.set('enterprise_id', '9')

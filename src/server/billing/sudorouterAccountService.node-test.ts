@@ -71,8 +71,8 @@ function setup() {
   return { db, provider, secrets, repository, service }
 }
 
-describe('SudorouterAccountService', () => {
-  test('幂等创建账号、初始化额度并把 Token 只写入 Nexus', async () => {
+void describe('SudorouterAccountService', () => {
+  void test('幂等创建账号、初始化额度并把 Token 只写入 Nexus', async () => {
     const context = setup()
     const input = {
       ownerId: 'user-1', orgId: 'org-1', username: '13800000000',
@@ -102,7 +102,7 @@ describe('SudorouterAccountService', () => {
     context.db.close()
   })
 
-  test('复用精确匹配的外部账号，只补足额度差额', async () => {
+  void test('复用精确匹配的外部账号，只补足额度差额', async () => {
     const context = setup()
     context.provider.accounts.set('77', {
       externalUserId: '77', username: 'existing', quotaUnits: 200_000, usedQuotaUnits: 10,
@@ -119,7 +119,7 @@ describe('SudorouterAccountService', () => {
     context.db.close()
   })
 
-  test('Nexus 写入失败可用同一幂等键恢复且不重复开户或加额度', async () => {
+  void test('Nexus 写入失败可用同一幂等键恢复且不重复开户或加额度', async () => {
     const context = setup()
     context.secrets.failNextPut = true
     const input = {
@@ -139,7 +139,7 @@ describe('SudorouterAccountService', () => {
     context.db.close()
   })
 
-  test('同一幂等键不能绑定不同用户或初始额度', async () => {
+  void test('同一幂等键不能绑定不同用户或初始额度', async () => {
     const context = setup()
     await context.service.ensureAccount({
       ownerId: 'user-4', orgId: 'org-1', username: 'same', displayName: 'Same', initialQuotaUnits: 10,

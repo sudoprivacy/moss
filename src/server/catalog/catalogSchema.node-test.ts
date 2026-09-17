@@ -33,8 +33,8 @@ function legacyDatabase(): DatabaseSync {
   return db
 }
 
-describe('统一 Agent/Skill 目录数据库结构', () => {
-  test('幂等升级旧表并为已有资源回填兼容默认值', () => {
+void describe('统一 Agent/Skill 目录数据库结构', () => {
+  void test('幂等升级旧表并为已有资源回填兼容默认值', () => {
     const db = legacyDatabase()
     ensureCatalogSchema(db)
     ensureCatalogSchema(db)
@@ -68,7 +68,7 @@ describe('统一 Agent/Skill 目录数据库结构', () => {
     db.close()
   })
 
-  test('目录组织分配表拒绝无效范围和不存在的资源', () => {
+  void test('目录组织分配表拒绝无效范围和不存在的资源', () => {
     const db = legacyDatabase()
     ensureCatalogSchema(db)
 
@@ -90,7 +90,7 @@ describe('统一 Agent/Skill 目录数据库结构', () => {
     db.close()
   })
 
-  test('数据库拒绝非法 Provider、运行模式和重复外部资源身份', () => {
+  void test('数据库拒绝非法 Provider、运行模式和重复外部资源身份', () => {
     const db = legacyDatabase()
     ensureCatalogSchema(db)
 
@@ -118,7 +118,7 @@ describe('统一 Agent/Skill 目录数据库结构', () => {
     db.close()
   })
 
-  test('升级后通过既有写入路径创建的资源自动获得稳定来源 ID', () => {
+  void test('升级后通过既有写入路径创建的资源自动获得稳定来源 ID', () => {
     const db = legacyDatabase()
     ensureCatalogSchema(db)
 

@@ -12,8 +12,8 @@ import {
   runInTransaction,
 } from './sqliteUnitOfWork.js'
 
-describe('SQLite UnitOfWork', () => {
-  test('commits outer work and isolates a handled nested failure with SAVEPOINT', () => {
+void describe('SQLite UnitOfWork', () => {
+  void test('commits outer work and isolates a handled nested failure with SAVEPOINT', () => {
     const db = new DatabaseSync(':memory:')
     db.exec('CREATE TABLE values_log (value TEXT NOT NULL)')
 
@@ -32,7 +32,7 @@ describe('SQLite UnitOfWork', () => {
     db.close()
   })
 
-  test('rejects asynchronous callbacks and restores connection state', () => {
+  void test('rejects asynchronous callbacks and restores connection state', () => {
     const db = new DatabaseSync(':memory:')
     db.exec('CREATE TABLE values_log (value TEXT NOT NULL)')
     assert.throws(() => runInTransaction(db, async () => {
@@ -44,26 +44,23 @@ describe('SQLite UnitOfWork', () => {
     db.close()
   })
 
-  test('allows AuthCenter bootstrap inside a caller-owned transaction', () => {
+  void test('runs AuthCenter bootstrap through its async driver transaction', async () => {
     const db = new DatabaseSync(':memory:')
     const authDb = new AuthCenterDb(db)
 
-    runInTransaction(db, () => {
-      const result = authDb.bootstrap({ username: 'root', password: 'StrongPass123' })
-      assert.equal(result.created, true)
-      assert.equal(db.isTransaction, true)
-    })
+    const result = await authDb.bootstrap({ username: 'root', password: 'StrongPass123' })
+    assert.equal(result.created, true)
 
-    assert.equal(authDb.listOrganizations().length, 1)
-    assert.equal(authDb.listUsersByRole('super_admin').length, 1)
+    assert.equal((await authDb.listOrganizations()).length, 1)
+    assert.equal((await authDb.listUsersByRole('super_admin')).length, 1)
     assert.equal(db.isTransaction, false)
     db.close()
   })
 
-  test('allows AuthCenter JSON migration inside a caller-owned transaction', () => {
+  void test('runs AuthCenter JSON migration through its async driver transaction', async () => {
     const db = new DatabaseSync(':memory:')
     const authDb = new AuthCenterDb(db)
-    runInTransaction(db, () => authDb.migrateFromJson({
+    await authDb.migrateFromJson({
       version: 3,
       issuer: 'legacy-moss',
       jwtSecret: 'secret',
@@ -86,13 +83,13 @@ describe('SQLite UnitOfWork', () => {
         extUserId: null,
       }],
       apiKeys: [],
-    }))
+    })
     assert.equal(authDb.getIssuer(), 'legacy-moss')
     assert.equal(db.isTransaction, false)
     db.close()
   })
 
-  test('在另一个 DatabaseSync 连接短暂持有写锁时只重试 BEGIN 并最终提交', async () => {
+  void test('在另一个 DatabaseSync 连接短暂持有写锁时只重试 BEGIN 并最终提交', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'moss-uow-busy-'))
     const dbPath = join(directory, 'shared.db')
     const db = new DatabaseSync(dbPath)

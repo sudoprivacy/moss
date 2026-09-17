@@ -23,8 +23,8 @@ class UserStatsSql implements QmsSqlPort {
   }
 }
 
-describe('QmsUserStatsService', () => {
-  it('merges historical daily and current raw data at a UTC boundary with tenant scope', async () => {
+void describe('QmsUserStatsService', () => {
+  void it('merges historical daily and current raw data at a UTC boundary with tenant scope', async () => {
     const db = new UserStatsSql()
     const service = new QmsUserStatsService(db, () => new Date('2026-09-07T12:00:00Z'))
 
@@ -41,7 +41,7 @@ describe('QmsUserStatsService', () => {
     assert.ok(db.statements[0]!.parameters.includes('tenant-a'))
   })
 
-  it('validates leaderboard types and assigns stable ranks', async () => {
+  void it('validates leaderboard types and assigns stable ranks', async () => {
     const db = new UserStatsSql()
     const service = new QmsUserStatsService(db)
 
@@ -54,7 +54,7 @@ describe('QmsUserStatsService', () => {
     ])
   })
 
-  it('scopes every realtime counter to the authorized tenant', async () => {
+  void it('scopes every realtime counter to the authorized tenant', async () => {
     const db = new UserStatsSql()
     const service = new QmsUserStatsService(db)
 
@@ -67,7 +67,7 @@ describe('QmsUserStatsService', () => {
     assert.equal(db.statements.every(statement => statement.parameters.includes('tenant-a')), true)
   })
 
-  it('filters raw rows by the same user identity fallback used for grouping', async () => {
+  void it('filters raw rows by the same user identity fallback used for grouping', async () => {
     const db = new UserStatsSql()
     const service = new QmsUserStatsService(db)
 

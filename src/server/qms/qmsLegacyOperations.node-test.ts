@@ -48,8 +48,8 @@ function setup() {
   return { operations, calls }
 }
 
-describe('QmsLegacyOperations', () => {
-  it('declares an implementation for all 72 frozen route keys', () => {
+void describe('QmsLegacyOperations', () => {
+  void it('declares an implementation for all 72 frozen route keys', () => {
     const { operations } = setup()
     const unsupported = QMS_LEGACY_ROUTES
       .map(([method, path]) => `${method} ${path}`)
@@ -57,7 +57,7 @@ describe('QmsLegacyOperations', () => {
     assert.deepEqual(unsupported, [])
   })
 
-  it('dispatches every frozen route without falling through to the compatibility 404', async () => {
+  void it('dispatches every frozen route without falling through to the compatibility 404', async () => {
     const { operations } = setup()
     const admin = { userId: 'root', orgId: 'root', tenantId: null, canViewAllTenants: true, qmsRole: 'admin' as const }
     for (const [method, path] of QMS_LEGACY_ROUTES) {
@@ -78,7 +78,7 @@ describe('QmsLegacyOperations', () => {
     }
   })
 
-  it('keeps telemetry, dual crash prefixes, and health response envelopes', async () => {
+  void it('keeps telemetry, dual crash prefixes, and health response envelopes', async () => {
     const { operations } = setup()
     const batch = await operations.execute({ key: 'POST /api/v1/telemetry/batch', params: {}, query: {}, body: {} })
     const crash = await operations.execute({
@@ -95,7 +95,7 @@ describe('QmsLegacyOperations', () => {
     assert.deepEqual(health, { status: 200, body: { status: 'healthy' } })
   })
 
-  it('uses the authorized tenant instead of the requested dashboard tenant', async () => {
+  void it('uses the authorized tenant instead of the requested dashboard tenant', async () => {
     const { operations, calls } = setup()
     await operations.execute({
       key: 'GET /api/v1/qms/dashboard/overview', params: {}, query: { tenant_id: 'tenant-b' }, body: undefined,
@@ -104,7 +104,7 @@ describe('QmsLegacyOperations', () => {
     assert.deepEqual(calls, ['overview:tenant-a'])
   })
 
-  it('keeps legacy crash validation and existing-continuous-aggregate errors', async () => {
+  void it('keeps legacy crash validation and existing-continuous-aggregate errors', async () => {
     const { operations } = setup()
     const missing = await operations.execute({
       key: 'POST /api/v1/crash/events', params: {}, query: {}, body: { tenant_id: 'tenant-a' },

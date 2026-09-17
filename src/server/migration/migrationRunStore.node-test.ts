@@ -18,8 +18,8 @@ function setup() {
   return { db, store }
 }
 
-describe('MigrationRunStore', () => {
-  test('creates unique durable runs with normalized source metadata', () => {
+void describe('MigrationRunStore', () => {
+  void test('creates unique durable runs with normalized source metadata', () => {
     const { db, store } = setup()
     try {
       const first = store.createRun({
@@ -39,7 +39,7 @@ describe('MigrationRunStore', () => {
     }
   })
 
-  test('enforces the fixed phase order and records phase completion atomically', () => {
+  void test('enforces the fixed phase order and records phase completion atomically', () => {
     const { db, store } = setup()
     try {
       const run = store.createRun({ sourceFingerprint: 'sha256:source', sourceMetadata: {} })
@@ -69,7 +69,7 @@ describe('MigrationRunStore', () => {
     }
   })
 
-  test('keeps stable mappings idempotent and rejects source or target remapping', () => {
+  void test('keeps stable mappings idempotent and rejects source or target remapping', () => {
     const { db, store } = setup()
     try {
       const run = store.createRun({ sourceFingerprint: 'sha256:source', sourceMetadata: {} })
@@ -97,7 +97,7 @@ describe('MigrationRunStore', () => {
     }
   })
 
-  test('resumes failed and running runs only when the source fingerprint is unchanged', () => {
+  void test('resumes failed and running runs only when the source fingerprint is unchanged', () => {
     const { db, store } = setup()
     try {
       const run = store.createRun({ sourceFingerprint: 'sha256:source', sourceMetadata: {} })
@@ -140,7 +140,7 @@ describe('MigrationRunStore', () => {
     }
   })
 
-  test('records suppressed effects idempotently without turning them into deliverable work', () => {
+  void test('records suppressed effects idempotently without turning them into deliverable work', () => {
     const { db, store } = setup()
     try {
       const run = store.createRun({ sourceFingerprint: 'sha256:source', sourceMetadata: {} })
@@ -161,7 +161,7 @@ describe('MigrationRunStore', () => {
     }
   })
 
-  test('stores immutable migration and verification reports', () => {
+  void test('stores immutable migration and verification reports', () => {
     const { db, store } = setup()
     try {
       const run = store.createRun({ sourceFingerprint: 'sha256:source', sourceMetadata: {} })

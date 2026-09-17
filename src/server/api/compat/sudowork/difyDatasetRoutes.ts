@@ -16,7 +16,7 @@ interface LegacyAliasResolution {
 
 interface DifyDatasetRouteOptions {
   dataset: DifyDatasetService
-  getActor: (authorization: string | undefined) => IdentityActor | null
+  getActor: (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
   resolveEnterpriseAlias: (legacyId: number) => LegacyAliasResolution | null
   idempotencyKey?: (context: Context) => string
 }
@@ -137,7 +137,7 @@ async function withAdmin(
   options: DifyDatasetRouteOptions,
   operation: (actor: IdentityActor) => Promise<Response>,
 ): Promise<Response> {
-  const actor = options.getActor(context.req.header('Authorization'))
+  const actor = await options.getActor(context.req.header('Authorization'))
   if (!actor) return failure(context, 401, '未授权，请先登录')
   if (actor.role !== 'admin' && actor.role !== 'super_admin') return failure(context, 403, '权限不足')
   return await operation(actor)

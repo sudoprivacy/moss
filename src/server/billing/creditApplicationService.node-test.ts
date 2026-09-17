@@ -27,18 +27,18 @@ class FakeSudorouter implements SudorouterPort {
   }
 }
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org1', 'Org 1', 1)
-  auth.createOrganization('org2', 'Org 2', 1)
+  await auth.createOrganization('org1', 'Org 1', 1)
+  await auth.createOrganization('org2', 'Org 2', 1)
   for (const [id, orgId, role] of [
     ['u1', 'org1', 'user'], ['admin1', 'org1', 'admin'],
     ['admin2', 'org2', 'admin'], ['root', 'org1', 'super_admin'],
   ] as const) {
-    auth.createUser({
+    await auth.createUser({
       id, orgId, email: `${id}@example.test`, name: id, displayName: null,
       departmentId: null, role, status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -63,9 +63,9 @@ function setup() {
   return { db, identities, repository, fake, service }
 }
 
-describe('CreditApplicationService', () => {
-  test('创建申请分配永久数字别名并阻止重复待审批', () => {
-    const { db, identities, service } = setup()
+void describe('CreditApplicationService', () => {
+  void test('创建申请分配永久数字别名并阻止重复待审批', async () => {
+    const { db, identities, service } = await setup()
     const actor = { userId: 'u1', orgId: 'org1', role: 'user' as const }
     const created = service.createApplication({ requestedPoints: 500, reason: '项目需要' }, actor, onlineCommandContext('apply-1'))
 
@@ -78,8 +78,8 @@ describe('CreditApplicationService', () => {
     db.close()
   })
 
-  test('企业管理员不能审批其他组织，超级管理员审批重复调用只发放一次', async () => {
-    const { db, repository, fake, service } = setup()
+  void test('企业管理员不能审批其他组织，超级管理员审批重复调用只发放一次', async () => {
+    const { db, repository, fake, service } = await setup()
     const application = service.createApplication(
       { requestedPoints: 500, reason: '项目需要' },
       { userId: 'u1', orgId: 'org1', role: 'user' },
@@ -110,8 +110,8 @@ describe('CreditApplicationService', () => {
     db.close()
   })
 
-  test('外部发放失败标记 SYNC_FAILED，显式重试成功且不重复申请记录', async () => {
-    const { db, repository, fake, service } = setup()
+  void test('外部发放失败标记 SYNC_FAILED，显式重试成功且不重复申请记录', async () => {
+    const { db, repository, fake, service } = await setup()
     const application = service.createApplication(
       { requestedPoints: 300, reason: '测试失败' },
       { userId: 'u1', orgId: 'org1', role: 'user' },
@@ -134,8 +134,8 @@ describe('CreditApplicationService', () => {
     db.close()
   })
 
-  test('拒绝申请必须有原因且只允许 PENDING', () => {
-    const { db, repository, service } = setup()
+  void test('拒绝申请必须有原因且只允许 PENDING', async () => {
+    const { db, repository, service } = await setup()
     const application = service.createApplication(
       { requestedPoints: 300, reason: '不再需要' },
       { userId: 'u1', orgId: 'org1', role: 'user' }, onlineCommandContext('apply-reject'),

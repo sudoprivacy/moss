@@ -14,8 +14,8 @@ class RecordingQueue implements TelemetryBatchQueue {
 
 const tenants = { hasCode: (code: string) => code === 'tenant-a' }
 
-describe('TelemetryService', () => {
-  it('normalizes and atomically enqueues the five legacy batch arrays', async () => {
+void describe('TelemetryService', () => {
+  void it('normalizes and atomically enqueues the five legacy batch arrays', async () => {
     const queue = new RecordingQueue()
     const service = new TelemetryService({ queue, tenants, now: () => 1234 })
     const result = await service.ingestBatch({
@@ -40,7 +40,7 @@ describe('TelemetryService', () => {
     assert.equal(queue.calls[0]?.every(item => item.payload.user_id === '42'), true)
   })
 
-  it('normalizes the newer event envelope and preserves client event ids', async () => {
+  void it('normalizes the newer event envelope and preserves client event ids', async () => {
     const queue = new RecordingQueue()
     const service = new TelemetryService({ queue, tenants })
 
@@ -62,7 +62,7 @@ describe('TelemetryService', () => {
     })
   })
 
-  it('rejects missing and unknown tenants before enqueueing any item', async () => {
+  void it('rejects missing and unknown tenants before enqueueing any item', async () => {
     const queue = new RecordingQueue()
     const service = new TelemetryService({ queue, tenants })
 
@@ -75,7 +75,7 @@ describe('TelemetryService', () => {
     assert.equal(queue.calls.length, 0)
   })
 
-  it('rejects an oversized batch before queueing', async () => {
+  void it('rejects an oversized batch before queueing', async () => {
     const queue = new RecordingQueue()
     const service = new TelemetryService({ queue, tenants, maxBatchSize: 2 })
 

@@ -26,8 +26,8 @@ class TransactionalSql implements QmsTransactionalSqlPort {
   }
 }
 
-describe('TelemetryPostgresWriter', () => {
-  it('persists a mixed claimed batch in one transaction with ingest id conflict protection', async () => {
+void describe('TelemetryPostgresWriter', () => {
+  void it('persists a mixed claimed batch in one transaction with ingest id conflict protection', async () => {
     const db = new TransactionalSql()
     const writer = new TelemetryPostgresWriter(db)
 
@@ -54,7 +54,7 @@ describe('TelemetryPostgresWriter', () => {
     assert.match(db.statements[3]!.sql, /INSERT INTO telemetry_install/)
   })
 
-  it('deduplicates an ingest id globally even when a replay changes the timestamp', async () => {
+  void it('deduplicates an ingest id globally even when a replay changes the timestamp', async () => {
     const db = new TransactionalSql()
     const writer = new TelemetryPostgresWriter(db)
     const base = {
@@ -68,7 +68,7 @@ describe('TelemetryPostgresWriter', () => {
     assert.equal(db.statements.filter(item => item.sql.includes('INSERT INTO telemetry_perf_raw')).length, 1)
   })
 
-  it('validates required fields before opening a transaction', async () => {
+  void it('validates required fields before opening a transaction', async () => {
     const db = new TransactionalSql()
     const writer = new TelemetryPostgresWriter(db)
 

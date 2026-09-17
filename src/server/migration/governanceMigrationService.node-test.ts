@@ -45,15 +45,15 @@ const snapshot: SudoworkGovernanceSnapshot = {
   checksum: 'governance-checksum',
 }
 
-function setup(source: SudoworkGovernanceSnapshot = snapshot) {
+async function setup(source: SudoworkGovernanceSnapshot = snapshot) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
   const unified = new UnifiedIdentityService(db, auth, identities)
-  const organization = unified.createOrganization({
+  const organization = await unified.createOrganization({
     name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 7,
   }, migrationCommandContext('identity-bootstrap', 'organization-7'))
-  const user = unified.createUser({
+  const user = await unified.createUser({
     orgId: organization.organizationId,
     username: '13800000000',
     phone: '13800000000',
@@ -73,9 +73,9 @@ function setup(source: SudoworkGovernanceSnapshot = snapshot) {
   return { db, auth, identities, runs, service, organization, user }
 }
 
-describe('GovernanceMigrationService', () => {
-  test('通过统一仓储幂等导入邀请码和完整审计且不产生外部副作用', () => {
-    const context = setup()
+void describe('GovernanceMigrationService', () => {
+  void test('通过统一仓储幂等导入邀请码和完整审计且不产生外部副作用', async () => {
+    const context = await setup()
     try {
       const plan = context.service.plan()
       assert.equal(plan.status, 'ready')
@@ -119,13 +119,13 @@ describe('GovernanceMigrationService', () => {
     }
   })
 
-  test('按唯一手机号归属 user_id=0 的历史日志', () => {
+  void test('按唯一手机号归属 user_id=0 的历史日志', async () => {
     const source: SudoworkGovernanceSnapshot = {
       invitations: [],
       operationLogs: [{ ...snapshot.operationLogs[0]!, id: 10, userId: 0 }],
       checksum: 'phone-log',
     }
-    const context = setup(source)
+    const context = await setup(source)
     try {
       const plan = context.service.plan()
       assert.equal(plan.status, 'ready')
@@ -138,13 +138,13 @@ describe('GovernanceMigrationService', () => {
     }
   })
 
-  test('无法推导组织的日志和孤立邀请会在预检阻断，显式旧企业归属可解除日志冲突', () => {
+  void test('无法推导组织的日志和孤立邀请会在预检阻断，显式旧企业归属可解除日志冲突', async () => {
     const source: SudoworkGovernanceSnapshot = {
       invitations: [{ ...snapshot.invitations[0]!, enterpriseId: 99 }],
       operationLogs: [{ ...snapshot.operationLogs[0]!, id: 11, userId: null, userPhone: null }],
       checksum: 'blocked-governance',
     }
-    const context = setup(source)
+    const context = await setup(source)
     try {
       const blocked = context.service.plan()
       assert.equal(blocked.status, 'blocked')
@@ -158,7 +158,7 @@ describe('GovernanceMigrationService', () => {
       )
 
       const onlyLog = { ...source, invitations: [], checksum: 'manual-log' }
-      const manual = setup(onlyLog)
+      const manual = await setup(onlyLog)
       try {
         const plan = manual.service.plan({ operationLogEnterpriseIds: { 11: 7 } })
         assert.equal(plan.status, 'ready')
@@ -170,8 +170,8 @@ describe('GovernanceMigrationService', () => {
     }
   })
 
-  test('拒绝在线上下文和已被其他目标占用的邀请码代码', () => {
-    const context = setup()
+  void test('拒绝在线上下文和已被其他目标占用的邀请码代码', async () => {
+    const context = await setup()
     try {
       context.identities.createInvitation({
         id: 'native-invitation',

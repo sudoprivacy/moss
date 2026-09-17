@@ -63,7 +63,7 @@ class RecordingAccountProvisioner {
   }
 }
 
-function setup(
+async function setup(
   status: AuthCenterUser['status'] = 'active',
   role = 'user',
   nativeActorResolver?: (token: string) => IdentityActor | null,
@@ -73,7 +73,7 @@ function setup(
   const identities = new IdentityRepository(db)
   const tokens = new MemoryTokenStore()
   const accounts = new RecordingAccountProvisioner()
-  authDb.createOrganization('org-a', '企业 A', 1)
+  await authDb.createOrganization('org-a', '企业 A', 1)
   identities.putOrganizationProfile({
     orgId: 'org-a',
     code: 'ENT-A',
@@ -85,7 +85,7 @@ function setup(
     namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a',
   })
   const legacyHash = hashSync('StrongPass123', 4)
-  authDb.createUser({
+  await authDb.createUser({
     id: 'user-a', orgId: 'org-a', email: 'user-a@users.internal.moss', name: 'legacy-account',
     displayName: '旧用户', departmentId: null, role, status, localAuth: true,
     tokenLimit: null, createdAt: 1, passwordHash: legacyHash, passwordUpdatedAt: null,
@@ -111,9 +111,9 @@ function setup(
   return { db, authDb, tokens, accounts, service, legacyHash }
 }
 
-describe('Sudowork unified identity service', () => {
-  test('logs in an active migrated user with the legacy token and refresh-token contract', async () => {
-    const { db, authDb, tokens, service, legacyHash } = setup()
+void describe('Sudowork unified identity service', () => {
+  void test('logs in an active migrated user with the legacy token and refresh-token contract', async () => {
+    const { db, authDb, tokens, service, legacyHash } = await setup()
 
     const session = await service.loginByPassword({
       phone: '13800000000', password: 'StrongPass123', deviceId: 'desktop-a', nowSeconds: 1_000,
@@ -142,26 +142,26 @@ describe('Sudowork unified identity service', () => {
       JSON.parse(tokens.values.get('refresh_token:17:desktop-a:refresh-one') ?? ''),
       { phone: '13800000000', role: 'USER', enterprise_id: 9 },
     )
-    const updated = authDb.getUserById('user-a')
+    const updated = await authDb.getUserById('user-a')
     assert.notEqual(updated?.passwordHash, legacyHash)
     assert.match(updated?.passwordHash ?? '', /^scrypt\$/)
     assert(updated?.lastLoginAt)
     db.close()
   })
 
-  test('uses the legacy generic credential error and disabled-state response', async () => {
-    const wrong = setup()
+  void test('uses the legacy generic credential error and disabled-state response', async () => {
+    const wrong = await setup()
     await assert.rejects(
       wrong.service.loginByPassword({ phone: '13800000000', password: 'wrong', deviceId: 'default' }),
       (error: unknown) => error instanceof SudoworkIdentityError
         && error.statusCode === 401
         && error.message === '账号或密码错误',
     )
-    assert.equal(wrong.authDb.getUserById('user-a')?.passwordHash, wrong.legacyHash)
+    assert.equal((await wrong.authDb.getUserById('user-a'))?.passwordHash, wrong.legacyHash)
     wrong.db.close()
 
     for (const status of ['pending', 'locked', 'disabled'] as const) {
-      const current = setup(status)
+      const current = await setup(status)
       await assert.rejects(
         current.service.loginByPassword({
           phone: '13800000000', password: 'StrongPass123', deviceId: 'default',
@@ -174,8 +174,8 @@ describe('Sudowork unified identity service', () => {
     }
   })
 
-  test('rotates an existing legacy refresh token and rejects a wrong device', async () => {
-    const { db, tokens, service } = setup()
+  void test('rotates an existing legacy refresh token and rejects a wrong device', async () => {
+    const { db, tokens, service } = await setup()
     await tokens.setex(
       'refresh_token:17:desktop-a:refresh-old',
       30 * 24 * 60 * 60,
@@ -200,8 +200,8 @@ describe('Sudowork unified identity service', () => {
     db.close()
   })
 
-  test('resolves a legacy access token to the unified profile and revokes sessions', async () => {
-    const { db, tokens, service } = setup()
+  void test('resolves a legacy access token to the unified profile and revokes sessions', async () => {
+    const { db, tokens, service } = await setup()
     const session = await service.loginByPassword({
       phone: '13800000000', password: 'StrongPass123', deviceId: 'desktop-a', nowSeconds: 1_000,
     })
@@ -211,8 +211,8 @@ describe('Sudowork unified identity service', () => {
       JSON.stringify({ phone: '13800000000', role: 'USER', enterprise_id: 9 }),
     )
 
-    assert.deepEqual(service.getProfile(session.accessToken, 1_001), session.user)
-    assert.equal(service.getProfile(`${session.accessToken}x`, 1_001), null)
+    assert.deepEqual(await service.getProfile(session.accessToken, 1_001), session.user)
+    assert.equal(await service.getProfile(`${session.accessToken}x`, 1_001), null)
 
     await service.logout({ refreshToken: 'refresh-one', deviceId: 'desktop-a' })
     assert.equal(tokens.values.has('refresh_token:17:desktop-a:refresh-one'), false)
@@ -223,8 +223,8 @@ describe('Sudowork unified identity service', () => {
     db.close()
   })
 
-  test('registers a new password user through the unified command and consumes the invitation', async () => {
-    const { db, authDb, tokens, accounts, service } = setup()
+  void test('registers a new password user through the unified command and consumes the invitation', async () => {
+    const { db, authDb, tokens, accounts, service } = await setup()
     const identities = new IdentityRepository(db)
     identities.createInvitation({
       id: 'invite-b', orgId: 'org-a', code: 'INVITE-B', initialCreditUnits: 42,
@@ -241,7 +241,7 @@ describe('Sudowork unified identity service', () => {
 
     const identity = identities.findAuthIdentity('phone', 'sudowork', 'new-user')
     assert(identity)
-    const created = authDb.getUserById(identity.userId)
+    const created = await authDb.getUserById(identity.userId)
     assert.equal(created?.name, 'new-user')
     assert.equal(created?.displayName, '新用户')
     assert.equal(created?.orgId, 'org-a')
@@ -258,8 +258,8 @@ describe('Sudowork unified identity service', () => {
     db.close()
   })
 
-  test('邀请码注册开户失败后复用同一 pending 用户恢复', async () => {
-    const { db, authDb, accounts, service } = setup()
+  void test('邀请码注册开户失败后复用同一 pending 用户恢复', async () => {
+    const { db, authDb, accounts, service } = await setup()
     const identities = new IdentityRepository(db)
     identities.createInvitation({
       id: 'invite-retry', orgId: 'org-a', code: 'INVITE-RETRY', initialCreditUnits: 42,
@@ -273,18 +273,18 @@ describe('Sudowork unified identity service', () => {
     await assert.rejects(service.registerByPassword(input), /Sudorouter 用户初始化失败/)
     const pendingIdentity = identities.findAuthIdentity('phone', 'sudowork', 'retry-user')
     assert(pendingIdentity)
-    assert.equal(authDb.getUserById(pendingIdentity.userId)?.status, 'pending')
+    assert.equal((await authDb.getUserById(pendingIdentity.userId))?.status, 'pending')
     assert.equal(identities.getInvitationByCode('INVITE-RETRY')?.status, 'used')
 
     const recovered = await service.registerByPassword(input)
     assert.equal(recovered.user.status, 1)
-    assert.equal(authDb.listUsersByOrg('org-a').filter(item => item.name === 'retry-user').length, 1)
+    assert.equal((await authDb.listUsersByOrg('org-a')).filter(item => item.name === 'retry-user').length, 1)
     assert.equal(accounts.calls.length, 2)
     db.close()
   })
 
-  test('preserves password registration validation messages', async () => {
-    const { db, service } = setup()
+  void test('preserves password registration validation messages', async () => {
+    const { db, service } = await setup()
     await assert.rejects(
       service.registerByPassword({
         phone: 'new-user', password: 'weak', nickname: '新用户',
@@ -306,8 +306,8 @@ describe('Sudowork unified identity service', () => {
     db.close()
   })
 
-  test('keeps the two-stage verified-phone registration protocol on unified users', async () => {
-    const { db, authDb, tokens, accounts, service } = setup()
+  void test('keeps the two-stage verified-phone registration protocol on unified users', async () => {
+    const { db, authDb, tokens, accounts, service } = await setup()
     const identities = new IdentityRepository(db)
     identities.createInvitation({
       id: 'invite-phone', orgId: 'org-a', code: 'PHONE-INVITE', initialCreditUnits: 7,
@@ -332,7 +332,7 @@ describe('Sudowork unified identity service', () => {
     })
     const identity = identities.findAuthIdentity('phone', 'sudowork', '13900000000')
     assert(identity)
-    assert.equal(authDb.getUserById(identity.userId)?.localAuth, false)
+    assert.equal((await authDb.getUserById(identity.userId))?.localAuth, false)
     assert.equal(registered.needRegistration, false)
     assert.equal(registered.session.user.phone, '13900000000')
     assert.equal(tokens.values.has('register_token:register-one'), false)
@@ -341,8 +341,8 @@ describe('Sudowork unified identity service', () => {
     db.close()
   })
 
-  test('uses unified users for legacy admin login and password changes', async () => {
-    const regular = setup('active', 'user')
+  void test('uses unified users for legacy admin login and password changes', async () => {
+    const regular = await setup('active', 'user')
     await assert.rejects(
       regular.service.loginAdminByPassword({
         phone: '13800000000', password: 'StrongPass123', deviceId: 'admin-a',
@@ -352,7 +352,7 @@ describe('Sudowork unified identity service', () => {
     )
     regular.db.close()
 
-    const admin = setup('active', 'admin')
+    const admin = await setup('active', 'admin')
     await assert.rejects(
       admin.service.loginAdminByPassword({
         phone: '13800000000', password: 'wrong', deviceId: 'admin-a',
@@ -364,7 +364,7 @@ describe('Sudowork unified identity service', () => {
       phone: '13800000000', password: 'StrongPass123', deviceId: 'admin-a',
     })
     assert.equal(session.user.role, 'ENTERPRISE_ADMIN')
-    assert.deepEqual(admin.service.getActor(session.accessToken), {
+    assert.deepEqual(await admin.service.getActor(session.accessToken), {
       userId: 'user-a', orgId: 'org-a', role: 'admin',
     })
 
@@ -384,30 +384,30 @@ describe('Sudowork unified identity service', () => {
       phone: '13800000000', password: 'AnotherPass456', deviceId: 'admin-a',
     })
     assert.equal(relogin.user.id, 17)
-    assert.deepEqual(admin.service.updateProfile(session.accessToken, ' 新昵称 '), {
+    assert.deepEqual(await admin.service.updateProfile(session.accessToken, ' 新昵称 '), {
       ...session.user,
       nickname: '新昵称',
     })
     admin.db.close()
   })
 
-  test('accepts a valid Moss access token without changing legacy JWT behavior', async () => {
+  void test('accepts a valid Moss access token without changing legacy JWT behavior', async () => {
     const nativeActor: IdentityActor = {
       userId: 'user-a', orgId: 'org-a', role: 'admin',
     }
-    const { db, service } = setup(
+    const { db, service } = await setup(
       'active',
       'admin',
       token => token === 'moss-access-token' ? nativeActor : null,
     )
 
-    assert.deepEqual(service.getActor('moss-access-token'), nativeActor)
-    assert.equal(service.getActor('invalid-token'), null)
+    assert.deepEqual(await service.getActor('moss-access-token'), nativeActor)
+    assert.equal(await service.getActor('invalid-token'), null)
 
     const session = await service.loginAdminByPassword({
       phone: '13800000000', password: 'StrongPass123', deviceId: 'admin-native-test',
     })
-    assert.deepEqual(service.getActor(session.accessToken), nativeActor)
+    assert.deepEqual(await service.getActor(session.accessToken), nativeActor)
     db.close()
   })
 })

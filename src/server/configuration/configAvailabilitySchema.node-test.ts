@@ -3,8 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { ensureConfigAvailabilitySchema } from './configAvailabilitySchema.js'
 
-describe('统一配置项组织可用范围', () => {
-  test('幂等升级并保留现有组织项与全局用户项语义', () => {
+void describe('统一配置项组织可用范围', () => {
+  void test('幂等升级并保留现有组织项与全局用户项语义', () => {
     const db = new DatabaseSync(':memory:')
     db.exec(`
       CREATE TABLE config_items (id INTEGER PRIMARY KEY, scope TEXT NOT NULL, org_id TEXT);

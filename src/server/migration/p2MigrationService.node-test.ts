@@ -43,9 +43,9 @@ async function setup() {
   const identities = new IdentityRepository(db)
   const identity = new UnifiedIdentityService(db, authDb, identities)
   const context = migrationCommandContext('identity-run', 'org-a')
-  const orgA = identity.createOrganization({ name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 1 }, context)
-  const orgB = identity.createOrganization({ name: '企业 B', code: 'ENT-B', legacyEnterpriseId: 2 }, migrationCommandContext('identity-run', 'org-b'))
-  const owner = identity.createUser({
+  const orgA = await identity.createOrganization({ name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 1 }, context)
+  const orgB = await identity.createOrganization({ name: '企业 B', code: 'ENT-B', legacyEnterpriseId: 2 }, migrationCommandContext('identity-run', 'org-b'))
+  const owner = await identity.createUser({
     orgId: orgA.organizationId, username: 'owner', password: 'secret', role: 'admin', legacyUserId: 10,
   }, migrationCommandContext('identity-run', 'user-owner'))
   const repository = new CatalogRepository(db)
@@ -99,8 +99,8 @@ async function setup() {
   return { root, db, identities, repository, migration, orgA, orgB, owner, manifest }
 }
 
-describe('P2 目录迁移计划与执行', () => {
-  test('预检无写入，执行后公共和多企业资源各只有一份且可重复运行', async () => {
+void describe('P2 目录迁移计划与执行', () => {
+  void test('预检无写入，执行后公共和多企业资源各只有一份且可重复运行', async () => {
     const fixture = await setup()
     try {
       const plan = await fixture.migration.plan()
@@ -128,7 +128,7 @@ describe('P2 目录迁移计划与执行', () => {
     }
   })
 
-  test('未知企业和同名目标资源形成阻塞报告，execute 不做部分写入', async () => {
+  void test('未知企业和同名目标资源形成阻塞报告，execute 不做部分写入', async () => {
     const fixture = await setup()
     try {
       fixture.repository.createSkill({

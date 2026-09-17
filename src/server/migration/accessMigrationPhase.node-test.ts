@@ -70,8 +70,8 @@ const aliases = {
   },
 }
 
-describe('Sudowork access migration', () => {
-  test('只读取需连续保留的 Redis 登录态和 SQLite CAS handoff', async () => {
+void describe('Sudowork access migration', () => {
+  void test('只读取需连续保留的 Redis 登录态和 SQLite CAS handoff', async () => {
     const { directory, db } = fixture(`
       INSERT INTO users VALUES (17, 'cas-user', 7);
       INSERT INTO third_party_auth_handoffs VALUES
@@ -103,7 +103,7 @@ describe('Sudowork access migration', () => {
     }
   })
 
-  test('JWT 密钥不一致、无主令牌和非法令牌内容均阻断预检', async () => {
+  void test('JWT 密钥不一致、无主令牌和非法令牌内容均阻断预检', async () => {
     const source = {
       async readSnapshot() {
         return {
@@ -127,7 +127,7 @@ describe('Sudowork access migration', () => {
     ])
   })
 
-  test('幂等迁移 Refresh Token、注册 handoff 和有效 CAS handoff，并保持旧 key', async () => {
+  void test('幂等迁移 Refresh Token、注册 handoff 和有效 CAS handoff，并保持旧 key', async () => {
     const sourceStore = new MemoryStore()
     const refreshValue = JSON.stringify({ phone: '13800000000', role: 'USER', enterprise_id: 7 })
     const registerValue = JSON.stringify({ phone: '13900000000', verified: true, created_at: 1 })
@@ -170,7 +170,7 @@ describe('Sudowork access migration', () => {
     assert.equal((await phase.verify({ runId: 'run-1', snapshot: context.snapshot })).status, 'matched')
   })
 
-  test('目标 key 内容冲突或执行阶段源内容变化时拒绝覆盖', async () => {
+  void test('目标 key 内容冲突或执行阶段源内容变化时拒绝覆盖', async () => {
     const target = new MemoryStore()
     target.values.set('register_token:r', { value: 'different', ttl: 30 })
     let checksum = 'first'

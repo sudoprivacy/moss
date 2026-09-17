@@ -6,8 +6,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { SudoworkP2SourceError, SudoworkP2SourceReader } from './sudoworkP2SourceReader.js'
 
-describe('Sudowork P2 冻结源读取器', () => {
-  test('只读提取旧配置关系和带来源版本的 Hub 清单', async () => {
+void describe('Sudowork P2 冻结源读取器', () => {
+  void test('只读提取旧配置关系和带来源版本的 Hub 清单', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sudowork-p2-source-'))
     try {
       const dbPath = join(root, 'sudowork.sqlite')
@@ -101,7 +101,7 @@ describe('Sudowork P2 冻结源读取器', () => {
     }
   })
 
-  test('拒绝重复资源 ID、缺失来源版本和逃逸快照目录的制品路径', async () => {
+  void test('拒绝重复资源 ID、缺失来源版本和逃逸快照目录的制品路径', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sudowork-p2-source-'))
     try {
       new DatabaseSync(join(root, 'sudowork.sqlite')).close()

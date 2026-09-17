@@ -7,8 +7,8 @@ import { IdentityRepository } from '../identity/identityRepository.js'
 import { IdentityMergePlanner, type LegacyIdentitySnapshot } from './identityMergePlanner.js'
 import { PlanningCatalogProjection, PlanningIdentityProjection } from './planningProjections.js'
 
-describe('migration planning projections', () => {
-  test('后续阶段可只读解析本批次将创建的组织、用户与认证身份', () => {
+void describe('migration planning projections', () => {
+  void test('后续阶段可只读解析本批次将创建的组织、用户与认证身份', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
     const base = new IdentityRepository(db)
@@ -36,11 +36,11 @@ describe('migration planning projections', () => {
     projection.deactivate()
     assert.equal(repository.resolveNumericAliasGlobal('user', 17), null)
     assert.equal(repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
-    assert.equal(auth.listOrganizations().length, 0)
+    assert.equal((await auth.listOrganizations()).length, 0)
     db.close()
   })
 
-  test('Dify 预检可看到本批次 Catalog 将导入的 Agent，但不写目标表', () => {
+  void test('Dify 预检可看到本批次 Catalog 将导入的 Agent，但不写目标表', () => {
     const db = new DatabaseSync(':memory:')
     db.exec(`
       CREATE TABLE tenant_assistants (

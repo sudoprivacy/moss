@@ -27,8 +27,8 @@ class MemorySmsStore implements SmsCodeStore {
   }
 }
 
-describe('SMS verification service', () => {
-  test('stores and sends a code with the legacy expiry and daily response fields', async () => {
+void describe('SMS verification service', () => {
+  void test('stores and sends a code with the legacy expiry and daily response fields', async () => {
     const store = new MemorySmsStore()
     const sent: Array<{ phone: string; code: string; expireMinutes: number }> = []
     const sender: SmsSender = {
@@ -47,7 +47,7 @@ describe('SMS verification service', () => {
     assert.equal(await store.get('sms_code:13800000000'), null)
   })
 
-  test('preserves resend throttling and invalid-attempt lockout messages', async () => {
+  void test('preserves resend throttling and invalid-attempt lockout messages', async () => {
     const store = new MemorySmsStore()
     const service = new SmsVerificationService({
       store, sender: { async send() {} }, codeFactory: () => '123456',

@@ -7,8 +7,8 @@ import { describe, test } from 'node:test'
 import { MigrationReportWriter } from './migrationReportWriter.js'
 import { MigrationRunStore, MigrationRunStoreError } from './migrationRunStore.js'
 
-describe('MigrationReportWriter', () => {
-  test('writes immutable canonical JSON and Chinese Markdown and registers their digest', async () => {
+void describe('MigrationReportWriter', () => {
+  void test('writes immutable canonical JSON and Chinese Markdown and registers their digest', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'moss-migration-report-'))
     const db = new DatabaseSync(':memory:')
     const runs = new MigrationRunStore(db, { idFactory: () => 'run-report', clock: () => 1_800_000_000_000 })

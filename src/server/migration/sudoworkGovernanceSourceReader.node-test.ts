@@ -29,8 +29,8 @@ function fixture(sql = ''): { directory: string; db: DatabaseSync } {
   return { directory, db }
 }
 
-describe('SudoworkGovernanceSourceReader', () => {
-  test('只读并确定性保留邀请码与操作日志的全部旧字段', () => {
+void describe('SudoworkGovernanceSourceReader', () => {
+  void test('只读并确定性保留邀请码与操作日志的全部旧字段', () => {
     const { directory, db } = fixture(`
       INSERT INTO invitation_codes VALUES
         (1, 'PENDING', 7, 0, NULL, NULL, '2026-09-01 01:02:03', NULL),
@@ -83,7 +83,7 @@ describe('SudoworkGovernanceSourceReader', () => {
     }
   })
 
-  test('非法邀请码状态和不完整的已使用记录会阻断读取', () => {
+  void test('非法邀请码状态和不完整的已使用记录会阻断读取', () => {
     const invalidStatus = fixture(`
       INSERT INTO invitation_codes VALUES (1, 'BAD', 7, 3, NULL, NULL, CURRENT_TIMESTAMP, NULL);
     `)
@@ -107,7 +107,7 @@ describe('SudoworkGovernanceSourceReader', () => {
     }
   })
 
-  test('缺少必需治理表时拒绝不完整快照', () => {
+  void test('缺少必需治理表时拒绝不完整快照', () => {
     const directory = mkdtempSync(join(tmpdir(), 'moss-governance-source-'))
     const db = new DatabaseSync(join(directory, 'sudowork.sqlite'))
     db.exec('CREATE TABLE invitation_codes (id INTEGER PRIMARY KEY)')

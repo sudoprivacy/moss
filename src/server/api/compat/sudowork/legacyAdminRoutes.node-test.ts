@@ -29,8 +29,8 @@ function setup() {
   return { app, calls }
 }
 
-describe('Sudowork legacy admin routes', () => {
-  test('四个查询接口保持旧 envelope、分页参数与管理员鉴权', async () => {
+void describe('Sudowork legacy admin routes', () => {
+  void test('四个查询接口保持旧 envelope、分页参数与管理员鉴权', async () => {
     const { app, calls } = setup()
     assert.equal((await app.request('/api/v1/admin/features')).status, 401)
     const headers = { authorization: 'Bearer admin' }
@@ -53,7 +53,7 @@ describe('Sudowork legacy admin routes', () => {
     assert.equal(logInput.query.page, '2')
   })
 
-  test('审批、拒绝、删除保留旧文案并传递数字 ID 与幂等键', async () => {
+  void test('审批、拒绝、删除保留旧文案并传递数字 ID 与幂等键', async () => {
     const { app, calls } = setup()
     const headers = {
       authorization: 'Bearer admin',
@@ -73,7 +73,7 @@ describe('Sudowork legacy admin routes', () => {
     }
   })
 
-  test('手动同步额度复用统一 Billing 服务并保持旧响应', async () => {
+  void test('手动同步额度复用统一 Billing 服务并保持旧响应', async () => {
     const { app, calls } = setup()
     const response = await app.request('/api/v1/admin/members/7/sync-quota', {
       method: 'POST',

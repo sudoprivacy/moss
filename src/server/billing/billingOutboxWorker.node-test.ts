@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { BillingOutboxWorker } from './billingOutboxWorker.js'
 
-test('Billing 后台执行器只恢复可投递额度操作并隔离单项失败', async () => {
+void test('Billing 后台执行器只恢复可投递额度操作并隔离单项失败', async () => {
   const retried: string[] = []
   const worker = new BillingOutboxWorker({
     listRecoverableQuotaOperationIds() {

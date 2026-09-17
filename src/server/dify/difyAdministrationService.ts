@@ -69,7 +69,7 @@ export class DifyAdministrationService {
     const binding = await this.provision(input.orgId, onlineCommandContext(`dify:sso:provision:${input.orgId}`))
     if ('suppressed' in binding) throw new Error('Dify provisioning suppressed')
     const profile = this.options.identities.getOrganizationProfile(input.orgId)
-    const user = this.options.auth.getUserByIdAndOrg(input.actor.userId, input.actor.orgId)
+    const user = await this.options.auth.getUserByIdAndOrg(input.actor.userId, input.actor.orgId)
     const legacyUserId = this.options.identities.getNumericAlias('user', input.actor.userId)
     if (!profile || !user || legacyUserId === null) throw new Error('Dify SSO identity is incomplete')
     const nowSeconds = Math.floor((this.options.clock?.() ?? Date.now()) / 1000)
@@ -115,7 +115,7 @@ export class DifyAdministrationService {
     assertTrustedCommandContext(context)
     const existing = this.defaultConnection(orgId)
     if (existing) return connectionDto(existing)
-    const organization = this.options.auth.getOrganization(orgId)
+    const organization = await this.options.auth.getOrganization(orgId)
     const profile = this.options.identities.getOrganizationProfile(orgId)
     if (!organization || !profile) throw new Error(`enterprise ${orgId} not found`)
 
@@ -410,14 +410,15 @@ export class DifyAdministrationService {
     return Array.isArray(response.datasets) ? response.datasets : []
   }
 
-  listShareableOrganizations(): Array<{ id: number; name: string; code: string }> {
-    return this.options.identities.listOrganizationProfiles().flatMap(profile => {
-      const organization = this.options.auth.getOrganization(profile.orgId)
+  async listShareableOrganizations(): Promise<Array<{ id: number; name: string; code: string }>> {
+    const items = await Promise.all(this.options.identities.listOrganizationProfiles().map(async profile => {
+      const organization = await this.options.auth.getOrganization(profile.orgId)
       const legacyId = this.options.identities.getNumericAlias('enterprise', profile.orgId)
       return organization && legacyId !== null
         ? [{ id: legacyId, name: organization.name, code: profile.code }]
         : []
-    })
+    }))
+    return items.flat()
   }
 
   async listEnterpriseAssistants(orgId: string): Promise<unknown> {

@@ -16,8 +16,8 @@ const execution = {
 }
 const verification = { runId: 'run-1', snapshot }
 
-describe('domain migration phases', () => {
-  test('Catalog 和配置阶段执行已有统一 Import Service 并用重规划校验', async () => {
+void describe('domain migration phases', () => {
+  void test('Catalog 和配置阶段执行已有统一 Import Service 并用重规划校验', async () => {
     let catalogImported = false
     const catalog = {
       async plan() {
@@ -58,7 +58,7 @@ describe('domain migration phases', () => {
     assert.equal((await configuration.verify(verification)).status, 'matched')
   })
 
-  test('Dify、Billing 和 QMS 阶段使用稳定 migration context 并透传领域校验', async () => {
+  void test('Dify、Billing 和 QMS 阶段使用稳定 migration context 并透传领域校验', async () => {
     const contexts: string[] = []
     const dify = {
       plan: () => ({ status: 'ready' as const, sourceChecksum: 'dify-sum', issues: [] }),

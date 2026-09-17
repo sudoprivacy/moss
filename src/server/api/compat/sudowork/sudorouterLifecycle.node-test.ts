@@ -28,7 +28,7 @@ class MemoryTokens implements LegacyKeyValueStore {
   }
 }
 
-test('邀请码注册到 Sudorouter 登录凭据与模型用量完整闭环', async () => {
+void test('邀请码注册到 Sudorouter 登录凭据与模型用量完整闭环', async () => {
   let created = false
   let quota = 0
   const router = createServer(async (request, response) => {
@@ -69,7 +69,7 @@ test('邀请码注册到 Sudorouter 登录凭据与模型用量完整闭环', as
   try {
     const auth = new AuthCenterDb(db)
     const identities = new IdentityRepository(db)
-    auth.createOrganization('org-1', '企业一', 1)
+    await auth.createOrganization('org-1', '企业一', 1)
     identities.putOrganizationProfile({
       orgId: 'org-1', code: 'ENT-A', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })

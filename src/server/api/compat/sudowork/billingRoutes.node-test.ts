@@ -49,8 +49,8 @@ function billingContract(): { routes: Array<{
   ))
 }
 
-describe('Sudowork Billing 兼容路由', () => {
-  test('Billing 未启用时返回明确的 503 而不是 404 或通用 500', async () => {
+void describe('Sudowork Billing 兼容路由', () => {
+  void test('Billing 未启用时返回明确的 503 而不是 404 或通用 500', async () => {
     const app = createSudoworkCompatibilityApp({ identity })
     const response = await app.request('/api/v1/admin/recharge/stats', {
       headers: { Authorization: 'Bearer root-token' },
@@ -59,14 +59,14 @@ describe('Sudowork Billing 兼容路由', () => {
     assert.deepEqual(await response.json(), { success: false, msg: 'Sudowork Billing 未配置' })
   })
 
-  test('完整注册冻结契约中的 28 条路由', () => {
+  void test('完整注册冻结契约中的 28 条路由', async () => {
     const app = createSudoworkCompatibilityApp({ identity, billing: createBilling() })
     const actual = app.routes.map(route => `${route.method} ${route.path}`)
     for (const route of routeKeys()) assert(actual.includes(route), `缺少路由 ${route}`)
     assert.equal(routeKeys().length, 28)
   })
 
-  test('套餐公开访问，用户和管理员接口保持各自鉴权', async () => {
+  void test('套餐公开访问，用户和管理员接口保持各自鉴权', async () => {
     const app = createSudoworkCompatibilityApp({
       identity,
       billing: createBilling({ listPackages: () => [{ id: 'pkg-5', amount: 5 }] }),
@@ -87,7 +87,7 @@ describe('Sudowork Billing 兼容路由', () => {
     assert.deepEqual(await admin.json(), { success: false, msg: '未授权' })
   })
 
-  test('富友回调无需用户 JWT，并保持 success/fail 纯文本协议', async () => {
+  void test('富友回调无需用户 JWT，并保持 success/fail 纯文本协议', async () => {
     let received: Record<string, unknown> | undefined
     const app = createSudoworkCompatibilityApp({
       identity,
@@ -104,7 +104,7 @@ describe('Sudowork Billing 兼容路由', () => {
     assert.deepEqual(received, { mchnt_cd: 'merchant', message: 'cipher', resp_code: '0000' })
   })
 
-  test('逐条请求 28 条路由并保持冻结的成功响应外层', async () => {
+  void test('逐条请求 28 条路由并保持冻结的成功响应外层', async () => {
     const marker = { marker: true }
     const billing = new Proxy({} as SudoworkBillingPort, {
       get: (_target, property) => {
@@ -150,7 +150,7 @@ describe('Sudowork Billing 兼容路由', () => {
     }
   })
 
-  test('统一 Billing 领域错误映射为旧接口状态码和错误外层', async () => {
+  void test('统一 Billing 领域错误映射为旧接口状态码和错误外层', async () => {
     const app = createSudoworkCompatibilityApp({
       identity,
       billing: createBilling({

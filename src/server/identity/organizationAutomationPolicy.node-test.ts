@@ -29,8 +29,8 @@ function createLegacyDatabase(): DatabaseSync {
   return db
 }
 
-describe('Organization 企业自动化策略', () => {
-  it('升级旧 Profile 时继承旧全局开关，之后各组织独立修改', () => {
+void describe('Organization 企业自动化策略', () => {
+  void it('升级旧 Profile 时继承旧全局开关，之后各组织独立修改', () => {
     const repository = new IdentityRepository(createLegacyDatabase(), {
       legacyClientCronEnabled: false,
     })
@@ -44,7 +44,7 @@ describe('Organization 企业自动化策略', () => {
     assert.equal(repository.getOrganizationProfile('org-b')?.clientCronEnabled, false)
   })
 
-  it('新 Organization 默认允许本地 Cron，更新其他资料不会覆盖策略', () => {
+  void it('新 Organization 默认允许本地 Cron，更新其他资料不会覆盖策略', () => {
     const repository = new IdentityRepository(createLegacyDatabase())
     repository.putOrganizationProfile({
       orgId: 'org-c', code: 'C', loginMethod: 'password', localEnabled: true, cloudEnabled: true,

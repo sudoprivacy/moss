@@ -12,8 +12,8 @@ function fakeFetch(response: Response, captured: Captured[], preserveResponse = 
   }) as typeof fetch
 }
 
-describe('DifyHttpAdapter', () => {
-  test('provision signs the exact JSON bytes and does not send a bearer token', async () => {
+void describe('DifyHttpAdapter', () => {
+  void test('provision signs the exact JSON bytes and does not send a bearer token', async () => {
     const captured: Captured[] = []
     const adapter = new DifyHttpAdapter({
       baseUrl: 'https://dify.example.test/',
@@ -32,7 +32,7 @@ describe('DifyHttpAdapter', () => {
     assert.equal(headers.get('Authorization'), null)
   })
 
-  test('system calls carry tenant and actor headers while service calls carry only the app key', async () => {
+  void test('system calls carry tenant and actor headers while service calls carry only the app key', async () => {
     const captured: Captured[] = []
     const adapter = new DifyHttpAdapter({
       baseUrl: 'https://dify.example.test', systemToken: 'system-token', provisionSecret: 'secret',
@@ -51,7 +51,7 @@ describe('DifyHttpAdapter', () => {
     assert.equal(serviceHeaders.get('X-Sudowork-Tenant'), null)
   })
 
-  test('streaming calls return the original body and force streaming mode', async () => {
+  void test('streaming calls return the original body and force streaming mode', async () => {
     const captured: Captured[] = []
     const source = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -72,7 +72,7 @@ describe('DifyHttpAdapter', () => {
     assert(captured[0]?.init.signal instanceof AbortSignal)
   })
 
-  test('raw calls preserve non-success responses for the compatibility route to serialize', async () => {
+  void test('raw calls preserve non-success responses for the compatibility route to serialize', async () => {
     const upstream = new Response('upstream rejected', { status: 429, headers: { 'Retry-After': '3' } })
     const adapter = new DifyHttpAdapter({
       baseUrl: 'https://dify.example.test', systemToken: 'system-token', provisionSecret: 'secret',
@@ -86,7 +86,7 @@ describe('DifyHttpAdapter', () => {
     assert.equal(await result.text(), 'upstream rejected')
   })
 
-  test('multipart injection owns the user field and preserves file bytes', async () => {
+  void test('multipart injection owns the user field and preserves file bytes', async () => {
     const captured: Captured[] = []
     const adapter = new DifyHttpAdapter({
       baseUrl: 'https://dify.example.test', systemToken: 'system-token', provisionSecret: 'secret',
@@ -103,7 +103,7 @@ describe('DifyHttpAdapter', () => {
     assert.equal(new Headers(captured[0]?.init.headers).has('content-type'), false)
   })
 
-  test('non-success responses expose status and sanitized detail without credentials', async () => {
+  void test('non-success responses expose status and sanitized detail without credentials', async () => {
     const adapter = new DifyHttpAdapter({
       baseUrl: 'https://dify.example.test', systemToken: 'system-secret-token', provisionSecret: 'secret',
       fetchImpl: fakeFetch(Response.json({ message: 'bad request' }, { status: 422 }), []),

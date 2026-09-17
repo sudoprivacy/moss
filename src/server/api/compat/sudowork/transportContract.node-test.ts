@@ -19,8 +19,8 @@ function identity() {
   } as never
 }
 
-describe('Sudowork transport contract', () => {
-  test('CORS 预检不消耗登录限额，第 11 次同 IP 登录保持旧 429 响应', async () => {
+void describe('Sudowork transport contract', () => {
+  void test('CORS 预检不消耗登录限额，第 11 次同 IP 登录保持旧 429 响应', async () => {
     const counters = new Map<string, number>()
     const app = createSudoworkCompatibilityApp({
       identity: identity(),
@@ -57,7 +57,7 @@ describe('Sudowork transport contract', () => {
     assert.equal([...counters.values()].reduce((total, value) => total + value, 0), 11)
   })
 
-  test('CAS HTML、Dify 302、ZIP 文件、SSE 与音频保持非 JSON 传输语义', async () => {
+  void test('CAS HTML、Dify 302、ZIP 文件、SSE 与音频保持非 JSON 传输语义', async () => {
     const app = createSudoworkCompatibilityApp({
       identity: identity(),
       cas: {

@@ -2,13 +2,13 @@ import type { Hono } from 'hono'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
 import type { SudoworkBillingPort } from './billingService.js'
 
-type ActorResolver = (authorization: string | undefined) => IdentityActor | null
+type ActorResolver = (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
 
 export interface SudoworkLegacyAdminPort {
   getFeatureFlags(actor: IdentityActor): unknown
   listOperationLogs(input: { actor: IdentityActor; query: Record<string, string | undefined> }): unknown
-  listMembers(actor: IdentityActor): unknown
-  getAdminStats(actor: IdentityActor): unknown
+  listMembers(actor: IdentityActor): Promise<unknown> | unknown
+  getAdminStats(actor: IdentityActor): Promise<unknown> | unknown
   approveUser(input: { actor: IdentityActor; legacyUserId: number; idempotencyKey?: string }): Promise<void> | void
   rejectUser(input: { actor: IdentityActor; legacyUserId: number; idempotencyKey?: string }): Promise<void> | void
   deletePendingUser(input: { actor: IdentityActor; legacyUserId: number; idempotencyKey?: string }): Promise<void> | void
@@ -42,28 +42,28 @@ export function registerSudoworkLegacyAdminRoutes(
     page_size: context.req.query('page_size'),
   })
 
-  app.get('/api/v1/admin/features', context => {
-    const actor = actorFor(context)
+  app.get('/api/v1/admin/features', async context => {
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: administration().getFeatureFlags(actor) })
   })
-  app.get('/api/v1/admin/logs', context => {
-    const actor = actorFor(context)
+  app.get('/api/v1/admin/logs', async context => {
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: administration().listOperationLogs({ actor, query: query(context) }) })
   })
-  app.get('/api/v1/admin/members', context => {
-    const actor = actorFor(context)
+  app.get('/api/v1/admin/members', async context => {
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: administration().listMembers(actor) })
+    return context.json({ success: true, data: await administration().listMembers(actor) })
   })
-  app.get('/api/v1/admin/stats', context => {
-    const actor = actorFor(context)
+  app.get('/api/v1/admin/stats', async context => {
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: administration().getAdminStats(actor) })
+    return context.json({ success: true, data: await administration().getAdminStats(actor) })
   })
   app.post('/api/v1/admin/members/:id/sync-quota', async context => {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     const legacyUserId = Number.parseInt(context.req.param('id'), 10)
     return context.json({ success: true, msg: '额度同步成功', data: await billing().syncUserQuota({
@@ -77,7 +77,7 @@ export function registerSudoworkLegacyAdminRoutes(
   app.post('/api/v1/admin/delete', async context => mutateUser(context, 'delete'))
 
   async function mutateUser(context: any, action: 'approve' | 'reject' | 'delete') {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     const value = await body(context)
     const legacyUserId = Number(value.userId)

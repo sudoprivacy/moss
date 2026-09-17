@@ -9,8 +9,8 @@ import {
 
 const snapshot = { fingerprint: 'source-fingerprint' } as never
 
-describe('core migration phases', () => {
-  test('组织和用户阶段共享身份计划但调用独立执行边界', async () => {
+void describe('core migration phases', () => {
+  void test('组织和用户阶段共享身份计划但调用独立执行边界', async () => {
     const calls: string[] = []
     const domainPlan = { status: 'ready' as const, issues: [], sourceChecksum: 'identity-checksum' }
     const service = {
@@ -54,7 +54,7 @@ describe('core migration phases', () => {
     assert.equal((await identities.verify({ runId: 'run-1', snapshot })).status, 'matched')
   })
 
-  test('治理阶段透传阻断项、人工归属和校验结果', async () => {
+  void test('治理阶段透传阻断项、人工归属和校验结果', async () => {
     const domainPlan = {
       status: 'blocked' as const,
       sourceChecksum: 'governance-checksum',

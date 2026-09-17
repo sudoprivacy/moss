@@ -11,11 +11,11 @@ import { DifyAdministrationService } from './difyAdministrationService.js'
 import { DifyProviderError } from './difyHttpAdapter.js'
 import { DifyRepository } from './difyRepository.js'
 
-function setup(options: { failArtifactPublish?: boolean; failFirstProvision?: boolean } = {}) {
+async function setup(options: { failArtifactPublish?: boolean; failFirstProvision?: boolean } = {}) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  auth.createOrganization('org-a', 'Organization A', 1)
-  auth.createOrganization('org-b', 'Organization B', 2)
+  await auth.createOrganization('org-a', 'Organization A', 1)
+  await auth.createOrganization('org-b', 'Organization B', 2)
   db.exec(`
     CREATE TABLE tenant_assistants (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
@@ -100,9 +100,9 @@ function setup(options: { failArtifactPublish?: boolean; failFirstProvision?: bo
 
 const admin = { userId: 'admin-a', orgId: 'org-a', role: 'admin' }
 
-describe('DifyAdministrationService', () => {
-  test('migration provisioning is suppressed without resolving external dependencies', async () => {
-    const { db, identities, difyRepository, service, externalCalls, secretWrites } = setup()
+void describe('DifyAdministrationService', () => {
+  void test('migration provisioning is suppressed without resolving external dependencies', async () => {
+    const { db, identities, difyRepository, service, externalCalls, secretWrites } = await setup()
     const result = await service.provision('org-a', migrationCommandContext('run-1', 'provision:org-a'))
     assert.deepEqual(result, { suppressed: true })
     assert.equal(externalCalls.length, 0)
@@ -112,8 +112,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('provisions once, puts plaintext service key only in Nexus, and persists one connection reference', async () => {
-    const { db, identities, service, externalCalls, secretWrites } = setup()
+  void test('provisions once, puts plaintext service key only in Nexus, and persists one connection reference', async () => {
+    const { db, identities, service, externalCalls, secretWrites } = await setup()
     const first = await service.provision('org-a', onlineCommandContext('provision:org-a'))
     const repeated = await service.provision('org-a', onlineCommandContext('provision:org-a:again'))
     assert.deepEqual(first, { dify_tenant_id: 'tenant-a', dify_system_account_id: 'system-a' })
@@ -129,23 +129,23 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('dataset listing preserves legacy first-read tenant provisioning', async () => {
-    const { db, service, externalCalls } = setup()
+  void test('dataset listing preserves legacy first-read tenant provisioning', async () => {
+    const { db, service, externalCalls } = await setup()
     assert.deepEqual(await service.listAvailableDatasets('org-a'), [{ id: 'dataset-1' }])
     assert.deepEqual(externalCalls.map(call => call.method), ['provisionTenant', 'systemJson'])
     db.close()
   })
 
-  test('retries a definitively failed auto-provision operation with the same stable key', async () => {
-    const { db, service, externalCalls } = setup({ failFirstProvision: true })
+  void test('retries a definitively failed auto-provision operation with the same stable key', async () => {
+    const { db, service, externalCalls } = await setup({ failFirstProvision: true })
     await assert.rejects(service.listAvailableDatasets('org-a'), /temporary provider rejection/)
     assert.deepEqual(await service.listAvailableDatasets('org-a'), [{ id: 'dataset-1' }])
     assert.equal(externalCalls.filter(call => call.method === 'provisionTenant').length, 2)
     db.close()
   })
 
-  test('creates a Dify app as one canonical Catalog agent and stores its key only in Nexus', async () => {
-    const { db, catalog, difyRepository, service, externalCalls, secretWrites } = setup()
+  void test('creates a Dify app as one canonical Catalog agent and stores its key only in Nexus', async () => {
+    const { db, catalog, difyRepository, service, externalCalls, secretWrites } = await setup()
     const result = await service.createAgent({
       actor: admin, orgId: 'org-a', name: 'Dify Agent', description: 'desc', mode: 'agent-chat',
     }, onlineCommandContext('agent:create:1'))
@@ -173,8 +173,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('rejects a reused app-create idempotency key with a different payload', async () => {
-    const { db, service } = setup()
+  void test('rejects a reused app-create idempotency key with a different payload', async () => {
+    const { db, service } = await setup()
     await service.createAgent({ actor: admin, orgId: 'org-a', name: 'First' }, onlineCommandContext('agent:create:conflict'))
     await assert.rejects(
       service.createAgent({ actor: admin, orgId: 'org-a', name: 'Different' }, onlineCommandContext('agent:create:conflict')),
@@ -183,8 +183,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('maps ACL and dataset bindings into the same Catalog record and forbids method changes', () => {
-    const { db, catalog, service, externalCalls } = setup()
+  void test('maps ACL and dataset bindings into the same Catalog record and forbids method changes', async () => {
+    const { db, catalog, service, externalCalls } = await setup()
     catalog.createAgent({
       id: 'rag-1', orgId: 'org-a', name: 'RAG', authorId: 'admin-a', providerType: 'dify',
       supportedModes: 'both', status: 'approved',
@@ -203,8 +203,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('creates and reads an enterprise assistant from the single Catalog model', async () => {
-    const { db, catalog, service, artifactCalls } = setup()
+  void test('creates and reads an enterprise assistant from the single Catalog model', async () => {
+    const { db, catalog, service, artifactCalls } = await setup()
     const source = new JSZip()
     source.file('Assistant.md', '# Prompt')
     const form = new FormData()
@@ -242,8 +242,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('replays enhanced enterprise assistant creation without creating another Dify App', async () => {
-    const { db, service, externalCalls } = setup()
+  void test('replays enhanced enterprise assistant creation without creating another Dify App', async () => {
+    const { db, service, externalCalls } = await setup()
     const form = new FormData()
     form.set('name', 'Enhanced Assistant')
     form.set('profession', '研发')
@@ -260,8 +260,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('deletes a Dify agent idempotently and suppresses migration deletion', async () => {
-    const { db, catalog, difyRepository, service, externalCalls } = setup()
+  void test('deletes a Dify agent idempotently and suppresses migration deletion', async () => {
+    const { db, catalog, difyRepository, service, externalCalls } = await setup()
     await service.createAgent({ actor: admin, orgId: 'org-a', name: 'Delete me' }, onlineCommandContext('agent:create:delete'))
 
     await service.deleteAgent('org-a', 'agent-new', migrationCommandContext('run-delete', 'agent:delete:suppressed'))
@@ -277,8 +277,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('service layer rejects enhancement method changes even without the HTTP adapter', async () => {
-    const { db, catalog, service } = setup()
+  void test('service layer rejects enhancement method changes even without the HTTP adapter', async () => {
+    const { db, catalog, service } = await setup()
     catalog.createAgent({
       id: 'enhanced', orgId: 'org-a', name: 'Enhanced', authorId: 'admin-a', status: 'approved',
       providerType: 'dify', supportedModes: 'both',
@@ -290,8 +290,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('compensates Catalog, command result, app secret, and Dify app when artifact publish fails', async () => {
-    const { db, catalog, service, externalCalls, secretDeletes } = setup({ failArtifactPublish: true })
+  void test('compensates Catalog, command result, app secret, and Dify app when artifact publish fails', async () => {
+    const { db, catalog, service, externalCalls, secretDeletes } = await setup({ failArtifactPublish: true })
     const form = new FormData()
     form.set('name', 'Assistant')
     form.set('profession', '研发')
@@ -315,8 +315,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('returns legacy enterprise aliases and tenant codes instead of Moss organization ids', async () => {
-    const { db, catalog, service } = setup()
+  void test('returns legacy enterprise aliases and tenant codes instead of Moss organization ids', async () => {
+    const { db, catalog, service } = await setup()
     catalog.createAgent({
       id: 'shared-1', orgId: 'org-a', name: 'Shared', authorId: 'admin-a', status: 'approved',
       providerType: 'local', supportedModes: 'local', availability: 'assigned',
@@ -330,8 +330,8 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('publishes a replacement artifact and updates its checksum and path', async () => {
-    const { db, catalog, service, artifactCalls } = setup()
+  void test('publishes a replacement artifact and updates its checksum and path', async () => {
+    const { db, catalog, service, artifactCalls } = await setup()
     catalog.createAgent({
       id: 'existing-1', orgId: 'org-a', name: 'Old', authorId: 'admin-a', status: 'approved',
       providerType: 'local', supportedModes: 'local', version: '1.0.0',
@@ -355,9 +355,9 @@ describe('DifyAdministrationService', () => {
     db.close()
   })
 
-  test('builds a short-lived organization-scoped SSO link', async () => {
-    const { db, identities, service } = setup()
-    new AuthCenterDb(db).createUser({
+  void test('builds a short-lived organization-scoped SSO link', async () => {
+    const { db, identities, service } = await setup()
+    await new AuthCenterDb(db).createUser({
       id: 'admin-a', orgId: 'org-a', email: 'admin@example.test', name: 'admin',
       displayName: 'Admin', departmentId: null, role: 'admin', status: 'active',
       localAuth: true, tokenLimit: null, createdAt: 1, passwordHash: null,

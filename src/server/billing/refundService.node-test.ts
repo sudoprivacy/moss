@@ -31,14 +31,14 @@ class FakeFuiouRefund implements FuiouRefundPort {
   }
 }
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org1', 'Org 1', 1)
+  await auth.createOrganization('org1', 'Org 1', 1)
   for (const [id, role] of [['u1', 'user'], ['admin1', 'admin']] as const) {
-    auth.createUser({
+    await auth.createUser({
       id, orgId: 'org1', email: `${id}@example.test`, name: id, displayName: null,
       departmentId: null, role, status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -74,9 +74,9 @@ function setup() {
   return { db, identities, repository, wallet, router, fuiou, service }
 }
 
-describe('RefundService', () => {
-  test('按订单真实到账总积分计算，赠送积分不重复相加', () => {
-    const { db, service } = setup()
+void describe('RefundService', () => {
+  void test('按订单真实到账总积分计算，赠送积分不重复相加', async () => {
+    const { db, service } = await setup()
     assert.deepEqual(service.calculate('USR17NO1'), {
       orderPoints: 5_500, userBalance: 5_500, usedPoints: 0,
       refundAmountCents: 3_650, deductPoints: 5_500, originalAmountCents: 3_650,
@@ -84,8 +84,8 @@ describe('RefundService', () => {
     db.close()
   })
 
-  test('部分积分已使用时按旧汇率公式扣除已用金额', () => {
-    const { db, service, wallet } = setup()
+  void test('部分积分已使用时按旧汇率公式扣除已用金额', async () => {
+    const { db, service, wallet } = await setup()
     wallet.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: -1_000, entryType: 'CONSUME',
       sourceType: 'usage', sourceId: 'usage-1', orgId: 'org1',
@@ -97,8 +97,8 @@ describe('RefundService', () => {
     db.close()
   })
 
-  test('同一订单并发退款只调用一次支付方并只扣一次钱包', async () => {
-    const { db, repository, fuiou, service } = setup()
+  void test('同一订单并发退款只调用一次支付方并只扣一次钱包', async () => {
+    const { db, repository, fuiou, service } = await setup()
     const actor = { userId: 'admin1', orgId: 'org1', role: 'admin' as const }
     const requests = await Promise.allSettled([
       service.request({ orderNo: 'USR17NO1', reason: '用户申请退款' }, actor, onlineCommandContext('refund-request-1')),
@@ -113,8 +113,8 @@ describe('RefundService', () => {
     db.close()
   })
 
-  test('缺少 Sudorouter 绑定时不调用支付方', async () => {
-    const { db, repository, fuiou, service } = setup()
+  void test('缺少 Sudorouter 绑定时不调用支付方', async () => {
+    const { db, repository, fuiou, service } = await setup()
     db.prepare("DELETE FROM billing_external_accounts WHERE provider = 'sudorouter' AND owner_id = 'u1'").run()
     const actor = { userId: 'admin1', orgId: 'org1', role: 'admin' as const }
 
@@ -131,8 +131,8 @@ describe('RefundService', () => {
     db.close()
   })
 
-  test('migration 上下文写退款、钱包和留痕但不调用外部服务', async () => {
-    const { db, repository, fuiou, service } = setup()
+  void test('migration 上下文写退款、钱包和留痕但不调用外部服务', async () => {
+    const { db, repository, fuiou, service } = await setup()
     const actor = { userId: 'admin1', orgId: 'org1', role: 'admin' as const }
 
     const refund = await service.request(

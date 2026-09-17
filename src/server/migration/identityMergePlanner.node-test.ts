@@ -40,8 +40,8 @@ function target(overrides: Partial<TargetIdentitySnapshot> = {}): TargetIdentity
   }
 }
 
-describe('IdentityMergePlanner', () => {
-  test('matches organizations by verified code and users by provider before phone or email', () => {
+void describe('IdentityMergePlanner', () => {
+  void test('matches organizations by verified code and users by provider before phone or email', () => {
     const plan = new IdentityMergePlanner(target()).plan(source, [])
     assert.equal(plan.status, 'ready')
     assert.deepEqual(plan.organizations[0], {
@@ -52,7 +52,7 @@ describe('IdentityMergePlanner', () => {
     })
   })
 
-  test('falls back to unique verified phone and then unique verified email', () => {
+  void test('falls back to unique verified phone and then unique verified email', () => {
     const phonePlan = new IdentityMergePlanner(target({
       users: [{
         id: 'user-phone', orgId: 'org-a', email: 'other@example.test', emailVerified: true,
@@ -70,7 +70,7 @@ describe('IdentityMergePlanner', () => {
     assert.equal(emailPlan.users[0].matchedBy, 'verified_email')
   })
 
-  test('never uses organization names, usernames, or display names as identity keys', () => {
+  void test('never uses organization names, usernames, or display names as identity keys', () => {
     const plan = new IdentityMergePlanner({
       organizations: [{ id: 'org-same-name', code: 'OTHER', codeVerified: true, name: '旧企业' }],
       users: [{
@@ -88,7 +88,7 @@ describe('IdentityMergePlanner', () => {
       new IdentityMergePlanner({ organizations: [], users: [] }).plan(source, []))
   })
 
-  test('blocks ambiguous verified identifiers and cross-organization provider matches', () => {
+  void test('blocks ambiguous verified identifiers and cross-organization provider matches', () => {
     const ambiguous = new IdentityMergePlanner(target({
       users: [
         { id: 'u1', orgId: 'org-a', email: null, emailVerified: false, phone: '13800000000', phoneVerified: true, providerIdentities: [] },
@@ -110,7 +110,7 @@ describe('IdentityMergePlanner', () => {
     assert(crossOrg.issues.some(issue => issue.code === 'CROSS_ORGANIZATION_IDENTITY'))
   })
 
-  test('uses explicit reviewed resolutions and rejects unknown targets', () => {
+  void test('uses explicit reviewed resolutions and rejects unknown targets', () => {
     const resolved = new IdentityMergePlanner(target()).plan(source, [
       { kind: 'organization', sourceId: '7', targetId: 'org-a' },
       { kind: 'user', sourceId: '17', targetId: 'user-a' },
@@ -125,7 +125,7 @@ describe('IdentityMergePlanner', () => {
     assert(invalid.issues.some(issue => issue.code === 'INVALID_MANUAL_RESOLUTION'))
   })
 
-  test('恢复和重跑优先复用迁移已建立的永久数字别名', () => {
+  void test('恢复和重跑优先复用迁移已建立的永久数字别名', () => {
     const plan = new IdentityMergePlanner({
       organizations: [{ id: 'org-a', code: '', codeVerified: false, legacyAlias: 7 }],
       users: [{
@@ -140,7 +140,7 @@ describe('IdentityMergePlanner', () => {
     assert.equal(plan.users[0].targetOrgId, 'org-a')
   })
 
-  test('blocks reuse when an already exposed numeric alias differs from the legacy id', () => {
+  void test('blocks reuse when an already exposed numeric alias differs from the legacy id', () => {
     const plan = new IdentityMergePlanner(target({
       organizations: [{ id: 'org-a', code: 'ACME', codeVerified: true, legacyAlias: 99 }],
       users: [{

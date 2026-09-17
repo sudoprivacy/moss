@@ -4,7 +4,6 @@ import { assertTrustedCommandContext, migrationCommandContext, type CommandConte
 import type { AuthCenterDb, AuthCenterUser } from '../authCenter/db.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
 import type { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import {
   type IdentityMergePlan,
   type IdentityMergePlanner,
@@ -86,9 +85,9 @@ export class IdentityMigrationService {
     }
   }
 
-  execute(plan: IdentityMigrationPlan, context: CommandContext): IdentityMigrationReport {
-    const organizations = this.executeOrganizations(plan, context)
-    const users = this.executeUsers(plan, context)
+  async execute(plan: IdentityMigrationPlan, context: CommandContext): Promise<IdentityMigrationReport> {
+    const organizations = await this.executeOrganizations(plan, context)
+    const users = await this.executeUsers(plan, context)
     return {
       migrationRunId: organizations.migrationRunId,
       sourceChecksum: plan.sourceChecksum,
@@ -101,28 +100,25 @@ export class IdentityMigrationService {
     }
   }
 
-  executeOrganizations(plan: IdentityMigrationPlan, context: CommandContext): OrganizationMigrationReport {
+  async executeOrganizations(plan: IdentityMigrationPlan, context: CommandContext): Promise<OrganizationMigrationReport> {
     const runId = this.assertExecutable(plan, context)
     const organizationIds: string[] = []
     for (const decision of plan.organizations) {
       const source = requiredById(plan.source.organizations, decision.legacyId, 'Organization')
-      const targetId = runInTransaction(this.options.db, () => {
-        const id = decision.action === 'reuse'
-          ? this.assertReusableAlias('enterprise', source.legacyId, decision.targetId!)
-          : this.options.unified.createOrganization({
-              id: decision.targetId!,
-              name: source.name,
-              code: source.code?.trim() || undefined,
-              legacyEnterpriseId: source.legacyId,
-            }, migrationCommandContext(runId, `migration:identity:organization:${source.legacyId}`)).organizationId
-        this.options.runs.putMapping({
-          runId,
-          namespace: 'enterprise',
-          sourceId: String(source.legacyId),
-          targetId: id,
-          metadata: { matchedBy: decision.matchedBy },
-        })
-        return id
+      const targetId = decision.action === 'reuse'
+        ? await this.assertReusableAlias('enterprise', source.legacyId, decision.targetId!)
+        : (await this.options.unified.createOrganization({
+            id: decision.targetId!,
+            name: source.name,
+            code: source.code?.trim() || undefined,
+            legacyEnterpriseId: source.legacyId,
+          }, migrationCommandContext(runId, `migration:identity:organization:${source.legacyId}`))).organizationId
+      this.options.runs.putMapping({
+        runId,
+        namespace: 'enterprise',
+        sourceId: String(source.legacyId),
+        targetId,
+        metadata: { matchedBy: decision.matchedBy },
       })
       organizationIds.push(targetId)
     }
@@ -135,42 +131,40 @@ export class IdentityMigrationService {
     }
   }
 
-  executeUsers(plan: IdentityMigrationPlan, context: CommandContext): UserIdentityMigrationReport {
+  async executeUsers(plan: IdentityMigrationPlan, context: CommandContext): Promise<UserIdentityMigrationReport> {
     const runId = this.assertExecutable(plan, context)
     let suppressedExternalEffects = 0
     for (const decision of plan.users) {
       const source = requiredById(plan.source.users, decision.legacyId, 'User')
       const orgId = this.options.identities.resolveNumericAliasGlobal('enterprise', source.enterpriseId)?.resourceId
       if (!orgId) throw new Error(`旧用户 ${source.legacyId} 缺少 Organization 映射`)
-      runInTransaction(this.options.db, () => {
-        const targetId = decision.action === 'reuse'
-          ? this.assertReusableAlias('user', source.legacyId, decision.targetId!, orgId)
-          : this.createUser(source, orgId, runId, decision.targetId!)
-        this.ensureProviderIdentities(source, targetId, orgId)
-        this.options.runs.putMapping({
-          runId,
-          namespace: 'user',
-          sourceId: String(source.legacyId),
-          targetId,
-          metadata: { matchedBy: decision.matchedBy, organizationId: orgId },
-        })
-        if (decision.action === 'create') {
-          const idempotencyKey = `welcome:migration:identity:user:${source.legacyId}`
-          const outbox = this.options.identities.getOutboxEvent(idempotencyKey)
-          if (!outbox || outbox.status !== 'suppressed' || outbox.contextSource !== 'migration') {
-            throw new Error(`迁移用户 ${source.legacyId} 的欢迎事件未被正确抑制`)
-          }
-          this.options.runs.recordSuppressedEffect(runId, {
-            runId,
-            effectType: 'user.welcome',
-            resourceType: 'user',
-            resourceId: targetId,
-            idempotencyKey,
-            reason: outbox.suppressReason ?? 'migration context suppresses external effects',
-          })
-          suppressedExternalEffects += 1
-        }
+      const targetId = decision.action === 'reuse'
+        ? await this.assertReusableAlias('user', source.legacyId, decision.targetId!, orgId)
+        : await this.createUser(source, orgId, runId, decision.targetId!)
+      this.ensureProviderIdentities(source, targetId, orgId)
+      this.options.runs.putMapping({
+        runId,
+        namespace: 'user',
+        sourceId: String(source.legacyId),
+        targetId,
+        metadata: { matchedBy: decision.matchedBy, organizationId: orgId },
       })
+      if (decision.action === 'create') {
+        const idempotencyKey = `welcome:migration:identity:user:${source.legacyId}`
+        const outbox = this.options.identities.getOutboxEvent(idempotencyKey)
+        if (!outbox || outbox.status !== 'suppressed' || outbox.contextSource !== 'migration') {
+          throw new Error(`迁移用户 ${source.legacyId} 的欢迎事件未被正确抑制`)
+        }
+        this.options.runs.recordSuppressedEffect(runId, {
+          runId,
+          effectType: 'user.welcome',
+          resourceType: 'user',
+          resourceId: targetId,
+          idempotencyKey,
+          reason: outbox.suppressReason ?? 'migration context suppresses external effects',
+        })
+        suppressedExternalEffects += 1
+      }
     }
 
     return {
@@ -201,12 +195,12 @@ export class IdentityMigrationService {
     return { status: issues.length === 0 ? 'matched' : 'mismatch', issues }
   }
 
-  private createUser(source: LegacyUserIdentity, orgId: string, runId: string, targetId: string): string {
+  private async createUser(source: LegacyUserIdentity, orgId: string, runId: string, targetId: string): Promise<string> {
     const providers = source.providerIdentities ?? (source.providerIdentity ? [source.providerIdentity] : [])
     if (!source.passwordHash && providers.length === 0) {
       throw new Error(`旧用户 ${source.legacyId} 缺少可迁移的认证凭据`)
     }
-    return this.options.unified.createUser({
+    return (await this.options.unified.createUser({
       id: targetId,
       orgId,
       username: source.username,
@@ -221,7 +215,7 @@ export class IdentityMigrationService {
         ...providers[0],
         metadata: { source: 'sudowork-migration', verified: true },
       } : undefined,
-    }, migrationCommandContext(runId, `migration:identity:user:${source.legacyId}`)).userId
+    }, migrationCommandContext(runId, `migration:identity:user:${source.legacyId}`))).userId
   }
 
   private assertExecutable(plan: IdentityMigrationPlan, context: CommandContext): string {
@@ -258,12 +252,12 @@ export class IdentityMigrationService {
     }
   }
 
-  private assertReusableAlias(
+  private async assertReusableAlias(
     namespace: 'enterprise' | 'user',
     legacyId: number,
     targetId: string,
     expectedOrgId?: string,
-  ): string {
+  ): Promise<string> {
     const byLegacy = this.options.identities.resolveNumericAliasGlobal(namespace, legacyId)
     if (byLegacy && byLegacy.resourceId !== targetId) {
       throw new Error(`${namespace} 旧 ID ${legacyId} 已映射到其他资源`)
@@ -273,9 +267,9 @@ export class IdentityMigrationService {
       throw new Error(`${namespace} 目标资源已有不同数字别名 ${existingAlias}`)
     }
     if (namespace === 'enterprise') {
-      if (!this.options.auth.getOrganization(targetId)) throw new Error(`Organization 不存在: ${targetId}`)
+      if (!await this.options.auth.getOrganization(targetId)) throw new Error(`Organization 不存在: ${targetId}`)
     } else {
-      const user = this.options.auth.getUserById(targetId)
+      const user = await this.options.auth.getUserById(targetId)
       if (!user) throw new Error(`User 不存在: ${targetId}`)
       if (expectedOrgId && user.orgId !== expectedOrgId) throw new Error(`User ${targetId} 不属于目标 Organization`)
     }

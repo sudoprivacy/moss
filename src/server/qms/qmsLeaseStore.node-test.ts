@@ -14,8 +14,8 @@ class LeaseSql implements QmsSqlPort {
   }
 }
 
-describe('PostgresQmsLeaseStore', () => {
-  it('acquires or takes over an expired task lease atomically', async () => {
+void describe('PostgresQmsLeaseStore', () => {
+  void it('acquires or takes over an expired task lease atomically', async () => {
     const db = new LeaseSql()
     const leases = new PostgresQmsLeaseStore(db)
 
@@ -25,14 +25,14 @@ describe('PostgresQmsLeaseStore', () => {
     assert.deepEqual(db.statements[0]!.parameters, ['alert-check', 'worker-a', 1_000, 1_500])
   })
 
-  it('reports a lease held by another live owner as unavailable', async () => {
+  void it('reports a lease held by another live owner as unavailable', async () => {
     const db = new LeaseSql()
     db.acquireResult = []
     const leases = new PostgresQmsLeaseStore(db)
     assert.equal(await leases.tryAcquire('alert-check', 'worker-b', 1_000, 500), false)
   })
 
-  it('records completion and failure only for the current owner', async () => {
+  void it('records completion and failure only for the current owner', async () => {
     const db = new LeaseSql()
     const leases = new PostgresQmsLeaseStore(db)
 

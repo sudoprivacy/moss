@@ -26,19 +26,19 @@ class CallbackSudorouter implements SudorouterPort {
   }
 }
 
-function setup(): {
+async function setup(): Promise<{
   db: DatabaseSync
   repository: BillingRepository
   service: RechargeService
   setNow(value: number): void
-} {
+}> {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org1', 'Org 1', 1)
+  await auth.createOrganization('org1', 'Org 1', 1)
   for (const id of ['u1', 'u2']) {
-    auth.createUser({
+    await auth.createUser({
       id, orgId: 'org1', email: `${id}@example.test`, name: id, displayName: null,
       departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -60,9 +60,9 @@ function setup(): {
   return { db, repository, service, setNow(value) { now = value } }
 }
 
-describe('RechargeService 套餐与订单', () => {
-  test('保留旧套餐、积分赠送和人民币展示字段', () => {
-    const { db, service } = setup()
+void describe('RechargeService 套餐与订单', () => {
+  void test('保留旧套餐、积分赠送和人民币展示字段', async () => {
+    const { db, service } = await setup()
     assert.deepEqual(service.listPackages(), [
       { amount: 1, points: 1000, bonus: 0, description: '基础充值', amount_cny: 7.3, exchange_rate: 7.3 },
       { amount: 5, points: 5000, bonus: 500, description: '充5送500积分', amount_cny: 36.5, exchange_rate: 7.3 },
@@ -73,8 +73,8 @@ describe('RechargeService 套餐与订单', () => {
     db.close()
   })
 
-  test('同一创建幂等键只产生一个旧格式订单号', () => {
-    const { db, repository, service } = setup()
+  void test('同一创建幂等键只产生一个旧格式订单号', async () => {
+    const { db, repository, service } = await setup()
     const input = {
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: '13800000000',
       amountUsd: 5, paymentMethod: 'ALIPAY' as const,
@@ -95,8 +95,8 @@ describe('RechargeService 套餐与订单', () => {
     db.close()
   })
 
-  test('同一订单幂等键绑定不同金额时拒绝', () => {
-    const { db, service } = setup()
+  void test('同一订单幂等键绑定不同金额时拒绝', async () => {
+    const { db, service } = await setup()
     const context = onlineCommandContext('create-order-conflict')
     const base = {
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
@@ -110,8 +110,8 @@ describe('RechargeService 套餐与订单', () => {
     db.close()
   })
 
-  test('过期订单转为取消且其他用户不能准备支付', () => {
-    const { db, repository, service, setNow } = setup()
+  void test('过期订单转为取消且其他用户不能准备支付', async () => {
+    const { db, repository, service, setNow } = await setup()
     const order = service.createOrder({
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
       amountUsd: 1, paymentMethod: 'ALIPAY',
@@ -131,8 +131,8 @@ describe('RechargeService 套餐与订单', () => {
     db.close()
   })
 
-  test('合法支付回调重复处理只入账一次，金额不符零写入', () => {
-    const { db, repository, service } = setup()
+  void test('合法支付回调重复处理只入账一次，金额不符零写入', async () => {
+    const { db, repository, service } = await setup()
     const wallet = new WalletService(db, repository)
     const order = service.createOrder({
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
@@ -164,8 +164,8 @@ describe('RechargeService 套餐与订单', () => {
     db.close()
   })
 
-  test('生产回调通过统一 Saga 同时发放钱包积分和 Sudorouter 额度', async () => {
-    const { db, repository, service } = setup()
+  void test('生产回调通过统一 Saga 同时发放钱包积分和 Sudorouter 额度', async () => {
+    const { db, repository, service } = await setup()
     const wallet = new WalletService(db, repository)
     const router = new CallbackSudorouter()
     const coordinator = new BillingCoordinator(db, repository, wallet, router)

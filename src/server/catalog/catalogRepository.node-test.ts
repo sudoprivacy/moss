@@ -27,8 +27,8 @@ function setup(): { db: DatabaseSync; catalog: CatalogRepository } {
   return { db, catalog: new CatalogRepository(db) }
 }
 
-describe('统一 Agent/Skill Catalog Repository', () => {
-  test('原子更新同一 Agent 配置并替换共享组织范围', () => {
+void describe('统一 Agent/Skill Catalog Repository', () => {
+  void test('原子更新同一 Agent 配置并替换共享组织范围', () => {
     const { db, catalog } = setup()
     catalog.createAgent({
       id: 'a-config', orgId: 'org-a', name: 'Before', authorId: 'admin-a',
@@ -50,7 +50,7 @@ describe('统一 Agent/Skill Catalog Repository', () => {
     db.close()
   })
 
-  test('本地与云端模式读取同一主表并按执行能力过滤', () => {
+  void test('本地与云端模式读取同一主表并按执行能力过滤', () => {
     const { db, catalog } = setup()
     catalog.createAgent({
       id: 'both-agent', orgId: 'org-a', name: 'both', authorId: 'u1', status: 'approved',
@@ -80,13 +80,13 @@ describe('统一 Agent/Skill Catalog Repository', () => {
     db.close()
   })
 
-  test('可见性过滤、稳定游标和 Skill 模式使用统一规则', () => {
+  void test('可见性过滤、稳定游标和 Skill 模式使用统一规则', () => {
     const { db, catalog } = setup()
     for (const [id, visibleTo, updatedAt] of [
       ['a3', null, 30],
       ['a2', { user_ids: ['u1'] }, 20],
       ['a1', { user_ids: [] }, 10],
-    ] as const) {
+    ] satisfies Array<[string, { user_ids: string[] } | null, number]>) {
       catalog.createSkill({
         id, orgId: 'org-a', name: id, authorId: 'owner', status: 'approved',
         supportedModes: 'both', visibleTo, updatedAt,
@@ -109,7 +109,7 @@ describe('统一 Agent/Skill Catalog Repository', () => {
     db.close()
   })
 
-  test('公共与显式分配资源保持单份主数据并向目标组织可见', () => {
+  void test('公共与显式分配资源保持单份主数据并向目标组织可见', () => {
     const { db, catalog } = setup()
     catalog.createSkill({
       id: 'public', orgId: 'catalog-owner', name: 'Public', authorId: 'owner',
@@ -134,7 +134,7 @@ describe('统一 Agent/Skill Catalog Repository', () => {
     db.close()
   })
 
-  test('Provider binding 只允许引用，不允许保存明文秘密', () => {
+  void test('Provider binding 只允许引用，不允许保存明文秘密', () => {
     const { db, catalog } = setup()
     assert.throws(() => catalog.createAgent({
       id: 'unsafe', orgId: 'org-a', name: 'unsafe', authorId: 'u1',
@@ -145,7 +145,7 @@ describe('统一 Agent/Skill Catalog Repository', () => {
     db.close()
   })
 
-  test('外部身份解析保持资源类型和组织归属', () => {
+  void test('外部身份解析保持资源类型和组织归属', () => {
     const { db, catalog } = setup()
     catalog.createAgent({ id: 'agent-a', orgId: 'org-a', name: 'A', authorId: 'u1' })
     catalog.bindExternalIdentity({

@@ -279,8 +279,8 @@ function createApp(
   })
 }
 
-describe('Sudowork compatibility Hono app', () => {
-  test('登录投影缺少 Sudorouter Token 时返回明确兼容错误', async () => {
+void describe('Sudowork compatibility Hono app', () => {
+  void test('登录投影缺少 Sudorouter Token 时返回明确兼容错误', async () => {
     const app = createApp('password', undefined, {
       getUserProjection: async () => {
         throw new SudoworkUserProjectionError(500, 'Sudorouter 用户 Token 不存在')
@@ -294,14 +294,14 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await response.json(), { success: false, msg: 'Sudorouter 用户 Token 不存在' })
   })
 
-  test('QMS 未启用时已知质量接口返回 503 而不是 404', async () => {
+  void test('QMS 未启用时已知质量接口返回 503 而不是 404', async () => {
     const app = createSudoworkCompatibilityApp({ identity: createIdentity() })
     const response = await app.request('/api/v1/qms/system/health')
     assert.equal(response.status, 503)
     assert.deepEqual(await response.json(), { success: false, msg: 'QMS 未配置' })
   })
 
-  test('maps legacy administration domain errors to the old JSON error envelope', async () => {
+  void test('maps legacy administration domain errors to the old JSON error envelope', async () => {
     const app = createApp('password', undefined, {
       legacyAdministration: {
         approveUser() { throw new SudoworkAdministrationError(403, '无权操作该用户') },
@@ -316,7 +316,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await response.json(), { success: false, msg: '无权操作该用户' })
   })
 
-  test('Moss 运营入口把超级管理员标记为当前组织作用域，旧入口保持全局语义', async () => {
+  void test('Moss 运营入口把超级管理员标记为当前组织作用域，旧入口保持全局语义', async () => {
     const received: Array<Record<string, unknown>> = []
     const administration = {
       listInvitationCodes(input: { actor: Record<string, unknown> }) {
@@ -338,7 +338,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.equal(received[1]?.organizationScoped, true)
   })
 
-  test('registers Dify administration routes through the compatibility app', async () => {
+  void test('registers Dify administration routes through the compatibility app', async () => {
     const app = createApp('password', undefined, {
       difyAdministration: { getBinding: () => ({ dify_tenant_id: 'tenant-a' }) } as never,
       resolveEnterpriseAlias: id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
@@ -351,7 +351,7 @@ describe('Sudowork compatibility Hono app', () => {
     }])
   })
 
-  test('registers every P1 identity and organization route from the legacy contract', () => {
+  void test('registers every P1 identity and organization route from the legacy contract', async () => {
     const actual = new Set(createApp().routes.map((route) => `${route.method} ${route.path}`))
     const expected = [
       'POST /api/v1/auth/send-code',
@@ -425,7 +425,7 @@ describe('Sudowork compatibility Hono app', () => {
     for (const route of expected) assert(actual.has(route), `missing compatibility route: ${route}`)
   })
 
-  test('keeps Hub cursor and visible-agent envelopes on the unified catalog', async () => {
+  void test('keeps Hub cursor and visible-agent envelopes on the unified catalog', async () => {
     const app = createApp()
     const adminHeaders = { authorization: 'Bearer admin-access' }
     const agents = await app.request('/api/assistants/cursor?tenant_id=ENT-A&limit=20', { headers: adminHeaders })
@@ -475,7 +475,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await categories.json(), { success: true, data: ['效率'] })
   })
 
-  test('保持旧 Agent/Skill multipart 上传字段和 ZIP 下载传输行为', async () => {
+  void test('保持旧 Agent/Skill multipart 上传字段和 ZIP 下载传输行为', async () => {
     const app = createApp()
     const agentForm = new FormData()
     agentForm.set('tenant_id', 'ENT-A')
@@ -504,7 +504,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.equal(await artifact.text(), 'zip')
   })
 
-  test('保持旧配置项分页、明细和用户可见列表响应外壳', async () => {
+  void test('保持旧配置项分页、明细和用户可见列表响应外壳', async () => {
     const app = createApp()
     const headers = { authorization: 'Bearer admin-access' }
     const list = await app.request('/api/v1/admin/config-items?page=1&page_size=20', { headers })
@@ -524,7 +524,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.equal((await tenant.json() as any).data.app_name, 'Sudowork')
   })
 
-  test('保持配置图标和企业 Logo 的 multipart 与公开读取契约', async () => {
+  void test('保持配置图标和企业 Logo 的 multipart 与公开读取契约', async () => {
     const app = createApp()
     const unauthorized = await app.request('/api/v1/admin/upload/config-item-icon', {
       method: 'POST', body: new FormData(),
@@ -562,7 +562,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.equal(await publicIcon.text(), 'config-item:config-icon.png')
   })
 
-  test('keeps the password login response shape and CORS behavior', async () => {
+  void test('keeps the password login response shape and CORS behavior', async () => {
     const app = createApp()
     const response = await app.request('/api/v1/auth/login-by-config', {
       method: 'POST',
@@ -600,7 +600,7 @@ describe('Sudowork compatibility Hono app', () => {
     })
   })
 
-  test('keeps legacy validation and authentication errors', async () => {
+  void test('keeps legacy validation and authentication errors', async () => {
     const app = createApp()
     const missing = await app.request('/api/v1/auth/login-by-config', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
@@ -620,7 +620,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await unauthorized.json(), { success: false, msg: '未授权' })
   })
 
-  test('keeps refresh, profile, and logout contracts', async () => {
+  void test('keeps refresh, profile, and logout contracts', async () => {
     const app = createApp()
     const refresh = await app.request('/api/v1/auth/refresh', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -659,7 +659,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await logout.json(), { success: true, msg: '注销成功' })
   })
 
-  test('registers password users through the same legacy session response contract', async () => {
+  void test('registers password users through the same legacy session response contract', async () => {
     const app = createApp()
     const response = await app.request('/api/v1/auth/register-password', {
       method: 'POST',
@@ -677,7 +677,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.equal(body.data.user.enterprise_code, 'ENT-A')
   })
 
-  test('keeps SMS send, login handoff, and verified registration contracts', async () => {
+  void test('keeps SMS send, login handoff, and verified registration contracts', async () => {
     const app = createApp()
     const sent = await app.request('/api/v1/auth/send-code', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -711,7 +711,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.equal(registeredBody.data.user.id, 19)
   })
 
-  test('dispatches login-by-config from the migrated global login policy', async () => {
+  void test('dispatches login-by-config from the migrated global login policy', async () => {
     const smsApp = createApp('sms')
     const smsLogin = await smsApp.request('/api/v1/auth/login-by-config', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -747,7 +747,7 @@ describe('Sudowork compatibility Hono app', () => {
     })
   })
 
-  test('系统配置管理接口复用统一策略服务并保持旧响应', async () => {
+  void test('系统配置管理接口复用统一策略服务并保持旧响应', async () => {
     const app = createApp()
     const unauthorized = await app.request('/api/v1/admin/system-config')
     assert.equal(unauthorized.status, 401)
@@ -765,7 +765,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await updated.json(), { success: true, msg: '系统配置更新成功' })
   })
 
-  test('下发旧客户端可解密的按用户 Hub 凭证和 Moss Hub 地址', async () => {
+  void test('下发旧客户端可解密的按用户 Hub 凭证和 Moss Hub 地址', async () => {
     const app = createApp('password', { skillhubBaseUrl: 'https://moss.example.test/' })
     const publicConfig = await app.request('/api/v1/system-config')
     assert.equal((await publicConfig.json() as any).data.skillhub_baseurl, 'https://moss.example.test')
@@ -794,7 +794,7 @@ describe('Sudowork compatibility Hono app', () => {
     })
   })
 
-  test('keeps legacy administrator login and password-change responses', async () => {
+  void test('keeps legacy administrator login and password-change responses', async () => {
     const app = createApp()
     const login = await app.request('/api/v1/admin/login', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-device-id': 'admin-a' },
@@ -829,7 +829,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await adminChanged.json(), { success: false, msg: '旧密码错误' })
   })
 
-  test('keeps enterprise and invitation administration contracts', async () => {
+  void test('keeps enterprise and invitation administration contracts', async () => {
     const app = createApp()
     const headers = { authorization: 'Bearer admin-access', 'content-type': 'application/json' }
     const enterprises = await app.request('/api/v1/admin/enterprises', { headers })
@@ -859,7 +859,7 @@ describe('Sudowork compatibility Hono app', () => {
     })
   })
 
-  test('keeps legacy user administration routes on the unified user model', async () => {
+  void test('keeps legacy user administration routes on the unified user model', async () => {
     const app = createApp()
     const headers = { authorization: 'Bearer admin-access', 'content-type': 'application/json' }
     const listed = await app.request('/api/v1/admin/users?enterprise_id=9&status=1&keyword=旧', { headers })
@@ -902,7 +902,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await deleted.json(), { success: true, msg: '用户删除成功，所有关联数据已清除' })
   })
 
-  test('updates the current profile through the canonical user', async () => {
+  void test('updates the current profile through the canonical user', async () => {
     const app = createApp()
     const response = await app.request('/api/v1/user/update-profile', {
       method: 'POST',
@@ -912,7 +912,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(await response.json(), { success: true, msg: '昵称已更新' })
   })
 
-  test('keeps CAS direct, callback, exchange, and logout callback protocols', async () => {
+  void test('keeps CAS direct, callback, exchange, and logout callback protocols', async () => {
     const app = createApp('cas')
     const direct = await app.request('/api/v1/auth/third-party/cas/login', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -934,7 +934,7 @@ describe('Sudowork compatibility Hono app', () => {
     assert.match(await logout.text(), /sudowork:\/\/cas-callback\/cas-main\/logout/)
   })
 
-  test('mounts QMS on the same Sudowork host app and reuses the unified legacy actor', async () => {
+  void test('mounts QMS on the same Sudowork host app and reuses the unified legacy actor', async () => {
     const calls: string[] = []
     const app = createApp('password', undefined, {
       qms: {

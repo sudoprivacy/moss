@@ -18,8 +18,8 @@ function config(): QmsRuntimeConfig {
   }
 }
 
-describe('QmsNexusSecretAdapter', () => {
-  it('projects one SMTP URL into the frozen legacy notification fields', () => {
+void describe('QmsNexusSecretAdapter', () => {
+  void it('projects one SMTP URL into the frozen legacy notification fields', () => {
     const adapter = new QmsNexusSecretAdapter(config(), { get: () => undefined, put: async () => undefined })
 
     assert.equal(adapter.get('notification_lark_webhook'), 'https://open.feishu.cn/old')
@@ -31,7 +31,7 @@ describe('QmsNexusSecretAdapter', () => {
     assert.equal(adapter.get('notification_email_to'), 'ops@example.com')
   })
 
-  it('merges one legacy notification update into two Nexus secrets without plaintext SQL storage', async () => {
+  void it('merges one legacy notification update into two Nexus secrets without plaintext SQL storage', async () => {
     const runtimeConfig = config()
     const writes: Array<[string, string]> = []
     const adapter = new QmsNexusSecretAdapter(runtimeConfig, {

@@ -26,8 +26,8 @@ class MemoryLeases implements QmsLeaseStore {
   }
 }
 
-describe('QmsScheduler', () => {
-  it('allows only one instance to execute a due task', async () => {
+void describe('QmsScheduler', () => {
+  void it('allows only one instance to execute a due task', async () => {
     const leases = new MemoryLeases()
     let calls = 0
     const task = { name: 'alert-check', intervalMs: 100, leaseMs: 500, run: async () => { calls += 1 } }
@@ -40,7 +40,7 @@ describe('QmsScheduler', () => {
     assert.equal(leases.completions.length, 1)
   })
 
-  it('records failure and permits the next due run without overlapping', async () => {
+  void it('records failure and permits the next due run without overlapping', async () => {
     const leases = new MemoryLeases()
     let calls = 0
     const scheduler = new QmsScheduler({
@@ -60,7 +60,7 @@ describe('QmsScheduler', () => {
     assert.equal(leases.completions.length, 1)
   })
 
-  it('lets another instance take over an expired lease', async () => {
+  void it('lets another instance take over an expired lease', async () => {
     const leases = new MemoryLeases()
     leases.leases.set('crash-cleanup', { owner: 'dead', until: 999 })
     let calls = 0
@@ -73,7 +73,7 @@ describe('QmsScheduler', () => {
     assert.equal(calls, 1)
   })
 
-  it('manual run executes only the requested task while keeping lease protection', async () => {
+  void it('manual run executes only the requested task while keeping lease protection', async () => {
     const leases = new MemoryLeases()
     const calls: string[] = []
     const scheduler = new QmsScheduler({

@@ -72,7 +72,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     const cost = Math.ceil((totalTokens / 1000) * 100) / 100
     if (cost <= 0) return { success: true, deducted: 0, newBalance: 0 }
 
-    const user = this.options.auth.getUserById(input.actor.userId)
+    const user = await this.options.auth.getUserById(input.actor.userId)
     if (!user) throw new SudoworkLegacyUsageError(404, '用户不存在')
     const requestKey = input.idempotencyKey?.trim() || randomUUID()
     const commandKey = `sudowork:usage:${requestKey}`
@@ -126,7 +126,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   async getDashboard(actor: IdentityActor): Promise<Record<string, unknown>> {
     const external = await this.getExternalDashboard(actor, true)
     if (external) return external
-    const stats = this.buildStats(actor)
+    const stats = await this.buildStats(actor)
     const now = this.clock()
     const recentUsage = this.options.repository.listUsageRecords({
       userId: actor.userId,
@@ -145,7 +145,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   }
 
   async listLedger(input: { actor: IdentityActor; timeFrom?: number; timeTo?: number }): Promise<{ data: unknown[]; total: number }> {
-    this.requireUser(input.actor.userId)
+    await this.requireUser(input.actor.userId)
     const account = this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
     if (account && this.options.sudorouter) {
       try {
@@ -182,11 +182,11 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   async getStats(actor: IdentityActor): Promise<Record<string, unknown>> {
     const external = await this.getExternalDashboard(actor, false)
     if (external) return external
-    return this.buildStats(actor)
+    return await this.buildStats(actor)
   }
 
   async getModelUsageStats(input: { actor: IdentityActor; startDate?: string; endDate?: string }): Promise<unknown[]> {
-    this.requireUser(input.actor.userId)
+    await this.requireUser(input.actor.userId)
     const from = parseLocalDate(input.startDate!, false)
     const to = parseLocalDate(input.endDate!, true)
     const account = this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
@@ -216,7 +216,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   }
 
   private async getExternalDashboard(actor: IdentityActor, includeLedger: boolean): Promise<Record<string, unknown> | null> {
-    this.requireUser(actor.userId)
+    await this.requireUser(actor.userId)
     const account = this.options.repository.getExternalAccount('sudorouter', 'user', actor.userId)
     if (!account || !this.options.sudorouter) return null
     try {
@@ -319,8 +319,8 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     }).list.map(entry => this.toLegacyLedger(entry, input.legacyUserId))
   }
 
-  private buildStats(actor: IdentityActor): Record<string, unknown> {
-    this.requireUser(actor.userId)
+  private async buildStats(actor: IdentityActor): Promise<Record<string, unknown>> {
+    await this.requireUser(actor.userId)
     const wallet = this.options.repository.getWallet('user', actor.userId)
     if (!wallet) throw new SudoworkLegacyUsageError(404, '用户不存在')
     const allUsage = this.options.repository.listUsageRecords({
@@ -352,8 +352,8 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     }
   }
 
-  private requireUser(userId: string): void {
-    if (!this.options.auth.getUserById(userId)) throw new SudoworkLegacyUsageError(404, '用户不存在')
+  private async requireUser(userId: string): Promise<void> {
+    if (!await this.options.auth.getUserById(userId)) throw new SudoworkLegacyUsageError(404, '用户不存在')
   }
 
   private assertAdmin(actor: IdentityActor): void {

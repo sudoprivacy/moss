@@ -14,7 +14,6 @@ import {
   verifyLegacyJwt,
   type LegacyKeyValueStore,
 } from '../../../identity/legacyToken.js'
-import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
@@ -119,7 +118,7 @@ export class SudoworkIdentityService {
       )
       return { needRegistration: true, registerToken, phone }
     }
-    const user = this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId)
+    const user = await this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId)
     if (!user) throw new SudoworkIdentityError(500, '用户企业信息异常')
     if (user.status !== 'active') {
       throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
@@ -154,7 +153,7 @@ export class SudoworkIdentityService {
     }
     const existingIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     const existingUser = existingIdentity
-      ? this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
+      ? await this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
       : null
     if (existingUser && (existingUser.status !== 'pending' || !this.options.accountProvisioner)) {
       await this.options.tokenStore.del(registerKey)
@@ -166,7 +165,7 @@ export class SudoworkIdentityService {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
     }
     const createKey = input.idempotencyKey ?? `sudowork-register:${phone}:${input.invitationCode}`
-    const created = existingUser ? { userId: existingUser.id } : this.unifiedIdentity.createUser({
+    const created = existingUser ? { userId: existingUser.id } : await this.unifiedIdentity.createUser({
       orgId: invitation!.orgId,
       username: phone,
       displayName: input.nickname,
@@ -179,7 +178,7 @@ export class SudoworkIdentityService {
     }, onlineCommandContext(createKey))
     await this.provisionAccount(created.userId, phone, input.nickname, createKey)
     await this.options.tokenStore.del(registerKey)
-    const user = this.options.authDb.getUserById(created.userId)
+    const user = await this.options.authDb.getUserById(created.userId)
     if (!user) throw new SudoworkIdentityError(500, '用户企业信息异常')
     return {
       needRegistration: false,
@@ -200,7 +199,7 @@ export class SudoworkIdentityService {
     const phone = input.phone.trim()
     const existingIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     const existingUser = existingIdentity
-      ? this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
+      ? await this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
       : null
     if (existingUser && (existingUser.status !== 'pending' || !this.options.accountProvisioner)) {
       throw new SudoworkIdentityError(400, '用户名已存在')
@@ -212,7 +211,7 @@ export class SudoworkIdentityService {
     }
     const createKey = input.idempotencyKey ?? `sudowork-register:${phone}:${input.invitationCode}`
     try {
-      const created = existingUser ? { userId: existingUser.id } : this.unifiedIdentity.createUser({
+      const created = existingUser ? { userId: existingUser.id } : await this.unifiedIdentity.createUser({
         orgId: invitation!.orgId,
         username: phone,
         displayName: input.nickname,
@@ -243,7 +242,7 @@ export class SudoworkIdentityService {
     createKey: string,
   ): Promise<void> {
     if (!this.options.accountProvisioner) return
-    const user = this.options.authDb.getUserById(userId)
+    const user = await this.options.authDb.getUserById(userId)
     const wallet = this.options.identities.getWallet('user', userId)
     if (!user || !wallet) throw new SudoworkIdentityError(500, '用户初始化失败')
     try {
@@ -254,7 +253,7 @@ export class SudoworkIdentityService {
         displayName: displayName.trim() || username,
         initialQuotaUnits: pointsToQuota(wallet.balanceUnits),
       }, onlineCommandContext(`sudorouter:${createKey}`))
-      this.options.authDb.updateUser(user.id, { status: 'active' })
+      await this.options.authDb.updateUser(user.id, { status: 'active' })
     } catch {
       throw new SudoworkIdentityError(500, 'Sudorouter 用户初始化失败，请稍后重试')
     }
@@ -268,7 +267,7 @@ export class SudoworkIdentityService {
   }): Promise<SudoworkLegacySession> {
     const phone = input.phone.trim()
     const identity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
-    const user = identity ? this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId) : null
+    const user = identity ? await this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId) : null
     if (!user || !verifyPassword(input.password, user.passwordHash)) {
       throw new SudoworkIdentityError(401, '账号或密码错误')
     }
@@ -276,11 +275,11 @@ export class SudoworkIdentityService {
       throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
     }
 
-    runInTransaction(this.options.authDb.db, () => {
+    await this.options.authDb.driver.transaction(async () => {
       if (isLegacyPasswordHash(user.passwordHash)) {
-        this.options.authDb.updateUserPassword(user.id, hashPassword(input.password), Date.now())
+        await this.options.authDb.updateUserPassword(user.id, hashPassword(input.password), Date.now())
       }
-      this.options.authDb.updateUserLastLogin(user.id)
+      await this.options.authDb.updateUserLastLogin(user.id)
     })
 
     return this.startSession(user, phone, input.deviceId, input.nowSeconds)
@@ -294,7 +293,7 @@ export class SudoworkIdentityService {
   }): Promise<SudoworkLegacySession> {
     const phone = input.phone.trim()
     const identity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
-    const user = identity ? this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId) : null
+    const user = identity ? await this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId) : null
     if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
       throw new SudoworkIdentityError(404, '账号不存在')
     }
@@ -304,11 +303,11 @@ export class SudoworkIdentityService {
     if (user.status !== 'active') {
       throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
     }
-    runInTransaction(this.options.authDb.db, () => {
+    await this.options.authDb.driver.transaction(async () => {
       if (isLegacyPasswordHash(user.passwordHash)) {
-        this.options.authDb.updateUserPassword(user.id, hashPassword(input.password), Date.now())
+        await this.options.authDb.updateUserPassword(user.id, hashPassword(input.password), Date.now())
       }
-      this.options.authDb.updateUserLastLogin(user.id)
+      await this.options.authDb.updateUserLastLogin(user.id)
     })
     return this.startSession(user, phone, input.deviceId, input.nowSeconds)
   }
@@ -319,7 +318,7 @@ export class SudoworkIdentityService {
     deviceId?: string
     nowSeconds?: number
   }): Promise<SudoworkLegacySession> {
-    const user = this.options.authDb.getUserById(input.userId)
+    const user = await this.options.authDb.getUserById(input.userId)
     if (!user) throw new SudoworkIdentityError(401, '登录凭证已失效，请重新登录')
     if (user.status !== 'active') throw new SudoworkIdentityError(403, 'CAS 用户已被禁用')
     return this.startSession(user, input.account, input.deviceId, input.nowSeconds)
@@ -334,7 +333,7 @@ export class SudoworkIdentityService {
   }): Promise<void> {
     const passwordError = validateLegacyPassword(input.newPassword)
     if (passwordError) throw new SudoworkIdentityError(400, passwordError)
-    const principal = resolveLegacyPrincipal(
+    const principal = await resolveLegacyPrincipal(
       input.accessToken,
       this.options.legacyJwtSecret,
       this.options.identities,
@@ -342,16 +341,16 @@ export class SudoworkIdentityService {
       input.nowSeconds,
     )
     if (!principal) throw new SudoworkIdentityError(401, '未授权')
-    const user = this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
+    const user = await this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
     if (!user) throw new SudoworkIdentityError(404, '用户不存在')
     if (!user.localAuth || !verifyPassword(input.oldPassword, user.passwordHash)) {
       throw new SudoworkIdentityError(401, input.oldPasswordError ?? '原始密码错误')
     }
-    this.options.authDb.updateUserPassword(user.id, hashPassword(input.newPassword), Date.now())
+    await this.options.authDb.updateUserPassword(user.id, hashPassword(input.newPassword), Date.now())
   }
 
-  updateProfile(accessToken: string, nickname: string, nowSeconds?: number): SudoworkLegacyUser {
-    const principal = resolveLegacyPrincipal(
+  async updateProfile(accessToken: string, nickname: string, nowSeconds?: number): Promise<SudoworkLegacyUser> {
+    const principal = await resolveLegacyPrincipal(
       accessToken,
       this.options.legacyJwtSecret,
       this.options.identities,
@@ -359,11 +358,11 @@ export class SudoworkIdentityService {
       nowSeconds,
     )
     if (!principal) throw new SudoworkIdentityError(401, '未授权')
-    const user = this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
+    const user = await this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
     if (!user) throw new SudoworkIdentityError(404, '用户不存在')
     const displayName = nickname.trim()
     if (!displayName) throw new SudoworkIdentityError(400, '昵称不能为空')
-    this.options.authDb.updateUser(user.id, { displayName })
+    await this.options.authDb.updateUser(user.id, { displayName })
     const phone = this.options.identities
       .findAuthIdentityByUser(user.id, 'phone', 'sudowork')?.normalizedSubject
     if (!phone) throw new SudoworkIdentityError(500, '用户企业信息异常')
@@ -414,14 +413,14 @@ export class SudoworkIdentityService {
     }
   }
 
-  getProfile(accessToken: string, nowSeconds?: number): SudoworkLegacyUser | null {
+  async getProfile(accessToken: string, nowSeconds?: number): Promise<SudoworkLegacyUser | null> {
     const claims = verifyLegacyJwt(
       accessToken,
       this.options.legacyJwtSecret,
       nowSeconds ?? Math.floor(Date.now() / 1000),
     )
     if (!claims) return null
-    const principal = resolveLegacyPrincipal(
+    const principal = await resolveLegacyPrincipal(
       accessToken,
       this.options.legacyJwtSecret,
       this.options.identities,
@@ -429,12 +428,12 @@ export class SudoworkIdentityService {
       nowSeconds,
     )
     if (!principal) return null
-    const user = this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
+    const user = await this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
     return user ? this.resolveLegacyUser(user, claims.phone) : null
   }
 
-  getActor(accessToken: string, nowSeconds?: number): IdentityActor | null {
-    const principal = resolveLegacyPrincipal(
+  async getActor(accessToken: string, nowSeconds?: number): Promise<IdentityActor | null> {
+    const principal = await resolveLegacyPrincipal(
       accessToken,
       this.options.legacyJwtSecret,
       this.options.identities,
@@ -442,7 +441,7 @@ export class SudoworkIdentityService {
       nowSeconds,
     )
     if (!principal) return this.options.nativeActorResolver?.(accessToken) ?? null
-    const user = this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
+    const user = await this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
     if (!user || user.status !== 'active') return null
     return { userId: user.id, orgId: user.orgId, role: user.role }
   }
@@ -455,7 +454,7 @@ export class SudoworkIdentityService {
     nowSeconds?: number
   }): Promise<void> {
     if (input.all && input.accessToken) {
-      const profile = this.getProfile(input.accessToken, input.nowSeconds)
+      const profile = await this.getProfile(input.accessToken, input.nowSeconds)
       if (profile) {
         const keys = await this.options.tokenStore.keys(`refresh_token:${profile.id}:*`)
         if (keys.length > 0) await this.options.tokenStore.del(...keys)

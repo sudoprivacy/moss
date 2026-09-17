@@ -15,8 +15,8 @@ function mapContent(): string {
   return generator.toString()
 }
 
-describe('SourceMapService', () => {
-  it('resolves maps by tenant, version, platform and generated file', async () => {
+void describe('SourceMapService', () => {
+  void it('resolves maps by tenant, version, platform and generated file', async () => {
     const lookups: unknown[][] = []
     const repository: QmsSourceMapRepository = {
       find: async (...args) => {
@@ -35,7 +35,7 @@ describe('SourceMapService', () => {
     assert.match(result, /at boot \(src\/app\.ts:10:2\)/)
   })
 
-  it('preserves the original frame when no map or mapping exists', async () => {
+  void it('preserves the original frame when no map or mapping exists', async () => {
     const service = new SourceMapService({ find: async () => null })
     const stack = 'TypeError: boom\n    at boot (app.js:1:0)'
     assert.equal(await service.symbolicate({ tenantId: 'tenant-a', version: '1', platform: 'linux', stack }), stack)

@@ -29,15 +29,15 @@ function encryptedPayload(value: unknown) {
   }
 }
 
-describe('QMS hybrid request decryption', () => {
-  it('passes plaintext only when encryption is optional', () => {
+void describe('QMS hybrid request decryption', () => {
+  void it('passes plaintext only when encryption is optional', () => {
     const body = { events: [{ type: 'perf' }] }
     assert.deepEqual(decodeQmsPayload(body, { encryptionRequired: false }), body)
     assert.throws(() => decodeQmsPayload(body, { encryptionRequired: true, privateKeyPem: 'unused' }),
       (error: unknown) => error instanceof QmsEncryptionError && error.code === 'ENCRYPTION_REQUIRED')
   })
 
-  it('decrypts the legacy RSA-OAEP and AES-256-GCM envelope', () => {
+  void it('decrypts the legacy RSA-OAEP and AES-256-GCM envelope', () => {
     const expected = { events: [{ type: 'perf', value_ms: 17 }] }
     const encrypted = encryptedPayload(expected)
 
@@ -47,7 +47,7 @@ describe('QMS hybrid request decryption', () => {
     }), expected)
   })
 
-  it('rejects missing private keys and authenticated ciphertext tampering', () => {
+  void it('rejects missing private keys and authenticated ciphertext tampering', () => {
     const encrypted = encryptedPayload({ value: 1 })
     assert.throws(() => decodeQmsPayload(encrypted.payload, { encryptionRequired: true }),
       (error: unknown) => error instanceof QmsEncryptionError && error.code === 'INVALID_PRIVATE_KEY')

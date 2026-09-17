@@ -38,8 +38,8 @@ function snapshot(overrides: Partial<SudoworkSourceSnapshot> = {}): SudoworkSour
   }
 }
 
-describe('AutomationMigrationPhase', () => {
-  test('旧服务端没有持久自动化数据时记录可审计的零迁移证据', async () => {
+void describe('AutomationMigrationPhase', () => {
+  void test('旧服务端没有持久自动化数据时记录可审计的零迁移证据', async () => {
     const { directory, db } = fixture()
     db.close()
     try {
@@ -73,7 +73,7 @@ describe('AutomationMigrationPhase', () => {
     }
   })
 
-  test('发现含数据的旧服务端自动化表时阻断，不能把未支持数据当作空迁移', async () => {
+  void test('发现含数据的旧服务端自动化表时阻断，不能把未支持数据当作空迁移', async () => {
     const { directory, db } = fixture(`
       CREATE TABLE cron_jobs (id INTEGER PRIMARY KEY, expression TEXT);
       INSERT INTO cron_jobs VALUES (1, '0 * * * *');
@@ -101,7 +101,7 @@ describe('AutomationMigrationPhase', () => {
     }
   })
 
-  test('本地数据排除声明不完整时阻断', async () => {
+  void test('本地数据排除声明不完整时阻断', async () => {
     const { directory, db } = fixture()
     db.close()
     try {
@@ -115,7 +115,7 @@ describe('AutomationMigrationPhase', () => {
     }
   })
 
-  test('执行前自动化源扫描结果变化时拒绝执行', async () => {
+  void test('执行前自动化源扫描结果变化时拒绝执行', async () => {
     const { directory, db } = fixture()
     db.close()
     try {

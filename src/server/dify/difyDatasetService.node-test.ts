@@ -39,8 +39,8 @@ function setup(responseFor?: (url: string, init: RequestInit) => Response) {
   return { db, repository, service, calls, ensureCalls }
 }
 
-describe('DifyDatasetService', () => {
-  test('preserves dataset and document paging query parameters', async () => {
+void describe('DifyDatasetService', () => {
+  void test('preserves dataset and document paging query parameters', async () => {
     const { db, service, calls } = setup(() => Response.json({ data: [], has_more: false, total: 0 }))
     await service.list('org-a', { page: 2, limit: 30, keyword: '产品 文档' })
     await service.listDocuments('org-a', 'dataset/a', { page: 3, limit: 50, keyword: 'guide' })
@@ -49,7 +49,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('auto-provisions a missing tenant through an online-only command boundary', async () => {
+  void test('auto-provisions a missing tenant through an online-only command boundary', async () => {
     const { db, service, ensureCalls } = setup(() => Response.json({ data: [] }))
     await service.list('org-a', {})
     assert.equal(ensureCalls.length, 1)
@@ -65,7 +65,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('creates a dataset with the legacy permission default and records recoverable local state', async () => {
+  void test('creates a dataset with the legacy permission default and records recoverable local state', async () => {
     const { db, repository, service, calls } = setup(() => Response.json({
       id: 'dataset-1', name: 'Knowledge', description: null, permission: 'all_team_members',
     }))
@@ -82,7 +82,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('replays the complete original provider response without a second Dify call', async () => {
+  void test('replays the complete original provider response without a second Dify call', async () => {
     const providerResponse = {
       id: 'dataset-1', name: 'Knowledge', permission: 'all_team_members',
       created_at: 123, document_count: 7,
@@ -99,7 +99,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('rejects a reused idempotency key with a different dataset request', async () => {
+  void test('rejects a reused idempotency key with a different dataset request', async () => {
     const { db, service, calls } = setup(() => Response.json({ id: 'dataset-1' }))
     const context = onlineCommandContext('dataset:create:conflict')
     await service.create('org-a', { name: 'First' }, context)
@@ -108,7 +108,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('retries a definitively failed provider write with the same idempotency key', async () => {
+  void test('retries a definitively failed provider write with the same idempotency key', async () => {
     let attempt = 0
     const { db, service, calls } = setup(() => {
       attempt += 1
@@ -125,7 +125,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('suppresses migration writes without invoking Dify', async () => {
+  void test('suppresses migration writes without invoking Dify', async () => {
     const { db, repository, service, calls } = setup()
     const result = await service.create('org-a', { name: 'Historical' }, migrationCommandContext('run-1', 'dataset:migrate:1'))
     assert.deepEqual(result, { suppressed: true })
@@ -134,7 +134,7 @@ describe('DifyDatasetService', () => {
     db.close()
   })
 
-  test('keeps text, file and retrieve payload defaults', async () => {
+  void test('keeps text, file and retrieve payload defaults', async () => {
     const { db, service, calls } = setup((url) => url.endsWith('/retrieve')
       ? Response.json({ records: [] })
       : Response.json({ document: { id: 'doc-1' } }))

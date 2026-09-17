@@ -4,7 +4,7 @@ import { after, before, describe, test } from 'node:test'
 import { Hono } from 'hono'
 import { createHostDispatch } from './hostDispatch.js'
 
-describe('production Sudowork host dispatch', () => {
+void describe('production Sudowork host dispatch', () => {
   let port = 0
   let close: () => Promise<void>
 
@@ -71,7 +71,7 @@ describe('production Sudowork host dispatch', () => {
     })
   }
 
-  test('routes exact trusted hosts before the native Moss handler', async () => {
+  void test('routes exact trusted hosts before the native Moss handler', async () => {
     assert.deepEqual(await send('api.sudowork.test:443'), {
       status: 200, body: { service: 'sudowork' },
     })
@@ -83,7 +83,7 @@ describe('production Sudowork host dispatch', () => {
     })
   })
 
-  test('only sends registered compatibility paths to Hono on the legacy host', async () => {
+  void test('only sends registered compatibility paths to Hono on the legacy host', async () => {
     assert.deepEqual(await send('api.sudowork.test', '/', 'GET'), {
       status: 200, body: { service: 'moss' },
     })
@@ -95,7 +95,7 @@ describe('production Sudowork host dispatch', () => {
     })
   })
 
-  test('uses a dedicated Moss operations namespace without exposing legacy paths on the Moss host', async () => {
+  void test('uses a dedicated Moss operations namespace without exposing legacy paths on the Moss host', async () => {
     assert.deepEqual(await send('moss.test', '/api/moss/v1/operations/logs', 'GET'), {
       status: 200, body: { service: 'sudowork' },
     })
@@ -116,7 +116,7 @@ describe('production Sudowork host dispatch', () => {
     })
   })
 
-  test('forwards a streamed request body to Hono exactly once', async () => {
+  void test('forwards a streamed request body to Hono exactly once', async () => {
     assert.deepEqual(await send(
       'api.sudowork.test',
       '/api/v1/usage/report',
@@ -128,7 +128,7 @@ describe('production Sudowork host dispatch', () => {
     })
   })
 
-  test('serves Moss operations when the legacy compatibility surface is disabled', async () => {
+  void test('serves Moss operations when the legacy compatibility surface is disabled', async () => {
     const operations = new Hono()
     operations.get('/api/v1/admin/stats', (context) => context.json({ service: 'operations' }))
     const isolated = createServer(createHostDispatch({

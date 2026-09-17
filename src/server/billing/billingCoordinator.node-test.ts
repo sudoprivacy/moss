@@ -30,18 +30,18 @@ class FakeSudorouter implements SudorouterPort {
   }
 }
 
-function setup(): {
+async function setup(): Promise<{
   db: DatabaseSync
   repository: BillingRepository
   fake: FakeSudorouter
   coordinator: BillingCoordinator
-} {
+}> {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org1', 'Org 1', 1)
-  auth.createUser({
+  await auth.createOrganization('org1', 'Org 1', 1)
+  await auth.createUser({
     id: 'u1', orgId: 'org1', email: 'u1@example.test', name: 'u1', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -73,9 +73,9 @@ const adjustment = {
   actorUserId: 'admin1',
 }
 
-describe('BillingCoordinator Sudorouter Saga', () => {
-  test('外部额度成功后才原子入账钱包，并保持操作幂等', async () => {
-    const { db, repository, fake, coordinator } = setup()
+void describe('BillingCoordinator Sudorouter Saga', () => {
+  void test('外部额度成功后才原子入账钱包，并保持操作幂等', async () => {
+    const { db, repository, fake, coordinator } = await setup()
     const context = onlineCommandContext('adjust-1')
     const first = await coordinator.adjustPoints(adjustment, context)
     const replay = await coordinator.adjustPoints(adjustment, context)
@@ -88,8 +88,8 @@ describe('BillingCoordinator Sudorouter Saga', () => {
     db.close()
   })
 
-  test('迁移上下文保留钱包和审计但抑制外部调用', async () => {
-    const { db, repository, fake, coordinator } = setup()
+  void test('迁移上下文保留钱包和审计但抑制外部调用', async () => {
+    const { db, repository, fake, coordinator } = await setup()
     const result = await coordinator.adjustPoints(adjustment, migrationCommandContext('batch-1', 'adjust-migration'))
 
     assert.equal(result.status, 'SUPPRESSED')
@@ -100,8 +100,8 @@ describe('BillingCoordinator Sudorouter Saga', () => {
     db.close()
   })
 
-  test('迁移钱包入账失败时不留下 SUPPRESSED 半成品操作', async () => {
-    const { db, repository, coordinator } = setup()
+  void test('迁移钱包入账失败时不留下 SUPPRESSED 半成品操作', async () => {
+    const { db, repository, coordinator } = await setup()
     db.exec(`
       CREATE TRIGGER fail_migration_ledger BEFORE INSERT ON billing_ledger_entries
       WHEN NEW.source_type = 'quota_operation'
@@ -117,8 +117,8 @@ describe('BillingCoordinator Sudorouter Saga', () => {
     db.close()
   })
 
-  test('外部成功但本地入账失败进入 UNKNOWN，重试查询确认后不重复增额', async () => {
-    const { db, repository, fake, coordinator } = setup()
+  void test('外部成功但本地入账失败进入 UNKNOWN，重试查询确认后不重复增额', async () => {
+    const { db, repository, fake, coordinator } = await setup()
     db.exec(`
       CREATE TRIGGER fail_quota_finalize BEFORE INSERT ON billing_ledger_entries
       WHEN NEW.source_type = 'quota_operation'
@@ -139,8 +139,8 @@ describe('BillingCoordinator Sudorouter Saga', () => {
     db.close()
   })
 
-  test('额度同步只更新绑定快照，不直接覆盖钱包账本余额', async () => {
-    const { db, repository, fake, coordinator } = setup()
+  void test('额度同步只更新绑定快照，不直接覆盖钱包账本余额', async () => {
+    const { db, repository, fake, coordinator } = await setup()
     fake.quotaUnits = 2_000
     fake.usedQuotaUnits = 40
     const result = await coordinator.syncQuota('user', 'u1', '9')
@@ -154,8 +154,8 @@ describe('BillingCoordinator Sudorouter Saga', () => {
     db.close()
   })
 
-  test('可恢复进程退出前留下的 PENDING 操作', async () => {
-    const { db, repository, fake, coordinator } = setup()
+  void test('可恢复进程退出前留下的 PENDING 操作', async () => {
+    const { db, repository, fake, coordinator } = await setup()
     repository.insertQuotaOperation({
       id: 'pending-operation', ownerType: 'user', ownerId: 'u1', externalUserId: '9',
       deltaUnits: 5_000, status: 'PENDING', idempotencyKey: 'pending-key',

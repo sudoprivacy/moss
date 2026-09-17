@@ -84,7 +84,7 @@ export class ConfigurationMigrationPhase implements MigrationPhase {
   async execute(context: MigrationExecutionContext, plan: MigrationPhasePlan) {
     requireWrappedPlan(plan, 'Configuration')
     const managedImages = await this.services.managedImages.execute()
-    const configuration = this.services.configuration.execute(context.runId)
+    const configuration = await this.services.configuration.execute(context.runId)
     const systemConfiguration = await this.services.systemConfiguration.execute(context.runId)
     return { managedImages, configuration, systemConfiguration }
   }

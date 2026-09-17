@@ -10,8 +10,8 @@ import { RedisTelemetryQueueBackend } from './redisTelemetryQueueBackend.js'
 const postgresUrl = process.env.QMS_INTEGRATION_POSTGRES_URL
 const redisUrl = process.env.QMS_INTEGRATION_REDIS_URL
 
-describe('QMS 真实基础设施门禁', () => {
-  it('在独立 PostgreSQL 测试库初始化 schema 并验证跨实例租约', { skip: !postgresUrl }, async () => {
+void describe('QMS 真实基础设施门禁', () => {
+  void it('在独立 PostgreSQL 测试库初始化 schema 并验证跨实例租约', { skip: !postgresUrl }, async () => {
     const store = new QmsPostgresStore(postgresUrl!, undefined, { aggregateMode: 'regular' })
     const task = `integration-${randomUUID()}`
     try {
@@ -31,7 +31,7 @@ describe('QMS 真实基础设施门禁', () => {
     }
   })
 
-  it('在独立 Redis 测试库验证 processing 超时恢复且不丢事件', { skip: !redisUrl }, async () => {
+  void it('在独立 Redis 测试库验证 processing 超时恢复且不丢事件', { skip: !redisUrl }, async () => {
     const redis = new Redis(redisUrl!, { lazyConnect: true, maxRetriesPerRequest: 1 })
     const namespace = `moss:qms:integration:${randomUUID()}`
     try {

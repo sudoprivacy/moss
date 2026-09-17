@@ -46,8 +46,8 @@ function setup(db = new SystemSql()) {
   return { service, secrets, taskCalls }
 }
 
-describe('QmsSystemService', () => {
-  it('reports health and keeps the legacy system envelope payload', async () => {
+void describe('QmsSystemService', () => {
+  void it('reports health and keeps the legacy system envelope payload', async () => {
     const { service } = setup()
     const result = await service.health()
     assert.equal(result.status, 200)
@@ -55,7 +55,7 @@ describe('QmsSystemService', () => {
     assert.equal(result.body.checks.database, true)
   })
 
-  it('masks leaked secret rows and never returns notification credentials', async () => {
+  void it('masks leaked secret rows and never returns notification credentials', async () => {
     const db = new SystemSql()
     db.rows = [
       { key: 'retention_days', value: '30' },
@@ -71,7 +71,7 @@ describe('QmsSystemService', () => {
     assert.equal(notifications.email.smtpPass, '******')
   })
 
-  it('writes notification secrets only through the secret port and audits without plaintext', async () => {
+  void it('writes notification secrets only through the secret port and audits without plaintext', async () => {
     const db = new SystemSql()
     const { service, secrets } = setup(db)
 
@@ -85,21 +85,21 @@ describe('QmsSystemService', () => {
     assert.equal(db.statements.filter(item => item.sql.includes('INSERT INTO audit_logs')).length, 2)
   })
 
-  it('manual aggregation delegates only to leased scheduler tasks', async () => {
+  void it('manual aggregation delegates only to leased scheduler tasks', async () => {
     const { service, taskCalls } = setup()
     const result = await service.runAggregation()
     assert.deepEqual(taskCalls, ['aggregation', 'crash-aggregation'])
     assert.equal(result.results.every(item => item.success), true)
   })
 
-  it('suppresses notification tests in migration context', async () => {
+  void it('suppresses notification tests in migration context', async () => {
     const { service } = setup()
     const result = await service.testNotification('lark', migrationCommandContext('m1', 'system-test'))
     assert.deepEqual(result, { success: true, suppressed: true })
     await assert.rejects(() => service.testNotification('sms', onlineCommandContext('bad')), /INVALID_CHANNEL/)
   })
 
-  it('keeps the frozen legacy E008 definition verbatim', () => {
+  void it('keeps the frozen legacy E008 definition verbatim', () => {
     const { service } = setup()
     const error = service.errorCodes().find(item => item.code === 'E008')
     assert.deepEqual(error, {

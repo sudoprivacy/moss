@@ -4,12 +4,12 @@ import { describe, test } from 'node:test'
 import { AuthCenterDb, type AuthCenterUser } from '../authCenter/db.js'
 import { IdentityRepository } from './identityRepository.js'
 
-function createStore(): { db: DatabaseSync; authDb: AuthCenterDb; repository: IdentityRepository } {
+async function createStore(): Promise<{ db: DatabaseSync; authDb: AuthCenterDb; repository: IdentityRepository }> {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   const repository = new IdentityRepository(db)
-  authDb.createOrganization('org-a', 'Organization A', 1)
-  authDb.createOrganization('org-b', 'Organization B', 1)
+  await authDb.createOrganization('org-a', 'Organization A', 1)
+  await authDb.createOrganization('org-b', 'Organization B', 1)
   return { db, authDb, repository }
 }
 
@@ -33,8 +33,8 @@ function user(id: string, orgId: string, status: AuthCenterUser['status']): Auth
   }
 }
 
-describe('unified identity schema and repository', () => {
-  test('upgrades the old two-state users table without losing rows or foreign keys', () => {
+void describe('unified identity schema and repository', () => {
+  void test('upgrades the old two-state users table without losing rows or foreign keys', async () => {
     const db = new DatabaseSync(':memory:')
     db.exec(`
       PRAGMA foreign_keys = ON;
@@ -70,18 +70,18 @@ describe('unified identity schema and repository', () => {
     `)
 
     const authDb = new AuthCenterDb(db)
-    assert.equal(authDb.getUserById('user-old')?.status, 'active')
-    authDb.updateUser('user-old', { status: 'locked' })
-    assert.equal(authDb.getUserById('user-old')?.status, 'locked')
+    assert.equal((await authDb.getUserById('user-old'))?.status, 'active')
+    await authDb.updateUser('user-old', { status: 'locked' })
+    assert.equal((await authDb.getUserById('user-old'))?.status, 'locked')
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [])
-    assert.equal(authDb.getApiKeyById('key-old')?.userId, 'user-old')
+    assert.equal((await authDb.getApiKeyById('key-old'))?.userId, 'user-old')
     db.close()
   })
 
-  test('persists all unified account states', () => {
-    const { db, authDb } = createStore()
+  void test('persists all unified account states', async () => {
+    const { db, authDb } = await createStore()
     for (const status of ['pending', 'active', 'locked', 'disabled'] as const) {
-      authDb.createUser(user(`user-${status}`, 'org-a', status))
+      await authDb.createUser(user(`user-${status}`, 'org-a', status))
     }
     assert.deepEqual(
       (db.prepare('SELECT status FROM users ORDER BY status').all() as Array<{ status: string }>)
@@ -91,8 +91,8 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('stores one organization profile and resolves its stable code', () => {
-    const { db, repository } = createStore()
+  void test('stores one organization profile and resolves its stable code', async () => {
+    const { db, repository } = await createStore()
     repository.putOrganizationProfile({
       orgId: 'org-a',
       code: 'acme',
@@ -111,10 +111,10 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('resolves provider identities without crossing organization boundaries', () => {
-    const { db, authDb, repository } = createStore()
-    authDb.createUser(user('user-a', 'org-a', 'active'))
-    authDb.createUser(user('user-b', 'org-b', 'active'))
+  void test('resolves provider identities without crossing organization boundaries', async () => {
+    const { db, authDb, repository } = await createStore()
+    await authDb.createUser(user('user-a', 'org-a', 'active'))
+    await authDb.createUser(user('user-b', 'org-b', 'active'))
     repository.createAuthIdentity({
       id: 'identity-a',
       orgId: 'org-a',
@@ -140,8 +140,10 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('keeps legacy numeric aliases unique per namespace and org-scoped on lookup', () => {
-    const { db, repository } = createStore()
+  void test('keeps legacy numeric aliases unique per namespace and org-scoped on lookup', async () => {
+    const { db, authDb, repository } = await createStore()
+    await authDb.createUser(user('user-a', 'org-a', 'active'))
+    await authDb.createUser(user('user-b', 'org-b', 'active'))
     repository.assignNumericAlias({ namespace: 'user', legacyId: 42, resourceId: 'user-a', orgId: 'org-a' })
     repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 42, resourceId: 'org-b', orgId: 'org-b' })
     assert.equal(repository.resolveNumericAlias('user', 42, 'org-a'), 'user-a')
@@ -152,8 +154,8 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('updates organization policy and lists profiles without a global singleton', () => {
-    const { db, repository } = createStore()
+  void test('updates organization policy and lists profiles without a global singleton', async () => {
+    const { db, repository } = await createStore()
     repository.putOrganizationProfile({
       orgId: 'org-a', code: 'A', loginMethod: 'sms', localEnabled: true, cloudEnabled: false,
       appName: 'A App',
@@ -168,8 +170,8 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('lists, filters, revokes, and deletes invitations with stable ordering', () => {
-    const { db, repository } = createStore()
+  void test('lists, filters, revokes, and deletes invitations with stable ordering', async () => {
+    const { db, repository } = await createStore()
     repository.createInvitation({ id: 'invite-a', orgId: 'org-a', code: 'CODE-A', initialCreditUnits: 10 })
     repository.createInvitation({ id: 'invite-b', orgId: 'org-b', code: 'CODE-B', initialCreditUnits: 20 })
     repository.createInvitation({ id: 'invite-c', orgId: 'org-a', code: 'CODE-C', initialCreditUnits: 30 })
@@ -188,9 +190,9 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('moves every organization-scoped identity reference with its user', () => {
-    const { db, authDb, repository } = createStore()
-    authDb.createUser(user('user-a', 'org-a', 'active'))
+  void test('moves every organization-scoped identity reference with its user', async () => {
+    const { db, authDb, repository } = await createStore()
+    await authDb.createUser(user('user-a', 'org-a', 'active'))
     repository.createAuthIdentity({
       id: 'identity-a', orgId: 'org-a', userId: 'user-a', provider: 'phone',
       issuer: 'sudowork', normalizedSubject: '13800000000', metadata: {},
@@ -207,8 +209,8 @@ describe('unified identity schema and repository', () => {
     db.close()
   })
 
-  test('stores organization integration connections without provider-specific tables', () => {
-    const { db, repository } = createStore()
+  void test('stores organization integration connections without provider-specific tables', async () => {
+    const { db, repository } = await createStore()
     repository.putIntegrationConnection({
       id: 'cas-main', orgId: 'org-a', providerType: 'cas', name: '统一认证', enabled: true,
       secretRef: null, config: { casUrl: 'https://cas.example.test', autoProvision: true },

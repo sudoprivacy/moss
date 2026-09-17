@@ -47,8 +47,8 @@ function setup(mode: DifyEnhancementContext['mode'], responder: (url: string, in
   return { service, calls }
 }
 
-describe('DifyEnhancementService', () => {
-  test('collects agent-chat SSE tokens into the old blocking result', async () => {
+void describe('DifyEnhancementService', () => {
+  void test('collects agent-chat SSE tokens into the old blocking result', async () => {
     const { service, calls } = setup('agent-chat', () => new Response([
       'data: {"event":"agent_message","answer":"hello "}\n\n',
       'data: {"event":"message","answer":"world"}\n\n',
@@ -62,7 +62,7 @@ describe('DifyEnhancementService', () => {
     assert.equal(JSON.parse(String(calls[0]?.init.body)).user, 'sudowork:9:17')
   })
 
-  test('runs workflow blocking and flattens knowledge chunks', async () => {
+  void test('runs workflow blocking and flattens knowledge chunks', async () => {
     const { service, calls } = setup('workflow', () => Response.json({
       data: { outputs: { result: [{ content: 'first' }, { text: 'second' }] } },
     }))
@@ -76,7 +76,7 @@ describe('DifyEnhancementService', () => {
     })
   })
 
-  test('queries every attached dataset and concatenates retrieved passages', async () => {
+  void test('queries every attached dataset and concatenates retrieved passages', async () => {
     const { service, calls } = setup('rag-only', url => Response.json({
       records: [{ segment: { content: url.includes('dataset-a') ? 'alpha' : 'beta' } }],
     }))
@@ -94,7 +94,7 @@ describe('DifyEnhancementService', () => {
     })
   })
 
-  test('converts workflow SSE into progress and result events', async () => {
+  void test('converts workflow SSE into progress and result events', async () => {
     const { service } = setup('workflow', () => new Response([
       'data: {"event":"node_started","data":{"title":"检索","node_id":"n1","node_type":"knowledge"}}\n\n',
       'data: {"event":"workflow_finished","data":{"outputs":{"answer":"done"}}}\n\n',

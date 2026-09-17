@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { P2MigrationCoordinator, P2MigrationPreflightError } from './p2MigrationCoordinator.js'
 
-describe('P2 统一迁移编排', () => {
-  test('任一领域预检阻塞时不执行任何写入', async () => {
+void describe('P2 统一迁移编排', () => {
+  void test('任一领域预检阻塞时不执行任何写入', async () => {
     const calls: string[] = []
     const coordinator = new P2MigrationCoordinator({
       catalog: {
@@ -16,7 +16,7 @@ describe('P2 统一迁移编排', () => {
       },
       configuration: {
         plan() { calls.push('configuration.plan'); return { status: 'blocked', conflicts: ['name'] } },
-        execute() { calls.push('configuration.execute'); return { imported: 1 } },
+        async execute() { calls.push('configuration.execute'); return { imported: 1 } },
       },
       systemConfiguration: {
         async plan() { calls.push('system.plan'); return { status: 'ready' } },
@@ -30,7 +30,7 @@ describe('P2 统一迁移编排', () => {
     assert.deepEqual(calls.filter(call => call.endsWith('.execute')), [])
   })
 
-  test('全部预检通过后按可恢复顺序执行并返回分域报告', async () => {
+  void test('全部预检通过后按可恢复顺序执行并返回分域报告', async () => {
     const calls: string[] = []
     const coordinator = new P2MigrationCoordinator({
       catalog: {
@@ -43,7 +43,7 @@ describe('P2 统一迁移编排', () => {
       },
       configuration: {
         plan() { calls.push('configuration.plan'); return { status: 'ready' } },
-        execute(runId) { calls.push(`configuration.execute:${runId}`); return { imported: 1 } },
+        async execute(runId) { calls.push(`configuration.execute:${runId}`); return { imported: 1 } },
       },
       systemConfiguration: {
         async plan() { calls.push('system.plan'); return { status: 'ready' } },

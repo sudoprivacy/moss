@@ -15,7 +15,7 @@ interface EnhancementContextResolver {
     actor: IdentityActor,
     assistantId: string,
     visibility: VisibilityFilter,
-  ): { enabled: boolean; mode: EnhancementMode | null }
+  ): Promise<{ enabled: boolean; mode: EnhancementMode | null }> | { enabled: boolean; mode: EnhancementMode | null }
   resolveEnhancementContext(
     actor: IdentityActor,
     assistantId: string,
@@ -43,8 +43,8 @@ export class DifyEnhancementService {
     this.clock = options.clock ?? Date.now
   }
 
-  describe(input: Omit<InvokeInput, 'query' | 'conversationId' | 'startedAt'>) {
-    return this.options.connections.describeEnhancement(input.actor, input.assistantId, input.visibility)
+  async describe(input: Omit<InvokeInput, 'query' | 'conversationId' | 'startedAt'>) {
+    return await this.options.connections.describeEnhancement(input.actor, input.assistantId, input.visibility)
   }
 
   async invokeBlocking(input: InvokeInput): Promise<{

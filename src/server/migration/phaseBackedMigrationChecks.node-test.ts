@@ -15,8 +15,8 @@ const snapshot: SudoworkSourceSnapshot = {
   excludedLocalData: ['sessions', 'client_cron', 'client_channels'],
 }
 
-describe('createPhaseBackedMigrationChecks', () => {
-  test('十项门禁复用真实阶段校验，缓存查询并传播 mismatch', async () => {
+void describe('createPhaseBackedMigrationChecks', () => {
+  void test('十项门禁复用真实阶段校验，缓存查询并传播 mismatch', async () => {
     const calls = new Map<string, number>()
     const phases = MIGRATION_PHASES.map((name): MigrationPhase => ({
       name,

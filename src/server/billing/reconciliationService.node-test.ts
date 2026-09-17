@@ -4,8 +4,8 @@ import { onlineCommandContext } from '../application/commandContext.js'
 import { setupBillingTestContext } from './testContext.node-test-helper.js'
 import { ReconciliationService } from './reconciliationService.js'
 
-test('钱包对账只记录差异，不自动覆盖余额或账本', () => {
-  const { db, repository, wallet } = setupBillingTestContext()
+void test('钱包对账只记录差异，不自动覆盖余额或账本', async () => {
+  const { db, repository, wallet } = await setupBillingTestContext()
   wallet.post({
     ownerType: 'user', ownerId: 'u1', deltaUnits: 100, entryType: 'BONUS',
     sourceType: 'test', sourceId: 'reconcile-seed', orgId: 'org1',

@@ -40,8 +40,8 @@ class MemoryLegacyTokenStore implements LegacyKeyValueStore {
   }
 }
 
-describe('legacy Sudowork token profile', () => {
-  test('issues and validates the old HS256 claim shape', () => {
+void describe('legacy Sudowork token profile', () => {
+  void test('issues and validates the old HS256 claim shape', async () => {
     const token = issueLegacyJwt({
       secret: 'explicit-production-secret',
       userId: 17,
@@ -63,13 +63,13 @@ describe('legacy Sudowork token profile', () => {
     assert.equal(verifyLegacyJwt(token, 'explicit-production-secret', 8_200), null)
   })
 
-  test('maps old numeric claims to one Moss principal and rejects cross-org aliases', () => {
+  void test('maps old numeric claims to one Moss principal and rejects cross-org aliases', async () => {
     const db = new DatabaseSync(':memory:')
     const authDb = new AuthCenterDb(db)
     const repository = new IdentityRepository(db)
-    authDb.createOrganization('org-a', 'Org A', 1)
-    authDb.createOrganization('org-b', 'Org B', 1)
-    authDb.createUser({
+    await authDb.createOrganization('org-a', 'Org A', 1)
+    await authDb.createOrganization('org-b', 'Org B', 1)
+    await authDb.createUser({
       id: 'user-a', orgId: 'org-a', email: 'a@example.test', name: 'a', displayName: null,
       departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -80,7 +80,7 @@ describe('legacy Sudowork token profile', () => {
       secret: 'explicit-production-secret', userId: 17, phone: '13800000000',
       role: 'USER', enterpriseId: 9, expiresInSec: 7200,
     })
-    assert.deepEqual(resolveLegacyPrincipal(token, 'explicit-production-secret', repository, authDb), {
+    assert.deepEqual(await resolveLegacyPrincipal(token, 'explicit-production-secret', repository, authDb), {
       userId: 'user-a', orgId: 'org-a', role: 'user', legacyUserId: 17, legacyEnterpriseId: 9,
     })
 
@@ -89,11 +89,11 @@ describe('legacy Sudowork token profile', () => {
       secret: 'explicit-production-secret', userId: 17, phone: '13800000000',
       role: 'USER', enterpriseId: 10, expiresInSec: 7200,
     })
-    assert.equal(resolveLegacyPrincipal(crossOrg, 'explicit-production-secret', repository, authDb), null)
+    assert.equal(await resolveLegacyPrincipal(crossOrg, 'explicit-production-secret', repository, authDb), null)
     db.close()
   })
 
-  test('keeps the old Redis key and device semantics during rolling refresh', async () => {
+  void test('keeps the old Redis key and device semantics during rolling refresh', async () => {
     const store = new MemoryLegacyTokenStore()
     const service = new LegacyRefreshTokenService(store, () => 'next-token')
     await store.setex(

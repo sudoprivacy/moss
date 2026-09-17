@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { buildMigrationReport } from './migrationReportFactory.js'
 
-test('校验报告保留最终门禁问题、阶段问题和真实副作用计数', () => {
+void test('校验报告保留最终门禁问题、阶段问题和真实副作用计数', () => {
   const report = buildMigrationReport({
     mode: 'verify',
     result: {

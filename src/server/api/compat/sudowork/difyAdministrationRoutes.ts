@@ -22,7 +22,7 @@ interface AdministrationPort {
   listAcl(orgId: string, assistantId: string): DifyAclEntry[]
   replaceAcl(orgId: string, assistantId: string, entries: DifyAclEntry[]): DifyAclEntry[]
   listEnterpriseAssistants(orgId: string): Promise<unknown>
-  listShareableOrganizations(): unknown
+  listShareableOrganizations(): Promise<unknown> | unknown
   listAvailableDatasets(orgId: string): Promise<unknown>
   createEnterpriseAssistant(input: { actor: IdentityActor; orgId: string; form: FormData }, context: CommandContext): Promise<unknown>
   getEnterpriseAssistant(orgId: string, assistantId: string): Promise<unknown>
@@ -35,7 +35,7 @@ interface AdministrationPort {
 
 interface DifyAdministrationRouteOptions {
   administration: AdministrationPort
-  getActor: (authorization: string | undefined) => IdentityActor | null
+  getActor: (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
   resolveEnterpriseAlias: (legacyId: number) => { resourceId: string; orgId: string } | null
   idempotencyKey?: (context: Context) => string
 }
@@ -141,7 +141,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   ))
 
   app.get('/api/v1/admin/dify/shareable-tenants', context => withResolvedQuery(
-    context, options, async () => context.json({ success: true, data: options.administration.listShareableOrganizations() }),
+    context, options, async () => context.json({ success: true, data: await options.administration.listShareableOrganizations() }),
   ))
 
   app.get('/api/v1/admin/dify/datasets', context => withResolvedQuery(
@@ -246,7 +246,7 @@ async function withAdmin(
   options: DifyAdministrationRouteOptions,
   operation: (actor: IdentityActor) => Promise<Response>,
 ): Promise<Response> {
-  const actor = options.getActor(context.req.header('Authorization'))
+  const actor = await options.getActor(context.req.header('Authorization'))
   if (!actor) return failure(context, 401, '未授权，请先登录')
   if (actor.role !== 'admin' && actor.role !== 'super_admin') return failure(context, 403, '权限不足')
   return await operation(actor)

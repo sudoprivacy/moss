@@ -10,8 +10,8 @@ function adapter(): FuiouAdapter {
   })
 }
 
-describe('FuiouAdapter 回调验证', () => {
-  test('拒绝错误响应码和错误商户号', async () => {
+void describe('FuiouAdapter 回调验证', () => {
+  void test('拒绝错误响应码和错误商户号', async () => {
     await assert.rejects(() => adapter().verifyCallback({
       mchnt_cd: 'M100', message: '', resp_code: '1001', resp_desc: 'failed',
     }), (error: unknown) => error instanceof FuiouProtocolError && error.code === 'FUIOU_RESPONSE_FAILED')
@@ -20,7 +20,7 @@ describe('FuiouAdapter 回调验证', () => {
     }), (error: unknown) => error instanceof FuiouProtocolError && error.code === 'FUIOU_MERCHANT_MISMATCH')
   })
 
-  test('解密并严格校验回调消息，生成稳定 Provider event id', async () => {
+  void test('解密并严格校验回调消息，生成稳定 Provider event id', async () => {
     const message = Buffer.from(JSON.stringify({
       order_id: 'USR17NO1', order_st: '1', order_amt: '730', order_date: '20260907',
     })).toString('base64')
@@ -38,7 +38,7 @@ describe('FuiouAdapter 回调验证', () => {
     assert.match(first.providerEventId, /^fuiou:[a-f0-9]{64}$/)
   })
 
-  test('拒绝无效密文、未知状态和非整数金额', async () => {
+  void test('拒绝无效密文、未知状态和非整数金额', async () => {
     await assert.rejects(() => adapter().verifyCallback({
       mchnt_cd: 'M100', message: 'not-base64!', resp_code: '0000', resp_desc: 'ok',
     }), FuiouProtocolError)
@@ -54,8 +54,8 @@ describe('FuiouAdapter 回调验证', () => {
   })
 })
 
-describe('FuiouAdapter 支付、查询和退款协议', () => {
-  test('创建支付订单保持旧富友字段和二维码响应', async () => {
+void describe('FuiouAdapter 支付、查询和退款协议', () => {
+  void test('创建支付订单保持旧富友字段和二维码响应', async () => {
     let requestUrl = ''
     let requestMessage: Record<string, unknown> = {}
     const adapter = new FuiouAdapter({
@@ -85,7 +85,7 @@ describe('FuiouAdapter 支付、查询和退款协议', () => {
     assert.deepEqual(result, { qrCodeUrl: 'https://qr.test/code', orderInfo: 'https://qr.test/code' })
   })
 
-  test('查询成功订单产生稳定回调事件，退款状态 5 才成功', async () => {
+  void test('查询成功订单产生稳定回调事件，退款状态 5 才成功', async () => {
     const encryptedRequests: Array<Record<string, unknown>> = []
     const responses = [
       { order_id: 'ORDER-1', order_st: '1', order_amt: '730', order_date: '20260907' },

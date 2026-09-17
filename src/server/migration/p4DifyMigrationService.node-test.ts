@@ -36,14 +36,14 @@ function snapshot(): SudoworkP4Snapshot {
   }
 }
 
-function setup(options: {
+async function setup(options: {
   source?: SudoworkP4Snapshot
   putSecret?: (namespace: string, key: string, value: string) => Promise<void>
 } = {}) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  auth.createOrganization('org-a', '企业 A', 1)
-  auth.createUser({
+  await auth.createOrganization('org-a', '企业 A', 1)
+  await auth.createUser({
     id: 'user-17', orgId: 'org-a', email: 'u17@example.test', name: 'u17', displayName: '用户 17',
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -92,9 +92,9 @@ function setup(options: {
   return { db, identities, catalog, dify, service, secretWrites }
 }
 
-describe('P4 Dify 迁移', () => {
-  test('统一迁移连接、App、Dataset、ACL 和元数据且不调用 Dify', async () => {
-    const { db, identities, catalog, dify, service, secretWrites } = setup()
+void describe('P4 Dify 迁移', () => {
+  void test('统一迁移连接、App、Dataset、ACL 和元数据且不调用 Dify', async () => {
+    const { db, identities, catalog, dify, service, secretWrites } = await setup()
     const plan = service.plan()
     assert.equal(plan.status, 'ready')
     const first = await service.execute(plan, migrationCommandContext('p4-run', 'p4:execute'))
@@ -121,8 +121,8 @@ describe('P4 Dify 迁移', () => {
     db.close()
   })
 
-  test('缺失企业或 Agent 映射时预检阻断且不写 Nexus', async () => {
-    const { db, identities, service, secretWrites } = setup()
+  void test('缺失企业或 Agent 映射时预检阻断且不写 Nexus', async () => {
+    const { db, identities, service, secretWrites } = await setup()
     db.prepare("DELETE FROM resource_numeric_aliases WHERE namespace = 'enterprise'").run()
     const plan = service.plan()
     assert.equal(plan.status, 'blocked')
@@ -138,14 +138,14 @@ describe('P4 Dify 迁移', () => {
     db.close()
   })
 
-  test('拒绝在线上下文执行迁移', async () => {
-    const { db, service } = setup()
+  void test('拒绝在线上下文执行迁移', async () => {
+    const { db, service } = await setup()
     await assert.rejects(service.execute(service.plan(), onlineCommandContext('bad')), /迁移上下文/)
     db.close()
   })
 
-  test('预检阻断已被其他 Agent 占用的 Dify App 外部别名', () => {
-    const { db, catalog, service } = setup()
+  void test('预检阻断已被其他 Agent 占用的 Dify App 外部别名', async () => {
+    const { db, catalog, service } = await setup()
     catalog.createAgent({ id: 'agent-other', orgId: 'org-a', name: 'Other', authorId: 'user-17', status: 'approved' })
     catalog.bindExternalIdentity({
       id: 'alias-conflict', orgId: 'org-a', resourceType: 'agent', resourceId: 'agent-other',
@@ -158,10 +158,10 @@ describe('P4 Dify 迁移', () => {
     db.close()
   })
 
-  test('预检明确报告旧 App API Key 缺失', () => {
+  void test('预检明确报告旧 App API Key 缺失', async () => {
     const source = snapshot()
     source.apps[0] = { ...source.apps[0]!, appApiKey: null }
-    const { db, service } = setup({ source })
+    const { db, service } = await setup({ source })
 
     const plan = service.plan()
     assert.equal(plan.status, 'blocked')
@@ -169,9 +169,9 @@ describe('P4 Dify 迁移', () => {
     db.close()
   })
 
-  test('Nexus 写入失败时不落连接、binding 或 Dataset 业务数据', async () => {
+  void test('Nexus 写入失败时不落连接、binding 或 Dataset 业务数据', async () => {
     let writes = 0
-    const { db, identities, catalog, dify, service } = setup({
+    const { db, identities, catalog, dify, service } = await setup({
       putSecret: async () => {
         writes += 1
         if (writes === 2) throw new Error('nexus unavailable')
@@ -188,8 +188,8 @@ describe('P4 Dify 迁移', () => {
     db.close()
   })
 
-  test('校验覆盖 Nexus 密钥、ACL 和元数据', async () => {
-    const { db, catalog, service, secretWrites } = setup()
+  void test('校验覆盖 Nexus 密钥、ACL 和元数据', async () => {
+    const { db, catalog, service, secretWrites } = await setup()
     await service.execute(service.plan(), migrationCommandContext('p4-verify', 'p4:verify'))
     secretWrites.splice(secretWrites.findIndex(item => item.key === 'service-api-key'), 1)
     catalog.updateAgentConfiguration('agent-app', 'org-a', {

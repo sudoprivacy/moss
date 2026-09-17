@@ -63,8 +63,8 @@ function createSource(path: string, balance: number | string = 100): void {
   db.close()
 }
 
-describe('SudoworkP3SourceReader', () => {
-  test('只读提取旧财务表并无损转换为整数单位', async () => {
+void describe('SudoworkP3SourceReader', () => {
+  void test('只读提取旧财务表并无损转换为整数单位', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sudowork-p3-source-'))
     try {
       createSource(join(root, 'sudowork.sqlite'))
@@ -82,7 +82,7 @@ describe('SudoworkP3SourceReader', () => {
     }
   })
 
-  test('无损读取旧 usage/report 产生的百分之一积分', async () => {
+  void test('无损读取旧 usage/report 产生的百分之一积分', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sudowork-p3-source-'))
     try {
       createSource(join(root, 'sudowork.sqlite'), '100.25')
@@ -98,7 +98,7 @@ describe('SudoworkP3SourceReader', () => {
     }
   })
 
-  test('拒绝超过百分之一积分精度的旧余额', async () => {
+  void test('拒绝超过百分之一积分精度的旧余额', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sudowork-p3-source-'))
     try {
       createSource(join(root, 'sudowork.sqlite'), '100.001')

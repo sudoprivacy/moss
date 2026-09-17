@@ -25,8 +25,8 @@ class FakeRedis implements RedisScriptPort {
   }
 }
 
-describe('RedisTelemetryQueueBackend', () => {
-  it('uses one atomic claim script and decodes receipt/message pairs', async () => {
+void describe('RedisTelemetryQueueBackend', () => {
+  void it('uses one atomic claim script and decodes receipt/message pairs', async () => {
     const redis = new FakeRedis()
     redis.responses.push([
       'worker-a:1', JSON.stringify({ ingestId: 'event-1', kind: 'perf', payload: { value_ms: 5 } }),
@@ -47,7 +47,7 @@ describe('RedisTelemetryQueueBackend', () => {
     }])
   })
 
-  it('acknowledges and recovers through atomic scripts', async () => {
+  void it('acknowledges and recovers through atomic scripts', async () => {
     const redis = new FakeRedis()
     redis.responses.push(2, 3)
     const backend = new RedisTelemetryQueueBackend(redis, 'qms:test')
@@ -59,7 +59,7 @@ describe('RedisTelemetryQueueBackend', () => {
     assert.equal(redis.calls[1]?.keys, 3)
   })
 
-  it('keeps queue keys namespaced and reports pending plus processing depths', async () => {
+  void it('keeps queue keys namespaced and reports pending plus processing depths', async () => {
     const redis = new FakeRedis()
     const backend = new RedisTelemetryQueueBackend(redis, 'moss:qms')
 
@@ -67,7 +67,7 @@ describe('RedisTelemetryQueueBackend', () => {
     assert.deepEqual(await backend.depths(), { pending: 4, processing: 2 })
   })
 
-  it('pushes a batch with one Redis command', async () => {
+  void it('pushes a batch with one Redis command', async () => {
     const redis = new FakeRedis()
     let pushes = 0
     redis.rpush = async (_key: string, ...values: string[]) => {

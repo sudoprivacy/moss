@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { CommandContext } from '../application/commandContext.js'
 import { AuthCenterDb, hashPassword, type AuthCenterUser } from '../authCenter/db.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import {
   IdentityRepository,
   type InvitationRecord,
@@ -53,22 +52,28 @@ export class OrganizationIdentityService {
     legacyEnterpriseId?: number
   }, context: CommandContext, actor?: IdentityActor) {
     if (actor) this.assertSuperAdmin(actor)
-    const created = this.unifiedIdentity.createOrganization(input, context)
-    const organization = this.authDb.getOrganization(created.organizationId)
+    return this.createOrganizationAsync(input, context, actor)
+  }
+
+  async createOrganizationAsync(input: Parameters<OrganizationIdentityService['createOrganization']>[0], context: CommandContext, actor?: IdentityActor) {
+    if (actor) this.assertSuperAdmin(actor)
+    const created = await this.unifiedIdentity.createOrganization(input, context)
+    const organization = await this.authDb.getOrganization(created.organizationId)
     const profile = this.repository.getOrganizationProfile(created.organizationId)
     const wallet = this.repository.getWallet('organization', created.organizationId)
     if (!organization || !profile || !wallet) throw new Error('Created organization is incomplete')
     return { organization, profile, wallet, legacyEnterpriseId: created.legacyEnterpriseId }
   }
 
-  listOrganizations(actor?: IdentityActor) {
+  async listOrganizations(actor?: IdentityActor) {
     if (actor && actor.role !== 'super_admin' && actor.role !== 'admin') {
       throw new IdentityDomainError('FORBIDDEN', 'Administrator permission required')
     }
+    const allOrganizations = await this.authDb.listOrganizations()
     const organizations = actor && !hasGlobalOrganizationAccess(actor)
-      ? this.authDb.listOrganizations().filter((organization) => organization.id === actor.orgId)
-      : this.authDb.listOrganizations()
-    return organizations.flatMap((organization) => {
+      ? allOrganizations.filter((organization) => organization.id === actor.orgId)
+      : allOrganizations
+    return Promise.all(organizations.flatMap(async (organization) => {
       const profile = this.repository.getOrganizationProfile(organization.id)
       if (!profile) return []
       return [{
@@ -76,12 +81,12 @@ export class OrganizationIdentityService {
         profile,
         wallet: this.repository.getWallet('organization', organization.id),
         legacyEnterpriseId: this.repository.getNumericAlias('enterprise', organization.id),
-        userCount: this.authDb.countUsersByOrg(organization.id),
+        userCount: await this.authDb.countUsersByOrg(organization.id),
       }]
-    })
+    })).then(items => items.flat())
   }
 
-  updateOrganization(orgId: string, patch: {
+  async updateOrganization(orgId: string, patch: {
     name?: string
     code?: string
     loginMethod?: OrganizationLoginMethod
@@ -95,14 +100,14 @@ export class OrganizationIdentityService {
     loginDescription?: string | null
   }, actor?: IdentityActor) {
     if (actor) this.assertOrganizationAdmin(actor, orgId)
-    return runInTransaction(this.db, () => {
-      const organization = this.authDb.getOrganization(orgId)
+    return this.authDb.driver.transaction(async () => {
+      const organization = await this.authDb.getOrganization(orgId)
       const profile = this.repository.getOrganizationProfile(orgId)
       if (!organization || !profile) throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
       if (patch.name !== undefined) {
         const name = patch.name.trim()
         if (!name) throw new IdentityDomainError('INVALID_NAME', 'Organization name is required')
-        this.authDb.updateOrganization(orgId, { name })
+        await this.authDb.updateOrganization(orgId, { name })
       }
       this.repository.putOrganizationProfile({
         ...profile,
@@ -111,20 +116,20 @@ export class OrganizationIdentityService {
         code: patch.code?.trim() || profile.code,
       })
       return {
-        organization: this.authDb.getOrganization(orgId)!,
+        organization: (await this.authDb.getOrganization(orgId))!,
         profile: this.repository.getOrganizationProfile(orgId)!,
       }
     })
   }
 
-  createInvitations(input: {
+  async createInvitations(input: {
     orgId: string
     count: number
     initialCreditUnits?: number
     legacyInitialQuotaUsd?: number | null
-  }, codeFactory: (() => string) | undefined = undefined, actor?: IdentityActor): InvitationRecord[] {
+  }, codeFactory: (() => string) | undefined = undefined, actor?: IdentityActor): Promise<InvitationRecord[]> {
     if (actor) this.assertOrganizationAdmin(actor, input.orgId)
-    if (!this.authDb.getOrganization(input.orgId)) {
+    if (!(await this.authDb.getOrganization(input.orgId))) {
       throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
     }
     if (!Number.isInteger(input.count) || input.count < 1 || input.count > 100) {
@@ -134,7 +139,7 @@ export class OrganizationIdentityService {
     if (!Number.isFinite(initialCreditUnits) || initialCreditUnits < 0) {
       throw new IdentityDomainError('INVALID_INITIAL_CREDIT', 'Initial credit must be non-negative')
     }
-    return runInTransaction(this.db, () => {
+    return this.authDb.driver.transaction(async () => {
       const created: InvitationRecord[] = []
       for (let index = 0; index < input.count; index += 1) {
         let invitation: InvitationRecord | null = null
@@ -186,21 +191,21 @@ export class OrganizationIdentityService {
     return this.unifiedIdentity.createUser({ ...input, role: input.role ?? 'user' }, context)
   }
 
-  listUsers(actor: IdentityActor, filters: {
+  async listUsers(actor: IdentityActor, filters: {
     orgId?: string
     status?: AuthCenterUser['status']
     role?: string
     keyword?: string
-  } = {}): AuthCenterUser[] {
+  } = {}): Promise<AuthCenterUser[]> {
     if (actor.role !== 'super_admin' && actor.role !== 'admin') {
       throw new IdentityDomainError('FORBIDDEN', 'Administrator permission required')
     }
     const orgIds = !hasGlobalOrganizationAccess(actor)
       ? [actor.orgId]
-      : filters.orgId ? [filters.orgId] : this.authDb.listOrganizations().map((org) => org.id)
+      : filters.orgId ? [filters.orgId] : (await this.authDb.listOrganizations()).map((org) => org.id)
     const keyword = filters.keyword?.trim().toLowerCase()
-    return orgIds
-      .flatMap((orgId) => this.authDb.listUsersByOrg(orgId))
+    const users = (await Promise.all(orgIds.map((orgId) => this.authDb.listUsersByOrg(orgId)))).flat()
+    return users
       .filter((user) => !filters.status || user.status === filters.status)
       .filter((user) => !filters.role || user.role === filters.role)
       .filter((user) => !keyword
@@ -209,14 +214,14 @@ export class OrganizationIdentityService {
       .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
   }
 
-  updateUser(userId: string, patch: {
+  async updateUser(userId: string, patch: {
     displayName?: string | null
     status?: AuthCenterUser['status']
     role?: 'admin' | 'dept_admin' | 'user'
     orgId?: string
     password?: string
-  }, actor: IdentityActor): AuthCenterUser {
-    const user = this.authDb.getUserById(userId)
+  }, actor: IdentityActor): Promise<AuthCenterUser> {
+    const user = await this.authDb.getUserById(userId)
     if (!user) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
     this.assertOrganizationAdmin(actor, user.orgId)
     if (user.role === 'super_admin') {
@@ -224,12 +229,12 @@ export class OrganizationIdentityService {
     }
     if (patch.orgId && patch.orgId !== user.orgId) {
       this.assertSuperAdmin(actor)
-      if (!this.authDb.getOrganization(patch.orgId)) {
+      if (!(await this.authDb.getOrganization(patch.orgId))) {
         throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
       }
     }
-    return runInTransaction(this.db, () => {
-      this.authDb.updateUser(userId, {
+    return this.authDb.driver.transaction(async () => {
+      await this.authDb.updateUser(userId, {
         displayName: patch.displayName,
         status: patch.status,
         role: patch.role,
@@ -239,61 +244,61 @@ export class OrganizationIdentityService {
         this.repository.moveUserOrganization(userId, patch.orgId)
       }
       if (patch.password) {
-        this.authDb.updateUserPassword(userId, hashPassword(patch.password), Date.now())
+        await this.authDb.updateUserPassword(userId, hashPassword(patch.password), Date.now())
       }
-      return this.authDb.getUserById(userId)!
+      return (await this.authDb.getUserById(userId))!
     })
   }
 
-  deleteUser(userId: string, actor: IdentityActor): void {
+  async deleteUser(userId: string, actor: IdentityActor): Promise<void> {
     this.assertSuperAdmin(actor)
-    const user = this.authDb.getUserById(userId)
+    const user = await this.authDb.getUserById(userId)
     if (!user) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
     if (user.role === 'super_admin') {
       throw new IdentityDomainError('SUPER_ADMIN_IMMUTABLE', 'Super admin cannot be deleted')
     }
-    runInTransaction(this.db, () => {
+    await this.authDb.driver.transaction(async () => {
       this.repository.deleteUserRecords(userId)
-      this.authDb.deleteUser(userId)
+      await this.authDb.deleteUser(userId)
     })
   }
 
-  resetUserPassword(userId: string, password: string, actor: IdentityActor): void {
+  async resetUserPassword(userId: string, password: string, actor: IdentityActor): Promise<void> {
     this.assertSuperAdmin(actor)
-    const user = this.authDb.getUserById(userId)
+    const user = await this.authDb.getUserById(userId)
     if (!user) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
-    this.authDb.updateUserPassword(userId, hashPassword(password), Date.now())
+    await this.authDb.updateUserPassword(userId, hashPassword(password), Date.now())
   }
 
-  deleteOrganization(orgId: string, actor: IdentityActor): void {
+  async deleteOrganization(orgId: string, actor: IdentityActor): Promise<void> {
     this.assertSuperAdmin(actor)
-    if (!this.authDb.getOrganization(orgId)) {
+    if (!(await this.authDb.getOrganization(orgId))) {
       throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
     }
-    if (this.authDb.countUsersByOrg(orgId) > 0 || this.authDb.countDepartmentsByOrg(orgId) > 0) {
+    if ((await this.authDb.countUsersByOrg(orgId)) > 0 || (await this.authDb.countDepartmentsByOrg(orgId)) > 0) {
       throw new IdentityDomainError('ORGANIZATION_NOT_EMPTY', 'Organization is not empty')
     }
-    runInTransaction(this.db, () => {
+    await this.authDb.driver.transaction(async () => {
       this.repository.deleteOrganizationRecords(orgId)
-      this.authDb.deleteOrganization(orgId)
+      await this.authDb.deleteOrganization(orgId)
     })
   }
 
-  setUserStatus(userId: string, status: AuthCenterUser['status']): AuthCenterUser {
-    const user = this.authDb.getUserById(userId)
+  async setUserStatus(userId: string, status: AuthCenterUser['status']): Promise<AuthCenterUser> {
+    const user = await this.authDb.getUserById(userId)
     if (!user) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
-    this.authDb.updateUser(userId, { status })
-    return this.authDb.getUserById(userId)!
+    await this.authDb.updateUser(userId, { status })
+    return (await this.authDb.getUserById(userId))!
   }
 
-  setUserRole(userId: string, role: 'admin' | 'dept_admin' | 'user'): AuthCenterUser {
-    const user = this.authDb.getUserById(userId)
+  async setUserRole(userId: string, role: 'admin' | 'dept_admin' | 'user'): Promise<AuthCenterUser> {
+    const user = await this.authDb.getUserById(userId)
     if (!user) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
     if (user.role === 'super_admin') {
       throw new IdentityDomainError('SUPER_ADMIN_IMMUTABLE', 'Super admin role cannot be changed')
     }
-    this.authDb.updateUser(userId, { role })
-    return this.authDb.getUserById(userId)!
+    await this.authDb.updateUser(userId, { role })
+    return (await this.authDb.getUserById(userId))!
   }
 
   mapLegacyRole(role: string): 'super_admin' | 'admin' | 'user' {

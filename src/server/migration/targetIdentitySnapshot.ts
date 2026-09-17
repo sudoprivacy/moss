@@ -9,6 +9,19 @@ type SqlIdentity = {
   normalized_subject: string
 }
 
+type SqlOrganization = {
+  id: string
+  name: string
+}
+
+type SqlUser = {
+  id: string
+  org_id: string
+  email: string
+  name: string
+  display_name: string | null
+}
+
 export function readTargetIdentitySnapshot(
   auth: AuthCenterDb,
   identities: IdentityRepository,
@@ -25,7 +38,12 @@ export function readTargetIdentitySnapshot(
     providersByUser.set(item.user_id, current)
   }
 
-  const organizations = auth.listOrganizations().map(organization => {
+  const organizationRows = auth.db.prepare(`
+    SELECT id, name
+    FROM organizations
+    ORDER BY created_at ASC
+  `).all() as unknown as SqlOrganization[]
+  const organizations = organizationRows.map(organization => {
     const profile = identities.getOrganizationProfile(organization.id)
     return {
       id: organization.id,
@@ -35,21 +53,26 @@ export function readTargetIdentitySnapshot(
       legacyAlias: identities.getNumericAlias('enterprise', organization.id),
     }
   })
-  const users = organizations.flatMap(organization => auth.listUsersByOrg(organization.id).map(user => {
+  const userRows = auth.db.prepare(`
+    SELECT id, org_id, email, name, display_name
+    FROM users
+    ORDER BY created_at ASC
+  `).all() as unknown as SqlUser[]
+  const users = userRows.map(user => {
     const userProviders = providersByUser.get(user.id) ?? []
     const phone = userProviders.find(item => item.provider === 'phone' && item.issuer === 'sudowork')?.subject ?? null
     return {
       id: user.id,
-      orgId: user.orgId,
+      orgId: user.org_id,
       email: user.email,
       emailVerified: false,
       phone,
       phoneVerified: phone !== null,
       username: user.name,
-      displayName: user.displayName,
+      displayName: user.display_name,
       legacyAlias: identities.getNumericAlias('user', user.id),
       providerIdentities: userProviders,
     }
-  }))
+  })
   return { organizations, users }
 }

@@ -9,7 +9,7 @@ import type { VisibilityFilter } from '../../../visibilityFilter.js'
 interface DifyRuntimeRouteOptions {
   runtime: DifyRuntimeService
   enhancement: DifyEnhancementService
-  getActor: (authorization: string | undefined) => IdentityActor | null
+  getActor: (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
   buildVisibility: (actor: IdentityActor) => VisibilityFilter
   upstreamBaseUrl: string
 }
@@ -21,8 +21,8 @@ type RuntimeRequestContext = {
 }
 
 export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntimeRouteOptions): void {
-  const requestContext = (context: Context): RuntimeRequestContext | Response => {
-    const actor = options.getActor(context.req.header('Authorization'))
+  const requestContext = async (context: Context): Promise<RuntimeRequestContext | Response> => {
+    const actor = await options.getActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权，请先登录' }, 401)
     return {
       actor,
@@ -31,18 +31,18 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }
   }
 
-  app.get('/api/v1/agents/:assistantId/enhancement', context => {
-    const runtime = requestContext(context)
+  app.get('/api/v1/agents/:assistantId/enhancement', async context => {
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     try {
-      return context.json({ success: true, data: options.enhancement.describe(runtime) })
+      return context.json({ success: true, data: await options.enhancement.describe(runtime) })
     } catch (error) {
       return runtimeError(context, error)
     }
   })
 
   app.post('/api/v1/agents/:assistantId/enhancement/invoke', async context => {
-    const runtime = requestContext(context)
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
     if (!body || typeof body.query !== 'string' || body.query.length === 0) return failure(context, 400, 'query is required')
@@ -57,7 +57,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
   })
 
   app.post('/api/v1/agents/:assistantId/enhancement/invoke-stream', async context => {
-    const runtime = requestContext(context)
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
     if (!body || typeof body.query !== 'string' || body.query.length === 0) return failure(context, 400, 'query is required')
@@ -83,7 +83,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
   })
 
   app.post('/api/v1/agents/:assistantId/chat', async context => {
-    const runtime = requestContext(context)
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
     if (!body || typeof body.query !== 'string' || body.query.length === 0) return failure(context, 400, 'query is required')
@@ -137,7 +137,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
   })
 
   app.delete('/api/v1/agents/:assistantId/conversations/:conversationId', async context => {
-    const runtime = requestContext(context)
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     try {
       await options.runtime.deleteConversation({ ...runtime, conversationId: context.req.param('conversationId') })
@@ -156,7 +156,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     })))
 
   app.post('/api/v1/agents/:assistantId/messages/:messageId/feedback', async context => {
-    const runtime = requestContext(context)
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
     if (!body) return failure(context, 400, 'body is required')
@@ -201,7 +201,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
   ))
 
   app.post('/api/v1/agents/:assistantId/text-to-audio', async context => {
-    const runtime = requestContext(context)
+    const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
     if (!body || (!body.message_id && !body.text)) return failure(context, 400, 'message_id or text is required')
@@ -235,10 +235,10 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
 
 async function jsonOperation(
   context: Context,
-  resolve: (context: Context) => RuntimeRequestContext | Response,
+  resolve: (context: Context) => Promise<RuntimeRequestContext | Response>,
   operation: (runtime: RuntimeRequestContext) => Promise<unknown>,
 ): Promise<Response> {
-  const runtime = resolve(context)
+  const runtime = await resolve(context)
   if (runtime instanceof Response) return runtime
   try {
     return context.json({ success: true, data: await operation(runtime) })
@@ -249,10 +249,10 @@ async function jsonOperation(
 
 async function multipartOperation(
   context: Context,
-  resolve: (context: Context) => RuntimeRequestContext | Response,
+  resolve: (context: Context) => Promise<RuntimeRequestContext | Response>,
   operation: (runtime: RuntimeRequestContext, file: File) => Promise<unknown>,
 ): Promise<Response> {
-  const runtime = resolve(context)
+  const runtime = await resolve(context)
   if (runtime instanceof Response) return runtime
   const form = await context.req.formData().catch(() => null)
   if (!form) return failure(context, 400, 'expected multipart/form-data')

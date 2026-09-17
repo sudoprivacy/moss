@@ -3,8 +3,8 @@ import { describe, it } from 'node:test'
 
 import { QmsNotificationAdapter } from './notificationAdapters.js'
 
-describe('QmsNotificationAdapter', () => {
-  it('sends the legacy interactive card to a configured HTTPS Lark webhook', async () => {
+void describe('QmsNotificationAdapter', () => {
+  void it('sends the legacy interactive card to a configured HTTPS Lark webhook', async () => {
     const requests: Array<{ url: string; body: string }> = []
     const adapter = new QmsNotificationAdapter({
       config: () => ({ larkWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test' }),
@@ -21,7 +21,7 @@ describe('QmsNotificationAdapter', () => {
     assert.match(requests[0]!.body, /interactive/)
   })
 
-  it('rejects insecure webhook URLs before network access', async () => {
+  void it('rejects insecure webhook URLs before network access', async () => {
     let calls = 0
     const adapter = new QmsNotificationAdapter({
       config: () => ({ larkWebhookUrl: 'http://127.0.0.1/internal' }),
@@ -34,7 +34,7 @@ describe('QmsNotificationAdapter', () => {
     assert.equal(calls, 0)
   })
 
-  it('uses the SMTP URL without exposing credentials in errors', async () => {
+  void it('uses the SMTP URL without exposing credentials in errors', async () => {
     const sent: Array<Record<string, unknown>> = []
     const adapter = new QmsNotificationAdapter({
       config: () => ({ smtpUrl: 'smtps://user:very-secret@mail.example:465?from=qms%40example.com&to=ops%40example.com' }),

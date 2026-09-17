@@ -55,7 +55,7 @@ export class SudoworkConfigService {
     ensureConfigAvailabilitySchema(options.db)
   }
 
-  list(input: {
+  async list(input: {
     actor: IdentityActor
     name?: string
     status?: string
@@ -89,17 +89,18 @@ export class SudoworkConfigService {
       ORDER BY ci.updated_at DESC, ci.id DESC LIMIT ? OFFSET ?
     `).all(...params, pageSize, (page - 1) * pageSize) as SqlRow[]
     return {
-      items: rows.map(row => this.legacyItem(row, input.actor.orgId)), total, page, page_size: pageSize,
+      items: await Promise.all(rows.map(row => this.legacyItem(row, input.actor.orgId))), total, page, page_size: pageSize,
     }
   }
 
-  create(actor: IdentityActor, body: Record<string, unknown>): { id: number } {
+  async create(actor: IdentityActor, body: Record<string, unknown>): Promise<{ id: number }> {
     this.assertAdmin(actor)
     const name = text(body.name)
     if (!name) throw new SudoworkConfigError(400, '配置项名称不能为空')
     if (name.length > 20) throw new SudoworkConfigError(400, '配置项名称不超过20个字符')
-    return runInTransaction(this.options.db, () => {
-      const result = this.options.configItems.create(actor.orgId, actor.userId, {
+    let id: number | null = null
+    try {
+      const result = await this.options.configItems.create(actor.orgId, actor.userId, {
         name,
         description: nullableText(body.description) ?? undefined,
         icon: nullableText(body.icon) ?? undefined,
@@ -110,29 +111,33 @@ export class SudoworkConfigService {
         entries: [],
       })
       const item = unwrapNative(result)
-      const id = Number((item as { id: number }).id)
+      id = Number((item as { id: number }).id)
       const availability = body.visible_to_all === 1 && actor.role === 'super_admin' ? 'all' : 'organization'
       this.options.db.prepare('UPDATE config_items SET availability = ? WHERE id = ?').run(availability, id)
       return { id: this.legacyIdFor(id, actor.orgId) }
-    })
-  }
-
-  get(actor: IdentityActor, id: number) {
-    const item = this.requireManageable(actor, id)
-    const nativeId = Number(item.id)
-    return {
-      ...this.legacyItem(item, actor.orgId),
-      entries: this.entries(nativeId, String(item.org_id ?? actor.orgId)),
-      enterprises: this.enterpriseRows(nativeId, true),
+    } catch (error) {
+      if (id !== null) this.deleteNativeConfigItem(id)
+      throw error
     }
   }
 
-  update(actor: IdentityActor, id: number, body: Record<string, unknown>): void {
+  async get(actor: IdentityActor, id: number) {
+    const item = this.requireManageable(actor, id)
+    const nativeId = Number(item.id)
+    return {
+      ...await this.legacyItem(item, actor.orgId),
+      entries: this.entries(nativeId, String(item.org_id ?? actor.orgId)),
+      enterprises: await this.enterpriseRows(nativeId, true),
+    }
+  }
+
+  async update(actor: IdentityActor, id: number, body: Record<string, unknown>): Promise<void> {
     const item = this.requireManageable(actor, id)
     const nativeId = Number(item.id)
     if (Number(item.status) === 0) throw new SudoworkConfigError(400, '禁用状态的配置项不能编辑')
-    runInTransaction(this.options.db, () => {
-      const result = this.options.configItems.update(
+    let nativeUpdated = false
+    try {
+      const result = await this.options.configItems.update(
         String(item.org_id ?? actor.orgId),
         actor.userId,
         nativeId,
@@ -147,6 +152,7 @@ export class SudoworkConfigService {
         },
       )
       unwrapNative(result)
+      nativeUpdated = true
       if (body.visible_to_all !== undefined) {
         if (actor.role !== 'super_admin' && body.visible_to_all === 1) {
           throw new SudoworkConfigError(403, '权限不足')
@@ -154,18 +160,19 @@ export class SudoworkConfigService {
         this.options.db.prepare('UPDATE config_items SET availability = ? WHERE id = ?')
           .run(body.visible_to_all === 1 ? 'all' : 'organization', nativeId)
       }
-    })
+    } catch (error) {
+      if (nativeUpdated) this.restoreNativeConfigItem(item)
+      throw error
+    }
   }
 
-  updateStatus(actor: IdentityActor, id: number, status: number): void {
+  async updateStatus(actor: IdentityActor, id: number, status: number): Promise<void> {
     const item = this.requireManageable(actor, id)
     const nativeId = Number(item.id)
     if (status !== 0 && status !== 1) throw new SudoworkConfigError(400, '状态值无效')
     if (Number(item.status) === status) throw new SudoworkConfigError(400, '状态未发生变化')
-    runInTransaction(this.options.db, () => {
-      unwrapNative(this.options.configItems.updateStatus(String(item.org_id ?? actor.orgId), actor.userId, nativeId, status))
-      if (status === 0) this.options.db.prepare('DELETE FROM config_item_org_assignments WHERE config_item_id = ?').run(nativeId)
-    })
+    unwrapNative(await this.options.configItems.updateStatus(String(item.org_id ?? actor.orgId), actor.userId, nativeId, status))
+    if (status === 0) this.options.db.prepare('DELETE FROM config_item_org_assignments WHERE config_item_id = ?').run(nativeId)
   }
 
   entriesFor(actor: IdentityActor, id: number) {
@@ -173,34 +180,32 @@ export class SudoworkConfigService {
     return this.entries(Number(item.id), String(item.org_id ?? actor.orgId))
   }
 
-  replaceEntries(actor: IdentityActor, id: number, entries: unknown): void {
+  async replaceEntries(actor: IdentityActor, id: number, entries: unknown): Promise<void> {
     const item = this.requireManageable(actor, id)
     const nativeId = Number(item.id)
     if (Number(item.status) === 0) throw new SudoworkConfigError(400, '禁用状态的配置项不能修改配置列表')
     if (!Array.isArray(entries)) throw new SudoworkConfigError(400, 'entries 必须为数组')
-    runInTransaction(this.options.db, () => {
-      const previousEntryIds = (this.options.db.prepare(
-        'SELECT id FROM config_entries WHERE config_item_id = ?',
-      ).all(nativeId) as Array<{ id: number }>).map(row => row.id)
-      unwrapNative(this.options.configItems.update(
-        String(item.org_id ?? actor.orgId), actor.userId, nativeId,
-        { entries: entries as Array<{ config_key: string; name: string; config_desc?: string; required?: boolean }> },
-      ))
-      const removeAlias = this.options.db.prepare(
-        `DELETE FROM resource_numeric_aliases WHERE namespace = 'config_entry' AND resource_id = ?`,
+    const previousEntryIds = (this.options.db.prepare(
+      'SELECT id FROM config_entries WHERE config_item_id = ?',
+    ).all(nativeId) as Array<{ id: number }>).map(row => row.id)
+    unwrapNative(await this.options.configItems.update(
+      String(item.org_id ?? actor.orgId), actor.userId, nativeId,
+      { entries: entries as Array<{ config_key: string; name: string; config_desc?: string; required?: boolean }> },
+    ))
+    const removeAlias = this.options.db.prepare(
+      `DELETE FROM resource_numeric_aliases WHERE namespace = 'config_entry' AND resource_id = ?`,
+    )
+    for (const entryId of previousEntryIds) removeAlias.run(String(entryId))
+    for (const entry of this.rawEntries(nativeId)) {
+      this.options.identities.allocateNumericAlias(
+        'config_entry', String(entry.id), String(item.org_id ?? actor.orgId),
       )
-      for (const entryId of previousEntryIds) removeAlias.run(String(entryId))
-      for (const entry of this.rawEntries(nativeId)) {
-        this.options.identities.allocateNumericAlias(
-          'config_entry', String(entry.id), String(item.org_id ?? actor.orgId),
-        )
-      }
-    })
+    }
   }
 
-  listEnterprises(actor: IdentityActor, id: number, page = 1, pageSize = 20) {
+  async listEnterprises(actor: IdentityActor, id: number, page = 1, pageSize = 20) {
     const item = this.requireManageable(actor, id)
-    const items = this.enterpriseRows(Number(item.id), false)
+    const items = await this.enterpriseRows(Number(item.id), false)
     const offset = (Math.max(1, page) - 1) * pageSize
     return { items: items.slice(offset, offset + pageSize), total: items.length, page, page_size: pageSize }
   }
@@ -235,7 +240,7 @@ export class SudoworkConfigService {
     if (result.changes === 0) throw new SudoworkConfigError(404, '该企业未关联此配置项')
   }
 
-  listForUser(actor: IdentityActor) {
+  async listForUser(actor: IdentityActor) {
     const items = this.options.db.prepare(`
       SELECT ci.*
       FROM config_items ci
@@ -250,13 +255,13 @@ export class SudoworkConfigService {
         )
       ORDER BY ci.updated_at DESC, ci.id DESC
     `).all(actor.orgId, actor.orgId) as SqlRow[]
-    return items.map(item => ({
-      ...this.legacyItem(item, String(item.org_id ?? actor.orgId)),
+    return await Promise.all(items.map(async item => ({
+      ...await this.legacyItem(item, String(item.org_id ?? actor.orgId)),
       entries: this.entries(Number(item.id), String(item.org_id ?? actor.orgId)),
-    }))
+    })))
   }
 
-  importConfigItem(actor: IdentityActor, input: ImportedConfigItem, context: CommandContext): { id: number } {
+  async importConfigItem(actor: IdentityActor, input: ImportedConfigItem, context: CommandContext): Promise<{ id: number }> {
     this.assertAdmin(actor)
     if (actor.role !== 'super_admin') throw new SudoworkConfigError(403, '权限不足')
     assertTrustedCommandContext(context)
@@ -282,73 +287,71 @@ export class SudoworkConfigService {
     const previous = this.options.identities.getCommandResult<{ id: number }>(commandType, context.idempotencyKey)
     if (previous) return previous
 
-    return runInTransaction(this.options.db, () => {
-      const repeated = this.options.identities.getCommandResult<{ id: number }>(commandType, context.idempotencyKey)
-      if (repeated) return repeated
+    const repeated = this.options.identities.getCommandResult<{ id: number }>(commandType, context.idempotencyKey)
+    if (repeated) return repeated
 
-      const created = unwrapNative(this.options.configItems.create(input.ownerOrgId, actor.userId, {
-        name: input.name,
-        description: input.description ?? undefined,
-        icon: input.icon ?? undefined,
-        pinyin: input.pinyin ?? `legacy_config_${input.legacyId}`,
-        scope: 'system',
-        url_pattern: input.urlPattern ?? undefined,
-        scheme: input.scheme ?? undefined,
-        bearer_prefix: input.bearerPrefix ?? undefined,
-        entries: input.entries.map(({ legacyId: _legacyId, createdAt: _createdAt, updatedAt: _updatedAt, ...entry }) => entry),
-      })) as { id: number }
-      const nativeId = Number(created.id)
-      const assignedOrgIds = [...new Set(input.assignedOrgIds)]
-      const availability = input.visibleToAll ? 'all' : assignedOrgIds.length > 0 ? 'assigned' : 'organization'
-      this.options.db.prepare(`
-        UPDATE config_items
-        SET availability = ?, status = ?, pinyin = ?, created_at = ?, updated_at = ?
-        WHERE id = ?
-      `).run(
-        availability,
-        input.status,
-        input.pinyin,
-        input.createdAt ?? Date.now(),
-        input.updatedAt ?? input.createdAt ?? Date.now(),
-        nativeId,
+    const created = unwrapNative(await this.options.configItems.create(input.ownerOrgId, actor.userId, {
+      name: input.name,
+      description: input.description ?? undefined,
+      icon: input.icon ?? undefined,
+      pinyin: input.pinyin ?? `legacy_config_${input.legacyId}`,
+      scope: 'system',
+      url_pattern: input.urlPattern ?? undefined,
+      scheme: input.scheme ?? undefined,
+      bearer_prefix: input.bearerPrefix ?? undefined,
+      entries: input.entries.map(({ legacyId: _legacyId, createdAt: _createdAt, updatedAt: _updatedAt, ...entry }) => entry),
+    })) as { id: number }
+    const nativeId = Number(created.id)
+    const assignedOrgIds = [...new Set(input.assignedOrgIds)]
+    const availability = input.visibleToAll ? 'all' : assignedOrgIds.length > 0 ? 'assigned' : 'organization'
+    this.options.db.prepare(`
+      UPDATE config_items
+      SET availability = ?, status = ?, pinyin = ?, created_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      availability,
+      input.status,
+      input.pinyin,
+      input.createdAt ?? Date.now(),
+      input.updatedAt ?? input.createdAt ?? Date.now(),
+      nativeId,
+    )
+    const insertAssignment = this.options.db.prepare(`
+      INSERT INTO config_item_org_assignments (config_item_id, org_id, created_at)
+      VALUES (?, ?, ?)
+    `)
+    const timestamp = Date.now()
+    for (const orgId of assignedOrgIds) insertAssignment.run(nativeId, orgId, timestamp)
+    this.options.identities.assignNumericAlias({
+      namespace: 'config_item',
+      legacyId: input.legacyId,
+      resourceId: String(nativeId),
+      orgId: input.ownerOrgId,
+      migrationRunId: context.migrationRunId ?? null,
+    })
+    const entriesByKey = new Map(this.rawEntries(nativeId).map(entry => [String(entry.config_key), entry]))
+    for (const sourceEntry of input.entries) {
+      if (!Number.isSafeInteger(sourceEntry.legacyId) || sourceEntry.legacyId <= 0) {
+        throw new SudoworkConfigError(400, '旧配置字段 ID 无效')
+      }
+      const entry = entriesByKey.get(sourceEntry.config_key)
+      if (!entry) throw new SudoworkConfigError(500, `配置字段写入失败: ${sourceEntry.config_key}`)
+      this.options.db.prepare(`UPDATE config_entries SET created_at = ?, updated_at = ? WHERE id = ?`).run(
+        sourceEntry.createdAt ?? input.createdAt ?? Date.now(),
+        sourceEntry.updatedAt ?? input.updatedAt ?? sourceEntry.createdAt ?? input.createdAt ?? Date.now(),
+        Number(entry.id),
       )
-      const insertAssignment = this.options.db.prepare(`
-        INSERT INTO config_item_org_assignments (config_item_id, org_id, created_at)
-        VALUES (?, ?, ?)
-      `)
-      const timestamp = Date.now()
-      for (const orgId of assignedOrgIds) insertAssignment.run(nativeId, orgId, timestamp)
       this.options.identities.assignNumericAlias({
-        namespace: 'config_item',
-        legacyId: input.legacyId,
-        resourceId: String(nativeId),
+        namespace: 'config_entry',
+        legacyId: sourceEntry.legacyId,
+        resourceId: String(entry.id),
         orgId: input.ownerOrgId,
         migrationRunId: context.migrationRunId ?? null,
       })
-      const entriesByKey = new Map(this.rawEntries(nativeId).map(entry => [String(entry.config_key), entry]))
-      for (const sourceEntry of input.entries) {
-        if (!Number.isSafeInteger(sourceEntry.legacyId) || sourceEntry.legacyId <= 0) {
-          throw new SudoworkConfigError(400, '旧配置字段 ID 无效')
-        }
-        const entry = entriesByKey.get(sourceEntry.config_key)
-        if (!entry) throw new SudoworkConfigError(500, `配置字段写入失败: ${sourceEntry.config_key}`)
-        this.options.db.prepare(`UPDATE config_entries SET created_at = ?, updated_at = ? WHERE id = ?`).run(
-          sourceEntry.createdAt ?? input.createdAt ?? Date.now(),
-          sourceEntry.updatedAt ?? input.updatedAt ?? sourceEntry.createdAt ?? input.createdAt ?? Date.now(),
-          Number(entry.id),
-        )
-        this.options.identities.assignNumericAlias({
-          namespace: 'config_entry',
-          legacyId: sourceEntry.legacyId,
-          resourceId: String(entry.id),
-          orgId: input.ownerOrgId,
-          migrationRunId: context.migrationRunId ?? null,
-        })
-      }
-      const result = { id: input.legacyId }
-      this.options.identities.recordCommandResult(commandType, context.idempotencyKey, context.source, result)
-      return result
-    })
+    }
+    const result = { id: input.legacyId }
+    this.options.identities.recordCommandResult(commandType, context.idempotencyKey, context.source, result)
+    return result
   }
 
   async getTenantConfig(actor: IdentityActor, code: string) {
@@ -378,6 +381,47 @@ export class SudoworkConfigService {
     }
   }
 
+  private deleteNativeConfigItem(id: number): void {
+    const entryIds = (this.options.db.prepare('SELECT id FROM config_entries WHERE config_item_id = ?').all(id) as Array<{ id: number }>)
+      .map(row => String(row.id))
+    const deleteAlias = this.options.db.prepare(
+      'DELETE FROM resource_numeric_aliases WHERE namespace = ? AND resource_id = ?',
+    )
+    for (const entryId of entryIds) deleteAlias.run('config_entry', entryId)
+    deleteAlias.run('config_item', String(id))
+    this.options.db.prepare('DELETE FROM config_item_org_assignments WHERE config_item_id = ?').run(id)
+    this.options.db.prepare('DELETE FROM config_entries WHERE config_item_id = ?').run(id)
+    this.options.db.prepare('DELETE FROM config_items WHERE id = ?').run(id)
+  }
+
+  private restoreNativeConfigItem(row: SqlRow): void {
+    const sqlValue = (value: unknown): string | number | bigint | Buffer | null => {
+      if (
+        typeof value === 'string'
+        || typeof value === 'number'
+        || typeof value === 'bigint'
+        || Buffer.isBuffer(value)
+      ) return value
+      return null
+    }
+    this.options.db.prepare(`
+      UPDATE config_items
+      SET name = ?, description = ?, icon = ?, pinyin = ?, url_pattern = ?,
+          scheme = ?, bearer_prefix = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      sqlValue(row.name),
+      sqlValue(row.description),
+      sqlValue(row.icon),
+      sqlValue(row.pinyin),
+      sqlValue(row.url_pattern),
+      sqlValue(row.scheme),
+      sqlValue(row.bearer_prefix),
+      sqlValue(row.updated_at) ?? Date.now(),
+      sqlValue(row.id),
+    )
+  }
+
   private requireManageable(actor: IdentityActor, id: number): SqlRow {
     this.assertAdmin(actor)
     const nativeId = this.resolveNativeId(id)
@@ -404,12 +448,12 @@ export class SudoworkConfigService {
     return this.options.db.prepare('SELECT * FROM config_entries WHERE config_item_id = ? ORDER BY id').all(id) as SqlRow[]
   }
 
-  private enterpriseRows(id: number, associatedOnly: boolean): SqlRow[] {
+  private async enterpriseRows(id: number, associatedOnly: boolean): Promise<SqlRow[]> {
     const item = this.options.db.prepare('SELECT * FROM config_items WHERE id = ?').get(id) as SqlRow
     const assigned = new Set((this.options.db.prepare(
       'SELECT org_id FROM config_item_org_assignments WHERE config_item_id = ?',
     ).all(id) as Array<{ org_id: string }>).map(row => row.org_id))
-    return this.options.authDb.listOrganizations().flatMap(org => {
+    return (await this.options.authDb.listOrganizations()).flatMap(org => {
       const legacyId = this.options.identities.getNumericAlias('enterprise', org.id)
       if (legacyId === null) return []
       const isAssociated = item.availability === 'all'
@@ -427,7 +471,7 @@ export class SudoworkConfigService {
     return result
   }
 
-  private legacyItem(row: SqlRow, fallbackOrgId: string): SqlRow {
+  private async legacyItem(row: SqlRow, fallbackOrgId: string): Promise<SqlRow> {
     const assigned = Number(row.assigned_count ?? (this.options.db.prepare(
       'SELECT COUNT(*) AS count FROM config_item_org_assignments WHERE config_item_id = ?',
     ).get(Number(row.id)) as SqlRow).count)
@@ -435,7 +479,7 @@ export class SudoworkConfigService {
       ...row,
       id: this.legacyIdFor(Number(row.id), String(row.org_id ?? fallbackOrgId)),
       visible_to_all: row.availability === 'all' ? 1 : 0,
-      enterprise_count: row.availability === 'all' ? this.options.authDb.listOrganizations().length : assigned,
+      enterprise_count: row.availability === 'all' ? (await this.options.authDb.listOrganizations()).length : assigned,
     }
   }
 

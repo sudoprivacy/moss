@@ -20,8 +20,8 @@ class RecordingSql implements QmsSqlPort {
   }
 }
 
-describe('QMS PostgreSQL schema', () => {
-  it('owns legacy-compatible QMS tables plus reliable ingest and lease metadata', async () => {
+void describe('QMS PostgreSQL schema', () => {
+  void it('owns legacy-compatible QMS tables plus reliable ingest and lease metadata', async () => {
     const db = new RecordingSql()
     const result = await initializeQmsSchema(db)
     const sql = db.statements.join('\n')
@@ -54,7 +54,7 @@ describe('QMS PostgreSQL schema', () => {
     assert.doesNotMatch(sql, /CREATE TABLE IF NOT EXISTS telemetry_perf_daily/)
   })
 
-  it('uses regular PostgreSQL tables when TimescaleDB is unavailable', async () => {
+  void it('uses regular PostgreSQL tables when TimescaleDB is unavailable', async () => {
     const db = new RecordingSql()
     db.timescaleAvailable = false
 
@@ -68,7 +68,7 @@ describe('QMS PostgreSQL schema', () => {
     assert.doesNotMatch(sql, /CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_perf_daily/)
   })
 
-  it('preserves regular aggregate tables even when TimescaleDB later becomes available', async () => {
+  void it('preserves regular aggregate tables even when TimescaleDB later becomes available', async () => {
     const db = new RecordingSql()
     db.aggregateRelationKind = 'r'
 

@@ -31,8 +31,8 @@ function createApp(overrides: Partial<SudoworkLegacyUsagePort> = {}) {
   return { app, calls }
 }
 
-describe('Sudowork legacy usage routes', () => {
-  test('保留模型列表和用量上报响应结构并传递幂等键', async () => {
+void describe('Sudowork legacy usage routes', () => {
+  void test('保留模型列表和用量上报响应结构并传递幂等键', async () => {
     const { app, calls } = createApp()
     const models = await app.request('/api/v1/router/models')
     assert.equal(models.status, 200)
@@ -48,7 +48,7 @@ describe('Sudowork legacy usage routes', () => {
     assert.equal((calls.find(call => call.name === 'reportUsage')?.input as any).idempotencyKey, 'usage-1')
   })
 
-  test('用户和管理员接口分别执行旧鉴权边界', async () => {
+  void test('用户和管理员接口分别执行旧鉴权边界', async () => {
     const { app, calls } = createApp()
     assert.equal((await app.request('/api/v1/user/dashboard')).status, 401)
     assert.equal((await app.request('/api/v1/admin/users/17/ledger', {
@@ -77,7 +77,7 @@ describe('Sudowork legacy usage routes', () => {
     )
   })
 
-  test('模型用量统计保持旧日期校验文案且不调用服务', async () => {
+  void test('模型用量统计保持旧日期校验文案且不调用服务', async () => {
     const { app, calls } = createApp()
     const headers = { authorization: 'Bearer user' }
     const missing = await app.request('/api/v1/user/model-usage-stats', { headers })

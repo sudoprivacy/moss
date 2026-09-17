@@ -15,7 +15,7 @@ import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import { SudoworkCatalogError, SudoworkCatalogService } from './catalogService.js'
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:')
   db.exec(`
     CREATE TABLE tenant_assistants (
@@ -39,8 +39,8 @@ function setup() {
   const authDb = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
   const unified = new UnifiedIdentityService(db, authDb, identities)
-  const orgA = unified.createOrganization({ name: '企业 A', code: 'ENT-A' }, migrationCommandContext('test', 'org-a'))
-  const orgB = unified.createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+  const orgA = await unified.createOrganization({ name: '企业 A', code: 'ENT-A' }, migrationCommandContext('test', 'org-a'))
+  const orgB = await unified.createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
   const repository = new CatalogRepository(db)
   const catalog = new CatalogService(db, repository)
   const compatibility = new SudoworkCatalogService({
@@ -57,9 +57,9 @@ function setup() {
   return { db, repository, catalog, identities, compatibility, orgA, orgB }
 }
 
-describe('Sudowork Catalog 协议投影', () => {
-  test('按企业码返回旧 Hub 游标结构且不泄漏内部文件路径', () => {
-    const { db, repository, compatibility, orgA } = setup()
+void describe('Sudowork Catalog 协议投影', () => {
+  void test('按企业码返回旧 Hub 游标结构且不泄漏内部文件路径', async () => {
+    const { db, repository, compatibility, orgA } = await setup()
     repository.createAgent({
       id: 'agent-1', orgId: orgA.organizationId, name: 'writer', displayName: '写作助手',
       profession: '内容创作', description: 'desc', defaultInitPrompt: '开始',
@@ -82,8 +82,8 @@ describe('Sudowork Catalog 协议投影', () => {
     db.close()
   })
 
-  test('企业管理员不能借 tenant_id 查询或变更其他组织资源', () => {
-    const { db, repository, compatibility, orgA, orgB } = setup()
+  void test('企业管理员不能借 tenant_id 查询或变更其他组织资源', async () => {
+    const { db, repository, compatibility, orgA, orgB } = await setup()
     repository.createSkill({ id: 'skill-b', orgId: orgB.organizationId, name: 'B', authorId: 'admin-b' })
     const actor = { userId: 'admin-a', orgId: orgA.organizationId, role: 'admin' }
 
@@ -98,8 +98,8 @@ describe('Sudowork Catalog 协议投影', () => {
     db.close()
   })
 
-  test('普通用户的 Hub 列表只返回本地模式下已审批、启用且可见的统一资源', () => {
-    const { db, repository, compatibility, orgA } = setup()
+  void test('普通用户的 Hub 列表只返回本地模式下已审批、启用且可见的统一资源', async () => {
+    const { db, repository, compatibility, orgA } = await setup()
     const common = { orgId: orgA.organizationId, authorId: 'admin-a' }
     repository.createAgent({
       id: 'visible-agent', name: 'Visible Agent', status: 'approved',
@@ -124,8 +124,8 @@ describe('Sudowork Catalog 协议投影', () => {
     db.close()
   })
 
-  test('用户可见列表与 Dify binding 都来自同一 Agent 行', () => {
-    const { db, repository, compatibility, orgA } = setup()
+  void test('用户可见列表与 Dify binding 都来自同一 Agent 行', async () => {
+    const { db, repository, compatibility, orgA } = await setup()
     repository.createAgent({
       id: 'dify-1', orgId: orgA.organizationId, name: 'Dify', authorId: 'admin-a', status: 'approved',
       providerType: 'dify', supportedModes: 'both',
@@ -144,8 +144,8 @@ describe('Sudowork Catalog 协议投影', () => {
     db.close()
   })
 
-  test('分类列表覆盖全部可见资源而不是只扫描第一页', () => {
-    const { db, repository, compatibility, orgA } = setup()
+  void test('分类列表覆盖全部可见资源而不是只扫描第一页', async () => {
+    const { db, repository, compatibility, orgA } = await setup()
     for (let index = 0; index < 101; index += 1) {
       repository.createSkill({
         id: `skill-${String(index).padStart(3, '0')}`,
@@ -168,8 +168,8 @@ describe('Sudowork Catalog 协议投影', () => {
     db.close()
   })
 
-  test('公共和分配资源详情按访问者企业投影且私有资源不跨企业泄漏', () => {
-    const { db, repository, compatibility, orgA, orgB } = setup()
+  void test('公共和分配资源详情按访问者企业投影且私有资源不跨企业泄漏', async () => {
+    const { db, repository, compatibility, orgA, orgB } = await setup()
     repository.createAgent({
       id: 'public-agent', orgId: orgB.organizationId, name: 'Public', authorId: 'owner-b',
       status: 'approved', supportedModes: 'both', availability: 'all',
@@ -194,9 +194,9 @@ describe('Sudowork Catalog 协议投影', () => {
     db.close()
   })
 
-  test('旧上传、审批、详情和下载共用统一 Catalog 与制品', async () => {
+  void test('旧上传、审批、详情和下载共用统一 Catalog 与制品', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-catalog-compat-'))
-    const fixture = setup()
+    const fixture = await setup()
     try {
       const uploads = new CatalogUploadService({
         db: fixture.db,

@@ -32,15 +32,15 @@ function setup() {
   return { app, operations }
 }
 
-describe('Sudowork QMS compatibility routes', () => {
-  it('registers all 72 frozen QMS routes including both crash prefixes', () => {
+void describe('Sudowork QMS compatibility routes', () => {
+  void it('registers all 72 frozen QMS routes including both crash prefixes', () => {
     const { app } = setup()
     assert.equal(app.routes.length, 72)
     assert.equal(app.routes.some(route => route.path === '/api/v1/crash/events'), true)
     assert.equal(app.routes.some(route => route.path === '/api/v1/qms/crash/events'), true)
   })
 
-  it('keeps API key ingestion and old success envelope', async () => {
+  void it('keeps API key ingestion and old success envelope', async () => {
     const { app, operations } = setup()
     const response = await app.request('/api/v1/telemetry/perf', {
       method: 'POST', headers: { 'content-type': 'application/json', 'X-API-Key': 'secret' },
@@ -52,7 +52,7 @@ describe('Sudowork QMS compatibility routes', () => {
     assert.equal(operations.calls[0]?.tenantId, null)
   })
 
-  it('requires the actual legacy JWT boundary for system health and scopes enterprise admins', async () => {
+  void it('requires the actual legacy JWT boundary for system health and scopes enterprise admins', async () => {
     const { app, operations } = setup()
     assert.equal((await app.request('/api/v1/qms/system/health')).status, 401)
 
@@ -63,7 +63,7 @@ describe('Sudowork QMS compatibility routes', () => {
     assert.equal(operations.calls.at(-1)?.tenantId, 'tenant-a')
   })
 
-  it('keeps legacy telemetry validation and queue failure envelopes', async () => {
+  void it('keeps legacy telemetry validation and queue failure envelopes', async () => {
     const { app, operations } = setup()
     operations.execute = async () => {
       throw new TelemetryServiceError(400, 'TENANT_ID_REQUIRED', 'tenant_id is required for QMS telemetry ingestion', ['perf'])

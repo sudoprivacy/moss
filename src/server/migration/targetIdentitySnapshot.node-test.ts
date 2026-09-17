@@ -5,18 +5,18 @@ import { AuthCenterDb } from '../authCenter/db.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
 import { readTargetIdentitySnapshot } from './targetIdentitySnapshot.js'
 
-describe('readTargetIdentitySnapshot', () => {
-  test('从 Moss 统一身份表读取组织、用户、验证状态、Provider 与数字别名', () => {
+void describe('readTargetIdentitySnapshot', () => {
+  void test('从 Moss 统一身份表读取组织、用户、验证状态、Provider 与数字别名', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
     const identities = new IdentityRepository(db)
-    auth.createOrganization('org-a', '企业 A', 1)
+    await auth.createOrganization('org-a', '企业 A', 1)
     identities.putOrganizationProfile({
       orgId: 'org-a', code: 'ENT-A', codeVerified: true,
       loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })
     identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 7, resourceId: 'org-a', orgId: 'org-a' })
-    auth.createUser({
+    await auth.createUser({
       id: 'user-a', orgId: 'org-a', email: 'a@example.test', name: '13800000000',
       displayName: 'A', departmentId: null, role: 'user', status: 'active', localAuth: true,
       tokenLimit: null, createdAt: 1, passwordHash: 'hash', passwordUpdatedAt: 1,

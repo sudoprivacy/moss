@@ -5,11 +5,11 @@ import { AuthCenterDb } from '../authCenter/db.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
 import { ConfigAvailabilityService } from './configAvailabilityService.js'
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  auth.createOrganization('org-a', '企业 A', 1)
-  auth.createOrganization('org-b', '企业 B', 1)
+  await auth.createOrganization('org-a', '企业 A', 1)
+  await auth.createOrganization('org-b', '企业 B', 1)
   new IdentityRepository(db)
   db.exec(`CREATE TABLE config_items (
     id INTEGER PRIMARY KEY, scope TEXT NOT NULL, org_id TEXT,
@@ -23,9 +23,9 @@ function setup() {
   return { db, service: new ConfigAvailabilityService(db) }
 }
 
-describe('ConfigAvailabilityService', () => {
-  test('超级管理员原子替换指定组织授权', () => {
-    const { db, service } = setup()
+void describe('ConfigAvailabilityService', () => {
+  void test('超级管理员原子替换指定组织授权', async () => {
+    const { db, service } = await setup()
     service.replace(1, { availability: 'assigned', organizationIds: ['org-b'] })
     assert.deepEqual(service.get(1), {
       availability: 'assigned', ownerOrgId: 'org-a', organizationIds: ['org-b'],
@@ -34,8 +34,8 @@ describe('ConfigAvailabilityService', () => {
     db.close()
   })
 
-  test('未知组织或 user scope 时拒绝且不留下部分写入', () => {
-    const { db, service } = setup()
+  void test('未知组织或 user scope 时拒绝且不留下部分写入', async () => {
+    const { db, service } = await setup()
     assert.throws(() => service.replace(1, { availability: 'assigned', organizationIds: ['org-b', 'missing'] }), /组织不存在/)
     assert.equal(service.get(1).availability, 'organization')
     db.prepare("UPDATE config_items SET scope = 'user' WHERE id = 1").run()

@@ -9,12 +9,12 @@ import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService
 import { migrationCommandContext } from '../../../application/commandContext.js'
 import { SudoworkSystemConfigError, SudoworkSystemConfigService } from './systemConfigService.js'
 
-function setup(secretFailure = false) {
+async function setup(secretFailure = false) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
   const unified = new UnifiedIdentityService(db, authDb, identities)
-  const org = unified.createOrganization({ name: '企业 A', code: 'ENT-A' }, migrationCommandContext('test', 'org-a'))
+  const org = await unified.createOrganization({ name: '企业 A', code: 'ENT-A' }, migrationCommandContext('test', 'org-a'))
   const secrets = new Map<string, string>()
   const service = new SudoworkSystemConfigService({
     db,
@@ -52,9 +52,9 @@ function setup(secretFailure = false) {
   return { db, identities, org, secrets, service }
 }
 
-describe('Sudowork 系统配置统一服务', () => {
-  test('平台策略与组织 CAS Connection 投影为旧公开和管理响应', async () => {
-    const { db, identities, org, secrets, service } = setup()
+void describe('Sudowork 系统配置统一服务', () => {
+  void test('平台策略与组织 CAS Connection 投影为旧公开和管理响应', async () => {
+    const { db, identities, org, secrets, service } = await setup()
     try {
       const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
       await service.update(root, {
@@ -107,8 +107,8 @@ describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  test('权限、短信前置条件和 Nexus 失败不会留下部分策略', async () => {
-    const { db, org, service } = setup(true)
+  void test('权限、短信前置条件和 Nexus 失败不会留下部分策略', async () => {
+    const { db, org, service } = await setup(true)
     try {
       await assert.rejects(
         service.update({ userId: 'admin', orgId: org.organizationId, role: 'admin' }, { login_method: 1 }),
@@ -126,8 +126,8 @@ describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  test('短信和支付基础设施非敏感参数写入统一平台策略并要求重启', async () => {
-    const { db, org, service } = setup()
+  void test('短信和支付基础设施非敏感参数写入统一平台策略并要求重启', async () => {
+    const { db, org, service } = await setup()
     try {
       const legacyRoot = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
       const root = { ...legacyRoot, organizationScoped: true }
@@ -198,8 +198,8 @@ describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  test('拒绝非法短信和支付基础设施参数', async () => {
-    const { db, org, service } = setup()
+  void test('拒绝非法短信和支付基础设施参数', async () => {
+    const { db, org, service } = await setup()
     const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
     try {
       await assert.rejects(service.update(root, {

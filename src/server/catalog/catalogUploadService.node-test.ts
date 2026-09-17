@@ -49,8 +49,8 @@ function setup(failPublish = false) {
   return { db, repository, service, staged, discarded }
 }
 
-describe('统一目录上传编排', () => {
-  test('上传 Skill 写入统一主表并保持命令幂等', async () => {
+void describe('统一目录上传编排', () => {
+  void test('上传 Skill 写入统一主表并保持命令幂等', async () => {
     const { db, repository, service, staged } = setup()
     const actor = { userId: 'user-a', orgId: 'org-a', role: 'user' }
     const first = await service.uploadSkill({
@@ -68,7 +68,7 @@ describe('统一目录上传编排', () => {
     db.close()
   })
 
-  test('制品发布失败时撤销资源和幂等记录并清理暂存文件', async () => {
+  void test('制品发布失败时撤销资源和幂等记录并清理暂存文件', async () => {
     const { db, repository, service, discarded } = setup(true)
     const input = {
       actor: { userId: 'user-a', orgId: 'org-a', role: 'user' },

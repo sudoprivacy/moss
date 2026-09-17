@@ -18,8 +18,8 @@ class MaintenanceSql implements QmsTransactionalSqlPort {
   }
 }
 
-describe('QmsMaintenanceService', () => {
-  it('refreshes Timescale aggregates and relies on retention policies for raw cleanup', async () => {
+void describe('QmsMaintenanceService', () => {
+  void it('refreshes Timescale aggregates and relies on retention policies for raw cleanup', async () => {
     const db = new MaintenanceSql()
     const service = new QmsMaintenanceService({ db, continuousAggregates: true })
 
@@ -32,7 +32,7 @@ describe('QmsMaintenanceService', () => {
     assert.equal(db.statements.some(item => item.sql.includes('DELETE FROM telemetry_perf_raw')), false)
   })
 
-  it('uses separate transactions for regular daily aggregation and retention cleanup', async () => {
+  void it('uses separate transactions for regular daily aggregation and retention cleanup', async () => {
     const db = new MaintenanceSql()
     const service = new QmsMaintenanceService({ db, continuousAggregates: false })
 
@@ -46,7 +46,7 @@ describe('QmsMaintenanceService', () => {
     assert.ok(db.statements.some(item => item.sql.includes('DELETE FROM crash_events')))
   })
 
-  it('builds exactly six leased task definitions and recovers the queue before processing', async () => {
+  void it('builds exactly six leased task definitions and recovers the queue before processing', async () => {
     const calls: string[] = []
     const tasks = createQmsScheduledTasks({
       queue: {

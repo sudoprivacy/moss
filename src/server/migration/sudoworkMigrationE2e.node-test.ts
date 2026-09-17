@@ -51,8 +51,8 @@ class InterruptOncePhase extends NoopPhase {
   }
 }
 
-describe('Sudowork migration end to end', () => {
-  test('空 Moss 可完成跨阶段预检、迁移、校验并安全重复执行', async () => {
+void describe('Sudowork migration end to end', () => {
+  void test('空 Moss 可完成跨阶段预检、迁移、校验并安全重复执行', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
     ensureBillingSchema(db)
@@ -141,7 +141,7 @@ describe('Sudowork migration end to end', () => {
 
     const dryRun = await coordinator.dryRun()
     assert.equal(dryRun.status, 'ready')
-    assert.equal(auth.listOrganizations().length, 0)
+    assert.equal((await auth.listOrganizations()).length, 0)
 
     await assert.rejects(coordinator.execute(), /fixture interruption/)
     let first
@@ -182,9 +182,9 @@ describe('Sudowork migration end to end', () => {
 
     const second = await coordinator.execute()
     assert.equal(second.phases.length, 10)
-    assert.equal(auth.listOrganizations().length, 2)
-    assert.equal(auth.listUsersByOrg(org.resourceId).length, 1)
-    assert.equal(auth.listUsersByOrg(orgB.resourceId).length, 1)
+    assert.equal((await auth.listOrganizations()).length, 2)
+    assert.equal((await auth.listUsersByOrg(org.resourceId)).length, 1)
+    assert.equal((await auth.listUsersByOrg(orgB.resourceId)).length, 1)
     db.close()
   })
 })

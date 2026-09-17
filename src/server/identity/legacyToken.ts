@@ -103,13 +103,13 @@ export function verifyLegacyJwt(
   return payload as unknown as LegacyJwtClaims
 }
 
-export function resolveLegacyPrincipal(
+export async function resolveLegacyPrincipal(
   token: string,
   secret: string,
   repository: IdentityRepository,
   authDb: AuthCenterDb,
   nowSeconds?: number,
-): LegacyPrincipal | null {
+): Promise<LegacyPrincipal | null> {
   const claims = verifyLegacyJwt(token, secret, nowSeconds)
   if (!claims) return null
   const userAlias = repository.resolveNumericAliasGlobal('user', claims.id)
@@ -118,7 +118,7 @@ export function resolveLegacyPrincipal(
     const orgAlias = repository.resolveNumericAliasGlobal('enterprise', claims.enterprise_id)
     if (!orgAlias || orgAlias.resourceId !== userAlias.orgId) return null
   }
-  const user = authDb.getUserByIdAndOrg(userAlias.resourceId, userAlias.orgId)
+  const user = await authDb.getUserByIdAndOrg(userAlias.resourceId, userAlias.orgId)
   if (!user || user.status !== 'active') return null
   return {
     userId: user.id,

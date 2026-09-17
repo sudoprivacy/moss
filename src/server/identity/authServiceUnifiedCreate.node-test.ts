@@ -5,15 +5,15 @@ import { AuthService } from '../auth/service.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { IdentityRepository } from './identityRepository.js'
 
-test('Moss native user creation uses the unified identity command', () => {
+void test('Moss native user creation uses the unified identity command', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('org-a', 'Org A', 1)
-  authDb.setConfig('issuer', 'moss-test')
-  authDb.setConfig('jwt_secret', 'test-secret')
+  await authDb.createOrganization('org-a', 'Org A', 1)
+  await authDb.setConfig('issuer', 'moss-test')
+  await authDb.setConfig('jwt_secret', 'test-secret')
   const authService = new AuthService(authDb, 3600)
 
-  const created = authService.createUser({
+  const created = await authService.createUser({
     orgId: 'org-a',
     name: 'new-moss-user',
     password: 'StrongPass123',
@@ -31,12 +31,12 @@ test('Moss native user creation uses the unified identity command', () => {
   db.close()
 })
 
-test('Moss native user creation provisions Sudorouter before activating the Sudowork account', async () => {
+void test('Moss native user creation provisions Sudorouter before activating the Sudowork account', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('org-a', 'Org A', 1)
-  authDb.setConfig('issuer', 'moss-test')
-  authDb.setConfig('jwt_secret', 'test-secret')
+  await authDb.createOrganization('org-a', 'Org A', 1)
+  await authDb.setConfig('issuer', 'moss-test')
+  await authDb.setConfig('jwt_secret', 'test-secret')
   const authService = new AuthService(authDb, 3600)
   const observedStatuses: string[] = []
   const provisionedOwners: string[] = []
@@ -44,7 +44,7 @@ test('Moss native user creation provisions Sudorouter before activating the Sudo
     initialQuotaUnits: 50_000_000,
     accountProvisioner: {
       ensureAccount: async input => {
-        observedStatuses.push(authDb.getUserById(input.ownerId)?.status ?? 'missing')
+        observedStatuses.push((await authDb.getUserById(input.ownerId))?.status ?? 'missing')
         provisionedOwners.push(input.ownerId)
         return {
           externalUserId: 'router-71', token: 'secret-token', tokenSecretRef: 'nexus://token/ref',
@@ -65,8 +65,8 @@ test('Moss native user creation provisions Sudorouter before activating the Sudo
   assert.deepEqual(observedStatuses, ['pending', 'active'])
   assert.deepEqual(provisionedOwners, [created.user.id, created.user.id])
   assert.equal(retried.user.id, created.user.id)
-  assert.equal(authDb.listUsersByOrg('org-a').length, 1)
-  assert.equal(authDb.getUserById(created.user.id)?.status, 'active')
+  assert.equal((await authDb.listUsersByOrg('org-a')).length, 1)
+  assert.equal((await authDb.getUserById(created.user.id))?.status, 'active')
   assert.deepEqual(repository.getWallet('user', created.user.id), { balanceUnits: 100_000, version: 0 })
   assert.equal(
     repository.findAuthIdentity('phone', 'sudowork', '13800000000')?.userId,
@@ -77,15 +77,15 @@ test('Moss native user creation provisions Sudorouter before activating the Sudo
   db.close()
 })
 
-test('Moss native organization creation gets a profile, numeric alias, and wallet', () => {
+void test('Moss native organization creation gets a profile, numeric alias, and wallet', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('bootstrap-org', 'Bootstrap', 1)
-  authDb.setConfig('issuer', 'moss-test')
-  authDb.setConfig('jwt_secret', 'test-secret')
+  await authDb.createOrganization('bootstrap-org', 'Bootstrap', 1)
+  await authDb.setConfig('issuer', 'moss-test')
+  await authDb.setConfig('jwt_secret', 'test-secret')
   const authService = new AuthService(authDb, 3600)
 
-  const created = authService.createOrganization({
+  const created = await authService.createOrganization({
     name: 'New Organization',
     code: 'new-org',
     idempotencyKey: 'native-org-1',
@@ -94,7 +94,7 @@ test('Moss native organization creation gets a profile, numeric alias, and walle
   assert.equal(repository.getOrganizationProfileByCode('new-org')?.orgId, created.organization.id)
   assert(repository.getNumericAlias('enterprise', created.organization.id) !== null)
   assert.deepEqual(repository.getWallet('organization', created.organization.id), { balanceUnits: 0, version: 0 })
-  const listed = authService.listAllOrganizations().organizations.find(item => item.id === created.organization.id)
+  const listed = (await authService.listAllOrganizations()).organizations.find(item => item.id === created.organization.id)
   assert.equal(listed?.legacyId, repository.getNumericAlias('enterprise', created.organization.id))
   assert.equal(listed?.code, 'new-org')
 
@@ -102,24 +102,24 @@ test('Moss native organization creation gets a profile, numeric alias, and walle
   db.close()
 })
 
-test('AuthService startup backfills compatibility records without external outbox events', () => {
+void test('AuthService startup backfills compatibility records without external outbox events', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('org-existing', 'Existing Org', 1)
-  authDb.createUser({
+  await authDb.createOrganization('org-existing', 'Existing Org', 1)
+  await authDb.createUser({
     id: 'user-existing', orgId: 'org-existing', email: 'existing@example.test', name: 'existing',
     displayName: null, departmentId: null, role: 'user', status: 'active', localAuth: true,
     tokenLimit: null, createdAt: 1, passwordHash: null, passwordUpdatedAt: null,
     lastLoginAt: null, extUserId: null,
   })
-  authDb.createUser({
+  await authDb.createUser({
     id: 'user-oauth', orgId: 'org-existing', email: 'oauth@example.test', name: 'oauth-user',
     displayName: null, departmentId: null, role: 'user', status: 'active', localAuth: false,
     tokenLimit: null, createdAt: 2, passwordHash: null, passwordUpdatedAt: null,
     lastLoginAt: null, extUserId: 'oauth-1',
   })
-  authDb.setConfig('issuer', 'moss-test')
-  authDb.setConfig('jwt_secret', 'test-secret')
+  await authDb.setConfig('issuer', 'moss-test')
+  await authDb.setConfig('jwt_secret', 'test-secret')
   const authService = new AuthService(authDb, 3600)
   const repository = new IdentityRepository(db)
 
@@ -136,25 +136,25 @@ test('AuthService startup backfills compatibility records without external outbo
   db.close()
 })
 
-test('Moss native user list exposes stable legacy alias, wallet summary and full account state', () => {
+void test('Moss native user list exposes stable legacy alias, wallet summary and full account state', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('org-a', 'Org A', 1)
-  authDb.createUser({
+  await authDb.createOrganization('org-a', 'Org A', 1)
+  await authDb.createUser({
     id: 'pending-user', orgId: 'org-a', email: 'pending@example.test', name: 'pending',
     displayName: '待审批用户', departmentId: null, role: 'user', status: 'pending', localAuth: true,
     tokenLimit: null, createdAt: 1, passwordHash: 'secret-hash', passwordUpdatedAt: null,
     lastLoginAt: null, extUserId: null,
   })
-  authDb.setConfig('issuer', 'moss-test')
-  authDb.setConfig('jwt_secret', 'test-secret')
+  await authDb.setConfig('issuer', 'moss-test')
+  await authDb.setConfig('jwt_secret', 'test-secret')
   const authService = new AuthService(authDb, 3600)
   const repository = new IdentityRepository(db)
   const legacyId = repository.getNumericAlias('user', 'pending-user')
   db.prepare("UPDATE wallets SET balance_units = ? WHERE owner_type = 'user' AND owner_id = ?")
     .run(125_000, 'pending-user')
 
-  const listed = authService.listUsers('org-a').users[0]!
+  const listed = (await authService.listUsers('org-a')).users[0]!
   assert.equal(listed.status, 'pending')
   assert.equal(listed.legacyId, legacyId)
   assert.equal(listed.balanceUnits, 1250)
@@ -164,20 +164,29 @@ test('Moss native user list exposes stable legacy alias, wallet summary and full
   db.close()
 })
 
-test('Moss /me organization carries the active organization legacy alias and code', () => {
+void test('Moss /me organization carries the active organization legacy alias and code', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  authDb.createOrganization('org-a', 'Org A', 1)
-  authDb.createUser({
+  await authDb.createOrganization('org-a', 'Org A', 1)
+  await authDb.createUser({
     id: 'admin-a', orgId: 'org-a', email: 'admin@example.test', name: 'admin', displayName: null,
     departmentId: null, role: 'admin', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   })
-  authDb.setConfig('issuer', 'moss-test')
-  authDb.setConfig('jwt_secret', 'test-secret')
+  await authDb.setConfig('issuer', 'moss-test')
+  await authDb.setConfig('jwt_secret', 'test-secret')
   const authService = new AuthService(authDb, 3600)
   const repository = new IdentityRepository(db)
-  const response = authService.getMe({ userId: 'admin-a', orgId: 'org-a', role: 'admin', scopes: ['*'], keyId: 'key' })
+  const response = await authService.getMe({
+    rawToken: 'token',
+    userId: 'admin-a',
+    orgId: 'org-a',
+    role: 'admin',
+    scopes: ['*'],
+    keyId: 'key',
+    jti: 'jti',
+    exp: 1,
+  })
   assert.equal(response.organization?.legacyId, repository.getNumericAlias('enterprise', 'org-a'))
   assert.equal(response.organization?.code, repository.getOrganizationProfile('org-a')?.code)
   authService.destroy()

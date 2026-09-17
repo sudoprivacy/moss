@@ -6,11 +6,11 @@ import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
 import { DifyConnectionService, DifyDomainError, parseNexusSecretRef } from './difyConnectionService.js'
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  auth.createOrganization('org-a', 'Org A', 1)
-  auth.createOrganization('org-b', 'Org B', 1)
+  await auth.createOrganization('org-a', 'Org A', 1)
+  await auth.createOrganization('org-b', 'Org B', 1)
   db.exec(`
     CREATE TABLE tenant_assistants (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
@@ -37,7 +37,7 @@ function setup() {
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   }
-  auth.createUser(user)
+  await auth.createUser(user)
   identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
   identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
   identities.putIntegrationConnection({
@@ -66,9 +66,9 @@ function setup() {
 const actor = { userId: 'user-a', orgId: 'org-a', role: 'user' }
 const visibility = { isAdmin: false, userId: 'user-a', departmentId: null, visibleDepartmentIds: new Set<string>() }
 
-describe('DifyConnectionService', () => {
-  test('uses legacy aliases for Dify EndUser and resolves the API key only through Nexus', async () => {
-    const { db, service, reads } = setup()
+void describe('DifyConnectionService', () => {
+  void test('uses legacy aliases for Dify EndUser and resolves the API key only through Nexus', async () => {
+    const { db, service, reads } = await setup()
 
     const context = await service.resolveRuntimeContext(actor, 'agent-a', visibility)
 
@@ -82,8 +82,8 @@ describe('DifyConnectionService', () => {
     db.close()
   })
 
-  test('rejects an invisible agent before reading any secret', async () => {
-    const { db, catalog, service, reads } = setup()
+  void test('rejects an invisible agent before reading any secret', async () => {
+    const { db, catalog, service, reads } = await setup()
     db.prepare('UPDATE tenant_assistants SET visible_to = ? WHERE id = ?')
       .run(JSON.stringify({ user_ids: ['someone-else'] }), 'agent-a')
     assert(catalog.findAgent('agent-a'))
@@ -96,8 +96,8 @@ describe('DifyConnectionService', () => {
     db.close()
   })
 
-  test('never falls back to a connection owned by another organization', async () => {
-    const { db, identities, catalog, service, reads } = setup()
+  void test('never falls back to a connection owned by another organization', async () => {
+    const { db, identities, catalog, service, reads } = await setup()
     identities.putIntegrationConnection({
       id: 'dify-org-b', orgId: 'org-b', providerType: 'dify', name: 'Dify B', enabled: true,
       secretRef: 'nexus://org:org-b:dify/service-api-key', config: { tenantId: 'tenant-b' },
@@ -114,8 +114,8 @@ describe('DifyConnectionService', () => {
     db.close()
   })
 
-  test('fails closed when a permanent legacy alias is missing', async () => {
-    const { db, identities, service, reads } = setup()
+  void test('fails closed when a permanent legacy alias is missing', async () => {
+    const { db, identities, service, reads } = await setup()
     db.prepare("DELETE FROM resource_numeric_aliases WHERE namespace = 'user' AND resource_id = 'user-a'").run()
     assert.equal(identities.getNumericAlias('user', 'user-a'), null)
 
@@ -127,15 +127,15 @@ describe('DifyConnectionService', () => {
     db.close()
   })
 
-  test('parses a Nexus reference without confusing colons in the namespace', () => {
+  void test('parses a Nexus reference without confusing colons in the namespace', async () => {
     assert.deepEqual(parseNexusSecretRef('nexus://org:org-a:dify/service-api-key'), {
       namespace: 'org:org-a:dify', key: 'service-api-key',
     })
     assert.throws(() => parseNexusSecretRef('plaintext-secret'), /Nexus secret reference/)
   })
 
-  test('resolves app-scoped enhancement keys from appSecretRef', async () => {
-    const { db, catalog, service, reads } = setup()
+  void test('resolves app-scoped enhancement keys from appSecretRef', async () => {
+    const { db, catalog, service, reads } = await setup()
     db.prepare('UPDATE tenant_assistants SET provider_binding = ? WHERE id = ?').run(JSON.stringify({
       connectionId: 'dify-org-a', appId: 'app-a', mode: 'workflow', tenantId: 'tenant-a',
       appSecretRef: 'nexus://org:org-a:dify/apps/app-a',
@@ -151,8 +151,8 @@ describe('DifyConnectionService', () => {
     db.close()
   })
 
-  test('resolves pure dataset enhancement without requiring an app id or app key', async () => {
-    const { db, catalog, service, reads } = setup()
+  void test('resolves pure dataset enhancement without requiring an app id or app key', async () => {
+    const { db, catalog, service, reads } = await setup()
     catalog.createAgent({
       id: 'rag-a', orgId: 'org-a', name: 'RAG A', authorId: 'admin-a', status: 'approved',
       providerType: 'dify', supportedModes: 'both',
@@ -169,16 +169,16 @@ describe('DifyConnectionService', () => {
     db.close()
   })
 
-  test('describes enhancement without reading Nexus secrets', () => {
-    const { db, service, reads } = setup()
-    const probe = service.describeEnhancement(actor, 'agent-a', visibility)
+  void test('describes enhancement without reading Nexus secrets', async () => {
+    const { db, service, reads } = await setup()
+    const probe = await service.describeEnhancement(actor, 'agent-a', visibility)
     assert.deepEqual(probe, { enabled: true, mode: 'agent-chat' })
     assert.equal(reads.length, 0)
     db.close()
   })
 
-  test('resolves one organization connection and rejects an ambiguous default', async () => {
-    const { db, identities, service, reads } = setup()
+  void test('resolves one organization connection and rejects an ambiguous default', async () => {
+    const { db, identities, service, reads } = await setup()
     const resolved = await service.resolveOrganizationContext('org-a')
     assert.equal(resolved.connectionId, 'dify-org-a')
     assert.equal(resolved.apiKey, 'service-api-secret')

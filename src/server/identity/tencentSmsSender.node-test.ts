@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { TencentSmsSender } from './tencentSmsSender.js'
 
-describe('Tencent SMS sender', () => {
-  test('uses the legacy request shape and normalizes mainland phone numbers', async () => {
+void describe('Tencent SMS sender', () => {
+  void test('uses the legacy request shape and normalizes mainland phone numbers', async () => {
     let request: Record<string, unknown> | undefined
     const sender = new TencentSmsSender({
       sdkAppId: '1400000000', signName: '企业签名', templateId: '1234', signId: '5678',
@@ -24,7 +24,7 @@ describe('Tencent SMS sender', () => {
     })
   })
 
-  test('surfaces provider rejection without leaking credentials', async () => {
+  void test('surfaces provider rejection without leaking credentials', async () => {
     const sender = new TencentSmsSender({
       sdkAppId: 'app', signName: 'sign', templateId: 'tpl', signId: 'sign-id',
       client: {

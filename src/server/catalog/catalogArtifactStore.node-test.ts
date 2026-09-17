@@ -12,8 +12,8 @@ async function zip(entries: Record<string, string>): Promise<Buffer> {
   return archive.generateAsync({ type: 'nodebuffer' })
 }
 
-describe('统一目录制品存储', () => {
-  test('暂存、原子发布并按 checksum 读取 Skill 制品', async () => {
+void describe('统一目录制品存储', () => {
+  void test('暂存、原子发布并按 checksum 读取 Skill 制品', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-catalog-artifacts-'))
     try {
       const store = new CatalogArtifactStore(root)
@@ -30,7 +30,7 @@ describe('统一目录制品存储', () => {
     }
   })
 
-  test('拒绝缺少 SKILL.md 的 Skill、危险路径和篡改文件', async () => {
+  void test('拒绝缺少 SKILL.md 的 Skill、危险路径和篡改文件', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-catalog-artifacts-'))
     try {
       const store = new CatalogArtifactStore(root)

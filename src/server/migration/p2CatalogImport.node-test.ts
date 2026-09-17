@@ -52,8 +52,8 @@ async function skillArchive(): Promise<Buffer> {
   return archive.generateAsync({ type: 'nodebuffer' })
 }
 
-describe('P2 目录迁移编排', () => {
-  test('保留历史 Skill 元数据并发布经过校验的制品，重复执行不会复制数据', async () => {
+void describe('P2 目录迁移编排', () => {
+  void test('保留历史 Skill 元数据并发布经过校验的制品，重复执行不会复制数据', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-p2-import-'))
     const fixture = setup(root)
     try {
@@ -87,7 +87,7 @@ describe('P2 目录迁移编排', () => {
     }
   })
 
-  test('源 checksum 不一致时不写主数据和幂等记录', async () => {
+  void test('源 checksum 不一致时不写主数据和幂等记录', async () => {
     const root = await mkdtemp(join(tmpdir(), 'moss-p2-import-'))
     const fixture = setup(root)
     try {

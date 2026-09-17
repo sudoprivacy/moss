@@ -4,8 +4,8 @@ import { describe, test } from 'node:test'
 import { ClientPolicyRepository } from './clientPolicyRepository.js'
 import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
-describe('统一客户端策略仓库', () => {
-  test('平台默认与组织覆盖合并且不复制整份策略', () => {
+void describe('统一客户端策略仓库', () => {
+  void test('平台默认与组织覆盖合并且不复制整份策略', () => {
     const db = new DatabaseSync(':memory:')
     const repository = new ClientPolicyRepository(db)
     repository.putPlatform({
@@ -34,7 +34,7 @@ describe('统一客户端策略仓库', () => {
     db.close()
   })
 
-  test('拒绝把密钥材料写入 SQLite，并参加外层 SAVEPOINT 回滚', () => {
+  void test('拒绝把密钥材料写入 SQLite，并参加外层 SAVEPOINT 回滚', () => {
     const db = new DatabaseSync(':memory:')
     const repository = new ClientPolicyRepository(db)
     assert.throws(

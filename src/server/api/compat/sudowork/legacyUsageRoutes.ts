@@ -1,7 +1,7 @@
 import type { Hono } from 'hono'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
 
-type ActorResolver = (authorization: string | undefined) => IdentityActor | null
+type ActorResolver = (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
 
 export interface SudoworkLegacyUsagePort {
   listModels(): Promise<unknown[]> | unknown[]
@@ -44,8 +44,8 @@ export function registerSudoworkLegacyUsageRoutes(
     return options.usage
   }
   const unauthorized = (context: any) => context.json({ success: false, msg: '未授权' }, 401)
-  const actorFor = (context: any, admin = false) => (
-    admin ? options.getAdminActor(context.req.header('Authorization')) : options.getActor(context.req.header('Authorization'))
+  const actorFor = async (context: any, admin = false) => (
+    admin ? await options.getAdminActor(context.req.header('Authorization')) : await options.getActor(context.req.header('Authorization'))
   )
 
   app.get('/api/v1/router/models', async context => (
@@ -53,7 +53,7 @@ export function registerSudoworkLegacyUsageRoutes(
   ))
 
   app.post('/api/v1/usage/report', async context => {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     const body = await context.req.json<Record<string, unknown>>().catch((): Record<string, unknown> => ({}))
     return context.json(await usage().reportUsage({
@@ -66,13 +66,13 @@ export function registerSudoworkLegacyUsageRoutes(
   })
 
   app.get('/api/v1/user/dashboard', async context => {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: await usage().getDashboard(actor) })
   })
 
   app.get('/api/v1/user/ledger', async context => {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     const result = await usage().listLedger({
       actor,
@@ -83,13 +83,13 @@ export function registerSudoworkLegacyUsageRoutes(
   })
 
   app.get('/api/v1/user/stats', async context => {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: await usage().getStats(actor) })
   })
 
   app.get('/api/v1/user/model-usage-stats', async context => {
-    const actor = actorFor(context)
+    const actor = await actorFor(context)
     if (!actor) return unauthorized(context)
     const startDate = context.req.query('start_date')
     const endDate = context.req.query('end_date')
@@ -113,7 +113,7 @@ export function registerSudoworkLegacyUsageRoutes(
   })
 
   app.get('/api/v1/admin/users/:id/ledger', async context => {
-    const actor = actorFor(context, true)
+    const actor = await actorFor(context, true)
     if (!actor) return unauthorized(context)
     return context.json({ success: true, data: await usage().listAdminUserLedger({
       actor,

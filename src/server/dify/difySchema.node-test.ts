@@ -3,8 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { ensureDifySchema } from './difySchema.js'
 
-describe('统一 Dify Provider schema', () => {
-  test('is idempotent and contains resources, operations, and migration checkpoints only', () => {
+void describe('统一 Dify Provider schema', () => {
+  void test('is idempotent and contains resources, operations, and migration checkpoints only', async () => {
     const db = new DatabaseSync(':memory:')
     ensureDifySchema(db)
     ensureDifySchema(db)
@@ -19,7 +19,7 @@ describe('统一 Dify Provider schema', () => {
     db.close()
   })
 
-  test('enforces organization-scoped external resources and operation states', () => {
+  void test('enforces organization-scoped external resources and operation states', async () => {
     const db = new DatabaseSync(':memory:')
     ensureDifySchema(db)
     const insert = db.prepare(`

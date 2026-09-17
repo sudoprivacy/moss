@@ -18,8 +18,8 @@ function setup(): DatabaseSync {
   return db
 }
 
-describe('Billing Schema', () => {
-  test('可重复初始化完整的统一计费表', () => {
+void describe('Billing Schema', () => {
+  void test('可重复初始化完整的统一计费表', () => {
     const db = setup()
     ensureBillingSchema(db)
     ensureBillingSchema(db)
@@ -49,7 +49,7 @@ describe('Billing Schema', () => {
     db.close()
   })
 
-  test('拒绝非法订单状态和非整数财务单位', () => {
+  void test('拒绝非法订单状态和非整数财务单位', () => {
     const db = setup()
     ensureBillingSchema(db)
 
@@ -71,7 +71,7 @@ describe('Billing Schema', () => {
     db.close()
   })
 
-  test('账本幂等键唯一且已入账记录不可更新或删除', () => {
+  void test('账本幂等键唯一且已入账记录不可更新或删除', () => {
     const db = setup()
     ensureBillingSchema(db)
     const insert = db.prepare(`
@@ -94,7 +94,7 @@ describe('Billing Schema', () => {
     db.close()
   })
 
-  test('旧账本表升级时补齐稳定数字 ID 并恢复只追加约束', () => {
+  void test('旧账本表升级时补齐稳定数字 ID 并恢复只追加约束', () => {
     const db = setup()
     db.exec(`
       CREATE TABLE billing_ledger_entries (

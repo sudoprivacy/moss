@@ -57,7 +57,7 @@ export class P2MigrationCoordinator {
     if (plan.status === 'blocked') throw new P2MigrationPreflightError(plan)
     const catalog = await this.domains.catalog.execute(migrationRunId)
     const managedImages = await this.domains.managedImages.execute(migrationRunId)
-    const configuration = this.domains.configuration.execute(migrationRunId)
+    const configuration = await this.domains.configuration.execute(migrationRunId)
     const systemConfiguration = await this.domains.systemConfiguration.execute(migrationRunId)
     return { migrationRunId, catalog, managedImages, configuration, systemConfiguration }
   }

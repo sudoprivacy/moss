@@ -6,8 +6,8 @@ import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { SudoworkIdentitySourceReader } from './sudoworkIdentitySourceReader.js'
 
-describe('SudoworkIdentitySourceReader', () => {
-  test('reads organizations, users and CAS identities from a frozen SQLite snapshot', () => {
+void describe('SudoworkIdentitySourceReader', () => {
+  void test('reads organizations, users and CAS identities from a frozen SQLite snapshot', () => {
     const directory = mkdtempSync(join(tmpdir(), 'moss-identity-source-'))
     const path = join(directory, 'sudowork.sqlite')
     const db = new DatabaseSync(path)
@@ -39,7 +39,7 @@ describe('SudoworkIdentitySourceReader', () => {
     }
   })
 
-  test('rejects users with missing organizations', () => {
+  void test('rejects users with missing organizations', () => {
     const directory = mkdtempSync(join(tmpdir(), 'moss-identity-source-'))
     const path = join(directory, 'sudowork.sqlite')
     const db = new DatabaseSync(path)
@@ -65,7 +65,7 @@ describe('SudoworkIdentitySourceReader', () => {
     }
   })
 
-  test('preserves every provider identity owned by the same legacy user', () => {
+  void test('preserves every provider identity owned by the same legacy user', () => {
     const directory = mkdtempSync(join(tmpdir(), 'moss-identity-source-'))
     const path = join(directory, 'sudowork.sqlite')
     const db = new DatabaseSync(path)

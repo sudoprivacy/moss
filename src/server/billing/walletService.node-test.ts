@@ -9,17 +9,17 @@ import { ensureBillingSchema } from './billingSchema.js'
 import { BillingDomainError } from './types.js'
 import { WalletService } from './walletService.js'
 
-function setup(initialBalance = 0): {
+async function setup(initialBalance = 0): Promise<{
   db: DatabaseSync
   repository: BillingRepository
   service: WalletService
-} {
+}> {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
-  auth.createOrganization('org1', 'Org 1', 1)
-  auth.createUser({
+  await auth.createOrganization('org1', 'Org 1', 1)
+  await auth.createUser({
     id: 'u1', orgId: 'org1', email: 'u1@example.test', name: 'u1', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
@@ -30,9 +30,9 @@ function setup(initialBalance = 0): {
   return { db, repository, service: new WalletService(db, repository) }
 }
 
-describe('WalletService', () => {
-  test('余额、版本、流水和审计原子提交且重复幂等键只入账一次', () => {
-    const { db, repository, service } = setup()
+void describe('WalletService', () => {
+  void test('余额、版本、流水和审计原子提交且重复幂等键只入账一次', async () => {
+    const { db, repository, service } = await setup()
     const context = onlineCommandContext('admin-bonus-1')
     const command = {
       ownerType: 'user' as const,
@@ -56,8 +56,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('余额不足时不写钱包、流水或审计', () => {
-    const { db, repository, service } = setup(20)
+  void test('余额不足时不写钱包、流水或审计', async () => {
+    const { db, repository, service } = await setup(20)
 
     assert.throws(() => service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: -21, entryType: 'CONSUME',
@@ -71,8 +71,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('按百分之一积分精确入账并可从流水重建余额', () => {
-    const { db, repository, service } = setup(1)
+  void test('按百分之一积分精确入账并可从流水重建余额', async () => {
+    const { db, repository, service } = await setup(1)
 
     const result = service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: -0.01, entryType: 'CONSUME',
@@ -90,8 +90,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('同一幂等键绑定不同财务命令时拒绝而不是返回旧结果', () => {
-    const { db, repository, service } = setup()
+  void test('同一幂等键绑定不同财务命令时拒绝而不是返回旧结果', async () => {
+    const { db, repository, service } = await setup()
     const context = onlineCommandContext('conflicting-key')
     service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: 10, entryType: 'BONUS',
@@ -108,8 +108,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('流水插入失败时钱包版本和余额一并回滚', () => {
-    const { db, repository, service } = setup()
+  void test('流水插入失败时钱包版本和余额一并回滚', async () => {
+    const { db, repository, service } = await setup()
     db.exec(`
       CREATE TRIGGER fail_test_ledger BEFORE INSERT ON billing_ledger_entries
       WHEN NEW.idempotency_key = 'wallet:rollback-1'
@@ -126,8 +126,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('余额重建只报告差异而不偷偷修复快照', () => {
-    const { db, repository, service } = setup()
+  void test('余额重建只报告差异而不偷偷修复快照', async () => {
+    const { db, repository, service } = await setup()
     service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: 40, entryType: 'BONUS',
       sourceType: 'test', sourceId: 'rebuild-1',
@@ -139,8 +139,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('迁移已验证历史流水时不重复增加 P1 已导入的钱包余额', () => {
-    const { db, repository, service } = setup(100)
+  void test('迁移已验证历史流水时不重复增加 P1 已导入的钱包余额', async () => {
+    const { db, repository, service } = await setup(100)
     const context = migrationCommandContext('p3-run', 'p3-wallet-user-17')
     const input = {
       ownerId: 'u1', legacyUserId: 17, balanceUnits: 100, sourceChecksum: 'a'.repeat(64),
@@ -161,8 +161,8 @@ describe('WalletService', () => {
     db.close()
   })
 
-  test('迁移历史流水有矛盾时整条命令回滚且不覆盖钱包找平', () => {
-    const { db, repository, service } = setup()
+  void test('迁移历史流水有矛盾时整条命令回滚且不覆盖钱包找平', async () => {
+    const { db, repository, service } = await setup()
 
     assert.throws(() => service.importLegacySnapshot({
       ownerId: 'u1', legacyUserId: 17, balanceUnits: 100, sourceChecksum: 'b'.repeat(64),

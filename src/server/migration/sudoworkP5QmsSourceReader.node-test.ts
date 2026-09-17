@@ -31,8 +31,8 @@ class FakeSourceDatabase implements QmsSqlPort {
   }
 }
 
-describe('Sudowork P5 QMS 只读源快照', () => {
-  it('只读取固定白名单、稳定分页并生成不暴露数据的确定性摘要', async () => {
+void describe('Sudowork P5 QMS 只读源快照', () => {
+  void it('只读取固定白名单、稳定分页并生成不暴露数据的确定性摘要', async () => {
     const db = new FakeSourceDatabase()
     const reader = new SudoworkP5QmsSourceReader(db)
 
@@ -51,7 +51,7 @@ describe('Sudowork P5 QMS 只读源快照', () => {
     assert(db.queries.every(query => !/DROP|UPDATE|INSERT|DELETE/i.test(query.sql)))
   })
 
-  it('拒绝读取白名单外的数据表', async () => {
+  void it('拒绝读取白名单外的数据表', async () => {
     const reader = new SudoworkP5QmsSourceReader(new FakeSourceDatabase())
     await assert.rejects(
       reader.readBatch('users' as never, 0, 100),

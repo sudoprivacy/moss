@@ -24,8 +24,8 @@ class RecordingDatabase implements QmsTransactionalSqlPort {
   }
 }
 
-describe('P5 QMS PostgreSQL 迁移目标', () => {
-  it('在同一 PostgreSQL 事务中写 receipt、业务行和 checkpoint', async () => {
+void describe('P5 QMS PostgreSQL 迁移目标', () => {
+  void it('在同一 PostgreSQL 事务中写 receipt、业务行和 checkpoint', async () => {
     const db = new RecordingDatabase()
     const target = new PostgresP5QmsMigrationTarget(db, { timescaleAvailable: true, continuousAggregates: false })
 
@@ -41,7 +41,7 @@ describe('P5 QMS PostgreSQL 迁移目标', () => {
     assert.match(db.statements[2]!.sql, /source_checksum=EXCLUDED.source_checksum/)
   })
 
-  it('ingest receipt 冲突时不继续业务行或 checkpoint', async () => {
+  void it('ingest receipt 冲突时不继续业务行或 checkpoint', async () => {
     const db = new RecordingDatabase()
     db.conflictReceipt = true
     const target = new PostgresP5QmsMigrationTarget(db, { timescaleAvailable: false, continuousAggregates: false })

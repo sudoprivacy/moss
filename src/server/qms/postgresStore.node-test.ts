@@ -25,8 +25,8 @@ class FakeClient implements QmsDatabaseClient {
   }
 }
 
-describe('QmsPostgresStore lifecycle', () => {
-  it('connects lazily, verifies health and initializes schema', async () => {
+void describe('QmsPostgresStore lifecycle', () => {
+  void it('connects lazily, verifies health and initializes schema', async () => {
     const client = new FakeClient()
     let factoryCalls = 0
     const store = new QmsPostgresStore('postgres://qms:secret@db/qms', () => {
@@ -44,7 +44,7 @@ describe('QmsPostgresStore lifecycle', () => {
     assert.deepEqual(await store.execute('SELECT 2 AS value'), [{ healthy: 1 }])
   })
 
-  it('closes a partially started client when initialization fails', async () => {
+  void it('closes a partially started client when initialization fails', async () => {
     const client = new FakeClient()
     client.failHealth = true
     const store = new QmsPostgresStore('postgres://qms:secret@db/qms', () => client)
@@ -54,7 +54,7 @@ describe('QmsPostgresStore lifecycle', () => {
     await assert.rejects(() => store.execute('SELECT 1'), /not started/)
   })
 
-  it('starts and stops idempotently', async () => {
+  void it('starts and stops idempotently', async () => {
     const client = new FakeClient()
     let factoryCalls = 0
     const store = new QmsPostgresStore('postgres://qms:secret@db/qms', () => {
@@ -71,7 +71,7 @@ describe('QmsPostgresStore lifecycle', () => {
     assert.equal(client.closeCalls, 1)
   })
 
-  it('allows the migration command to force regular aggregate tables', async () => {
+  void it('allows the migration command to force regular aggregate tables', async () => {
     const client = new FakeClient()
     client.timescaleAvailable = true
     const store = new QmsPostgresStore(

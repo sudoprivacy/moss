@@ -21,8 +21,8 @@ const infrastructure = {
   },
 }
 
-describe('Sudowork Billing 运行配置', () => {
-  test('在线计费关闭时仍可独立装配 Sudorouter 用户生命周期', () => {
+void describe('Sudowork Billing 运行配置', () => {
+  void test('在线计费关闭时仍可独立装配 Sudorouter 用户生命周期', () => {
     assert.deepEqual(resolveSudorouterRuntimeConfig({
       infrastructure: infrastructure.sudorouter,
       environment: {},
@@ -35,7 +35,7 @@ describe('Sudowork Billing 运行配置', () => {
     })
   })
 
-  test('非敏感参数来自统一策略且敏感值来自 Nexus', () => {
+  void test('非敏感参数来自统一策略且敏感值来自 Nexus', () => {
     const secrets = new Map([
       ['server.fuiou-merchant-private-key', 'nexus-private'],
       ['server.fuiou-public-key', 'nexus-public'],
@@ -62,7 +62,7 @@ describe('Sudowork Billing 运行配置', () => {
     })
   })
 
-  test('旧环境变量和密钥文件保持最高优先级', () => {
+  void test('旧环境变量和密钥文件保持最高优先级', () => {
     const resolved = resolveBillingRuntimeConfig({
       infrastructure,
       environment: {
@@ -84,7 +84,7 @@ describe('Sudowork Billing 运行配置', () => {
     assert.equal(resolved?.sudorouterApiToken, 'env-token')
   })
 
-  test('启用时缺少必要配置会阻止启动，关闭时不要求凭据', () => {
+  void test('启用时缺少必要配置会阻止启动，关闭时不要求凭据', () => {
     assert.equal(resolveBillingRuntimeConfig({
       infrastructure: { ...infrastructure, enabled: false },
       environment: {}, getSecret: () => undefined, readFile: () => '',

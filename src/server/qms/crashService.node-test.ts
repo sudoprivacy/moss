@@ -38,13 +38,13 @@ const event: CrashEvent = {
   error_message: 'boom', stack_trace: 'at fn (/app/a.js:10:20)\nat run (/app/b.js:30:40)',
 }
 
-describe('CrashService', () => {
-  it('keeps the legacy normalized stack fingerprint and issue title', () => {
+void describe('CrashService', () => {
+  void it('keeps the legacy normalized stack fingerprint and issue title', () => {
     assert.equal(generateCrashFingerprint(event), 'TypeError:f5f14a8ff7962c26')
     assert.equal(generateCrashIssueTitle(event), 'TypeError: boom')
   })
 
-  it('locks by tenant and fingerprint, creates one issue and inserts an idempotent event', async () => {
+  void it('locks by tenant and fingerprint, creates one issue and inserts an idempotent event', async () => {
     const db = new CrashSql()
     const service = new CrashService({ db, tenants: { hasCode: code => code === 'tenant-a' } })
 
@@ -57,7 +57,7 @@ describe('CrashService', () => {
     assert.equal(db.statements.at(-1)!.parameters[0], 'event-1')
   })
 
-  it('stores a symbolicated stack resolved for the event tenant and release', async () => {
+  void it('stores a symbolicated stack resolved for the event tenant and release', async () => {
     const db = new CrashSql()
     const calls: unknown[] = []
     const service = new CrashService({
@@ -81,7 +81,7 @@ describe('CrashService', () => {
     assert.ok(insert.parameters.includes('at fn (src/a.ts:1:2)'))
   })
 
-  it('returns the existing issue without incrementing when ingest id is replayed', async () => {
+  void it('returns the existing issue without incrementing when ingest id is replayed', async () => {
     const db = new CrashSql()
     db.existingEvent = { issue_id: 9 }
     const service = new CrashService({ db, tenants: { hasCode: () => true } })
@@ -91,7 +91,7 @@ describe('CrashService', () => {
     assert.equal(db.statements.some(item => item.sql.includes('INSERT INTO crash_issues')), false)
   })
 
-  it('rejects missing required fields and unknown tenants before opening a transaction', async () => {
+  void it('rejects missing required fields and unknown tenants before opening a transaction', async () => {
     const db = new CrashSql()
     const service = new CrashService({ db, tenants: { hasCode: () => false } })
 
@@ -100,7 +100,7 @@ describe('CrashService', () => {
     assert.equal(db.statements.length, 0)
   })
 
-  it('validates the entire batch before writing any event', async () => {
+  void it('validates the entire batch before writing any event', async () => {
     const db = new CrashSql()
     const service = new CrashService({ db, tenants: { hasCode: code => code === 'tenant-a' } })
 
@@ -117,7 +117,7 @@ describe('CrashService', () => {
     assert.equal(db.statements.length, 0)
   })
 
-  it('keeps legacy partial batch handling for malformed events after tenant validation', async () => {
+  void it('keeps legacy partial batch handling for malformed events after tenant validation', async () => {
     const db = new CrashSql()
     const service = new CrashService({ db, tenants: { hasCode: () => true } })
 
@@ -127,7 +127,7 @@ describe('CrashService', () => {
     assert.deepEqual(result.errors, ['Invalid event: missing required fields'])
   })
 
-  it('scopes issue and event queries to the authorized tenant', async () => {
+  void it('scopes issue and event queries to the authorized tenant', async () => {
     const db = new CrashSql()
     const service = new CrashService({ db, tenants: { hasCode: () => true } })
 
@@ -140,14 +140,14 @@ describe('CrashService', () => {
     assert.equal(db.statements[2]!.parameters.includes('tenant-a'), true)
   })
 
-  it('restricts distribution dimensions to the legacy allowlist', async () => {
+  void it('restricts distribution dimensions to the legacy allowlist', async () => {
     const db = new CrashSql()
     const service = new CrashService({ db, tenants: { hasCode: () => true } })
     await assert.rejects(() => service.distribution('tenant-a', 'tenant_id' as 'type'), /Invalid 'by' parameter/)
     assert.equal(db.statements.length, 0)
   })
 
-  it('reads crash trends from daily aggregates within the authorized tenant', async () => {
+  void it('reads crash trends from daily aggregates within the authorized tenant', async () => {
     const db = new CrashSql()
     db.execute = async (sql, parameters = []) => {
       db.statements.push({ sql, parameters })

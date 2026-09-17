@@ -8,7 +8,6 @@ import {
   hashPassword,
   type AuthCenterUser,
 } from '../authCenter/db.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import { IdentityRepository } from './identityRepository.js'
 
 export interface CreateUnifiedUserInput {
@@ -53,7 +52,7 @@ export class UnifiedIdentityService {
     private readonly repository: IdentityRepository,
   ) {}
 
-  createOrganization(input: {
+  async createOrganization(input: {
     id?: string
     name: string
     code?: string
@@ -69,26 +68,26 @@ export class UnifiedIdentityService {
     appCompanyName?: string | null
     loginDescription?: string | null
     initialCreditUnits?: number
-  }, context: CommandContext): CreateUnifiedOrganizationResult {
+  }, context: CommandContext): Promise<CreateUnifiedOrganizationResult> {
     assertTrustedCommandContext(context)
     const previous = this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
       'identity.create_organization', context.idempotencyKey,
     )
     if (previous) return previous
 
-    return runInTransaction(this.db, () => {
+    return await this.authDb.driver.transaction(async () => {
       const repeated = this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
         'identity.create_organization', context.idempotencyKey,
       )
       if (repeated) return repeated
       const name = input.name.trim()
       if (!name) throw new Error('Organization name is required')
-      if (this.authDb.getOrganizationByName(name)) throw new Error('Organization name already exists')
+      if (await this.authDb.getOrganizationByName(name)) throw new Error('Organization name already exists')
 
       const organizationId = input.id?.trim() || randomUUID()
-      if (this.authDb.getOrganization(organizationId)) throw new Error('Organization id already exists')
+      if (await this.authDb.getOrganization(organizationId)) throw new Error('Organization id already exists')
       const code = input.code?.trim() || `moss-${organizationId.slice(0, 8)}`
-      this.authDb.createOrganization(organizationId, name, Date.now(), input.extOrgId?.trim() || null)
+      await this.authDb.createOrganization(organizationId, name, Date.now(), input.extOrgId?.trim() || null)
       this.repository.putOrganizationProfile({
         orgId: organizationId,
         code,
@@ -122,19 +121,19 @@ export class UnifiedIdentityService {
     })
   }
 
-  createUser(input: CreateUnifiedUserInput, context: CommandContext): CreateUnifiedUserResult {
+  async createUser(input: CreateUnifiedUserInput, context: CommandContext): Promise<CreateUnifiedUserResult> {
     assertTrustedCommandContext(context)
     const previous = this.repository.getCommandResult<CreateUnifiedUserResult>('identity.create_user', context.idempotencyKey)
     if (previous) return previous
 
-    return runInTransaction(this.db, () => {
+    return await this.authDb.driver.transaction(async () => {
       const repeated = this.repository.getCommandResult<CreateUnifiedUserResult>('identity.create_user', context.idempotencyKey)
       if (repeated) return repeated
-      const organization = this.authDb.getOrganization(input.orgId)
+      const organization = await this.authDb.getOrganization(input.orgId)
       if (!organization) throw new Error('Unknown organization')
       const username = input.username.trim()
       if (!username) throw new Error('Username is required')
-      if (this.authDb.listUsersByName(username).length > 0) throw new Error('Username already exists')
+      if ((await this.authDb.listUsersByName(username)).length > 0) throw new Error('Username already exists')
       const hasLocalPassword = Boolean(input.password || input.passwordHash)
       if (!hasLocalPassword && !input.authIdentity) {
         throw new Error('Password, password hash, or provider identity is required')
@@ -149,7 +148,7 @@ export class UnifiedIdentityService {
       if (invitation && invitation.orgId !== input.orgId) throw new Error('Invitation organization mismatch')
 
       const userId = input.id?.trim() || randomUUID()
-      if (this.authDb.getUserById(userId)) throw new Error('User id already exists')
+      if (await this.authDb.getUserById(userId)) throw new Error('User id already exists')
       const timestamp = Date.now()
       const user: AuthCenterUser = {
         id: userId,
@@ -169,7 +168,7 @@ export class UnifiedIdentityService {
         extUserId: input.extUserId?.trim() || null,
         phone: input.phone?.trim() || null,
       }
-      this.authDb.createUser(user)
+      await this.authDb.createUser(user)
 
       if (hasLocalPassword) {
         this.repository.createAuthIdentity({

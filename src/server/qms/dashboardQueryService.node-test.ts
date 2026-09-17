@@ -19,8 +19,8 @@ class DashboardSql implements QmsSqlPort {
   }
 }
 
-describe('QmsDashboardQueryService', () => {
-  it('scopes every overview query to the authorized tenant and keeps legacy rates', async () => {
+void describe('QmsDashboardQueryService', () => {
+  void it('scopes every overview query to the authorized tenant and keeps legacy rates', async () => {
     const db = new DashboardSql()
     const service = new QmsDashboardQueryService(db)
     const result = await service.overview({
@@ -37,7 +37,7 @@ describe('QmsDashboardQueryService', () => {
     }
   })
 
-  it('returns legacy dimension labels from tenant-scoped data', async () => {
+  void it('returns legacy dimension labels from tenant-scoped data', async () => {
     const db = new DashboardSql()
     const service = new QmsDashboardQueryService(db)
 
@@ -51,7 +51,7 @@ describe('QmsDashboardQueryService', () => {
     assert.equal(db.statements.every(statement => statement.parameters.includes('tenant-a')), true)
   })
 
-  it('rejects unsupported dimensions before querying', async () => {
+  void it('rejects unsupported dimensions before querying', async () => {
     const db = new DashboardSql()
     const service = new QmsDashboardQueryService(db)
 

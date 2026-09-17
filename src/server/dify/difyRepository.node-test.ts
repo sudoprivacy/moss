@@ -3,8 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { DifyRepository, DifyRepositoryError } from './difyRepository.js'
 
-describe('DifyRepository', () => {
-  test('upserts and lists organization-scoped provider resources', () => {
+void describe('DifyRepository', () => {
+  void test('upserts and lists organization-scoped provider resources', async () => {
     const db = new DatabaseSync(':memory:')
     const repository = new DifyRepository(db)
     repository.putResource({
@@ -25,7 +25,7 @@ describe('DifyRepository', () => {
     db.close()
   })
 
-  test('persists idempotent operation state transitions', () => {
+  void test('persists idempotent operation state transitions', async () => {
     const db = new DatabaseSync(':memory:')
     const repository = new DifyRepository(db)
     const first = repository.createOperation({
@@ -46,7 +46,7 @@ describe('DifyRepository', () => {
     db.close()
   })
 
-  test('rejects secret material recursively before writing SQLite', () => {
+  void test('rejects secret material recursively before writing SQLite', async () => {
     const db = new DatabaseSync(':memory:')
     const repository = new DifyRepository(db)
     assert.throws(() => repository.putResource({
