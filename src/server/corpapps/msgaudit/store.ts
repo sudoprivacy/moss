@@ -240,13 +240,12 @@ export type RoomMeta = {
   count: number
   lastSeen: number
   /**
-   * Group display name, resolved once when the room is first seen.
+   * Group display name, re-resolved on every pull that touches the room.
    *
-   * Absent when the lookup is off, the room is an internal group (WeCom's
-   * customer-group API answers 90501 for those), or the name could not be
-   * fetched. Never re-fetched once set: like user names, a group that is
-   * later dissolved stops resolving, and a captured name beats a lookup
-   * that may now fail.
+   * Falls back to the roomid when the lookup fails — internal groups
+   * answer 90501 on the customer-group API, so those keep showing the id.
+   * Not cached across pulls: groups get renamed, and a stale name is
+   * worse than one extra request per room per pull.
    */
   name?: string
 }
@@ -284,17 +283,17 @@ export async function updateRooms(
   }
 
   if (nameLookup) {
-    // Only rooms still missing a name, and only real groups — a 1:1 chat
-    // has no roomid and therefore no group name to fetch.
-    const unnamed = Object.values(rooms).filter(
-      (m) => !m.name && m.roomid && m.roomid !== DIRECT_BUCKET,
-    )
-    for (const meta of unnamed) {
+    // Only rooms touched by THIS batch, and only real groups — a 1:1 chat
+    // has no roomid and therefore no group name to fetch. Rooms already
+    // carrying a name are refreshed too, since groups get renamed.
+    const touched = new Set(records.map((r) => r.roomid).filter((id) => id && id !== DIRECT_BUCKET))
+    for (const roomid of touched) {
+      const meta = rooms[roomid]
+      if (!meta) continue
       try {
-        const name = await nameLookup(meta.roomid)
-        if (name) meta.name = name
+        meta.name = (await nameLookup(roomid)) ?? roomid
       } catch {
-        // leave unnamed; retried next time this room sees traffic
+        meta.name = roomid
       }
     }
   }
