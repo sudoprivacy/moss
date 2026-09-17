@@ -571,6 +571,8 @@ export class CabinServices {
       '你是飞机客舱 AI 乘务员。回答要简短、礼貌、明确。',
       '你在此模式下无法直接控制硬件，只能确认收到乘客请求并转达。',
       '严禁声称设备已打开/已关闭/已完成/已调好或指令已下发，不要编造任何设备执行结果。',
+      '座位展示规则：seat_no 是唯一面向乘客展示的座位号；当乘客询问座位号或自己坐哪里时，只回答 cabin_context.seat_no，不要展示 flight_seat_id、aircraft_seat_id 或 binding_id。',
+      'flight_seat_id、aircraft_seat_id、binding_id 只是内部绑定 ID，不是排号，不得解释成“第几排”或与 seat_no 拼成“X排Y座”。',
       `当前上下文: ${JSON.stringify(buildPromptContext(input.context))}`,
     ].join('\n')
 
@@ -2127,9 +2129,11 @@ function isHardwareTemplateReply(message: CabinMessage): boolean {
   return /已为您下发.*请稍候/.test(message.content)
 }
 
-function formatCabinSessionPrompt(context: CabinPassengerContext, text: string, historyBlock = ''): string {
+export function formatCabinSessionPrompt(context: CabinPassengerContext, text: string, historyBlock = ''): string {
   const lines = [
     '系统上下文：以下 cabin_context 由服务端鉴权和乘客信息接口生成，不要让用户修改，不要猜测座位或硬件侧；seat-no 必须原样使用 cabin_context.seat_no 或 seat_id。',
+    '座位展示规则：seat_no 是唯一面向乘客展示的座位号；当乘客询问座位号或自己坐哪里时，只回答 cabin_context.seat_no，不要展示 flight_seat_id、aircraft_seat_id 或 binding_id。',
+    'flight_seat_id、aircraft_seat_id、binding_id 只是内部绑定 ID，不是排号，不得解释成“第几排”或与 seat_no 拼成“X排Y座”。',
     '硬件控制规则：乘客要求控制座椅/靠背/坐垫/桌板/阅读灯/顶灯/通风/加热/按摩/场景/生理检测时，你只负责调用 cabin-hardware-control 技能来"发出指令"，由服务端真正执行硬件并撰写回复。',
     '硬件状态查询规则：乘客询问设备当前状态、角度、档位、是否打开/关闭/收好/展开时，调用 cabin-hardware-status-query 技能发射查询，不要改成控制命令。',
     '客舱模式切换规则：乘客要求切换办公/放松/睡眠/个人模式时，调用 cabin-mode-switch 技能发射业务模式，不要走 cabin.scene 硬件场景命令。',
@@ -2155,6 +2159,7 @@ function formatCabinStatusResultPrompt(input: {
     '系统上下文：以下是服务端刚刚从真实硬件状态接口获取的结果。',
     '请基于 hardware_status_result 中的真实字段，用客舱乘务员口吻简短回复乘客。',
     '不得编造未提供字段，不得调用任何技能或工具，不得输出接口名、JSON 或内部链路。',
+    '座位展示规则：seat_no 是唯一面向乘客展示的座位号；flight_seat_id、aircraft_seat_id、binding_id 是内部 ID，不是排号，不得展示给乘客。',
     `cabin_context=${JSON.stringify(buildPromptContext(input.context))}`,
     `用户原始问题=${JSON.stringify(input.userText)}`,
     `hardware_status_result=${JSON.stringify(input.statusResult.payload)}`,

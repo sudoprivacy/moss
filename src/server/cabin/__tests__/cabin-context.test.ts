@@ -8,7 +8,7 @@ import { join } from 'path'
 import type { DatabaseSync } from 'node:sqlite'
 import { issueCabinToken, verifyCabinTokenDetailed } from '../auth.js'
 import { createCabinApi } from '../api.js'
-import { CabinServices, normalizeCabinHardwareReply, normalizeCabinPassengerReply } from '../service.js'
+import { CabinServices, formatCabinSessionPrompt, normalizeCabinHardwareReply, normalizeCabinPassengerReply } from '../service.js'
 import type { RuntimeService } from '../../runtimeService.js'
 import type { ServerConfig } from '../../types.js'
 
@@ -120,6 +120,28 @@ async function readSse(response: Response): Promise<Array<{ event: string; data:
 }
 
 describe('cabin binding context', () => {
+  it('tells the model to display only seat_no as the passenger seat number', () => {
+    const prompt = formatCabinSessionPrompt({
+      flightId: '2',
+      flightDate: '2026-06-05',
+      flightNo: 'CA8888',
+      flightSeatId: '22',
+      aircraftSeatId: '22',
+      bindingId: '2823',
+      seatId: 'C',
+      columnNo: 'B',
+      tabletId: 'PAX-PAD-003',
+      passengerName: '穆巴佩',
+    }, '我的座位号是多少？')
+
+    expect(prompt).toContain('seat_no 是唯一面向乘客展示的座位号')
+    expect(prompt).toContain('只回答 cabin_context.seat_no')
+    expect(prompt).toContain('flight_seat_id、aircraft_seat_id、binding_id 只是内部绑定 ID，不是排号')
+    expect(prompt).toContain('不得解释成“第几排”或与 seat_no 拼成“X排Y座”')
+    expect(prompt).toContain('"flight_seat_id":"22"')
+    expect(prompt).toContain('"seat_no":"C"')
+  })
+
   it('writes structured cabin request logs', async () => {
     const upstream = http.createServer((req, res) => {
       if (req.url === '/passenger') {

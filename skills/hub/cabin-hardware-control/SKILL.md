@@ -40,6 +40,7 @@ Required fields:
 
 - `seat_no` or `seat_id`: customer hardware `seatNo` code from `cabin_context`, for example `A`, `B`, `01A`, or any site-specific value. Use the value exactly as provided. Do not pad, concatenate, normalize, or infer a different seat number.
 - `column_no`: hardware side/channel, for example `A` or `B`. It may expand beyond A/B later. The current tray table API does not require it, but still pass it to the script for audit context.
+- Passenger-facing seat display: `seat_no` is the only seat number to show to the passenger. `flight_seat_id`, `aircraft_seat_id`, and `binding_id` are internal binding IDs, not row numbers; never combine them with `seat_no` as `X排Y座` or expose them in passenger-facing replies.
 
 ## How To Execute
 
