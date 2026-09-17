@@ -1533,7 +1533,7 @@ async function ensureGatewayAccount(
   config: ServerConfig,
   input: { userId: string; username: string; displayName?: string },
 ): Promise<void> {
-  if (authService.getUserModelCredential(input.userId)) return
+  if (await authService.getUserModelCredential(input.userId)) return
   const client = buildSudorouterClient(config)
   if (!client) return
   try {
@@ -2280,8 +2280,8 @@ export function startServer(
           if (pull.resolveNames) {
             pull.nameLookup = async (id: string, external: boolean) => {
               try {
-                const appRow = runtime.store
-                  .listAllCorpAppsByType('wecomapp')
+                const appRow = (await runtime.store
+                  .listAllCorpAppsByType('wecomapp'))
                   .find(
                     (r) =>
                       String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
@@ -2577,7 +2577,7 @@ export function startServer(
             buildFuiouClient(config),
             buildSudorouterClient(config),
             await readJsonBody(req) as unknown as FuiouCallbackPayload,
-            userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+            async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
           )
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
           res.end('success')
@@ -2671,7 +2671,7 @@ export function startServer(
           writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
           return
         }
-        if (authService.findUserByPhone(username)) {
+        if (await authService.findUserByPhone(username)) {
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
@@ -6270,13 +6270,13 @@ export function startServer(
           return
         }
         const body = await readJsonBody(req)
-        const user = authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const user = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         if (!user) {
           writeJson(res, 404, { success: false, msg: '用户不存在' })
           return
         }
         try {
-          const order = createRechargeOrder(
+          const order = await createRechargeOrder(
             authService.rechargeOrders,
             buildRechargePolicy(config),
             {
@@ -6330,7 +6330,7 @@ export function startServer(
       const rechargeQueryMatch = pathname.match(/^\/api\/v1\/recharge\/query\/([^/]+)$/)
       if (req.method === 'GET' && rechargeQueryMatch) {
         const orderNo = decodeURIComponent(rechargeQueryMatch[1] || '')
-        const order = queryRechargeOrder(authService.rechargeOrders, auth.userId, orderNo)
+        const order = await queryRechargeOrder(authService.rechargeOrders, auth.userId, orderNo)
         if (!order) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6344,7 +6344,7 @@ export function startServer(
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || 20)))
         writeJson(res, 200, {
           success: true,
-          data: listRechargeOrders(authService.rechargeOrders, auth.userId, page, pageSize),
+          data: await listRechargeOrders(authService.rechargeOrders, auth.userId, page, pageSize),
         })
         return
       }
@@ -6352,7 +6352,7 @@ export function startServer(
       const rechargeCancelMatch = pathname.match(/^\/api\/v1\/recharge\/cancel\/([^/]+)$/)
       if (req.method === 'POST' && rechargeCancelMatch) {
         try {
-          cancelRechargeOrder(
+          await cancelRechargeOrder(
             authService.rechargeOrders,
             auth.userId,
             decodeURIComponent(rechargeCancelMatch[1] || ''),
@@ -6478,7 +6478,7 @@ export function startServer(
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
         const statusParam = url.searchParams.get('status')
         const syncStatusParam = url.searchParams.get('sync_status')?.trim()
-        const result = authService.rechargeOrders.listForAdmin({
+        const result = await authService.rechargeOrders.listForAdmin({
           orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
           status: statusParam == null || statusParam === '' ? undefined : Number(statusParam),
           syncStatus: syncStatusParam ? syncStatusParam as never : undefined,
@@ -6507,7 +6507,7 @@ export function startServer(
         const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || url.searchParams.get('page_size') || 20)))
         writeJson(res, 200, {
           success: true,
-          data: listAdminRechargeRecords(authService.rechargeOrders, {
+          data: await listAdminRechargeRecords(authService.rechargeOrders, {
             orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
             orderNo: url.searchParams.get('order_no')?.trim() || undefined,
             userPhone: url.searchParams.get('user_phone')?.trim() || undefined,
@@ -6522,7 +6522,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/admin/recharge/stats') {
         authService.requireScope(auth, 'admin:users')
-        const result = authService.rechargeOrders.listForAdmin({
+        const result = await authService.rechargeOrders.listForAdmin({
           orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
           page: 1,
           pageSize: 100000,
@@ -6573,8 +6573,8 @@ export function startServer(
       if (req.method === 'POST' && adminRechargeRetryMatch) {
         authService.requireScope(auth, 'admin:users')
         const raw = decodeURIComponent(adminRechargeRetryMatch[1] || '')
-        const byId = /^\d+$/.test(raw) ? authService.rechargeOrders.getById(Number(raw)) : null
-        const existing = byId ?? authService.rechargeOrders.getByOrderNo(raw)
+        const byId = /^\d+$/.test(raw) ? await authService.rechargeOrders.getById(Number(raw)) : null
+        const existing = byId ?? await authService.rechargeOrders.getByOrderNo(raw)
         if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6586,7 +6586,7 @@ export function startServer(
             {
               orderId: byId ? existing.id : undefined,
               orderNo: byId ? undefined : existing.orderNo,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单同步重试成功', data })
@@ -6604,7 +6604,7 @@ export function startServer(
       if (req.method === 'POST' && adminRechargeSyncMatch) {
         authService.requireScope(auth, 'admin:users')
         const orderNo = decodeURIComponent(adminRechargeSyncMatch[1] || '')
-        const existing = authService.rechargeOrders.getByOrderNo(orderNo)
+        const existing = await authService.rechargeOrders.getByOrderNo(orderNo)
         if (!existing || (auth.role !== 'super_admin' && existing.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6616,7 +6616,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orderNo,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单状态同步完成', data })
@@ -6639,7 +6639,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '待处理订单同步完成', data })
@@ -6656,7 +6656,7 @@ export function startServer(
       const adminRechargeDetailMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/orders\/([^/]+)$/)
       if (req.method === 'GET' && adminRechargeDetailMatch) {
         authService.requireScope(auth, 'admin:users')
-        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(adminRechargeDetailMatch[1] || ''))
+        const order = await authService.rechargeOrders.getByOrderNo(decodeURIComponent(adminRechargeDetailMatch[1] || ''))
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6671,7 +6671,7 @@ export function startServer(
       const refundCalcMatch = pathname.match(/^\/api\/v1\/admin\/recharge\/refund-calc\/([^/]+)$/)
       if (req.method === 'GET' && refundCalcMatch) {
         authService.requireScope(auth, 'admin:users')
-        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(refundCalcMatch[1] || ''))
+        const order = await authService.rechargeOrders.getByOrderNo(decodeURIComponent(refundCalcMatch[1] || ''))
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6680,7 +6680,7 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '订单状态不支持退款' })
           return
         }
-        const gatewayUserId = authService.getUserModelCredential(order.userId)?.sudorouterUserId
+        const gatewayUserId = (await authService.getUserModelCredential(order.userId))?.sudorouterUserId
         const client = buildSudorouterClient(config)
         if (!gatewayUserId || !client) {
           writeJson(res, 409, { success: false, msg: '用户信息异常' })
@@ -6709,7 +6709,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req).catch(() => ({}))
         const orderNo = decodeURIComponent(refundMatch[1] || '')
-        const order = authService.rechargeOrders.getByOrderNo(orderNo)
+        const order = await authService.rechargeOrders.getByOrderNo(orderNo)
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6726,7 +6726,7 @@ export function startServer(
               orderNo,
               reason,
               adminId: auth.userId,
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '退款成功', data: result })
@@ -6748,7 +6748,7 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '仅在测试模式下可用' })
           return
         }
-        const order = authService.rechargeOrders.getByOrderNo(decodeURIComponent(simulateMatch[1] || ''))
+        const order = await authService.rechargeOrders.getByOrderNo(decodeURIComponent(simulateMatch[1] || ''))
         if (!order || (auth.role !== 'super_admin' && order.orgId !== auth.orgId)) {
           writeJson(res, 404, { success: false, msg: '订单不存在' })
           return
@@ -6763,7 +6763,7 @@ export function startServer(
             buildSudorouterClient(config),
             order,
             {
-              getGatewayUserId: userId => authService.getUserModelCredential(userId)?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '模拟支付成功', data: { order_no: order.orderNo } })

@@ -1312,38 +1312,38 @@ export class AuthService {
   get rechargeOrders(): RechargeOrderStore {
     const db = this.db
     return {
-      create(input) {
-        return db.createRechargeOrder(input) as RechargeOrder
+      async create(input) {
+        return (await db.createRechargeOrder(input)) as RechargeOrder
       },
-      getByOrderNo(orderNo) {
-        return db.getRechargeOrderByNo(orderNo) as RechargeOrder | null
+      async getByOrderNo(orderNo) {
+        return (await db.getRechargeOrderByNo(orderNo)) as RechargeOrder | null
       },
-      getById(id) {
-        return db.getRechargeOrderById(id) as RechargeOrder | null
+      async getById(id) {
+        return (await db.getRechargeOrderById(id)) as RechargeOrder | null
       },
-      listForUser(userId, page, pageSize) {
-        const result = db.listRechargeOrdersForUser(userId, pageSize, (page - 1) * pageSize)
+      async listForUser(userId, page, pageSize) {
+        const result = await db.listRechargeOrdersForUser(userId, pageSize, (page - 1) * pageSize)
         return { list: result.list as RechargeOrder[], total: result.total }
       },
-      listForAdmin(input) {
-        const result = db.listRechargeOrdersForAdmin({
+      async listForAdmin(input) {
+        const result = await db.listRechargeOrdersForAdmin({
           ...input,
           limit: input.pageSize,
           offset: (input.page - 1) * input.pageSize,
         })
         return { list: result.list as RechargeOrder[], total: result.total }
       },
-      update(id, patch) {
-        db.updateRechargeOrder(id, patch)
+      async update(id, patch) {
+        await db.updateRechargeOrder(id, patch)
       },
-      claimRefund(id, reason) {
+      async claimRefund(id, reason) {
         return db.claimRechargeRefund(id, reason)
       },
-      createRefund(input) {
-        return db.createRefundRecord(input) as RefundRecord
+      async createRefund(input) {
+        return (await db.createRefundRecord(input)) as RefundRecord
       },
-      listRefundsForAdmin(input) {
-        const result = db.listRefundRecordsForAdmin({
+      async listRefundsForAdmin(input) {
+        const result = await db.listRefundRecordsForAdmin({
           ...input,
           limit: input.pageSize,
           offset: (input.page - 1) * input.pageSize,

@@ -1050,11 +1050,11 @@ export class AuthCenterDb {
 
   // ---- paid recharge orders (`pay` recharge mode) ----
 
-  createRechargeOrder(input: Omit<RechargeOrderRow, 'id' | 'createdAt' | 'updatedAt' | 'fuiouOrderInfo'
+  async createRechargeOrder(input: Omit<RechargeOrderRow, 'id' | 'createdAt' | 'updatedAt' | 'fuiouOrderInfo'
     | 'status' | 'syncStatus' | 'syncError' | 'callbackData' | 'callbackTime'
-    | 'callbackAmountCents' | 'remark'>): RechargeOrderRow {
+    | 'callbackAmountCents' | 'remark'>): Promise<RechargeOrderRow> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO recharge_orders (
         order_no, user_id, user_phone, org_id,
         amount_usd, amount_yuan, amount_cents, exchange_rate,
@@ -1062,7 +1062,7 @@ export class AuthCenterDb {
         payment_method, order_date, status, sync_status,
         created_at, updated_at, expired_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'NONE', ?, ?, ?)
-    `).run(
+    `, [
       input.orderNo,
       input.userId,
       input.userPhone,
@@ -1079,45 +1079,46 @@ export class AuthCenterDb {
       ts,
       ts,
       input.expiredAt,
-    )
-    const row = this.db.prepare(`
+    ])
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM recharge_orders WHERE order_no = ?
-    `).get(input.orderNo) as SqlRow
+    `, [input.orderNo])
+    if (!row) throw new Error(`recharge_orders row vanished after insert: ${input.orderNo}`)
     return mapRechargeOrder(row)
   }
 
-  getRechargeOrderByNo(orderNo: string): RechargeOrderRow | null {
-    const row = this.db.prepare(`
+  async getRechargeOrderByNo(orderNo: string): Promise<RechargeOrderRow | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM recharge_orders WHERE order_no = ? LIMIT 1
-    `).get(orderNo) as SqlRow | undefined
+    `, [orderNo])
     return row ? mapRechargeOrder(row) : null
   }
 
-  getRechargeOrderById(id: number): RechargeOrderRow | null {
-    const row = this.db.prepare(`
+  async getRechargeOrderById(id: number): Promise<RechargeOrderRow | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM recharge_orders WHERE id = ? LIMIT 1
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapRechargeOrder(row) : null
   }
 
-  listRechargeOrdersForUser(
+  async listRechargeOrdersForUser(
     userId: string,
     limit: number,
     offset: number,
-  ): { list: RechargeOrderRow[]; total: number } {
-    const rows = this.db.prepare(`
+  ): Promise<{ list: RechargeOrderRow[]; total: number }> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM recharge_orders
       WHERE user_id = ?
       ORDER BY created_at DESC, id DESC
       LIMIT ? OFFSET ?
-    `).all(userId, limit, offset) as SqlRow[]
-    const counted = this.db.prepare(`
+    `, [userId, limit, offset])
+    const counted = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM recharge_orders WHERE user_id = ?
-    `).get(userId) as SqlRow | undefined
+    `, [userId])
     return { list: rows.map(mapRechargeOrder), total: Number(counted?.n ?? 0) }
   }
 
-  listRechargeOrdersForAdmin(input: {
+  async listRechargeOrdersForAdmin(input: {
     orgId?: string
     status?: number
     syncStatus?: RechargeSyncStatus
@@ -1127,7 +1128,7 @@ export class AuthCenterDb {
     endDate?: string
     limit: number
     offset: number
-  }): { list: RechargeOrderRow[]; total: number } {
+  }): Promise<{ list: RechargeOrderRow[]; total: number }> {
     const where: string[] = []
     const params: SQLInputValue[] = []
     if (input.orgId) {
@@ -1165,21 +1166,21 @@ export class AuthCenterDb {
       }
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM recharge_orders
       ${whereSql}
       ORDER BY created_at DESC, id DESC
       LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const counted = this.db.prepare(`
+    `, [...params, input.limit, input.offset] as SqlParam[])
+    const counted = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM recharge_orders ${whereSql}
-    `).get(...params) as SqlRow | undefined
+    `, params as SqlParam[])
     return { list: rows.map(mapRechargeOrder), total: Number(counted?.n ?? 0) }
   }
 
-  updateRechargeOrder(id: number, patch: Partial<Pick<RechargeOrderRow,
+  async updateRechargeOrder(id: number, patch: Partial<Pick<RechargeOrderRow,
     'status' | 'syncStatus' | 'syncError' | 'fuiouOrderInfo' | 'callbackData'
-    | 'callbackTime' | 'callbackAmountCents' | 'remark'>>): void {
+    | 'callbackTime' | 'callbackAmountCents' | 'remark'>>): Promise<void> {
     const columns: string[] = []
     const values: unknown[] = []
     const add = (column: string, value: unknown): void => {
@@ -1197,29 +1198,29 @@ export class AuthCenterDb {
     if (!columns.length) return
     add('updated_at', now())
     values.push(id)
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE recharge_orders SET ${columns.join(', ')} WHERE id = ?
-    `).run(...values as never[])
+    `, values as SqlParam[])
   }
 
-  claimRechargeRefund(id: number, reason: string): boolean {
-    const result = this.db.prepare(`
+  async claimRechargeRefund(id: number, reason: string): Promise<boolean> {
+    const changes = await this.driver.run(`
       UPDATE recharge_orders
       SET status = ?, remark = ?, updated_at = ?
       WHERE id = ? AND status = ?
-    `).run(
+    `, [
       4,
       `退款原因: ${reason}`,
       now(),
       id,
       2,
-    )
-    return result.changes > 0
+    ])
+    return changes > 0
   }
 
-  createRefundRecord(input: Omit<RefundRecordRow, 'id' | 'createdAt'>): RefundRecordRow {
+  async createRefundRecord(input: Omit<RefundRecordRow, 'id' | 'createdAt'>): Promise<RefundRecordRow> {
     const ts = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO refund_records (
         refund_no, order_id, order_no, user_id, org_id,
         admin_id,
@@ -1227,7 +1228,7 @@ export class AuthCenterDb {
         refund_reason, refund_type, status, sync_status, sync_error,
         fuiou_refund_no, fuiou_response, created_at, processed_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.refundNo,
       input.orderId,
       input.orderNo,
@@ -1246,14 +1247,15 @@ export class AuthCenterDb {
       input.fuiouResponse,
       ts,
       input.processedAt,
-    )
-    const row = this.db.prepare(`
+    ])
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM refund_records WHERE refund_no = ?
-    `).get(input.refundNo) as SqlRow
+    `, [input.refundNo])
+    if (!row) throw new Error(`refund_records row vanished after insert: ${input.refundNo}`)
     return mapRefundRecord(row)
   }
 
-  listRefundRecordsForAdmin(input: {
+  async listRefundRecordsForAdmin(input: {
     orgId?: string
     orderNo?: string
     userId?: string
@@ -1262,7 +1264,7 @@ export class AuthCenterDb {
     endDate?: string
     limit: number
     offset: number
-  }): { list: RefundRecordRow[]; total: number } {
+  }): Promise<{ list: RefundRecordRow[]; total: number }> {
     const where: string[] = []
     const params: SQLInputValue[] = []
     if (input.orgId) {
@@ -1296,15 +1298,15 @@ export class AuthCenterDb {
       }
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM refund_records
       ${whereSql}
       ORDER BY created_at DESC, id DESC
       LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const counted = this.db.prepare(`
+    `, [...params, input.limit, input.offset] as SqlParam[])
+    const counted = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS n FROM refund_records ${whereSql}
-    `).get(...params) as SqlRow | undefined
+    `, params as SqlParam[])
     return { list: rows.map(mapRefundRecord), total: Number(counted?.n ?? 0) }
   }
 

@@ -115,7 +115,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -546,10 +546,10 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: still exactly [1, 2, 3].
+        // Re-run is a no-op: still exactly [1, 2, 3, 4].
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4]);
         // v3 (audit fixes): tenant-store org indexes (C-4) + the E-2
         // channel_sessions snapshot column.
         for (const idx of ["idx_tenant_skills_org", "idx_tenant_assistants_org"]) {
@@ -563,6 +563,14 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           "SELECT count(*) AS n FROM information_schema.columns WHERE table_name = 'channel_sessions' AND column_name = 'last_agent_config'",
         );
         assert.equal(Number(colV3!.n), 1, "channel_sessions.last_agent_config must exist after v3");
+        // v4 (recharge): paid recharge orders + refund records.
+        for (const tbl of ["recharge_orders", "refund_records"]) {
+          const r = await driver.get<{ n: number }>(
+            "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = ?",
+            [tbl],
+          );
+          assert.equal(Number(r!.n), 1, `${tbl} must exist after v4`);
+        }
       } finally {
         await pool.end();
         await dropDatabase(admin, oldDbName);

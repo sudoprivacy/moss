@@ -107,10 +107,10 @@ export type RefundRecord = {
 export type RechargeOrderStore = {
   create(input: Omit<RechargeOrder, 'id' | 'createdAt' | 'updatedAt' | 'fuiouOrderInfo'
     | 'status' | 'syncStatus' | 'syncError' | 'callbackData' | 'callbackTime'
-    | 'callbackAmountCents' | 'remark'>): RechargeOrder
-  getByOrderNo(orderNo: string): RechargeOrder | null
-  getById(id: number): RechargeOrder | null
-  listForUser(userId: string, page: number, pageSize: number): { list: RechargeOrder[]; total: number }
+    | 'callbackAmountCents' | 'remark'>): Promise<RechargeOrder>
+  getByOrderNo(orderNo: string): Promise<RechargeOrder | null>
+  getById(id: number): Promise<RechargeOrder | null>
+  listForUser(userId: string, page: number, pageSize: number): Promise<{ list: RechargeOrder[]; total: number }>
   listForAdmin(input: {
     orgId?: string
     status?: number
@@ -121,12 +121,12 @@ export type RechargeOrderStore = {
     endDate?: string
     page: number
     pageSize: number
-  }): { list: RechargeOrder[]; total: number }
+  }): Promise<{ list: RechargeOrder[]; total: number }>
   update(id: number, patch: Partial<Pick<RechargeOrder,
     'status' | 'syncStatus' | 'syncError' | 'fuiouOrderInfo' | 'callbackData'
-    | 'callbackTime' | 'callbackAmountCents' | 'remark'>>): void
-  claimRefund(id: number, reason: string): boolean
-  createRefund(input: Omit<RefundRecord, 'id' | 'createdAt'>): RefundRecord
+    | 'callbackTime' | 'callbackAmountCents' | 'remark'>>): Promise<void>
+  claimRefund(id: number, reason: string): Promise<boolean>
+  createRefund(input: Omit<RefundRecord, 'id' | 'createdAt'>): Promise<RefundRecord>
   listRefundsForAdmin(input: {
     orgId?: string
     orderNo?: string
@@ -136,7 +136,7 @@ export type RechargeOrderStore = {
     endDate?: string
     page: number
     pageSize: number
-  }): { list: RefundRecord[]; total: number }
+  }): Promise<{ list: RefundRecord[]; total: number }>
 }
 
 export class RechargeError extends Error {
@@ -194,7 +194,7 @@ function newOrderNo(userId: string): string {
   return `USR${userPart}NO${Date.now()}${randomUUID().slice(0, 6).toUpperCase()}`
 }
 
-export function createRechargeOrder(
+export async function createRechargeOrder(
   store: RechargeOrderStore,
   policy: RechargePolicy,
   input: {
@@ -204,7 +204,7 @@ export function createRechargeOrder(
     amount: unknown
     paymentMethod: unknown
   },
-): RechargeOrder {
+): Promise<RechargeOrder> {
   const amountUsd = normalizeAmount(input.amount)
   if (!amountUsd || amountUsd < policy.minAmountUsd || amountUsd > policy.maxAmountUsd) {
     throw new RechargeError(400, `充值金额无效（${policy.minAmountUsd}-${policy.maxAmountUsd}美元）`)
@@ -218,7 +218,7 @@ export function createRechargeOrder(
   const amountYuan = Math.round(amountUsd * policy.usdToCnyRate * 100) / 100
   const amountCents = Math.round(amountYuan * 100)
   const createdAt = now()
-  return store.create({
+  return await store.create({
     orderNo: newOrderNo(input.userId),
     userId: input.userId,
     userPhone: input.userPhone ?? null,
@@ -243,13 +243,13 @@ export async function payRechargeOrder(
   orderNo: string,
 ): Promise<{ qr_code_url: string; order_info: string }> {
   if (!fuiou?.isConfigured()) throw new RechargeError(503, '支付服务未配置')
-  const order = store.getByOrderNo(orderNo)
+  const order = await store.getByOrderNo(orderNo)
   if (!order || order.userId !== userId) throw new RechargeError(404, '订单不存在')
   if (order.status !== ORDER_STATUS.PENDING && order.status !== ORDER_STATUS.PAYING) {
     throw new RechargeError(400, '订单状态无效')
   }
   if (order.expiredAt < now()) {
-    store.update(order.id, { status: ORDER_STATUS.CANCELLED, remark: '订单已过期' })
+    await store.update(order.id, { status: ORDER_STATUS.CANCELLED, remark: '订单已过期' })
     throw new RechargeError(400, '订单已过期')
   }
 
@@ -265,7 +265,7 @@ export async function payRechargeOrder(
   if (!result.success || !result.data?.order_info) {
     throw new RechargeError(400, result.error || '支付二维码获取失败')
   }
-  store.update(order.id, {
+  await store.update(order.id, {
     status: ORDER_STATUS.PAYING,
     fuiouOrderInfo: result.data.order_info,
   })
@@ -277,11 +277,11 @@ export async function handleRechargeCallback(
   fuiou: FuiouClient | null,
   sudorouter: SudorouterClient | null,
   payload: FuiouCallbackPayload,
-  getGatewayUserId: (userId: string) => string | null,
+  getGatewayUserId: (userId: string) => Promise<string | null>,
 ): Promise<{ order_no: string }> {
   if (!fuiou?.isConfigured()) throw new RechargeError(503, '支付服务未配置')
   const message = await fuiou.handleCallback(payload)
-  const order = store.getByOrderNo(message.order_id)
+  const order = await store.getByOrderNo(message.order_id)
   if (!order) throw new RechargeError(404, '订单不存在')
   if (order.status === ORDER_STATUS.SUCCESS) return { order_no: order.orderNo }
   if (order.syncStatus === 'SYNCED' || order.syncStatus === 'PROCESSING' || order.syncStatus === 'SYNC_UNKNOWN') {
@@ -291,7 +291,7 @@ export async function handleRechargeCallback(
   const callbackAmount = Number.parseInt(message.order_amt, 10)
   const expectedAmount = fuiou.isTestMode() ? 1 : order.amountCents
   if (!fuiou.isTestMode() && callbackAmount !== expectedAmount) {
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_INVALID',
       syncError: `Paid amount ${callbackAmount} did not match order amount ${expectedAmount}`,
@@ -304,7 +304,7 @@ export async function handleRechargeCallback(
   }
 
   if (message.order_st === '2') {
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.FAILED,
       callbackData: JSON.stringify(payload),
       callbackTime: now(),
@@ -334,7 +334,7 @@ export async function settlePaidRechargeOrder(
     callbackData?: string
     callbackTime?: number
     callbackAmountCents?: number
-    getGatewayUserId: (userId: string) => string | null
+    getGatewayUserId: (userId: string) => Promise<string | null>
   },
 ): Promise<void> {
   const callbackPatch = (): Partial<Pick<RechargeOrder,
@@ -345,7 +345,7 @@ export async function settlePaidRechargeOrder(
     if (input.callbackAmountCents !== undefined) patch.callbackAmountCents = input.callbackAmountCents
     return patch
   }
-  const current = store.getById(order.id) ?? store.getByOrderNo(order.orderNo)
+  const current = await store.getById(order.id) ?? await store.getByOrderNo(order.orderNo)
   if (!current) throw new RechargeError(404, '订单不存在')
   if (current.status === ORDER_STATUS.SUCCESS || current.syncStatus === 'SYNCED') return
   if (current.syncStatus === 'PROCESSING') return
@@ -356,9 +356,9 @@ export async function settlePaidRechargeOrder(
     throw new RechargeError(409, '订单金额异常，不允许重试发放')
   }
 
-  const gatewayUserId = input.getGatewayUserId(current.userId)
+  const gatewayUserId = await input.getGatewayUserId(current.userId)
   if (!gatewayUserId) {
-    store.update(current.id, {
+    await store.update(current.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_FAILED',
       syncError: 'User has no model gateway account',
@@ -368,7 +368,7 @@ export async function settlePaidRechargeOrder(
     throw new RechargeError(409, '用户信息异常')
   }
   if (!sudorouter) {
-    store.update(current.id, {
+    await store.update(current.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_FAILED',
       syncError: 'Model gateway is not configured',
@@ -378,7 +378,7 @@ export async function settlePaidRechargeOrder(
     throw new RechargeError(503, '模型网关未配置')
   }
 
-  store.update(current.id, {
+  await store.update(current.id, {
     status: ORDER_STATUS.PAYING,
     syncStatus: 'PROCESSING',
     syncError: null,
@@ -390,7 +390,7 @@ export async function settlePaidRechargeOrder(
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error)
     const refused = isSudorouterRefusal(error)
-    store.update(current.id, {
+    await store.update(current.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: refused ? 'SYNC_FAILED' : 'SYNC_UNKNOWN',
       syncError: messageText.slice(0, 500),
@@ -399,7 +399,7 @@ export async function settlePaidRechargeOrder(
     throw new RechargeError(502, refused ? `Sudorouter 更新失败: ${messageText}` : `Sudorouter 更新结果未知: ${messageText}`)
   }
 
-  store.update(current.id, {
+  await store.update(current.id, {
     status: ORDER_STATUS.SUCCESS,
     syncStatus: 'SYNCED',
     syncError: null,
@@ -413,12 +413,12 @@ export async function retryRechargeOrderSync(
   input: {
     orderId?: number
     orderNo?: string
-    getGatewayUserId: (userId: string) => string | null
+    getGatewayUserId: (userId: string) => Promise<string | null>
   },
 ): Promise<unknown> {
   const order = input.orderId !== undefined
-    ? store.getById(input.orderId)
-    : input.orderNo ? store.getByOrderNo(input.orderNo) : null
+    ? await store.getById(input.orderId)
+    : input.orderNo ? await store.getByOrderNo(input.orderNo) : null
   if (!order) throw new RechargeError(404, '订单不存在')
   if (order.syncStatus === 'SYNCED') {
     return toAdminOrderPayload(order)
@@ -432,7 +432,7 @@ export async function retryRechargeOrderSync(
   await settlePaidRechargeOrder(store, sudorouter, order, {
     getGatewayUserId: input.getGatewayUserId,
   })
-  return toAdminOrderPayload(store.getByOrderNo(order.orderNo) ?? order)
+  return toAdminOrderPayload(await store.getByOrderNo(order.orderNo) ?? order)
 }
 
 export async function syncRechargeOrderStatus(
@@ -441,11 +441,11 @@ export async function syncRechargeOrderStatus(
   sudorouter: SudorouterClient | null,
   input: {
     orderNo: string
-    getGatewayUserId: (userId: string) => string | null
+    getGatewayUserId: (userId: string) => Promise<string | null>
   },
 ): Promise<unknown> {
   if (!fuiou?.isConfigured()) throw new RechargeError(503, '支付服务未配置')
-  const order = store.getByOrderNo(input.orderNo)
+  const order = await store.getByOrderNo(input.orderNo)
   if (!order) throw new RechargeError(404, '订单不存在')
   if (order.status === ORDER_STATUS.SUCCESS || order.syncStatus === 'SYNCED') {
     return toAdminOrderPayload(order)
@@ -469,7 +469,7 @@ export async function syncRechargeOrderStatus(
   const amount = Number.parseInt(data.order_amt, 10)
   const expectedAmount = fuiou.isTestMode() ? 1 : order.amountCents
   if (!fuiou.isTestMode() && data.order_st === '1' && amount !== expectedAmount) {
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.FAILED,
       syncStatus: 'SYNC_INVALID',
       syncError: 'Fuiou amount mismatch during manual sync',
@@ -481,24 +481,24 @@ export async function syncRechargeOrderStatus(
     throw new RechargeError(400, '金额不一致')
   }
   if (data.order_st === '2') {
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.FAILED,
       callbackData: JSON.stringify(data),
       callbackTime: now(),
       callbackAmountCents: Number.isFinite(amount) ? amount : null,
       remark: '支付失败',
     })
-    return toAdminOrderPayload(store.getByOrderNo(order.orderNo) ?? order)
+    return toAdminOrderPayload(await store.getByOrderNo(order.orderNo) ?? order)
   }
   if (data.order_st !== '1') {
-    store.update(order.id, {
+    await store.update(order.id, {
       status: ORDER_STATUS.PAYING,
       callbackData: JSON.stringify(data),
       callbackTime: now(),
       callbackAmountCents: Number.isFinite(amount) ? amount : null,
       remark: '富友订单仍在处理中',
     })
-    return toAdminOrderPayload(store.getByOrderNo(order.orderNo) ?? order)
+    return toAdminOrderPayload(await store.getByOrderNo(order.orderNo) ?? order)
   }
 
   await settlePaidRechargeOrder(store, sudorouter, order, {
@@ -507,7 +507,7 @@ export async function syncRechargeOrderStatus(
     callbackAmountCents: Number.isFinite(amount) ? amount : undefined,
     getGatewayUserId: input.getGatewayUserId,
   })
-  return toAdminOrderPayload(store.getByOrderNo(order.orderNo) ?? order)
+  return toAdminOrderPayload(await store.getByOrderNo(order.orderNo) ?? order)
 }
 
 export async function syncPendingRechargeOrders(
@@ -516,14 +516,14 @@ export async function syncPendingRechargeOrders(
   sudorouter: SudorouterClient | null,
   input: {
     orgId?: string
-    getGatewayUserId: (userId: string) => string | null
+    getGatewayUserId: (userId: string) => Promise<string | null>
   },
 ): Promise<{ total: number; success: number; failed: number; skipped: number; results: Array<{ order_no: string; success: boolean; error?: string }> }> {
-  const candidates = store.listForAdmin({
+  const candidates = (await store.listForAdmin({
     orgId: input.orgId,
     page: 1,
     pageSize: 500,
-  }).list.filter(order =>
+  })).list.filter(order =>
     (order.status === ORDER_STATUS.PENDING ||
       order.status === ORDER_STATUS.PAYING ||
       order.status === ORDER_STATUS.FAILED ||
@@ -553,33 +553,33 @@ export async function syncPendingRechargeOrders(
   return summary
 }
 
-export function queryRechargeOrder(store: RechargeOrderStore, userId: string, orderNo: string): unknown | null {
-  const order = store.getByOrderNo(orderNo)
+export async function queryRechargeOrder(store: RechargeOrderStore, userId: string, orderNo: string): Promise<unknown | null> {
+  const order = await store.getByOrderNo(orderNo)
   if (!order || order.userId !== userId) return null
   return toUserOrderPayload(order)
 }
 
-export function listRechargeOrders(
+export async function listRechargeOrders(
   store: RechargeOrderStore,
   userId: string,
   page: number,
   pageSize: number,
-): { list: unknown[]; total: number; page: number; pageSize: number } {
-  const result = store.listForUser(userId, page, pageSize)
+): Promise<{ list: unknown[]; total: number; page: number; pageSize: number }> {
+  const result = await store.listForUser(userId, page, pageSize)
   return { list: result.list.map(toUserOrderListPayload), total: result.total, page, pageSize }
 }
 
-export function cancelRechargeOrder(
+export async function cancelRechargeOrder(
   store: RechargeOrderStore,
   userId: string,
   orderNo: string,
-): void {
-  const order = store.getByOrderNo(orderNo)
+): Promise<void> {
+  const order = await store.getByOrderNo(orderNo)
   if (!order || order.userId !== userId) throw new RechargeError(404, '订单不存在')
   if (order.status !== ORDER_STATUS.PENDING && order.status !== ORDER_STATUS.PAYING) {
     throw new RechargeError(400, '订单状态不可取消')
   }
-  store.update(order.id, { status: ORDER_STATUS.CANCELLED })
+  await store.update(order.id, { status: ORDER_STATUS.CANCELLED })
 }
 
 export function toCreatedOrderPayload(order: RechargeOrder): unknown {
@@ -653,7 +653,7 @@ export function toAdminOrderPayload(
   }
 }
 
-export function listAdminRechargeRecords(
+export async function listAdminRechargeRecords(
   store: RechargeOrderStore,
   input: {
     orgId?: string
@@ -664,8 +664,8 @@ export function listAdminRechargeRecords(
     page: number
     pageSize: number
   },
-): { list: unknown[]; total: number; page: number; pageSize: number } {
-  const orders = store.listForAdmin({
+): Promise<{ list: unknown[]; total: number; page: number; pageSize: number }> {
+  const orders = (await store.listForAdmin({
     orgId: input.orgId,
     status: ORDER_STATUS.SUCCESS,
     orderNo: input.orderNo,
@@ -674,8 +674,8 @@ export function listAdminRechargeRecords(
     endDate: input.endDate,
     page: 1,
     pageSize: 100000,
-  }).list
-  const refunds = store.listRefundsForAdmin({
+  })).list
+  const refunds = (await store.listRefundsForAdmin({
     orgId: input.orgId,
     orderNo: input.orderNo,
     userPhone: input.userPhone,
@@ -683,7 +683,7 @@ export function listAdminRechargeRecords(
     endDate: input.endDate,
     page: 1,
     pageSize: 100000,
-  }).list
+  })).list
   const records = [
     ...orders.map(order => ({
       id: `order:${order.id}`,
@@ -703,8 +703,8 @@ export function listAdminRechargeRecords(
       sync_error: order.syncError,
       created_at: iso(order.createdAt),
     })),
-    ...refunds.map(refund => {
-      const order = store.getByOrderNo(refund.orderNo)
+    ...(await Promise.all(refunds.map(async refund => {
+      const order = await store.getByOrderNo(refund.orderNo)
       return {
         id: `refund:${refund.id}`,
         source: 'REFUND',
@@ -723,7 +723,7 @@ export function listAdminRechargeRecords(
         sync_error: refund.syncError,
         created_at: iso(refund.createdAt),
       }
-    }),
+    }))),
   ].sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''))
   const start = (input.page - 1) * input.pageSize
   return {
@@ -778,15 +778,15 @@ export async function refundRechargeOrder(
     orderNo: string
     reason: string
     adminId: string
-    getGatewayUserId: (userId: string) => string | null
+    getGatewayUserId: (userId: string) => Promise<string | null>
   },
 ): Promise<{ refund_no: string; refund_amount: number }> {
-  const order = store.getByOrderNo(input.orderNo)
+  const order = await store.getByOrderNo(input.orderNo)
   if (!order) throw new RechargeError(404, '订单不存在')
   if (order.status !== ORDER_STATUS.SUCCESS) throw new RechargeError(400, '订单状态不支持退款')
   if (!fuiou?.isConfigured()) throw new RechargeError(503, '支付服务未配置')
   if (!sudorouter) throw new RechargeError(503, '模型网关未配置')
-  const gatewayUserId = input.getGatewayUserId(order.userId)
+  const gatewayUserId = await input.getGatewayUserId(order.userId)
   if (!gatewayUserId) throw new RechargeError(409, '用户信息异常')
 
   const credits = await sudorouter.getCredits(gatewayUserId)
@@ -794,7 +794,7 @@ export async function refundRechargeOrder(
   const refundNo = `RF${Date.now()}${randomUUID().slice(0, 6).toUpperCase()}`
   const refundDate = localDateCompact()
 
-  if (!store.claimRefund(order.id, input.reason)) {
+  if (!await store.claimRefund(order.id, input.reason)) {
     throw new RechargeError(409, '订单退款正在处理或已处理')
   }
 
@@ -812,7 +812,7 @@ export async function refundRechargeOrder(
       if (!result.success) throw new RechargeError(400, result.error || '退款请求失败')
       if (result.data?.refund_st !== '5') throw new RechargeError(400, '退款状态异常')
     } catch (error) {
-      store.update(order.id, { status: ORDER_STATUS.SUCCESS, remark: '退款请求失败' })
+      await store.update(order.id, { status: ORDER_STATUS.SUCCESS, remark: '退款请求失败' })
       throw error
     }
   }
@@ -823,7 +823,7 @@ export async function refundRechargeOrder(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const refused = isSudorouterRefusal(error)
-      store.createRefund({
+      await store.createRefund({
         refundNo,
         orderId: order.id,
         orderNo: order.orderNo,
@@ -845,7 +845,7 @@ export async function refundRechargeOrder(
       throw new RechargeError(502, refused ? `Sudorouter 扣减失败: ${message}` : `Sudorouter 扣减结果未知: ${message}`)
     }
   }
-  store.createRefund({
+  await store.createRefund({
     refundNo,
     orderId: order.id,
     orderNo: order.orderNo,
