@@ -105,6 +105,11 @@ export type PullConfig = {
    * self-built app, auto-discovered by corpId. Absent = keep raw ids.
    */
   nameLookup?: NameLookup
+  /**
+   * Resolves a roomid to a group name. Called once per newly seen room,
+   * so it costs one request per group rather than a scan of the corp.
+   */
+  roomNameLookup?: (roomId: string) => Promise<string | null>
 }
 
 export type PullResult = {
@@ -227,7 +232,7 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
 
       // Write first, then advance — see ORDERING above.
       const { written: w } = await appendRecords(cfg.corpAppId, records)
-      await updateRooms(cfg.corpAppId, records)
+      await updateRooms(cfg.corpAppId, records, cfg.roomNameLookup)
       written += w
 
       // Media is downloaded AFTER the transcript is durable, and its

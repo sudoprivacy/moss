@@ -2204,26 +2204,50 @@ export function startServer(
           // lazily so a missing or IP-blocked app costs names, never the
           // transcript itself.
           if (pull.resolveNames) {
+            /** The same-corp self-built app, resolved lazily per call. */
+            const resolveSiblingApp = async () => {
+              const appRow = runtime.store
+                .listAllCorpAppsByType('wecomapp')
+                .find(
+                  (r) =>
+                    String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
+                    String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
+                      String(JSON.parse(String(row.config_json ?? '{}')).corpId ?? ''),
+                ) as Record<string, unknown> | undefined
+              if (!appRow) return null
+              const { createCorpApp } = await import('./corpapps/types.js')
+              const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
+              const appCreds =
+                typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
+                  ? await readSecret(appRow.credentials_secret_key)
+                  : {}
+              const appConn = createCorpApp(String(appRow.type))
+              await appConn.init(appCfg, appCreds)
+              return appConn
+            }
+
+            // Group names: one request per newly seen room (see
+            // updateRooms), never a scan — a corp can have tens of
+            // thousands of groups, and the archive only ever touches the
+            // handful it has actually recorded.
+            pull.roomNameLookup = async (roomId: string) => {
+              try {
+                const appConn = await resolveSiblingApp()
+                if (!appConn?.getCustomerGroup) return null
+                const r = await appConn.getCustomerGroup(roomId, false)
+                const g = (r.group_chat ?? r.groupChat ?? r) as Record<string, unknown>
+                const name = g?.name
+                return typeof name === 'string' && name ? name : null
+              } catch {
+                // Internal groups answer 90501 here; that is expected, not
+                // an error worth surfacing per room.
+                return null
+              }
+            }
             pull.nameLookup = async (id: string, external: boolean) => {
               try {
-                const appRow = runtime.store
-                  .listAllCorpAppsByType('wecomapp')
-                  .find(
-                    (r) =>
-                      String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
-                      String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
-                        String(JSON.parse(String(row.config_json ?? '{}')).corpId ?? ''),
-                  ) as Record<string, unknown> | undefined
-                if (!appRow) return null
-                const { createCorpApp } = await import('./corpapps/types.js')
-                const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
-                const appCreds =
-                  typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
-                    ? await readSecret(appRow.credentials_secret_key)
-                    : {}
-                const appConn = createCorpApp(String(appRow.type))
-                await appConn.init(appCfg, appCreds)
-                return appConn.getUserName ? await appConn.getUserName(id, external) : null
+                const appConn = await resolveSiblingApp()
+                return appConn?.getUserName ? await appConn.getUserName(id, external) : null
               } catch {
                 return null
               }

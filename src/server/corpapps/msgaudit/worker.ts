@@ -21,8 +21,9 @@ import type { PullConfig, PullResult } from './puller.js'
 
 /** A name lookup the child needs us to perform (see pullChild.ts). */
 type LookupRequest = { kind: 'lookup'; id: number; userId: string; external: boolean }
+type RoomLookupRequest = { kind: 'roomLookup'; id: number; roomId: string }
 type ResultMessage = { ok: boolean; result?: PullResult; error?: string }
-type ChildMessage = LookupRequest | ResultMessage
+type ChildMessage = LookupRequest | RoomLookupRequest | ResultMessage
 
 /**
  * Locate the forked child's entrypoint.
@@ -125,6 +126,26 @@ export function pullInChild(cfg: PullConfig): Promise<PullResult> {
         }
         cfg
           .nameLookup(req.userId, req.external)
+          .then(answer)
+          .catch(() => answer(null))
+        return
+      }
+
+      if (msg && (msg as RoomLookupRequest).kind === 'roomLookup') {
+        const req = msg as RoomLookupRequest
+        const answer = (name: string | null) => {
+          try {
+            child.send({ kind: 'lookupResult', id: req.id, name })
+          } catch {
+            // child already gone; its own timeout will unblock it
+          }
+        }
+        if (!cfg.roomNameLookup) {
+          answer(null)
+          return
+        }
+        cfg
+          .roomNameLookup(req.roomId)
           .then(answer)
           .catch(() => answer(null))
         return
