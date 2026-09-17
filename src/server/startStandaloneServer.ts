@@ -17,6 +17,7 @@ import { AuthProxyServer, loadAuthProxyRules } from './authProxy/authProxyServer
 import { TokenMinter } from './authProxy/tokenMinter.js'
 import { setSecretsApiDependencies } from './authProxy/secretsApi.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
+import { assertSafeInstanceIdentity } from './startupGuards.js'
 
 export type StandaloneServerOptions = ServerConfig
 
@@ -126,26 +127,20 @@ async function finishStandaloneServerStartup(
   const store = await openStoreAsync(config)
   await store.ensureDefaultConfigItems()
 
-  // E-5: HA-shaped deployment without MOSS_INSTANCE_ID → refuse to start.
+  // E-5: a live peer without MOSS_INSTANCE_ID → refuse to start.
   // The container-name suffix, docker label filter and wiki claim column all
   // collapse to the 'default' fallback when instanceId is unset, which makes
   // two such instances claim-kill each other's containers and stage dirs.
+  // publicBaseUrl is deliberately not a signal here: legacy single-node
+  // installs set it so generated links are externally reachable.
   // We cannot know our own row yet (registration happens below), so the
   // live-peer count uses an empty-string sentinel — before registration
   // there is no self row to exclude, and `instance_id != ''` holds for every
   // real UUID row. (Never pass config.instanceId here: undefined bind values
   // throw in the driver.)
   if (!config.instanceId) {
-    const haShaped = Boolean(config.publicBaseUrl)
-      || (await store.countLiveOtherInstances('', config.heartbeatTimeoutMs)) > 0
-    if (haShaped) {
-      throw new Error(
-        '[Startup] Refusing to start: this deployment is HA-shaped (publicBaseUrl set, or live peer instances found) ' +
-          'but MOSS_INSTANCE_ID is not set. Without a per-instance id, container names, docker labels and wiki job ' +
-          'claims collapse to the shared "default" suffix and two instances will destroy each other\'s state. ' +
-          'Set a unique MOSS_INSTANCE_ID per instance.',
-      )
-    }
+    const livePeerCount = await store.countLiveOtherInstances('', config.heartbeatTimeoutMs)
+    assertSafeInstanceIdentity(config, livePeerCount)
   }
   // B-9: sqlite backend + instanceId set + live peers sharing the file →
   // refuse: the advisory-lock seam is a no-op passthrough on sqlite, so

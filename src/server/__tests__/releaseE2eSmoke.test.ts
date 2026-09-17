@@ -69,9 +69,7 @@ describe("packaged Server E2E smoke", () => {
     expect(runner).toContain('zip -q -r "$DIST_DIR/$EVIDENCE_NAME.zip"');
     expect(runner).toContain('install.sh" --offline');
     expect(runner).toContain('uninstall.sh" --purge');
-    expect(runner).toContain('E2E_INSTANCE_ID="e2e-${VERSION//./-}"');
-    expect(runner).toContain('MOSS_INSTANCE_ID="$E2E_INSTANCE_ID"');
-    expect(runner).not.toContain('MOSS_INSTANCE_ID="e2e-$VERSION"');
+    expect(runner).not.toContain("MOSS_INSTANCE_ID=");
     expect(runner).toContain("MOSS_MODEL_LIST_URL=");
     expect(driver).toMatch(/type:\s*["']user["']/);
     expect(driver).toMatch(/event\.type\s*===\s*["']assistant["']/);
