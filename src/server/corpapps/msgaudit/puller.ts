@@ -109,6 +109,12 @@ export type PullConfig = {
    */
   rosterLookup?: (roomId: string) => Promise<string[] | null>
   /**
+   * Whether to take membership snapshots. A plain boolean because
+   * `rosterLookup` is a function and cannot cross the IPC boundary to the
+   * pull child — the child sees this flag and asks the parent instead.
+   */
+  snapshotRosters?: boolean
+  /**
    * Raw room filter as typed by the admin: room ids separated by commas
    * and/or whitespace. Empty (or absent) archives every conversation.
    */

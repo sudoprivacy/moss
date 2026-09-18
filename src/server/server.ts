@@ -2207,6 +2207,8 @@ export function startServer(
           // SDK has no membership API. Found by corpId, same as the name
           // lookups — an archive instance and the app that can read its
           // groups belong to the same corp by definition.
+          // Flag travels over IPC; the function stays here (see pullChild).
+          pull.snapshotRosters = true
           pull.rosterLookup = async (roomId: string) => {
             try {
               const appRow = runtime.store

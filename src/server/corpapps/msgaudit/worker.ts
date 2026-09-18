@@ -19,8 +19,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PullConfig, PullResult } from './puller.js'
 
+/** A roster fetch the child needs us to perform (see pullChild.ts). */
+type RosterRequest = { kind: 'roster'; id: number; roomId: string }
 type ResultMessage = { ok: boolean; result?: PullResult; error?: string }
-type ChildMessage = ResultMessage
+type ChildMessage = RosterRequest | ResultMessage
 
 /**
  * Locate the forked child's entrypoint.
@@ -105,6 +107,29 @@ export function pullInChild(cfg: PullConfig): Promise<PullResult> {
     timer.unref()
 
     child.on('message', (msg: ChildMessage) => {
+      // The child cannot be handed cfg.rosterLookup directly — IPC is
+      // JSON, so a function arrives as undefined. It asks us instead, and
+      // we answer here where the connector and its credentials live.
+      if (msg && (msg as RosterRequest).kind === 'roster') {
+        const req = msg as RosterRequest
+        const answer = (members: string[] | null) => {
+          try {
+            child.send({ kind: 'rosterResult', id: req.id, members })
+          } catch {
+            // child already gone; its own timeout will unblock it
+          }
+        }
+        if (!cfg.rosterLookup) {
+          answer(null)
+          return
+        }
+        cfg
+          .rosterLookup(req.roomId)
+          .then(answer)
+          .catch(() => answer(null))
+        return
+      }
+
       const done = msg as ResultMessage
       finish(() => {
         child.kill()
