@@ -146,10 +146,19 @@ RUN chmod +x /usr/local/bin/scode \
 FROM node:22-trixie-slim AS server-runtime
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
-RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
+# Timeout is 300s, not 60s: fonts-noto-cjk alone is ~54MB, and a mirror
+# serving it at 0.4MB/s needs ~135s. With a 60s ceiling that package can
+# never finish, so apt loops download->timeout->retry forever and the
+# build hangs instead of failing (observed three times, 1-3 hours each).
+RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "300";\nAcquire::https::Timeout "300";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
 # Mirror: deb.debian.org is intermittently 502/unreachable through some proxies
 # (a single probe can pass, then a later apt call in the same build 502s), so
-# rewrite the trixie sources to mirrors.aliyun.com UNCONDITIONALLY. Use http://
+# rewrite the trixie sources to a domestic mirror UNCONDITIONALLY.
+#
+# Tsinghua first, aliyun second: measured 10.9MB/s vs 0.4MB/s from this
+# network, and at aliyun's rate the 54MB fonts-noto-cjk cannot finish
+# inside any sane apt timeout. Both fall back to deb.debian.org if the
+# index will not refresh. Use http://
 # (not https://): some egress proxies mangle the TLS handshake to the mirror,
 # which surfaces as apt "Ign:" on the InRelease files and a failed update; plain
 # http avoids that path and the deb822 Signed-By keyring still authenticates the
@@ -157,12 +166,19 @@ RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https
 # deb.debian.org. node:22-trixie-slim uses the deb822 format at
 # /etc/apt/sources.list.d/debian.sources.
 RUN cp -a /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.orig 2>/dev/null || true; \
-    sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
-      /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
-    sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
-      /etc/apt/sources.list 2>/dev/null || true; \
-    if ! apt-get update; then \
-      echo "mirrors.aliyun.com apt-get update failed; reverting to deb.debian.org"; \
+    set_mirror() { \
+      cp -a /etc/apt/sources.list.d/debian.sources.orig /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+      sed -i "s|https\?://deb.debian.org/debian-security|http://$1/debian-security|g; s|https\?://deb.debian.org|http://$1|g" \
+        /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+      sed -i "s|https\?://deb.debian.org/debian-security|http://$1/debian-security|g; s|https\?://deb.debian.org|http://$1|g" \
+        /etc/apt/sources.list 2>/dev/null || true; \
+    }; \
+    if set_mirror mirrors.tuna.tsinghua.edu.cn && apt-get update; then \
+      echo "apt mirror: mirrors.tuna.tsinghua.edu.cn"; \
+    elif set_mirror mirrors.aliyun.com && apt-get update; then \
+      echo "apt mirror: mirrors.aliyun.com (tsinghua unavailable)"; \
+    else \
+      echo "domestic mirrors unavailable; reverting to deb.debian.org"; \
       cp -a /etc/apt/sources.list.d/debian.sources.orig /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
       apt-get update; \
     fi
