@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process'
  * Suites this gates, by directory. Adding a directory here is what makes its
  * tests run in CI at all — a test outside these is not protecting anything.
  */
-const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__', 'src/server/configStore']
+const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__', 'src/server/configStore', 'src/server/zones/__tests__']
 
 // Module-level HOME mocks and ConfigStore singletons must not share a Bun process
 // with other suites, which may have already imported systemSettings.
@@ -33,6 +33,8 @@ const BUN = [
   // src/server/nexus/__tests__
   'nexusClient.test.ts',
   'nexusManager.test.ts',
+  // src/server/zones/__tests__ (iam/v1 owner-local contract; ajv only, no node:sqlite)
+  'orgZoneBindingContract.test.ts',
   // src/channels/__tests__
   'connectionScope.test.ts',
   'crashSeedRecovery.test.ts',
