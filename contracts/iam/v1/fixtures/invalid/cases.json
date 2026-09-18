@@ -1,0 +1,319 @@
+{
+  "$comment": "Invalid OrgZoneBinding payloads. Every case must be rejected by the schema and the generated adapter. Clients judge by code, never by message.",
+  "cases": [
+    {
+      "name": "unknown-major",
+      "why": "api_version carries an unsupported major; unknown majors are rejected, not ignored.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v2",
+        "kind": "OrgZoneBinding",
+        "binding_id": "binding_x",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "wrong-kind",
+      "why": "kind is a closed identity discriminator.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBindings",
+        "binding_id": "binding_x",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "missing-required-binding-id",
+      "why": "binding_id is required.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "missing-required-org-id",
+      "why": "org_id is required.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "missing-required-zone-id",
+      "why": "zone_id is required.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "missing-required-generation",
+      "why": "generation is required (desired-state generations are applied in order).",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "missing-required-sync-status",
+      "why": "sync_status is required.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "missing-required-created-at",
+      "why": "created_at is required.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "wrong-type-is-default",
+      "why": "is_default must be a boolean, not its string spelling.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": "true",
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "wrong-type-generation",
+      "why": "generation must be an integer, not a numeric string.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": "3",
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "negative-generation",
+      "why": "generation is a monotonic counter starting at zero.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": -1,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "wrong-type-capabilities",
+      "why": "desired_capabilities must be an array of strings, not a bare string.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": "zone.data.read",
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "bad-enum-desired-state",
+      "why": "desired_state is a closed enum; unknown spellings are typos, not extensions.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "Bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "bad-enum-sync-status",
+      "why": "sync_status is a closed enum with an explicit 'unknown' member; anything else is invalid.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "active-ish",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "empty-binding-id",
+      "why": "binding_id is an opaque but non-empty identity.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "bad-time-missing-clock",
+      "why": "created_at must be an RFC 3339 date-time, not a bare date.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "b",
+        "org_id": "org_x",
+        "nexus_deployment_id": "d",
+        "zone_id": "z",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": [],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    }
+  ]
+}

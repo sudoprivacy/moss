@@ -1,0 +1,27 @@
+{
+  "$comment": "Unknown-optional cases: under the supported major, unknown optional fields are accepted at the wire layer and dropped by the object model (the parsed value carries only schema-known properties).",
+  "cases": [
+    {
+      "name": "unknown-fields-accepted-and-dropped",
+      "why": "A future minor adds expiry_hint and x_internal_note; this major must accept and ignore them.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "binding_01H5K8V2M9XQZ3A6B7C8D9E0F5",
+        "org_id": "org_550e8400-e29b-41d4-a716-446655440004",
+        "nexus_deployment_id": "nexusd-cluster-v0.1.5",
+        "zone_id": "org-hr-us",
+        "purpose": "office",
+        "is_default": false,
+        "desired_capabilities": ["zone.data.read"],
+        "desired_state": "bound",
+        "sync_status": "syncing",
+        "generation": 2,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z",
+        "expiry_hint": "2027-01-01T00:00:00Z",
+        "x_internal_note": "provisioned by backfill batch 12"
+      }
+    }
+  ]
+}

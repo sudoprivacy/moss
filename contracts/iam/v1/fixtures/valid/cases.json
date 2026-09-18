@@ -1,0 +1,90 @@
+{
+  "$comment": "Valid OrgZoneBinding payloads. Every case must parse successfully against contracts/iam/v1/org-zone-binding.schema.json and the generated adapter.",
+  "cases": [
+    {
+      "name": "minimal",
+      "why": "Only the required fields, with the smallest legal values.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "binding_01H5K8V2M9XQZ3A6B7C8D9E0F1",
+        "org_id": "org_550e8400-e29b-41d4-a716-446655440000",
+        "nexus_deployment_id": "nexusd-cluster-v0.1.5",
+        "zone_id": "cloud-user-1001",
+        "purpose": "default",
+        "is_default": true,
+        "desired_capabilities": ["zone.data.read"],
+        "desired_state": "bound",
+        "sync_status": "pending",
+        "generation": 0,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "full",
+      "why": "Every field, including all optionals.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "binding_01H5K8V2M9XQZ3A6B7C8D9E0F2",
+        "org_id": "org_550e8400-e29b-41d4-a716-446655440001",
+        "nexus_deployment_id": "nexusd-cluster-v0.1.5",
+        "zone_id": "org-acme-shared",
+        "purpose": "shared",
+        "is_default": false,
+        "desired_capabilities": ["zone.data.read", "zone.data.write", "zone.runtime.execute"],
+        "resource_prefixes": ["/sessions", "/artifacts"],
+        "desired_state": "bound",
+        "sync_status": "active",
+        "nexus_grant_id": "grant_01H5K9W3N0YRA4B7C8D9E0F1G2",
+        "nexus_operation_id": "op_01H5K9X4O1ZSB5C8D9E0F1G2H3",
+        "generation": 7,
+        "last_error_code": "ZONE_RUNTIME_UNAVAILABLE",
+        "created_at": "2026-09-17T10:30:00.123Z",
+        "updated_at": "2026-09-18T09:45:12.456789+02:00"
+      }
+    },
+    {
+      "name": "open-purpose",
+      "why": "purpose is an open registry: an unknown-but-nonempty purpose must be accepted within the supported major.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "binding_01H5K8V2M9XQZ3A6B7C8D9E0F3",
+        "org_id": "org_550e8400-e29b-41d4-a716-446655440002",
+        "nexus_deployment_id": "nexusd-cluster-v0.1.5",
+        "zone_id": "org-finance-eu",
+        "purpose": "billing-experiment",
+        "is_default": false,
+        "desired_capabilities": [],
+        "desired_state": "detached",
+        "sync_status": "detached",
+        "generation": 1,
+        "created_at": "2026-09-18T08:00:00Z",
+        "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "sync-failed-with-error-code",
+      "why": "sync_failed status together with an open error-code string.",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1",
+        "kind": "OrgZoneBinding",
+        "binding_id": "binding_01H5K8V2M9XQZ3A6B7C8D9E0F4",
+        "org_id": "org_550e8400-e29b-41d4-a716-446655440003",
+        "nexus_deployment_id": "nexusd-cluster-v0.1.5",
+        "zone_id": "org-research-ap",
+        "purpose": "core",
+        "is_default": false,
+        "desired_capabilities": ["zone.data.read"],
+        "desired_state": "bound",
+        "sync_status": "sync_failed",
+        "generation": 3,
+        "last_error_code": "GRANT_NOT_ACTIVE",
+        "created_at": "2026-09-16T00:00:00Z",
+        "updated_at": "2026-09-18T11:00:00Z"
+      }
+    }
+  ]
+}
