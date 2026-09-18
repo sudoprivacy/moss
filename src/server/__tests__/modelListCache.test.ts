@@ -1,38 +1,113 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { clearModelCache, getAvailableModels } from "../modelListCache.js";
+import { afterEach, describe, expect, it } from 'bun:test'
+import { buildModelsConfig } from '../modelListCache.js'
+import {
+  clearProviderModelCache,
+  discoverProviderModels,
+  normalizeModelProviders,
+  resolveModelSelection,
+  toPublicProviders,
+  type ModelProvider,
+} from '../modelProviders.js'
 
-const originalFetch = globalThis.fetch;
-const originalModelListUrl = process.env.MOSS_MODEL_LIST_URL;
+const originalFetch = globalThis.fetch
 
 afterEach(() => {
-  clearModelCache();
-  globalThis.fetch = originalFetch;
-  if (originalModelListUrl === undefined)
-    delete process.env.MOSS_MODEL_LIST_URL;
-  else process.env.MOSS_MODEL_LIST_URL = originalModelListUrl;
-});
+  clearProviderModelCache()
+  globalThis.fetch = originalFetch
+})
 
-describe("model list cache", () => {
-  it("uses the configured model-list URL for hermetic deployments", async () => {
-    const expectedUrl = "http://127.0.0.1:43210/api/specific_pricing";
-    let requestedUrl = "";
-    process.env.MOSS_MODEL_LIST_URL = expectedUrl;
-    globalThis.fetch = (async (input) => {
-      requestedUrl = String(input);
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: [
-            { model_id: "moss-e2e-model", model: "Moss E2E Model", ratio: 1 },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }) as typeof fetch;
+describe('provider model discovery', () => {
+  it('normalizes an OpenAI-compatible /models response into provider-scoped selections', async () => {
+    const provider: ModelProvider = {
+      id: 'local-vllm',
+      name: 'Local vLLM',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      discoveryUrl: 'http://127.0.0.1:8000/v1/models',
+      protocol: 'openai-completions',
+      enabled: true,
+    }
+    let authorization = ''
+    globalThis.fetch = (async (_input, init) => {
+      authorization = new Headers(init?.headers).get('authorization') || ''
+      return new Response(JSON.stringify({ data: [{ id: 'Qwen3.6-35B-A3B-NVFP4' }] }), { status: 200 })
+    }) as typeof fetch
 
-    await expect(getAvailableModels()).resolves.toEqual([
-      { id: "moss-e2e-model", name: "Moss E2E Model", ratio: 1 },
-    ]);
-    expect(requestedUrl).toBe(expectedUrl);
-  });
-});
+    await expect(discoverProviderModels(provider, 'temporary-key')).resolves.toEqual([
+      {
+        id: 'local-vllm:Qwen3.6-35B-A3B-NVFP4',
+        modelId: 'Qwen3.6-35B-A3B-NVFP4',
+        name: 'Qwen3.6-35B-A3B-NVFP4',
+        providerId: 'local-vllm',
+        providerName: 'Local vLLM',
+        protocol: 'openai-completions',
+        ratio: 1,
+      },
+    ])
+    expect(authorization).toBe('Bearer temporary-key')
+  })
+
+  it('routes a qualified user choice to its provider and keeps plain legacy choices backward compatible', () => {
+    const providers: ModelProvider[] = [
+      {
+        id: 'local-vllm', name: 'Local vLLM', kind: 'openai-compatible',
+        baseUrl: 'http://local/v1', discoveryUrl: 'http://local/v1/models', protocol: 'openai-completions', enabled: true,
+      },
+      {
+        id: 'sudorouter', name: 'Sudorouter', kind: 'openai-compatible',
+        baseUrl: 'https://model.sudorouter.ai/v1', discoveryUrl: 'https://model.sudorouter.ai/v1/models', protocol: 'openai-responses', enabled: true,
+      },
+    ]
+    expect(resolveModelSelection(providers, 'local-vllm', 'Qwen', 'sudorouter:gemini-3.5-flash')).toMatchObject({
+      provider: { id: 'sudorouter' }, modelId: 'gemini-3.5-flash', selectionId: 'sudorouter:gemini-3.5-flash',
+    })
+    expect(resolveModelSelection(providers, 'local-vllm', 'Qwen', 'Qwen')).toMatchObject({
+      provider: { id: 'local-vllm' }, modelId: 'Qwen', selectionId: 'local-vllm:Qwen',
+    })
+  })
+
+  it('keeps the configured inference protocol in the generated scode model entry', () => {
+    expect(buildModelsConfig([{
+      modelId: 'gpt-5.6',
+      protocol: 'openai-responses',
+    }])).toEqual({
+      'proxy/gpt-5.6': {
+        alias: 'proxy/gpt-5.6',
+        name: 'Moss provider: proxy/gpt-5.6',
+        input: ['text'],
+        providers: {
+          proxy: {
+            provider: 'moss-proxy',
+            model: 'gpt-5.6',
+            api: 'openai-responses',
+          },
+        },
+      },
+    })
+  })
+
+  it('keeps provider credentials write-only while retaining the configured protocol', () => {
+    const [provider] = normalizeModelProviders([{
+      id: 'sudorouter',
+      name: 'Sudorouter',
+      baseUrl: 'https://model.sudorouter.ai/v1',
+      discoveryUrl: 'https://model.sudorouter.ai/v1/models',
+      protocol: 'openai-responses',
+      enabled: true,
+    }], '')
+    const [publicProvider] = toPublicProviders([provider], { sudorouter: 'not-returned' }, '')
+
+    expect(publicProvider.protocol).toBe('openai-responses')
+    expect(publicProvider.apiKeyConfigured).toBe(true)
+    expect('apiKey' in publicProvider).toBe(false)
+  })
+
+  it('keeps an unconfigured legacy installation on the historical default endpoint', () => {
+    const [provider] = normalizeModelProviders([], '')
+    expect(provider).toMatchObject({
+      id: 'legacy-default',
+      baseUrl: 'https://hk.sudorouter.ai/v1',
+      discoveryUrl: 'https://hk.sudorouter.ai/v1/models',
+    })
+  })
+})

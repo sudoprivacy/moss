@@ -70,7 +70,9 @@ describe("packaged Server E2E smoke", () => {
     expect(runner).toContain('install.sh" --offline');
     expect(runner).toContain('uninstall.sh" --purge');
     expect(runner).not.toContain("MOSS_INSTANCE_ID=");
-    expect(runner).toContain("MOSS_MODEL_LIST_URL=");
+    expect(runner).not.toContain("MOSS_MODEL_LIST_URL=");
+    expect(mock).toContain('"/v1/models"');
+    expect(mock).not.toContain("/api/specific_pricing");
     expect(driver).toMatch(/type:\s*["']user["']/);
     expect(driver).toMatch(/event\.type\s*===\s*["']assistant["']/);
     expect(driver).toMatch(/event\.type\s*===\s*["']result["']/);

@@ -28,6 +28,8 @@ import { Switch } from '@/components/ui/switch'
 import { getSystemSettings, updateSystemSettings } from '@/lib/api/settings'
 import type {
   SystemSettings,
+  SystemSettingsModelProvider,
+  ModelProviderProtocol,
   ThinkingMode,
   UpdateSystemSettingsRequest,
 } from '@/lib/api/types'
@@ -49,8 +51,13 @@ import { toast } from 'sonner'
 
 type EditableSystemSettings = Omit<
   SystemSettings,
-  'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError'
+  'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError' | 'modelProviders'
 >
+
+type EditableModelProvider = SystemSettingsModelProvider & { apiKey?: string }
+type EditableSystemSettingsWithProviders = EditableSystemSettings & {
+  modelProviders: EditableModelProvider[]
+}
 
 type SettingsSectionProps = {
   icon: ComponentType<{ className?: string }>
@@ -87,7 +94,19 @@ const thinkingModeOptions: Array<{
   },
 ]
 
-function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
+function toEditableSettings(settings: SystemSettings): EditableSystemSettingsWithProviders {
+  const modelProviders = Array.isArray(settings.modelProviders) && settings.modelProviders.length > 0
+    ? settings.modelProviders
+    : [{
+        id: 'legacy-default',
+        name: '默认模型服务',
+        kind: 'openai-compatible' as const,
+        baseUrl: settings.url || 'https://hk.sudorouter.ai/v1',
+        discoveryUrl: `${(settings.url || 'https://hk.sudorouter.ai/v1').replace(/\/+$/, '')}/models`,
+        protocol: 'openai-completions' as const,
+        enabled: true,
+        apiKeyConfigured: Boolean(settings.apiKey),
+      }]
   return {
     bypassPermissions: settings.bypassPermissions,
     model: settings.model,
@@ -96,6 +115,8 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     thinkingBudgetTokens: settings.thinkingBudgetTokens,
     url: settings.url,
     apiKey: settings.apiKey,
+    modelProviders: modelProviders.map(provider => ({ ...provider })),
+    defaultModelProviderId: settings.defaultModelProviderId || 'legacy-default',
     image: {
       provider: settings.image.provider,
       url: settings.image.url,
@@ -122,7 +143,7 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
 
 function buildSystemSettingsPatch(
   settings: SystemSettings,
-  draft: EditableSystemSettings,
+  draft: EditableSystemSettingsWithProviders,
 ): UpdateSystemSettingsRequest {
   const patch: UpdateSystemSettingsRequest = {}
 
@@ -152,6 +173,29 @@ function buildSystemSettingsPatch(
   }
   if (draft.apiKey !== settings.apiKey) {
     patch.apiKey = draft.apiKey
+  }
+  if (draft.defaultModelProviderId !== settings.defaultModelProviderId) {
+    patch.defaultModelProviderId = draft.defaultModelProviderId
+  }
+  const providerMetadata = (provider: EditableModelProvider | SystemSettingsModelProvider) => {
+    const { apiKey: _apiKey, apiKeyConfigured: _apiKeyConfigured, ...metadata } = provider as EditableModelProvider
+    return metadata
+  }
+  // A pre-Provider server can still render this page safely, but must not
+  // receive a synthetic Provider patch merely because its response has no
+  // `modelProviders` field yet.
+  const serverSupportsProviders = Array.isArray(settings.modelProviders)
+  const providersChanged = serverSupportsProviders
+    && JSON.stringify(draft.modelProviders.map(providerMetadata))
+      !== JSON.stringify(settings.modelProviders.map(providerMetadata))
+  const hasNewProviderKey = draft.modelProviders.some(provider => Boolean(provider.apiKey?.trim()))
+  if (serverSupportsProviders && (providersChanged || hasNewProviderKey)) {
+    patch.modelProviders = draft.modelProviders.map(provider => {
+      const metadata = providerMetadata(provider)
+      return provider.apiKey?.trim()
+        ? { ...metadata, apiKey: provider.apiKey.trim() }
+        : metadata
+    })
   }
 
   const imagePatch: NonNullable<UpdateSystemSettingsRequest['image']> = {}
@@ -384,14 +428,14 @@ function ClientSettingsSection() {
 
 export default function SystemSettingsPage() {
   const [settings, setSettings] = useState<SystemSettings | null>(null)
-  const [draft, setDraft] = useState<EditableSystemSettings | null>(null)
+  const [draft, setDraft] = useState<EditableSystemSettingsWithProviders | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [hasSavedOnce, setHasSavedOnce] = useState(false)
   const settingsRef = useRef<SystemSettings | null>(null)
-  const draftRef = useRef<EditableSystemSettings | null>(null)
+  const draftRef = useRef<EditableSystemSettingsWithProviders | null>(null)
   const lastFailedSnapshotRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -702,7 +746,7 @@ export default function SystemSettingsPage() {
           title="文本模型"
           description="设置服务端默认使用的文本模型、API 地址和认证信息。"
         >
-          <SettingField label="默认模型" description="新的本地会话会默认使用这个模型。">
+          <SettingField label="默认模型" description="新的本地会话默认使用的模型名；它会与下方默认 Provider 共同组成实际路由。">
             <Input
               value={draft.model}
               onChange={(event) =>
@@ -719,7 +763,199 @@ export default function SystemSettingsPage() {
             />
           </SettingField>
 
-          <SettingField label="API URL" description="为空时使用默认地址。">
+          <SettingField
+            label="默认模型服务"
+            description="未带 Provider 前缀的旧模型名会使用此服务；新选择会保存为 provider:model，避免模型与凭证串线。"
+          >
+            <Select
+              value={draft.defaultModelProviderId}
+              onValueChange={(value) =>
+                setDraft(current => current
+                  ? { ...current, defaultModelProviderId: value }
+                  : current)
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="选择默认模型服务" />
+              </SelectTrigger>
+              <SelectContent>
+                {draft.modelProviders.filter(provider => provider.enabled).map(provider => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {provider.name} ({provider.id})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingField>
+
+          <div className="space-y-3 rounded-lg border p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">模型服务 Providers</p>
+                <p className="text-sm text-muted-foreground">
+                  每个 Provider 绑定发现地址、推理协议和独立凭证。凭证只写入 Nexus，刷新页面不会回显。
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setDraft(current => current
+                  ? {
+                      ...current,
+                      modelProviders: [
+                        ...current.modelProviders,
+                        {
+                          id: `provider-${Date.now().toString(36)}`,
+                          name: '新模型服务',
+                          kind: 'openai-compatible',
+                          baseUrl: 'http://127.0.0.1:8000/v1',
+                          discoveryUrl: 'http://127.0.0.1:8000/v1/models',
+                          protocol: 'openai-completions',
+                          enabled: true,
+                          apiKeyConfigured: false,
+                        },
+                      ],
+                    }
+                  : current)}
+              >
+                添加 Provider
+              </Button>
+            </div>
+
+            {draft.modelProviders.map((provider, index) => (
+              <div key={provider.id} className="space-y-3 rounded-md border bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Badge variant={provider.enabled ? 'secondary' : 'outline'}>
+                    {provider.enabled ? '已启用' : '已停用'}
+                  </Badge>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground">
+                      凭证：{provider.apiKeyConfigured ? '已配置' : '未配置'}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={draft.modelProviders.length === 1}
+                      onClick={() => setDraft(current => current
+                        ? {
+                            ...current,
+                            modelProviders: current.modelProviders.filter((_, itemIndex) => itemIndex !== index),
+                          }
+                        : current)}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Input
+                    value={provider.name}
+                    onChange={(event) => setDraft(current => current
+                      ? {
+                          ...current,
+                          modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                            ? { ...item, name: event.target.value }
+                            : item),
+                        }
+                      : current)}
+                    placeholder="显示名称，例如 Local vLLM"
+                  />
+                  <Input
+                    value={provider.id}
+                    onChange={(event) => setDraft(current => current
+                      ? {
+                          ...current,
+                          modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                            ? { ...item, id: event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') }
+                            : item),
+                        }
+                      : current)}
+                    placeholder="稳定 ID，例如 local-vllm"
+                  />
+                </div>
+                <Input
+                  value={provider.baseUrl}
+                  onChange={(event) => setDraft(current => current
+                    ? {
+                        ...current,
+                        modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                          ? { ...item, baseUrl: event.target.value }
+                          : item),
+                      }
+                    : current)}
+                  placeholder="推理 Base URL，例如 https://model.sudorouter.ai/v1"
+                />
+                <Input
+                  value={provider.discoveryUrl}
+                  onChange={(event) => setDraft(current => current
+                    ? {
+                        ...current,
+                        modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                          ? { ...item, discoveryUrl: event.target.value }
+                          : item),
+                      }
+                    : current)}
+                  placeholder="模型发现 URL，例如 https://model.sudorouter.ai/v1/models"
+                />
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <Select
+                      value={provider.protocol}
+                      onValueChange={(value) => setDraft(current => current
+                        ? {
+                            ...current,
+                            modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                              ? { ...item, protocol: value as ModelProviderProtocol }
+                              : item),
+                          }
+                        : current)}
+                    >
+                      <SelectTrigger><SelectValue placeholder="调用协议" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="openai-completions">OpenAI Chat Completions</SelectItem>
+                        <SelectItem value="openai-responses">OpenAI Responses</SelectItem>
+                        <SelectItem value="anthropic-messages">Anthropic Messages</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">`/models` 可发现模型，但不代表三个推理协议都可用；请按服务商已验证的接口选择。</p>
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border px-3">
+                    <span className="text-sm">启用 Provider</span>
+                    <Switch
+                      checked={provider.enabled}
+                      onCheckedChange={(enabled) => setDraft(current => current
+                        ? {
+                            ...current,
+                            modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                              ? { ...item, enabled }
+                              : item),
+                          }
+                        : current)}
+                    />
+                  </div>
+                </div>
+                <Input
+                  type="password"
+                  value={provider.apiKey ?? ''}
+                  className="font-mono text-xs"
+                  onChange={(event) => setDraft(current => current
+                    ? {
+                        ...current,
+                        modelProviders: current.modelProviders.map((item, itemIndex) => itemIndex === index
+                          ? { ...item, apiKey: event.target.value }
+                          : item),
+                      }
+                    : current)}
+                  placeholder={provider.apiKeyConfigured ? '已保存；输入新 Key 才会替换' : 'Provider API Key（可选）'}
+                />
+              </div>
+            ))}
+          </div>
+
+          <SettingField label="兼容服务 API URL" description="仅供旧的 legacy-default Provider 使用；新服务请在上方 Provider 列表中配置。">
             <Input
               value={draft.url}
               onChange={(event) =>
@@ -737,8 +973,8 @@ export default function SystemSettingsPage() {
           </SettingField>
 
           <SettingField
-            label="API Key"
-            description="保存后会写入 Nexus 凭据存储（不再明文落盘到 settings.json）。"
+            label="兼容服务 API Key"
+            description="仅供 legacy-default Provider 使用。新 Provider 的凭证在对应卡片中设置，并写入 Nexus。"
           >
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input

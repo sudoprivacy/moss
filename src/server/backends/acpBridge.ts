@@ -16,6 +16,8 @@ type AcpBridgeOptions = {
   sessionId: string
   cwd: string
   model: string
+  /** Provider identity bound to this running scode process. */
+  modelProviderId?: string
   transcriptPath?: string
   runtime: SessionRuntimeInfo
   resumeSessionId?: string
@@ -48,7 +50,7 @@ type AcpBridgeOptions = {
 }
 
 export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle {
-  const { child, sessionId, cwd, model, runtime } = options
+  const { child, sessionId, cwd, model, modelProviderId, runtime } = options
   const containerMode = options.containerMode ?? runtime.containerMode ?? 'session'
   const transcriptPath = options.transcriptPath
 
@@ -1149,9 +1151,41 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         const parsed = JSON.parse(data)
         process.stderr.write(`[AcpBridge] Received control_request: ${JSON.stringify(parsed)}\n`)
         if (parsed.type === 'control_request' && parsed.request?.subtype === 'set_model') {
-          const modelId = parsed.request.model_id
-          if (!modelId) {
+          const requestedModelId = parsed.request.model_id
+          if (typeof requestedModelId !== 'string' || !requestedModelId) {
             process.stderr.write(`[AcpBridge] set_model request missing model_id\n`)
+            return
+          }
+
+          // A scode process is configured with exactly one base URL and API
+          // key.  Repointing only `session/set_model` cannot safely move it to
+          // another Provider, so reject that request instead of falsely
+          // emitting `model_changed` and sending subsequent turns to the old
+          // endpoint.  The client can start a new session with the selected
+          // provider; same-provider switches remain in place.
+          const separator = requestedModelId.indexOf(':')
+          const requestedProviderId = separator > 0
+            ? requestedModelId.slice(0, separator)
+            : undefined
+          if (requestedProviderId && requestedProviderId !== modelProviderId) {
+            const rejectedEvent = JSON.stringify({
+              type: 'system',
+              subtype: 'model_switch_rejected',
+              session_id: sessionId,
+              model: requestedModelId,
+              current_provider_id: modelProviderId ?? null,
+              reason: 'provider_switch_requires_new_session',
+            })
+            process.stderr.write(`[AcpBridge] Rejecting cross-provider model switch: ${requestedModelId}\n`)
+            emitStdout(rejectedEvent + '\n')
+            return
+          }
+
+          const modelId = requestedProviderId
+            ? requestedModelId.slice(separator + 1)
+            : requestedModelId
+          if (!modelId) {
+            process.stderr.write(`[AcpBridge] set_model request has an empty qualified model ID\n`)
             return
           }
 
@@ -1187,14 +1221,14 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             })
             .catch((error) => {
               process.stderr.write(`[AcpBridge] Model switch failed: ${error.message}\n`)
-              // Still emit model_changed event for UI consistency (model preference is saved)
-              const modelChangedEvent = JSON.stringify({
+              const rejectedEvent = JSON.stringify({
                 type: 'system',
-                subtype: 'model_changed',
+                subtype: 'model_switch_rejected',
                 session_id: sessionId,
                 model: scodeModelName,
+                reason: 'runtime_rejected_model',
               })
-              emitStdout(modelChangedEvent + '\n')
+              emitStdout(rejectedEvent + '\n')
             })
 
           return

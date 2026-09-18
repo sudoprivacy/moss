@@ -200,6 +200,9 @@ export class K8sBackend implements SessionBackend {
       const allModels = ensureOpenAIModelConfig(
         await buildAllModelsConfig(baseUrl),
         env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview',
+        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
+          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
+          : 'openai-completions',
       )
       const scodeConfig = {
         auth_modes: { proxy: { 'moss-proxy': { baseUrl, apiKey } } },
@@ -384,6 +387,7 @@ export class K8sBackend implements SessionBackend {
       sessionId: options.sessionId,
       cwd: safeCwd,
       model,
+      modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: options.transcriptPath,
       resumeSessionId,
       scodeSessionIdPath,
