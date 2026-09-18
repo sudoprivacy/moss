@@ -7,7 +7,7 @@ import { safeParseCommon } from '@sudo/contracts/common/v1'
 
 type ParseResult = { ok: boolean; value?: unknown; issues?: Array<{ path: string; message: string }> }
 
-const expectedSudostackSha = '65904eb0a0991366767095b707f5a86835089a1e'
+const expectedSudostackSha = '6a51190a0e08f673912967716629a2fdb424b85a'
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '../../..')
 const sudostack = process.env.SUDOSTACK_REPO ?? join(repo, '../sudostack')

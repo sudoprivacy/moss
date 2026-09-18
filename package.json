@@ -113,7 +113,7 @@
     "xss": "^1.0.15",
     "yaml": "^2.8.3",
     "zod": "*",
-    "@sudo/contracts": "github:sudoprivacy/sudostack#65904eb0a0991366767095b707f5a86835089a1e"
+    "@sudo/contracts": "github:sudoprivacy/sudostack#6a51190a0e08f673912967716629a2fdb424b85a"
   },
   "optionalDependencies": {
     "@img/sharp-darwin-arm64": "*",
