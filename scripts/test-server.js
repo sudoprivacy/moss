@@ -64,6 +64,7 @@ const BUN = [
 const NODE = [
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
+  'enterpriseConfig.test.ts',
   'jsonlParse.test.ts',
   'lbDraining.test.ts',
   'lbServerInstance.test.ts',
