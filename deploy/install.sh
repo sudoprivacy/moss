@@ -1179,8 +1179,24 @@ tar -xzf "$SOURCE_DIR/$SERVER_ARCHIVE" -C "$WORK_DIR"
 PACKAGE_DIR="$WORK_DIR/moss-server"
 NODE_BINARY="$PACKAGE_DIR/node/bin/node"
 [ -x "$NODE_BINARY" ] || die "server package does not contain Node"
-[ "$($NODE_BINARY -p 'process.versions.node.split(`.`)[0]')" -eq 22 ] \
-  || die "server package must contain Node 22"
+SERVER_NODE_VERSION_MINIMUM=22.21.0
+SERVER_NODE_VERSION_CHECK='
+const parse = value => {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value)
+  return match && match.slice(1).map(Number)
+}
+const actual = parse(process.argv[1])
+const minimum = parse(process.argv[2])
+if (!actual || !minimum) process.exit(1)
+for (let index = 0; index < 3; index++) {
+  if (actual[index] > minimum[index]) process.exit(0)
+  if (actual[index] < minimum[index]) process.exit(1)
+}
+'
+NODE_VERSION="$($NODE_BINARY -p 'process.versions.node')"
+"$NODE_BINARY" --no-warnings -e "$SERVER_NODE_VERSION_CHECK" \
+  "$NODE_VERSION" "$SERVER_NODE_VERSION_MINIMUM" \
+  || die "server package must contain Node >=$SERVER_NODE_VERSION_MINIMUM (found $NODE_VERSION)"
 "$NODE_BINARY" --no-warnings -e "require('node:sqlite')" >/dev/null
 [ -f "$PACKAGE_DIR/app/bin/moss-server.mjs" ] || die "server package is incomplete"
 [ -x "$PACKAGE_DIR/app/bin/scode" ] || die "server package does not contain host scode"
