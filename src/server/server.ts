@@ -225,7 +225,7 @@ import {
   setUserModelPreference,
   initUserModelPreferenceStore,
 } from './userModelPreference.js'
-import { getAvailableModels, getCacheStatus, refreshModelCache } from './modelListCache.js'
+import { getAvailableModels, getCacheStatus, getModelsForSelection, refreshModelCache } from './modelListCache.js'
 import { createCabinApi } from './cabin/api.js'
 import { CabinStore } from './cabin/store.js'
 import { CabinFlightAutomation } from './cabin/automation.js'
@@ -6994,7 +6994,7 @@ export function startServer(
             success: true,
             data: preference,
             // Include system default model for frontend to display when user has no preference
-            systemDefaultModel: systemSettings.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview',
+            systemDefaultModel: `${systemSettings.defaultModelProviderId}:${systemSettings.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview'}`,
           })
           return
         }
@@ -7006,11 +7006,20 @@ export function startServer(
           if (!modelId) {
             throw new HttpError(400, 'modelId is required')
           }
-          await setUserModelPreference(userId, modelId)
-          console.log(`[ModelPreference] Saved preference for user ${userId}: ${modelId}`)
+          let resolvedModelId: string
+          try {
+            resolvedModelId = (await getModelsForSelection(modelId)).selection.selectionId
+          } catch (error) {
+            throw new HttpError(
+              400,
+              error instanceof Error ? error.message : 'Selected model is unavailable',
+            )
+          }
+          await setUserModelPreference(userId, resolvedModelId)
+          console.log(`[ModelPreference] Saved preference for user ${userId}: ${resolvedModelId}`)
           writeJson(res, 200, {
             success: true,
-            data: { modelId, updatedAt: Date.now() },
+            data: { modelId: resolvedModelId, updatedAt: Date.now() },
           })
           return
         }

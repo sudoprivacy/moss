@@ -89,7 +89,13 @@ export class ScodeBackend implements SessionBackend {
 
       // Preload all available models from sudorouter API
       // This allows dynamic model switching without modifying sudocode.json
-      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
+      const allModels = ensureOpenAIModelConfig(
+        await buildAllModelsConfig(baseUrl),
+        model,
+        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
+          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
+          : 'openai-completions',
+      )
 
       const scodeConfig = {
         auth_modes: {
@@ -180,6 +186,7 @@ export class ScodeBackend implements SessionBackend {
       sessionId: options.sessionId,
       cwd: options.cwd,
       model: scodeModel,
+      modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: (options as any).transcriptPath,
       resumeSessionId,
       scodeSessionIdPath,
