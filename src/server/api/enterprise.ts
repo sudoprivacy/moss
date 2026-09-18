@@ -1,13 +1,24 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { DirectConnectStore } from '../db.js'
+import type { EnterpriseRecord } from '../types.js'
 import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
+
+type EnterpriseBrandingPatch = Partial<
+  Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
+>
 
 export function createEnterpriseApi(
   db: DirectConnectStore,
   runtimeDir: string,
   options: { cabinEnabled?: boolean } = {},
 ) {
+  function enterpriseLogoDir(orgId: string): string {
+    return orgId === 'default'
+      ? path.join(runtimeDir, 'uploads', 'enterprise')
+      : path.join(runtimeDir, 'uploads', 'enterprise', encodeURIComponent(orgId))
+  }
+
   const api = {
     /**
      * Get enterprise configuration. Branding fields come from the DB
@@ -15,22 +26,35 @@ export function createEnterpriseApi(
      * sourced from settings.json (clientCronEnabled / clientShowToolCalls) —
      * the source of truth for the client-facing toggles.
      */
-    getConfig: async () => {
+    getConfig: async (orgId?: string) => {
       try {
-        const enterprise = await db.getEnterprise()
+        const enterprise = await db.getEnterprise(orgId)
         let logoBase64: string | null = null
 
         if (enterprise.logo) {
-          const logoPath = path.join(runtimeDir, 'uploads', 'enterprise', enterprise.logo)
+          const logoPath = path.join(enterpriseLogoDir(enterprise.id), enterprise.logo)
           try {
             const buffer = await fs.readFile(logoPath)
             const ext = path.extname(enterprise.logo).slice(1) || 'png'
             const mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`
             logoBase64 = `data:${mimeType};base64,${buffer.toString('base64')}`
           } catch (err) {
-            // Logo file not found or unreadable, return null as requested
-            console.error(`Failed to read enterprise logo at ${logoPath}:`, err)
-            logoBase64 = null
+            // A tenant seeded from the legacy default can initially reference
+            // its logo. Keep that deployment-level file readable until the
+            // tenant uploads a replacement in its own directory.
+            const legacyLogoPath = path.join(enterpriseLogoDir('default'), enterprise.logo)
+            if (enterprise.id !== 'default') {
+              try {
+                const buffer = await fs.readFile(legacyLogoPath)
+                const ext = path.extname(enterprise.logo).slice(1) || 'png'
+                const mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`
+                logoBase64 = `data:${mimeType};base64,${buffer.toString('base64')}`
+              } catch {
+                console.error(`Failed to read enterprise logo at ${logoPath}:`, err)
+              }
+            } else {
+              console.error(`Failed to read enterprise logo at ${logoPath}:`, err)
+            }
           }
         }
 
@@ -63,14 +87,15 @@ export function createEnterpriseApi(
      * workspace_upload_limit_bytes) that the client PATCHes back, and writing
      * those to `enterprises` would throw "no such column" and fail the save.
      */
-    updateConfig: async (patch: any) => {
+    updateConfig: async (orgId: string, patch: unknown) => {
       try {
         if (patch && typeof patch === 'object') {
+          const patchRecord = patch as Record<string, unknown>
           const {
             client_cron_enabled,
             client_show_tool_calls,
             workspace_upload_limit_bytes,
-          } = patch
+          } = patchRecord
 
           const settingsPatch: Record<string, unknown> = {}
           if (client_cron_enabled !== undefined) {
@@ -92,17 +117,19 @@ export function createEnterpriseApi(
             'logo', 'app_name', 'top_name', 'about_name',
             'app_company_name', 'login_desp', 'client_cron_enabled',
           ] as const
-          const dbPatch: Record<string, unknown> = {}
+          const dbPatch: EnterpriseBrandingPatch = {}
           for (const col of ENTERPRISE_COLUMNS) {
-            if (patch[col] !== undefined) dbPatch[col] = patch[col]
+            if (patchRecord[col] !== undefined) {
+              ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
+            }
           }
           if (Object.keys(dbPatch).length > 0) {
-            await db.updateEnterprise(dbPatch)
+            await db.updateEnterprise(orgId, dbPatch)
           }
-        } else {
-          await db.updateEnterprise(patch)
+        } else if (patch !== undefined && patch !== null) {
+          throw new Error('Enterprise configuration patch must be an object')
         }
-        return await api.getConfig()
+        return await api.getConfig(orgId)
       } catch (err) {
         console.error('Failed to update enterprise config:', err)
         return {

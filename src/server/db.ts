@@ -2171,37 +2171,75 @@ export class DirectConnectStore {
     }
   }
 
-  async getEnterprise(): Promise<EnterpriseRecord> {
+  /**
+   * Return an organization's enterprise configuration.  The historical
+   * `default` row remains the deployment-wide fallback for unauthenticated
+   * clients and organizations which have not saved their own branding yet.
+   */
+  async getEnterprise(orgId?: string): Promise<EnterpriseRecord> {
+    const id = orgId?.trim() || 'default'
     const row = await this.driver.get<SqlRow>(`
-      SELECT * FROM enterprises WHERE id = 'default' LIMIT 1
-    `)
+      SELECT * FROM enterprises WHERE id = ? LIMIT 1
+    `, [id])
 
-    if (!row) {
+    // Do not eagerly copy the legacy row on read.  That avoids turning a
+    // deployment-wide default into permanent tenant data until the tenant
+    // actually customizes its branding.
+    let resolvedRow = row
+    if (!resolvedRow && id !== 'default') {
+      resolvedRow = await this.driver.get<SqlRow>(
+        `SELECT * FROM enterprises WHERE id = 'default' LIMIT 1`,
+      )
+    }
+
+    if (!resolvedRow) {
       throw new Error('Default enterprise record not found')
     }
 
     return {
-      id: String(row.id),
-      logo: typeof row.logo === 'string' ? row.logo : null,
-      app_name: typeof row.app_name === 'string' ? row.app_name : null,
-      top_name: typeof row.top_name === 'string' ? row.top_name : null,
-      about_name: typeof row.about_name === 'string' ? row.about_name : null,
-      app_company_name: typeof row.app_company_name === 'string' ? row.app_company_name : null,
-      login_desp: typeof row.login_desp === 'string' ? row.login_desp : null,
+      id: String(resolvedRow.id),
+      logo: typeof resolvedRow.logo === 'string' ? resolvedRow.logo : null,
+      app_name: typeof resolvedRow.app_name === 'string' ? resolvedRow.app_name : null,
+      top_name: typeof resolvedRow.top_name === 'string' ? resolvedRow.top_name : null,
+      about_name: typeof resolvedRow.about_name === 'string' ? resolvedRow.about_name : null,
+      app_company_name: typeof resolvedRow.app_company_name === 'string' ? resolvedRow.app_company_name : null,
+      login_desp: typeof resolvedRow.login_desp === 'string' ? resolvedRow.login_desp : null,
       // null (column never set) is preserved so the client applies its
       // default-on behaviour; 0/1 map to false/true.
       client_cron_enabled:
-        row.client_cron_enabled === null || row.client_cron_enabled === undefined
+        resolvedRow.client_cron_enabled === null || resolvedRow.client_cron_enabled === undefined
           ? null
-          : Number(row.client_cron_enabled) !== 0,
-      created_at: Number(row.created_at),
-      updated_at: Number(row.updated_at),
+          : Number(resolvedRow.client_cron_enabled) !== 0,
+      created_at: Number(resolvedRow.created_at),
+      updated_at: Number(resolvedRow.updated_at),
     }
   }
 
-  async updateEnterprise(patch: Partial<Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>>): Promise<void> {
+  async updateEnterprise(
+    orgId: string,
+    patch: Partial<Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>>,
+  ): Promise<void> {
     const entries = Object.entries(patch)
     if (entries.length === 0) return
+
+    const id = orgId.trim()
+    if (!id) throw new Error('Organization id is required for enterprise configuration')
+
+    // Lazily seed a tenant from the historical deployment-level row.  This is
+    // a non-destructive migration: existing installations keep their current
+    // appearance, while later writes are isolated to the active organization.
+    const ts = now()
+    await this.driver.run(`
+      INSERT INTO enterprises (
+        id, logo, app_name, top_name, about_name, app_company_name,
+        login_desp, client_cron_enabled, created_at, updated_at
+      )
+      SELECT ?, logo, app_name, top_name, about_name, app_company_name,
+        login_desp, client_cron_enabled, ?, ?
+      FROM enterprises
+      WHERE id = 'default'
+      ON CONFLICT(id) DO NOTHING
+    `, [id, ts, ts])
 
     const sets = entries.map(([key]) => `${key} = ?`).join(', ')
     // SQLite has no boolean type — coerce booleans to 0/1 so INTEGER columns
@@ -2209,13 +2247,11 @@ export class DirectConnectStore {
     const values = entries.map(([, value]) =>
       typeof value === 'boolean' ? (value ? 1 : 0) : value ?? null,
     )
-    const ts = now()
-
     await this.driver.run(`
       UPDATE enterprises
       SET ${sets}, updated_at = ?
-      WHERE id = 'default'
-    `, [...values, ts])
+      WHERE id = ?
+    `, [...values, ts, id])
   }
 
   // ==================== Channel Plugins ====================

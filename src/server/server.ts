@@ -3157,7 +3157,12 @@ export function startServer(
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/tenant/config') {
-        writeJson(res, 200, await enterpriseApi.getConfig())
+        // Login screens may still fetch the deployment-level default without a
+        // token. Once authenticated, the current token's org is the only
+        // trusted tenant selector; never accept an organization id from the
+        // request itself.
+        const auth = await authenticateRequest(req, authService)
+        writeJson(res, 200, await enterpriseApi.getConfig(auth?.orgId))
         return
       }
 
@@ -7918,7 +7923,7 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/enterprise') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await enterpriseApi.updateConfig(body))
+        writeJson(res, 200, await enterpriseApi.updateConfig(auth.orgId, body))
         return
       }
 
@@ -8184,7 +8189,12 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/upload/logo') {
         authService.requireScope(auth, 'admin:settings')
         const buffer = await readRawBody(req)
-        const uploadDir = join(config.runtimeDir, 'uploads', 'enterprise')
+        const uploadDir = join(
+          config.runtimeDir,
+          'uploads',
+          'enterprise',
+          encodeURIComponent(auth.orgId),
+        )
         await mkdir(uploadDir, { recursive: true })
 
         const contentType = req.headers['content-type']
