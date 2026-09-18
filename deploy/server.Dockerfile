@@ -24,7 +24,7 @@ RUN unzip -q Xenova.zip -d out \
     && find out -name '.cache' -type d -prune -exec rm -rf {} + \
     && test -f out/Xenova/multilingual-e5-small/onnx/model_quantized.onnx
 
-FROM node:22.14.0-slim
+FROM node:22.22.1-slim
 # 让 apt 对镜像源的瞬时故障 (例如代理偶发 502/连接超时) 自动重试，并强制串行单连接下载，
 # 避免并发把脆弱的代理打挂导致整层构建失败。
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
