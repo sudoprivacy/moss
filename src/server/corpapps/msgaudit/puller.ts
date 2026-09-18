@@ -18,6 +18,8 @@ import { openSdk, type RawChatRecord, type SdkHandle } from './sdk.js'
 import {
   appendRecords,
   dayKey,
+  listRooms,
+  DIRECT_BUCKET,
   readCursor,
   updateRooms,
   writeCursor,
@@ -26,10 +28,14 @@ import {
 } from './store.js'
 import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
 import {
-  appendLeaves,
   diffExternalLeaves,
+  leavesExist,
   previousSnapshot,
+  readLastUpdated,
+  readSnapshot,
   snapshotExists,
+  writeLastUpdated,
+  writeLeaves,
   writeSnapshot,
   type LeaveRecord,
 } from './members.js'
@@ -181,7 +187,6 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let mediaFailed = 0
   let snapshots = 0
   let leaveCount = 0
-  const roomsSeen = new Set<string>()
   let pages = 0
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
   const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
@@ -264,8 +269,6 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
       // Advance past the whole page, including records we could not
       // decrypt: they will never become readable, and leaving the cursor
       // behind them would block the archive permanently.
-      for (const rec of records) if (rec.roomid) roomsSeen.add(rec.roomid)
-
       const maxSeq = page.reduce((m, r) => (r.seq > m ? r.seq : m), cursor)
       cursor = maxSeq
       await writeCursor(cfg.corpAppId, cursor)
@@ -290,38 +293,72 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     })
   }
 
-  // Membership snapshots run AFTER the transcript is durable, once per
-  // room per day. WeCom never reports departures, so the only way to see
-  // a customer leave is to photograph the roster daily and diff.
+  // Membership snapshots run AFTER the transcript is durable. WeCom never
+  // reports departures, so the only way to see a customer leave is to
+  // photograph every known roster daily and diff consecutive photos.
+  //
+  // Driven by rooms.json rather than the rooms in this batch: a quiet
+  // group still loses members, and tying snapshots to traffic would miss
+  // exactly the departures worth noticing. It also means a mid-day deploy
+  // still captures the day — the first pull after startup photographs
+  // whatever has no photo yet.
   if (cfg.rosterLookup) {
-    const pending: LeaveRecord[] = []
-    for (const roomId of roomsSeen) {
+    const today = dayKey(Date.now())
+    // Direct chats have no roster to fetch.
+    const rooms = listRooms(cfg.corpAppId)
+      .map((r) => r.roomid)
+      .filter((id) => id && id !== DIRECT_BUCKET)
+
+    // Phase 1: photograph anything missing today's snapshot.
+    let complete = true
+    for (const roomId of rooms) {
       try {
-        if (await snapshotExists(cfg.corpAppId, roomId)) continue
+        if (await snapshotExists(cfg.corpAppId, roomId, today)) continue
         const members = await cfg.rosterLookup(roomId)
-        if (!members) continue
-        const prev = await previousSnapshot(cfg.corpAppId, roomId, dayKey(Date.now()))
-        const snap = await writeSnapshot(cfg.corpAppId, roomId, members)
-        snapshots += 1
-        if (prev) {
-          const gone = diffExternalLeaves(prev, snap)
-          if (gone.length > 0) {
-            // Dated to the EARLIER snapshot: they were present then and
-            // absent now, so they left during that day.
-            pending.push({ roomid: roomId, date: prev.date, leaves: gone, comparedWith: snap.date })
-            leaveCount += gone.length
-          }
+        if (!members) {
+          // No roster available (internal group answers 90501). Not a
+          // failure of the day — just a room that cannot be photographed.
+          continue
         }
+        await writeSnapshot(cfg.corpAppId, roomId, members)
+        snapshots += 1
       } catch (err) {
+        // A room that failed today leaves the day incomplete, so phase 2
+        // holds off rather than diffing against a half-built picture.
+        complete = false
         console.error(
           `[msgaudit] roster snapshot failed for ${roomId}:`,
           err instanceof Error ? err.message : err,
         )
       }
     }
-    await appendLeaves(cfg.corpAppId, pending).catch(() => {
-      // snapshots are on disk; a lost leaves.json is recomputable
-    })
+    if (complete && rooms.length > 0) {
+      await writeLastUpdated(cfg.corpAppId, today).catch(() => {})
+    }
+
+    // Phase 2: once the day is fully photographed, compute departures —
+    // exactly once, because the file's existence is the guard.
+    if ((await readLastUpdated(cfg.corpAppId)) === today && !(await leavesExist(cfg.corpAppId, today))) {
+      const records: LeaveRecord[] = []
+      for (const roomId of rooms) {
+        const current = await readSnapshot(cfg.corpAppId, roomId, today)
+        if (!current) continue
+        const prev = await previousSnapshot(cfg.corpAppId, roomId, today)
+        const gone = prev ? diffExternalLeaves(prev, current) : []
+        records.push({
+          roomid: roomId,
+          currentDate: today,
+          previousDate: prev ? prev.date : null,
+          leaves: gone,
+        })
+        leaveCount += gone.length
+      }
+      // Written even when nobody left: an empty file means "computed,
+      // nothing found", a missing one means "not computed yet".
+      await writeLeaves(cfg.corpAppId, today, records).catch((err) => {
+        console.error('[msgaudit] writing leaves failed:', err instanceof Error ? err.message : err)
+      })
+    }
   }
 
   return { fetched, written, failed, filtered, media, mediaFailed, snapshots, leaves: leaveCount, cursor, pages }

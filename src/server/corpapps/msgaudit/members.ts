@@ -5,16 +5,24 @@
  * is told when a customer leaves a group. The only way to notice is to
  * photograph the roster periodically and diff consecutive photographs.
  *
- * Snapshots are taken once per day, on the first pull after midnight, and
- * stored beside the transcripts:
+ * Layout, beside the transcripts:
  *
- *   members/<roomId>/<YYYY-MM-DD>.json   roster as of that day's first pull
- *   leaves.json                          departures, keyed by room + date
+ *   members/<roomId>/<YYYY-MM-DD>.json   roster as of that day's snapshot
+ *   members/lastupdated.json             the day fully photographed last
+ *   members/leaves/<YYYY-MM-DD>.json     departures computed on that day
  *
- * A departure is dated to the EARLIER snapshot — comparing 9/9 with 9/10
- * yields entries dated 9/9, meaning "gone sometime after the 9/9 photo".
- * Since the first pull of a day lands minutes after midnight, that reads
- * as "left during 9/9", which is what an operator expects.
+ * Two phases, each guarded so they run once per day regardless of how
+ * often pulling happens:
+ *
+ *   1. snapshot every room in rooms.json that has no photo for today
+ *   2. once every room is photographed, diff against each room's previous
+ *      photo and write one leaves file for the day
+ *
+ * Phase 2 is keyed on the CURRENT date, so the file answers "what did we
+ * learn today". The window it actually covers is in `previousDate`:
+ * normally yesterday, but after an outage it can be several days back,
+ * since the only honest comparison is against the last photo that
+ * exists.
  *
  * Only external members (`wo_`/`wm_` prefixed) are reported: staff leaving
  * a group is ordinary churn, while a customer leaving is the signal worth
@@ -38,20 +46,69 @@ export type MemberSnapshot = {
 /** Departures observed for one room between two consecutive snapshots. */
 export type LeaveRecord = {
   roomid: string
-  /** Date of the EARLIER snapshot — departures happened after it. */
-  date: string
-  /** External userids present then, absent now. */
+  /** The snapshot this was computed against — today, normally. */
+  currentDate: string
+  /**
+   * The earlier snapshot. Usually yesterday; after an outage it can be
+   * days back, which is exactly why it is recorded rather than assumed.
+   * Null when this room has no earlier photo (first day seen).
+   */
+  previousDate: string | null
+  /** External userids present in the previous photo, absent in the current. */
   leaves: string[]
-  /** The later snapshot this was computed against, for traceability. */
-  comparedWith: string
+}
+
+/** One day's departure computation, across every room. */
+export type LeavesFile = {
+  date: string
+  computedAt: number
+  rooms: LeaveRecord[]
 }
 
 function membersDir(corpAppId: string, roomId: string): string {
   return path.join(appDir(corpAppId), 'members', sanitizeSegment(roomId))
 }
 
-function leavesFile(corpAppId: string): string {
-  return path.join(appDir(corpAppId), 'leaves.json')
+function leavesFile(corpAppId: string, date: string): string {
+  return path.join(appDir(corpAppId), 'members', 'leaves', `${date}.json`)
+}
+
+function lastUpdatedFile(corpAppId: string): string {
+  return path.join(appDir(corpAppId), 'members', 'lastupdated.json')
+}
+
+/** The last date on which every known room was photographed. */
+export async function readLastUpdated(corpAppId: string): Promise<string | null> {
+  try {
+    const raw = await fsp.readFile(lastUpdatedFile(corpAppId), 'utf8')
+    const parsed = JSON.parse(raw) as { date?: unknown }
+    return typeof parsed.date === 'string' ? parsed.date : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Mark a day as fully photographed. Written only after every room in
+ * rooms.json has a snapshot, so it doubles as the gate for phase 2 — a
+ * partial day must not produce a departure list.
+ */
+export async function writeLastUpdated(corpAppId: string, date: string): Promise<void> {
+  const file = lastUpdatedFile(corpAppId)
+  await fsp.mkdir(path.dirname(file), { recursive: true })
+  const tmp = `${file}.tmp`
+  await fsp.writeFile(tmp, JSON.stringify({ date, at: Date.now() }, null, 2), 'utf8')
+  await fsp.rename(tmp, file)
+}
+
+/** Whether the departure list for `date` has already been computed. */
+export async function leavesExist(corpAppId: string, date: string): Promise<boolean> {
+  try {
+    await fsp.access(leavesFile(corpAppId, date))
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** External ids are prefixed by WeCom; everything else is an employee. */
@@ -129,35 +186,32 @@ export function diffExternalLeaves(before: MemberSnapshot, after: MemberSnapshot
   return before.members.filter((id) => isExternalId(id) && !present.has(id)).sort()
 }
 
-export async function readLeaves(corpAppId: string): Promise<LeaveRecord[]> {
+export async function readLeaves(corpAppId: string, date: string): Promise<LeavesFile | null> {
   try {
-    const raw = await fsp.readFile(leavesFile(corpAppId), 'utf8')
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? (parsed as LeaveRecord[]) : []
+    const raw = await fsp.readFile(leavesFile(corpAppId, date), 'utf8')
+    return JSON.parse(raw) as LeavesFile
   } catch {
-    return []
+    return null
   }
 }
 
 /**
- * Merge new departure records into leaves.json.
+ * Write one day's departure list.
  *
- * Keyed by room+date so a re-run replaces rather than duplicates: the
- * same two snapshots always yield the same answer, and an operator
- * re-running a day should not see it twice.
+ * Always written, even when nobody left: an empty file means "computed,
+ * nothing found", while a missing file means "not computed yet" — and
+ * phase 2 keys off exactly that distinction.
  */
-export async function appendLeaves(corpAppId: string, records: LeaveRecord[]): Promise<void> {
-  if (records.length === 0) return
-  const existing = await readLeaves(corpAppId)
-  const byKey = new Map(existing.map((r) => [`${r.roomid}|${r.date}`, r]))
-  for (const r of records) byKey.set(`${r.roomid}|${r.date}`, r)
-  const merged = [...byKey.values()].sort(
-    (a, b) => a.date.localeCompare(b.date) || a.roomid.localeCompare(b.roomid),
-  )
-  const file = leavesFile(corpAppId)
+export async function writeLeaves(
+  corpAppId: string,
+  date: string,
+  rooms: LeaveRecord[],
+): Promise<void> {
+  const file = leavesFile(corpAppId, date)
   await fsp.mkdir(path.dirname(file), { recursive: true })
+  const payload: LeavesFile = { date, computedAt: Date.now(), rooms }
   const tmp = `${file}.tmp`
-  await fsp.writeFile(tmp, JSON.stringify(merged, null, 2), 'utf8')
+  await fsp.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
   await fsp.rename(tmp, file)
 }
 

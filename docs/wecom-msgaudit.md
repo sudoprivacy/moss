@@ -107,8 +107,9 @@ $MOSS_HOME/msgaudit/<corpAppId>/
   cursor.json                        {"seq": 12345, "updatedAt": ...}
   rooms.json                         roomId -> {dir, count, lastSeen}
   chats/<roomId>/<YYYY-MM-DD>.jsonl  每行一条消息
-  members/<roomId>/<YYYY-MM-DD>.json 每日成员快照(每天首轮拉取后)
-  leaves.json                        外部成员离群记录
+  members/<roomId>/<YYYY-MM-DD>.json 每日成员快照
+  members/lastupdated.json           最后一次全量快照完成的日期
+  members/leaves/<YYYY-MM-DD>.json   当日计算出的外部成员离群名单
 ```
 
 `MOSS_HOME` 已在 `deploy/docker-compose.yml` 中挂载到宿主机（`./.moss:/root/.moss`），**无需额外挂载**，容器内写入的记录宿主机直接可读。
@@ -274,31 +275,44 @@ corpapp names --app 数牍 --rooms wr_xxx,wr_yyy
 
 ### 成员快照与离群检测
 
-企微的存档流水里**没有成员进出事件** —— 客户退群不会有任何通知。唯一的办法是
-定期给花名册拍照，再比对相邻两张。
+企微的存档流水里**没有成员进出事件** —— 客户退群不会有任何通知，回调也不推
+（那条通道只管存档服务自身的状态变更）。唯一的办法是定期给花名册拍照，
+再比对相邻两张。
 
-**每天首轮拉取后**（`snapshotExists` 保证一天一次，否则每 5 分钟一轮会拍 288 次）
-为当轮涉及的每个群保存快照：
+**分两个阶段，各自保证一天只跑一次：**
+
+**阶段 1 —— 拍快照。** 遍历 `rooms.json` 里的**所有群**（不只是当轮有消息的群 ——
+安静的群照样会掉人），为今天还没有快照的群拍一张：
 
 ```
-members/<roomId>/2026-09-10.json   {roomid, date, members[], takenAt}
+members/<roomId>/2026-09-18.json   {roomid, date, members[], takenAt}
 ```
 
-随后与**上一张快照**比对，把消失的**外部成员**（`wo_`/`wm_` 前缀）记入
-`leaves.json`：
+全部拍完后写 `members/lastupdated.json`。所以**中途部署也不会漏**：17:00 上线，
+部署后第一轮拉取就会补齐当天快照。
+
+**阶段 2 —— 算离群。** 当 `lastupdated == 今天` 且 `members/leaves/<今天>.json`
+不存在时，逐群与**上一张快照**比对：
 
 ```json
-[{"roomid":"wr_x","date":"2026-09-09","leaves":["wo_cust2"],"comparedWith":"2026-09-10"}]
+{
+  "date": "2026-09-21",
+  "computedAt": 1789...,
+  "rooms": [
+    {"roomid":"wr_x","currentDate":"2026-09-21","previousDate":"2026-09-18","leaves":["wo_cust2"]}
+  ]
+}
 ```
 
-- **`date` 是较早那张快照的日期** —— 「9/9 在、9/10 不在」记为 `date: 2026-09-09`，
-  因为首轮拉取发生在零点后几分钟，等价于比较 9/9 00:00 与 9/10 00:00
-- **`comparedWith`** 记录对比对象。停机跨天时（如 9/10 直接跳到 9/14）会与最近
-  一张比对，这个字段让窗口跨度可见
-- **只报外部成员** —— 员工退群是日常，客户退群才是信号
-- 同一 room+date 重复计算会**覆盖而非追加**
+- **`currentDate`** 是今天，即文件名；**`previousDate`** 是实际对比的那张。
+  正常是昨天，停机后可能是几天前 —— 窗口跨度因此始终可见
+- **无人离群也会生成文件**（`leaves` 为空数组）。空文件表示"算过、没有"，
+  文件缺失表示"还没算" —— 阶段 2 正是靠这个区分决定要不要跑
+- **只报外部成员**（`wo_`/`wm_` 前缀）—— 员工退群是日常，客户退群才是信号
+- **首日只有快照、没有对比基准**，`previousDate` 为 `null`、`leaves` 为空
+- 按日切分，避免单文件无限增长
 
-内部群没有花名册接口（`90501`），不做快照。
+内部群没有花名册接口（`90501`），拍不了快照；单聊没有 roomid，跳过。
 
 ## 十一、幂等与游标
 
