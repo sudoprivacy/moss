@@ -172,11 +172,11 @@ sudo env \
   ANTHROPIC_API_KEY="$MOCK_API_KEY" \
   "$OFFLINE_DIR/install.sh" --offline
 
-# Keep model discovery and the agent/skill Hub hermetic too. Session runners
-# inherit these settings from moss-server, while both host and Docker scode use
-# ANTHROPIC_BASE_URL above.
-printf 'MOSS_MODEL_LIST_URL=http://127.0.0.1:%s/api/specific_pricing\nMOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\nANTHROPIC_API_KEY=%s\n' \
-  "$MOCK_PORT" "$MOCK_PORT" "$MOCK_API_KEY" \
+# Keep the agent/skill Hub hermetic. Model discovery deliberately follows the
+# configured Provider's OpenAI-compatible /v1/models endpoint through the
+# ANTHROPIC_BASE_URL supplied to the installer above.
+printf 'MOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\nANTHROPIC_API_KEY=%s\n' \
+  "$MOCK_PORT" "$MOCK_API_KEY" \
   | sudo tee -a "$INSTALL_DIR/moss-server.env" >/dev/null
 sudo systemctl restart "$SERVICE_NAME.service"
 for _ in $(seq 1 60); do
