@@ -6,7 +6,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:secrets": "bun test __tests__/secrets.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
