@@ -25,3 +25,4 @@ node_modules
 !/tests/credential-list.test.ts
 !/tests/secrets-api.test.ts
 !/tests/cron-jobs.browser.js
+!/tests/credentials.browser.js

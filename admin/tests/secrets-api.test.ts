@@ -210,7 +210,7 @@ describe('credential API semantic failures', () => {
           key: 'credential',
           value: 'dummy-legacy-value-must-be-discarded',
           enabled: true,
-          current_version: 2,
+          version: 2,
         }],
       }
     }) as typeof dcClient.get
@@ -226,7 +226,6 @@ describe('credential API semantic failures', () => {
     assert.deepEqual(secrets, [{
       namespace: 'org:acme:system:demo',
       key: 'credential',
-      value: null,
       status: 'enabled',
       version: 2,
       config_item: configItem,

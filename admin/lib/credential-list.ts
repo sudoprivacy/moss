@@ -1,6 +1,6 @@
 export type CredentialScope = 'system' | 'department' | 'user'
 
-/** A listed field is saved even when its value is redacted as null. */
+/** A listed field is saved even when disabled; list entries contain no value. */
 export function hasSavedCredentialField(entries: readonly { key: string }[], key: string): boolean {
   return entries.some(entry => entry.key === key)
 }
