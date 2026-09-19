@@ -34,8 +34,15 @@ import {
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import {
   Select,
   SelectContent,
@@ -43,11 +50,29 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuAction,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
+  useSidebar,
+} from '@/components/ui/sidebar'
 import { useAuth } from '@/lib/hooks/use-auth'
+import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes'
 import { hasAnyScope, hasScope, setPreferredOrgId } from '@/lib/api/client'
 import { getOrganizations, switchOrg } from '@/lib/api/auth'
 import { getEnterpriseConfig } from '@/lib/api/enterprise'
-import type { AuthOrgWithCounts } from '@/lib/api/types'
+import type { AuthOrgWithCounts, EnterpriseConfig } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
 import { OPERATION_ROUTES } from '@/src/operations-navigation'
 
@@ -220,12 +245,41 @@ const systemItems: NavItem[] = [
   },
 ]
 
+const primaryNavGroups = [
+  {
+    title: '工作空间',
+    items: [
+      menuItems[0],
+      menuItems[1],
+      menuItems[3],
+      menuItems[4],
+      menuItems[5],
+      menuItems[9],
+      menuItems[10],
+      menuItems[11],
+    ],
+  },
+  {
+    title: '组织管理',
+    items: [menuItems[2], menuItems[7], menuItems[8], menuItems[12]],
+  },
+  {
+    title: '运营与集成',
+    items: [menuItems[6], menuItems[13], menuItems[14]],
+  },
+] as const
+
 export function AppSidebar() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
+  const { setOpenMobile } = useSidebar()
+  useEffect(() => { setOpenMobile(false) }, [pathname, setOpenMobile])
   const { user, scopes, activeOrgId, logout } = useAuth()
-  const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set())
+  const { confirmDiscard } = useUnsavedChanges()
+  const [expandedMenus, setExpandedMenus] = useState<Record<string, boolean>>({})
+  useEffect(() => { setExpandedMenus({}) }, [pathname])
   const [cabinEnabled, setCabinEnabled] = useState(false)
+  const [enterpriseConfig, setEnterpriseConfig] = useState<EnterpriseConfig | null>(null)
 
   // Super-admin org switcher: lists all orgs and re-scopes the session to the
   // selected one. Only super admins may switch across organizations.
@@ -252,10 +306,16 @@ export function AppSidebar() {
     let cancelled = false
     getEnterpriseConfig()
       .then((response) => {
-        if (!cancelled) setCabinEnabled(response.data.cabin_enabled === true)
+        if (!cancelled) {
+          setCabinEnabled(response.data.cabin_enabled === true)
+          setEnterpriseConfig(response.data)
+        }
       })
       .catch(() => {
-        if (!cancelled) setCabinEnabled(false)
+        if (!cancelled) {
+          setCabinEnabled(false)
+          setEnterpriseConfig(null)
+        }
       })
     return () => {
       cancelled = true
@@ -264,6 +324,7 @@ export function AppSidebar() {
 
   const handleSwitchOrg = async (orgId: string) => {
     if (!orgId || orgId === activeOrgId || switchingOrg) return
+    if (!(await confirmDiscard())) return
     setSwitchingOrg(true)
     try {
       await switchOrg(orgId)
@@ -300,6 +361,7 @@ export function AppSidebar() {
   const visibleSystemItems = systemItems.filter(matchesScope)
 
   const handleLogout = async () => {
+    if (!(await confirmDiscard())) return
     await logout()
     navigate('/login', { replace: true })
   }
@@ -323,215 +385,215 @@ export function AppSidebar() {
     return matchesScope(item)
   }
 
+  const visiblePrimaryNavGroups = primaryNavGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => visibleMenuItems.includes(item)),
+    }))
+    .filter((group) => group.items.length > 0)
+
+  const setMenuExpanded = (title: string, open: boolean) => {
+    setExpandedMenus(current => ({ ...current, [title]: open }))
+  }
+
   const renderNavItem = (item: NavItem, level = 0) => {
-    // Parent menu with children
     if (item.children) {
       const visibleChildren = item.children.filter(isItemVisible)
       if (visibleChildren.length === 0) return null
 
-      const isAnyChildActive = hasActiveDescendant(item)
-      const isExpanded = expandedMenus.has(item.title) || isAnyChildActive
+      const isAnyChildActive = isItemActive(item) || hasActiveDescendant(item)
+      const isExpanded = expandedMenus[item.title] ?? isAnyChildActive
+
+      if (level === 0) {
+        return (
+          <SidebarMenuItem key={item.title}>
+            <Collapsible open={isExpanded} onOpenChange={(open) => setMenuExpanded(item.title, open)}>
+              <SidebarMenuButton asChild isActive={isAnyChildActive} tooltip={item.title}>
+                <Link to={item.url}>
+                  <item.icon />
+                  <span>{item.title}</span>
+                </Link>
+              </SidebarMenuButton>
+              <CollapsibleTrigger asChild>
+                <SidebarMenuAction aria-label={`${item.title} 展开/收起`} showOnHover>
+                  <ChevronRight className={cn('transition-transform', isExpanded && 'rotate-90')} />
+                </SidebarMenuAction>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <SidebarMenuSub>
+                  {visibleChildren.map((child) => renderNavItem(child, level + 1))}
+                </SidebarMenuSub>
+              </CollapsibleContent>
+            </Collapsible>
+          </SidebarMenuItem>
+        )
+      }
 
       return (
-        <li key={item.title}>
-          <Collapsible open={isExpanded} onOpenChange={(open) => {
-            const next = new Set(expandedMenus)
-            if (open) { next.add(item.title) } else { next.delete(item.title) }
-            setExpandedMenus(next)
-          }}>
-            {/* The label navigates to the section's own page; only the chevron
-                toggles. A trigger that covers the whole row makes a parent with
-                a real `url` unreachable by clicking its name. */}
-            <div className={cn(
-              'flex items-center gap-3 px-3 py-2 rounded-md text-sm w-full transition-colors text-left',
-              isAnyChildActive
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-            )}>
-              <Link to={item.url} className="flex items-center gap-3 flex-1 min-w-0">
-                <item.icon className="size-4" />
-                <span className="flex-1 truncate">{item.title}</span>
-              </Link>
-              <CollapsibleTrigger aria-label={`${item.title} 展开/收起`} className="shrink-0">
-                <ChevronRight className={cn('size-3.5 transition-transform', isExpanded && 'rotate-90')} />
-              </CollapsibleTrigger>
-            </div>
+        <SidebarMenuSubItem key={item.title}>
+          <Collapsible open={isExpanded} onOpenChange={(open) => setMenuExpanded(item.title, open)}>
+            <CollapsibleTrigger asChild>
+              <SidebarMenuSubButton asChild isActive={isAnyChildActive}>
+                <button type="button" aria-label={`${item.title} 展开/收起`}>
+                  <item.icon />
+                  <span>{item.title}</span>
+                  <ChevronRight className={cn('ml-auto transition-transform', isExpanded && 'rotate-90')} />
+                </button>
+              </SidebarMenuSubButton>
+            </CollapsibleTrigger>
             <CollapsibleContent>
-              <ul className="space-y-0.5 mt-1 ml-4">
-                {visibleChildren.map(child => {
-                  // Check if child has nested children (for 工具中心 -> MCP 服务)
-                  const hasNestedChildren = child.children && child.children.length > 0
-                  return (
-                    <li key={child.title}>
-                      {hasNestedChildren ? (
-                        // Nested menu (level 1 with children, like MCP 服务)
-                        (() => {
-                          const nestedChildren = child.children!.filter(isItemVisible)
-                          const isAnyNestedActive = nestedChildren.some((c: NavItem) => isItemActive(c))
-                          const isNestedExpanded = expandedMenus.has(child.title) || isAnyNestedActive
-                          return (
-                            <Collapsible open={isNestedExpanded} onOpenChange={(open) => {
-                              const next = new Set(expandedMenus)
-                              if (open) { next.add(child.title) } else { next.delete(child.title) }
-                              setExpandedMenus(next)
-                            }}>
-                              <CollapsibleTrigger className={cn(
-                                'flex items-center gap-3 px-2 py-1.5 rounded-md text-sm w-full transition-colors text-left ml-2',
-                                isAnyNestedActive
-                                  ? 'bg-primary/10 text-primary font-medium'
-                                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-                              )}>
-                                <span className="w-1 h-1 rounded-full bg-current opacity-40" />
-                                <span className="flex-1">{child.title}</span>
-                                <ChevronRight className={cn('size-3.5 transition-transform', isNestedExpanded && 'rotate-90')} />
-                              </CollapsibleTrigger>
-                              <CollapsibleContent>
-                                <ul className="space-y-0.5 mt-0.5 ml-4">
-                                  {nestedChildren.map((nested: NavItem) => {
-                                    const isActive = isItemActive(nested)
-                                    return (
-                                      <li key={nested.title}>
-                                        <Link
-                                          to={nested.url}
-                                          className={cn(
-                                            'flex items-center gap-3 px-2 py-1.5 rounded-md text-sm transition-colors ml-2',
-                                            isActive
-                                              ? 'bg-primary/10 text-primary font-medium'
-                                              : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-                                          )}
-                                        >
-                                          {nested.icon && <nested.icon className="size-3.5" />}
-                                          <span>{nested.title}</span>
-                                        </Link>
-                                      </li>
-                                    )
-                                  })}
-                                </ul>
-                              </CollapsibleContent>
-                            </Collapsible>
-                          )
-                        })()
-                      ) : (
-                        // Regular child (no nested children, like 知识树管理)
-                        (() => {
-                          const isActive = isItemActive(child)
-                          return (
-                            <Link
-                              to={child.url}
-                              className={cn(
-                                'flex items-center gap-3 px-3 py-1.5 rounded-md text-sm transition-colors',
-                                isActive
-                                  ? 'bg-primary/10 text-primary font-medium'
-                                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-                              )}
-                            >
-                              <span className="w-1 h-1 rounded-full bg-current opacity-40" />
-                              <span>{child.title}</span>
-                            </Link>
-                          )
-                        })()
-                      )}
-                    </li>
-                  )
-                })}
-              </ul>
+              <SidebarMenuSub className="ml-2">
+                {visibleChildren.map((child) => renderNavItem(child, level + 1))}
+              </SidebarMenuSub>
             </CollapsibleContent>
           </Collapsible>
-        </li>
+        </SidebarMenuSubItem>
       )
     }
 
-    // Regular menu item (no children)
     const isActive = isItemActive(item)
+    if (level === 0) {
+      return (
+        <SidebarMenuItem key={item.title}>
+          <SidebarMenuButton asChild isActive={isActive} tooltip={item.title}>
+            <Link to={item.url}>
+              <item.icon />
+              <span>{item.title}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      )
+    }
+
     return (
-      <li key={item.title}>
-        <Link
-          to={item.url}
-          className={cn(
-            'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors',
-            isActive
-              ? 'bg-primary/10 text-primary font-medium'
-              : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-          )}
-        >
-          <item.icon className="size-4" />
-          <span>{item.title}</span>
-        </Link>
-      </li>
+      <SidebarMenuSubItem key={item.title}>
+        <SidebarMenuSubButton asChild isActive={isActive}>
+          <Link to={item.url}>
+            <item.icon />
+            <span>{item.title}</span>
+          </Link>
+        </SidebarMenuSubButton>
+      </SidebarMenuSubItem>
     )
   }
 
+  const activeOrganization = organizations.find((organization) => organization.id === activeOrgId)
+  const brandName = enterpriseConfig?.top_name || enterpriseConfig?.app_name || activeOrganization?.name || '管理平台'
+  const accountName = user?.displayName || user?.name || '当前用户'
+
   return (
-    <aside className="w-64 border-r bg-card flex flex-col h-full">
-      {/* Header */}
-      <div className="border-b px-4 py-3 flex flex-col gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <Shield className="size-5" />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-sm font-semibold">moss 中控平台</span>
-          </div>
+    <Sidebar collapsible="icon">
+      <SidebarHeader className="border-sidebar-border gap-3 border-b px-3 py-4">
+        <div className="flex min-w-0 items-center gap-2 px-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
+          {enterpriseConfig?.logo ? (
+            <img
+              src={enterpriseConfig.logo}
+              alt={`${brandName} 标志`}
+              className="size-8 shrink-0 rounded-md object-contain"
+            />
+          ) : (
+            <span className="bg-sidebar-primary text-sidebar-primary-foreground flex size-8 shrink-0 items-center justify-center rounded-md">
+              <Shield className="size-4" aria-hidden="true" />
+            </span>
+          )}
+          <span className="min-w-0 truncate text-sm font-semibold tracking-[-0.01em] group-data-[collapsible=icon]:hidden">
+            {brandName}
+          </span>
         </div>
+
         {isSuperAdmin ? (
-          <Select
-            value={activeOrgId ?? ''}
-            onValueChange={(value) => void handleSwitchOrg(value)}
-            disabled={switchingOrg}
-          >
-            <SelectTrigger className="h-8 text-xs" aria-label="切换组织">
-              <Building2 className="size-3.5 shrink-0 text-muted-foreground" />
-              <SelectValue placeholder="选择组织" />
-            </SelectTrigger>
-            <SelectContent>
-              {organizations.map((org) => (
-                <SelectItem key={org.id} value={org.id}>
-                  {org.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <Select
+                value={activeOrgId ?? ''}
+                onValueChange={(value) => void handleSwitchOrg(value)}
+                disabled={switchingOrg}
+              >
+                <SelectTrigger
+                  className="border-sidebar-border bg-background/60 h-auto w-full justify-start gap-2 px-2 py-2 text-left shadow-none hover:bg-sidebar-accent group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-transparent group-data-[collapsible=icon]:bg-transparent group-data-[collapsible=icon]:p-2! group-data-[collapsible=icon]:[&>svg]:hidden"
+                  aria-label="切换组织"
+                >
+                  <span className="shrink-0"><Building2 className="text-sidebar-foreground/70 size-4" /></span>
+                  <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
+                    <SelectValue placeholder={activeOrganization?.name || '选择组织'} />
+                    <span className="text-muted-foreground text-xs">企业工作空间</span>
+                  </span>
+                </SelectTrigger>
+                <SelectContent>
+                  {organizations.map((organization) => (
+                    <SelectItem key={organization.id} value={organization.id}>
+                      {organization.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </SidebarMenuItem>
+          </SidebarMenu>
         ) : null}
-      </div>
+      </SidebarHeader>
 
-      {/* Navigation */}
-      <nav className="flex-1 p-4 overflow-y-auto">
-        <div className="mb-6">
-          <p className="text-xs font-medium text-muted-foreground mb-2 px-3">主菜单</p>
-          <ul className="space-y-1">
-            {visibleMenuItems.map(renderNavItem)}
-          </ul>
-        </div>
+      <SidebarContent className="gap-0 px-2 py-3">
+        <nav aria-label="主导航">
+          {visiblePrimaryNavGroups.map((group) => (
+            <SidebarGroup key={group.title} className="px-1 py-2">
+              <SidebarGroupLabel className="text-sidebar-foreground/60 h-7 px-2 text-xs font-medium">
+                {group.title}
+              </SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu className="gap-0.5">
+                  {group.items.map((item) => renderNavItem(item))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ))}
 
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-2 px-3">系统</p>
-          <ul className="space-y-1">
-            {visibleSystemItems.map(renderNavItem)}
-          </ul>
-        </div>
-      </nav>
+          {visibleSystemItems.length > 0 ? (
+            <SidebarGroup className="px-1 py-2">
+              <SidebarGroupLabel className="text-sidebar-foreground/60 h-7 px-2 text-xs font-medium">
+                系统
+              </SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu className="gap-0.5">
+                  {visibleSystemItems.map((item) => renderNavItem(item))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ) : null}
+        </nav>
+      </SidebarContent>
 
-      {/* Footer */}
-      <div className="border-t p-4">
-        <div className="flex items-center gap-3">
-          <Avatar className="size-8">
-            <AvatarFallback className="bg-primary/10 text-primary text-xs">
-              {user?.name?.slice(0, 1) || 'U'}
-            </AvatarFallback>
-          </Avatar>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate">{user?.name || 'User'}</p>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => void handleLogout()}
-            className="shrink-0"
-          >
-            <LogOut className="size-4" />
-          </Button>
-        </div>
-      </div>
-    </aside>
+      <SidebarFooter className="border-sidebar-border border-t p-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <SidebarMenuButton tooltip={accountName} className="h-auto py-1.5">
+              <Avatar className="size-6 shrink-0">
+                <AvatarFallback className="bg-sidebar-accent text-sidebar-accent-foreground text-xs">
+                  {accountName.slice(0, 1)}
+                </AvatarFallback>
+              </Avatar>
+              <span className="flex min-w-0 flex-1 flex-col text-left">
+                <span className="truncate text-sm font-medium">{accountName}</span>
+                <span className="text-sidebar-foreground/60 truncate text-xs">
+                  {roleLabels[user?.role ?? ''] || '用户'}
+                </span>
+              </span>
+            </SidebarMenuButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="right" align="end" className="w-56">
+            <DropdownMenuLabel className="flex min-w-0 flex-col gap-0.5">
+              <span className="truncate">{accountName}</span>
+              {user?.email ? (
+                <span className="text-muted-foreground truncate text-xs font-normal">{user.email}</span>
+              ) : null}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void handleLogout()}>
+              <LogOut />
+              退出登录
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SidebarFooter>
+    </Sidebar>
   )
 }

@@ -3,6 +3,7 @@
 import { Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { AppSidebar } from '@/components/app-sidebar'
+import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { Loader2 } from 'lucide-react'
 
 export function DashboardShell() {
@@ -10,7 +11,7 @@ export function DashboardShell() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-background">
         <Loader2 className="size-8 animate-spin text-muted-foreground" />
       </div>
     )
@@ -21,11 +22,11 @@ export function DashboardShell() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <SidebarProvider className="h-svh min-h-0 overflow-hidden bg-background">
       <AppSidebar />
-      <div className="flex-1 flex flex-col min-w-0">
+      <SidebarInset className="min-h-0 overflow-hidden bg-background">
         <Outlet />
-      </div>
-    </div>
+      </SidebarInset>
+    </SidebarProvider>
   )
 }

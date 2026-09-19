@@ -2,10 +2,18 @@
 
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import {
+  ListEmptyState,
+  ListError,
+  ListSkeleton,
+  ListStatusBadge,
+  ListSummary,
+  ListSurface,
+  ListToolbar,
+} from '@/components/list-page'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
   TableBody,
@@ -63,23 +71,6 @@ const statusConfig: Record<string, { label: string; variant: 'default' | 'second
   queued: { label: '队列中', variant: 'secondary' },
 }
 
-function CronJobsSkeleton() {
-  return (
-    <div className="space-y-4">
-      {[...Array(10)].map((_, i) => (
-        <div key={i} className="flex items-center gap-4 p-4 border rounded-lg">
-          <Skeleton className="h-4 w-48" />
-          <Skeleton className="h-4 w-24" />
-          <Skeleton className="h-4 w-20" />
-          <Skeleton className="h-4 w-32" />
-          <Skeleton className="h-4 w-20" />
-          <Skeleton className="h-8 w-24" />
-        </div>
-      ))}
-    </div>
-  )
-}
-
 export default function CronJobsPage() {
   const { scopes, user } = useAuth()
   const currentUserId = user?.id ?? ''
@@ -97,6 +88,8 @@ export default function CronJobsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [hasLoadedJobs, setHasLoadedJobs] = useState(false)
   const [selectedJob, setSelectedJob] = useState<CronJob | null>(null)
   const [runs, setRuns] = useState<CronJobRun[]>([])
   const [runsLoading, setRunsLoading] = useState(false)
@@ -204,17 +197,25 @@ export default function CronJobsPage() {
         // create button stays visible even when the org disabled client cron.
         getEnterpriseConfig().catch(() => null),
       ])
-      if (jobsRes.success && jobsRes.data) {
-        setJobs(jobsRes.data)
-      }
       setUsers(usersRes.users)
       setAgents(agentsRes)
       if (settingsRes?.data) {
         // null/true = enabled; only an explicit false disables client cron.
         setClientCronEnabled(settingsRes.data.client_cron_enabled !== false)
       }
+
+      if (!jobsRes.success) {
+        setLoadError(jobsRes.message || '无法加载定时任务列表。')
+        return
+      }
+
+      setJobs(jobsRes.data ?? [])
+      setLoadError(null)
+      setHasLoadedJobs(true)
     } catch (error) {
       console.error('Failed to fetch cron jobs:', error)
+      const message = error instanceof Error ? error.message : '无法加载定时任务列表。'
+      setLoadError(message)
       toast.error('获取定时任务列表失败')
     } finally {
       setIsLoading(false)
@@ -447,229 +448,285 @@ export default function CronJobsPage() {
     return format(new Date(nextRunAt), 'MM-dd HH:mm')
   }
 
+  const hasActiveFilters = Boolean(searchQuery || userFilter !== 'all' || statusFilter !== 'all')
+
   if (isLoading) {
     return (
-      <DashboardLayout title="定时任务管理">
-        <CronJobsSkeleton />
+      <DashboardLayout
+        title="定时任务管理"
+        description="创建并管理按计划运行的任务，以及它们的执行记录和工作区文件。"
+      >
+        <ListSkeleton label="正在加载定时任务" rows={8} />
       </DashboardLayout>
     )
   }
 
   return (
-    <DashboardLayout title="定时任务管理">
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-1 flex-wrap gap-2">
-            <div className="relative w-full max-w-[200px]">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-              <Input
-                placeholder="搜索任务..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9"
-              />
-            </div>
-            <Select value={userFilter} onValueChange={setUserFilter}>
-              <SelectTrigger className="w-[140px]">
-                <SelectValue placeholder="筛选用户" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部用户</SelectItem>
-                {users.map((user) => (
-                  <SelectItem key={user.id} value={user.id}>
-                    {user.name}
-                  </SelectItem>
-                ))}
-                {extraOwners.map((job) => (
-                  <SelectItem key={job.userId} value={job.userId}>
-                    {getUserName(job)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[140px]">
-                <SelectValue placeholder="筛选状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部状态</SelectItem>
-                <SelectItem value="enabled">已启用</SelectItem>
-                <SelectItem value="disabled">已禁用</SelectItem>
-                <SelectItem value="error">有错误</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={handleRefresh} disabled={isRefreshing}>
-              <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-              刷新
-            </Button>
-            {canCreateJob ? (
-              <Button onClick={openCreateForm}>
-                <Plus className="mr-2 h-4 w-4" />
-                新建任务
+    <DashboardLayout
+      title="定时任务管理"
+      description="创建并管理按计划运行的任务，以及它们的执行记录和工作区文件。"
+    >
+      <div className="space-y-5">
+        <ListToolbar
+          actions={(
+            <>
+              <Button
+                variant="outline"
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                aria-label="刷新定时任务列表"
+              >
+                <RefreshCw
+                  className={`mr-2 size-4 ${isRefreshing ? 'animate-spin motion-reduce:animate-none' : ''}`}
+                  aria-hidden="true"
+                />
+                刷新
               </Button>
-            ) : null}
+              {canCreateJob ? (
+                <Button onClick={openCreateForm} aria-label="新建定时任务">
+                  <Plus className="mr-2 size-4" aria-hidden="true" />
+                  新建任务
+                </Button>
+              ) : null}
+            </>
+          )}
+        >
+          <div className="relative w-full sm:w-64">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Input
+              placeholder="搜索任务名称或 ID"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9"
+              aria-label="搜索任务名称或 ID"
+            />
           </div>
-        </div>
+          <Select value={userFilter} onValueChange={setUserFilter}>
+            <SelectTrigger className="w-full sm:w-40" aria-label="按所有者筛选">
+              <SelectValue placeholder="筛选所有者" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部所有者</SelectItem>
+              {users.map((user) => (
+                <SelectItem key={user.id} value={user.id}>
+                  {user.name}
+                </SelectItem>
+              ))}
+              {extraOwners.map((job) => (
+                <SelectItem key={job.userId} value={job.userId}>
+                  {getUserName(job)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-full sm:w-36" aria-label="按状态筛选">
+              <SelectValue placeholder="筛选状态" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部状态</SelectItem>
+              <SelectItem value="enabled">已启用</SelectItem>
+              <SelectItem value="disabled">已禁用</SelectItem>
+              <SelectItem value="error">有错误</SelectItem>
+            </SelectContent>
+          </Select>
+        </ListToolbar>
 
-        {/* Stats */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-          <div className="rounded-lg border p-4">
-            <div className="text-sm text-muted-foreground">总任务数</div>
-            <div className="text-2xl font-bold">{jobs.length}</div>
-          </div>
-          <div className="rounded-lg border p-4">
-            <div className="text-sm text-muted-foreground">已启用</div>
-            <div className="text-2xl font-bold text-green-600">{jobs.filter(j => j.enabled).length}</div>
-          </div>
-          <div className="rounded-lg border p-4">
-            <div className="text-sm text-muted-foreground">已禁用</div>
-            <div className="text-2xl font-bold text-gray-500">{jobs.filter(j => !j.enabled).length}</div>
-          </div>
-          <div className="rounded-lg border p-4">
-            <div className="text-sm text-muted-foreground">错误数</div>
-            <div className="text-2xl font-bold text-red-600">{jobs.filter(j => j.lastStatus === 'error').length}</div>
-          </div>
-        </div>
+        {hasLoadedJobs ? (
+          <ListSummary aria-label="定时任务汇总">
+            <span><strong className="font-medium tabular-nums text-foreground">{jobs.length}</strong> 个任务</span>
+            <span><strong className="font-medium tabular-nums text-primary">{jobs.filter((job) => job.enabled).length}</strong> 个已启用</span>
+            <span><strong className="font-medium tabular-nums text-foreground">{jobs.filter((job) => !job.enabled).length}</strong> 个已禁用</span>
+            <span><strong className="font-medium tabular-nums text-destructive">{jobs.filter((job) => job.lastStatus === 'error').length}</strong> 个有错误</span>
+          </ListSummary>
+        ) : null}
 
-        {/* Table */}
-        <div className="rounded-lg border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>任务名称</TableHead>
-                <TableHead>用户</TableHead>
-                <TableHead>调度</TableHead>
-                <TableHead>下次执行</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>执行次数</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredJobs.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                    暂无定时任务
-                  </TableCell>
-                </TableRow>
-              ) : (
-                filteredJobs.map((job) => (
-                  <TableRow key={job.id}>
-                    <TableCell>
-                      <div>
-                        <div className="font-medium">{job.name}</div>
-                        <div className="text-xs text-muted-foreground">{job.id.slice(0, 8)}</div>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {(() => {
-                        // Comma-separated "owner, co-owner, …" — owner first
-                        // (untagged); the executor's name gets a trailing '*'.
-                        const execId = job.executorUserId ?? job.userId
-                        const coOwnerIds = job.coOwnerIds ?? []
-                        const entries: Array<{ id: string; name: string }> = [
-                          { id: job.userId, name: resolveOwnerName(users, job.userId, job.userName) },
-                          ...coOwnerIds.map((id, i) => ({
-                            id,
-                            name: resolveOwnerName(users, id, job.coOwnerNames?.[i]),
-                          })),
-                        ]
-                        return (
-                          <span className="text-sm">
-                            {entries
-                              .map(e => (e.id === execId ? `${e.name}*` : e.name))
-                              .join(', ')}
-                          </span>
-                        )
-                      })()}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Clock className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-sm">{formatSchedule(job)}</span>
-                      </div>
-                      <div className="mt-0.5 text-xs text-muted-foreground">
-                        {(job.assistantName || '默认智能体')} · {job.conversationMode === 'reuse' ? '复用会话' : '新建会话'}
-                      </div>
-                    </TableCell>
-                    <TableCell>{formatNextRun(job.nextRunAt)}</TableCell>
-                    <TableCell>
-                      <Badge variant={job.enabled ? 'default' : 'secondary'}>
-                        {job.enabled ? '已启用' : '已禁用'}
-                      </Badge>
-                      {job.lastStatus === 'error' && (
-                        <Badge variant="destructive" className="ml-1">错误</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>{job.runCount}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleTriggerJob(job)}
-                          disabled={triggeringJobId === job.id}
-                          title="立即触发（使用你的用户凭证运行；定时运行则使用执行者的凭证）"
-                        >
-                          {triggeringJobId === job.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Zap className="h-4 w-4" />
-                          )}
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => openEditForm(job)} title="编辑">
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleViewRuns(job)}
-                          title="执行记录"
-                        >
-                          <History className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleViewFiles(job)}
-                          title="任务文件"
-                        >
-                          <Paperclip className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant={job.enabled ? 'secondary' : 'default'}
-                          size="sm"
-                          onClick={() => handleToggleJob(job)}
-                          disabled={togglingJobId === job.id}
-                          title={job.enabled ? '禁用' : '启用'}
-                        >
-                          {togglingJobId === job.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : job.enabled ? (
-                            <Pause className="h-4 w-4" />
-                          ) : (
-                            <Play className="h-4 w-4" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => setDeletingJob(job)}
-                          title="删除"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </div>
+        {loadError ? (
+          <ListError
+            title="无法加载定时任务"
+            description={hasLoadedJobs ? `${loadError} 已保留上次成功加载的记录。` : loadError}
+            onRetry={handleRefresh}
+            retrying={isRefreshing}
+          />
+        ) : null}
+
+        {hasLoadedJobs ? (
+          <ListSurface
+            aria-label="定时任务列表"
+            aria-busy={isRefreshing}
+            footer={<ListSummary className="justify-between"><span>显示 {filteredJobs.length} / {jobs.length} 个任务</span><span>按创建时间倒序</span></ListSummary>}
+          >
+            {filteredJobs.length === 0 ? (
+              <ListEmptyState
+                title={hasActiveFilters ? '没有匹配的定时任务' : '还没有定时任务'}
+                description={hasActiveFilters
+                  ? '尝试调整搜索条件或筛选项，查看其他任务。'
+                  : canCreateJob
+                    ? '创建一个任务，按计划运行工作。'
+                    : '组织当前不允许创建客户端定时任务。'}
+                action={hasActiveFilters ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setSearchQuery('')
+                      setUserFilter('all')
+                      setStatusFilter('all')
+                    }}
+                  >
+                    清除筛选
+                  </Button>
+                ) : canCreateJob ? (
+                  <Button type="button" size="sm" onClick={openCreateForm}>新建任务</Button>
+                ) : undefined}
+              />
+            ) : (
+              <Table className="min-w-[980px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="min-w-[240px]">任务名称</TableHead>
+                      <TableHead className="min-w-[180px]">所有者</TableHead>
+                      <TableHead className="min-w-[240px]">调度</TableHead>
+                      <TableHead className="min-w-[116px]">下次执行</TableHead>
+                      <TableHead className="min-w-[132px]">状态</TableHead>
+                      <TableHead className="min-w-[84px] text-right">执行次数</TableHead>
+                      <TableHead className="min-w-[250px] text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredJobs.map((job) => (
+                      <TableRow key={job.id}>
+                        <TableCell className="align-top whitespace-normal">
+                          <div className="min-w-[13rem] max-w-[19rem]">
+                            <div className="break-words font-medium">{job.name}</div>
+                            <code className="mt-1 block break-all text-xs text-muted-foreground">{job.id}</code>
+                          </div>
+                        </TableCell>
+                        <TableCell className="align-top whitespace-normal">
+                          {(() => {
+                            // Comma-separated "owner, co-owner, …" — owner first
+                            // (untagged); the executor's name gets a trailing '*'.
+                            const execId = job.executorUserId ?? job.userId
+                            const coOwnerIds = job.coOwnerIds ?? []
+                            const entries: Array<{ id: string; name: string }> = [
+                              { id: job.userId, name: resolveOwnerName(users, job.userId, job.userName) },
+                              ...coOwnerIds.map((id, i) => ({
+                                id,
+                                name: resolveOwnerName(users, id, job.coOwnerNames?.[i]),
+                              })),
+                            ]
+                            return (
+                              <span className="block max-w-[16rem] break-words text-sm">
+                                {entries
+                                  .map((entry) => (entry.id === execId ? `${entry.name}*` : entry.name))
+                                  .join(', ')}
+                              </span>
+                            )
+                          })()}
+                        </TableCell>
+                        <TableCell className="align-top whitespace-normal">
+                          <div className="flex items-start gap-2">
+                            <Clock className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                            <span className="break-words text-sm">{formatSchedule(job)}</span>
+                          </div>
+                          <div className="mt-1 break-words text-xs text-muted-foreground">
+                            {(job.assistantName || '默认智能体')} · {job.conversationMode === 'reuse' ? '复用会话' : '新建会话'}
+                          </div>
+                        </TableCell>
+                        <TableCell className="align-top text-sm tabular-nums">{formatNextRun(job.nextRunAt)}</TableCell>
+                        <TableCell className="align-top whitespace-normal">
+                          <div className="flex flex-wrap gap-1.5">
+                            <ListStatusBadge tone={job.enabled ? 'positive' : 'neutral'}>
+                              {job.enabled ? '已启用' : '已禁用'}
+                            </ListStatusBadge>
+                            {job.lastStatus === 'error' ? <ListStatusBadge tone="danger">最近错误</ListStatusBadge> : null}
+                          </div>
+                        </TableCell>
+                        <TableCell className="align-top text-right text-sm tabular-nums">{job.runCount}</TableCell>
+                        <TableCell className="align-top text-right">
+                          <div className="flex justify-end gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="size-8 p-0"
+                              onClick={() => handleTriggerJob(job)}
+                              disabled={triggeringJobId === job.id}
+                              title="立即触发（使用你的用户凭证运行；定时运行则使用执行者的凭证）"
+                              aria-label={`立即触发任务 ${job.name}（使用你的用户凭证运行；定时运行则使用执行者的凭证）`}
+                            >
+                              {triggeringJobId === job.id ? (
+                                <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                              ) : (
+                                <Zap className="size-4" aria-hidden="true" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="size-8 p-0"
+                              onClick={() => openEditForm(job)}
+                              title="编辑"
+                              aria-label={`编辑任务 ${job.name}`}
+                            >
+                              <Pencil className="size-4" aria-hidden="true" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="size-8 p-0"
+                              onClick={() => handleViewRuns(job)}
+                              title="执行记录"
+                              aria-label={`查看任务 ${job.name} 的执行记录`}
+                            >
+                              <History className="size-4" aria-hidden="true" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="size-8 p-0"
+                              onClick={() => handleViewFiles(job)}
+                              title="任务文件"
+                              aria-label={`查看任务 ${job.name} 的工作区文件`}
+                            >
+                              <Paperclip className="size-4" aria-hidden="true" />
+                            </Button>
+                            <Button
+                              variant={job.enabled ? 'secondary' : 'default'}
+                              size="sm"
+                              className="size-8 p-0"
+                              onClick={() => handleToggleJob(job)}
+                              disabled={togglingJobId === job.id}
+                              title={job.enabled ? '禁用' : '启用'}
+                              aria-label={`${job.enabled ? '禁用' : '启用'}任务 ${job.name}`}
+                            >
+                              {togglingJobId === job.id ? (
+                                <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                              ) : job.enabled ? (
+                                <Pause className="size-4" aria-hidden="true" />
+                              ) : (
+                                <Play className="size-4" aria-hidden="true" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              className="size-8 p-0"
+                              onClick={() => setDeletingJob(job)}
+                              title="删除"
+                              aria-label={`删除任务 ${job.name}`}
+                            >
+                              <Trash2 className="size-4" aria-hidden="true" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+              </Table>
+            )}
+          </ListSurface>
+        ) : null}
       </div>
 
       {/* Job workspace files */}
@@ -740,8 +797,13 @@ export default function CronJobsPage() {
                     </TableCell>
                     <TableCell>
                       {!f.isDir && (
-                        <Button variant="ghost" size="sm" title="删除"
-                          onClick={() => void handleDeleteFile(f.relativePath)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title="删除"
+                          aria-label={`删除任务文件 ${f.relativePath}`}
+                          onClick={() => void handleDeleteFile(f.relativePath)}
+                        >
                           <X className="h-4 w-4" />
                         </Button>
                       )}

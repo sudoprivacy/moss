@@ -1,1148 +1,204 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ComponentType, ReactNode } from 'react'
-import { DashboardLayout } from '@/components/dashboard-layout'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Switch } from '@/components/ui/switch'
-import { getSystemSettings, updateSystemSettings } from '@/lib/api/settings'
-import type {
-  SystemSettings,
-  ThinkingMode,
-  UpdateSystemSettingsRequest,
-} from '@/lib/api/types'
-import {
-  Building2,
-  Copy,
-  Image as ImageIcon,
-  KeyRound,
-  Loader2,
-  MonitorSmartphone,
-  Package,
-  RefreshCw,
-  Save,
-  Shield,
-  Sparkles,
-  TriangleAlert,
-} from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useBlocker } from 'react-router-dom'
+import { Check, CheckCheck, ChevronRight, CircleAlert, Copy, FileJson, Globe2, Loader2, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
+import { DashboardLayout } from '@/components/dashboard-layout'
+import { SystemSettingsFields } from '@/components/settings/system-settings-fields'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { getSystemSettings, updateSystemSettings } from '@/lib/api/settings'
+import type { SystemSettings } from '@/lib/api/types'
+import { copyToClipboard } from '@/lib/clipboard'
+import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes'
+import { buildSystemSettingsPatch, createSettingsDraft, getRedactedSettings, getSettingsChanges, TAB_FIELDS, validateSettingsDraft, type SettingsDraft, type SettingsErrors, type SettingsField, type SettingsTab } from '@/lib/system-settings'
+import './system-settings.css'
 
-type EditableSystemSettings = Omit<
-  SystemSettings,
-  'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError'
->
-
-type SettingsSectionProps = {
-  icon: ComponentType<{ className?: string }>
-  title: string
-  description?: string
-  children?: ReactNode
-}
-
-type SettingsFieldProps = {
-  label: string
-  description?: string
-  children: ReactNode
-}
-
-const thinkingModeOptions: Array<{
-  value: ThinkingMode
-  label: string
-  description: string
-}> = [
-  {
-    value: 'disabled',
-    label: 'disabled',
-    description: '关闭思考模式',
-  },
-  {
-    value: 'adaptive',
-    label: 'adaptive',
-    description: '由系统自动决定',
-  },
-  {
-    value: 'enabled',
-    label: 'enabled',
-    description: '始终启用思考模式',
-  },
-]
-
-function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
-  return {
-    bypassPermissions: settings.bypassPermissions,
-    model: settings.model,
-    maxTurns: settings.maxTurns,
-    thinkingMode: settings.thinkingMode,
-    thinkingBudgetTokens: settings.thinkingBudgetTokens,
-    url: settings.url,
-    apiKey: settings.apiKey,
-    image: {
-      provider: settings.image.provider,
-      url: settings.image.url,
-      apiKey: settings.image.apiKey,
-      model: settings.image.model,
-    },
-    skillStore: {
-      tenantId: settings.skillStore.tenantId,
-    },
-    oauth2: {
-      enabled: settings.oauth2.enabled,
-      authorizeUrlTemplate: settings.oauth2.authorizeUrlTemplate,
-      scriptPath: settings.oauth2.scriptPath,
-      requireState: settings.oauth2.requireState,
-    },
-    clientCronEnabled: settings.clientCronEnabled,
-    clientShowToolCalls: settings.clientShowToolCalls,
-    workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
-    cronReuseMaxRuns: settings.cronReuseMaxRuns,
-    imReuseMaxTurns: settings.imReuseMaxTurns,
-    mintScriptsDir: settings.mintScriptsDir,
-  }
-}
-
-function buildSystemSettingsPatch(
-  settings: SystemSettings,
-  draft: EditableSystemSettings,
-): UpdateSystemSettingsRequest {
-  const patch: UpdateSystemSettingsRequest = {}
-
-  if (draft.bypassPermissions !== settings.bypassPermissions) {
-    patch.bypassPermissions = draft.bypassPermissions
-  }
-  if (draft.model !== settings.model) {
-    patch.model = draft.model
-  }
-  if (draft.maxTurns !== settings.maxTurns) {
-    patch.maxTurns = draft.maxTurns
-  }
-  if (draft.cronReuseMaxRuns !== settings.cronReuseMaxRuns) {
-    patch.cronReuseMaxRuns = draft.cronReuseMaxRuns
-  }
-  if (draft.imReuseMaxTurns !== settings.imReuseMaxTurns) {
-    patch.imReuseMaxTurns = draft.imReuseMaxTurns
-  }
-  if (draft.thinkingMode !== settings.thinkingMode) {
-    patch.thinkingMode = draft.thinkingMode
-  }
-  if (draft.thinkingBudgetTokens !== settings.thinkingBudgetTokens) {
-    patch.thinkingBudgetTokens = draft.thinkingBudgetTokens
-  }
-  if (draft.url !== settings.url) {
-    patch.url = draft.url
-  }
-  if (draft.apiKey !== settings.apiKey) {
-    patch.apiKey = draft.apiKey
-  }
-
-  const imagePatch: NonNullable<UpdateSystemSettingsRequest['image']> = {}
-  if (draft.image.provider !== settings.image.provider) {
-    imagePatch.provider = draft.image.provider
-  }
-  if (draft.image.url !== settings.image.url) {
-    imagePatch.url = draft.image.url
-  }
-  if (draft.image.apiKey !== settings.image.apiKey) {
-    imagePatch.apiKey = draft.image.apiKey
-  }
-  if (draft.image.model !== settings.image.model) {
-    imagePatch.model = draft.image.model
-  }
-  if (Object.keys(imagePatch).length > 0) {
-    patch.image = imagePatch
-  }
-
-  const skillStorePatch: NonNullable<UpdateSystemSettingsRequest['skillStore']> = {}
-  if (draft.skillStore.tenantId !== settings.skillStore.tenantId) {
-    skillStorePatch.tenantId = draft.skillStore.tenantId
-  }
-  if (Object.keys(skillStorePatch).length > 0) {
-    patch.skillStore = skillStorePatch
-  }
-
-  const oauth2Patch: NonNullable<UpdateSystemSettingsRequest['oauth2']> = {}
-  if (draft.oauth2.enabled !== settings.oauth2.enabled) {
-    oauth2Patch.enabled = draft.oauth2.enabled
-  }
-  if (draft.oauth2.authorizeUrlTemplate !== settings.oauth2.authorizeUrlTemplate) {
-    oauth2Patch.authorizeUrlTemplate = draft.oauth2.authorizeUrlTemplate
-  }
-  if (draft.oauth2.scriptPath !== settings.oauth2.scriptPath) {
-    oauth2Patch.scriptPath = draft.oauth2.scriptPath
-  }
-  if (draft.oauth2.requireState !== settings.oauth2.requireState) {
-    oauth2Patch.requireState = draft.oauth2.requireState
-  }
-  if (Object.keys(oauth2Patch).length > 0) {
-    patch.oauth2 = oauth2Patch
-  }
-
-  // workspaceUploadLimitBytes is owned by ClientSettingsSection (separate
-  // load/save), so it is intentionally not part of the primary auto-save patch.
-
-  return patch
-}
-
-function SettingSection({
-  icon: Icon,
-  title,
-  description,
-  children,
-}: SettingsSectionProps) {
-  return (
-    <Card>
-      <CardHeader className="border-b">
-        <CardTitle className="flex items-center gap-2">
-          <Icon className="size-4 text-muted-foreground" />
-          <span>{title}</span>
-        </CardTitle>
-        {description ? <CardDescription>{description}</CardDescription> : null}
-      </CardHeader>
-      {children ? <CardContent className="space-y-5 pt-6">{children}</CardContent> : null}
-    </Card>
-  )
-}
-
-function SettingField({
-  label,
-  description,
-  children,
-}: SettingsFieldProps) {
-  return (
-    <div className="grid gap-3 md:grid-cols-[minmax(0,240px)_minmax(0,1fr)] md:items-start md:gap-6">
-      <div className="space-y-1">
-        <Label className="text-sm font-medium">{label}</Label>
-        {description ? (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        ) : null}
-      </div>
-      <div className="space-y-2">{children}</div>
-    </div>
-  )
-}
-
-function SettingsSkeleton() {
-  return (
-    <div className="space-y-6">
-      {[...Array(4)].map((_, index) => (
-        <Card key={index}>
-          <CardHeader className="border-b">
-            <Skeleton className="h-5 w-32" />
-            <Skeleton className="h-4 w-72" />
-          </CardHeader>
-          <CardContent className="space-y-4 pt-6">
-            {[...Array(3)].map((__, fieldIndex) => (
-              <div key={fieldIndex} className="grid gap-3 md:grid-cols-[240px_1fr] md:gap-6">
-                <div className="space-y-2">
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-4 w-40" />
-                </div>
-                <Skeleton className="h-10 w-full" />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      ))}
-    </div>
-  )
-}
-
-/**
- * Client-facing settings. clientCronEnabled / clientShowToolCalls are persisted
- * in settings.json via the system-settings API. Self-contained load/save so it
- * doesn't entangle the page's primary auto-save flow.
- */
-function ClientSettingsSection() {
-  const DEFAULT_UPLOAD_LIMIT_MB = 20
-  const [cronEnabled, setCronEnabled] = useState(true)
-  const [showToolCalls, setShowToolCalls] = useState(true)
-  const [uploadLimitMb, setUploadLimitMb] = useState(DEFAULT_UPLOAD_LIMIT_MB)
-  const [loaded, setLoaded] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [dirty, setDirty] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    getSystemSettings()
-      .then((res) => {
-        if (cancelled) return
-        setCronEnabled(res.clientCronEnabled !== false)
-        setShowToolCalls(res.clientShowToolCalls !== false)
-        if (Number.isFinite(res.workspaceUploadLimitBytes) && res.workspaceUploadLimitBytes > 0) {
-          setUploadLimitMb(Math.round(res.workspaceUploadLimitBytes / (1024 * 1024)))
-        }
-        setLoaded(true)
-      })
-      .catch(() => {
-        if (!cancelled) setLoaded(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      await updateSystemSettings({
-        clientCronEnabled: cronEnabled,
-        clientShowToolCalls: showToolCalls,
-        workspaceUploadLimitBytes: Math.max(1, uploadLimitMb) * 1024 * 1024,
-      })
-      setDirty(false)
-      toast.success('客户端设置已保存')
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存客户端设置失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <SettingSection
-      icon={MonitorSmartphone}
-      title="客户端设置"
-      description="控制企业版客户端（sudowork）用户可使用的功能。仅对企业模式生效。"
-    >
-      <SettingField
-        label="客户端定时任务"
-        description="是否允许客户端用户使用定时任务（cron）功能。关闭后，客户端将隐藏定时任务菜单及运行记录列表。"
-      >
-        <Switch
-          checked={cronEnabled}
-          disabled={!loaded || saving}
-          onCheckedChange={(checked) => {
-            setCronEnabled(checked)
-            setDirty(true)
-          }}
-        />
-      </SettingField>
-
-      <SettingField
-        label="显示工具调用"
-        description="客户端对话流中是否默认显示工具调用详情。此项为默认值，客户端用户可在本地设置中覆盖。"
-      >
-        <Switch
-          checked={showToolCalls}
-          disabled={!loaded || saving}
-          onCheckedChange={(checked) => {
-            setShowToolCalls(checked)
-            setDirty(true)
-          }}
-        />
-      </SettingField>
-
-      <SettingField
-        label="工作区上传大小上限 (MB)"
-        description="企业客户端上传到会话工作区的单个文件大小上限。默认 20MB。"
-      >
-        <Input
-          type="number"
-          min={1}
-          max={1024}
-          value={uploadLimitMb}
-          disabled={!loaded || saving}
-          onChange={(event) => {
-            setUploadLimitMb(Number.parseInt(event.target.value || '1', 10) || 1)
-            setDirty(true)
-          }}
-        />
-      </SettingField>
-
-      <div className="flex justify-end pt-2">
-        <Button onClick={() => void handleSave()} disabled={!loaded || saving || !dirty}>
-          {saving ? (
-            <Loader2 className="mr-2 size-4 animate-spin" />
-          ) : (
-            <Save className="mr-2 size-4" />
-          )}
-          保存
-        </Button>
-      </div>
-    </SettingSection>
-  )
-}
+const TABS = [
+  { value: 'models', label: '模型配置', icon: Sparkles },
+  { value: 'runtime', label: '执行与权限', icon: ShieldCheck },
+  { value: 'clients', label: '客户端与集成', icon: SlidersHorizontal },
+] as const
 
 export default function SystemSettingsPage() {
   const [settings, setSettings] = useState<SystemSettings | null>(null)
-  const [draft, setDraft] = useState<EditableSystemSettings | null>(null)
+  const [draft, setDraft] = useState<SettingsDraft | null>(null)
+  const [tab, setTab] = useState<SettingsTab>('models')
+  const [errors, setErrors] = useState<SettingsErrors>({})
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [saveError, setSaveError] = useState('')
-  const [hasSavedOnce, setHasSavedOnce] = useState(false)
-  const settingsRef = useRef<SystemSettings | null>(null)
-  const draftRef = useRef<EditableSystemSettings | null>(null)
-  const lastFailedSnapshotRef = useRef<string | null>(null)
+  const [hasSaved, setHasSaved] = useState(false)
+  const [modal, setModal] = useState<'review' | 'config' | null>(null)
+  const [confirmSave, setConfirmSave] = useState(false)
+  const loadVersion = useRef(0)
+  const saveInFlight = useRef(false)
+  const handlingNavigation = useRef(false)
+  const { registerGuard, confirmDiscard } = useUnsavedChanges()
+  const changes = settings && draft ? getSettingsChanges(settings, draft) : []
+  const isDirty = changes.length > 0
 
-  useEffect(() => {
-    settingsRef.current = settings
+  const discard = useCallback(() => {
+    if (settings) setDraft(createSettingsDraft(settings))
+    setErrors({})
+    setSaveError('')
   }, [settings])
 
+  useEffect(() => registerGuard({ isDirty, isSaving, discard }), [registerGuard, isDirty, isSaving, discard])
+  const blocker = useBlocker(isDirty || isSaving)
   useEffect(() => {
-    draftRef.current = draft
-  }, [draft])
+    if (blocker.state !== 'blocked' || handlingNavigation.current) return
+    handlingNavigation.current = true
+    void confirmDiscard().then(confirmed => {
+      if (confirmed) blocker.proceed()
+      else blocker.reset()
+    }).finally(() => { handlingNavigation.current = false })
+  }, [blocker, confirmDiscard])
 
   const loadSettings = useCallback(async () => {
+    const version = ++loadVersion.current
+    setIsLoading(true)
     setLoadError('')
+    setSaveError('')
+    setErrors({})
+    setSettings(null)
+    setDraft(null)
     try {
       const response = await getSystemSettings()
+      if (version !== loadVersion.current) return
       setSettings(response)
-      setDraft(toEditableSettings(response))
-      setSaveError('')
-      setHasSavedOnce(false)
-      lastFailedSnapshotRef.current = null
+      setDraft(createSettingsDraft(response))
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : '读取系统设置失败'
-      setLoadError(message)
-      toast.error(message)
+      if (version !== loadVersion.current) return
+      setLoadError(error instanceof Error ? error.message : '无法连接服务器。')
     } finally {
-      setIsLoading(false)
+      if (version === loadVersion.current) setIsLoading(false)
     }
   }, [])
 
   useEffect(() => {
     void loadSettings()
+    return () => { loadVersion.current += 1 }
   }, [loadSettings])
 
-  const isDirty = useMemo(() => {
-    if (!settings || !draft) return false
-    return (
-      JSON.stringify(toEditableSettings(settings)) !== JSON.stringify(draft)
-    )
-  }, [draft, settings])
-  const serializedDraft = useMemo(
-    () => (draft ? JSON.stringify(draft) : ''),
-    [draft],
-  )
-  const serializedSettings = useMemo(
-    () => (settings ? JSON.stringify(toEditableSettings(settings)) : ''),
-    [settings],
-  )
-
-  const handleCopy = async (value: string, label: string) => {
-    if (!value) return
-
-    // Fallback for non-HTTPS environments (navigator.clipboard requires secure context)
-    const fallbackCopy = (text: string): boolean => {
-      const textarea = document.createElement('textarea')
-      textarea.value = text
-      textarea.style.position = 'fixed'
-      textarea.style.left = '0'
-      textarea.style.top = '0'
-      textarea.style.opacity = '0'
-      textarea.style.pointerEvents = 'none'
-      document.body.appendChild(textarea)
-      textarea.focus()
-      textarea.select()
-      const success = document.execCommand('copy')
-      document.body.removeChild(textarea)
-      return success
-    }
-
-    try {
-      // Try modern clipboard API first (works in HTTPS and localhost)
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(value)
-        toast.success(`${label} 已复制`)
-      } else {
-        // Fallback for HTTP environments
-        const success = fallbackCopy(value)
-        if (success) {
-          toast.success(`${label} 已复制`)
-        } else {
-          toast.error(`复制 ${label} 失败`)
-        }
-      }
-    } catch {
-      // Try fallback if clipboard API throws
-      const success = fallbackCopy(value)
-      if (success) {
-        toast.success(`${label} 已复制`)
-      } else {
-        toast.error(`复制 ${label} 失败`)
-      }
-    }
+  function update<K extends SettingsField>(field: K, value: SettingsDraft[K]) {
+    setDraft(current => current ? { ...current, [field]: value } : current)
+    setErrors(current => ({ ...current, [field]: undefined }))
+    setSaveError('')
+    setHasSaved(false)
   }
 
-  const handleRefresh = async () => {
-    setIsLoading(true)
+  async function refresh() {
+    if (isSaving || !(await confirmDiscard())) return
+    setHasSaved(false)
     await loadSettings()
   }
 
-  useEffect(() => {
-    if (!settings || !draft) {
-      return
-    }
-    if (serializedDraft === serializedSettings) {
-      if (!isSaving) {
-        setSaveError('')
-      }
-      return
-    }
-    if (lastFailedSnapshotRef.current === serializedDraft) {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      const latestSettings = settingsRef.current
-      const latestDraft = draftRef.current
-      if (!latestSettings || !latestDraft) {
+  async function save() {
+    if (!settings || !draft || saveInFlight.current) return
+    saveInFlight.current = true
+    setIsSaving(true)
+    setSaveError('')
+    setModal(null)
+    const version = loadVersion.current
+    try {
+      const patch = buildSystemSettingsPatch(settings, draft)
+      if (!Object.keys(patch).length) {
+        setDraft(createSettingsDraft(settings))
+        toast.info('配置未发生实际变化。')
         return
       }
-
-      const draftSnapshot = JSON.stringify(latestDraft)
-      const settingsSnapshot = JSON.stringify(toEditableSettings(latestSettings))
-      if (draftSnapshot === settingsSnapshot) {
-        return
-      }
-
-      const patch = buildSystemSettingsPatch(latestSettings, latestDraft)
-      if (Object.keys(patch).length === 0) {
-        return
-      }
-
-      setIsSaving(true)
-      setSaveError('')
-      void updateSystemSettings(patch)
-        .then(response => {
-          lastFailedSnapshotRef.current = null
-          setHasSavedOnce(true)
-          setSettings(response)
-          setDraft(current => {
-            if (!current) return current
-            return JSON.stringify(current) === draftSnapshot
-              ? toEditableSettings(response)
-              : current
-          })
-        })
-        .catch(error => {
-          const message =
-            error instanceof Error ? error.message : '自动保存系统设置失败'
-          lastFailedSnapshotRef.current = draftSnapshot
-          setSaveError(message)
-          toast.error(message)
-        })
-        .finally(() => {
-          setIsSaving(false)
-        })
-    }, 600)
-
-    return () => window.clearTimeout(timer)
-  }, [draft, serializedDraft, serializedSettings, settings, isSaving])
-
-  const autoSaveStatus = useMemo(() => {
-    if (saveError) {
-      return {
-        label: '自动保存失败',
-        variant: 'destructive' as const,
-      }
+      const response = await updateSystemSettings(patch)
+      if (version !== loadVersion.current) return
+      setSettings(response)
+      setDraft(createSettingsDraft(response))
+      setErrors({})
+      setHasSaved(true)
+      toast.success('系统设置已保存。')
+    } catch (error) {
+      if (version !== loadVersion.current) return
+      setSaveError(error instanceof Error ? error.message : '请求未能完成，请稍后重试。')
+      toast.error('保存失败，未保存的更改已保留。')
+    } finally {
+      saveInFlight.current = false
+      if (version === loadVersion.current) setIsSaving(false)
     }
-    if (isSaving) {
-      return {
-        label: '自动保存中',
-        variant: 'secondary' as const,
-      }
-    }
-    if (isDirty) {
-      return {
-        label: '等待自动保存',
-        variant: 'outline' as const,
-      }
-    }
-    return {
-      label: hasSavedOnce ? '已自动保存' : '自动保存已开启',
-      variant: 'secondary' as const,
-    }
-  }, [hasSavedOnce, isDirty, isSaving, saveError])
-
-  if (isLoading && !draft) {
-    return (
-      <DashboardLayout
-        title="系统设置"
-        description="管理服务端的默认文本模型、图片模型和执行权限。"
-      >
-        <SettingsSkeleton />
-      </DashboardLayout>
-    )
   }
 
-  if (!draft || !settings) {
-    return (
-      <DashboardLayout
-        title="系统设置"
-        description="管理服务端的默认文本模型、图片模型和执行权限。"
-      >
-        <div className="space-y-4">
-          <div className="flex justify-end">
-            <Button variant="outline" onClick={() => void handleRefresh()}>
-              <RefreshCw className="mr-2 size-4" />
-              刷新
-            </Button>
-          </div>
-          <Alert variant="destructive" className="max-w-3xl">
-            <TriangleAlert className="size-4" />
-            <AlertTitle>读取系统设置失败</AlertTitle>
-            <AlertDescription>
-              <p>{loadError || '未获取到系统设置数据。'}</p>
-            </AlertDescription>
-          </Alert>
-        </div>
-      </DashboardLayout>
-    )
+  function requestSave() {
+    if (!settings || !draft || !isDirty || settings.settingsParseError || saveInFlight.current) return
+    const nextErrors = validateSettingsDraft(draft)
+    setErrors(nextErrors)
+    const invalidTab = TABS.find(item => TAB_FIELDS[item.value].some(field => nextErrors[field]))
+    if (invalidTab) {
+      setModal(null)
+      setTab(invalidTab.value)
+      const field = TAB_FIELDS[invalidTab.value].find(key => nextErrors[key])!
+      requestAnimationFrame(() => (document.getElementById(`setting-${field}-value`) || document.getElementById(`setting-${field}`))?.focus())
+      toast.error('请修正标记的字段后再保存。')
+      return
+    }
+    if (draft.apiKey.action === 'clear' || draft.imageApiKey.action === 'clear') {
+      setModal(null)
+      setConfirmSave(true)
+    } else {
+      void save()
+    }
   }
 
-  const thinkingModeMeta = thinkingModeOptions.find(
-    option => option.value === draft.thinkingMode,
-  )
+  async function copy(text: string, label: string) {
+    try {
+      await copyToClipboard(text)
+      toast.success(`${label}已复制。`)
+    } catch { toast.error('浏览器未允许复制，请手动选择文本。') }
+  }
 
-  return (
-    <DashboardLayout
-      title="系统设置"
-      description="管理服务端的默认文本模型、图片模型和执行权限。所有改动都会写入 ~/.moss/settings.json。"
-    >
-      <div className="space-y-6">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={settings.settingsExists ? 'secondary' : 'outline'}>
-              {settings.settingsExists ? '配置文件已存在' : '配置文件尚未创建'}
-            </Badge>
-            <Badge variant={settings.settingsLoaded ? 'secondary' : 'outline'}>
-              {settings.settingsLoaded ? '已加载' : '使用默认值'}
-            </Badge>
-            <Badge variant={autoSaveStatus.variant}>
-              {autoSaveStatus.label}
-            </Badge>
-            {settings.settingsParseError ? (
-              <Badge variant="destructive">文件解析失败</Badge>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              onClick={() => void handleRefresh()}
-              disabled={isLoading || isSaving}
-            >
-              <RefreshCw className="mr-2 size-4" />
-              刷新
-            </Button>
-          </div>
-        </div>
+  const footer = settings && draft ? <div className="system-settings-save-bar">
+    <div className="system-settings-save-status" role="status" aria-live="polite">
+      {isSaving ? <Loader2 size={17} className="animate-spin" /> : saveError ? <CircleAlert size={17} /> : isDirty ? <span className="system-settings-dirty-dot" /> : <CheckCheck size={17} />}
+      <div><strong>{isSaving ? '正在保存…' : saveError ? '保存失败，草稿已保留' : isDirty ? `${changes.length} 项未保存的更改` : hasSaved ? '已保存到服务器' : '没有未保存的更改'}</strong><span>适用于此服务器上的所有组织</span></div>
+      {isDirty && <button type="button" className="system-settings-text-button" disabled={isSaving} onClick={() => setModal('review')}>查看更改</button>}
+    </div>
+    <div className="system-settings-save-actions"><Button type="button" variant="ghost" size="sm" disabled={!isDirty || isSaving} onClick={() => { void confirmDiscard() }}>取消</Button><Button type="submit" form="system-settings-form" size="sm" disabled={!isDirty || isSaving}>{isSaving ? <Loader2 className="animate-spin" /> : <Check />}保存更改</Button></div>
+  </div> : undefined
 
-        {saveError ? (
-          <Alert variant="destructive">
-            <TriangleAlert className="size-4" />
-            <AlertTitle>自动保存失败</AlertTitle>
-            <AlertDescription>
-              <p>{saveError}</p>
-            </AlertDescription>
-          </Alert>
-        ) : null}
-
-        <Card>
-          <CardHeader className="border-b">
-            <div>
-              <CardTitle>配置文件</CardTitle>
-              <CardDescription>
-                这里展示当前服务端读取的配置文件位置和加载状态。
-              </CardDescription>
-            </div>
-            <CardAction>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleCopy(settings.settingsPath, '配置文件路径')}
-              >
-                <Copy className="mr-2 size-4" />
-                复制路径
-              </Button>
-            </CardAction>
-          </CardHeader>
-          <CardContent className="space-y-4 pt-6">
-            <div className="rounded-lg border bg-muted/40 px-3 py-2 font-mono text-xs">
-              {settings.settingsPath}
-            </div>
-            {settings.settingsParseError ? (
-              <Alert variant="destructive">
-                <TriangleAlert className="size-4" />
-                <AlertTitle>配置文件存在 JSON 解析错误</AlertTitle>
-                <AlertDescription>
-                  <p>{settings.settingsParseError}</p>
-                  <p>
-                    当前表单展示的是默认值和可识别字段。保存后会用新的合法配置覆盖原文件。
-                  </p>
-                </AlertDescription>
-              </Alert>
-            ) : null}
-          </CardContent>
-        </Card>
-
-        <SettingSection
-          icon={Sparkles}
-          title="文本模型"
-          description="设置服务端默认使用的文本模型、API 地址和认证信息。"
-        >
-          <SettingField label="默认模型" description="新的本地会话会默认使用这个模型。">
-            <Input
-              value={draft.model}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        model: event.target.value,
-                      }
-                    : current,
-                )
-              }
-              placeholder="claude-sonnet-4-6"
-            />
-          </SettingField>
-
-          <SettingField label="API URL" description="为空时使用默认地址。">
-            <Input
-              value={draft.url}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        url: event.target.value,
-                      }
-                    : current,
-                )
-              }
-              placeholder="https://api.anthropic.com"
-            />
-          </SettingField>
-
-          <SettingField
-            label="API Key"
-            description="保存后会写入 Nexus 凭据存储（不再明文落盘到 settings.json）。"
-          >
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Input
-                type="password"
-                value={draft.apiKey}
-                className="font-mono text-xs"
-                onChange={(event) =>
-                  setDraft(current =>
-                    current
-                      ? {
-                          ...current,
-                          apiKey: event.target.value,
-                        }
-                      : current,
-                  )
-                }
-                placeholder="sk-ant-..."
-              />
-              {draft.apiKey ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="sm:shrink-0"
-                  onClick={() => void handleCopy(draft.apiKey, '文本模型 API Key')}
-                >
-                  <Copy className="mr-2 size-4" />
-                  复制
-                </Button>
-              ) : null}
-            </div>
-          </SettingField>
-        </SettingSection>
-
-        <SettingSection
-          icon={ImageIcon}
-          title="图片模型"
-          description="设置图片生成的供应商、接口地址和默认模型。"
-        >
-          <SettingField label="图片厂商" description="与桌面端保持一致，支持 OpenAI 与 Google (Gemini)。">
-            <Select
-              value={draft.image.provider}
-              onValueChange={(value) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        image: {
-                          ...current.image,
-                          provider: value,
-                        },
-                      }
-                    : current,
-                )
-              }
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="选择图片厂商" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="google">Google (Gemini)</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingField>
-
-          <SettingField label="API URL" description="图片生成接口地址。">
-            <Input
-              value={draft.image.url}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        image: {
-                          ...current.image,
-                          url: event.target.value,
-                        },
-                      }
-                    : current,
-                )
-              }
-              placeholder="https://hk.sudorouter.ai/v1"
-            />
-          </SettingField>
-
-          <SettingField
-            label="API Key"
-            description="图片模型的供应商认证信息。"
-          >
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Input
-                type="password"
-                value={draft.image.apiKey}
-                className="font-mono text-xs"
-                onChange={(event) =>
-                  setDraft(current =>
-                    current
-                      ? {
-                          ...current,
-                          image: {
-                            ...current.image,
-                            apiKey: event.target.value,
-                          },
-                        }
-                      : current,
-                  )
-                }
-                placeholder="sk-..."
-              />
-              {draft.image.apiKey ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="sm:shrink-0"
-                  onClick={() => void handleCopy(draft.image.apiKey, '图片模型 API Key')}
-                >
-                  <Copy className="mr-2 size-4" />
-                  复制
-                </Button>
-              ) : null}
-            </div>
-          </SettingField>
-
-          <SettingField label="图片模型" description="默认图片模型名称。">
-            <Input
-              value={draft.image.model}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        image: {
-                          ...current.image,
-                          model: event.target.value,
-                        },
-                      }
-                    : current,
-                )
-              }
-              placeholder="gpt-image-1"
-            />
-          </SettingField>
-        </SettingSection>
-
-        <SettingSection
-          icon={Building2}
-          title="专属资产"
-        >
-          <SettingField label="租户 ID">
-            <Input
-              value={draft.skillStore.tenantId}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        skillStore: {
-                          ...current.skillStore,
-                          tenantId: event.target.value,
-                        },
-                      }
-                    : current,
-                )
-              }
-              placeholder="tenant-001"
-            />
-          </SettingField>
-        </SettingSection>
-
-        <SettingSection
-          icon={Shield}
-          title="运行时设置"
-          description="设置工具调用权限确认、最大轮次和 thinking 模式。"
-        >
-          <SettingField
-            label="跳过所有权限确认"
-            description="打开后，新会话的工具调用将不再弹出权限确认框。"
-          >
-            <div className="flex min-h-10 items-center">
-              <Switch
-                checked={draft.bypassPermissions}
-                onCheckedChange={checked =>
-                  setDraft(current =>
-                    current
-                      ? {
-                          ...current,
-                          bypassPermissions: checked,
-                        }
-                      : current,
-                  )
-                }
-              />
-            </div>
-          </SettingField>
-
-          <SettingField
-            label="最大轮次"
-            description="仅影响新的 local 会话。"
-          >
-            <Input
-              type="number"
-              min={1}
-              max={10000}
-              value={draft.maxTurns}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        maxTurns: Number.parseInt(event.target.value || '1', 10) || 1,
-                      }
-                    : current,
-                )
-              }
-            />
-          </SettingField>
-
-          <SettingField
-            label="定时任务会话复用上限"
-            description="复用模式的定时任务每复用同一会话满该次数后，自动退役并新建会话，避免运行时上下文不断累积直至超出模型上限。0 表示不限制（一直复用）。默认 50。"
-          >
-            <Input
-              type="number"
-              min={0}
-              max={10000}
-              value={draft.cronReuseMaxRuns}
-              onChange={(event) => {
-                const parsed = Number.parseInt(event.target.value, 10)
-                const next = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 10000) : 0
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        cronReuseMaxRuns: next,
-                      }
-                    : current,
-                )
-              }}
-            />
-          </SettingField>
-
-          <SettingField
-            label="IM 会话轮次上限"
-            description="同一个 IM 聊天累计对话满该轮数后，自动重建会话并注入最近对话摘要，避免运行时上下文不断累积直至超出模型上限。重建会保留对话主线，但工具调用等中间状态会丢失。0 表示不限制（一直复用）。默认 200。"
-          >
-            <Input
-              type="number"
-              min={0}
-              max={10000}
-              value={draft.imReuseMaxTurns}
-              onChange={(event) => {
-                const parsed = Number.parseInt(event.target.value, 10)
-                const next = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 10000) : 0
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        imReuseMaxTurns: next,
-                      }
-                    : current,
-                )
-              }}
-            />
-          </SettingField>
-
-          <SettingField
-            label="思考模式"
-            description={thinkingModeMeta?.description || '控制 thinking 的默认行为。'}
-          >
-            <Select
-              value={draft.thinkingMode}
-              onValueChange={value =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        thinkingMode: value as ThinkingMode,
-                      }
-                    : current,
-                )
-              }
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="选择思考模式" />
-              </SelectTrigger>
-              <SelectContent>
-                {thinkingModeOptions.map(option => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </SettingField>
-
-          {draft.thinkingMode === 'enabled' ? (
-            <SettingField
-              label="Thinking Budget Tokens"
-              description="只在强制开启思考模式时生效。"
-            >
-              <Input
-                type="number"
-                min={1024}
-                max={128000}
-                value={draft.thinkingBudgetTokens}
-                onChange={(event) =>
-                  setDraft(current =>
-                    current
-                      ? {
-                          ...current,
-                          thinkingBudgetTokens:
-                            Number.parseInt(event.target.value || '1024', 10) ||
-                            1024,
-                        }
-                      : current,
-                  )
-                }
-              />
-            </SettingField>
-          ) : null}
-        </SettingSection>
-
-        <SettingSection
-          icon={KeyRound}
-          title="OAuth2 登录"
-          description="允许企业用户通过外部身份提供方（IdP）以浏览器跳转方式登录 SudoWork。"
-        >
-          <SettingField
-            label="启用 OAuth2 登录"
-            description="关闭后，客户端的 OAuth2 登录选项将提示未启用。"
-          >
-            <div className="flex min-h-10 items-center">
-              <Switch
-                checked={draft.oauth2.enabled}
-                onCheckedChange={checked =>
-                  setDraft(current =>
-                    current
-                      ? { ...current, oauth2: { ...current.oauth2, enabled: checked } }
-                      : current,
-                  )
-                }
-              />
-            </div>
-          </SettingField>
-
-          <SettingField
-            label="强制校验 state 参数 (CSRF 保护)"
-            description="默认开启。客户端在收到 OAuth2 回调时会校验 state 是否与发起授权时一致，用于防御 CSRF 攻击。在完全可信的内网部署中可关闭：客户端仍会在授权 URL 中携带 state（兼容性需要），但回调时不再进行本地校验。"
-          >
-            <div className="flex min-h-10 items-center">
-              <Switch
-                checked={draft.oauth2.requireState}
-                onCheckedChange={checked =>
-                  setDraft(current =>
-                    current
-                      ? { ...current, oauth2: { ...current.oauth2, requireState: checked } }
-                      : current,
-                  )
-                }
-              />
-            </div>
-          </SettingField>
-
-          <SettingField
-            label="Authorize URL 模板"
-            description="完整授权地址。系统只会替换 {redirect_uri}，客户端会填充 {state}。client_id、scope、response_type 等参数请直接写入地址中。"
-          >
-            <Input
-              value={draft.oauth2.authorizeUrlTemplate}
-              onChange={(event) =>
-                setDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        oauth2: { ...current.oauth2, authorizeUrlTemplate: event.target.value },
-                      }
-                    : current,
-                )
-              }
-              placeholder="https://idp.example.com/authorize?client_id=your-client-id&scope=server&response_type=token&redirect_uri={redirect_uri}&state={state}"
-            />
-          </SettingField>
-
-          <SettingField
-            label="凭证脚本路径"
-            description="用于解析用户身份的服务器端可执行脚本路径。该项需由系统管理员在服务器 settings.json 中配置 oauth2.scriptPath，无法在此修改。如需调整，请联系系统管理员。"
-          >
-            <p className="min-h-10 break-all rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
-              请联系系统管理员在 settings.json 中配置 oauth2.scriptPath
-            </p>
-          </SettingField>
-
-          <SettingField
-            label="Redirect URI"
-            description="请在 IdP 中将此地址注册为允许的回调地址。认证完成后，IdP 重定向到该地址，至少携带凭证脚本所需的业务参数 (例如标准 OAuth2 的 code，或非标准实现的 access_token / refresh_token 等)。当“强制校验 state 参数”开启时，IdP 还需将发起授权时的 state 原样回传；关闭后可省略。"
-          >
-            <p className="min-h-10 break-all rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
-              sudowork://oauth2-callback
-            </p>
-          </SettingField>
-        </SettingSection>
-
-        <ClientSettingsSection />
+  return <DashboardLayout title="系统设置" description="配置模型、执行策略与客户端默认行为。" footer={footer}>
+    <div className="system-settings-page">
+      <div className="system-settings-intro">
+        <div><span className="system-settings-scope"><Globe2 size={14} />服务器全局配置</span><p>切换组织不会改变此处配置。</p></div>
+        <div className="system-settings-toolbar-actions"><Button type="button" variant="outline" size="sm" disabled={!settings || isLoading} onClick={() => setModal('config')}><FileJson />配置详情</Button><Button type="button" variant="ghost" size="icon-sm" aria-label="重新加载设置" title="重新加载设置" disabled={isLoading || isSaving} onClick={() => void refresh()}><RefreshCw className={isLoading ? 'animate-spin' : ''} /></Button></div>
       </div>
-    </DashboardLayout>
-  )
+      {isLoading ? <div className="space-y-4" aria-label="正在加载系统设置" role="status"><Skeleton className="h-10 w-full" /><Skeleton className="h-64 w-full" /><Skeleton className="h-52 w-full" /><span className="sr-only">正在加载系统设置</span></div> : loadError ? <Alert variant="destructive"><CircleAlert /><AlertTitle>无法加载系统设置</AlertTitle><AlertDescription><p>{loadError}</p><p>未加载配置前不会显示可编辑的默认值，以免覆盖服务器设置。</p><Button type="button" variant="outline" size="sm" onClick={() => void loadSettings()}>重试</Button></AlertDescription></Alert> : settings && draft ? <>
+        {settings.settingsParseError && <Alert variant="destructive" className="mb-5"><CircleAlert /><AlertTitle>配置文件解析失败</AlertTitle><AlertDescription><p>当前展示服务端回退配置。为避免覆盖原配置或影响已有凭据，已暂停编辑。请在服务器修复文件后重新加载。</p><p className="break-all">{settings.settingsParseError}</p></AlertDescription></Alert>}
+        {saveError && <Alert variant="destructive" className="mb-5"><CircleAlert /><AlertTitle>保存失败</AlertTitle><AlertDescription><p>{saveError}</p><p>草稿仍在当前页面。请检查连接或权限后点击“保存更改”重试。</p></AlertDescription></Alert>}
+        <Tabs value={tab} onValueChange={value => setTab(value as SettingsTab)}>
+          <TabsList className="system-settings-tabs" aria-label="系统设置分类">{TABS.map(item => <TabsTrigger key={item.value} value={item.value} className="system-settings-tab"><item.icon size={15} />{item.label}{TAB_FIELDS[item.value].some(field => changes.some(change => change.field === field)) && <span className="system-settings-tab-dot" aria-label="有未保存更改" />}</TabsTrigger>)}</TabsList>
+          <div className="system-settings-grid">
+            <form id="system-settings-form" noValidate onSubmit={event => { event.preventDefault(); requestSave() }}>
+              <fieldset disabled={isSaving || Boolean(settings.settingsParseError)}><legend className="sr-only">服务器系统设置</legend><SystemSettingsFields settings={settings} draft={draft} errors={errors} update={update} /></fieldset>
+              <button type="button" className="system-settings-source" onClick={() => setModal('config')}><FileJson size={15} /><span>{settings.settingsLoaded ? '已加载服务器配置' : settings.settingsExists ? '配置文件已存在' : '使用服务端默认配置'}</span><ChevronRight size={14} /></button>
+            </form>
+            <aside className="system-settings-rail" aria-label="设置说明">
+              <div><h3>配置作用范围</h3><Globe2 size={27} className="text-primary" /><h4>一处配置，所有组织</h4><p>这里管理服务器级设置。企业名称与标志请在“企业信息配置”中管理。</p></div>
+              <div><h3>在此页面</h3>{TABS.map(item => <button type="button" key={item.value} aria-current={tab === item.value ? 'true' : undefined} onClick={() => setTab(item.value)}>{item.label}<ChevronRight size={13} /></button>)}</div>
+              <div><ShieldCheck size={22} className="text-primary" /><h4>凭据安全存储</h4><p>已有密钥不会填入表单。只有选择替换或清除时，才会提交密钥变更。</p><p>保存只提交变更字段；模型和运行默认值在新会话中使用。</p></div>
+            </aside>
+          </div>
+        </Tabs>
+      </> : null}
+    </div>
+    <Dialog open={modal !== null} onOpenChange={open => { if (!open) setModal(null) }}>
+      <DialogContent className="system-settings-dialog sm:max-w-2xl"><DialogHeader><DialogTitle>{modal === 'review' ? '查看未保存的更改' : '配置详情'}</DialogTitle><DialogDescription>{modal === 'review' ? '以下更改将应用于服务器上的所有组织，密钥内容始终隐藏。' : '当前服务端配置与加载状态；不包含未保存的草稿，密钥已脱敏。'}</DialogDescription></DialogHeader>
+        {modal === 'review' && <><div className="system-settings-change-list">{changes.map(change => <div key={change.field}><strong>{change.label}</strong><div><span>{change.before}</span><ChevronRight size={14} /><b>{change.after}</b></div></div>)}</div><div className="system-settings-dialog-actions"><Button type="button" variant="outline" onClick={() => setModal(null)}>返回编辑</Button><Button type="button" disabled={!isDirty || isSaving} onClick={requestSave}>保存更改</Button></div></>}
+        {modal === 'config' && settings && <><div className="system-settings-config-path"><span>配置文件路径</span><code>{settings.settingsPath}</code><Button type="button" variant="ghost" size="icon-sm" aria-label="复制配置文件路径" onClick={() => void copy(settings.settingsPath, '配置文件路径')}><Copy /></Button></div><pre className="system-settings-config" tabIndex={0}>{JSON.stringify(getRedactedSettings(settings), null, 2)}</pre><div className="system-settings-dialog-actions"><Button type="button" variant="outline" onClick={() => void copy(JSON.stringify(getRedactedSettings(settings), null, 2), '脱敏配置')}><Copy />复制脱敏配置</Button></div></>}
+      </DialogContent>
+    </Dialog>
+    <AlertDialog open={confirmSave} onOpenChange={setConfirmSave}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>确认保存重要更改</AlertDialogTitle><AlertDialogDescription>这些操作会影响服务器上使用相关配置的所有组织。</AlertDialogDescription></AlertDialogHeader><ul className="list-disc space-y-2 pl-5 text-sm">{draft?.apiKey.action === 'clear' && <li>删除已保存的文本模型 API Key。</li>}{draft?.imageApiKey.action === 'clear' && <li>删除已保存的图片模型 API Key。</li>}</ul><AlertDialogFooter><AlertDialogCancel>返回检查</AlertDialogCancel><AlertDialogAction onClick={() => void save()}>确认保存</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  </DashboardLayout>
 }
