@@ -23,7 +23,11 @@ import { spawnSync } from 'node:child_process'
  * Suites this gates, by directory. Adding a directory here is what makes its
  * tests run in CI at all — a test outside these is not protecting anything.
  */
-const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__']
+const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__', 'src/server/configStore']
+
+// Module-level HOME mocks and ConfigStore singletons must not share a Bun process
+// with other suites, which may have already imported systemSettings.
+const BUN_ISOLATED = ['configStore.test.ts']
 
 const BUN = [
   // src/server/nexus/__tests__
@@ -128,17 +132,17 @@ const present = SUITES.flatMap(dir =>
   acc.set(name, dir)
   return acc
 }, new Map())
-const accounted = new Set([...BUN, ...NODE, ...Object.keys(EXCLUDED)])
+const accounted = new Set([...BUN, ...BUN_ISOLATED, ...NODE, ...Object.keys(EXCLUDED)])
 const unlisted = [...present.keys()].filter(name => !accounted.has(name))
 if (unlisted.length > 0) {
   console.error(
     `Unlisted test files in ${SUITES.join(' / ')}:\n  ${unlisted.join('\n  ')}\n` +
-      'Add each to BUN or NODE in scripts/test-server.js so it actually runs.',
+      'Add each to BUN, BUN_ISOLATED or NODE in scripts/test-server.js so it actually runs.',
   )
   process.exit(1)
 }
 
-const missing = [...BUN, ...NODE].filter(name => !present.has(name))
+const missing = [...BUN, ...BUN_ISOLATED, ...NODE].filter(name => !present.has(name))
 if (missing.length > 0) {
   console.error(`Listed but absent from ${SUITES.join(' / ')}:\n  ${missing.join('\n  ')}`)
   process.exit(1)
@@ -159,6 +163,10 @@ function run(label, command, leadingArgs, names) {
 // other's result, or fixing a failure means discovering the next one a commit
 // later.
 const bunOk = run('bun:test', 'bun', ['test'], BUN)
+let isolatedBunOk = true
+for (const name of BUN_ISOLATED) {
+  if (!run('bun:test (isolated)', 'bun', ['test'], [name])) isolatedBunOk = false
+}
 const nodeOk = run('node:test', 'npx', ['tsx', '--test'], NODE)
 
 const skipped = Object.entries(EXCLUDED)
@@ -167,5 +175,5 @@ if (skipped.length > 0) {
   for (const [name, reason] of skipped) console.log(`  ${name} — ${reason}`)
 }
 
-if (!bunOk || !nodeOk) process.exit(1)
+if (!bunOk || !isolatedBunOk || !nodeOk) process.exit(1)
 console.log('\nserver suite: both runners passed')
