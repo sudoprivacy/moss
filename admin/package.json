@@ -11,7 +11,10 @@
     "test:settings": "bun test tests/system-settings.test.ts",
     "test:lists": "bun test tests/list-page.test.tsx",
     "test:clipboard": "bun test tests/clipboard.test.ts",
-    "test:credentials": "bun test tests/credential-list.test.ts tests/secrets-api.test.ts"
+    "test:credentials": "bun test tests/credential-list.test.ts tests/secrets-api.test.ts",
+    "dev:prototype": "vite --config vite.prototype.config.ts",
+    "build:prototype": "vite build --config vite.prototype.config.ts",
+    "check:prototype": "tsc --project prototype/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
