@@ -10,7 +10,8 @@
     "test:secrets": "bun test __tests__/secrets.test.ts",
     "test:settings": "bun test tests/system-settings.test.ts",
     "test:lists": "bun test tests/list-page.test.tsx",
-    "test:clipboard": "bun test tests/clipboard.test.ts"
+    "test:clipboard": "bun test tests/clipboard.test.ts",
+    "test:credentials": "bun test tests/credential-list.test.ts tests/secrets-api.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import {
   ListEmptyState,
@@ -93,7 +93,10 @@ export default function CronJobsPage() {
   const [selectedJob, setSelectedJob] = useState<CronJob | null>(null)
   const [runs, setRuns] = useState<CronJobRun[]>([])
   const [runsLoading, setRunsLoading] = useState(false)
-  const [togglingJobId, setTogglingJobId] = useState<string | null>(null)
+  const [runsError, setRunsError] = useState<string | null>(null)
+  const runsRequestSequence = useRef(0)
+  const togglesInFlight = useRef(new Set<string>())
+  const [togglingJobIds, setTogglingJobIds] = useState<Set<string>>(new Set())
   const [triggeringJobId, setTriggeringJobId] = useState<string | null>(null)
 
   // Job workspace files — what this job's runs will see, in both 'new' and
@@ -232,38 +235,56 @@ export default function CronJobsPage() {
     fetchData()
   }
 
+  useEffect(() => () => {
+    runsRequestSequence.current += 1
+  }, [])
+
   const handleViewRuns = async (job: CronJob) => {
+    const request = ++runsRequestSequence.current
     setSelectedJob(job)
+    setRuns([])
+    setRunsError(null)
     setRunsLoading(true)
     try {
       const res = await getCronJobRuns(job.id, 50)
-      if (res.success && res.data) {
-        setRuns(res.data)
+      if (request !== runsRequestSequence.current) return
+      if (!res.success) {
+        throw new Error(res.message || '获取执行记录失败')
       }
+      setRuns(res.data ?? [])
     } catch (error) {
-      console.error('Failed to fetch runs:', error)
-      toast.error('获取执行记录失败')
+      if (request !== runsRequestSequence.current) return
+      setRunsError(error instanceof Error ? error.message : '获取执行记录失败')
     } finally {
-      setRunsLoading(false)
+      if (request === runsRequestSequence.current) setRunsLoading(false)
     }
   }
 
+  const handleCloseRuns = () => {
+    runsRequestSequence.current += 1
+    setSelectedJob(null)
+    setRuns([])
+    setRunsError(null)
+    setRunsLoading(false)
+  }
+
   const handleToggleJob = async (job: CronJob) => {
-    setTogglingJobId(job.id)
+    if (togglesInFlight.current.has(job.id)) return
+    togglesInFlight.current.add(job.id)
+    setTogglingJobIds(new Set(togglesInFlight.current))
     try {
-      if (job.enabled) {
-        await disableCronJob(job.id)
-        toast.success('任务已禁用')
-        setJobs(jobs.map(j => j.id === job.id ? { ...j, enabled: false } : j))
-      } else {
-        await enableCronJob(job.id)
-        toast.success('任务已启用')
-        setJobs(jobs.map(j => j.id === job.id ? { ...j, enabled: true } : j))
+      const enabled = !job.enabled
+      const res = await (enabled ? enableCronJob(job.id) : disableCronJob(job.id))
+      if (!res.success) {
+        throw new Error(res.message || '操作失败')
       }
+      setJobs(previous => previous.map(j => j.id === job.id ? { ...j, enabled } : j))
+      toast.success(enabled ? '任务已启用' : '任务已禁用')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '操作失败')
     } finally {
-      setTogglingJobId(null)
+      togglesInFlight.current.delete(job.id)
+      setTogglingJobIds(new Set(togglesInFlight.current))
     }
   }
 
@@ -696,11 +717,11 @@ export default function CronJobsPage() {
                               size="sm"
                               className="size-8 p-0"
                               onClick={() => handleToggleJob(job)}
-                              disabled={togglingJobId === job.id}
+                              disabled={togglingJobIds.has(job.id)}
                               title={job.enabled ? '禁用' : '启用'}
                               aria-label={`${job.enabled ? '禁用' : '启用'}任务 ${job.name}`}
                             >
-                              {togglingJobId === job.id ? (
+                              {togglingJobIds.has(job.id) ? (
                                 <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                               ) : job.enabled ? (
                                 <Pause className="size-4" aria-hidden="true" />
@@ -817,7 +838,7 @@ export default function CronJobsPage() {
       </Dialog>
 
       {/* Runs Dialog */}
-      <Dialog open={!!selectedJob} onOpenChange={() => setSelectedJob(null)}>
+      <Dialog open={!!selectedJob} onOpenChange={(open) => { if (!open) handleCloseRuns() }}>
         <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
@@ -825,9 +846,15 @@ export default function CronJobsPage() {
             </DialogTitle>
           </DialogHeader>
           {runsLoading ? (
-            <div className="flex justify-center py-8">
+            <div role="status" aria-label="正在加载执行记录" className="flex justify-center py-8">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>
+          ) : runsError ? (
+            <ListError
+              title="无法加载执行记录"
+              description={runsError}
+              onRetry={() => { if (selectedJob) void handleViewRuns(selectedJob) }}
+            />
           ) : runs.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               暂无执行记录

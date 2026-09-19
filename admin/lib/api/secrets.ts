@@ -170,7 +170,9 @@ export async function getConfigItems(params?: {
     total?: number
     page?: number
     page_size?: number
+    error?: { code: string; message: string }
   }>(`/api/v1/config-items${qs ? `?${qs}` : ''}`)
+  if (!res.success) throw new Error(res.error?.message || '获取配置项失败')
   return {
     items: res.data ?? [],
     total: res.total ?? 0,
@@ -225,11 +227,13 @@ export async function updateConfigItem(id: number, data: {
 }
 
 export async function updateConfigItemStatus(id: number, status: number): Promise<void> {
-  await dcClient.put(`/api/v1/config-items/${id}/status`, { status })
+  const res = await dcClient.put<{ success: boolean; error?: { code: string; message: string } }>(`/api/v1/config-items/${id}/status`, { status })
+  if (!res.success) throw new Error(res.error?.message || '更新失败')
 }
 
 export async function deleteConfigItem(id: number): Promise<void> {
-  await dcClient.delete(`/api/v1/config-items/${id}`)
+  const res = await dcClient.delete<{ success: boolean; error?: { code: string; message: string } }>(`/api/v1/config-items/${id}`)
+  if (!res.success) throw new Error(res.error?.message || '删除失败')
 }
 
 export async function uploadConfigItemIcon(file: File): Promise<{ url: string }> {
@@ -243,7 +247,8 @@ export async function uploadConfigItemIcon(file: File): Promise<{ url: string }>
     body: buffer,
   })
   if (!res.ok) throw new Error('上传图标失败')
-  const data = await res.json()
+  const data = await res.json() as { success?: boolean; url: string; error?: { code: string; message: string } }
+  if (data.success === false) throw new Error(data.error?.message || '上传图标失败')
   return { url: data.url }
 }
 
@@ -253,11 +258,15 @@ export async function uploadConfigItemIcon(file: File): Promise<{ url: string }>
 
 export async function getEnterpriseSecrets(preloadedConfigItems?: ConfigItem[]): Promise<(SecretListEntry & { config_item: ConfigItem })[]> {
   const [secretsRes, itemsRes] = await Promise.all([
-    dcClient.get<{ success: boolean; data?: BackendSecretListEntry[] }>('/api/v1/secrets'),
+    dcClient.get<{ success: boolean; data?: BackendSecretListEntry[]; error?: { code: string; message: string } }>('/api/v1/secrets'),
     preloadedConfigItems
       ? Promise.resolve(preloadedConfigItems)
-      : dcClient.get<{ success: boolean; data?: ConfigItem[] }>('/api/v1/config/items').then(r => r.data ?? []),
+      : dcClient.get<{ success: boolean; data?: ConfigItem[]; error?: { code: string; message: string } }>('/api/v1/config/items').then(r => {
+        if (!r.success) throw new Error(r.error?.message || '获取配置项失败')
+        return r.data ?? []
+      }),
   ])
+  if (!secretsRes.success) throw new Error(secretsRes.error?.message || '获取凭据失败')
   const secrets = secretsRes.data ?? []
   const configItems = preloadedConfigItems ?? itemsRes as ConfigItem[]
   return secrets.map(s => {
@@ -265,7 +274,7 @@ export async function getEnterpriseSecrets(preloadedConfigItems?: ConfigItem[]):
     const configItem = configItems.find(c => c.pinyin === pinyin)
     if (!configItem) return null
     return { ...mapSecretListEntry(s), config_item: configItem }
-  }).filter((s): s is SecretListEntry & { config_item: ConfigItem } => s !== null)
+  }).filter(s => s !== null)
 }
 
 export async function getSecret(namespace: string, key: string): Promise<SecretEntry> {
@@ -284,11 +293,13 @@ export async function deleteSecret(namespace: string, key: string): Promise<void
 }
 
 export async function enableSecret(namespace: string, key: string): Promise<void> {
-  await dcClient.post(`/api/v1/secrets/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/enable`)
+  const res = await dcClient.post<{ success: boolean; error?: { code: string; message: string } }>(`/api/v1/secrets/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/enable`)
+  if (!res.success) throw new Error(res.error?.message || '启用失败')
 }
 
 export async function disableSecret(namespace: string, key: string): Promise<void> {
-  await dcClient.post(`/api/v1/secrets/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/disable`)
+  const res = await dcClient.post<{ success: boolean; error?: { code: string; message: string } }>(`/api/v1/secrets/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/disable`)
+  if (!res.success) throw new Error(res.error?.message || '禁用失败')
 }
 
 // ============================================================
@@ -335,11 +346,15 @@ export async function disableUserSecret(namespace: string, key: string): Promise
 
 export async function getSecretMetadata(preloadedConfigItems?: ConfigItem[]): Promise<(SecretMetadata & { config_item: ConfigItem })[]> {
   const [metaRes, itemsRes] = await Promise.all([
-    dcClient.get<{ success: boolean; data?: SecretMetadata[] }>('/api/v1/secret-metadata'),
+    dcClient.get<{ success: boolean; data?: SecretMetadata[]; error?: { code: string; message: string } }>('/api/v1/secret-metadata'),
     preloadedConfigItems
       ? Promise.resolve(preloadedConfigItems)
-      : dcClient.get<{ success: boolean; data?: ConfigItem[] }>('/api/v1/config/items').then(r => r.data ?? []),
+      : dcClient.get<{ success: boolean; data?: ConfigItem[]; error?: { code: string; message: string } }>('/api/v1/config/items').then(r => {
+        if (!r.success) throw new Error(r.error?.message || '获取配置项失败')
+        return r.data ?? []
+      }),
   ])
+  if (!metaRes.success) throw new Error(metaRes.error?.message || '获取凭据元数据失败')
   const metadata = metaRes.data ?? []
   const configItems = preloadedConfigItems ?? itemsRes as ConfigItem[]
   return metadata.map(m => {
@@ -350,7 +365,8 @@ export async function getSecretMetadata(preloadedConfigItems?: ConfigItem[]): Pr
 }
 
 export async function updateSecretMetadata(configItemId: number, expiresAt: number | null): Promise<void> {
-  await dcClient.put(`/api/v1/secret-metadata/${configItemId}`, { expires_at: expiresAt })
+  const res = await dcClient.put<{ success: boolean; error?: { code: string; message: string } }>(`/api/v1/secret-metadata/${configItemId}`, { expires_at: expiresAt })
+  if (!res.success) throw new Error(res.error?.message || '更新失败')
 }
 
 // ============================================================
@@ -395,7 +411,9 @@ export async function getAuditLog(params?: {
     total?: number
     page?: number
     page_size?: number
+    error?: { code: string; message: string }
   }>(`/api/v1/secrets-audit${qs ? `?${qs}` : ''}`)
+  if (!res.success) throw new Error(res.error?.message || '获取审计日志失败')
   return {
     items: res.data ?? [],
     total: res.total ?? 0,
@@ -409,7 +427,8 @@ export async function getAuditLog(params?: {
 // ============================================================
 
 export async function getRotationAlerts(): Promise<(SecretMetadata & { config_item: ConfigItem })[]> {
-  const res = await dcClient.get<{ success: boolean; data?: (SecretMetadata & { config_item?: ConfigItem })[] }>('/api/v1/secret-rotation/alerts')
+  const res = await dcClient.get<{ success: boolean; data?: (SecretMetadata & { config_item?: ConfigItem })[]; error?: { code: string; message: string } }>('/api/v1/secret-rotation/alerts')
+  if (!res.success) throw new Error(res.error?.message || '获取轮换提醒失败')
   return (res.data ?? []).filter((m): m is SecretMetadata & { config_item: ConfigItem } => !!m.config_item)
 }
 

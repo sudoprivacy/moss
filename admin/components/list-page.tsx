@@ -1,5 +1,6 @@
 import type { ComponentProps, ReactNode } from 'react'
-import { AlertCircle, Inbox, RefreshCw } from 'lucide-react'
+import { AlertCircle, ChevronLeft, ChevronRight, Inbox, RefreshCw } from 'lucide-react'
+import { Pagination } from '@/components/ui/pagination'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -120,6 +121,40 @@ export function ListSkeleton({ label = '正在加载列表', rows = 6 }: { label
         </div>
       ))}
     </div>
+  )
+}
+
+export function ListPagination({
+  page,
+  pageSize,
+  total,
+  busy = false,
+  onPageChange,
+}: {
+  page: number
+  pageSize: number
+  total: number
+  busy?: boolean
+  onPageChange: (page: number) => void
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize))
+  const start = total === 0 ? 0 : (page - 1) * pageSize + 1
+  const end = Math.min(page * pageSize, total)
+  return (
+    <Pagination aria-label="列表分页" aria-busy={busy} className="flex-wrap justify-between gap-3">
+      <p className="text-[13px] text-muted-foreground" aria-live="polite">
+        {start}–{end} 条，共 {total} 条
+      </p>
+      <div className="flex items-center gap-2">
+        <span className="mr-1 text-xs text-muted-foreground">第 {page} / {pages} 页</span>
+        <Button type="button" variant="outline" size="sm" disabled={busy || page <= 1} onClick={() => onPageChange(page - 1)}>
+          <ChevronLeft className="size-3.5" aria-hidden="true" />上一页
+        </Button>
+        <Button type="button" variant="outline" size="sm" disabled={busy || page >= pages} onClick={() => onPageChange(page + 1)}>
+          下一页<ChevronRight className="size-3.5" aria-hidden="true" />
+        </Button>
+      </div>
+    </Pagination>
   )
 }
 

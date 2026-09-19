@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   ListEmptyState,
   ListError,
+  ListPagination,
   ListSkeleton,
   ListStatusBadge,
   ListSummary,
@@ -13,6 +14,30 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 
 const render = renderToStaticMarkup
+
+for (const [total, page, range, disabledButtons] of [
+  [0, 1, '0–0 条，共 0 条', 2],
+  [1, 1, '1–1 条，共 1 条', 2],
+  [20, 1, '1–20 条，共 20 条', 2],
+  [21, 1, '1–20 条，共 21 条', 1],
+  [21, 2, '21–21 条，共 21 条', 1],
+  [61, 2, '21–40 条，共 61 条', 0],
+] as const) {
+  test(`pagination reports the server range for ${total} records on page ${page}`, () => {
+    const html = render(<ListPagination page={page} pageSize={20} total={total} onPageChange={() => {}} />)
+    assert.ok(html.includes(range))
+    assert.match(html, /<nav[^>]*aria-label="列表分页"/)
+    assert.equal((html.match(/disabled=""/g) ?? []).length, disabledButtons)
+    assert.match(html, /上一页/)
+    assert.match(html, /下一页/)
+  })
+}
+
+test('pagination disables navigation during a request', () => {
+  const html = render(<ListPagination page={2} pageSize={20} total={61} busy onPageChange={() => {}} />)
+  assert.match(html, /aria-busy="true"/)
+  assert.equal((html.match(/disabled=""/g) ?? []).length, 2)
+})
 
 test('toolbar retains labelled filters and independently accessible actions', () => {
   const html = render(
