@@ -345,6 +345,19 @@ async function waitForText(text, description = text) {
   );
 }
 
+async function waitForList(label, rowText = "") {
+  const selector = `main section[aria-label="${label}"][aria-busy="false"]`;
+  await waitForExpression(
+    `(() => {
+      const list = document.querySelector(${JSON.stringify(selector)});
+      if (!list || !list.getClientRects().length || document.querySelector('main [role="alert"]')) return false;
+      return ${JSON.stringify(rowText)} === "" || [...list.querySelectorAll("tbody tr")]
+        .some(row => row.innerText.includes(${JSON.stringify(rowText)}));
+    })()`,
+    `loaded ${label}${rowText ? ` containing ${rowText}` : ""}`,
+  );
+}
+
 async function clickText(text, selector = "button, a") {
   const clicked = await evaluate(`(() => {
     const normalize = value => (value || "").replace(/\\s+/g, " ").trim();
@@ -546,8 +559,8 @@ async function main() {
     `location.pathname === "/admin/users"`,
     "user management route",
   );
-  await waitForText("用户列表");
-  await capture("03-user-management", ["用户与组织管理", "用户列表"]);
+  await waitForList("用户列表");
+  await capture("03-user-management", ["用户与组织管理", "用户名", "所属部门"]);
   recordAssertion("用户管理页面和用户列表可加载");
 
   await clickText("新建用户", "button");
@@ -570,15 +583,16 @@ async function main() {
   })()`);
   assert(submitted, "Could not submit the new user form");
   await waitForExpression(
-    `!document.querySelector('[role="dialog"]') && document.body?.innerText.includes(${JSON.stringify(options.createdUsername)})`,
-    "created user in user list",
+    `!document.querySelector('[role="dialog"]')`,
+    "new user dialog closed after creation",
   );
+  await waitForList("用户列表", options.createdUsername);
   await fillSelector(
-    'input[placeholder="搜索用户名、部门或邮箱"]',
+    'input[aria-label="搜索用户名、邮箱或部门"]',
     options.createdUsername,
   );
-  await waitForText(options.createdUsername, "created user name");
-  await capture("05-user-created", ["用户列表", options.createdUsername]);
+  await waitForList("用户列表", options.createdUsername);
+  await capture("05-user-created", ["用户与组织管理", options.createdUsername]);
   recordAssertion("通过管理端创建用户并在列表中确认");
 
   await navigate("/settings/agents");
@@ -619,12 +633,11 @@ async function main() {
   recordAssertion("技能商店加载 Hub 数据并可切换页签");
 
   await navigate("/secrets/config-items");
-  await waitForText("创建配置项", "credential configuration action");
+  await waitForList("配置项列表");
   await capture("08-credential-config-items", [
     "配置项列表",
     "全部分类",
     "全部状态",
-    "认证方案",
     "创建配置项",
   ]);
   recordAssertion("凭据配置项列表和分类可加载");
@@ -644,19 +657,42 @@ async function main() {
   await capture("09-credential-config-form", [
     "定义新的凭据服务模板",
     "认证方式",
+    "认证方案",
     "字段定义",
   ]);
   await clickText("创建", '[role="dialog"] button');
   await waitForExpression(
-    `!document.querySelector('[role="dialog"]') && document.body?.innerText.includes("E2E凭据模板")`,
-    "created credential configuration in the list",
+    `!document.querySelector('[role="dialog"]')`,
+    "credential configuration dialog closed after creation",
   );
+  await waitForList("配置项列表", "E2E凭据模板");
   await capture("10-credential-config-created", [
     "配置项列表",
     "E2E凭据模板",
-    "API Key",
+    "认证方式",
+    "1 个",
   ]);
   recordAssertion("凭据模板可通过表单创建并在列表中确认");
+
+  const openedConfig = await evaluate(`(() => {
+    const button = document.querySelector('button[aria-label="编辑 E2E凭据模板"]');
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  })()`);
+  assert(openedConfig, "Could not open the created credential configuration");
+  await waitForExpression(
+    `document.querySelector('[role="dialog"] input[placeholder="access_token"]')?.value === "api_key"
+      && document.querySelector('[role="dialog"] input[placeholder="Access Token"]')?.value === "API Key"`,
+    "persisted credential field identifier and display name",
+  );
+  await capture("10b-credential-config-persisted-fields", ["编辑配置项", "字段定义"]);
+  await clickText("取消", '[role="dialog"] button');
+  await waitForExpression(
+    `!document.querySelector('[role="dialog"]')`,
+    "saved credential configuration editor closed",
+  );
+  recordAssertion("重新打开凭据模板可确认字段标识和显示名称已保存");
 
   await navigate("/settings/server-credentials");
   await capture("11-server-credentials", [

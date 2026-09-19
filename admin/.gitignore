@@ -14,3 +14,15 @@ next.user-config.*
 node_modules
 .next/
 .DS_Store
+/prototype-dist/
+
+# Keep source regression tests despite the repository-wide tests/ ignore.
+!/tests/
+/tests/*
+!/tests/system-settings.test.ts
+!/tests/list-page.test.tsx
+!/tests/clipboard.test.ts
+!/tests/credential-list.test.ts
+!/tests/secrets-api.test.ts
+!/tests/cron-jobs.browser.js
+!/tests/credentials.browser.js
