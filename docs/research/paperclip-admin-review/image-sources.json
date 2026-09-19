@@ -1,0 +1,110 @@
+[
+  {
+    "file": "images/01-dashboard.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/screenshots/PR-8000-home-flag-off.png",
+    "upstream_path": "screenshots/PR-8000-home-flag-off.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": null,
+    "width": 1440,
+    "height": 900,
+    "note": "官方开发环境截图；PR-8000，实验开关关闭场景。",
+    "sha256": "51993dc8b72276f1c12ff80f3a2f64f7f27a77a06a6ca229ed45157e749220aa"
+  },
+  {
+    "file": "images/02-task-detail.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/screenshots/PR-8000-task-thread-flag-off.png",
+    "upstream_path": "screenshots/PR-8000-task-thread-flag-off.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": null,
+    "width": 1440,
+    "height": 900,
+    "note": "官方开发环境截图；PR-8000，实验开关关闭场景。",
+    "sha256": "fae763087031abb8cf57f42ab3ed59b4ed8311ebe977e868fd11f8a81e8147ec"
+  },
+  {
+    "file": "images/03-agent-configuration.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/screenshots/PR-7938-agent-config-forced-kubernetes.png",
+    "upstream_path": "screenshots/PR-7938-agent-config-forced-kubernetes.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": [
+      216,
+      122,
+      1064,
+      803
+    ],
+    "width": 848,
+    "height": 681,
+    "note": "官方 Storybook/fixture 场景截图；裁剪至运行环境、适配器和模型配置区。",
+    "sha256": "f220d297263c9d71513d1642ac9e926b38723506698c7e261b0cb33522f69cf5"
+  },
+  {
+    "file": "images/04-run-ledger.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/docs/pr-screenshots/pap-2837/runledger-profile-badges-desktop.png",
+    "upstream_path": "docs/pr-screenshots/pap-2837/runledger-profile-badges-desktop.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": [
+      260,
+      440,
+      2620,
+      1680
+    ],
+    "width": 2360,
+    "height": 1240,
+    "note": "官方 Storybook/fixture 场景截图；裁剪至运行记录组件。",
+    "sha256": "0b236ba0ddfc5cd5a75fc6fb5668650a2e720513dbcdad1d451a605d769a8ea7"
+  },
+  {
+    "file": "images/05-tool-policies.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/doc/screenshots/garden-mcp-split-stack/policies.png",
+    "upstream_path": "doc/screenshots/garden-mcp-split-stack/policies.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": null,
+    "width": 1280,
+    "height": 633,
+    "note": "官方开发环境截图；仅展示工具策略交互，不证明所有集成均默认启用。",
+    "sha256": "3d9208fcde75e7aef226ebceb5f669c579e10f6d65561ed3c710ffacf8567736"
+  },
+  {
+    "file": "images/06-secrets.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/doc/pr/5429/secrets-inventory.png",
+    "upstream_path": "doc/pr/5429/secrets-inventory.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": [
+      0,
+      0,
+      1440,
+      295
+    ],
+    "width": 1440,
+    "height": 295,
+    "note": "官方组件场景截图；裁去下方空白，内容为示例数据。",
+    "sha256": "04713815b692dee9311042acfd5df31d099e5966097d4bae8b971b47f1601bf5"
+  },
+  {
+    "file": "images/07-skills.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/docs/pr-screenshots/pap-2944/skills-custom-light.png",
+    "upstream_path": "docs/pr-screenshots/pap-2944/skills-custom-light.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": [
+      84,
+      116,
+      1196,
+      1030
+    ],
+    "width": 1112,
+    "height": 914,
+    "note": "官方 Storybook/fixture 场景截图；展示自定义适配器的技能兼容性提示。",
+    "sha256": "47dc8f4acc1c3704744ff4fe9ba6c4992b472eeebdf1b640623befeb2c8a59bf"
+  },
+  {
+    "file": "images/08-execution-recovery.png",
+    "source_url": "https://raw.githubusercontent.com/paperclipai/paperclip/685d4faba3715197fef85e7634f415b589f67812/doc/assets/execution-recovery/fixture-completed.png",
+    "upstream_path": "doc/assets/execution-recovery/fixture-completed.png",
+    "revision": "685d4faba3715197fef85e7634f415b589f67812",
+    "crop": null,
+    "width": 1440,
+    "height": 1080,
+    "note": "官方恢复测试 fixture 的开发环境截图；不是生产执行记录。",
+    "sha256": "d430838a30a0b4978f9776e2f9bf8428cbdfa52af82e27a43fce29139b0764dd"
+  }
+]
