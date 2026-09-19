@@ -23,12 +23,15 @@ import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 
 import { NexusSecretClient } from './nexusSecretClient.js'
 
-interface SecretMetadata {
+export interface SecretListMetadata {
   namespace: string
   key: string
-  value: string | null
   status: string
   version: number
+}
+
+interface SecretMetadata extends SecretListMetadata {
+  value: string | null
 }
 
 /** mTLS material for connecting to an auth-on external `nexusd-cluster`. */
@@ -115,19 +118,26 @@ export class NexusClient {
     await this.getSecretClient().deleteSecret(namespace, key)
   }
 
-  async listSecrets(namespace?: string, subject?: string): Promise<SecretMetadata[]> {
+  /** List saved records (including disabled ones) without retrieving any values. */
+  async listSecretMetadata(namespace?: string, subject?: string): Promise<SecretListMetadata[]> {
     void subject
-    const secretClient = this.getSecretClient()
-    const all = await secretClient.listSecrets(undefined, true)
+    const all = await this.getSecretClient().listSecrets(undefined, true)
     const matchesPrefix = (ns: string) => !namespace || ns === namespace || ns.startsWith(`${namespace}:`)
-    const filtered = all.filter(m => matchesPrefix(m.namespace))
-    const values = await secretClient.batchGet(filtered.map(m => ({ namespace: m.namespace, key: m.key })))
-    return filtered.map(m => ({
+    return all.filter(m => matchesPrefix(m.namespace)).map(m => ({
       namespace: m.namespace,
       key: m.key,
-      value: values[`${m.namespace}:${m.key}`] ?? null,
       status: m.deleted ? 'disabled' : 'enabled',
       version: m.currentVersion,
+    }))
+  }
+
+  /** Value-bearing list for runtime consumers; admin lists use listSecretMetadata. */
+  async listSecrets(namespace?: string, subject?: string): Promise<SecretMetadata[]> {
+    const metadata = await this.listSecretMetadata(namespace, subject)
+    const values = await this.getSecretClient().batchGet(metadata.map(m => ({ namespace: m.namespace, key: m.key })))
+    return metadata.map(m => ({
+      ...m,
+      value: values[`${m.namespace}:${m.key}`] ?? null,
     }))
   }
 

@@ -15,14 +15,14 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { toast } from 'sonner'
 import { Link } from 'react-router-dom'
 import {
-  Shield, Eye, EyeOff, Loader2, AlertTriangle, Clock, ExternalLink, Ban, CheckCircle,
+  Shield, Loader2, AlertTriangle, Clock, ExternalLink, Ban, CheckCircle,
   ChevronRight, ChevronDown, FolderTree, Minus,
 } from 'lucide-react'
 import {
   getDepartmentSecrets, getSecretMetadata, getConfigItems, putSecret,
   enableSecret, disableSecret, updateSecretMetadata,
   getConfigItemDepartments, updateConfigItemDepartments,
-  type SecretEntry, type ConfigItem, type SecretMetadata,
+  type SecretListEntry, type ConfigItem, type SecretMetadata,
 } from '@/lib/api/secrets'
 import {
   getDepartments as getAuthDepartments,
@@ -124,7 +124,7 @@ export default function DepartmentSecretsPage() {
 
 function DepartmentSecretsAdminPage() {
   const [configItems, setConfigItems] = useState<ConfigItem[]>([])
-  const [secrets, setSecrets] = useState<(SecretEntry & { config_item: ConfigItem })[]>([])
+  const [secrets, setSecrets] = useState<(SecretListEntry & { config_item: ConfigItem })[]>([])
   const [metadata, setMetadata] = useState<(SecretMetadata & { config_item: ConfigItem })[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
@@ -132,7 +132,6 @@ function DepartmentSecretsAdminPage() {
   const [editItem, setEditItem] = useState<ConfigItem | null>(null)
   const [editValues, setEditValues] = useState<Record<string, string>>({})
   const [editExpires, setEditExpires] = useState<string>('')
-  const [showValues, setShowValues] = useState<Record<string, boolean>>({})
   const [isSaving, setIsSaving] = useState(false)
 
   // Department tree
@@ -170,8 +169,7 @@ function DepartmentSecretsAdminPage() {
    */
   const editEntryHasValue = (configKey: string) => {
     if (!editItem) return false
-    const s = getSecretsForItem(editItem.id).find(x => x.key === configKey)
-    return !!s && s.value !== null
+    return getSecretsForItem(editItem.id).some(s => s.key === configKey)
   }
   const getMetadataForItem = (itemId: number) => metadata.find(m => m.config_item_id === itemId)
 
@@ -182,7 +180,6 @@ function DepartmentSecretsAdminPage() {
     setEditValues(vals)
     const meta = getMetadataForItem(item.id)
     setEditExpires(meta?.expires_at ? new Date(meta.expires_at).toISOString().slice(0, 10) : '')
-    setShowValues({})
 
     // Load department tree and current associations
     try {
@@ -202,7 +199,7 @@ function DepartmentSecretsAdminPage() {
   const handleSave = async () => {
     if (!editItem) return
     for (const entry of editItem.entries) {
-      if (entry.required && !(editValues[entry.config_key]?.trim())) {
+      if (entry.required && !editEntryHasValue(entry.config_key) && !(editValues[entry.config_key]?.trim())) {
         toast.error(`请填写必填项：${entry.name}`)
         return
       }
@@ -419,17 +416,10 @@ function DepartmentSecretsAdminPage() {
                   <div className="flex items-center gap-4 mt-1.5">
                     {item.entries.map(entry => {
                       const secret = itemSecrets.find(s => s.key === entry.config_key)
-                      const key = `${item.id}:${entry.config_key}`
-                      const visible = showValues[key]
                       return (
                         <span key={entry.id} className="text-xs text-muted-foreground flex items-center gap-1">
                           {entry.name}:
-                          <span className="font-mono">
-                            {visible ? (secret?.value ?? '-') : '••••••••'}
-                          </span>
-                          <button onClick={() => setShowValues(v => ({ ...v, [key]: !v[key] }))} className="hover:text-foreground transition-colors">
-                            {visible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
-                          </button>
+                          <span>{secret ? '已填写' : '未填写'}</span>
                         </span>
                       )
                     })}
@@ -480,7 +470,7 @@ function DepartmentSecretsAdminPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Shield className="size-5" />
-              {editItem?.name ?? ''} — {getSecretsForItem(editItem?.id ?? 0).some(s => s.value !== null) ? '编辑凭据' : '配置凭据'}
+              {editItem?.name ?? ''} — {getSecretsForItem(editItem?.id ?? 0).length > 0 ? '编辑凭据' : '配置凭据'}
             </DialogTitle>
           </DialogHeader>
           {editItem && (

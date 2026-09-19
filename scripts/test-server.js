@@ -39,6 +39,7 @@ const BUN = [
   'nexusZoneId.test.ts',
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
+  'secretsMetadata.test.ts',
   'credits.test.ts',
   'fuiou.test.ts',
   'lbHaConfig.test.ts',
