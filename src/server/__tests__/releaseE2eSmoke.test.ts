@@ -52,7 +52,35 @@ describe("packaged Server E2E smoke", () => {
     expect(usersPage).toContain('aria-label="搜索用户名、邮箱或部门"');
   });
 
+  it("checks config list readiness and persisted fields in the editor", () => {
+    const browser = readFileSync(
+      resolve(root, "scripts/e2e/server-admin-browser-smoke.mjs"),
+      "utf8",
+    );
+    const captureTexts = (name: string): string[] => {
+      const match = browser.match(new RegExp(`capture\\("${name}", (\\[[\\s\\S]*?\\])\\)`));
+      expect(match).not.toBeNull();
+      return runInNewContext(match![1]);
+    };
+    // An empty successful list has no table headers. Field names live in the editor.
+    expect(browser).toContain('waitForList("配置项列表")');
+    expect(captureTexts("08-credential-config-items")).toEqual([
+      "配置项列表", "全部分类", "全部状态", "创建配置项",
+    ]);
+    expect(captureTexts("09-credential-config-form")).toContain("认证方案");
+    expect(browser).toContain('waitForList("配置项列表", "E2E凭据模板")');
+    expect(captureTexts("10-credential-config-created")).toEqual([
+      "配置项列表", "E2E凭据模板", "认证方式", "1 个",
+    ]);
+    expect(browser).toContain('button[aria-label="编辑 E2E凭据模板"]');
+    expect(browser).toContain('input[placeholder="access_token"]\')?.value === "api_key"');
+    expect(browser).toContain('input[placeholder="Access Token"]\')?.value === "API Key"');
+    expect(browser).toContain('capture("10b-credential-config-persisted-fields"');
+  });
+
   for (const scenario of [
+    { name: "empty configuration list", label: "配置项列表", ready: true, expected: true },
+    { name: "created configuration row", label: "配置项列表", ready: true, rowText: "E2E凭据模板", rows: ["E2E凭据模板 1 个"], expected: true },
     { name: "loaded empty list", ready: true, expected: true },
     { name: "missing list", ready: false, expected: false },
     { name: "busy list", ready: true, busy: true, expected: false },
@@ -71,7 +99,8 @@ describe("packaged Server E2E smoke", () => {
       const end = browser.indexOf("async function clickText(", start);
       expect(start).toBeGreaterThan(-1);
       expect(end).toBeGreaterThan(start);
-      const selector = 'main section[aria-label="用户列表"][aria-busy="false"]';
+      const label = scenario.label ?? "用户列表";
+      const selector = `main section[aria-label="${label}"][aria-busy="false"]`;
       const list = {
         innerText: "e2e-user",
         getClientRects: () => scenario.hidden ? [] : [{}],
@@ -82,7 +111,7 @@ describe("packaged Server E2E smoke", () => {
       };
       let checked = false;
       await runInNewContext(
-        `${browser.slice(start, end)}\nwaitForList("用户列表", ${JSON.stringify(scenario.rowText ?? "")})`,
+        `${browser.slice(start, end)}\nwaitForList(${JSON.stringify(label)}, ${JSON.stringify(scenario.rowText ?? "")})`,
         {
           waitForExpression: async (expression: string) => {
             const result = runInNewContext(expression, {

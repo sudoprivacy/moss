@@ -633,12 +633,11 @@ async function main() {
   recordAssertion("技能商店加载 Hub 数据并可切换页签");
 
   await navigate("/secrets/config-items");
-  await waitForText("创建配置项", "credential configuration action");
+  await waitForList("配置项列表");
   await capture("08-credential-config-items", [
     "配置项列表",
     "全部分类",
     "全部状态",
-    "认证方案",
     "创建配置项",
   ]);
   recordAssertion("凭据配置项列表和分类可加载");
@@ -658,19 +657,42 @@ async function main() {
   await capture("09-credential-config-form", [
     "定义新的凭据服务模板",
     "认证方式",
+    "认证方案",
     "字段定义",
   ]);
   await clickText("创建", '[role="dialog"] button');
   await waitForExpression(
-    `!document.querySelector('[role="dialog"]') && document.body?.innerText.includes("E2E凭据模板")`,
-    "created credential configuration in the list",
+    `!document.querySelector('[role="dialog"]')`,
+    "credential configuration dialog closed after creation",
   );
+  await waitForList("配置项列表", "E2E凭据模板");
   await capture("10-credential-config-created", [
     "配置项列表",
     "E2E凭据模板",
-    "API Key",
+    "认证方式",
+    "1 个",
   ]);
   recordAssertion("凭据模板可通过表单创建并在列表中确认");
+
+  const openedConfig = await evaluate(`(() => {
+    const button = document.querySelector('button[aria-label="编辑 E2E凭据模板"]');
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  })()`);
+  assert(openedConfig, "Could not open the created credential configuration");
+  await waitForExpression(
+    `document.querySelector('[role="dialog"] input[placeholder="access_token"]')?.value === "api_key"
+      && document.querySelector('[role="dialog"] input[placeholder="Access Token"]')?.value === "API Key"`,
+    "persisted credential field identifier and display name",
+  );
+  await capture("10b-credential-config-persisted-fields", ["编辑配置项", "字段定义"]);
+  await clickText("取消", '[role="dialog"] button');
+  await waitForExpression(
+    `!document.querySelector('[role="dialog"]')`,
+    "saved credential configuration editor closed",
+  );
+  recordAssertion("重新打开凭据模板可确认字段标识和显示名称已保存");
 
   await navigate("/settings/server-credentials");
   await capture("11-server-credentials", [
