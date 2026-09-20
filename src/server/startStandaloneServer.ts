@@ -33,6 +33,7 @@ import {
 import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
+import { getSystemSettings } from './systemSettings.js'
 import type { LegacyKeyValueStore } from './identity/legacyToken.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
 import { assertSafeInstanceIdentity } from './startupGuards.js'
@@ -421,13 +422,19 @@ async function finishStandaloneServerStartup(
   const billing = billingRuntime && sudorouter
     ? createBillingCompatibilityService(authService, systemConfiguration, publicBaseUrl, billingRuntime, sudorouter)
     : undefined
+  const listOrganizationModels = async (orgId?: string) => {
+    const settings = orgId
+      ? await authService.getOrganizationSystemSettings(orgId)
+      : getSystemSettings()
+    return getAvailableModels({ settings, orgId })
+  }
   const legacyUsage = authService.createSudoworkLegacyUsageService({
-    listModels: getAvailableModels,
+    listModels: listOrganizationModels,
     sudorouter,
   })
   const userProjection = authService.createSudoworkUserProjectionService({
     secrets: nexusClient,
-    listModels: getAvailableModels,
+    listModels: listOrganizationModels,
     quotaReader: sudorouter,
     getRuntimeConfig: orgId => ({
       modelServiceUrl: systemConfiguration.getInfrastructureConfig().billing.sudorouter.modelServiceUrl,

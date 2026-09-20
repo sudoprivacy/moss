@@ -4,7 +4,7 @@ import type { IdentityActor } from '../../../identity/organizationIdentityServic
 type ActorResolver = (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
 
 export interface SudoworkLegacyUsagePort {
-  listModels(): Promise<unknown[]> | unknown[]
+  listModels(actor?: IdentityActor): Promise<unknown[]> | unknown[]
   reportUsage(input: {
     actor: IdentityActor
     inputTokens: number
@@ -48,9 +48,10 @@ export function registerSudoworkLegacyUsageRoutes(
     admin ? await options.getAdminActor(context.req.header('Authorization')) : await options.getActor(context.req.header('Authorization'))
   )
 
-  app.get('/api/v1/router/models', async context => (
-    context.json({ success: true, data: await usage().listModels() })
-  ))
+  app.get('/api/v1/router/models', async context => {
+    const actor = await actorFor(context)
+    return context.json({ success: true, data: await usage().listModels(actor ?? undefined) })
+  })
 
   app.post('/api/v1/usage/report', async context => {
     const actor = await actorFor(context)

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { buildModelsConfig } from '../modelListCache.js'
+import { buildModelsConfig, refreshModelCache } from '../modelListCache.js'
 import {
   clearProviderModelCache,
   discoverProviderModels,
@@ -76,6 +76,34 @@ describe('provider model discovery', () => {
     ])
 
     expect(seenAuth).toEqual(['Bearer org-a-key', 'Bearer org-b-key'])
+  })
+
+  it('refreshes the model cache using the supplied organization settings', async () => {
+    const seenAuth: string[] = []
+    globalThis.fetch = (async (_input, init) => {
+      seenAuth.push(new Headers(init?.headers).get('authorization') || '')
+      return new Response(JSON.stringify({ data: [{ id: 'org-model' }] }), { status: 200 })
+    }) as typeof fetch
+
+    await expect(refreshModelCache({
+      orgId: 'org-a',
+      settings: {
+        apiKey: 'org-a-key',
+        modelProviders: [{
+          id: 'legacy-default',
+          name: '默认模型服务',
+          kind: 'openai-compatible',
+          baseUrl: 'https://org-a.example.invalid/v1',
+          discoveryUrl: 'https://org-a.example.invalid/v1/models',
+          protocol: 'openai-completions',
+          enabled: true,
+          apiKeyConfigured: true,
+        }],
+      } as never,
+    })).resolves.toMatchObject([
+      { modelId: 'org-model', providerId: 'legacy-default' },
+    ])
+    expect(seenAuth).toEqual(['Bearer org-a-key'])
   })
 
   it('routes a qualified user choice to its provider and keeps plain legacy choices backward compatible', () => {

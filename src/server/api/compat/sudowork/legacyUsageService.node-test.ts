@@ -39,25 +39,31 @@ async function setup(initialBalance = 10, sudorouter?: SudorouterPort & Sudorout
     })
   }
   let now = Date.parse('2026-09-07T10:00:00Z')
+  const modelOrgIds: Array<string | undefined> = []
   const service = new SudoworkLegacyUsageService({
     db,
     auth,
     identities,
     repository,
     wallet: new WalletService(db, repository, () => now),
-    listModels: async () => [{ id: 'model-1', name: '模型一' }],
+    listModels: async orgId => {
+      modelOrgIds.push(orgId)
+      return [{ id: orgId ? `${orgId}-model` : 'model-1', name: '模型一' }]
+    },
     sudorouter,
     clock: () => now,
   })
-  return { db, repository, service, setNow(value: number) { now = value } }
+  return { db, repository, service, modelOrgIds, setNow(value: number) { now = value } }
 }
 
 const userActor = { userId: 'user-1', orgId: 'org-1', role: 'user' } as const
 
 void describe('SudoworkLegacyUsageService', () => {
   void test('模型列表来自 Moss 统一模型源而不是兼容层硬编码', async () => {
-    const { db, service } = await setup()
+    const { db, service, modelOrgIds } = await setup()
     assert.deepEqual(await service.listModels(), [{ label: '模型一', value: 'model-1' }])
+    assert.deepEqual(await service.listModels(userActor), [{ label: '模型一', value: 'org-1-model' }])
+    assert.deepEqual(modelOrgIds, [undefined, 'org-1'])
     db.close()
   })
 

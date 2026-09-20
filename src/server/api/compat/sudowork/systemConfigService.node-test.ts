@@ -257,11 +257,11 @@ void describe('Sudowork 系统配置统一服务', () => {
 
       await service.update(scopedRoot, {
         client_cron_enabled: false,
-        client_show_tool_calls: true,
+        client_show_tool_calls: false,
         workspace_upload_limit_bytes: 8192,
       })
       assert.equal(identities.getOrganizationProfile(orgB.organizationId)?.clientCronEnabled, false)
-      assert.equal(policies.getOrganization(orgB.organizationId).clientShowToolCalls, true)
+      assert.equal(policies.getOrganization(orgB.organizationId).clientShowToolCalls, false)
       assert.equal(policies.getOrganization(orgB.organizationId).workspaceUploadLimitBytes, 8192)
     } finally {
       db.close()
@@ -348,6 +348,63 @@ void describe('Sudowork 系统配置统一服务', () => {
       assert.equal(config.client_show_tool_calls, false)
     } finally {
       db.close()
+    }
+  })
+
+  void test('组织作用域把已有 override 改回部署默认值时会清除 override', async () => {
+    const original = getSystemSettings()
+    const { db, identities, service } = await setup()
+    try {
+      await updateSystemSettings({
+        clientShowToolCalls: false,
+        workspaceUploadLimitBytes: 20 * 1024 * 1024,
+      })
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putOrganization(orgB.organizationId, {
+        clientShowToolCalls: true,
+        workspaceUploadLimitBytes: 4096,
+      }, 'admin-b')
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+
+      await service.update(scopedRoot, {
+        client_show_tool_calls: false,
+        workspace_upload_limit_bytes: 20 * 1024 * 1024,
+      })
+
+      assert.deepEqual(policies.getOrganization(orgB.organizationId), {})
+      const config = service.getAdminConfig(scopedRoot) as any
+      assert.equal(config.client_show_tool_calls, false)
+      assert.equal(config.workspace_upload_limit_bytes, 20 * 1024 * 1024)
+    } finally {
+      await updateSystemSettings({
+        clientShowToolCalls: original.clientShowToolCalls,
+        workspaceUploadLimitBytes: original.workspaceUploadLimitBytes,
+      })
+      db.close()
+    }
+  })
+
+  void test('平台 cron 写入在数据库事务失败时不留下部分全局修改', async () => {
+    const original = getSystemSettings()
+    const { db, org, service } = await setup()
+    try {
+      await updateSystemSettings({ clientCronEnabled: true })
+      db.close()
+
+      await assert.rejects(service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin',
+      }, {
+        client_cron_enabled: false,
+        scode_auto_model: 'will-fail-before-settings-write',
+      }))
+
+      assert.equal(getSystemSettings().clientCronEnabled, true)
+    } finally {
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
     }
   })
 

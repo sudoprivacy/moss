@@ -20,7 +20,7 @@ import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
-import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
+import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
@@ -1139,6 +1139,16 @@ async function attachSudocodeFields<T extends Record<string, unknown>>(
     model_service_url: settings.url || 'https://hk.sudorouter.ai/v1',
     models: [settings.model],
   }
+}
+
+async function resolveSystemSettingsOrgScope(
+  auth: AuthContext,
+  authService: AuthService,
+): Promise<string | undefined> {
+  const actor = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
+  return actor?.role === 'super_admin' && actor.orgId === auth.orgId
+    ? undefined
+    : auth.orgId
 }
 
 function redirect(
@@ -7114,7 +7124,9 @@ export function startServer(
       // Model cache refresh endpoint (admin only)
       if (req.method === 'POST' && pathname === '/api/v1/models/refresh-cache') {
         authService.requireScope(auth, 'admin:settings')
-        const models = await refreshModelCache()
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService)
+        const systemSettings = await authService.getOrganizationSystemSettings(settingsOrgId)
+        const models = await refreshModelCache({ settings: systemSettings, orgId: settingsOrgId })
         writeJson(res, 200, {
           success: true,
           data: models,
@@ -7913,7 +7925,8 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
-        writeJson(res, 200, await authService.getOrganizationSystemSettings(auth.orgId, { redactSecrets: true }))
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService)
+        writeJson(res, 200, await authService.getOrganizationSystemSettings(settingsOrgId, { redactSecrets: true }))
         return
       }
 
@@ -7932,12 +7945,18 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await authService.updateOrganizationSystemSettings(
-          auth.orgId,
-          body,
-          auth.userId,
-          { redactSecrets: true },
-        ))
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService)
+        try {
+          writeJson(res, 200, await authService.updateOrganizationSystemSettings(
+            settingsOrgId,
+            body,
+            auth.userId,
+            { redactSecrets: true },
+          ))
+        } catch (error) {
+          if (error instanceof SystemSettingsScopeError) throw new HttpError(400, error.message)
+          throw error
+        }
         return
       }
 

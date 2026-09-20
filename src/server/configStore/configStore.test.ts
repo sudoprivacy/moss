@@ -31,6 +31,7 @@ const {
   getOrganizationSystemSettings,
   getSystemSettings,
   SYSTEM_SETTINGS_PATH,
+  SystemSettingsScopeError,
   updateOrganizationSystemSettings,
   updateSystemSettings,
 } = await import('../systemSettings.js')
@@ -500,6 +501,20 @@ describe('updateSystemSettings 敏感字段写 Nexus、文件不落盘', () => {
     expect(orgB.modelProviders[0]?.id).toBe('platform-provider')
     expect(orgB.modelProviders[0]?.apiKeyConfigured).toBe(false)
     expect(getModelProviderApiKey('platform-provider', orgB.apiKey, 'org-b')).toBeUndefined()
+  })
+
+  it('组织系统设置入口拒绝部署级字段且不修改全局设置', async () => {
+    await updateSystemSettings({ clientCronEnabled: false, bypassPermissions: false })
+    const repository = new FakeOrganizationModelSettingsRepository() as never
+
+    await expect(updateOrganizationSystemSettings('org-a', repository, {
+      model: 'org-a-model',
+      clientCronEnabled: true,
+    }, 'admin-a')).rejects.toThrow(SystemSettingsScopeError)
+
+    expect(getSystemSettings().clientCronEnabled).toBe(false)
+    expect(getSystemSettings().bypassPermissions).toBe(false)
+    expect((repository as FakeOrganizationModelSettingsRepository).get('org-a')).toEqual({})
   })
 })
 

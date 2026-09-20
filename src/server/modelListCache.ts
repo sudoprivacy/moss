@@ -63,9 +63,11 @@ export function clearModelCache(providerId?: string): void {
   clearProviderModelCache(providerId)
 }
 
-export async function refreshModelCache(): Promise<ModelInfo[]> {
+export async function refreshModelCache(
+  options: { settings?: SystemSettingsPayload; orgId?: string } = {},
+): Promise<ModelInfo[]> {
   clearModelCache()
-  return getAvailableModels({ forceRefresh: true })
+  return getAvailableModels({ ...options, forceRefresh: true })
 }
 
 export function getCacheStatus(): { cached: boolean; age: number | null; count: number } {

@@ -45,15 +45,15 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     identities: IdentityRepository
     repository: BillingRepository
     wallet: WalletService
-    listModels: () => Promise<ModelDescriptor[]> | ModelDescriptor[]
+    listModels: (orgId?: string) => Promise<ModelDescriptor[]> | ModelDescriptor[]
     sudorouter?: SudorouterPort & SudorouterUsagePort
     clock?: () => number
   }) {
     this.clock = options.clock ?? Date.now
   }
 
-  async listModels(): Promise<Array<{ label: string; value: string }>> {
-    return (await this.options.listModels()).map(model => ({
+  async listModels(actor?: IdentityActor): Promise<Array<{ label: string; value: string }>> {
+    return (await this.options.listModels(actor?.orgId)).map(model => ({
       label: model.name?.trim() || model.id,
       value: model.id,
     }))

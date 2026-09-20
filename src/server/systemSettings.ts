@@ -110,6 +110,13 @@ export type SystemSettingsPayload = {
   settingsParseError: string
 }
 
+export class SystemSettingsScopeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SystemSettingsScopeError'
+  }
+}
+
 type PersistedSystemSettings = Record<string, unknown> & Omit<
   SystemSettingsPayload,
   'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError' | 'modelProviders'
@@ -622,10 +629,7 @@ async function performUpdateOrganizationModelSettings(
   updatedBy: string,
 ): Promise<void> {
   const source = isRecord(patch) ? patch : {}
-  const globalPatch = deploymentSettingsPatchFromInput(source)
-  if (Object.keys(globalPatch).length > 0) {
-    await performUpdateSystemSettings(globalPatch)
-  }
+  assertOnlyOrganizationModelSettings(source)
 
   await refreshOrganizationModelCredentials(orgId)
   const currentState = readOrganizationSystemSettingsState(orgId, repository.get(orgId))
@@ -662,15 +666,6 @@ async function performUpdateOrganizationModelSettings(
   }
 }
 
-function deploymentSettingsPatchFromInput(source: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(source)) {
-    if (isOrganizationModelSettingsKey(key)) continue
-    result[key] = value
-  }
-  return result
-}
-
 function isOrganizationModelSettingsKey(key: string): boolean {
   return key === 'model'
     || key === 'url'
@@ -678,6 +673,15 @@ function isOrganizationModelSettingsKey(key: string): boolean {
     || key === 'modelProviders'
     || key === 'defaultModelProviderId'
     || key === 'image'
+}
+
+function assertOnlyOrganizationModelSettings(source: Record<string, unknown>): void {
+  const rejected = Object.keys(source).filter(key => !isOrganizationModelSettingsKey(key))
+  if (rejected.length > 0) {
+    throw new SystemSettingsScopeError(
+      `Organization-scoped system settings may only update model settings; rejected fields: ${rejected.join(', ')}`,
+    )
+  }
 }
 
 function modelSettingsPatchFromInput(

@@ -47,6 +47,7 @@ async function setup(
     balanceBeforeUnits: 65, balanceAfterUnits: 75, entryType: 'BONUS', sourceType: 'admin',
     sourceId: 'bonus-1', idempotencyKey: 'bonus-1', contextSource: 'online', createdAt: 3,
   })
+  const modelOrgIds: Array<string | undefined> = []
   const service = new SudoworkUserProjectionService({
     identities,
     billing,
@@ -58,14 +59,17 @@ async function setup(
         return { value: 'router-token', status: 'enabled', version: 1 }
       },
     },
-    listModels: async () => [{ id: 'model-a' }, { id: 'model-b' }],
+    listModels: async orgId => {
+      modelOrgIds.push(orgId)
+      return [{ id: 'model-a' }, { id: 'model-b' }]
+    },
     getRuntimeConfig: () => ({
       modelServiceUrl: 'https://router.test/v1/',
       scodeAutoModel: 'model-a',
     }),
     quotaReader,
   })
-  return { db, service, billing }
+  return { db, service, billing, modelOrgIds }
 }
 
 const user = {
@@ -75,7 +79,7 @@ const user = {
 
 void describe('SudoworkUserProjectionService', () => {
   void test('从统一账户、Nexus、钱包、用量和模型配置构造旧登录投影', async () => {
-    const { db, service } = await setup()
+    const { db, service, modelOrgIds } = await setup()
     assert.deepEqual(await service.project(user), {
       sudorouterKey: 'sk-router-token',
       modelServiceUrl: 'https://router.test/v1',
@@ -88,6 +92,7 @@ void describe('SudoworkUserProjectionService', () => {
       quota: 37_500,
       usedQuota: 12_500,
     })
+    assert.deepEqual(modelOrgIds, ['org-1'])
     db.close()
   })
 

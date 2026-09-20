@@ -230,9 +230,6 @@ export class SudoworkSystemConfigService {
     } = this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
-    if (clientCronEnabled !== undefined && orgId === undefined) {
-      await updateSystemSettings({ clientCronEnabled })
-    }
     try {
       runInTransaction(this.options.db, () => {
         if (Object.keys(patch).length > 0) {
@@ -253,6 +250,9 @@ export class SudoworkSystemConfigService {
         }
         if (providers) this.replaceCasConnections(providers, orgId)
       })
+      if (clientCronEnabled !== undefined && orgId === undefined) {
+        await updateSystemSettings({ clientCronEnabled })
+      }
     } catch (error) {
       if (nextLogKey !== undefined) {
         if (previousLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, previousLogKey)
@@ -383,7 +383,7 @@ export class SudoworkSystemConfigService {
       )
     }
     const scoped = orgId
-      ? splitPlatformInheritedValues(patch, this.options.policies.getPlatform())
+      ? splitPlatformInheritedValues(patch, this.platformInheritedValues())
       : { patch, inheritedKeys: [] }
     return {
       patch: scoped.patch,
@@ -411,6 +411,29 @@ export class SudoworkSystemConfigService {
 
   private policy(orgId?: string): Json {
     return this.options.policies.getEffective(orgId)
+  }
+
+  private platformInheritedValues(): Json {
+    const platform = this.options.policies.getPlatform()
+    const systemSettings = getSystemSettings()
+    return {
+      ...platform,
+      loginMethod: platform.loginMethod ?? loginMethodToNumber(this.options.defaults.loginMethod),
+      logReport: platform.logReport ?? { enabled: 0, protocol: '', domain: '', keySet: Boolean(this.options.secrets.get(LOG_REPORT_SECRET_KEY)) },
+      versionUpdate: platform.versionUpdate ?? { enabled: 0, cosDomain: '' },
+      productImprovement: platform.productImprovement ?? { enabled: 0 },
+      thirdPartyAuth: platform.thirdPartyAuth ?? { enabled: 0, defaultProvider: '' },
+      scodeAutoModel: string(platform.scodeAutoModel),
+      rechargeMode: rechargeMode(platform.rechargeMode),
+      creditApplication: normalizeCreditApplication(platform.creditApplication),
+      clientShowToolCalls: typeof platform.clientShowToolCalls === 'boolean'
+        ? platform.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspaceUploadLimitBytes: workspaceUploadLimit(
+        platform.workspaceUploadLimitBytes,
+        systemSettings.workspaceUploadLimitBytes,
+      ),
+    }
   }
 
   private thirdPartyAuth(admin: boolean, orgId?: string): Json {

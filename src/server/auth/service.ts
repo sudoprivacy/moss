@@ -418,7 +418,7 @@ export class AuthService {
     return new ClientPolicyRepository(this.db.db).putOrganization(orgId, patch, updatedBy)
   }
 
-  getOrganizationSystemSettings(orgId: string, options: { redactSecrets?: boolean } = {}) {
+  getOrganizationSystemSettings(orgId: string | undefined, options: { redactSecrets?: boolean } = {}) {
     return getOrganizationSystemSettings(
       orgId,
       new OrganizationModelSettingsRepository(this.db.db),
@@ -427,7 +427,7 @@ export class AuthService {
   }
 
   updateOrganizationSystemSettings(
-    orgId: string,
+    orgId: string | undefined,
     patch: unknown,
     updatedBy: string,
     options: { redactSecrets?: boolean } = {},
@@ -487,7 +487,7 @@ export class AuthService {
 
   createSudoworkUserProjectionService(input: {
     secrets: Pick<NexusClient, 'getSecret'>
-    listModels: () => Promise<Array<{ id: string }>> | Array<{ id: string }>
+    listModels: (orgId?: string) => Promise<Array<{ id: string }>> | Array<{ id: string }>
     getRuntimeConfig: (orgId?: string) => { modelServiceUrl: string; scodeAutoModel: string }
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }): SudoworkUserProjectionService {
@@ -666,7 +666,7 @@ export class AuthService {
   }
 
   createSudoworkLegacyUsageService(input: {
-    listModels: () => Promise<Array<{ id: string; name?: string }>> | Array<{ id: string; name?: string }>
+    listModels: (orgId?: string) => Promise<Array<{ id: string; name?: string }>> | Array<{ id: string; name?: string }>
     sudorouter?: SudorouterPort & SudorouterUsagePort
   }): SudoworkLegacyUsageService {
     const repository = new BillingRepository(this.db.db)
