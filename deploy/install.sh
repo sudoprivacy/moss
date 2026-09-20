@@ -23,6 +23,23 @@ log() { printf '[moss-install] %s\n' "$*"; }
 warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[moss-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+assert_nexus_zone_id_upgrade_safe() {
+  local existing_install="$1"
+  local env_path="$2"
+  local lock_path="$3"
+  local explicit_declaration="$4"
+  local declaration_present="$explicit_declaration"
+
+  [ "$existing_install" = 1 ] || return 0
+  if [ "$declaration_present" != 1 ] && [ -f "$env_path" ] \
+    && grep -Eq '^[[:space:]]*MOSS_NEXUS_ZONE_ID=' "$env_path"; then
+    declaration_present=1
+  fi
+  if [ "$declaration_present" = 1 ] && [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+    die "cannot first-declare MOSS_NEXUS_ZONE_ID during an existing-install upgrade; upgrade without the declaration, verify health, then configure the ZoneId and restart separately while Nexus data is still empty"
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: install.sh [options]
@@ -55,6 +72,7 @@ Options:
 Configuration environment variables:
   MOSS_ROLE, MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
   MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_RUNTIME (docker|k8s),
+  MOSS_NEXUS_ZONE_ID (optional, embedded Nexus only; immutable after first use),
   MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY,
   MOSS_INSTANCE_ID (optional stable per-instance id; required for multi-instance
   deployments — the server refuses to join a live peer without it, so each HA
@@ -1214,6 +1232,8 @@ fi
 
 EXISTING_INSTALL=0
 [ -f "$INSTALL_DIR/server.json" ] && EXISTING_INSTALL=1
+ENV_PATH="$INSTALL_DIR/moss-server.env"
+NEXUS_ZONE_ID_LOCK_PATH="$INSTALL_DIR/.moss/nexus/data.zone-id.lock.json"
 DEFAULT_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
 DEFAULT_HOST="${DEFAULT_HOST:-127.0.0.1}"
 EXISTING_PORT=43127
@@ -1228,6 +1248,17 @@ MOSS_ADMIN_USERNAME_VALUE="${MOSS_ADMIN_USERNAME:-}"
 MOSS_ADMIN_PASSWORD_VALUE="${MOSS_ADMIN_PASSWORD:-}"
 ANTHROPIC_BASE_URL_VALUE="${ANTHROPIC_BASE_URL:-}"
 ANTHROPIC_API_KEY_VALUE="${ANTHROPIC_API_KEY:-}"
+MOSS_NEXUS_ZONE_ID_OVERRIDE_SET=0
+MOSS_NEXUS_ZONE_ID_VALUE=""
+if [ "${MOSS_NEXUS_ZONE_ID+x}" = x ]; then
+  MOSS_NEXUS_ZONE_ID_OVERRIDE_SET=1
+  MOSS_NEXUS_ZONE_ID_VALUE="$MOSS_NEXUS_ZONE_ID"
+  case "$MOSS_NEXUS_ZONE_ID_VALUE" in
+    *$'\n'*|*$'\r'*|*"'"*) die "MOSS_NEXUS_ZONE_ID contains characters unsafe for the systemd EnvironmentFile" ;;
+  esac
+fi
+assert_nexus_zone_id_upgrade_safe \
+  "$EXISTING_INSTALL" "$ENV_PATH" "$NEXUS_ZONE_ID_LOCK_PATH" "$MOSS_NEXUS_ZONE_ID_OVERRIDE_SET"
 GENERATED_PASSWORD=0
 
 if [ "$EXISTING_INSTALL" = 0 ]; then
@@ -1293,18 +1324,36 @@ NEW_RELEASE_DIR="$INSTALL_DIR/releases/.$RELEASE_TAG.new.$$"
 PREVIOUS_TARGET="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
 CONFIG_PATH="$INSTALL_DIR/server.json"
 CONFIG_BACKUP=""
+ENV_BACKUP=""
+ENV_EXISTED=0
 if [ "$EXISTING_INSTALL" = 1 ]; then
   CONFIG_BACKUP="$WORK_DIR/server.json.backup"
   cp -a "$CONFIG_PATH" "$CONFIG_BACKUP"
+  if [ -f "$ENV_PATH" ]; then
+    ENV_BACKUP="$WORK_DIR/moss-server.env.backup"
+    cp -L -p "$ENV_PATH" "$ENV_BACKUP"
+    ENV_EXISTED=1
+  fi
 fi
 SERVICE_STOPPED=0
+
+restore_install_config() {
+  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
+    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
+  fi
+  if [ "$EXISTING_INSTALL" = 1 ]; then
+    if [ "$ENV_EXISTED" = 1 ] && [ -n "$ENV_BACKUP" ] && [ -f "$ENV_BACKUP" ]; then
+      cp -p "$ENV_BACKUP" "$ENV_PATH"
+    else
+      rm -f "$ENV_PATH"
+    fi
+  fi
+}
 
 rollback_on_error() {
   local status=$?
   trap - ERR
-  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
-    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
-  fi
+  restore_install_config
   if [ "$SERVICE_STOPPED" = 1 ] && [ -n "$PREVIOUS_TARGET" ] && [ -d "$PREVIOUS_TARGET" ]; then
     log "Installation failed; restoring $PREVIOUS_TARGET"
     ln -sfn "$PREVIOUS_TARGET" "$INSTALL_DIR/.current.rollback"
@@ -1431,7 +1480,6 @@ fs.chmodSync(settingsPath, 0o600)
 NODE
 fi
 
-ENV_PATH="$INSTALL_DIR/moss-server.env"
 # Optional per-instance id (HA): written through verbatim when provided, absent
 # for plain single-instance installs. The server side refuses to join a live
 # peer without one, so multi-node installs set it per host.
@@ -1444,6 +1492,29 @@ MOSS_INSTANCE_ID_LINE=""
 if [ -n "${MOSS_INSTANCE_ID:-}" ]; then
   MOSS_INSTANCE_ID_LINE="MOSS_INSTANCE_ID=$MOSS_INSTANCE_ID"
 fi
+
+# Optional embedded Nexus ZoneId. Preserve an existing complete EnvironmentFile
+# assignment verbatim on upgrade; systemd quoting is not shell quoting and must
+# not be decoded and re-encoded here. An explicit operator value wins and is
+# quoted only after the preflight safety check above.
+MOSS_NEXUS_ZONE_ID_LINE=""
+if [ "$MOSS_NEXUS_ZONE_ID_OVERRIDE_SET" = 1 ]; then
+  MOSS_NEXUS_ZONE_ID_LINE="MOSS_NEXUS_ZONE_ID='$MOSS_NEXUS_ZONE_ID_VALUE'"
+elif [ -f "$ENV_PATH" ]; then
+  MOSS_NEXUS_ZONE_ID_LINE="$(awk '
+    continuing {
+      block = block ORS $0
+      continuing = ($0 ~ /\\$/)
+      next
+    }
+    /^[[:space:]]*MOSS_NEXUS_ZONE_ID=/ {
+      block = $0
+      continuing = ($0 ~ /\\$/)
+    }
+    END { if (block != "") printf "%s", block }
+  ' "$ENV_PATH")"
+fi
+
 cat > "$ENV_PATH" <<EOF
 HOME=$INSTALL_DIR
 MOSS_SERVER_CONFIG=$INSTALL_DIR/server.json
@@ -1454,6 +1525,7 @@ MOSS_AUTH_PROXY_HOST=$AUTH_PROXY_BIND_HOST
 MOSS_AUTH_PROXY_URL=http://$SESSION_REACHABLE_HOST:12013
 MOSS_SERVER_URL=http://$SESSION_REACHABLE_HOST:$MOSS_PORT_VALUE
 $MOSS_INSTANCE_ID_LINE
+$MOSS_NEXUS_ZONE_ID_LINE
 PATH=$INSTALL_DIR/current/node/bin:$INSTALL_DIR/current/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
 chmod 600 "$ENV_PATH"
@@ -1550,9 +1622,7 @@ done
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME.service" >/dev/null
 if ! systemctl restart "$SERVICE_NAME.service"; then
-  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
-    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
-  fi
+  restore_install_config
   if [ -n "$PREVIOUS_TARGET" ] && [ -d "$PREVIOUS_TARGET" ]; then
     ln -sfn "$PREVIOUS_TARGET" "$INSTALL_DIR/.current.rollback"
     mv -Tf "$INSTALL_DIR/.current.rollback" "$INSTALL_DIR/current"
@@ -1571,9 +1641,7 @@ for _ in $(seq 1 60); do
 done
 if [ "$HEALTHY" != 1 ]; then
   journalctl -u "$SERVICE_NAME.service" -n 80 --no-pager >&2 || true
-  if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
-    cp -a "$CONFIG_BACKUP" "$CONFIG_PATH"
-  fi
+  restore_install_config
   if [ -n "$PREVIOUS_TARGET" ] && [ -d "$PREVIOUS_TARGET" ]; then
     log "Health check failed; rolling back to $PREVIOUS_TARGET"
     systemctl stop "$SERVICE_NAME.service" || true
