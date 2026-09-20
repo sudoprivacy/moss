@@ -432,12 +432,11 @@ export const serverFileConfigSchema = lazySchema(() =>
       /** When set, registration additionally requires this invitation code. */
       invitationCode: z.string().min(1).optional(),
       /**
-       * Give each new person their own organisation (one-person company) — the
-       * public-cloud shape, and what makes an individual an organisation of one
-       * rather than a second tenancy model. Turn off for a single-company
-       * deployment, where new people join the organisation that already exists.
+       * Legacy migration switch used by provisionPhoneUser. Interactive phone
+       * registration always requires an organization invitation and never
+       * creates a new organization.
        */
-      autoCreateOrg: z.boolean().default(true),
+      autoCreateOrg: z.boolean().default(false),
     }).default({
       enabled: false,
       delivery: 'log',
@@ -445,7 +444,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       resendCooldownSec: 60,
       maxSendsPerHour: 5,
       maxVerifyAttempts: 5,
-      autoCreateOrg: true,
+      autoCreateOrg: false,
     }),
     /**
      * Public, unauthenticated client bootstrap (`GET /api/v1/system-config`).
@@ -455,13 +454,19 @@ export const serverFileConfigSchema = lazySchema(() =>
      * are, instead of hard-coding either. See `publicSystemConfig.ts` for the
      * wire contract and for what must never be put in here.
      *
-     * Defaults describe a self-hosted deployment: username/password login (the
-     * only method moss implements today), no billing, and every phone-home
-     * feature OFF. A public-cloud deployment turns those on explicitly.
+     * Defaults describe a self-hosted deployment: username/password and API Key
+     * login, no billing, and every phone-home feature OFF. A public-cloud
+     * deployment turns additional methods and services on explicitly.
      */
     systemConfig: z.object({
       /** 0 = phone code, 1 = username/password, 2 = third-party (CAS). */
       loginMethod: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
+      /**
+       * Login capabilities advertised to new clients. `loginMethod` remains the
+       * preferred/legacy method for older clients; this list allows a deployment
+       * to expose phone and password login at the same time.
+       */
+      authMethods: z.array(z.enum(['phone', 'password', 'api_key', 'sso'])).min(1).optional(),
       thirdPartyAuth: z.object({
         enabled: z.boolean().default(true),
         defaultProvider: z.string().min(1).optional(),
@@ -830,6 +835,8 @@ export type AttemptRuntimeState =
 
 export type SessionRecord = {
   sessionId: string
+  /** Provisional implicit Task identifier; one task per newly-created session. */
+  taskId: string
   transcriptSessionId: string
   orgId: string
   userId: string
@@ -901,6 +908,8 @@ export type SessionListFilter = {
 
 export type SessionSummary = {
   sessionId: string
+  /** Provisional implicit Task identifier; not yet the final Task API contract. */
+  taskId: string
   transcriptSessionId: string
   workDir: string
   userId: string
@@ -910,6 +919,7 @@ export type SessionSummary = {
   runtime: SessionRuntimeInfo
   status: SessionStatus
   desiredState: DesiredSessionState
+  currentAttemptId: string | null
   assistantName: string | null
   source?: string
   channelChatId?: string
@@ -950,6 +960,8 @@ export type EnterpriseRecord = {
    * only and surfaced to the client via GET /api/v1/tenant/config.
    */
   client_cron_enabled: boolean | null
+  client_show_tool_calls: boolean | null
+  workspace_upload_limit_bytes: number | null
   created_at: number
   updated_at: number
 }

@@ -165,7 +165,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       resendCooldownSec: 60,
       maxSendsPerHour: 5,
       maxVerifyAttempts: 5,
-      autoCreateOrg: true,
+      autoCreateOrg: false,
     },
     systemConfig: {
       loginMethod: 1,
@@ -491,8 +491,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
           : process.env.MOSS_LOGIN_METHOD === '1' ? 1
             : process.env.MOSS_LOGIN_METHOD === '2' ? 2
               : raw.systemConfig.loginMethod,
+      authMethods: parseAuthMethods(process.env.MOSS_AUTH_METHODS) ?? raw.systemConfig.authMethods,
     },
   }
+}
+
+function parseAuthMethods(value: string | undefined): Array<'phone' | 'password' | 'api_key' | 'sso'> | undefined {
+  if (!value?.trim()) return undefined
+  const allowed = new Set(['phone', 'password', 'api_key', 'sso'])
+  const methods = [...new Set(value.split(',').map(item => item.trim()).filter(item => allowed.has(item)))]
+  return methods.length > 0 ? methods as Array<'phone' | 'password' | 'api_key' | 'sso'> : undefined
 }
 
 export async function readServerConfig(

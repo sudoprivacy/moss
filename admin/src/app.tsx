@@ -303,6 +303,10 @@ export default function App() {
           }
         />
         <Route
+          path="/operations"
+          element={<Navigate to={OPERATION_ROUTES.invitations} replace />}
+        />
+        <Route
           path={OPERATION_ROUTES.invitations}
           element={
             <SuspendedRoute>

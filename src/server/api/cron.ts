@@ -33,8 +33,14 @@ export function isCronMutationBlocked(clientCronEnabled: boolean, auth: CronAuth
  * wired. Admins bypass, matching the route-level and scheduler checks. Returns
  * an error result when blocked so callers surface a clean message.
  */
-function cronDisabledError(auth: CronAuth): { success: false; message: string } | null {
-  if (isCronMutationBlocked(getSystemSettings().clientCronEnabled, auth)) {
+async function cronDisabledError(
+  auth: CronAuth,
+  getClientCronEnabled?: (orgId: string) => Promise<boolean>,
+): Promise<{ success: false; message: string } | null> {
+  const isEnabled = getClientCronEnabled
+    ? await getClientCronEnabled(auth.orgId)
+    : getSystemSettings().clientCronEnabled
+  if (isCronMutationBlocked(isEnabled, auth)) {
     return { success: false, message: 'cron_disabled_by_org' }
   }
   return null
@@ -222,6 +228,8 @@ export interface CronApiConfig {
    * validation is skipped (tests may pass a stub or leave it unset).
    */
   isOrgUser?: (userId: string, orgId: string) => Promise<boolean>
+  /** Resolve the organization override, falling back to deployment policy. */
+  getClientCronEnabled?: (orgId: string) => Promise<boolean>
 }
 
 export function createCronApi(driver: DbDriver, config: CronApiConfig) {
@@ -325,7 +333,7 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
      */
     createJob: async (auth: CronAuth, input: Omit<CreateCronJobInput, 'orgId' | 'userId'>) => {
       try {
-        const blocked = cronDisabledError(auth)
+        const blocked = await cronDisabledError(auth, config.getClientCronEnabled)
         if (blocked) return blocked
         // Executor defaults to the creator; validate any co-owners/executor the
         // caller supplied (org membership + executor ∈ {creator} ∪ co_owners).

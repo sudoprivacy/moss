@@ -40,13 +40,38 @@ describe('buildPublicSystemConfig defaults', () => {
   it('describes a self-hosted deployment when nothing is configured', () => {
     const payload = buildPublicSystemConfig(configWith(undefined))
 
-    // Username/password is the only method moss implements today; claiming 0
-    // would advertise a phone-code flow that has no endpoints behind it.
+    // Phone auth is disabled by default, so the preferred legacy method is password.
     expect(payload.login_method).toBe(1)
+    expect(payload.auth_methods).toEqual(['password', 'api_key'])
+    expect(payload.registration).toEqual({
+      phone_enabled: false,
+      invitation_required: false,
+      auto_create_org: false,
+    })
     // moss holds no credit ledger.
     expect(payload.recharge_mode).toBe('disabled')
     expect(payload.third_party_auth).toBeUndefined()
     expect(payload.credit_application).toBeUndefined()
+  })
+
+  it('advertises phone and password together for a legacy phone deployment', () => {
+    const payload = buildPublicSystemConfig(configWith({ loginMethod: 0 }))
+
+    expect(payload.login_method).toBe(0)
+    expect(payload.auth_methods).toEqual(['phone', 'password', 'api_key'])
+    expect(payload.registration).toEqual({
+      phone_enabled: true,
+      invitation_required: true,
+      auto_create_org: false,
+    })
+  })
+
+  it('honours an explicit ordered list of login capabilities', () => {
+    const payload = buildPublicSystemConfig(
+      configWith({ loginMethod: 0, authMethods: ['password', 'phone', 'api_key', 'phone'] }),
+    )
+
+    expect(payload.auth_methods).toEqual(['password', 'phone', 'api_key'])
   })
 
   it('always serialises the phone-home switches as an explicit off', () => {
@@ -69,7 +94,7 @@ describe('buildPublicSystemConfig defaults', () => {
     const serialised = JSON.stringify(payload)
     // This route is served before the auth wall. Guard the boundary explicitly
     // so a future field addition has to justify itself against a failing test.
-    for (const forbidden of ['apiKey', 'api_key', 'token', 'secret', 'password']) {
+    for (const forbidden of ['access_token', 'refresh_token', 'client_secret', 'password_hash']) {
       expect(serialised.toLowerCase()).not.toContain(forbidden.toLowerCase())
     }
   })

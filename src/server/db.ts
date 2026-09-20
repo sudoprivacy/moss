@@ -84,8 +84,15 @@ function mapRuntime(row: SqlRow): SessionRuntimeInfo {
 }
 
 function mapSession(row: SqlRow): SessionRecord {
+  const clientMetadata = parseJsonObject(row.client_metadata)
   return {
     sessionId: String(row.session_id),
+    // Sessions created before the implicit-task compatibility layer use their
+    // session id as a stable fallback. New rows receive an independent id.
+    taskId:
+      typeof clientMetadata?.implicit_task_id === 'string'
+        ? clientMetadata.implicit_task_id
+        : String(row.session_id),
     transcriptSessionId: String(row.transcript_session_id),
     orgId: String(row.org_id),
     userId: String(row.user_id),
@@ -103,7 +110,7 @@ function mapSession(row: SqlRow): SessionRecord {
     assistantName: typeof row.assistant_name === 'string' ? row.assistant_name : null,
     source: typeof row.source === 'string' ? row.source : undefined,
     channelChatId: typeof row.channel_chat_id === 'string' ? row.channel_chat_id : undefined,
-    clientMetadata: parseJsonObject(row.client_metadata),
+    clientMetadata,
     createdAt: Number(row.created_at),
     lastActiveAt: Number(row.last_active_at),
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
@@ -133,6 +140,90 @@ function mapAttempt(row: SqlRow): AttemptRecord {
     exitSignal: typeof row.exit_signal === 'string' ? row.exit_signal : null,
     stopReason: typeof row.stop_reason === 'string' ? row.stop_reason : null,
     errorText: typeof row.error_text === 'string' ? row.error_text : null,
+  }
+}
+
+type SqliteColumnInfo = {
+  name: string
+  notnull: number
+  dflt_value: unknown
+}
+
+/**
+ * Upgrade the pre-runtime-backend SQLite tables in place. Some early local
+ * deployments used profile_dir/transcript_dir and attempt_dir/manifest_path as
+ * mandatory columns. CREATE TABLE IF NOT EXISTS cannot evolve those tables, so
+ * new session writes otherwise fail before the normal recovery path can run.
+ */
+function migrateLegacyRuntimeTables(db: DatabaseSync): void {
+  const sessionColumns = db.prepare('PRAGMA table_info(sessions)').all() as SqliteColumnInfo[]
+  const sessionNames = new Set(sessionColumns.map(column => column.name))
+  const attemptColumns = db.prepare('PRAGMA table_info(session_attempts)').all() as SqliteColumnInfo[]
+  const attemptNames = new Set(attemptColumns.map(column => column.name))
+  const statements: string[] = []
+
+  if (!sessionNames.has('runtime_type')) {
+    statements.push(
+      `ALTER TABLE sessions ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'host'`,
+      `UPDATE sessions
+       SET runtime_type = CASE
+         WHEN docker_image IS NOT NULL OR container_name IS NOT NULL THEN 'docker'
+         ELSE 'host'
+       END`,
+    )
+  }
+  if (!sessionNames.has('docker_mode')) {
+    statements.push(
+      `ALTER TABLE sessions ADD COLUMN docker_mode TEXT`,
+      `UPDATE sessions
+       SET docker_mode = 'session'
+       WHERE docker_image IS NOT NULL OR container_name IS NOT NULL`,
+    )
+  }
+  if (!sessionNames.has('config_dir')) {
+    statements.push(`ALTER TABLE sessions ADD COLUMN config_dir TEXT`)
+  }
+  if (sessionNames.has('profile_dir')) {
+    statements.push(`UPDATE sessions SET config_dir = COALESCE(config_dir, profile_dir)`)
+  }
+  for (const legacyColumn of ['profile_dir', 'transcript_dir']) {
+    const column = sessionColumns.find(candidate => candidate.name === legacyColumn)
+    if (column?.notnull === 1 && column.dflt_value == null) {
+      statements.push(`ALTER TABLE sessions DROP COLUMN ${legacyColumn}`)
+    }
+  }
+
+  if (!attemptNames.has('backend_type')) {
+    statements.push(
+      `ALTER TABLE session_attempts ADD COLUMN backend_type TEXT NOT NULL DEFAULT 'host'`,
+      `UPDATE session_attempts
+       SET backend_type = COALESCE(
+         (SELECT runtime_type FROM sessions WHERE sessions.session_id = session_attempts.session_id),
+         'host'
+       )`,
+    )
+  }
+  for (const legacyColumn of ['attempt_dir', 'manifest_path']) {
+    const column = attemptColumns.find(candidate => candidate.name === legacyColumn)
+    if (column?.notnull === 1 && column.dflt_value == null) {
+      statements.push(`ALTER TABLE session_attempts DROP COLUMN ${legacyColumn}`)
+    }
+  }
+
+  if (statements.length === 0) return
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    for (const statement of statements) db.exec(statement)
+    db.exec('COMMIT')
+    console.log('[DB] Migrated legacy session runtime tables')
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      // Preserve the original migration error.
+    }
+    throw error
   }
 }
 
@@ -244,6 +335,8 @@ export class DirectConnectStore {
         app_company_name TEXT,
         login_desp TEXT,
         client_cron_enabled INTEGER,
+        client_show_tool_calls INTEGER,
+        workspace_upload_limit_bytes INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -308,6 +401,7 @@ export class DirectConnectStore {
         user_id TEXT
       );
     `)
+    migrateLegacyRuntimeTables(this.db)
     ensureCabinTables(this.db)
 
     const nowTs = now()
@@ -362,6 +456,14 @@ export class DirectConnectStore {
     if (!enterprisesColumns.some(col => col.name === 'client_cron_enabled')) {
       this.db.exec(`ALTER TABLE enterprises ADD COLUMN client_cron_enabled INTEGER`)
       console.log('[DB] Added client_cron_enabled column to enterprises')
+    }
+    if (!enterprisesColumns.some(col => col.name === 'client_show_tool_calls')) {
+      this.db.exec(`ALTER TABLE enterprises ADD COLUMN client_show_tool_calls INTEGER`)
+      console.log('[DB] Added client_show_tool_calls column to enterprises')
+    }
+    if (!enterprisesColumns.some(col => col.name === 'workspace_upload_limit_bytes')) {
+      this.db.exec(`ALTER TABLE enterprises ADD COLUMN workspace_upload_limit_bytes INTEGER`)
+      console.log('[DB] Added workspace_upload_limit_bytes column to enterprises')
     }
 
     // Migration: backfill org_id on department_secret_policies rows written by
@@ -1535,14 +1637,19 @@ export class DirectConnectStore {
     channelChatId?: string
   }): Promise<SessionRecord> {
     const ts = now()
+    const clientMetadata = JSON.stringify({
+      implicit_task_id: randomUUID(),
+      task_contract: 'implicit-v1',
+      requested_execution: 'cloud',
+    })
     await this.driver.run(`
       INSERT INTO sessions (
         session_id, transcript_session_id, org_id, user_id, role, scopes_json,
         cwd, runtime_type, docker_image, docker_mode, config_dir, container_name,
         status, desired_state, current_attempt_id, transcript_path, title, summary, assistant_name,
-        source, channel_chat_id,
+        source, channel_chat_id, client_metadata,
         created_at, last_active_at, ended_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `, [
       input.sessionId,
       input.transcriptSessionId,
@@ -1566,6 +1673,7 @@ export class DirectConnectStore {
       input.assistantName ?? null,
       input.source ?? null,
       input.channelChatId ?? null,
+      clientMetadata,
       ts,
       ts,
     ])
@@ -2174,7 +2282,7 @@ export class DirectConnectStore {
   /**
    * Return an organization's enterprise configuration.  The historical
    * `default` row remains the deployment-wide fallback for unauthenticated
-   * clients and organizations which have not saved their own branding yet.
+   * clients and organizations which have not saved their own configuration yet.
    */
   async getEnterprise(orgId?: string): Promise<EnterpriseRecord> {
     const id = orgId?.trim() || 'default'
@@ -2210,6 +2318,14 @@ export class DirectConnectStore {
         resolvedRow.client_cron_enabled === null || resolvedRow.client_cron_enabled === undefined
           ? null
           : Number(resolvedRow.client_cron_enabled) !== 0,
+      client_show_tool_calls:
+        resolvedRow.client_show_tool_calls === null || resolvedRow.client_show_tool_calls === undefined
+          ? null
+          : Number(resolvedRow.client_show_tool_calls) !== 0,
+      workspace_upload_limit_bytes:
+        resolvedRow.workspace_upload_limit_bytes === null || resolvedRow.workspace_upload_limit_bytes === undefined
+          ? null
+          : Number(resolvedRow.workspace_upload_limit_bytes),
       created_at: Number(resolvedRow.created_at),
       updated_at: Number(resolvedRow.updated_at),
     }
@@ -2232,10 +2348,12 @@ export class DirectConnectStore {
     await this.driver.run(`
       INSERT INTO enterprises (
         id, logo, app_name, top_name, about_name, app_company_name,
-        login_desp, client_cron_enabled, created_at, updated_at
+        login_desp, client_cron_enabled, client_show_tool_calls,
+        workspace_upload_limit_bytes, created_at, updated_at
       )
       SELECT ?, logo, app_name, top_name, about_name, app_company_name,
-        login_desp, client_cron_enabled, ?, ?
+        login_desp, client_cron_enabled, client_show_tool_calls,
+        workspace_upload_limit_bytes, ?, ?
       FROM enterprises
       WHERE id = 'default'
       ON CONFLICT(id) DO NOTHING
@@ -4676,6 +4794,7 @@ export async function openStoreAsync(config: ServerConfig): Promise<DirectConnec
 export function toSessionSummary(session: SessionRecord): SessionSummary {
   return {
     sessionId: session.sessionId,
+    taskId: session.taskId,
     transcriptSessionId: session.transcriptSessionId,
     workDir: session.cwd,
     userId: session.userId,
@@ -4685,9 +4804,11 @@ export function toSessionSummary(session: SessionRecord): SessionSummary {
     runtime: session.runtime,
     status: session.status,
     desiredState: session.desiredState,
+    currentAttemptId: session.currentAttemptId,
     assistantName: session.assistantName,
     source: session.source,
     channelChatId: session.channelChatId,
+    clientMetadata: session.clientMetadata,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,

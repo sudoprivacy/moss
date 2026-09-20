@@ -135,8 +135,9 @@ export class UnifiedIdentityService {
       if (!username) throw new Error('Username is required')
       if ((await this.authDb.listUsersByName(username)).length > 0) throw new Error('Username already exists')
       const hasLocalPassword = Boolean(input.password || input.passwordHash)
-      if (!hasLocalPassword && !input.authIdentity) {
-        throw new Error('Password, password hash, or provider identity is required')
+      const hasPhoneIdentity = Boolean(input.phone?.trim())
+      if (!hasLocalPassword && !input.authIdentity && !hasPhoneIdentity) {
+        throw new Error('Password, phone, password hash, or provider identity is required')
       }
 
       const invitation = input.invitationCode

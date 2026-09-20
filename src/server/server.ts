@@ -369,6 +369,7 @@ function serializeSession(session: {
 }) {
   return {
     sessionId: session.sessionId,
+    taskId: (session as { taskId?: string }).taskId ?? session.sessionId,
     transcriptSessionId: session.transcriptSessionId,
     workDir: session.cwd,
     userId: session.userId,
@@ -378,6 +379,12 @@ function serializeSession(session: {
     runtime: session.runtime,
     status: session.status,
     desiredState: session.desiredState,
+    attemptId: (session as { currentAttemptId?: string | null }).currentAttemptId ?? null,
+    execution: {
+      requestedLocation: 'cloud',
+      runtimeType: session.runtime.type,
+      sessionStatus: session.status,
+    },
     assistantName: session.assistantName,
     title: session.title,
     source: session.source,
@@ -1854,6 +1861,7 @@ async function readWorkspaceTree(
 async function writeWorkspaceFileTo(
   workspaceRoot: string,
   params: { path: string | null; contentBase64: string | null },
+  configuredUploadLimit?: number,
 ): Promise<{ relativePath: string; size: number }> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
   if (!relativePath) throw new HttpError(400, 'Missing path')
@@ -1867,10 +1875,10 @@ async function writeWorkspaceFileTo(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  // Admin-configurable cap (settings.json: workspaceUploadLimitBytes), read per
-  // request so changes take effect without a restart. Falls back to 20MB if the
-  // setting is missing/invalid.
-  const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+  // Organization policy is supplied by the authenticated route. Internal
+  // callers without one retain the deployment-wide settings fallback.
+  const configuredLimit =
+    configuredUploadLimit ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1906,8 +1914,9 @@ async function writeWorkspaceFile(
   session: SessionRecord,
   params: { path: string | null; contentBase64: string | null },
   remote: WorkspaceFileAccess | null,
+  configuredUploadLimit?: number,
 ): Promise<{ relativePath: string; size: number }> {
-  if (!remote) return writeWorkspaceFileTo(session.cwd, params)
+  if (!remote) return writeWorkspaceFileTo(session.cwd, params, configuredUploadLimit)
 
   // Same validation as the direct-fs path, applied before the upload leaves
   // moss: an oversized or malformed body should be rejected here rather than
@@ -1923,7 +1932,8 @@ async function writeWorkspaceFile(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+  const configuredLimit =
+    configuredUploadLimit ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -2105,6 +2115,8 @@ export function startServer(
     dockerContainerMode: config.docker?.containerMode ?? 'session',
     workspace: config.workspace,
     countLiveOtherInstances: () => runtime.countLiveOtherInstances(),
+    getClientCronEnabled: async orgId =>
+      (await enterpriseApi.getEffectivePolicy(orgId)).clientCronEnabled,
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
@@ -2132,6 +2144,8 @@ export function startServer(
     // A user may be a co-owner/executor only if they belong to the job's org.
     // getUserOrNull (no auth arg) resolves org membership without a viewer check.
     isOrgUser: async (userId: string, orgId: string) => (await authService.getUserOrNull(userId, orgId)) != null,
+    getClientCronEnabled: async orgId =>
+      (await enterpriseApi.getEffectivePolicy(orgId)).clientCronEnabled,
   })
 
   // Event Triggers - external systems POST an event to start an agent run.
@@ -2688,25 +2702,26 @@ export function startServer(
         const username = typeof body.phone === 'string' ? body.phone.trim() : ''
         const password = typeof body.password === 'string' ? body.password : ''
         const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
-        if (!username || !password || !nickname) {
-          writeJson(res, 400, { success: false, msg: 'phone, password and nickname are required' })
-          return
-        }
-        // The same gate the phone flow uses, so turning invitations on or off
-        // applies to both rather than leaving one door open.
-        if (!authService.phoneAuth.checkInvitationCode(body.invitation_code)) {
-          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+        const invitationCode = typeof body.invitation_code === 'string'
+          ? body.invitation_code.trim()
+          : ''
+        if (!username || !password || !nickname || !invitationCode) {
+          writeJson(res, 400, {
+            success: false,
+            msg: 'phone, password, nickname and invitation_code are required',
+          })
           return
         }
         if (await authService.findUserByPhone(username)) {
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
-        const { user } = await authService.provisionPhoneUser({
+        const registered = await authService.registerWithPhone({
           phone: username,
           nickname,
-          autoCreateOrg: authService.phoneAuth.autoCreateOrg,
+          invitationCode,
         })
+        const user = registered.user
         await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
         await ensureGatewayAccount(authService, config, {
           userId: user.id,
@@ -2726,20 +2741,48 @@ export function startServer(
         if (!phoneAuth.enabled) {
           throw new HttpError(404, 'Phone login is not enabled on this server')
         }
-        const phone = phoneAuth.verifyRegisterToken(body.register_token)
-        if (!phone) {
-          writeJson(res, 400, { success: false, msg: 'Registration token is invalid or expired' })
+        const phone = normalizePhone(body.phone)
+        const code = typeof body.code === 'string' ? body.code : ''
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        const invitationCode = typeof body.invitation_code === 'string'
+          ? body.invitation_code.trim()
+          : ''
+        if (!phone || !code || !nickname || !invitationCode) {
+          writeJson(res, 400, {
+            success: false,
+            msg: 'phone, code, nickname and invitation_code are required',
+          })
           return
         }
-        if (!phoneAuth.checkInvitationCode(body.invitation_code)) {
-          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+        if (await authService.findUserByPhone(phone)) {
+          writeJson(res, 409, { success: false, msg: 'This phone number is already registered' })
           return
         }
-        const nickname = typeof body.nickname === 'string' ? body.nickname : undefined
+        let verified: boolean
+        try {
+          verified = await phoneAuth.verifyCode(phone, code)
+        } catch (error) {
+          if (error instanceof PhoneAuthError) {
+            writeJson(res, error.status, { success: false, msg: error.message })
+            return
+          }
+          throw error
+        }
+        if (!verified) {
+          writeJson(res, 401, {
+            success: false,
+            msg: 'Verification code is incorrect or expired',
+          })
+          return
+        }
         const result = await authService.registerWithPhone({
           phone,
           nickname,
-          autoCreateOrg: phoneAuth.autoCreateOrg,
+          invitationCode,
+          idempotencyKey:
+            typeof req.headers['idempotency-key'] === 'string'
+              ? req.headers['idempotency-key']
+              : undefined,
         })
         await ensureGatewayAccount(authService, config, {
           userId: result.user.id,
@@ -2787,16 +2830,12 @@ export function startServer(
 
           const existing = await authService.findUserByPhone(phone)
           if (!existing) {
-            // Not an error: a first-time number is the normal start of signup.
-            // The client shows its register form and comes back to
-            // /api/v1/auth/register with this token, so the code is checked
-            // exactly once even though registration is a second request.
-            writeJson(res, 200, {
+            // Login and registration are separate entry points. An unknown
+            // number must use /api/v1/auth/register with an enterprise invite.
+            writeJson(res, 404, {
               success: false,
-              need_register: true,
-              register_token: phoneAuth.issueRegisterToken(phone),
-              phone,
-              msg: 'No account for this number yet, please register',
+              code: 'phone_not_registered',
+              msg: 'This phone number is not registered',
             })
             return
           }
@@ -3161,7 +3200,9 @@ export function startServer(
         // token. Once authenticated, the current token's org is the only
         // trusted tenant selector; never accept an organization id from the
         // request itself.
-        const auth = await authenticateRequest(req, authService)
+        const token = getBearerToken(req)
+        const auth = token ? await authenticateRequest(req, authService) : null
+        if (token && !auth) throw new HttpError(401, 'Unauthorized')
         writeJson(res, 200, await enterpriseApi.getConfig(auth?.orgId))
         return
       }
@@ -7994,13 +8035,15 @@ export function startServer(
         }
         if (req.method === 'POST') {
           const body = await readJsonBody(req)
+          const uploadLimit = (await enterpriseApi.getEffectivePolicy(auth.orgId))
+            .workspaceUploadLimitBytes
           // Same name overwrites: re-uploading a corrected spreadsheet is the
           // common case, and leaving the stale one in place would let the job
           // keep running against it.
           const result = await writeWorkspaceFileTo(resolved.workspace, {
             path: typeof body.path === 'string' ? body.path : null,
             contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-          })
+          }, uploadLimit)
           writeJson(res, 200, { success: true, ...result })
           return
         }
@@ -10253,10 +10296,12 @@ export function startServer(
           throw new HttpError(403, 'Forbidden')
         }
         const body = await readJsonBody(req)
+        const uploadLimit = (await enterpriseApi.getEffectivePolicy(auth.orgId))
+          .workspaceUploadLimitBytes
         const result = await writeWorkspaceFile(session, {
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-        }, resolveSessionWorkspaceAccess(session, config))
+        }, resolveSessionWorkspaceAccess(session, config), uploadLimit)
         writeJson(res, 200, result)
         return
       }
@@ -10322,6 +10367,9 @@ export function startServer(
         if (body.client_metadata && typeof body.client_metadata === 'object' && !Array.isArray(body.client_metadata)) {
           const patch: Record<string, unknown> = {}
           for (const [key, value] of Object.entries(body.client_metadata as Record<string, unknown>)) {
+            if (key === 'implicit_task_id' || key === 'task_contract' || key === 'requested_execution') {
+              throw new HttpError(400, `Reserved client_metadata key: ${key}`)
+            }
             patch[key] = value === null ? undefined : value
           }
           await runtime.store.updateSessionClientMetadata(sessionId, patch)
@@ -10378,6 +10426,13 @@ export function startServer(
           : { ownerInstanceId: null, ownerLive: false }
         writeJson(res, 200, {
           session_id: created.sessionId,
+          task_id: created.taskId,
+          attempt_id: created.currentAttemptId,
+          execution: {
+            requested_location: 'cloud',
+            runtime_type: created.runtime.type,
+            session_status: created.status,
+          },
           ws_url: buildWsUrl(server, config, created.sessionId, wsRouteHint(config, owner)),
           work_dir: created.cwd,
           runtime: created.runtime,

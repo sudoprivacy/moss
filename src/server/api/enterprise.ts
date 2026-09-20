@@ -2,9 +2,9 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
-import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
+import { getSystemSettings } from '../systemSettings.js'
 
-type EnterpriseBrandingPatch = Partial<
+type EnterpriseConfigPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
 >
 
@@ -19,12 +19,24 @@ export function createEnterpriseApi(
       : path.join(runtimeDir, 'uploads', 'enterprise', encodeURIComponent(orgId))
   }
 
+  const getEffectivePolicy = async (orgId = 'default') => {
+    const enterprise = await db.getEnterprise(orgId)
+    const systemSettings = getSystemSettings()
+    return {
+      clientCronEnabled:
+        enterprise.client_cron_enabled ?? systemSettings.clientCronEnabled,
+      clientShowToolCalls:
+        enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,
+      workspaceUploadLimitBytes:
+        enterprise.workspace_upload_limit_bytes ?? systemSettings.workspaceUploadLimitBytes,
+    }
+  }
+
   const api = {
     /**
      * Get enterprise configuration. Branding fields come from the DB
-     * (enterprises table); client_cron_enabled / client_show_tool_calls are
-     * sourced from settings.json (clientCronEnabled / clientShowToolCalls) —
-     * the source of truth for the client-facing toggles.
+     * (enterprises table). Organization policy overrides are stored on the same
+     * row; null values inherit the legacy deployment-wide settings.json values.
      */
     getConfig: async (orgId?: string) => {
       try {
@@ -58,15 +70,15 @@ export function createEnterpriseApi(
           }
         }
 
-        const systemSettings = getSystemSettings()
+        const policy = await getEffectivePolicy(orgId)
         return {
           success: true,
           data: {
             ...enterprise,
             logo: logoBase64,
-            client_cron_enabled: systemSettings.clientCronEnabled,
-            client_show_tool_calls: systemSettings.clientShowToolCalls,
-            workspace_upload_limit_bytes: systemSettings.workspaceUploadLimitBytes,
+            client_cron_enabled: policy.clientCronEnabled,
+            client_show_tool_calls: policy.clientShowToolCalls,
+            workspace_upload_limit_bytes: policy.workspaceUploadLimitBytes,
             cabin_enabled: options.cabinEnabled === true,
           },
         }
@@ -80,44 +92,48 @@ export function createEnterpriseApi(
     },
 
     /**
-     * Update enterprise configuration. Only the branding columns persist to the
-     * DB; the client toggles and workspace upload limit are routed to
-     * settings.json (that's their source of truth in getConfig). Any other key
-     * is ignored — getConfig returns settings-sourced fields (e.g.
-     * workspace_upload_limit_bytes) that the client PATCHes back, and writing
-     * those to `enterprises` would throw "no such column" and fail the save.
+     * Update one organization's configuration. Deployment settings remain the
+     * fallback for organizations that have not saved an override.
      */
-    updateConfig: async (orgId: string, patch: unknown) => {
+    updateConfig: async (
+      ...args:
+        | [orgId: string, patch: unknown]
+        | [patch: unknown, orgId?: string]
+    ) => {
       try {
+        const [first, second] = args
+        const usesOrgFirst = typeof first === 'string' && args.length > 1
+        const orgId = usesOrgFirst
+          ? first
+          : typeof second === 'string' && second.trim()
+            ? second
+            : 'default'
+        const patch = usesOrgFirst ? second : first
+
         if (patch && typeof patch === 'object') {
           const patchRecord = patch as Record<string, unknown>
-          const {
-            client_cron_enabled,
-            client_show_tool_calls,
-            workspace_upload_limit_bytes,
-          } = patchRecord
-
-          const settingsPatch: Record<string, unknown> = {}
-          if (client_cron_enabled !== undefined) {
-            settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
+          for (const key of ['client_cron_enabled', 'client_show_tool_calls'] as const) {
+            if (patchRecord[key] !== undefined && typeof patchRecord[key] !== 'boolean') {
+              throw new Error(`${key} must be a boolean`)
+            }
           }
-          if (client_show_tool_calls !== undefined) {
-            settingsPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
-          }
-          if (workspace_upload_limit_bytes !== undefined) {
-            settingsPatch.workspaceUploadLimitBytes = workspace_upload_limit_bytes
-          }
-          if (Object.keys(settingsPatch).length > 0) {
-            await updateSystemSettings(settingsPatch)
+          if (
+            patchRecord.workspace_upload_limit_bytes !== undefined &&
+            (!Number.isInteger(patchRecord.workspace_upload_limit_bytes) ||
+              Number(patchRecord.workspace_upload_limit_bytes) <= 0 ||
+              Number(patchRecord.workspace_upload_limit_bytes) > 1024 * 1024 * 1024)
+          ) {
+            throw new Error('workspace_upload_limit_bytes must be an integer between 1 and 1073741824')
           }
 
-          // Whitelist the actual `enterprises` columns so read-only /
-          // settings-sourced fields in the round-tripped config can't reach SQL.
+          // Whitelist actual columns so round-tripped read-only fields cannot
+          // reach dynamically constructed SQL.
           const ENTERPRISE_COLUMNS = [
             'logo', 'app_name', 'top_name', 'about_name',
             'app_company_name', 'login_desp', 'client_cron_enabled',
+            'client_show_tool_calls', 'workspace_upload_limit_bytes',
           ] as const
-          const dbPatch: EnterpriseBrandingPatch = {}
+          const dbPatch: EnterpriseConfigPatch = {}
           for (const col of ENTERPRISE_COLUMNS) {
             if (patchRecord[col] !== undefined) {
               ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
@@ -138,6 +154,8 @@ export function createEnterpriseApi(
         }
       }
     },
+
+    getEffectivePolicy,
   }
 
   return api

@@ -1225,6 +1225,13 @@ CREATE INDEX IF NOT EXISTS refund_records_user_idx
   ON refund_records (user_id, created_at DESC);
 `
 
+// Organization-scoped client policy. Existing rows inherit settings.json
+// through null values until an administrator saves an organization override.
+const MIGRATION_0005_ENTERPRISE_POLICY = `
+ALTER TABLE enterprises ADD COLUMN IF NOT EXISTS client_show_tool_calls BIGINT;
+ALTER TABLE enterprises ADD COLUMN IF NOT EXISTS workspace_upload_limit_bytes BIGINT;
+`
+
 interface PgMigration {
   version: number
   name: string
@@ -1236,6 +1243,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
   { version: 4, name: 'recharge-orders-2026-09', sql: MIGRATION_0004_RECHARGE },
+  { version: 5, name: 'enterprise-policy-2026-09', sql: MIGRATION_0005_ENTERPRISE_POLICY },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

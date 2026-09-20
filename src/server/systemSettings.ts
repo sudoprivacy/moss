@@ -70,17 +70,15 @@ export type SystemSettingsPayload = {
   skillStore: SystemSettingsSkillStore
   oauth2: SystemSettingsOAuth2
   /** Whether enterprise client (sudowork) users may use the cron / scheduled
-   *  task feature. Stored in settings.json; surfaced to clients via
-   *  GET /api/v1/tenant/config. */
+   *  task feature. Deployment fallback for organizations without an override. */
   clientCronEnabled: boolean
   /** Default for whether the enterprise client (sudowork) shows tool calls in
    *  the chat stream. This is only a default — client users may override it
-   *  locally. Stored in settings.json; surfaced to clients via
-   *  GET /api/v1/tenant/config. */
+   *  locally. Deployment fallback for organizations without an override. */
   clientShowToolCalls: boolean
   /** Max size (bytes) for a single file uploaded into a session workspace via
-   *  POST /api/v1/sessions/:id/workspace/file. Enforced server-side (413 when
-   *  exceeded). Admin-editable; default 20MB. */
+   *  POST /api/v1/sessions/:id/workspace/file. Deployment fallback for
+   *  organizations without an override; default 20MB. */
   workspaceUploadLimitBytes: number
   /** Max cron runs a single reuse-mode session serves before CronService retires
    *  it and starts a fresh one. Bounds the runtime's compounding compaction
