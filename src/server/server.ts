@@ -7984,7 +7984,8 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/enterprise') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await enterpriseApi.updateConfig(auth.orgId, body, auth.userId))
+        const result = await enterpriseApi.updateConfig(auth.orgId, body, auth.userId)
+        writeJson(res, result.success ? 200 : 400, result)
         return
       }
 

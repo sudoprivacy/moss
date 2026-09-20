@@ -369,6 +369,7 @@ async function finishStandaloneServerStartup(
     tokenStore: legacyTokenStore,
     legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret ?? 'moss-operations-only',
     accountProvisioner,
+    getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
   })
   const administration = authService.createSudoworkAdministrationService({
     accountProvisioner,
@@ -380,6 +381,7 @@ async function finishStandaloneServerStartup(
         tokenStore: legacyTokenStore,
         accountProvisioner,
         initialQuotaUnits: sudorouterRuntime?.initialQuota,
+        getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
       })
     : undefined
   const dify = authService.createSudoworkDifyServices({

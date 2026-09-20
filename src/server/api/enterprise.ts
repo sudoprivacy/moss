@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
-import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
+import { getSystemSettings } from '../systemSettings.js'
 
 type EnterpriseBrandingPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
@@ -32,6 +32,7 @@ export function createEnterpriseApi(
 
   const getEffectivePolicy = async (orgId = 'default') => {
     const requestedOrgId = orgId.trim() || 'default'
+    const enterprise = await db.getEnterprise(requestedOrgId === 'default' ? undefined : requestedOrgId)
     const systemSettings = getSystemSettings()
     const policy = requestedOrgId !== 'default' && options.getClientPolicy
       ? options.getClientPolicy(requestedOrgId)
@@ -39,12 +40,12 @@ export function createEnterpriseApi(
     return {
       clientCronEnabled: requestedOrgId !== 'default' && options.getClientCronEnabled
         ? options.getClientCronEnabled(requestedOrgId)
-        : systemSettings.clientCronEnabled,
+        : enterprise.client_cron_enabled ?? systemSettings.clientCronEnabled,
       clientShowToolCalls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
-        : systemSettings.clientShowToolCalls,
+        : enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,
       workspaceUploadLimitBytes: normalizeUploadLimit(
-        policy.workspaceUploadLimitBytes,
+        policy.workspaceUploadLimitBytes ?? enterprise.workspace_upload_limit_bytes,
         systemSettings.workspaceUploadLimitBytes,
       ),
     }
@@ -116,8 +117,22 @@ export function createEnterpriseApi(
      * policy hooks when available and fall back to settings.json for legacy
      * embeddings. Any other key is ignored.
      */
-    updateConfig: async (orgId: string, patch: unknown, updatedBy = orgId) => {
+    updateConfig: async (
+      ...args:
+        | [orgId: string, patch: unknown, updatedBy?: string]
+        | [patch: unknown, orgId?: string]
+    ) => {
       try {
+        const [first, second, third] = args
+        const usesOrgFirst = typeof first === 'string' && args.length > 1
+        const orgId = usesOrgFirst
+          ? first
+          : typeof second === 'string' && second.trim()
+            ? second
+            : 'default'
+        const patch = usesOrgFirst ? second : first
+        const updatedBy = typeof third === 'string' && third.trim() ? third : orgId
+
         if (patch && typeof patch === 'object') {
           const patchRecord = patch as Record<string, unknown>
           const {
@@ -125,33 +140,38 @@ export function createEnterpriseApi(
             client_show_tool_calls,
             workspace_upload_limit_bytes,
           } = patchRecord
+          const nextClientCronEnabled = client_cron_enabled === undefined
+            ? undefined
+            : parseBoolean(client_cron_enabled, 'client_cron_enabled')
+          const nextClientShowToolCalls = client_show_tool_calls === undefined
+            ? undefined
+            : parseBoolean(client_show_tool_calls, 'client_show_tool_calls')
+          const nextWorkspaceUploadLimitBytes = workspace_upload_limit_bytes === undefined
+            ? undefined
+            : parseUploadLimit(workspace_upload_limit_bytes)
 
-          const settingsPatch: Record<string, unknown> = {}
           const policyPatch: ClientFacingPolicy = {}
-          if (client_cron_enabled !== undefined) {
+          const dbPolicyPatch: EnterpriseBrandingPatch = {}
+          if (nextClientCronEnabled !== undefined) {
             if (options.setClientCronEnabled) {
-              options.setClientCronEnabled(orgId, Boolean(client_cron_enabled))
+              options.setClientCronEnabled(orgId, nextClientCronEnabled)
             } else {
-              settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
+              dbPolicyPatch.client_cron_enabled = nextClientCronEnabled
             }
           }
-          if (client_show_tool_calls !== undefined) {
+          if (nextClientShowToolCalls !== undefined) {
             if (options.putClientPolicy) {
-              policyPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
+              policyPatch.clientShowToolCalls = nextClientShowToolCalls
             } else {
-              settingsPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
+              dbPolicyPatch.client_show_tool_calls = nextClientShowToolCalls
             }
           }
-          if (workspace_upload_limit_bytes !== undefined) {
-            const normalized = parseUploadLimit(workspace_upload_limit_bytes)
+          if (nextWorkspaceUploadLimitBytes !== undefined) {
             if (options.putClientPolicy) {
-              policyPatch.workspaceUploadLimitBytes = normalized
+              policyPatch.workspaceUploadLimitBytes = nextWorkspaceUploadLimitBytes
             } else {
-              settingsPatch.workspaceUploadLimitBytes = normalized
+              dbPolicyPatch.workspace_upload_limit_bytes = nextWorkspaceUploadLimitBytes
             }
-          }
-          if (Object.keys(settingsPatch).length > 0) {
-            await updateSystemSettings(settingsPatch)
           }
           if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
             options.putClientPolicy(orgId, policyPatch, updatedBy)
@@ -164,6 +184,7 @@ export function createEnterpriseApi(
             'app_company_name', 'login_desp',
           ] as const
           const dbPatch: EnterpriseBrandingPatch = {}
+          Object.assign(dbPatch, dbPolicyPatch)
           for (const col of ENTERPRISE_COLUMNS) {
             if (patchRecord[col] !== undefined) {
               ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
@@ -205,4 +226,10 @@ function parseUploadLimit(value: unknown): number {
     throw new Error('workspace_upload_limit_bytes must be an integer between 1 and 1073741824')
   }
   return limit
+}
+
+function parseBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value === 'boolean') return value
+  if (value === 0 || value === 1) return value === 1
+  throw new Error(`${fieldName} must be a boolean`)
 }

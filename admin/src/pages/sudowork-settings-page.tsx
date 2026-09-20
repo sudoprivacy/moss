@@ -21,27 +21,36 @@ type JsonObject = Record<string, unknown>
 
 export default function SudoworkSettingsPage() {
   const [config, setConfig] = useState<Config | null>(null)
+  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
-    try { setConfig((await operationsApi.getSudoworkSystemConfig()).data) }
+    try {
+      setConfig((await operationsApi.getSudoworkSystemConfig()).data)
+      setDirtyKeys(new Set())
+    }
     catch (error) { toast.error(error instanceof Error ? error.message : '获取 Sudowork 策略失败') }
     finally { setLoading(false) }
   }, [])
 
   useEffect(() => { void load() }, [load])
 
-  const patch = (value: Config) => setConfig(current => ({ ...(current ?? {}), ...value }))
+  const patch = (value: Config) => {
+    setDirtyKeys(current => new Set([...current, ...Object.keys(value)]))
+    setConfig(current => ({ ...(current ?? {}), ...value }))
+  }
   const nested = (key: string, value: JsonObject) => patch({ [key]: { ...object(config?.[key]), ...value } })
 
   const save = async () => {
     if (!config) return
     setSaving(true)
     try {
-      await operationsApi.updateSudoworkSystemConfig(config)
+      const payload = Object.fromEntries([...dirtyKeys].map(key => [key, config[key]]))
+      await operationsApi.updateSudoworkSystemConfig(payload)
       setConfig((await operationsApi.getSudoworkSystemConfig()).data)
+      setDirtyKeys(new Set())
       toast.success(config.scope_type === 'organization'
         ? 'Sudowork 组织策略已保存'
         : 'Sudowork 配置已保存；短信和支付基础设施变更需重启 Moss')

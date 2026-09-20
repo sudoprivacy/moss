@@ -8,7 +8,7 @@ import {
 } from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
-import { getSystemSettings } from '../../../systemSettings.js'
+import { getSystemSettings, updateSystemSettings } from '../../../systemSettings.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
 
@@ -123,9 +123,7 @@ export class SudoworkSystemConfigService {
       third_party_auth: this.thirdPartyAuth(false, orgId),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
-      client_cron_enabled: orgId
-        ? this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled ?? systemSettings.clientCronEnabled
-        : systemSettings.clientCronEnabled,
+      client_cron_enabled: this.effectiveClientCronEnabled(orgId, systemSettings.clientCronEnabled),
       client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
         : systemSettings.clientShowToolCalls,
@@ -191,9 +189,7 @@ export class SudoworkSystemConfigService {
       scode_auto_model: string(policy.scodeAutoModel),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
-      client_cron_enabled: orgId
-        ? this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled ?? getSystemSettings().clientCronEnabled
-        : getSystemSettings().clientCronEnabled,
+      client_cron_enabled: this.effectiveClientCronEnabled(orgId),
       client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
         : getSystemSettings().clientShowToolCalls,
@@ -230,14 +226,25 @@ export class SudoworkSystemConfigService {
 
   async update(actor: IdentityActor, body: Json): Promise<void> {
     const {
-      patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId,
+      patch, inheritedKeys, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId, clientCronEnabled,
     } = this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
+    if (clientCronEnabled !== undefined && orgId === undefined) {
+      await updateSystemSettings({ clientCronEnabled })
+    }
     try {
       runInTransaction(this.options.db, () => {
-        if (orgId) this.options.policies.putOrganization(orgId, patch, actor.userId)
-        else this.options.policies.putPlatform(patch, actor.userId)
+        if (Object.keys(patch).length > 0) {
+          if (orgId) this.options.policies.putOrganization(orgId, patch, actor.userId)
+          else this.options.policies.putPlatform(patch, actor.userId)
+        }
+        if (orgId && inheritedKeys.length > 0) {
+          this.options.policies.removeOrganizationKeys(orgId, inheritedKeys, actor.userId)
+        }
+        if (clientCronEnabled !== undefined && orgId !== undefined) {
+          this.options.identities.setOrganizationClientCronEnabled(orgId, clientCronEnabled)
+        }
         if (smsInfrastructure) {
           this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
         }
@@ -261,11 +268,13 @@ export class SudoworkSystemConfigService {
 
   private prepareUpdate(actor: IdentityActor, body: Json): {
     patch: Json
+    inheritedKeys: string[]
     providers?: NormalizedProvider[]
     nextLogKey?: string
     smsInfrastructure?: SudoworkInfrastructureConfig['sms']
     billingInfrastructure?: SudoworkInfrastructureConfig['billing']
     orgId?: string
+    clientCronEnabled?: boolean
   } {
     if (actor.role !== 'super_admin') throw new SudoworkSystemConfigError(403, '权限不足')
     const orgId = this.policyOrgId(actor)
@@ -274,6 +283,7 @@ export class SudoworkSystemConfigService {
     let providers: NormalizedProvider[] | undefined
     let smsInfrastructure: SudoworkInfrastructureConfig['sms'] | undefined
     let billingInfrastructure: SudoworkInfrastructureConfig['billing'] | undefined
+    let clientCronEnabled: boolean | undefined
 
     if (body.third_party_auth !== undefined) {
       const normalized = normalizeThirdPartyAuth(body.third_party_auth)
@@ -346,6 +356,19 @@ export class SudoworkSystemConfigService {
     }
     if (body.recharge_mode !== undefined) patch.rechargeMode = rechargeMode(body.recharge_mode)
     if (body.credit_application !== undefined) patch.creditApplication = normalizeCreditApplication(body.credit_application)
+    if (body.client_cron_enabled !== undefined) {
+      const requested = parseBoolean(body.client_cron_enabled, 'client_cron_enabled')
+      const current = orgId
+        ? this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled
+        : getSystemSettings().clientCronEnabled
+      if (current === undefined || requested !== current) clientCronEnabled = requested
+    }
+    if (body.client_show_tool_calls !== undefined) {
+      patch.clientShowToolCalls = parseBoolean(body.client_show_tool_calls, 'client_show_tool_calls')
+    }
+    if (body.workspace_upload_limit_bytes !== undefined) {
+      patch.workspaceUploadLimitBytes = parseWorkspaceUploadLimit(body.workspace_upload_limit_bytes)
+    }
     if (body.sms !== undefined) {
       if (!platformActor) throw new SudoworkSystemConfigError(403, '短信基础设施属于部署级配置,仅平台超级管理员可修改')
       smsInfrastructure = parseSmsInfrastructure(
@@ -360,7 +383,19 @@ export class SudoworkSystemConfigService {
         this.getInfrastructureConfig().billing,
       )
     }
-    return { patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId }
+    const scoped = orgId
+      ? splitPlatformInheritedValues(patch, this.options.policies.getPlatform())
+      : { patch, inheritedKeys: [] }
+    return {
+      patch: scoped.patch,
+      inheritedKeys: scoped.inheritedKeys,
+      providers,
+      nextLogKey,
+      smsInfrastructure,
+      billingInfrastructure,
+      orgId,
+      clientCronEnabled,
+    }
   }
 
   isSmsConfigured(): boolean {
@@ -389,16 +424,31 @@ export class SudoworkSystemConfigService {
         legacyProvider(connection, profile.code, admin)),
     )
     const visibleProviders = providers.filter(item => admin || item.enabled === 1)
+    const enabledProviders = visibleProviders.filter(item => item.enabled === 1)
     const configuredDefault = string(policy.defaultProvider)
-    const defaultProvider = visibleProviders.some(provider => provider.id === configuredDefault)
+    const defaultProvider = enabledProviders.some(provider => provider.id === configuredDefault)
       ? configuredDefault
-      : string(visibleProviders[0]?.id as string | undefined)
-    return { enabled: flag(policy.enabled), default_provider: defaultProvider, providers: visibleProviders }
+      : string(enabledProviders[0]?.id as string | undefined)
+    return {
+      enabled: enabledProviders.length > 0 ? flag(policy.enabled) : 0,
+      default_provider: defaultProvider,
+      providers: visibleProviders,
+    }
   }
 
   private validateProvider(provider: NormalizedProvider, orgScopeId?: string): NormalizedProvider {
     if (provider.type !== 'cas') throw new SudoworkSystemConfigError(400, '当前仅支持 CAS 类型 Provider')
     if (!provider.id || !provider.name) throw new SudoworkSystemConfigError(400, 'Provider ID 和名称不能为空')
+    const profile = this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
+    if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
+    const existing = this.options.identities.getIntegrationConnection(provider.id)
+    if (orgScopeId && existing && existing.orgId !== orgScopeId) {
+      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
+    }
+    if (orgScopeId && profile.orgId !== orgScopeId) {
+      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
+    }
+    if (!provider.enabled) return { ...provider, orgId: profile.orgId }
     if (!validHttpUrl(provider.casUrl)) throw new SudoworkSystemConfigError(400, 'CAS URL 格式不正确')
     if (!provider.loginPath || !provider.validatePath || !provider.logoutPath || !provider.serviceParam) {
       throw new SudoworkSystemConfigError(400, 'CAS 登录地址、校验地址、登出地址和 service 参数名不能为空')
@@ -410,15 +460,6 @@ export class SudoworkSystemConfigService {
       throw new SudoworkSystemConfigError(400, '登出回跳 URL 必须使用 http 或 https')
     }
     if (!provider.appCallbackUrl) throw new SudoworkSystemConfigError(400, 'App 回调 URL 不能为空')
-    const profile = this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
-    if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
-    const existing = this.options.identities.getIntegrationConnection(provider.id)
-    if (orgScopeId && existing && existing.orgId !== orgScopeId) {
-      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
-    }
-    if (orgScopeId && profile.orgId !== orgScopeId) {
-      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
-    }
     return { ...provider, orgId: profile.orgId }
   }
 
@@ -465,6 +506,12 @@ export class SudoworkSystemConfigService {
 
   private policyOrgId(actor: IdentityActor): string | undefined {
     return hasGlobalOrganizationAccess(actor) ? undefined : actor.orgId
+  }
+
+  private effectiveClientCronEnabled(orgId?: string, global = getSystemSettings().clientCronEnabled): boolean {
+    return orgId
+      ? global && (this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled ?? true)
+      : global
   }
 }
 
@@ -546,6 +593,20 @@ function object(value: unknown): Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Json : {}
 }
 
+function splitPlatformInheritedValues(patch: Json, platform: Json): { patch: Json; inheritedKeys: string[] } {
+  const result: Json = {}
+  const inheritedKeys: string[] = []
+  for (const [key, value] of Object.entries(patch)) {
+    if (jsonEqual(value, platform[key])) inheritedKeys.push(key)
+    else result[key] = value
+  }
+  return { patch: result, inheritedKeys }
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 function string(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value.trim() : fallback
 }
@@ -554,12 +615,24 @@ function flag(value: unknown): 0 | 1 {
   return value === true || value === 1 || value === '1' ? 1 : 0
 }
 
+function parseBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value === 'boolean') return value
+  if (value === 0 || value === 1) return value === 1
+  throw new SudoworkSystemConfigError(400, `${fieldName} 必须为布尔值`)
+}
+
 function workspaceUploadLimit(value: unknown, fallback: number): number {
-  const limit = Number.parseInt(String(value), 10)
-  if (Number.isFinite(limit) && limit >= 1) {
-    return Math.min(limit, 1024 * 1024 * 1024)
-  }
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (Number.isSafeInteger(limit) && limit >= 1 && limit <= 1024 * 1024 * 1024) return limit
   return fallback
+}
+
+function parseWorkspaceUploadLimit(value: unknown): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024 * 1024 * 1024) {
+    throw new SudoworkSystemConfigError(400, '工作区上传限制必须为 1 至 1073741824 字节之间的整数')
+  }
+  return limit
 }
 
 function rechargeMode(value: unknown): RechargeMode {

@@ -19,6 +19,8 @@ export interface LegacyPrincipal {
   legacyEnterpriseId: number | null
 }
 
+export type LegacyLoginMethod = 'sms' | 'password' | 'cas'
+
 export interface LegacyKeyValueStore {
   setex(key: string, seconds: number, value: string): Promise<void>
   keys(pattern: string): Promise<string[]>
@@ -140,7 +142,7 @@ export class LegacyRefreshTokenService {
     token: string
     userId: number
     deviceId: string
-    claims: { phone: string; role: string; enterprise_id: number | null }
+    claims: { phone: string; role: string; enterprise_id: number | null; login_method?: LegacyLoginMethod }
   } | null> {
     const keys = await this.store.keys(`refresh_token:*:${deviceId}:${token}`)
     if (keys.length !== 1) return null
@@ -149,13 +151,17 @@ export class LegacyRefreshTokenService {
     if (!match || match[2] !== deviceId || match[3] !== token) return null
     const value = await this.store.get(oldKey)
     if (!value) return null
-    let claims: { phone: string; role: string; enterprise_id: number | null }
+    let claims: { phone: string; role: string; enterprise_id: number | null; login_method?: LegacyLoginMethod }
     try {
       const parsed = JSON.parse(value) as Record<string, unknown>
       if (
         typeof parsed.phone !== 'string'
         || typeof parsed.role !== 'string'
         || (parsed.enterprise_id !== null && typeof parsed.enterprise_id !== 'number')
+        || (parsed.login_method !== undefined
+          && parsed.login_method !== 'sms'
+          && parsed.login_method !== 'password'
+          && parsed.login_method !== 'cas')
       ) return null
       claims = parsed as typeof claims
     } catch {

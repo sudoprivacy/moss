@@ -245,7 +245,7 @@ export interface SudoworkManagedImagePort {
 }
 
 export interface SudoworkSystemConfigPort {
-  getLoginMethod(): ReturnType<SudoworkSystemConfigService['getLoginMethod']>
+  getLoginMethod(orgId?: string): ReturnType<SudoworkSystemConfigService['getLoginMethod']>
   getPublicConfig(orgId?: string): ReturnType<SudoworkSystemConfigService['getPublicConfig']>
   getAdminConfig(actor: IdentityActor): ReturnType<SudoworkSystemConfigService['getAdminConfig']>
   update(actor: IdentityActor, body: Record<string, unknown>): ReturnType<SudoworkSystemConfigService['update']>
@@ -543,17 +543,17 @@ export function createSudoworkCompatibilityApp(options: {
 
   app.post('/api/v1/auth/login-by-config', async (context) => {
     const body = await context.req.json<Record<string, unknown>>()
-    if (loginMethod() === 'cas') {
-      return context.json({
-        success: false,
-        msg: '当前系统已开启三方认证登录，请使用 CAS 登录',
-      }, 403)
-    }
-    if (loginMethod() === 'sms') return loginBySms(context, body)
+    if (typeof body.code === 'string') return loginBySms(context, body)
 
     const phone = typeof body.phone === 'string' ? body.phone : ''
     const password = typeof body.password === 'string' ? body.password : ''
     if (!phone || !password) {
+      if (loginMethod() === 'cas') {
+        return context.json({
+          success: false,
+          msg: '当前系统已开启三方认证登录，请使用 CAS 登录',
+        }, 403)
+      }
       return context.json({ success: false, msg: '账号或密码不能为空' }, 400)
     }
     const session = await options.identity.loginByPassword({
@@ -619,12 +619,6 @@ export function createSudoworkCompatibilityApp(options: {
 
   app.post('/api/v1/admin/change-password', (context) => changePassword(context, '旧密码'))
   app.post('/api/v1/auth/change-password', (context) => {
-    if (loginMethod() !== 'password') {
-      return context.json({
-        success: false,
-        msg: '当前系统未开启用户名密码登录，修改密码功能暂不可用',
-      }, 403)
-    }
     return changePassword(context, '原始密码')
   })
 
@@ -640,6 +634,16 @@ export function createSudoworkCompatibilityApp(options: {
   const getAdminActor = async (authorization: string | undefined): Promise<IdentityActor | null> => {
     const actor = await getAuthenticatedActor(authorization)
     return actor && (actor.role === 'super_admin' || actor.role === 'admin') ? actor : null
+  }
+
+  const getSystemConfigAdminActor = async (authorization: string | undefined): Promise<IdentityActor | null> => {
+    const token = bearerToken(authorization)
+    if (!token) return null
+    const actor = await options.identity.getActor(token)
+    if (!actor || (actor.role !== 'super_admin' && actor.role !== 'admin')) return null
+    return options.organizationScopedAdmin && actor.role !== 'super_admin'
+      ? { ...actor, organizationScoped: true }
+      : actor
   }
 
   const cursorLimit = (value: string | undefined): number | undefined => {
@@ -1023,6 +1027,10 @@ export function createSudoworkCompatibilityApp(options: {
     if (!Number.isInteger(invitationCodeId)) {
       return context.json({ success: false, msg: '请选择邀请码' }, 400)
     }
+    const targetOrgId = options.resolveEnterpriseAlias?.(enterpriseId)?.orgId ?? actor.orgId
+    if (options.systemConfiguration?.getLoginMethod(targetOrgId) !== 'password') {
+      return context.json({ success: false, msg: '当前企业未开启用户名密码登录' }, 403)
+    }
     if (password) {
       const error = validatePassword(password)
       if (error) return context.json({ success: false, msg: error }, 400)
@@ -1040,9 +1048,6 @@ export function createSudoworkCompatibilityApp(options: {
     if (actor.role !== 'super_admin') {
       return context.json({ success: false, msg: '只有超级管理员可以创建用户' }, 403)
     }
-    if (loginMethod() !== 'sms') {
-      return context.json({ success: false, msg: '当前登录方式不支持创建手机验证码用户' }, 403)
-    }
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     const body = await context.req.json<Record<string, unknown>>()
     const phone = typeof body.phone === 'string' ? body.phone : ''
@@ -1053,6 +1058,10 @@ export function createSudoworkCompatibilityApp(options: {
     }
     if (!Number.isInteger(invitationCodeId)) {
       return context.json({ success: false, msg: '请选择邀请码' }, 400)
+    }
+    const targetOrgId = options.resolveEnterpriseAlias?.(enterpriseId)?.orgId ?? actor.orgId
+    if (options.systemConfiguration?.getLoginMethod(targetOrgId) !== 'sms') {
+      return context.json({ success: false, msg: '当前企业未开启手机验证码登录' }, 403)
     }
     const result = await options.administration.createPhoneUser({
       actor,
@@ -1261,14 +1270,14 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.get('/api/v1/admin/system-config', async (context) => {
-    const actor = await getAdminActor(context.req.header('Authorization'))
+    const actor = await getSystemConfigAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json({ success: true, data: options.systemConfiguration.getAdminConfig(actor) })
   })
 
   app.put('/api/v1/admin/system-config', async (context) => {
-    const actor = await getAdminActor(context.req.header('Authorization'))
+    const actor = await getSystemConfigAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     await options.systemConfiguration.update(actor, await context.req.json<Record<string, unknown>>())
@@ -1276,10 +1285,11 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.get('/api/v1/system-config', async (context) => {
+    const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     const casProviders = await publicCasProviders()
     return context.json({
       success: true,
-      data: options.systemConfiguration?.getPublicConfig() ?? {
+      data: options.systemConfiguration?.getPublicConfig(actor?.orgId) ?? {
       login_method: loginMethod() === 'sms' ? 0 : loginMethod() === 'password' ? 1 : 2,
       log_report: { enabled: 0 }, version_update: { enabled: 0 }, product_improvement: { enabled: 0 },
       sudorouter_baseurl: '', skillhub_baseurl: skillhubBaseUrl, scode_auto_model: '',

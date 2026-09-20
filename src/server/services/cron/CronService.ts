@@ -794,6 +794,13 @@ export class CronService {
 
     // The clicking user's identity drives this run; fall back to the executor.
     const runUserId = actor?.userId ?? resolveExecutorId(job)
+    const actorAuth = await this.config.getUserAuth(runUserId, job.orgId)
+    const clientCronEnabled = await (this.config.getClientCronEnabled?.(job.orgId)
+      ?? getSystemSettings().clientCronEnabled
+    )
+    if (!clientCronEnabled && !(actorAuth && isCronAdminCapable(actorAuth))) {
+      throw new Error('cron_disabled_by_org')
+    }
 
     // Create run record (attributed to whoever triggered it)
     const run = await this.store.createRun(job.id, job.orgId, runUserId)
@@ -803,7 +810,7 @@ export class CronService {
 
     try {
       // Get the triggering user's auth context — this is what the session runs as.
-      const userAuth = await this.config.getUserAuth(runUserId, job.orgId)
+      const userAuth = actorAuth ?? await this.config.getUserAuth(runUserId, job.orgId)
       if (!userAuth) {
         throw new Error(`User auth not found for ${runUserId}`)
       }

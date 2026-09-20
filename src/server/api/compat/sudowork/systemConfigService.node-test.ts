@@ -7,6 +7,7 @@ import { PlatformIntegrationSettingsRepository } from '../../../configuration/pl
 import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import { migrationCommandContext } from '../../../application/commandContext.js'
+import { getSystemSettings, updateSystemSettings } from '../../../systemSettings.js'
 import { SudoworkSystemConfigError, SudoworkSystemConfigService } from './systemConfigService.js'
 
 async function setup(secretFailure = false) {
@@ -163,10 +164,10 @@ void describe('Sudowork 系统配置统一服务', () => {
       assert.equal(config.billing.sudorouter.initial_quota, 50_000_000)
       assert.equal(config.billing.sudorouter.model_service_url, 'https://router.test/v1')
       assert.equal(service.getPublicConfig().sudorouter_baseurl, 'https://router.test')
-      assert.equal(db.prepare(`
+      assert.equal((db.prepare(`
         SELECT instr(policy_json, 'billingInfrastructure') + instr(policy_json, 'smsInfrastructure') AS leaked
         FROM client_delivery_policies WHERE scope_type = 'platform' AND scope_id = 'default'
-      `).get()?.leaked, 0)
+      `).get() as { leaked: number } | undefined)?.leaked ?? 0, 0)
       assert.equal(db.prepare(`
         SELECT COUNT(*) AS count FROM platform_integration_settings
         WHERE setting_key IN ('sudowork.sms', 'sudowork.billing')
@@ -253,6 +254,121 @@ void describe('Sudowork 系统配置统一服务', () => {
         log_report: { key: 'platform-log-key' },
         product_improvement: { api_key: 'qms-api-key', public_key: 'qms-public-key' },
       })
+
+      await service.update(scopedRoot, {
+        client_cron_enabled: false,
+        client_show_tool_calls: true,
+        workspace_upload_limit_bytes: 8192,
+      })
+      assert.equal(identities.getOrganizationProfile(orgB.organizationId)?.clientCronEnabled, false)
+      assert.equal(policies.getOrganization(orgB.organizationId).clientShowToolCalls, true)
+      assert.equal(policies.getOrganization(orgB.organizationId).workspaceUploadLimitBytes, 8192)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织 cron 开关和全局 kill switch 组合生效', async () => {
+    const original = getSystemSettings()
+    const { db, identities, org, service } = await setup()
+    try {
+      await updateSystemSettings({ clientCronEnabled: false })
+      identities.setOrganizationClientCronEnabled(org.organizationId, true)
+      assert.equal(service.getPublicConfig(org.organizationId).client_cron_enabled, false)
+
+      await updateSystemSettings({ clientCronEnabled: true })
+      assert.equal(service.getPublicConfig(org.organizationId).client_cron_enabled, true)
+
+      identities.setOrganizationClientCronEnabled(org.organizationId, false)
+      assert.equal(service.getPublicConfig(org.organizationId).client_cron_enabled, false)
+
+      await service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+      }, { client_cron_enabled: true })
+      assert.equal(identities.getOrganizationProfile(org.organizationId)?.clientCronEnabled, true)
+    } finally {
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
+    }
+  })
+
+  void test('组织作用域保存单字段不会复制继承的平台策略', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({
+        loginMethod: 1,
+        logReport: { enabled: 0, protocol: '', domain: '', keySet: false },
+        versionUpdate: { enabled: 0, cosDomain: '' },
+        productImprovement: { enabled: 0 },
+        thirdPartyAuth: { enabled: 0, defaultProvider: '' },
+        scodeAutoModel: 'platform-model',
+        rechargeMode: 'pay',
+        creditApplication: { min_points: 100, max_points: 1000, allow_duplicate_pending: false },
+        clientShowToolCalls: false,
+        workspaceUploadLimitBytes: 4096,
+      }, 'root')
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      const roundTripped = service.getAdminConfig(scopedRoot) as Record<string, unknown>
+      await service.update(scopedRoot, { ...roundTripped, scode_auto_model: 'org-b-model' })
+
+      assert.deepEqual(policies.getOrganization(orgB.organizationId), { scodeAutoModel: 'org-b-model' })
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域把已有 override 改回平台值时会清除 override', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({ scodeAutoModel: 'platform-model', clientShowToolCalls: false }, 'root')
+      policies.putOrganization(orgB.organizationId, {
+        scodeAutoModel: 'org-b-model',
+        clientShowToolCalls: true,
+      }, 'admin-b')
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+
+      await service.update(scopedRoot, {
+        scode_auto_model: 'platform-model',
+        client_show_tool_calls: false,
+      })
+
+      assert.deepEqual(policies.getOrganization(orgB.organizationId), {})
+      const config = service.getAdminConfig(scopedRoot) as any
+      assert.equal(config.scode_auto_model, 'platform-model')
+      assert.equal(config.client_show_tool_calls, false)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域拒绝字符串布尔值避免 Boolean 字符串误判', async () => {
+    const { db, org, service } = await setup()
+    const scopedRoot = {
+      userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+    }
+    try {
+      await assert.rejects(
+        service.update(scopedRoot, { client_cron_enabled: 'false' }),
+        (error: unknown) => error instanceof SudoworkSystemConfigError
+          && error.statusCode === 400
+          && /client_cron_enabled/.test(error.message),
+      )
+      await assert.rejects(
+        service.update(scopedRoot, { client_show_tool_calls: 'false' }),
+        (error: unknown) => error instanceof SudoworkSystemConfigError
+          && error.statusCode === 400
+          && /client_show_tool_calls/.test(error.message),
+      )
     } finally {
       db.close()
     }
@@ -361,6 +477,48 @@ void describe('Sudowork 系统配置统一服务', () => {
           }],
         },
       }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织继承平台 CAS 但没有启用 Provider 时可 GET 后原样 PUT', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'cas-a' },
+      }, 'root')
+      identities.putIntegrationConnection({
+        id: 'cas-a',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      identities.putIntegrationConnection({
+        id: 'cas-b-disabled',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B 禁用 CAS',
+        enabled: false,
+        secretRef: null,
+        config: {},
+      })
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      const config = service.getAdminConfig(scopedRoot) as any
+      assert.equal(config.third_party_auth.enabled, 0)
+      assert.equal(config.third_party_auth.default_provider, '')
+      assert.equal(config.third_party_auth.providers.length, 1)
+
+      await service.update(scopedRoot, { ...config, scode_auto_model: 'org-b-model' })
+      assert.equal(policies.getOrganization(orgB.organizationId).scodeAutoModel, 'org-b-model')
     } finally {
       db.close()
     }

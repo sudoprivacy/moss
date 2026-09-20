@@ -338,6 +338,36 @@ void describe('Sudowork compatibility Hono app', () => {
     assert.equal(received[1]?.organizationScoped, true)
   })
 
+  void test('系统配置入口保留 platform super-admin 管理部署级配置', async () => {
+    const received: Array<Record<string, unknown>> = []
+    const app = createApp('password', undefined, {
+      organizationScopedAdmin: true,
+      systemConfiguration: {
+        getLoginMethod() { return 'password' },
+        getPublicConfig() { return {} },
+        getCredentialData() { return {} },
+        getAdminConfig(actor: Record<string, unknown>) {
+          received.push(actor)
+          return { scope_type: actor.organizationScoped ? 'organization' : 'platform' }
+        },
+        async update(actor: Record<string, unknown>) { received.push(actor) },
+      },
+    } as never)
+    const headers = { authorization: 'Bearer admin-access' }
+
+    const read = await app.request('/api/v1/admin/system-config', { headers })
+    const updated = await app.request('/api/v1/admin/system-config', {
+      method: 'PUT',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: '{}',
+    })
+
+    assert.deepEqual(await read.json(), { success: true, data: { scope_type: 'platform' } })
+    assert.equal(updated.status, 200)
+    assert.equal(received[0]?.organizationScoped, undefined)
+    assert.equal(received[1]?.organizationScoped, undefined)
+  })
+
   void test('registers Dify administration routes through the compatibility app', async () => {
     const app = createApp('password', undefined, {
       difyAdministration: { getBinding: () => ({ dify_tenant_id: 'tenant-a' }) } as never,
@@ -792,6 +822,44 @@ void describe('Sudowork compatibility Hono app', () => {
     assert.deepEqual(JSON.parse(plaintext.toString('utf8')), {
       skillhub: { token: 'Bearer access-token' },
     })
+  })
+
+  void test('认证后的 system-config 与 credentials 使用同一组织 scope', async () => {
+    const calls: Array<{ method: string; orgId?: string }> = []
+    const app = createApp('password', undefined, {
+      systemConfiguration: {
+        getLoginMethod() { return 'password' },
+        getAdminConfig() { return {} },
+        async update() {},
+        getPublicConfig(orgId?: string) {
+          calls.push({ method: 'public', orgId })
+          return {
+            login_method: 1,
+            log_report: { enabled: orgId === 'org-a' ? 0 : 1 },
+            version_update: { enabled: 0 },
+            product_improvement: { enabled: 0 },
+            sudorouter_baseurl: '',
+            skillhub_baseurl: '',
+            scode_auto_model: '',
+            third_party_auth: { enabled: 0, default_provider: '', providers: [] },
+            recharge_mode: 'disabled',
+            credit_application: { enabled: 0 },
+          }
+        },
+        getCredentialData(orgId?: string) {
+          calls.push({ method: 'credentials', orgId })
+          return orgId === 'org-a' ? {} : { log_report: { key: 'platform-key' } }
+        },
+      },
+    } as never)
+
+    await app.request('/api/v1/system-config', { headers: { authorization: 'Bearer access-token' } })
+    await app.request('/api/v1/system-config/credentials', { headers: { authorization: 'Bearer access-token' } })
+
+    assert.deepEqual(calls, [
+      { method: 'public', orgId: 'org-a' },
+      { method: 'credentials', orgId: 'org-a' },
+    ])
   })
 
   void test('keeps legacy administrator login and password-change responses', async () => {

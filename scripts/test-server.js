@@ -16,7 +16,7 @@
  * it, and `UNLISTED` below makes a new file fail loudly instead of being
  * silently skipped — a test that never runs is worse than one that fails.
  */
-import { readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
 /**
@@ -106,6 +106,15 @@ const NODE = [
   'userContainerName.test.ts',
 ]
 
+const EXTRA_NODE_PATHS = [
+  'src/server/api/cron.node-test.ts',
+  'src/server/api/compat/sudowork/app.node-test.ts',
+  'src/server/api/compat/sudowork/casService.node-test.ts',
+  'src/server/api/compat/sudowork/configService.node-test.ts',
+  'src/server/api/compat/sudowork/identityService.node-test.ts',
+  'src/server/api/compat/sudowork/systemConfigService.node-test.ts',
+]
+
 /**
  * Currently unrunnable, excluded so the gate reflects a reachable bar.
  *
@@ -152,10 +161,26 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+const missingExtraNode = EXTRA_NODE_PATHS.filter(path => !existsSync(path))
+if (missingExtraNode.length > 0) {
+  console.error(`Listed but absent extra node tests:\n  ${missingExtraNode.join('\n  ')}`)
+  process.exit(1)
+}
+
 function run(label, command, leadingArgs, names) {
   if (names.length === 0) return true
   console.log(`\n=== ${label} (${names.length} files) ===`)
   const paths = names.map(name => `${present.get(name)}/${name}`)
+  const { status } = spawnSync(command, [...leadingArgs, ...paths], {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  })
+  return status === 0
+}
+
+function runPaths(label, command, leadingArgs, paths) {
+  if (paths.length === 0) return true
+  console.log(`\n=== ${label} (${paths.length} files) ===`)
   const { status } = spawnSync(command, [...leadingArgs, ...paths], {
     stdio: 'inherit',
     shell: process.platform === 'win32',
@@ -172,6 +197,7 @@ for (const name of BUN_ISOLATED) {
   if (!run('bun:test (isolated)', 'bun', ['test'], [name])) isolatedBunOk = false
 }
 const nodeOk = run('node:test', 'npx', ['tsx', '--test'], NODE)
+const extraNodeOk = runPaths('node:test (server api)', 'npx', ['tsx', '--test'], EXTRA_NODE_PATHS)
 
 const skipped = Object.entries(EXCLUDED)
 if (skipped.length > 0) {
@@ -179,5 +205,5 @@ if (skipped.length > 0) {
   for (const [name, reason] of skipped) console.log(`  ${name} — ${reason}`)
 }
 
-if (!bunOk || !isolatedBunOk || !nodeOk) process.exit(1)
+if (!bunOk || !isolatedBunOk || !nodeOk || !extraNodeOk) process.exit(1)
 console.log('\nserver suite: both runners passed')

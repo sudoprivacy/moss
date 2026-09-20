@@ -350,6 +350,7 @@ export class AuthService {
     tokenStore: LegacyKeyValueStore
     legacyJwtSecret: string
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
+    getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas'
   }): SudoworkIdentityService {
     return new SudoworkIdentityService({
       authDb: this.db,
@@ -357,6 +358,7 @@ export class AuthService {
       tokenStore: input.tokenStore,
       legacyJwtSecret: input.legacyJwtSecret,
       accountProvisioner: input.accountProvisioner,
+      getLoginMethod: input.getLoginMethod,
       nativeActorResolver: token => {
         const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer())
         if (!auth) return null
@@ -386,8 +388,8 @@ export class AuthService {
   }
 
   isOrganizationClientCronEnabled(orgId: string): boolean {
-    return this.identityRepository.getOrganizationProfile(orgId)?.clientCronEnabled
-      ?? getSystemSettings().clientCronEnabled
+    return getSystemSettings().clientCronEnabled
+      && (this.identityRepository.getOrganizationProfile(orgId)?.clientCronEnabled ?? true)
   }
 
   setOrganizationClientCronEnabled(orgId: string, enabled: boolean): void {
@@ -420,6 +422,7 @@ export class AuthService {
     tokenStore: LegacyKeyValueStore
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     initialQuotaUnits?: number
+    getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas'
   }): SudoworkCasService {
     return new SudoworkCasService({
       authDb: this.db,
@@ -429,6 +432,7 @@ export class AuthService {
       tokenStore: input.tokenStore,
       accountProvisioner: input.accountProvisioner,
       initialQuotaUnits: input.initialQuotaUnits,
+      getLoginMethod: input.getLoginMethod,
     })
   }
 

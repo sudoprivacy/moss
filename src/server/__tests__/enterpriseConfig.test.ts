@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DirectConnectStore } from '../db.js'
 import { createEnterpriseApi } from '../api/enterprise.js'
+import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
 
 describe('enterprise configuration organization isolation', () => {
   it('keeps organization writes isolated and retains the legacy default as a fallback', async () => {
@@ -97,6 +98,95 @@ describe('enterprise configuration API', () => {
       assert.equal(orgA.data.workspace_upload_limit_bytes, 4096)
       assert.equal(orgB.data.client_cron_enabled, true)
       assert.equal(orgB.data.client_show_tool_calls, true)
+    } finally {
+      await rm(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps no-hook cron read-after-write on the legacy enterprise store', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'moss-enterprise-no-hook-'))
+    const original = getSystemSettings()
+    try {
+      await updateSystemSettings({ clientCronEnabled: true })
+      const store = new DirectConnectStore(':memory:')
+      await store.updateEnterprise('org-a', { client_cron_enabled: false } as never)
+      const api = createEnterpriseApi(store, runtimeDir)
+
+      assert.equal((await api.getConfig('org-a')).data?.client_cron_enabled, false)
+      await api.updateConfig('org-a', { client_cron_enabled: true })
+      assert.equal((await api.getConfig('org-a')).data?.client_cron_enabled, true)
+      await api.updateConfig({ client_cron_enabled: false }, 'org-a')
+      assert.equal((await api.getConfig('org-a')).data?.client_cron_enabled, false)
+    } finally {
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      await rm(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects invalid workspace upload limits instead of widening to defaults', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'moss-enterprise-upload-limit-'))
+    const orgPolicies = new Map<string, Record<string, unknown>>()
+    try {
+      const api = createEnterpriseApi(new DirectConnectStore(':memory:'), runtimeDir, {
+        getClientPolicy: orgId => orgPolicies.get(orgId) ?? {},
+        putClientPolicy: (orgId, patch) => {
+          orgPolicies.set(orgId, { ...(orgPolicies.get(orgId) ?? {}), ...patch })
+        },
+      })
+      orgPolicies.set('org-a', { workspaceUploadLimitBytes: 4 * 1024 * 1024 })
+
+      for (const invalid of [0, -1, '4096', Number.NaN, 1024 * 1024 * 1024 + 1]) {
+        const response = await api.updateConfig('org-a', { workspace_upload_limit_bytes: invalid }, 'admin-a')
+        assert.equal(response.success, false)
+        assert.equal(orgPolicies.get('org-a')?.workspaceUploadLimitBytes, 4 * 1024 * 1024)
+      }
+    } finally {
+      await rm(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('validates all client policy fields before writing any organization override', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'moss-enterprise-atomic-policy-'))
+    const orgPolicies = new Map<string, Record<string, unknown>>()
+    const cronEnabled = new Map<string, boolean>()
+    let cronWrites = 0
+    try {
+      const api = createEnterpriseApi(new DirectConnectStore(':memory:'), runtimeDir, {
+        getClientCronEnabled: orgId => cronEnabled.get(orgId) ?? true,
+        setClientCronEnabled: (orgId, enabled) => {
+          cronWrites += 1
+          cronEnabled.set(orgId, enabled)
+        },
+        getClientPolicy: orgId => orgPolicies.get(orgId) ?? {},
+        putClientPolicy: (orgId, patch) => {
+          orgPolicies.set(orgId, { ...(orgPolicies.get(orgId) ?? {}), ...patch })
+        },
+      })
+
+      const response = await api.updateConfig('org-a', {
+        client_cron_enabled: false,
+        workspace_upload_limit_bytes: 0,
+      }, 'admin-a')
+
+      assert.equal(response.success, false)
+      assert.equal(cronWrites, 0)
+      assert.equal(cronEnabled.has('org-a'), false)
+      assert.deepEqual(orgPolicies.get('org-a'), undefined)
+    } finally {
+      await rm(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects string booleans for client policy fields', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'moss-enterprise-bool-policy-'))
+    try {
+      const api = createEnterpriseApi(new DirectConnectStore(':memory:'), runtimeDir)
+
+      for (const field of ['client_cron_enabled', 'client_show_tool_calls'] as const) {
+        const response = await api.updateConfig('org-a', { [field]: 'false' }, 'admin-a')
+        assert.equal(response.success, false)
+        assert.match(response.message ?? '', new RegExp(field))
+      }
     } finally {
       await rm(runtimeDir, { recursive: true, force: true })
     }

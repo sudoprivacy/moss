@@ -116,6 +116,7 @@ export class SudoworkCasService {
     codeFactory?: () => string
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     initialQuotaUnits?: number
+    getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas'
   }) {
     this.validator = options.ticketValidator ?? new HttpCasTicketValidator()
     this.codeFactory = options.codeFactory ?? (() => randomBytes(32).toString('base64url'))
@@ -144,6 +145,7 @@ export class SudoworkCasService {
     deviceId?: string
   }): Promise<SudoworkLegacySession> {
     const resolved = await this.resolveUser(input.providerId, input.ticket, input.service)
+    this.assertCasLoginEnabled(resolved.provider.orgId)
     return this.options.identity.startSessionForCanonicalUser({
       userId: resolved.user.id,
       account: resolved.profile.account,
@@ -156,6 +158,7 @@ export class SudoworkCasService {
     if (provider.callbackMode !== 'server_callback') {
       throw new SudoworkCasError(400, '当前 Provider 未启用服务端回调模式')
     }
+    this.assertCasLoginEnabled(provider.orgId)
     if (!provider.serverCallbackUrl) throw new SudoworkCasError(400, '服务端回调 URL 未配置')
     const resolved = await this.resolveUser(provider.id, input.ticket, provider.serverCallbackUrl)
     const code = this.codeFactory()
@@ -178,6 +181,7 @@ export class SudoworkCasService {
     if (!raw) throw new SudoworkCasError(401, '登录凭证无效，请重新登录')
     const payload = JSON.parse(raw) as { providerId: string; userId: string; account: string }
     if (payload.providerId !== provider.id) throw new SudoworkCasError(401, '登录凭证无效，请重新登录')
+    this.assertCasLoginEnabled(provider.orgId)
     const consumed = this.options.tokenStore.rotate
       ? await this.options.tokenStore.rotate(key, `cas_handoff_used:${hash(input.code)}`, 1, 'used')
       : await consumeHandoffToken(this.options.tokenStore, key, `cas_handoff_used:${hash(input.code)}`)
@@ -263,6 +267,13 @@ export class SudoworkCasService {
     }
     if (!user) throw new SudoworkCasError(500, '三方认证身份绑定失败')
     return { provider, profile, user }
+  }
+
+  private assertCasLoginEnabled(orgId: string): void {
+    const loginMethod = this.options.getLoginMethod?.(orgId)
+    if (loginMethod && loginMethod !== 'cas') {
+      throw new SudoworkCasError(403, '当前企业未开启三方认证登录')
+    }
   }
 }
 
