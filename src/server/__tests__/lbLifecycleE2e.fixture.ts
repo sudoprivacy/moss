@@ -12,7 +12,7 @@ import { DirectConnectStore } from '../db.js'
 import { RuntimeService } from '../runtimeService.js'
 import { createAuthService } from '../auth/service.js'
 import { startServer } from '../server.js'
-import type { SessionRuntimeInfo } from '../types.js'
+import type { SessionRuntimeInfo } from '../sessionManager.js'
 
 const configPath = process.env.MOSS_SERVER_CONFIG
 if (!configPath) {
@@ -21,6 +21,10 @@ if (!configPath) {
 
 const { config } = await readServerConfig(configPath)
 await ensureServerDirectories(config)
+const bootstrapPassword = config.bootstrapAdmin.password
+if (!bootstrapPassword) {
+  throw new Error('bootstrapAdmin.password is required by the LB lifecycle fixture')
+}
 
 const store = new DirectConnectStore(config.dbPath)
 const { service: authService } = await createAuthService({
@@ -38,7 +42,7 @@ const { service: authService } = await createAuthService({
 // carries no usage and is skipped by the usage parser.
 const issued = await authService.issueTokenFromPassword({
   username: config.bootstrapAdmin.username,
-  password: config.bootstrapAdmin.password,
+  password: bootstrapPassword,
 })
 // ServerConfig is flat (readServerConfig unfolds the server.json nesting):
 // transcriptDir/dbPath/runtimeDir are top-level, there is no config.storage.
