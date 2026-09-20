@@ -183,36 +183,45 @@ export type SettingsChange = { field: SettingsField; label: string; before: stri
 
 export function getSettingsChanges(settings: SystemSettings, draft: SettingsDraft): SettingsChange[] {
   const baseline = createSettingsDraft(settings)
-  const display = (field: SettingsField, value: SettingsDraft[SettingsField]) => {
+  const display = (field: Exclude<SettingsField, 'apiKey' | 'imageApiKey' | 'modelProviders'>, value: string | boolean) => {
     if (typeof value === 'boolean') return value ? '开启' : '关闭'
-    if (typeof value === 'object') return '已隐藏'
     if (field === 'uploadLimitMiB') return `${value} MiB`
     return value || '未设置'
   }
-  return (Object.keys(FIELD_LABELS) as SettingsField[]).flatMap(field => {
-    const value = draft[field]
+  const changes: SettingsChange[] = []
+  const metadata = (providers: EditableModelProvider[] | SystemSettingsModelProvider[]) => providers.map(provider => {
+    const { apiKey: _apiKey, apiKeyConfigured: _apiKeyConfigured, ...rest } = provider as EditableModelProvider
+    return rest
+  })
+  for (const field of Object.keys(FIELD_LABELS) as SettingsField[]) {
     if (field === 'modelProviders') {
-      const metadata = (providers: EditableModelProvider[] | SystemSettingsModelProvider[]) => providers.map(provider => {
-        const { apiKey: _apiKey, apiKeyConfigured: _apiKeyConfigured, ...rest } = provider as EditableModelProvider
-        return rest
-      })
-      const changed = JSON.stringify(metadata(value)) !== JSON.stringify(metadata(baseline.modelProviders))
-      const hasNewKey = value.some(provider => Boolean(provider.apiKey?.trim()))
-      return !changed && !hasNewKey ? [] : [{
+      const changed = JSON.stringify(metadata(draft.modelProviders)) !== JSON.stringify(metadata(baseline.modelProviders))
+      const hasNewKey = draft.modelProviders.some(provider => Boolean(provider.apiKey?.trim()))
+      if (changed || hasNewKey) changes.push({
         field,
         label: FIELD_LABELS[field],
         before: `${baseline.modelProviders.length} 个 Provider`,
-        after: hasNewKey ? `${value.length} 个 Provider（含新的 API Key）` : `${value.length} 个 Provider`,
-      }]
+        after: hasNewKey ? `${draft.modelProviders.length} 个 Provider（含新的 API Key）` : `${draft.modelProviders.length} 个 Provider`,
+      })
+      continue
     }
-    if (typeof value === 'object') {
+    if (field === 'apiKey' || field === 'imageApiKey') {
+      const value = draft[field]
       const configured = field === 'apiKey' ? Boolean(settings.apiKey) : Boolean(settings.image.apiKey)
-      if (value.action === 'keep' || (value.action === 'clear' && !configured)) return []
-      return [{ field, label: FIELD_LABELS[field], before: configured ? '已配置（已隐藏）' : '未配置', after: value.action === 'clear' ? '清除密钥' : '替换为新密钥（已隐藏）' }]
+      if (value.action !== 'keep' && !(value.action === 'clear' && !configured)) changes.push({
+        field,
+        label: FIELD_LABELS[field],
+        before: configured ? '已配置（已隐藏）' : '未配置',
+        after: value.action === 'clear' ? '清除密钥' : '替换为新密钥（已隐藏）',
+      })
+      continue
     }
-    if (field === 'thinkingBudgetTokens' && draft.thinkingMode !== 'enabled') return []
-    return value === baseline[field] ? [] : [{ field, label: FIELD_LABELS[field], before: display(field, baseline[field]), after: display(field, value) }]
-  })
+    if (field === 'thinkingBudgetTokens' && draft.thinkingMode !== 'enabled') continue
+    const value = draft[field] as string | boolean
+    const before = baseline[field] as string | boolean
+    if (value !== before) changes.push({ field, label: FIELD_LABELS[field], before: display(field, before), after: display(field, value) })
+  }
+  return changes
 }
 
 function createLegacyProvider(baseUrl: string): EditableModelProvider {
