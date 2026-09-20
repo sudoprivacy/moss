@@ -8,13 +8,36 @@ import { describe, expect, it } from 'bun:test'
 import { buildNexusArgs } from '../nexus/nexusManager.js'
 
 const root = resolve(import.meta.dir, '../../..')
-const activationSha = '60bd8dda6fb2d348ec8571b9b1a4eaa535e36dc5'
-const candidateRevision = '30da0ddd953268ff8a9a0f0980276300ab153003'
-const dependencySpec = `github:sudoprivacy/sudostack#${activationSha}`
+const candidateVersion = '0.2.1'
+const baselineVersion = '0.2.0'
+const contentSha = '273fd4097cbc33c1c049c39bb1fb60cef2663e2b'
+const contentShortSha = contentSha.slice(0, 7)
+const mergeSha = 'dc9cf01acf61dff586d292d15710332d35a5f811'
+const previousCandidateContentSha = '30da0ddd953268ff8a9a0f0980276300ab153003'
+const previousActivationSha = '60bd8dda6fb2d348ec8571b9b1a4eaa535e36dc5'
+const retiredPinSha = '45304cf15d1e8d02814e46b7b2fe0b3c30c1709c'
+const dependencySpec = `github:sudoprivacy/sudostack#${contentSha}`
+const lockIntegrity = 'sha512-Z/cwfFmCElZxS0Dik5cH8ThmRAwireEYV1fNqzhSln+twc9RBVGBfZvCHSiUXQMKpAFIovsSm0F1ueF998foIg=='
+const candidateManifestSha256 = '956a19cbc6b42ebc3c4e1c9ebe93e0842e1c295d1f6465e0d42d532d45785a9b'
+const compatibilitySha256 = 'a27553991ab8bd57d66bc12aaca4b08f52cd8def13a1f971d698fa3f435b35ad'
+const baselineSha256 = '9ec2cffbcb19f3e728a6691176ed739bab6de52a56b60abe4217420d2ce0c17c'
+const tarballSha256 = '1c6b2794de3572bffb59e3dd3f0a504c68a23fd2531c7838773bf78d01469c5e'
 const serverNodeVersion = '22.22.1'
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T
+}
+
+function readJsonWithSha256<T>(path: string): { value: T; sha256: string } {
+  const bytes = readFileSync(path)
+  return {
+    value: JSON.parse(bytes.toString('utf8')) as T,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  }
+}
+
+function sha256(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
 const contractEntry = realpathSync(fileURLToPath(import.meta.resolve('@sudo/contracts/zone-id')))
@@ -24,35 +47,160 @@ const installedPackage = readJson<{ name: string; version: string; engines: { no
 )
 const nodeMinimumVersion = installedPackage.engines.node.match(/^>=(\d+\.\d+\.\d+)$/)?.[1]
 
+type CandidateManifest = {
+  compatibility: { prior_baseline_sha256: string; runtime_contract: string }
+  lifecycle: {
+    artifact_publication: string
+    content_stage: string
+    contract_baseline: string
+    deployment_evidence: string
+  }
+  package: {
+    actual_consumers: string[]
+    actual_producers: string[]
+    support_state: string
+    version: string
+  }
+  sudostack: {
+    activation_state: string
+    candidate_revision: null
+    content_stage: { exact_pin_target: string; state: string }
+    predecessor: { activation_revision: string; candidate_content_revision: string }
+  }
+  support_evidence: { current_candidate: string }
+}
+
+type CompatibilityManifest = {
+  baseline: { sha256: string }
+  families: {
+    resource_ref: { runtime_bytes: string }
+    zone_id: { runtime_bytes: string }
+  }
+  package: { candidate: string; previous: string; semver_change: string }
+  support_matrix: { actual_consumers: string[]; actual_producers: string[]; state: string }
+}
+
+type PackMetadata = {
+  filename: string
+  files: unknown[]
+  shasum: string
+  size: number
+}
+
 type ZoneVector = {
   id: string
   value: string
   expected: 'accept' | 'reject'
 }
 
-describe('@sudo/contracts activation', () => {
-  it('pins and resolves the activated F1 package from this install', () => {
+describe('@sudo/contracts evaluation pin', () => {
+  it(`pins Candidate2 and verifies the installed unfrozen ${candidateVersion} package identity`, () => {
     const appPackage = readJson<{ dependencies: Record<string, string> }>(resolve(root, 'package.json'))
     const lockfile = readFileSync(resolve(root, 'bun.lock'), 'utf8')
-    const candidate = readJson<{ sudostack: { candidate_revision: string } }>(
-      resolve(contractRoot, 'manifests/releases/0.2.0-candidate.gen.json'),
+    const candidateManifestPath = resolve(
+      contractRoot,
+      `manifests/releases/${candidateVersion}-candidate.gen.json`,
     )
+    const compatibilityPath = resolve(contractRoot, 'compatibility/current.gen.json')
+    const baselinePath = resolve(
+      contractRoot,
+      `compatibility/baselines/${baselineVersion}-package.json`,
+    )
+    const candidateArtifact = readJsonWithSha256<CandidateManifest>(candidateManifestPath)
+    const compatibilityArtifact = readJsonWithSha256<CompatibilityManifest>(compatibilityPath)
+    const candidate = candidateArtifact.value
+    const compatibility = compatibilityArtifact.value
     const installedEntry = relative(root, contractEntry)
 
     expect(appPackage.dependencies['@sudo/contracts']).toBe(dependencySpec)
     expect(lockfile).toContain(dependencySpec)
-    expect(lockfile).toContain('@sudo/contracts@github:sudoprivacy/sudostack#60bd8dd')
-    expect(lockfile).not.toContain('45304cf15d1e8d02814e46b7b2fe0b3c30c1709c')
+    const contractLockEntries = lockfile.match(
+      /"@sudo\/contracts": \["@sudo\/contracts@github:sudoprivacy\/sudostack#[0-9a-f]+"/g,
+    ) ?? []
+    expect(contractLockEntries).toEqual([
+      `"@sudo/contracts": ["@sudo/contracts@github:sudoprivacy/sudostack#${contentShortSha}"`,
+    ])
+    expect(lockfile).toContain(`sudoprivacy-sudostack-${contentShortSha}`)
+    expect(lockfile).toContain(lockIntegrity)
+    expect(lockfile).not.toContain(previousActivationSha)
+    expect(lockfile).not.toContain(previousActivationSha.slice(0, 7))
+    expect(lockfile).not.toContain(retiredPinSha)
+    expect(lockfile).not.toContain(retiredPinSha.slice(0, 7))
+    expect(lockfile).not.toContain(mergeSha)
     expect(installedEntry.startsWith(`node_modules${sep}`)).toBe(true)
     expect(installedPackage).toEqual(expect.objectContaining({
       name: '@sudo/contracts',
-      version: '0.2.0',
+      version: candidateVersion,
       engines: { node: '>=22.21.0' },
     }))
-    expect(candidate.sudostack.candidate_revision).toBe(candidateRevision)
-    expect(createHash('sha256').update(readFileSync(contractEntry)).digest('hex')).toBe(
+
+    expect(candidateArtifact.sha256).toBe(candidateManifestSha256)
+    expect(compatibilityArtifact.sha256).toBe(compatibilitySha256)
+    expect(sha256(baselinePath)).toBe(baselineSha256)
+    expect(candidate.lifecycle).toEqual(expect.objectContaining({
+      content_stage: 'staged',
+      contract_baseline: 'unfrozen',
+      artifact_publication: 'candidate_unpublished',
+      deployment_evidence: 'not_deployed',
+    }))
+    expect(candidate.package).toEqual(expect.objectContaining({
+      version: candidateVersion,
+      support_state: 'pending_moss_repin',
+      actual_consumers: [],
+      actual_producers: [],
+    }))
+    expect(candidate.sudostack.candidate_revision).toBeNull()
+    expect(candidate.sudostack.activation_state).toBe('pending_future_commit')
+    expect(candidate.sudostack.content_stage).toEqual(expect.objectContaining({
+      state: 'staged',
+      exact_pin_target: 'content_commit_C',
+    }))
+    expect(candidate.sudostack.predecessor).toEqual(expect.objectContaining({
+      activation_revision: previousActivationSha,
+      candidate_content_revision: previousCandidateContentSha,
+    }))
+    expect(candidate.support_evidence.current_candidate).toBe('none_pending_moss_repin')
+    expect(candidate.compatibility).toEqual(expect.objectContaining({
+      prior_baseline_sha256: baselineSha256,
+      runtime_contract: 'byte_identical',
+    }))
+    expect(compatibility).toEqual(expect.objectContaining({
+      baseline: expect.objectContaining({ sha256: baselineSha256 }),
+      package: { candidate: candidateVersion, previous: baselineVersion, semver_change: 'patch' },
+      support_matrix: expect.objectContaining({
+        state: 'pending_moss_repin',
+        actual_consumers: [],
+        actual_producers: [],
+      }),
+    }))
+    const expectedRuntimeIdentity = `byte_identical_to_${baselineVersion}`
+    expect(compatibility.families.resource_ref.runtime_bytes).toBe(expectedRuntimeIdentity)
+    expect(compatibility.families.zone_id.runtime_bytes).toBe(expectedRuntimeIdentity)
+    expect(sha256(contractEntry)).toBe(
       '87734eb51ac89a9ca9d50bbb4993ac6fba42af50c6d0c612cfe1b49fbb0a9b56',
     )
+
+    const packDir = mkdtempSync(resolve(tmpdir(), 'moss-contracts-pack-'))
+    try {
+      const packed = spawnSync(
+        'npm',
+        ['pack', contractRoot, '--json', '--pack-destination', packDir],
+        { encoding: 'utf8', timeout: 30_000 },
+      )
+      if (packed.status !== 0) {
+        throw new Error(`npm pack failed: ${packed.error?.message || packed.stderr || packed.stdout}`)
+      }
+      const [metadata] = JSON.parse(packed.stdout) as PackMetadata[]
+      expect(metadata).toEqual(expect.objectContaining({
+        files: expect.any(Array),
+        shasum: '5774dcb821d483bf8848ba0bda511ec728ae6cf9',
+        size: 39_541,
+      }))
+      expect(metadata.files).toHaveLength(43)
+      expect(sha256(resolve(packDir, metadata.filename))).toBe(tarballSha256)
+    } finally {
+      rmSync(packDir, { recursive: true, force: true })
+    }
   })
 
   it('applies every installed owner vector at the pre-spawn argument boundary', () => {
