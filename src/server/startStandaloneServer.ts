@@ -34,6 +34,7 @@ import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
 import { getSystemSettings } from './systemSettings.js'
+import { migrateLegacyModelSettings } from './configuration/migrateLegacyModelSettings.js'
 import type { LegacyKeyValueStore } from './identity/legacyToken.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
 import { assertSafeInstanceIdentity } from './startupGuards.js'
@@ -239,6 +240,7 @@ async function finishStandaloneServerStartup(
   const defaultOrgId = (await authService.listAllOrganizations()).organizations[0]?.id
   if (defaultOrgId) {
     await store.backfillOrgScoping(defaultOrgId)
+    await migrateLegacyModelSettings(store.db, defaultOrgId)
   }
 
   // Token minter for login-type 凭据 (mints + caches a per-user access_token

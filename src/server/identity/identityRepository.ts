@@ -364,9 +364,9 @@ export class IdentityRepository {
     const timestamp = now()
     this.db.prepare(`
       INSERT INTO organization_profiles (
-        org_id, code, login_method, local_enabled, cloud_enabled, logo, app_name,
+        org_id, code, login_method, local_enabled, cloud_enabled, client_cron_enabled, logo, app_name,
         top_name, about_name, app_company_name, login_description, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(org_id) DO UPDATE SET
         code = excluded.code,
         login_method = excluded.login_method,

@@ -1677,7 +1677,7 @@ if [ "$EXISTING_INSTALL" = 0 ] && [ -n "$ANTHROPIC_API_KEY_VALUE" ]; then
   else
     SEED_BODY="$(MOSS_KEY="$ANTHROPIC_API_KEY_VALUE" MOSS_URL="$ANTHROPIC_BASE_URL_VALUE" \
       "$SEED_NODE" -e 'const b={apiKey:process.env.MOSS_KEY};if(process.env.MOSS_URL)b.url=process.env.MOSS_URL;process.stdout.write(JSON.stringify(b))')"
-    if curl -fsS -X PATCH "$SEED_BASE/api/v1/settings/system" \
+    if curl -fsS -X PATCH "$SEED_BASE/api/v1/settings/system?scope=organization" \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       -H 'Content-Type: application/json' -d "$SEED_BODY" >/dev/null 2>&1; then
       log "Model API key seeded into the secrets vault"

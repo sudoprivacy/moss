@@ -4,10 +4,11 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
-import type { ModelProviderProtocol, SystemSettings, ThinkingMode } from '@/lib/api/types'
+import type { ConfigScope, ModelProviderProtocol, SystemSettings, ThinkingMode } from '@/lib/api/types'
 import { FIELD_LABELS, type EditableModelProvider, type SecretDraft, type SettingsDraft, type SettingsErrors, type SettingsField } from '@/lib/system-settings'
 
 type FieldsProps = {
+  scope: ConfigScope
   settings: SystemSettings
   draft: SettingsDraft
   errors: SettingsErrors
@@ -93,7 +94,7 @@ function ProviderFields({ draft, error, update }: Pick<FieldsProps, 'draft' | 'u
   </Field>
 }
 
-export function SystemSettingsFields({ settings, draft, errors, update }: FieldsProps) {
+export function SystemSettingsFields({ scope, settings, draft, errors, update }: FieldsProps) {
   const textField = (field: Exclude<SettingsField, 'apiKey' | 'imageApiKey' | 'modelProviders' | 'defaultModelProviderId'>, description: ReactNode, options: { placeholder?: string; min?: number; max?: number; number?: boolean; step?: string } = {}) => (
     <Field field={field} description={description} error={errors[field]}>
       <div className={field === 'uploadLimitMiB' ? 'system-settings-unit-input' : undefined}>
@@ -134,7 +135,7 @@ export function SystemSettingsFields({ settings, draft, errors, update }: Fields
         <SecretField field="imageApiKey" configured={settings.image.apiKeyConfigured} value={draft.imageApiKey} error={errors.imageApiKey} onChange={value => update('imageApiKey', value)} />
       </Section>
     </TabsContent>
-    <TabsContent value="runtime" className="system-settings-tab-content">
+    {scope === 'platform' ? <><TabsContent value="runtime" className="system-settings-tab-content">
       <Section icon={ShieldCheck} title="执行与权限" description="控制新会话的工具调用确认与运行边界。">
         {toggle('bypassPermissions', '开启后，新会话中的工具调用将跳过权限确认。建议仅在可信环境中启用。')}
         {draft.bypassPermissions && <p className="system-settings-warning">权限确认已跳过。请确认运行环境与可调用的工具均可信。</p>}
@@ -169,6 +170,6 @@ export function SystemSettingsFields({ settings, draft, errors, update }: Fields
         <div className="system-settings-readonly"><span>服务器登录脚本</span><code>{settings.oauth2.scriptPath || '未配置'}</code><p>脚本路径只读，请在服务器配置中维护。启用登录需要同时配置授权地址和脚本。</p></div>
         {draft.oauthEnabled && !settings.oauth2.scriptPath && <p className="system-settings-warning">尚未配置登录脚本。即使保存启用状态，OAuth2 登录也不会生效。</p>}
       </Section>
-    </TabsContent>
+    </TabsContent></> : null}
   </>
 }

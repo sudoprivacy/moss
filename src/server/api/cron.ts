@@ -38,9 +38,8 @@ async function cronDisabledError(
   getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>,
   orgId = auth.orgId,
 ): Promise<{ success: false; message: string } | null> {
-  const isEnabled = getClientCronEnabled
-    ? await getClientCronEnabled(orgId)
-    : getSystemSettings().clientCronEnabled
+  const orgEnabled = getClientCronEnabled ? await getClientCronEnabled(orgId) : true
+  const isEnabled = getSystemSettings().clientCronEnabled && orgEnabled
   if (isCronMutationBlocked(isEnabled, auth)) {
     return { success: false, message: 'cron_disabled_by_org' }
   }
@@ -489,6 +488,8 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
         const run = await config.cronService.triggerJob(jobId, {
           userId: auth.userId,
           orgId: auth.orgId,
+          role: auth.role,
+          scopes: [...(auth.scopes ?? [])],
         })
         return {
           success: true,

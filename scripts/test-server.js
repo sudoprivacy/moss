@@ -107,11 +107,18 @@ const NODE = [
 ]
 
 const EXTRA_NODE_PATHS = [
+  'src/server/configuration/modelSettings.node-test.ts',
+  'src/server/identity/loginPolicy.node-test.ts',
+  'src/server/identity/organizationAutomationPolicy.node-test.ts',
+  'src/server/identity/passwordCompatibility.node-test.ts',
   'src/server/api/cron.node-test.ts',
   'src/server/api/compat/sudowork/app.node-test.ts',
   'src/server/api/compat/sudowork/casService.node-test.ts',
   'src/server/api/compat/sudowork/configService.node-test.ts',
   'src/server/api/compat/sudowork/identityService.node-test.ts',
+  'src/server/api/compat/sudowork/legacyUsageRoutes.node-test.ts',
+  'src/server/api/compat/sudowork/legacyUsageService.node-test.ts',
+  'src/server/api/compat/sudowork/userProjectionService.node-test.ts',
   'src/server/api/compat/sudowork/systemConfigService.node-test.ts',
 ]
 

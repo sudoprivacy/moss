@@ -1,19 +1,83 @@
 import assert from 'node:assert/strict'
 import { createDecipheriv } from 'node:crypto'
-import { describe, test } from 'node:test'
-import { SudoworkIdentityError, type SudoworkLegacyUser } from './identityService.js'
-import { SudoworkAdministrationError } from './adminService.js'
-import { SudoworkUserProjectionError } from './userProjectionService.js'
-import { QmsAuthorizationService } from '../../../qms/qmsAuthorization.js'
-import {
-  createSudoworkCompatibilityApp,
-  type SudoworkAdministrationPort,
-  type SudoworkCatalogPort,
-  type SudoworkConfigPort,
-  type SudoworkIdentityPort,
-  type SudoworkManagedImagePort,
-  type SudoworkSystemConfigPort,
+import { mkdtempSync, rmSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import os from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { after, describe, mock, test } from 'node:test'
+import type { SudoworkLegacyUser } from './identityService.js'
+import type {
+  SudoworkAdministrationPort,
+  SudoworkCatalogPort,
+  SudoworkConfigPort,
+  SudoworkIdentityPort,
+  SudoworkManagedImagePort,
+  SudoworkSystemConfigPort,
 } from './app.js'
+
+const testHome = mkdtempSync(join(os.tmpdir(), 'moss-compat-app-test-'))
+const homedirMock = mock.method(os, 'homedir', () => testHome)
+syncBuiltinESMExports()
+const { SudoworkIdentityError } = await import('./identityService.js')
+const { SudoworkAdministrationError } = await import('./adminService.js')
+const { SudoworkUserProjectionError } = await import('./userProjectionService.js')
+const { QmsAuthorizationService } = await import('../../../qms/qmsAuthorization.js')
+const { createSudoworkCompatibilityApp } = await import('./app.js')
+const { AuthCenterDb, hashPassword } = await import('../../../authCenter/db.js')
+const { AuthService } = await import('../../../auth/service.js')
+const { IdentityRepository } = await import('../../../identity/identityRepository.js')
+const { ClientPolicyRepository } = await import('../../../configuration/clientPolicyRepository.js')
+const { SudoworkSystemConfigService } = await import('./systemConfigService.js')
+const { SYSTEM_SETTINGS_PATH } = await import('../../../systemSettings.js')
+assert.equal(SYSTEM_SETTINGS_PATH, join(testHome, '.moss', 'settings.json'))
+after(() => {
+  homedirMock.mock.restore()
+  syncBuiltinESMExports()
+  rmSync(testHome, { recursive: true, force: true })
+})
+
+async function createNativeSystemConfigFixture() {
+  const db = new DatabaseSync(':memory:')
+  const authDb = new AuthCenterDb(db)
+  const identities = new IdentityRepository(db)
+  const policies = new ClientPolicyRepository(db)
+  await authDb.setConfig('issuer', 'moss-compat-test')
+  await authDb.setConfig('jwt_secret', 'moss-compat-test-secret')
+  for (const orgId of ['org-a', 'org-b']) {
+    await authDb.createOrganization(orgId, orgId, 1)
+    identities.putOrganizationProfile({
+      orgId, code: orgId.toUpperCase(), loginMethod: 'password', localEnabled: true, cloudEnabled: true,
+    })
+  }
+  for (const role of ['admin', 'super_admin', 'user']) {
+    await authDb.createUser({
+      id: role, orgId: 'org-a', email: `${role}@example.test`, name: role,
+      displayName: null, departmentId: null, role, status: 'active', localAuth: true,
+      tokenLimit: null, createdAt: 1, passwordHash: hashPassword('FixturePass123'), passwordUpdatedAt: null,
+      lastLoginAt: null, extUserId: null,
+    })
+  }
+  const auth = new AuthService(authDb, 3600)
+  const identity = auth.createSudoworkIdentityService({
+    legacyJwtSecret: 'moss-compat-legacy-test-secret', tokenStore: {} as never,
+  })
+  const systemConfiguration = new SudoworkSystemConfigService({
+    db, identities, policies, smsConfigured: true,
+    defaults: { loginMethod: 'password', skillhubBaseUrl: 'https://example.test' },
+    secrets: { get: () => undefined, put: async () => {}, remove: async () => {} },
+  })
+  const legacy = createSudoworkCompatibilityApp({ identity, systemConfiguration })
+  const native = createSudoworkCompatibilityApp({ identity, systemConfiguration, organizationScopedAdmin: true })
+  const tokens: Record<string, string> = {}
+  for (const role of ['admin', 'super_admin', 'user']) {
+    tokens[role] = (await auth.issueTokenFromPassword({ username: role, password: 'FixturePass123' })).access_token
+  }
+  const rootContext = await auth.verifyAccessToken(tokens.super_admin!)
+  assert(rootContext)
+  tokens.switched_root = (await auth.switchOrg(rootContext, 'org-b')).access_token
+  return { db, auth, policies, identities, native, legacy, tokens }
+}
 
 const user: SudoworkLegacyUser = {
   id: 17,
@@ -338,7 +402,7 @@ void describe('Sudowork compatibility Hono app', () => {
     assert.equal(received[1]?.organizationScoped, true)
   })
 
-  void test('系统配置入口保留 platform super-admin 管理部署级配置', async () => {
+  void test('原生系统配置默认组织作用域，平台配置需显式选择', async () => {
     const received: Array<Record<string, unknown>> = []
     const app = createApp('password', undefined, {
       organizationScopedAdmin: true,
@@ -362,10 +426,135 @@ void describe('Sudowork compatibility Hono app', () => {
       body: '{}',
     })
 
-    assert.deepEqual(await read.json(), { success: true, data: { scope_type: 'platform' } })
+    assert.deepEqual(await read.json(), { success: true, data: { scope_type: 'organization' } })
     assert.equal(updated.status, 200)
-    assert.equal(received[0]?.organizationScoped, undefined)
-    assert.equal(received[1]?.organizationScoped, undefined)
+    assert.equal(received[0]?.organizationScoped, true)
+    assert.equal(received[1]?.organizationScoped, true)
+    const platform = await app.request('/api/v1/admin/system-config?scope=platform', { headers })
+    assert.deepEqual(await platform.json(), { success: true, data: { scope_type: 'platform' } })
+    assert.equal(received[2]?.organizationScoped, false)
+  })
+
+  void test('真实原生 Token 的系统配置读写按组织与平台作用域隔离', async () => {
+    const { db, auth, policies, native, tokens } = await createNativeSystemConfigFixture()
+    try {
+      const scenarios = [
+        { role: 'admin', scope: '', orgId: 'org-a' },
+        { role: 'admin', scope: '?scope=organization', orgId: 'org-a' },
+        { role: 'super_admin', scope: '', orgId: 'org-a' },
+        { role: 'super_admin', scope: '?scope=organization', orgId: 'org-a' },
+        { role: 'switched_root', scope: '', orgId: 'org-b' },
+        { role: 'switched_root', scope: '?scope=organization', orgId: 'org-b' },
+        { role: 'super_admin', scope: '?scope=platform', orgId: undefined },
+        { role: 'switched_root', scope: '?scope=platform', orgId: undefined },
+      ]
+      for (const [index, scenario] of scenarios.entries()) {
+        const headers = { authorization: `Bearer ${tokens[scenario.role]}`, 'content-type': 'application/json' }
+        const url = `/api/v1/admin/system-config${scenario.scope}`
+        const previousPlatform = policies.getPlatform()
+        const otherOrg = scenario.orgId === 'org-a' ? 'org-b' : 'org-a'
+        const previousOtherOrg = policies.getOrganization(otherOrg)
+        const model = `model-${index}`
+        const updated = await native.request(url, {
+          method: 'PUT', headers, body: JSON.stringify({ scode_auto_model: model }),
+        })
+        assert.equal(updated.status, 200, `${scenario.role} ${scenario.scope}`)
+        const read = await native.request(url, { headers })
+        assert.equal(read.status, 200)
+        const { data } = await read.json() as { data: Record<string, unknown> }
+        assert.equal(data.scope_type, scenario.orgId ? 'organization' : 'platform')
+        assert.equal(data.organization_id, scenario.orgId ?? '')
+        assert.equal(data.scode_auto_model, model)
+        assert.equal(data.sms !== undefined, scenario.orgId === undefined)
+        if (scenario.orgId) {
+          assert.equal(policies.getOrganization(scenario.orgId).scodeAutoModel, model)
+          assert.deepEqual(policies.getPlatform(), previousPlatform)
+        } else {
+          assert.equal(policies.getPlatform().scodeAutoModel, model)
+        }
+        assert.deepEqual(policies.getOrganization(otherOrg), previousOtherOrg)
+      }
+
+      for (const role of ['admin', 'super_admin', 'switched_root']) {
+        for (const body of [{ sms: { provider: 'disabled' } }, { billing: { enabled: true } }]) {
+          const response = await native.request('/api/v1/admin/system-config', {
+            method: 'PUT', headers: { authorization: `Bearer ${tokens[role]}`, 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          assert.equal(response.status, 403)
+        }
+      }
+      const infrastructure = await native.request('/api/v1/admin/system-config?scope=platform', {
+        method: 'PUT', headers: { authorization: `Bearer ${tokens.switched_root}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ sms: { provider: 'disabled' }, billing: { enabled: true } }),
+      })
+      assert.equal(infrastructure.status, 200)
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM platform_integration_settings').get()?.count, 2)
+    } finally {
+      auth.destroy()
+      db.close()
+    }
+  })
+
+  void test('真实原生 Token 拒绝非法 scope、普通管理员的平台访问和非管理员访问', async () => {
+    const { db, auth, policies, native, tokens } = await createNativeSystemConfigFixture()
+    try {
+      const scenarios = [
+        { role: 'admin', query: '?scope=platform', status: 403 },
+        { role: 'admin', query: '?scope=invalid', status: 400 },
+        { role: 'super_admin', query: '?scope=invalid', status: 400 },
+        { role: 'super_admin', query: '?scope=', status: 400 },
+        { role: 'switched_root', query: '?scope=invalid', status: 400 },
+        { role: 'user', query: '', status: 401 },
+        { role: 'user', query: '?scope=platform', status: 401 },
+        { role: 'missing', query: '?scope=organization', status: 401 },
+      ]
+      for (const scenario of scenarios) {
+        for (const method of ['GET', 'PUT']) {
+          const response = await native.request(`/api/v1/admin/system-config${scenario.query}`, {
+            method, headers: { authorization: `Bearer ${tokens[scenario.role] ?? 'invalid'}`, 'content-type': 'application/json' },
+            ...(method === 'PUT' ? { body: JSON.stringify({ scode_auto_model: 'forbidden' }) } : {}),
+          })
+          assert.equal(response.status, scenario.status, `${method} ${scenario.role} ${scenario.query}`)
+          assert.equal((await response.json() as { success: boolean }).success, false)
+        }
+      }
+      assert.deepEqual(policies.getPlatform(), {})
+      assert.deepEqual(policies.getOrganization('org-a'), {})
+      assert.deepEqual(policies.getOrganization('org-b'), {})
+    } finally {
+      auth.destroy()
+      db.close()
+    }
+  })
+
+  void test('旧入口保留真实 actor 的自然作用域并支持显式选择', async () => {
+    const { db, auth, policies, legacy, tokens } = await createNativeSystemConfigFixture()
+    try {
+      const scenarios = [
+        { role: 'admin', query: '', orgId: 'org-a' },
+        { role: 'super_admin', query: '', orgId: undefined },
+        { role: 'super_admin', query: '?scope=organization', orgId: 'org-a' },
+        { role: 'switched_root', query: '', orgId: 'org-b' },
+        { role: 'switched_root', query: '?scope=organization', orgId: 'org-b' },
+        { role: 'switched_root', query: '?scope=platform', orgId: undefined },
+      ]
+      for (const [index, scenario] of scenarios.entries()) {
+        const headers = { authorization: `Bearer ${tokens[scenario.role]}`, 'content-type': 'application/json' }
+        const url = `/api/v1/admin/system-config${scenario.query}`
+        const model = `legacy-model-${index}`
+        const updated = await legacy.request(url, { method: 'PUT', headers, body: JSON.stringify({ scode_auto_model: model }) })
+        assert.equal(updated.status, 200)
+        const read = await legacy.request(url, { headers })
+        const { data } = await read.json() as { data: Record<string, unknown> }
+        assert.equal(data.scope_type, scenario.orgId ? 'organization' : 'platform')
+        assert.equal(data.organization_id, scenario.orgId ?? '')
+        assert.equal((scenario.orgId ? policies.getOrganization(scenario.orgId) : policies.getPlatform()).scodeAutoModel, model)
+      }
+    } finally {
+      auth.destroy()
+      db.close()
+    }
   })
 
   void test('registers Dify administration routes through the compatibility app', async () => {

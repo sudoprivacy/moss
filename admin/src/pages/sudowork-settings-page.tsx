@@ -1,10 +1,12 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { KeyRound, Loader2, Save } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { ConfigScopeSelect } from '@/components/settings/config-scope-select'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -14,51 +16,118 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { operationsApi } from '@/lib/api/operations'
-import { SUDOWORK_LOGIN_METHODS } from '../sudowork-settings'
+import type { ConfigScope } from '@/lib/api/types'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { useSettingsNavigationGuard } from '@/lib/hooks/use-settings-navigation-guard'
+import { buildSudoworkConfigPatch, SUDOWORK_LOGIN_METHODS } from '../sudowork-settings'
 
 type Config = Record<string, unknown>
 type JsonObject = Record<string, unknown>
 
 export default function SudoworkSettingsPage() {
+  const { user, activeOrgId } = useAuth()
+  const [selectedScope, setScope] = useState<ConfigScope>('organization')
+  const allowPlatform = user?.role === 'super_admin'
+  const scope = allowPlatform ? selectedScope : 'organization'
+  return <ScopedSudoworkSettings key={`${activeOrgId}:${scope}`} scope={scope} organizationId={activeOrgId} allowPlatform={allowPlatform} onScopeChange={setScope} />
+}
+
+function ScopedSudoworkSettings({ scope, organizationId, allowPlatform, onScopeChange }: {
+  scope: ConfigScope
+  organizationId: string | null
+  allowPlatform: boolean
+  onScopeChange(scope: ConfigScope): void
+}) {
   const [config, setConfig] = useState<Config | null>(null)
+  const [baseline, setBaseline] = useState<Config | null>(null)
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const loadVersion = useRef(0)
+  const saveInFlight = useRef(false)
+  const discard = useCallback(() => {
+    setConfig(baseline)
+    setDirtyKeys(new Set())
+  }, [baseline])
+  const confirmDiscard = useSettingsNavigationGuard(dirtyKeys.size > 0, saving, discard)
+
+  async function changeScope(next: ConfigScope) {
+    if (next === scope || saveInFlight.current || !(await confirmDiscard())) return
+    onScopeChange(next)
+  }
+
+  const readConfig = useCallback(async () => {
+    const response = await operationsApi.getSudoworkSystemConfig(scope)
+    if (!response.success || !response.data) throw new Error(response.msg || '获取 Sudowork 策略失败')
+    if (response.data.scope_type !== scope || (scope === 'organization' && organizationId && response.data.organization_id !== organizationId)) {
+      throw new Error('服务器返回的配置范围不匹配，请重新加载。')
+    }
+    return response.data
+  }, [scope, organizationId])
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current
     setLoading(true)
+    setLoadError('')
+    setConfig(null)
+    setBaseline(null)
+    setDirtyKeys(new Set())
     try {
-      setConfig((await operationsApi.getSudoworkSystemConfig()).data)
-      setDirtyKeys(new Set())
+      const data = await readConfig()
+      if (version !== loadVersion.current) return
+      setConfig(data)
+      setBaseline(data)
     }
-    catch (error) { toast.error(error instanceof Error ? error.message : '获取 Sudowork 策略失败') }
-    finally { setLoading(false) }
-  }, [])
+    catch (error) { if (version === loadVersion.current) setLoadError(error instanceof Error ? error.message : '获取 Sudowork 策略失败') }
+    finally { if (version === loadVersion.current) setLoading(false) }
+  }, [readConfig])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { loadVersion.current += 1 }
+  }, [load])
 
   const patch = (value: Config) => {
-    setDirtyKeys(current => new Set([...current, ...Object.keys(value)]))
+    setDirtyKeys(current => {
+      const next = new Set(current)
+      for (const key of Object.keys(value)) {
+        if (JSON.stringify(value[key]) === JSON.stringify(baseline?.[key])) next.delete(key)
+        else next.add(key)
+      }
+      return next
+    })
     setConfig(current => ({ ...(current ?? {}), ...value }))
   }
   const nested = (key: string, value: JsonObject) => patch({ [key]: { ...object(config?.[key]), ...value } })
 
   const save = async () => {
-    if (!config) return
+    if (!config || !dirtyKeys.size || saveInFlight.current) return
+    saveInFlight.current = true
     setSaving(true)
+    const version = loadVersion.current
     try {
-      const payload = Object.fromEntries([...dirtyKeys].map(key => [key, config[key]]))
-      await operationsApi.updateSudoworkSystemConfig(payload)
-      setConfig((await operationsApi.getSudoworkSystemConfig()).data)
+      const payload = buildSudoworkConfigPatch(config, dirtyKeys, scope)
+      const response = await operationsApi.updateSudoworkSystemConfig(payload, scope)
+      if (!response.success) throw new Error(response.msg || '保存失败')
+      if (version !== loadVersion.current) return
+      const data = await readConfig()
+      if (version !== loadVersion.current) return
+      setConfig(data)
+      setBaseline(data)
       setDirtyKeys(new Set())
-      toast.success(config.scope_type === 'organization'
+      toast.success(scope === 'organization'
         ? 'Sudowork 组织策略已保存'
         : 'Sudowork 配置已保存；短信和支付基础设施变更需重启 Moss')
-    } catch (error) { toast.error(error instanceof Error ? error.message : '保存失败') }
-    finally { setSaving(false) }
+    } catch (error) { if (version === loadVersion.current) toast.error(error instanceof Error ? error.message : '保存失败') }
+    finally {
+      saveInFlight.current = false
+      if (version === loadVersion.current) setSaving(false)
+    }
   }
 
-  if (loading || !config) return <DashboardLayout title="Sudowork 系统设置"><div className="space-y-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20" />)}</div></DashboardLayout>
+  const scopeControl = <ConfigScopeSelect scope={scope} allowPlatform={allowPlatform} disabled={saving} onChange={next => void changeScope(next)} />
+  if (loading || !config) return <DashboardLayout title="Sudowork 系统设置"><div className="space-y-5">{scopeControl}{loadError ? <Alert variant="destructive"><AlertTitle>无法加载 Sudowork 策略</AlertTitle><AlertDescription><p>{loadError}</p><Button variant="outline" size="sm" onClick={() => void load()}>重试</Button></AlertDescription></Alert> : <div className="space-y-3" role="status" aria-label="正在加载 Sudowork 策略">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20" />)}</div>}</div></DashboardLayout>
 
   const logReport = object(config.log_report)
   const versionUpdate = object(config.version_update)
@@ -69,15 +138,17 @@ export default function SudoworkSettingsPage() {
   const billing = object(config.billing)
   const fuiou = object(billing.fuiou)
   const sudorouter = object(billing.sudorouter)
-  const isPlatformScope = config.scope_type !== 'organization'
+  const isPlatformScope = scope === 'platform'
   const nestedChild = (key: string, childKey: string, value: JsonObject) => {
     const parent = object(config[key])
     nested(key, { [childKey]: { ...object(parent[childKey]), ...value } })
   }
 
   return (
-    <DashboardLayout title="Sudowork 系统设置" description="统一管理客户端策略以及短信、支付和额度服务参数">
+    <DashboardLayout title="Sudowork 系统设置" description={isPlatformScope ? '平台客户端默认策略、短信和支付基础设施' : '当前组织的登录、客户端与充值策略'}>
       <div className="space-y-5">
+        {scopeControl}
+        <fieldset disabled={saving} className="space-y-5"><legend className="sr-only">{isPlatformScope ? '平台' : '当前组织'} Sudowork 策略</legend>
         <Card><CardHeader><CardTitle className="text-base">登录方式</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
           <Field label="默认登录方式"><Select value={String(config.login_method ?? 1)} onValueChange={value => patch({ login_method: Number(value) })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{SUDOWORK_LOGIN_METHODS.map(method => <SelectItem key={method.value} value={method.value}>{method.label}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="自动模型"><Input value={String(config.scode_auto_model ?? '')} onChange={event => patch({ scode_auto_model: event.target.value })} placeholder="留空使用 Moss 默认模型" /></Field>
@@ -135,7 +206,8 @@ export default function SudoworkSettingsPage() {
           </CardContent></Card>
         ) : null}
 
-        <div className="flex justify-end"><Button onClick={() => void save()} disabled={saving}>{saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}保存策略</Button></div>
+        </fieldset>
+        <div className="flex justify-end gap-2"><Button variant="ghost" disabled={saving || !dirtyKeys.size} onClick={() => void confirmDiscard()}>取消</Button><Button onClick={() => void save()} disabled={saving || !dirtyKeys.size}>{saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}保存策略</Button></div>
       </div>
     </DashboardLayout>
   )

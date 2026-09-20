@@ -49,6 +49,7 @@ import { SudoworkConfigService } from '../api/compat/sudowork/configService.js'
 import { createConfigItemsApi } from '../api/configItems.js'
 import type { ManagedImageStore } from '../configuration/managedImageStore.js'
 import { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
+import { resolveEffectiveLoginMethod } from '../configuration/loginPolicy.js'
 import { OrganizationModelSettingsRepository } from '../configuration/organizationModelSettingsRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../configuration/platformIntegrationSettingsRepository.js'
 import {
@@ -311,6 +312,8 @@ export class AuthService {
   private readonly oauth2Bridge: OAuth2Bridge
   private readonly identityRepository: IdentityRepository
   private readonly unifiedIdentity: UnifiedIdentityService
+  private readonly clientPolicies: ClientPolicyRepository
+  private readonly loginPolicyDefaults: { loginMethod: LoginPolicyMethod } = { loginMethod: 'password' }
   private sudorouterAccounts?: {
     accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
     initialQuotaUnits: number
@@ -332,6 +335,7 @@ export class AuthService {
     this.identityRepository = new IdentityRepository(this.db.db, {
       legacyClientCronEnabled: getSystemSettings().clientCronEnabled,
     })
+    this.clientPolicies = new ClientPolicyRepository(this.db.db)
     this.unifiedIdentity = new UnifiedIdentityService(this.db.db, this.db, this.identityRepository)
     void this.ensureCompatibilityRecords().catch((error) => {
       console.warn('[AuthService] Failed to ensure Sudowork compatibility records:', error)
@@ -372,15 +376,24 @@ export class AuthService {
       tokenStore: input.tokenStore,
       legacyJwtSecret: input.legacyJwtSecret,
       accountProvisioner: input.accountProvisioner,
-      getLoginMethod: input.getLoginMethod,
+      getLoginMethod: input.getLoginMethod ?? (orgId => this.getEffectiveLoginMethod(orgId)),
       nativeActorResolver: token => {
         const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer())
         if (!auth) return null
         const user = this.db.db
-          .prepare('SELECT * FROM users WHERE id = ? AND (org_id = ? OR role = ?) LIMIT 1')
-          .get(auth.userId, auth.orgId, 'super_admin') as unknown as AuthCenterUser | undefined
+          .prepare('SELECT id, org_id, role, status FROM users WHERE id = ? AND (org_id = ? OR role = ?) LIMIT 1')
+          .get(auth.userId, auth.orgId, 'super_admin') as {
+            id: string; org_id: string; role: string; status: string
+          } | undefined
         if (!user || user.status !== 'active') return null
-        return { userId: user.id, orgId: auth.orgId, role: user.role }
+        return {
+          userId: user.id,
+          orgId: auth.orgId,
+          role: user.role,
+          ...(user.role !== 'super_admin' || user.org_id !== auth.orgId
+            ? { organizationScoped: true }
+            : {}),
+        }
       },
     })
   }
@@ -616,9 +629,10 @@ export class AuthService {
     billing: SudoworkInfrastructureConfig['billing']
     productImprovementEncryptionRequired?: boolean
   }): SudoworkSystemConfigService {
+    this.loginPolicyDefaults.loginMethod = input.loginMethod
     return new SudoworkSystemConfigService({
       db: this.db.db,
-      policies: new ClientPolicyRepository(this.db.db),
+      policies: this.clientPolicies,
       infrastructureSettings: new PlatformIntegrationSettingsRepository(this.db.db),
       identities: this.identityRepository,
       defaults: {
@@ -709,10 +723,7 @@ export class AuthService {
                   FROM users ORDER BY created_at ASC`)
         .all() as unknown as AuthCenterUser[]
       for (const user of users) {
-        if (this.identityRepository.getNumericAlias('user', user.id) === null) {
-          this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
-        }
-        this.identityRepository.ensureWallet('user', user.id)
+        this.ensureUserCompatibilityRecords(user)
         if (user.localAuth && !this.identityRepository.findAuthIdentityByUser(user.id, 'password', 'moss')) {
           this.identityRepository.createAuthIdentity({
             id: randomUUID(), orgId: user.orgId, userId: user.id,
@@ -721,6 +732,13 @@ export class AuthService {
         }
       }
     })
+  }
+
+  private ensureUserCompatibilityRecords(user: AuthCenterUser): void {
+    if (this.identityRepository.getNumericAlias('user', user.id) === null) {
+      this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
+    }
+    this.identityRepository.ensureWallet('user', user.id)
   }
 
   destroy(): void {
@@ -778,7 +796,7 @@ export class AuthService {
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(401, 'User is invalid')
     }
-    this.assertRefreshLoginMethodAllowed(auth.orgId, auth.keyId)
+    this.assertRefreshLoginMethodAllowed(user.orgId, auth.keyId)
 
     return this.issueToken({
       user,
@@ -1248,15 +1266,17 @@ export class AuthService {
       if (!targetOrg) {
         const orgId = randomUUID()
         const orgName = incomingOrgName || `org-${identity.extOrgId}`
-        const createdAt = Date.now()
+        // Evaluate the intended CAS profile before provisioning anything. An
+        // explicit delivery policy still overrides this onboarding default.
+        this.assertOrganizationLoginMethod(orgId, 'cas', 'cas')
         try {
-          await this.db.createOrganization(orgId, orgName, createdAt, identity.extOrgId)
-          targetOrg = {
+          await this.unifiedIdentity.createOrganization({
             id: orgId,
             name: orgName,
             extOrgId: identity.extOrgId,
-            createdAt,
-          }
+            loginMethod: 'cas',
+          }, onlineCommandContext(`oauth2:organization:${identity.extOrgId}`))
+          targetOrg = await this.db.getOrganizationByExtId(identity.extOrgId)
         } catch (err) {
           // Race: another concurrent OAuth2 login created the same org first.
           // Re-read and continue with whichever row won.
@@ -1264,16 +1284,6 @@ export class AuthService {
             targetOrg = await this.db.getOrganizationByExtId(identity.extOrgId)
           }
           if (!targetOrg) throw err
-        }
-      } else if (incomingOrgName && incomingOrgName !== targetOrg.name) {
-        // IdP-authoritative rename. Empty incoming value preserves the moss
-        // row's name so a momentarily-missing IdP field doesn't clobber.
-        try {
-          await this.db.updateOrganization(targetOrg.id, { name: incomingOrgName })
-          targetOrg = { ...targetOrg, name: incomingOrgName }
-        } catch {
-          // A naming collision with another moss org is non-fatal here —
-          // login proceeds with the stale name.
         }
       }
     }
@@ -1284,6 +1294,16 @@ export class AuthService {
     }
     if (!targetOrg) {
       throw new AuthServiceError(500, 'No organization available for OAuth2 user')
+    }
+    this.assertOrganizationLoginMethod(targetOrg.id, 'cas')
+    const incomingOrgName = identity.extOrgName?.trim() || ''
+    if (identity.extOrgId && incomingOrgName && incomingOrgName !== targetOrg.name) {
+      try {
+        await this.db.updateOrganization(targetOrg.id, { name: incomingOrgName })
+        targetOrg = { ...targetOrg, name: incomingOrgName }
+      } catch {
+        // A naming collision is non-fatal; retain the current organization name.
+      }
     }
 
     // ── 2. User resolution ────────────────────────────────────────────────
@@ -1335,7 +1355,10 @@ export class AuthService {
         phone: null,
       }
       try {
-        await this.db.createUser(newUser)
+        await this.db.driver.transaction(async () => {
+          await this.db.createUser(newUser)
+          this.ensureUserCompatibilityRecords(newUser)
+        })
         user = newUser
       } catch (err) {
         // Race: concurrent login created the same user. Re-read.
@@ -1440,6 +1463,7 @@ export class AuthService {
     if (user.status !== 'active') {
       throw new AuthServiceError(403, 'User account is disabled')
     }
+    this.ensureUserCompatibilityRecords(user)
 
     // moss JWT scopes are moss's own permission vocabulary, derived from the
     // user's role — identical to the password/api_key paths. The provider's
@@ -2503,8 +2527,11 @@ export class AuthService {
     scopes: string[]
   }> {
     const orgId = input.orgIdOverride ?? input.user.orgId
-    if (input.loginMethod) {
-      this.assertOrganizationLoginMethod(orgId, input.loginMethod)
+    const loginMethod = input.loginMethod ?? loginMethodForTokenKey(input.keyId)
+    if (loginMethod) {
+      // Authentication belongs to the user's home organization; orgId may be
+      // a resource organization selected by a super admin.
+      this.assertOrganizationLoginMethod(input.user.orgId, loginMethod)
     }
     const access = issueAccessToken(
       {
@@ -2555,8 +2582,23 @@ export class AuthService {
     this.assertOrganizationLoginMethod(orgId, loginMethod)
   }
 
-  private assertOrganizationLoginMethod(orgId: string, expected: LoginPolicyMethod): void {
-    const actual = this.identityRepository.getOrganizationProfile(orgId)?.loginMethod ?? 'password'
+  private getEffectiveLoginMethod(orgId: string, newProfileMethod?: LoginPolicyMethod): LoginPolicyMethod {
+    return resolveEffectiveLoginMethod({
+      policies: this.clientPolicies,
+      identities: {
+        getOrganizationProfile: id => this.identityRepository.getOrganizationProfile(id)
+          ?? (newProfileMethod ? { loginMethod: newProfileMethod } : null),
+      },
+      defaults: this.loginPolicyDefaults,
+    }, orgId)
+  }
+
+  private assertOrganizationLoginMethod(
+    orgId: string,
+    expected: LoginPolicyMethod,
+    newProfileMethod?: LoginPolicyMethod,
+  ): void {
+    const actual = this.getEffectiveLoginMethod(orgId, newProfileMethod)
     if (actual === expected) return
     if (expected === 'password') {
       throw new AuthServiceError(403, 'Current organization does not allow password login')

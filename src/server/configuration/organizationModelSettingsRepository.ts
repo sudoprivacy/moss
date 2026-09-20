@@ -31,6 +31,10 @@ export class OrganizationModelSettingsRepository {
     }
   }
 
+  has(orgId: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM organization_model_settings WHERE org_id = ?').get(orgId.trim()))
+  }
+
   put(orgId: string, patch: OrganizationModelSettings, updatedBy: string): OrganizationModelSettings {
     const id = orgId.trim()
     if (!id) throw new Error('Organization id is required')

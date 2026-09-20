@@ -44,8 +44,14 @@ void describe('Organization 企业自动化策略', () => {
     assert.equal(repository.getOrganizationProfile('org-b')?.clientCronEnabled, false)
   })
 
-  void it('新 Organization 默认允许本地 Cron，更新其他资料不会覆盖策略', () => {
-    const repository = new IdentityRepository(createLegacyDatabase())
+  void it('新 Organization 默认允许本地 Cron，更新其他资料不会覆盖策略', t => {
+    const db = createLegacyDatabase()
+    t.after(() => db.close())
+    const repository = new IdentityRepository(db, { legacyClientCronEnabled: false })
+    const cronColumn = db.prepare('PRAGMA table_info(organization_profiles)').all()
+      .find(column => column.name === 'client_cron_enabled')
+    assert.equal(cronColumn?.dflt_value, '0')
+    assert.equal(repository.getOrganizationProfile('org-a')?.clientCronEnabled, false)
     repository.putOrganizationProfile({
       orgId: 'org-c', code: 'C', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })

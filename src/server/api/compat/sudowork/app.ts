@@ -14,6 +14,7 @@ import { CatalogArtifactError } from '../../../catalog/catalogArtifactStore.js'
 import { SudoworkConfigError, type SudoworkConfigService } from './configService.js'
 import { ManagedImageError, type ManagedImageStore } from '../../../configuration/managedImageStore.js'
 import { SudoworkSystemConfigError, type SudoworkSystemConfigService } from './systemConfigService.js'
+import { ConfigurationScopeError, resolveConfigurationActor } from '../../../configuration/adminScope.js'
 import { SudoworkBillingError, type SudoworkBillingPort } from './billingService.js'
 import { registerSudoworkBillingRoutes } from './billingRoutes.js'
 import { BillingDomainError } from '../../../billing/types.js'
@@ -412,7 +413,7 @@ export function createSudoworkCompatibilityApp(options: {
     if (error instanceof ManagedImageError) {
       return context.json({ success: false, msg: error.message }, error.statusCode as 400)
     }
-    if (error instanceof SudoworkSystemConfigError) {
+    if (error instanceof SudoworkSystemConfigError || error instanceof ConfigurationScopeError) {
       return context.json({ success: false, msg: error.message }, error.statusCode as 400)
     }
     if (error instanceof SudoworkBillingError) {
@@ -636,14 +637,17 @@ export function createSudoworkCompatibilityApp(options: {
     return actor && (actor.role === 'super_admin' || actor.role === 'admin') ? actor : null
   }
 
-  const getSystemConfigAdminActor = async (authorization: string | undefined): Promise<IdentityActor | null> => {
+  const getSystemConfigAdminActor = async (
+    authorization: string | undefined,
+    scope: string | undefined,
+  ): Promise<IdentityActor | null> => {
     const token = bearerToken(authorization)
     if (!token) return null
     const actor = await options.identity.getActor(token)
     if (!actor || (actor.role !== 'super_admin' && actor.role !== 'admin')) return null
-    return options.organizationScopedAdmin && actor.role !== 'super_admin'
-      ? { ...actor, organizationScoped: true }
-      : actor
+    const defaultScope = options.organizationScopedAdmin || actor.organizationScoped || actor.role !== 'super_admin'
+      ? 'organization' : 'platform'
+    return resolveConfigurationActor(actor, scope, defaultScope)
   }
 
   const cursorLimit = (value: string | undefined): number | undefined => {
@@ -1270,14 +1274,14 @@ export function createSudoworkCompatibilityApp(options: {
   })
 
   app.get('/api/v1/admin/system-config', async (context) => {
-    const actor = await getSystemConfigAdminActor(context.req.header('Authorization'))
+    const actor = await getSystemConfigAdminActor(context.req.header('Authorization'), context.req.query('scope'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json({ success: true, data: options.systemConfiguration.getAdminConfig(actor) })
   })
 
   app.put('/api/v1/admin/system-config', async (context) => {
-    const actor = await getSystemConfigAdminActor(context.req.header('Authorization'))
+    const actor = await getSystemConfigAdminActor(context.req.header('Authorization'), context.req.query('scope'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     await options.systemConfiguration.update(actor, await context.req.json<Record<string, unknown>>())

@@ -26,3 +26,5 @@ node_modules
 !/tests/secrets-api.test.ts
 !/tests/cron-jobs.browser.js
 !/tests/credentials.browser.js
+!/tests/config-scope.test.ts
+!/tests/config-scope.browser.py

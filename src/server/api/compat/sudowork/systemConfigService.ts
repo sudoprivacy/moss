@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
+import { resolveEffectiveLoginMethod } from '../../../configuration/loginPolicy.js'
 import type { ConfigKey } from '../../../configStore/configStore.js'
 import {
   hasGlobalOrganizationAccess,
@@ -8,7 +9,7 @@ import {
 } from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
-import { getSystemSettings, updateSystemSettings } from '../../../systemSettings.js'
+import { getSystemSettings, updateSystemSettingsWithCommit } from '../../../systemSettings.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
 
@@ -90,7 +91,7 @@ export class SudoworkSystemConfigService {
   }
 
   getLoginMethod(orgId?: string): LoginMethod {
-    return loginMethodFromNumber(this.policy(orgId).loginMethod, this.options.defaults.loginMethod)
+    return resolveEffectiveLoginMethod(this.options, orgId)
   }
 
   getPublicConfig(orgId?: string): Json {
@@ -229,9 +230,9 @@ export class SudoworkSystemConfigService {
       patch, inheritedKeys, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId, clientCronEnabled,
     } = this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
-    if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
     try {
-      runInTransaction(this.options.db, () => {
+      if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
+      const commit = () => runInTransaction(this.options.db, () => {
         if (Object.keys(patch).length > 0) {
           if (orgId) this.options.policies.putOrganization(orgId, patch, actor.userId)
           else this.options.policies.putPlatform(patch, actor.userId)
@@ -251,8 +252,8 @@ export class SudoworkSystemConfigService {
         if (providers) this.replaceCasConnections(providers, orgId)
       })
       if (clientCronEnabled !== undefined && orgId === undefined) {
-        await updateSystemSettings({ clientCronEnabled })
-      }
+        await updateSystemSettingsWithCommit({ clientCronEnabled }, commit)
+      } else commit()
     } catch (error) {
       if (nextLogKey !== undefined) {
         if (previousLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, previousLogKey)
@@ -276,7 +277,7 @@ export class SudoworkSystemConfigService {
     orgId?: string
     clientCronEnabled?: boolean
   } {
-    if (actor.role !== 'super_admin') throw new SudoworkSystemConfigError(403, '权限不足')
+    this.assertAdmin(actor)
     const orgId = this.policyOrgId(actor)
     const platformActor = orgId === undefined
     const patch: Json = {}
@@ -383,7 +384,7 @@ export class SudoworkSystemConfigService {
       )
     }
     const scoped = orgId
-      ? splitPlatformInheritedValues(patch, this.platformInheritedValues())
+      ? splitPlatformInheritedValues(patch, this.platformInheritedValues(orgId))
       : { patch, inheritedKeys: [] }
     return {
       patch: scoped.patch,
@@ -413,12 +414,12 @@ export class SudoworkSystemConfigService {
     return this.options.policies.getEffective(orgId)
   }
 
-  private platformInheritedValues(): Json {
+  private platformInheritedValues(orgId: string): Json {
     const platform = this.options.policies.getPlatform()
     const systemSettings = getSystemSettings()
     return {
       ...platform,
-      loginMethod: platform.loginMethod ?? loginMethodToNumber(this.options.defaults.loginMethod),
+      loginMethod: loginMethodToNumber(resolveEffectiveLoginMethod(this.options, orgId, { ignoreOrganizationPolicy: true })),
       logReport: platform.logReport ?? { enabled: 0, protocol: '', domain: '', keySet: Boolean(this.options.secrets.get(LOG_REPORT_SECRET_KEY)) },
       versionUpdate: platform.versionUpdate ?? { enabled: 0, cosDomain: '' },
       productImprovement: platform.productImprovement ?? { enabled: 0 },
@@ -889,11 +890,6 @@ function adminOptionalUrl(value: unknown, fallback: string | undefined, label: s
   const normalized = value === undefined ? fallback : string(value)
   if (normalized && !validHttpUrl(normalized)) throw new SudoworkSystemConfigError(400, `${label}格式不正确`)
   return normalized || undefined
-}
-
-function loginMethodFromNumber(value: unknown, fallback: LoginMethod): LoginMethod {
-  return value === 0 ? 'sms' : value === 1 ? 'password' : value === 2 ? 'cas'
-    : value === 'sms' || value === 'password' || value === 'cas' ? value : fallback
 }
 
 function loginMethodToNumber(value: LoginMethod): 0 | 1 | 2 {

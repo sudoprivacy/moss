@@ -5,6 +5,7 @@ import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
 import { getSystemSettings } from '../systemSettings.js'
 import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import { migrateLegacyEnterpriseCronPolicy } from '../migration/legacyEnterpriseCronPolicy.js'
 
 type EnterpriseBrandingPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
@@ -26,6 +27,12 @@ export function createEnterpriseApi(
     putClientPolicy?: (orgId: string, patch: ClientFacingPolicy, updatedBy: string) => void
   } = {},
 ) {
+  // Production auth seeds profiles before this factory is created. Only the
+  // hook-backed API switches policy ownership away from the legacy columns.
+  if (db.db && options.getClientCronEnabled && options.setClientCronEnabled) {
+    migrateLegacyEnterpriseCronPolicy(db.db)
+  }
+
   function enterpriseLogoDir(orgId: string): string {
     return orgId === 'default'
       ? path.join(runtimeDir, 'uploads', 'enterprise')
@@ -40,9 +47,9 @@ export function createEnterpriseApi(
       ? options.getClientPolicy(requestedOrgId === 'default' ? undefined : requestedOrgId)
       : {}
     return {
-      clientCronEnabled: requestedOrgId !== 'default' && options.getClientCronEnabled
+      clientCronEnabled: systemSettings.clientCronEnabled && (requestedOrgId !== 'default' && options.getClientCronEnabled
         ? options.getClientCronEnabled(requestedOrgId)
-        : enterprise.client_cron_enabled ?? systemSettings.clientCronEnabled,
+        : enterprise.client_cron_enabled ?? true),
       clientShowToolCalls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
         : enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,

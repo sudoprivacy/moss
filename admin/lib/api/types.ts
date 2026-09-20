@@ -226,7 +226,12 @@ export interface UpdateSystemSettingsModelProvider extends Omit<SystemSettingsMo
   apiKey?: string
 }
 
+export type ConfigScope = 'organization' | 'platform'
+
 export interface SystemSettings {
+  scopeType?: ConfigScope
+  /** Empty for platform configuration. */
+  organizationId?: string
   bypassPermissions: boolean
   model: string
   maxTurns: number

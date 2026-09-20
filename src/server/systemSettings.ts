@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { randomUUID } from 'node:crypto'
 import os from 'os'
 import path from 'path'
 import { getConfigStore, organizationConfigKey } from './configStore/configStore.js'
@@ -9,6 +10,7 @@ import {
   normalizeModelProviders,
   providerApiKeysFromInput,
   refreshStoredProviderApiKeys,
+  providerApiKeysConfigKey,
   saveProviderApiKeys,
   toPublicProviders,
   type ModelProvider,
@@ -61,6 +63,8 @@ export type SystemSettingsOAuth2 = {
 export type SystemSettingsModelProvider = PublicModelProvider
 
 export type SystemSettingsPayload = {
+  scopeType?: 'organization' | 'platform'
+  organizationId?: string
   bypassPermissions: boolean
   model: string
   maxTurns: number
@@ -537,11 +541,12 @@ export async function getOrganizationSystemSettings(
 ): Promise<SystemSettingsPayload> {
   if (!orgId?.trim()) {
     const platform = getSystemSettings()
-    return options.redactSecrets ? redactSystemSettingsSecrets(platform) : platform
+    const scoped = { ...platform, scopeType: 'platform' as const, organizationId: '' }
+    return options.redactSecrets ? redactSystemSettingsSecrets(scoped) : scoped
   }
   await refreshOrganizationModelCredentials(orgId)
   const state = readOrganizationSystemSettingsState(orgId, repository.get(orgId))
-  const payload = toSystemSettingsPayload(state, orgId)
+  const payload = { ...toSystemSettingsPayload(state, orgId), scopeType: 'organization' as const, organizationId: orgId }
   return options.redactSecrets ? redactSystemSettingsSecrets(payload) : payload
 }
 
@@ -564,6 +569,35 @@ export function updateSystemSettings(patch: unknown): Promise<SystemSettingsPayl
   return run
 }
 
+/** Serialize the file and DB commit with other settings writes, restoring the file on failure. */
+export function updateSystemSettingsWithCommit(
+  patch: unknown,
+  commit: () => void,
+): Promise<SystemSettingsPayload> {
+  const source = isRecord(patch) ? patch : {}
+  if (Object.keys(source).some(key => key !== 'clientCronEnabled')) {
+    return Promise.reject(new Error('Transactional settings updates only support clientCronEnabled'))
+  }
+  const run = updateSystemSettingsQueue.then(async () => {
+    const previous = existsSync(SYSTEM_SETTINGS_PATH) ? readFileSync(SYSTEM_SETTINGS_PATH) : undefined
+    const settings = await performUpdateSystemSettings(source)
+    try {
+      commit()
+    } catch (error) {
+      try {
+        if (previous) writeSettingsFile(previous)
+        else rmSync(SYSTEM_SETTINGS_PATH, { force: true })
+      } catch (restoreError) {
+        throw new AggregateError([error, restoreError], 'Failed to commit settings and restore previous file')
+      }
+      throw error
+    }
+    return settings
+  })
+  updateSystemSettingsQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
 export function updateOrganizationSystemSettings(
   orgId: string | undefined,
   repository: OrganizationModelSettingsRepository,
@@ -574,7 +608,8 @@ export function updateOrganizationSystemSettings(
   if (!orgId?.trim()) {
     const run = updateSystemSettingsQueue.then(async () => {
       const platform = await performUpdateSystemSettings(patch)
-      return options.redactSecrets ? redactSystemSettingsSecrets(platform) : platform
+      const scoped = { ...platform, scopeType: 'platform' as const, organizationId: '' }
+      return options.redactSecrets ? redactSystemSettingsSecrets(scoped) : scoped
     })
     updateSystemSettingsQueue = run.then(() => undefined, () => undefined)
     return run
@@ -636,33 +671,59 @@ async function performUpdateOrganizationModelSettings(
   const currentSettings = currentState.value
   const nextSettings = normalizeSystemSettings(source, currentSettings)
   const store = getConfigStore()
+  const credentialKeys = [
+    organizationScopedConfigKey(orgId, 'settings.anthropic-auth-token'),
+    organizationScopedConfigKey(orgId, 'settings.image-api-key'),
+    providerApiKeysConfigKey(orgId),
+  ]
+  const previousCredentials = new Map(credentialKeys.map(key => [key, store.get(key)]))
+  const changedKeys: ConfigKey[] = []
+  try {
+    if (typeof source.apiKey === 'string') {
+      const nextApiKey = source.apiKey.trim()
+      const key = organizationScopedConfigKey(orgId, 'settings.anthropic-auth-token')
+      changedKeys.push(key)
+      if (nextApiKey) await store.put(key, nextApiKey)
+      else await store.remove(key)
+    }
 
-  if (typeof source.apiKey === 'string') {
-    const nextApiKey = source.apiKey.trim()
-    const key = organizationScopedConfigKey(orgId, 'settings.anthropic-auth-token')
-    if (nextApiKey) await store.put(key, nextApiKey)
-    else await store.remove(key)
-  }
+    const sourceImage = isRecord(source.image) ? source.image : {}
+    if (typeof sourceImage.apiKey === 'string') {
+      const nextApiKey = sourceImage.apiKey.trim()
+      const key = organizationScopedConfigKey(orgId, 'settings.image-api-key')
+      changedKeys.push(key)
+      if (nextApiKey) await store.put(key, nextApiKey)
+      else await store.remove(key)
+    }
 
-  const sourceImage = isRecord(source.image) ? source.image : {}
-  if (typeof sourceImage.apiKey === 'string') {
-    const nextApiKey = sourceImage.apiKey.trim()
-    const key = organizationScopedConfigKey(orgId, 'settings.image-api-key')
-    if (nextApiKey) await store.put(key, nextApiKey)
-    else await store.remove(key)
-  }
+    if (Array.isArray(source.modelProviders)) {
+      changedKeys.push(providerApiKeysConfigKey(orgId))
+      await saveProviderApiKeys(
+        providerApiKeysFromInput(source.modelProviders, getStoredProviderApiKeys(orgId)),
+        orgId,
+      )
+    }
+    clearProviderModelCache(undefined, orgId)
 
-  if (Array.isArray(source.modelProviders)) {
-    await saveProviderApiKeys(
-      providerApiKeysFromInput(source.modelProviders, getStoredProviderApiKeys(orgId)),
-      orgId,
-    )
-  }
-  clearProviderModelCache()
-
-  const organizationPatch = modelSettingsPatchFromInput(source, nextSettings)
-  if (Object.keys(organizationPatch).length > 0) {
-    repository.put(orgId, organizationPatch, updatedBy)
+    const organizationPatch = modelSettingsPatchFromInput(source, nextSettings)
+    // An explicit credential clear also marks this organization as initialized.
+    if (Object.keys(source).length > 0) {
+      repository.put(orgId, organizationPatch, updatedBy)
+    }
+  } catch (error) {
+    const failures: unknown[] = [error]
+    for (const key of changedKeys.reverse()) {
+      try {
+        const previous = previousCredentials.get(key)
+        if (previous === undefined) await store.remove(key)
+        else await store.put(key, previous)
+      } catch (restoreError) {
+        failures.push(restoreError)
+      }
+    }
+    clearProviderModelCache(undefined, orgId)
+    if (failures.length > 1) throw new AggregateError(failures, 'Organization credentials could not be restored')
+    throw error
   }
 }
 
@@ -803,8 +864,7 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
     delete toSave.env
   }
 
-  mkdirSync(MOSS_HOME, { recursive: true })
-  writeFileSync(SYSTEM_SETTINGS_PATH, `${JSON.stringify(toSave, null, 2)}\n`, 'utf8')
+  writeSettingsFile(`${JSON.stringify(toSave, null, 2)}\n`)
 
   return {
     bypassPermissions: nextSettings.bypassPermissions,
@@ -837,5 +897,16 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
     settingsExists: true,
     settingsLoaded: true,
     settingsParseError: '',
+  }
+}
+
+function writeSettingsFile(contents: string | Buffer): void {
+  mkdirSync(MOSS_HOME, { recursive: true })
+  const temporary = `${SYSTEM_SETTINGS_PATH}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, contents, { mode: 0o600 })
+    renameSync(temporary, SYSTEM_SETTINGS_PATH)
+  } finally {
+    rmSync(temporary, { force: true })
   }
 }

@@ -1,16 +1,30 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import os from 'node:os'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, test } from 'node:test'
-import { AuthCenterDb } from '../../../authCenter/db.js'
-import { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
-import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
-import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
-import { migrationCommandContext } from '../../../application/commandContext.js'
-import { getSystemSettings, updateSystemSettings } from '../../../systemSettings.js'
-import { SudoworkSystemConfigError, SudoworkSystemConfigService } from './systemConfigService.js'
+import { after, describe, mock, test } from 'node:test'
 
-async function setup(secretFailure = false) {
+const testHome = fs.mkdtempSync(join(os.tmpdir(), 'moss-system-config-test-'))
+const homedirMock = mock.method(os, 'homedir', () => testHome)
+syncBuiltinESMExports()
+const { AuthCenterDb } = await import('../../../authCenter/db.js')
+const { ClientPolicyRepository } = await import('../../../configuration/clientPolicyRepository.js')
+const { PlatformIntegrationSettingsRepository } = await import('../../../configuration/platformIntegrationSettingsRepository.js')
+const { IdentityRepository } = await import('../../../identity/identityRepository.js')
+const { UnifiedIdentityService } = await import('../../../identity/unifiedIdentityService.js')
+const { migrationCommandContext } = await import('../../../application/commandContext.js')
+const { SYSTEM_SETTINGS_PATH, getSystemSettings, updateSystemSettings } = await import('../../../systemSettings.js')
+const { SudoworkSystemConfigError, SudoworkSystemConfigService } = await import('./systemConfigService.js')
+assert.equal(SYSTEM_SETTINGS_PATH, join(testHome, '.moss', 'settings.json'))
+after(() => {
+  homedirMock.mock.restore()
+  syncBuiltinESMExports()
+  fs.rmSync(testHome, { recursive: true, force: true })
+})
+
+async function setup(secretFailure: false | 'before-write' | 'after-write' = false) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   const identities = new IdentityRepository(db)
@@ -44,8 +58,9 @@ async function setup(secretFailure = false) {
     secrets: {
       get(key: string) { return secrets.get(key) },
       async put(key: string, value: string) {
-        if (secretFailure) throw new Error('nexus unavailable')
+        if (secretFailure === 'before-write') throw new Error('nexus unavailable')
         secrets.set(key, value)
+        if (secretFailure === 'after-write' && value === 'new-secret') throw new Error('nexus unavailable after write')
       },
       async remove(key: string) { secrets.delete(key) },
     },
@@ -109,10 +124,10 @@ void describe('Sudowork 系统配置统一服务', () => {
   })
 
   void test('权限、短信前置条件和 Nexus 失败不会留下部分策略', async () => {
-    const { db, org, service } = await setup(true)
+    const { db, org, service } = await setup('before-write')
     try {
       await assert.rejects(
-        service.update({ userId: 'admin', orgId: org.organizationId, role: 'admin' }, { login_method: 1 }),
+        service.update({ userId: 'user', orgId: org.organizationId, role: 'user' }, { login_method: 1 }),
         (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403,
       )
       await assert.rejects(
@@ -126,6 +141,42 @@ void describe('Sudowork 系统配置统一服务', () => {
       db.close()
     }
   })
+
+  void test('组织管理员可保存客户端策略但不能修改部署级基础设施', async () => {
+    const { db, org, service } = await setup()
+    try {
+      const actor = { userId: 'admin', orgId: org.organizationId, role: 'admin' }
+      await service.update(actor, { scode_auto_model: 'organization-model', client_show_tool_calls: false })
+      const policies = new ClientPolicyRepository(db)
+      assert.deepEqual(policies.getPlatform(), {})
+      assert.deepEqual(policies.getOrganization(org.organizationId), {
+        scodeAutoModel: 'organization-model', clientShowToolCalls: false,
+      })
+      for (const body of [{ sms: { provider: 'disabled' } }, { billing: { enabled: false } }]) {
+        await assert.rejects(service.update(actor, body),
+          (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  for (const previousSecret of [undefined, 'previous-secret']) {
+    void test(`密钥写入后失败时恢复${previousSecret ? '原密钥' : '未配置状态'}`, async () => {
+      const { db, org, secrets, service } = await setup('after-write')
+      try {
+        if (previousSecret) secrets.set('client.log-report-key', previousSecret)
+        await assert.rejects(service.update({ userId: 'root', orgId: org.organizationId, role: 'super_admin' }, {
+          scode_auto_model: 'should-not-save',
+          log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+        }), /nexus unavailable after write/)
+        assert.equal(secrets.get('client.log-report-key'), previousSecret)
+        assert.deepEqual(new ClientPolicyRepository(db).getPlatform(), {})
+      } finally {
+        db.close()
+      }
+    })
+  }
 
   void test('平台超级管理员可更新短信和支付基础设施并要求重启', async () => {
     const { db, org, service } = await setup()
@@ -388,23 +439,113 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  void test('平台 cron 写入在数据库事务失败时不留下部分全局修改', async () => {
+  void test('平台未配置登录方式时恢复组织 profile 的 CAS 会清除 override', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const profile = identities.getOrganizationProfile(org.organizationId)
+      assert(profile)
+      identities.putOrganizationProfile({ ...profile, loginMethod: 'cas' })
+      const policies = new ClientPolicyRepository(db)
+      policies.putOrganization(org.organizationId, {
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'org-cas' },
+      }, 'admin')
+      identities.putIntegrationConnection({
+        id: 'org-cas', orgId: org.organizationId, providerType: 'cas', name: 'Org CAS',
+        enabled: true, secretRef: null, config: {},
+      })
+      const actor = { userId: 'admin', orgId: org.organizationId, role: 'admin' }
+      assert.equal(service.getLoginMethod(), 'password')
+      assert.equal(service.getLoginMethod(org.organizationId), 'cas')
+      assert.equal(service.getAdminConfig(actor).login_method, 2)
+      assert.equal(service.getPublicConfig(org.organizationId).login_method, 2)
+
+      await service.update(actor, { login_method: 1 })
+      assert.equal(policies.getOrganization(org.organizationId).loginMethod, 1)
+      assert.equal(service.getLoginMethod(org.organizationId), 'password')
+      await service.update(actor, { login_method: 2 })
+      assert.equal(policies.getOrganization(org.organizationId).loginMethod, undefined)
+      assert.equal(service.getLoginMethod(org.organizationId), 'cas')
+      assert.deepEqual(policies.getPlatform(), {})
+
+      policies.putPlatform({ loginMethod: 1 }, 'root')
+      assert.equal(service.getLoginMethod(org.organizationId), 'password')
+      await service.update(actor, { login_method: 2 })
+      assert.equal(policies.getOrganization(org.organizationId).loginMethod, 2)
+      assert.equal(service.getLoginMethod(org.organizationId), 'cas')
+      await service.update(actor, { login_method: 1 })
+      assert.equal(policies.getOrganization(org.organizationId).loginMethod, undefined)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('平台 cron 写入在数据库事务失败时恢复文件、策略和密钥', async () => {
     const original = getSystemSettings()
-    const { db, org, service } = await setup()
+    const { db, org, secrets, service } = await setup()
     try {
       await updateSystemSettings({ clientCronEnabled: true })
-      db.close()
+      const previousFile = fs.readFileSync(SYSTEM_SETTINGS_PATH)
+      secrets.set('client.log-report-key', 'previous-secret')
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({ scodeAutoModel: 'previous-model' }, 'root')
+      db.exec(`
+        CREATE TRIGGER fail_infrastructure_insert BEFORE INSERT ON platform_integration_settings
+        BEGIN SELECT RAISE(ABORT, 'infrastructure database failure'); END;
+      `)
 
       await assert.rejects(service.update({
         userId: 'root', orgId: org.organizationId, role: 'super_admin',
       }, {
         client_cron_enabled: false,
-        scode_auto_model: 'will-fail-before-settings-write',
-      }))
+        scode_auto_model: 'should-roll-back',
+        sms: { provider: 'disabled' },
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+      }), /infrastructure database failure/)
 
       assert.equal(getSystemSettings().clientCronEnabled, true)
+      assert.deepEqual(fs.readFileSync(SYSTEM_SETTINGS_PATH), previousFile)
+      assert.deepEqual(policies.getPlatform(), { scodeAutoModel: 'previous-model' })
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM platform_integration_settings').get()?.count, 0)
+      assert.equal(secrets.get('client.log-report-key'), 'previous-secret')
     } finally {
       await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
+    }
+  })
+
+  void test('平台 cron 文件写入失败时不提交数据库并恢复密钥', async () => {
+    const original = getSystemSettings()
+    const { db, org, secrets, service } = await setup()
+    await updateSystemSettings({ clientCronEnabled: true })
+    const previousFile = fs.readFileSync(SYSTEM_SETTINGS_PATH)
+    const policies = new ClientPolicyRepository(db)
+    policies.putPlatform({ scodeAutoModel: 'previous-model' }, 'root')
+    secrets.set('client.log-report-key', 'previous-secret')
+    const writeFile = fs.writeFileSync
+    const writeMock = mock.method(fs, 'writeFileSync', (...args: Parameters<typeof fs.writeFileSync>) => {
+      if (String(args[0]).startsWith(`${SYSTEM_SETTINGS_PATH}.`)) throw new Error('settings file write failure')
+      return writeFile(...args)
+    })
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin',
+      }, {
+        client_cron_enabled: false,
+        scode_auto_model: 'should-not-save',
+        sms: { provider: 'disabled' },
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+      }), /settings file write failure/)
+      assert.deepEqual(policies.getPlatform(), { scodeAutoModel: 'previous-model' })
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM platform_integration_settings').get()?.count, 0)
+      assert.equal(secrets.get('client.log-report-key'), 'previous-secret')
+      assert.equal(getSystemSettings().clientCronEnabled, true)
+      assert.deepEqual(fs.readFileSync(SYSTEM_SETTINGS_PATH), previousFile)
+    } finally {
+      writeMock.mock.restore()
+      syncBuiltinESMExports()
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
     }
   })
 

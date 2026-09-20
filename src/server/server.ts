@@ -21,6 +21,7 @@ import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
+import { ConfigurationScopeError, resolveConfigurationActor } from './configuration/adminScope.js'
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
@@ -1144,11 +1145,17 @@ async function attachSudocodeFields<T extends Record<string, unknown>>(
 async function resolveSystemSettingsOrgScope(
   auth: AuthContext,
   authService: AuthService,
+  requestedScope: string | null,
 ): Promise<string | undefined> {
   const actor = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
-  return actor?.role === 'super_admin' && actor.orgId === auth.orgId
-    ? undefined
-    : auth.orgId
+  if (!actor) throw new HttpError(401, 'User is invalid')
+  try {
+    const scoped = resolveConfigurationActor({ userId: auth.userId, orgId: auth.orgId, role: actor.role }, requestedScope)
+    return scoped.organizationScoped ? auth.orgId : undefined
+  } catch (error) {
+    if (error instanceof ConfigurationScopeError) throw new HttpError(error.statusCode, error.message)
+    throw error
+  }
 }
 
 function redirect(
@@ -2144,7 +2151,7 @@ export function startServer(
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
-        if (!user) return null
+        if (!user || user.status !== 'active') return null
         return {
           role: user.role,
           scopes: user.scopes || [],
@@ -2184,7 +2191,7 @@ export function startServer(
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
-        if (!user) return null
+        if (!user || user.status !== 'active') return null
         return { role: user.role, scopes: user.scopes || [] }
       } catch {
         return null
@@ -7124,7 +7131,7 @@ export function startServer(
       // Model cache refresh endpoint (admin only)
       if (req.method === 'POST' && pathname === '/api/v1/models/refresh-cache') {
         authService.requireScope(auth, 'admin:settings')
-        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService)
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
         const systemSettings = await authService.getOrganizationSystemSettings(settingsOrgId)
         const models = await refreshModelCache({ settings: systemSettings, orgId: settingsOrgId })
         writeJson(res, 200, {
@@ -7925,7 +7932,7 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
-        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService)
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
         writeJson(res, 200, await authService.getOrganizationSystemSettings(settingsOrgId, { redactSecrets: true }))
         return
       }
@@ -7945,7 +7952,7 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService)
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
         try {
           writeJson(res, 200, await authService.updateOrganizationSystemSettings(
             settingsOrgId,

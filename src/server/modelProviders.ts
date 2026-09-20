@@ -213,9 +213,12 @@ export async function discoverProviderModels(
   return models
 }
 
-export function clearProviderModelCache(providerId?: string): void {
-  if (!providerId) return void catalogCache.clear()
-  for (const key of catalogCache.keys()) if (key.startsWith(`${providerId}\u0000`)) catalogCache.delete(key)
+export function clearProviderModelCache(providerId?: string, orgId?: string): void {
+  if (!providerId && !orgId) return void catalogCache.clear()
+  for (const key of catalogCache.keys()) {
+    const [scope, cachedProviderId] = key.split('\u0000')
+    if ((!orgId || scope === orgId) && (!providerId || cachedProviderId === providerId)) catalogCache.delete(key)
+  }
 }
 
 export function getProviderModelCacheStatus(): { cached: boolean; age: number | null; count: number } {

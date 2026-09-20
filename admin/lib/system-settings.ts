@@ -1,4 +1,5 @@
 import type {
+  ConfigScope,
   ModelProviderProtocol,
   SystemSettings,
   SystemSettingsModelProvider,
@@ -80,7 +81,7 @@ export function createSettingsDraft(settings: SystemSettings): SettingsDraft {
   }
 }
 
-export function validateSettingsDraft(draft: SettingsDraft): SettingsErrors {
+export function validateSettingsDraft(draft: SettingsDraft, scope: ConfigScope = 'organization'): SettingsErrors {
   const errors: SettingsErrors = {}
   if (!draft.model.trim()) errors.model = '请输入默认模型名称。'
   const providerIds = new Set<string>()
@@ -99,7 +100,7 @@ export function validateSettingsDraft(draft: SettingsDraft): SettingsErrors {
   for (const key of ['apiKey', 'imageApiKey'] as const) {
     if (draft[key].action === 'replace' && !draft[key].value.trim()) errors[key] = '请输入新密钥，或选择保持不变 / 清除。'
   }
-  for (const key of ['url', 'imageUrl', 'authorizeUrlTemplate'] as const) {
+  for (const key of ['url', 'imageUrl'] as const) {
     const value = draft[key].trim()
     if (!value) continue
     try {
@@ -108,6 +109,10 @@ export function validateSettingsDraft(draft: SettingsDraft): SettingsErrors {
     } catch {
       errors[key] = '请输入完整的 http:// 或 https:// 地址。'
     }
+  }
+  if (scope === 'organization') return errors
+  if (draft.authorizeUrlTemplate.trim() && !isHttpUrl(draft.authorizeUrlTemplate)) {
+    errors.authorizeUrlTemplate = '请输入完整的 http:// 或 https:// 地址。'
   }
   if (draft.oauthEnabled && !draft.authorizeUrlTemplate.trim()) errors.authorizeUrlTemplate = '启用 OAuth2 时需要填写授权地址模板。'
   const ranges = [
@@ -127,23 +132,13 @@ export function validateSettingsDraft(draft: SettingsDraft): SettingsErrors {
   return errors
 }
 
-export function buildSystemSettingsPatch(settings: SystemSettings, draft: SettingsDraft): UpdateSystemSettingsRequest {
+export function buildSystemSettingsPatch(settings: SystemSettings, draft: SettingsDraft, scope: ConfigScope = settings.scopeType ?? 'organization'): UpdateSystemSettingsRequest {
   if (settings.settingsParseError) throw new Error('配置文件解析失败，请先在服务器修复后重新加载。')
-  if (Object.keys(validateSettingsDraft(draft)).length) throw new Error('请先修正配置中的错误。')
+  if (Object.keys(validateSettingsDraft(draft, scope)).length) throw new Error('请先修正配置中的错误。')
   const patch: UpdateSystemSettingsRequest = {}
-  for (const key of ['model', 'url', 'thinkingMode'] as const) {
+  for (const key of ['model', 'url'] as const) {
     if (draft[key].trim() !== settings[key]) Object.assign(patch, { [key]: draft[key].trim() })
   }
-  for (const key of ['bypassPermissions', 'clientCronEnabled', 'clientShowToolCalls'] as const) {
-    if (draft[key] !== settings[key]) patch[key] = draft[key]
-  }
-  for (const key of ['maxTurns', 'cronReuseMaxRuns', 'imReuseMaxTurns', 'thinkingBudgetTokens'] as const) {
-    // A hidden, unfinished budget input must not be serialized as 0 / NaN.
-    if (key === 'thinkingBudgetTokens' && draft.thinkingMode !== 'enabled') continue
-    if (Number(draft[key]) !== settings[key]) patch[key] = Number(draft[key])
-  }
-  const bytes = Number(draft.uploadLimitMiB) * MIB
-  if (bytes !== settings.workspaceUploadLimitBytes) patch.workspaceUploadLimitBytes = bytes
   if (draft.apiKey.action !== 'keep') patch.apiKey = draft.apiKey.action === 'clear' ? '' : draft.apiKey.value.trim()
   const providerMetadata = (provider: EditableModelProvider | SystemSettingsModelProvider) => {
     const { apiKey: _apiKey, apiKeyConfigured: _apiKeyConfigured, ...metadata } = provider as EditableModelProvider
@@ -170,6 +165,20 @@ export function buildSystemSettingsPatch(settings: SystemSettings, draft: Settin
   if (draft.imageModel.trim() !== settings.image.model) image.model = draft.imageModel.trim()
   if (draft.imageApiKey.action !== 'keep') image.apiKey = draft.imageApiKey.action === 'clear' ? '' : draft.imageApiKey.value.trim()
   if (Object.keys(image).length) patch.image = image
+  // Organization writes must never include deployment fields, even if a stale
+  // draft or an inherited invalid value reaches this helper.
+  if (scope === 'organization') return patch
+  if (draft.thinkingMode !== settings.thinkingMode) patch.thinkingMode = draft.thinkingMode
+  for (const key of ['bypassPermissions', 'clientCronEnabled', 'clientShowToolCalls'] as const) {
+    if (draft[key] !== settings[key]) patch[key] = draft[key]
+  }
+  for (const key of ['maxTurns', 'cronReuseMaxRuns', 'imReuseMaxTurns', 'thinkingBudgetTokens'] as const) {
+    // A hidden, unfinished budget input must not be serialized as 0 / NaN.
+    if (key === 'thinkingBudgetTokens' && draft.thinkingMode !== 'enabled') continue
+    if (Number(draft[key]) !== settings[key]) patch[key] = Number(draft[key])
+  }
+  const bytes = Number(draft.uploadLimitMiB) * MIB
+  if (bytes !== settings.workspaceUploadLimitBytes) patch.workspaceUploadLimitBytes = bytes
   if (draft.tenantId.trim() !== settings.skillStore.tenantId) patch.skillStore = { tenantId: draft.tenantId.trim() }
   const oauth2: NonNullable<UpdateSystemSettingsRequest['oauth2']> = {}
   if (draft.oauthEnabled !== settings.oauth2.enabled) oauth2.enabled = draft.oauthEnabled
@@ -181,7 +190,7 @@ export function buildSystemSettingsPatch(settings: SystemSettings, draft: Settin
 
 export type SettingsChange = { field: SettingsField; label: string; before: string; after: string }
 
-export function getSettingsChanges(settings: SystemSettings, draft: SettingsDraft): SettingsChange[] {
+export function getSettingsChanges(settings: SystemSettings, draft: SettingsDraft, scope: ConfigScope = settings.scopeType ?? 'organization'): SettingsChange[] {
   const baseline = createSettingsDraft(settings)
   const display = (field: Exclude<SettingsField, 'apiKey' | 'imageApiKey' | 'modelProviders'>, value: string | boolean) => {
     if (typeof value === 'boolean') return value ? '开启' : '关闭'
@@ -194,6 +203,7 @@ export function getSettingsChanges(settings: SystemSettings, draft: SettingsDraf
     return rest
   })
   for (const field of Object.keys(FIELD_LABELS) as SettingsField[]) {
+    if (scope === 'organization' && !TAB_FIELDS.models.includes(field)) continue
     if (field === 'modelProviders') {
       const changed = JSON.stringify(metadata(draft.modelProviders)) !== JSON.stringify(metadata(baseline.modelProviders))
       const hasNewKey = draft.modelProviders.some(provider => Boolean(provider.apiKey?.trim()))

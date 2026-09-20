@@ -78,6 +78,37 @@ describe('provider model discovery', () => {
     expect(seenAuth).toEqual(['Bearer org-a-key', 'Bearer org-b-key'])
   })
 
+  it('invalidates provider and organization caches without clearing unrelated entries', async () => {
+    const [provider] = normalizeModelProviders([], 'https://example.invalid/v1')
+    const otherProvider = { ...provider, id: 'other-provider' }
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls += 1
+      return new Response(JSON.stringify({ data: [{ id: `model-${calls}` }] }))
+    }) as typeof fetch
+    const a = () => discoverProviderModels(provider, 'key-a', { orgId: 'org-a' })
+    const b = () => discoverProviderModels(provider, 'key-b', { orgId: 'org-b' })
+    const other = () => discoverProviderModels(otherProvider, 'key-a', { orgId: 'org-a' })
+    await a()
+    await b()
+    await other()
+    clearProviderModelCache(provider.id, 'org-a')
+    await a()
+    await b()
+    await other()
+    expect(calls).toBe(4)
+    clearProviderModelCache(provider.id)
+    await a()
+    await b()
+    await other()
+    expect(calls).toBe(6)
+    clearProviderModelCache(undefined, 'org-a')
+    await a()
+    await b()
+    await other()
+    expect(calls).toBe(8)
+  })
+
   it('refreshes the model cache using the supplied organization settings', async () => {
     const seenAuth: string[] = []
     globalThis.fetch = (async (_input, init) => {

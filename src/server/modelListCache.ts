@@ -59,14 +59,14 @@ export async function getModelsForSelection(
   return { selection: selectionInfo, models }
 }
 
-export function clearModelCache(providerId?: string): void {
-  clearProviderModelCache(providerId)
+export function clearModelCache(providerId?: string, orgId?: string): void {
+  clearProviderModelCache(providerId, orgId)
 }
 
 export async function refreshModelCache(
   options: { settings?: SystemSettingsPayload; orgId?: string } = {},
 ): Promise<ModelInfo[]> {
-  clearModelCache()
+  clearModelCache(undefined, options.orgId)
   return getAvailableModels({ ...options, forceRefresh: true })
 }
 
