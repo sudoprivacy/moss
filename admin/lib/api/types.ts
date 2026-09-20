@@ -203,6 +203,28 @@ export interface SystemSettingsOAuth2 {
   requireState: boolean
 }
 
+export type ModelProviderProtocol =
+  | 'openai-completions'
+  | 'openai-responses'
+  | 'anthropic-messages'
+
+/** Provider metadata returned by the server. The credential itself is never returned. */
+export interface SystemSettingsModelProvider {
+  id: string
+  name: string
+  kind: 'openai-compatible'
+  baseUrl: string
+  discoveryUrl: string
+  protocol: ModelProviderProtocol
+  enabled: boolean
+  apiKeyConfigured: boolean
+}
+
+/** Write shape. `apiKey` is write-only and omitted to preserve the stored key. */
+export interface UpdateSystemSettingsModelProvider extends Omit<SystemSettingsModelProvider, 'apiKeyConfigured'> {
+  apiKey?: string
+}
+
 export interface SystemSettings {
   bypassPermissions: boolean
   model: string
@@ -211,6 +233,8 @@ export interface SystemSettings {
   thinkingBudgetTokens: number
   url: string
   apiKey: string
+  modelProviders: SystemSettingsModelProvider[]
+  defaultModelProviderId: string
   image: SystemSettingsImage
   skillStore: SystemSettingsSkillStore
   oauth2: SystemSettingsOAuth2
@@ -250,6 +274,8 @@ export interface UpdateSystemSettingsRequest {
   thinkingBudgetTokens?: number
   url?: string
   apiKey?: string
+  modelProviders?: UpdateSystemSettingsModelProvider[]
+  defaultModelProviderId?: string
   image?: Partial<SystemSettingsImage>
   skillStore?: Partial<SystemSettingsSkillStore>
   oauth2?: Partial<SystemSettingsOAuth2>

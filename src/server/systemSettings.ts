@@ -3,6 +3,16 @@ import os from 'os'
 import path from 'path'
 import { getConfigStore } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
+import {
+  getStoredProviderApiKeys,
+  clearProviderModelCache,
+  normalizeModelProviders,
+  providerApiKeysFromInput,
+  saveProviderApiKeys,
+  toPublicProviders,
+  type ModelProvider,
+  type PublicModelProvider,
+} from './modelProviders.js'
 
 /** 敏感字段在 Nexus（namespace moss:config）中的 key。 */
 const AUTH_TOKEN_KEY: ConfigKey = 'settings.anthropic-auth-token'
@@ -41,6 +51,9 @@ export type SystemSettingsOAuth2 = {
   requireState: boolean
 }
 
+/** A model service plus the model-catalog endpoint associated with it. */
+export type SystemSettingsModelProvider = PublicModelProvider
+
 export type SystemSettingsPayload = {
   bypassPermissions: boolean
   model: string
@@ -49,6 +62,10 @@ export type SystemSettingsPayload = {
   thinkingBudgetTokens: number
   url: string
   apiKey: string
+  /** Provider metadata only. API keys stay in Nexus and are never returned. */
+  modelProviders: SystemSettingsModelProvider[]
+  /** The provider used for legacy/plain model IDs and the system default model. */
+  defaultModelProviderId: string
   image: SystemSettingsImage
   skillStore: SystemSettingsSkillStore
   oauth2: SystemSettingsOAuth2
@@ -90,8 +107,8 @@ export type SystemSettingsPayload = {
 
 type PersistedSystemSettings = Record<string, unknown> & Omit<
   SystemSettingsPayload,
-  'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError'
->
+  'settingsPath' | 'settingsExists' | 'settingsLoaded' | 'settingsParseError' | 'modelProviders'
+> & { modelProviders: ModelProvider[] }
 
 const DEFAULT_BYPASS_PERMISSIONS =
   process.env.CLAUDE_CODE_BYPASS_PERMISSIONS === 'true'
@@ -111,6 +128,8 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   thinkingBudgetTokens: 16000,
   url: '',
   apiKey: '',
+  modelProviders: [],
+  defaultModelProviderId: 'legacy-default',
   image: {
     provider: 'openai',
     url: '',
@@ -268,6 +287,27 @@ function normalizeSystemSettings(
     result.apiKey = DEFAULT_SYSTEM_SETTINGS.apiKey
   }
 
+  const legacyUrl = typeof result.url === 'string' ? result.url : ''
+  // Keep a missing legacy field empty until the final payload has resolved the
+  // base URL from `env.ANTHROPIC_BASE_URL`; otherwise legacy installs would
+  // accidentally create a provider with an empty URL.
+  result.modelProviders = source.modelProviders === undefined && result.modelProviders === undefined
+    ? []
+    : normalizeModelProviders(
+      source.modelProviders === undefined ? result.modelProviders : source.modelProviders,
+      legacyUrl,
+    )
+  const requestedDefaultProviderId = typeof source.defaultModelProviderId === 'string'
+    ? source.defaultModelProviderId
+    : typeof result.defaultModelProviderId === 'string'
+      ? result.defaultModelProviderId
+      : 'legacy-default'
+  result.defaultModelProviderId = (result.modelProviders as ModelProvider[]).some(
+    provider => provider.id === requestedDefaultProviderId && provider.enabled,
+  )
+    ? requestedDefaultProviderId
+    : (result.modelProviders as ModelProvider[]).find(provider => provider.enabled)?.id || 'legacy-default'
+
   const sourceImage = isRecord(source.image) ? source.image : {}
   const existingImage = isRecord(result.image) ? result.image : {}
   result.image = {
@@ -404,6 +444,8 @@ function readSystemSettingsState(): SystemSettingsState {
 function toSystemSettingsPayload(
   state: SystemSettingsState,
 ): SystemSettingsPayload {
+  const providers = normalizeModelProviders(state.value.modelProviders, state.value.url)
+  const apiKeys = getStoredProviderApiKeys()
   return {
     bypassPermissions: state.value.bypassPermissions,
     model: state.value.model,
@@ -412,6 +454,10 @@ function toSystemSettingsPayload(
     thinkingBudgetTokens: state.value.thinkingBudgetTokens,
     url: state.value.url,
     apiKey: state.value.apiKey,
+    modelProviders: toPublicProviders(providers, apiKeys, state.value.apiKey),
+    defaultModelProviderId: providers.some(provider => provider.id === state.value.defaultModelProviderId && provider.enabled)
+      ? state.value.defaultModelProviderId
+      : providers.find(provider => provider.enabled)?.id || 'legacy-default',
     image: state.value.image,
     skillStore: state.value.skillStore,
     oauth2: state.value.oauth2,
@@ -495,6 +541,17 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
       await store.remove(IMAGE_API_KEY_KEY)
     }
   }
+  // Provider credentials are write-only. Just like the legacy text/image
+  // credentials above, do not touch their Nexus record unless this PATCH
+  // explicitly includes the Provider list; otherwise an unrelated settings
+  // save would create/delete a secret record and violate partial-update
+  // semantics.
+  if (Array.isArray(source.modelProviders)) {
+    await saveProviderApiKeys(providerApiKeysFromInput(source.modelProviders, getStoredProviderApiKeys()))
+  }
+  // Discovery entries are credential- and endpoint-bound. A settings update
+  // may replace either, so never serve the old Provider's catalog afterward.
+  clearProviderModelCache()
 
   const env: Record<string, unknown> = { ...existingEnv }
   if (nextSettings.url) {
@@ -529,6 +586,12 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
     thinkingBudgetTokens: nextSettings.thinkingBudgetTokens,
     url: nextSettings.url,
     apiKey: nextSettings.apiKey,
+    modelProviders: toPublicProviders(
+      normalizeModelProviders(nextSettings.modelProviders, nextSettings.url),
+      getStoredProviderApiKeys(),
+      nextSettings.apiKey,
+    ),
+    defaultModelProviderId: nextSettings.defaultModelProviderId,
     image: nextSettings.image,
     skillStore: nextSettings.skillStore,
     oauth2: nextSettings.oauth2,

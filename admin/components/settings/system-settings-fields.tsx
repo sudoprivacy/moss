@@ -4,8 +4,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
-import type { SystemSettings, ThinkingMode } from '@/lib/api/types'
-import { FIELD_LABELS, type SecretDraft, type SettingsDraft, type SettingsErrors, type SettingsField } from '@/lib/system-settings'
+import type { ModelProviderProtocol, SystemSettings, ThinkingMode } from '@/lib/api/types'
+import { FIELD_LABELS, type EditableModelProvider, type SecretDraft, type SettingsDraft, type SettingsErrors, type SettingsField } from '@/lib/system-settings'
 
 type FieldsProps = {
   settings: SystemSettings
@@ -44,8 +44,57 @@ function SecretField({ field, configured, value, error, onChange }: { field: 'ap
   </Field>
 }
 
+function ProviderFields({ draft, error, update }: Pick<FieldsProps, 'draft' | 'update'> & { error?: string }) {
+  const updateProvider = (index: number, patch: Partial<EditableModelProvider>) => {
+    update('modelProviders', draft.modelProviders.map((provider, itemIndex) => itemIndex === index ? { ...provider, ...patch } : provider))
+  }
+  const addProvider = () => {
+    const suffix = Date.now().toString(36)
+    update('modelProviders', [...draft.modelProviders, {
+      id: `provider-${suffix}`,
+      name: '新模型服务',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      discoveryUrl: 'http://127.0.0.1:8000/v1/models',
+      protocol: 'openai-completions',
+      enabled: true,
+      apiKeyConfigured: false,
+    }])
+  }
+  const removeProvider = (index: number) => {
+    const modelProviders = draft.modelProviders.filter((_, itemIndex) => itemIndex !== index)
+    update('modelProviders', modelProviders)
+    if (!modelProviders.some(provider => provider.id === draft.defaultModelProviderId)) {
+      update('defaultModelProviderId', modelProviders.find(provider => provider.enabled)?.id || '')
+    }
+  }
+
+  return <Field field="modelProviders" description="每个 Provider 绑定模型发现地址、推理协议和独立凭据。已有凭据不会回显；仅输入新 Key 才会替换。" error={error}>
+    <div className="space-y-3">
+      <div className="flex justify-end"><Button type="button" size="sm" variant="outline" onClick={addProvider}>添加 Provider</Button></div>
+      {draft.modelProviders.map((provider, index) => <div key={`${provider.id}-${index}`} className="space-y-3 rounded-md border p-3">
+        <div className="flex items-center justify-between gap-3">
+          <strong className="text-sm">{provider.name || '未命名 Provider'}</strong>
+          <div className="flex items-center gap-3 text-xs text-muted-foreground"><span>凭据：{provider.apiKeyConfigured ? '已配置' : '未配置'}</span><Button type="button" variant="ghost" size="sm" disabled={draft.modelProviders.length === 1} onClick={() => removeProvider(index)}>删除</Button></div>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <Input value={provider.name} onChange={event => updateProvider(index, { name: event.target.value })} placeholder="显示名称，例如 Local vLLM" />
+          <Input value={provider.id} onChange={event => updateProvider(index, { id: event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') })} placeholder="稳定 ID，例如 local-vllm" />
+        </div>
+        <Input value={provider.baseUrl} onChange={event => updateProvider(index, { baseUrl: event.target.value })} placeholder="推理 Base URL，例如 https://model.sudorouter.ai/v1" />
+        <Input value={provider.discoveryUrl} onChange={event => updateProvider(index, { discoveryUrl: event.target.value })} placeholder="模型发现 URL，例如 https://model.sudorouter.ai/v1/models" />
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="space-y-1 text-sm"><span>推理协议</span><select className="system-settings-select" value={provider.protocol} onChange={event => updateProvider(index, { protocol: event.target.value as ModelProviderProtocol })}><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label>
+          <div className="flex items-center justify-between rounded-md border px-3"><span className="text-sm">启用 Provider</span><Switch checked={provider.enabled} onCheckedChange={enabled => updateProvider(index, { enabled })} /></div>
+        </div>
+        <Input type="password" value={provider.apiKey ?? ''} autoComplete="new-password" spellCheck={false} className="font-mono text-xs" onChange={event => updateProvider(index, { apiKey: event.target.value })} placeholder={provider.apiKeyConfigured ? '已保存；输入新 Key 才会替换' : 'Provider API Key（可选）'} />
+      </div>)}
+    </div>
+  </Field>
+}
+
 export function SystemSettingsFields({ settings, draft, errors, update }: FieldsProps) {
-  const textField = (field: Exclude<SettingsField, 'apiKey' | 'imageApiKey'>, description: ReactNode, options: { placeholder?: string; min?: number; max?: number; number?: boolean; step?: string } = {}) => (
+  const textField = (field: Exclude<SettingsField, 'apiKey' | 'imageApiKey' | 'modelProviders' | 'defaultModelProviderId'>, description: ReactNode, options: { placeholder?: string; min?: number; max?: number; number?: boolean; step?: string } = {}) => (
     <Field field={field} description={description} error={errors[field]}>
       <div className={field === 'uploadLimitMiB' ? 'system-settings-unit-input' : undefined}>
         <Input id={`setting-${field}`} name={field} value={String(draft[field])} type={options.number ? 'number' : 'text'} min={options.min} max={options.max} step={options.step ?? (options.number ? '1' : undefined)} placeholder={options.placeholder} spellCheck={false} autoComplete="off" aria-invalid={Boolean(errors[field])} aria-describedby={`setting-${field}-hint${errors[field] ? ` setting-${field}-error` : ''}`} onChange={event => update(field, event.target.value)} />
@@ -61,8 +110,16 @@ export function SystemSettingsFields({ settings, draft, errors, update }: Fields
   return <>
     <TabsContent value="models" className="system-settings-tab-content">
       <Section icon={Sparkles} title="文本模型" description="配置默认模型、服务地址与调用凭据。">
-        {textField('model', '填写服务支持的模型名称，仅对新的会话生效。', { placeholder: '例如 claude-sonnet-4-6' })}
-        {textField('url', '留空使用默认服务地址，也可填写兼容的代理地址。', { placeholder: 'https://api.anthropic.com' })}
+        {textField('model', '填写默认 Provider 支持的模型名称，仅对新的会话生效。', { placeholder: '例如 claude-sonnet-4-6' })}
+        <Field field="defaultModelProviderId" description="未带 Provider 前缀的模型名由此服务处理。" error={errors.defaultModelProviderId}>
+          <select id="setting-defaultModelProviderId" className="system-settings-select" value={draft.defaultModelProviderId} onChange={event => update('defaultModelProviderId', event.target.value)}>
+            {draft.modelProviders.filter(provider => provider.enabled).map(provider => <option key={provider.id} value={provider.id}>{provider.name} ({provider.id})</option>)}
+          </select>
+        </Field>
+        <ProviderFields draft={draft} update={update} error={errors.modelProviders} />
+        <Field field="url" description="仅供 legacy-default Provider 兼容配置使用；新服务应在上方 Provider 列表中配置。" error={errors.url}>
+          <Input id="setting-url" name="url" value={draft.url} placeholder="https://api.anthropic.com" spellCheck={false} autoComplete="off" onChange={event => update('url', event.target.value)} />
+        </Field>
         <SecretField field="apiKey" configured={Boolean(settings.apiKey)} value={draft.apiKey} error={errors.apiKey} onChange={value => update('apiKey', value)} />
       </Section>
       <Section icon={Image} title="图片模型" description="供图片生成相关工具调用的提供商与模型配置。">

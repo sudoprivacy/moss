@@ -24,6 +24,7 @@ export const CONFIG_NAMESPACE = 'moss:config'
 
 export const CONFIG_KEYS = [
   'settings.anthropic-auth-token',
+  'settings.model-provider-api-keys',
   'settings.image-api-key',
   'server.hub-authorization',
   'server.wiki-index-resource-token-secret',

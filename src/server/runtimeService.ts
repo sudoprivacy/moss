@@ -47,6 +47,7 @@ import {
 import { errorMessage } from '../utils/errors.js'
 import { getSystemSettings } from './systemSettings.js'
 import { getUserModelPreference } from './userModelPreference.js'
+import { getModelProviderApiKey, getModelsForSelection } from './modelListCache.js'
 import type { AuthProxyServer } from './authProxy/authProxyServer.js'
 import {
   appendSharedAgentMemory,
@@ -2076,12 +2077,20 @@ export class RuntimeService {
     // Model priority: user preference > system settings > default
     const userModelPref = session.userId ? await getUserModelPreference(session.userId) : null
     const isCabinSession = session.source === 'cabin'
-    const defaultModel = isCabinSession
+    const requestedModel = isCabinSession
       ? (session.runtime.model || this.options.config.cabin.llmModel)
       : userModelPref?.modelId
       || systemSettings.model
       || process.env.MOSS_DEFAULT_MODEL
       || 'gemini-3-flash-preview'
+
+    // A selected Provider is a routing boundary.  Do not fall back to the
+    // process-global endpoint when its catalog cannot be resolved: that would
+    // make an unavailable/stale selection call a different Provider.
+    const providerCatalog = !isCabinSession
+      ? await getModelsForSelection(requestedModel)
+      : null
+    const defaultModel = providerCatalog?.selection.modelId || requestedModel
 
     process.stderr.write(`[RuntimeService] Model selection for session ${session.sessionId}:\n`)
     process.stderr.write(`  - userId: ${session.userId}\n`)
@@ -2093,9 +2102,12 @@ export class RuntimeService {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
     }
-    // Pass settings.json env vars to runner
-    if (systemSettings.url) {
-      runnerEnv.ANTHROPIC_BASE_URL = systemSettings.url
+    if (providerCatalog) {
+      runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
+      runnerEnv.MOSS_MODEL_PROVIDER_PROTOCOL = providerCatalog.selection.provider.protocol
+      runnerEnv.MOSS_PROVIDER_MODELS_JSON = JSON.stringify(providerCatalog.models)
+      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
+      runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
     }
     // A metered deployment keys its credit ledger on a per-user gateway token,
     // so a session must spend the token of the user who owns it. Falling back to
@@ -2106,7 +2118,20 @@ export class RuntimeService {
     const userModelKey = session.userId
       ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
       : undefined
-    const sessionApiKey = userModelKey || systemSettings.apiKey
+    const providerApiKey = providerCatalog
+      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey)
+      : undefined
+    // Per-user Sudorouter keys only apply to the legacy default provider. A
+    // configured Provider must never receive a process-global or legacy key;
+    // local unauthenticated endpoints intentionally run with no credential.
+    const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
+    const sessionApiKey = isLegacyProvider
+      ? userModelKey || providerApiKey
+      : providerApiKey
+    if (providerCatalog && !isLegacyProvider) {
+      delete runnerEnv.ANTHROPIC_AUTH_TOKEN
+      delete runnerEnv.ANTHROPIC_API_KEY
+    }
     if (sessionApiKey) {
       runnerEnv.ANTHROPIC_AUTH_TOKEN = sessionApiKey
       // 同值补设 API_KEY：runner 子进程 buildSessionEnv 的选值链为
@@ -2114,8 +2139,8 @@ export class RuntimeService {
       // 两个同名值可消除主进程 env 自带 ANTHROPIC_API_KEY 时的优先级翻转
       runnerEnv.ANTHROPIC_API_KEY = sessionApiKey
     }
-    if (systemSettings.model) {
-      runnerEnv.ANTHROPIC_MODEL = systemSettings.model
+    if (defaultModel) {
+      runnerEnv.ANTHROPIC_MODEL = defaultModel
     }
     if (isCabinSession) {
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'

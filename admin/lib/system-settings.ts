@@ -1,11 +1,24 @@
-import type { SystemSettings, ThinkingMode, UpdateSystemSettingsRequest } from './api/types'
+import type {
+  ModelProviderProtocol,
+  SystemSettings,
+  SystemSettingsModelProvider,
+  ThinkingMode,
+  UpdateSystemSettingsRequest,
+} from './api/types'
 
 export type SettingsTab = 'models' | 'runtime' | 'clients'
 export type SecretDraft = { action: 'keep' | 'replace' | 'clear'; value: string }
+export type EditableModelProvider = Omit<SystemSettingsModelProvider, 'apiKeyConfigured'> & {
+  apiKeyConfigured: boolean
+  /** Write-only replacement. Omitting it retains the stored credential. */
+  apiKey?: string
+}
 export type SettingsDraft = {
   model: string
   url: string
   apiKey: SecretDraft
+  modelProviders: EditableModelProvider[]
+  defaultModelProviderId: string
   imageProvider: string
   imageUrl: string
   imageApiKey: SecretDraft
@@ -30,6 +43,7 @@ export const MIB = 1024 * 1024
 
 export const FIELD_LABELS: Record<SettingsField, string> = {
   model: '默认模型', url: 'API 地址', apiKey: '文本模型 API Key',
+  modelProviders: '模型服务 Providers', defaultModelProviderId: '默认模型服务',
   imageProvider: '图片提供商', imageUrl: '图片 API 地址', imageApiKey: '图片模型 API Key', imageModel: '图片模型',
   tenantId: '专属资产租户 ID', bypassPermissions: '跳过权限确认', maxTurns: '最大对话轮数',
   cronReuseMaxRuns: '定时任务会话复用上限', imReuseMaxTurns: 'IM 会话轮换上限',
@@ -39,14 +53,19 @@ export const FIELD_LABELS: Record<SettingsField, string> = {
 }
 
 export const TAB_FIELDS: Record<SettingsTab, SettingsField[]> = {
-  models: ['model', 'url', 'apiKey', 'imageProvider', 'imageUrl', 'imageApiKey', 'imageModel'],
+  models: ['model', 'defaultModelProviderId', 'modelProviders', 'url', 'apiKey', 'imageProvider', 'imageUrl', 'imageApiKey', 'imageModel'],
   runtime: ['bypassPermissions', 'maxTurns', 'cronReuseMaxRuns', 'imReuseMaxTurns', 'thinkingMode', 'thinkingBudgetTokens'],
   clients: ['clientCronEnabled', 'clientShowToolCalls', 'uploadLimitMiB', 'tenantId', 'oauthEnabled', 'oauthRequireState', 'authorizeUrlTemplate'],
 }
 
 export function createSettingsDraft(settings: SystemSettings): SettingsDraft {
+  const modelProviders = Array.isArray(settings.modelProviders) && settings.modelProviders.length > 0
+    ? settings.modelProviders
+    : [createLegacyProvider(settings.url)]
   return {
     model: settings.model, url: settings.url, apiKey: { action: 'keep', value: '' },
+    modelProviders: modelProviders.map(provider => ({ ...provider })),
+    defaultModelProviderId: settings.defaultModelProviderId || modelProviders[0]?.id || 'legacy-default',
     imageProvider: settings.image.provider, imageUrl: settings.image.url,
     imageApiKey: { action: 'keep', value: '' }, imageModel: settings.image.model,
     tenantId: settings.skillStore.tenantId, bypassPermissions: settings.bypassPermissions,
@@ -64,6 +83,19 @@ export function createSettingsDraft(settings: SystemSettings): SettingsDraft {
 export function validateSettingsDraft(draft: SettingsDraft): SettingsErrors {
   const errors: SettingsErrors = {}
   if (!draft.model.trim()) errors.model = '请输入默认模型名称。'
+  const providerIds = new Set<string>()
+  const enabledProviders = draft.modelProviders.filter(provider => provider.enabled)
+  for (const provider of draft.modelProviders) {
+    if (!/^[a-z][a-z0-9-]{0,62}$/.test(provider.id) || providerIds.has(provider.id)
+      || !provider.name.trim() || !isHttpUrl(provider.baseUrl) || !isHttpUrl(provider.discoveryUrl)) {
+      errors.modelProviders = '每个 Provider 需要唯一的稳定 ID、名称及有效的 Base URL 和模型发现 URL。'
+      break
+    }
+    providerIds.add(provider.id)
+  }
+  if (!errors.modelProviders && (!enabledProviders.length || !enabledProviders.some(provider => provider.id === draft.defaultModelProviderId))) {
+    errors.defaultModelProviderId = '请选择一个已启用的默认模型服务。'
+  }
   for (const key of ['apiKey', 'imageApiKey'] as const) {
     if (draft[key].action === 'replace' && !draft[key].value.trim()) errors[key] = '请输入新密钥，或选择保持不变 / 清除。'
   }
@@ -113,6 +145,25 @@ export function buildSystemSettingsPatch(settings: SystemSettings, draft: Settin
   const bytes = Number(draft.uploadLimitMiB) * MIB
   if (bytes !== settings.workspaceUploadLimitBytes) patch.workspaceUploadLimitBytes = bytes
   if (draft.apiKey.action !== 'keep') patch.apiKey = draft.apiKey.action === 'clear' ? '' : draft.apiKey.value.trim()
+  const providerMetadata = (provider: EditableModelProvider | SystemSettingsModelProvider) => {
+    const { apiKey: _apiKey, apiKeyConfigured: _apiKeyConfigured, ...metadata } = provider as EditableModelProvider
+    return metadata
+  }
+  // Older servers do not expose Provider metadata. Keep their existing settings
+  // editable without sending a synthetic Provider configuration they cannot read.
+  const serverSupportsProviders = Array.isArray(settings.modelProviders)
+  const providersChanged = serverSupportsProviders
+    && JSON.stringify(draft.modelProviders.map(providerMetadata)) !== JSON.stringify(settings.modelProviders.map(providerMetadata))
+  const hasNewProviderKey = draft.modelProviders.some(provider => Boolean(provider.apiKey?.trim()))
+  if (serverSupportsProviders && (providersChanged || hasNewProviderKey)) {
+    patch.modelProviders = draft.modelProviders.map(provider => {
+      const metadata = providerMetadata(provider)
+      return provider.apiKey?.trim() ? { ...metadata, apiKey: provider.apiKey.trim() } : metadata
+    })
+  }
+  if (serverSupportsProviders && draft.defaultModelProviderId !== settings.defaultModelProviderId) {
+    patch.defaultModelProviderId = draft.defaultModelProviderId
+  }
   const image: NonNullable<UpdateSystemSettingsRequest['image']> = {}
   if (draft.imageProvider !== settings.image.provider) image.provider = draft.imageProvider
   if (draft.imageUrl.trim() !== settings.image.url) image.url = draft.imageUrl.trim()
@@ -132,22 +183,68 @@ export type SettingsChange = { field: SettingsField; label: string; before: stri
 
 export function getSettingsChanges(settings: SystemSettings, draft: SettingsDraft): SettingsChange[] {
   const baseline = createSettingsDraft(settings)
-  const display = (field: SettingsField, value: SettingsDraft[SettingsField]) => {
+  const display = (field: Exclude<SettingsField, 'apiKey' | 'imageApiKey' | 'modelProviders'>, value: string | boolean) => {
     if (typeof value === 'boolean') return value ? '开启' : '关闭'
-    if (typeof value === 'object') return '已隐藏'
     if (field === 'uploadLimitMiB') return `${value} MiB`
     return value || '未设置'
   }
-  return (Object.keys(FIELD_LABELS) as SettingsField[]).flatMap(field => {
-    const value = draft[field]
-    if (typeof value === 'object') {
-      const configured = field === 'apiKey' ? Boolean(settings.apiKey) : Boolean(settings.image.apiKey)
-      if (value.action === 'keep' || (value.action === 'clear' && !configured)) return []
-      return [{ field, label: FIELD_LABELS[field], before: configured ? '已配置（已隐藏）' : '未配置', after: value.action === 'clear' ? '清除密钥' : '替换为新密钥（已隐藏）' }]
-    }
-    if (field === 'thinkingBudgetTokens' && draft.thinkingMode !== 'enabled') return []
-    return value === baseline[field] ? [] : [{ field, label: FIELD_LABELS[field], before: display(field, baseline[field]), after: display(field, value) }]
+  const changes: SettingsChange[] = []
+  const metadata = (providers: EditableModelProvider[] | SystemSettingsModelProvider[]) => providers.map(provider => {
+    const { apiKey: _apiKey, apiKeyConfigured: _apiKeyConfigured, ...rest } = provider as EditableModelProvider
+    return rest
   })
+  for (const field of Object.keys(FIELD_LABELS) as SettingsField[]) {
+    if (field === 'modelProviders') {
+      const changed = JSON.stringify(metadata(draft.modelProviders)) !== JSON.stringify(metadata(baseline.modelProviders))
+      const hasNewKey = draft.modelProviders.some(provider => Boolean(provider.apiKey?.trim()))
+      if (changed || hasNewKey) changes.push({
+        field,
+        label: FIELD_LABELS[field],
+        before: `${baseline.modelProviders.length} 个 Provider`,
+        after: hasNewKey ? `${draft.modelProviders.length} 个 Provider（含新的 API Key）` : `${draft.modelProviders.length} 个 Provider`,
+      })
+      continue
+    }
+    if (field === 'apiKey' || field === 'imageApiKey') {
+      const value = draft[field]
+      const configured = field === 'apiKey' ? Boolean(settings.apiKey) : Boolean(settings.image.apiKey)
+      if (value.action !== 'keep' && !(value.action === 'clear' && !configured)) changes.push({
+        field,
+        label: FIELD_LABELS[field],
+        before: configured ? '已配置（已隐藏）' : '未配置',
+        after: value.action === 'clear' ? '清除密钥' : '替换为新密钥（已隐藏）',
+      })
+      continue
+    }
+    if (field === 'thinkingBudgetTokens' && draft.thinkingMode !== 'enabled') continue
+    const value = draft[field] as string | boolean
+    const before = baseline[field] as string | boolean
+    if (value !== before) changes.push({ field, label: FIELD_LABELS[field], before: display(field, before), after: display(field, value) })
+  }
+  return changes
+}
+
+function createLegacyProvider(baseUrl: string): EditableModelProvider {
+  const resolvedBaseUrl = baseUrl.trim() || 'https://hk.sudorouter.ai/v1'
+  return {
+    id: 'legacy-default',
+    name: '默认模型服务',
+    kind: 'openai-compatible',
+    baseUrl: resolvedBaseUrl,
+    discoveryUrl: `${resolvedBaseUrl.replace(/\/+$/, '')}/models`,
+    protocol: 'openai-completions' as ModelProviderProtocol,
+    enabled: true,
+    apiKeyConfigured: false,
+  }
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value.trim())
+    return (url.protocol === 'http:' || url.protocol === 'https:') && Boolean(url.hostname)
+  } catch {
+    return false
+  }
 }
 
 export function getRedactedSettings(settings: SystemSettings) {
