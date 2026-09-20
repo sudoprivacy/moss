@@ -126,11 +126,11 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  void test('短信和支付基础设施非敏感参数写入统一平台策略并要求重启', async () => {
+  void test('平台超级管理员可更新短信和支付基础设施并要求重启', async () => {
     const { db, org, service } = await setup()
     try {
-      const legacyRoot = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
-      const root = { ...legacyRoot, organizationScoped: true }
+      const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
+      const scopedRoot = { ...root, organizationScoped: true }
       await service.update(root, {
         sms: {
           provider: 'tencent', sdk_app_id: '1400000000', sign_name: '企业签名',
@@ -153,6 +153,7 @@ void describe('Sudowork 系统配置统一服务', () => {
       })
 
       const config = service.getAdminConfig(root) as any
+      assert.equal(config.scope_type, 'platform')
       assert.equal(config.restart_required, true)
       assert.equal(config.sms.provider, 'tencent')
       assert.equal(config.sms.expire_minutes, 8)
@@ -189,10 +190,177 @@ void describe('Sudowork 系统配置统一服务', () => {
           },
         },
       })
-      const legacyConfig = service.getAdminConfig(legacyRoot) as any
-      assert.equal(legacyConfig.sms, undefined)
-      assert.equal(legacyConfig.billing, undefined)
-      assert.equal(legacyConfig.restart_required, undefined)
+      const scopedConfig = service.getAdminConfig(scopedRoot) as any
+      assert.equal(scopedConfig.scope_type, 'organization')
+      assert.equal(scopedConfig.sms, undefined)
+      assert.equal(scopedConfig.billing, undefined)
+      assert.equal(scopedConfig.restart_required, undefined)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域系统配置写入本组织策略且不改平台默认', async () => {
+    const { db, identities, org, secrets, service } = await setup()
+    try {
+      secrets.set('client.log-report-key', 'platform-log-key')
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({
+        loginMethod: 1,
+        scodeAutoModel: 'platform-model',
+        rechargeMode: 'pay',
+        creditApplication: { min_points: 100, max_points: 1000, allow_duplicate_pending: false },
+      }, 'root')
+
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      await service.update(scopedRoot, {
+        login_method: 1,
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs-b.example.test', key: '' },
+        version_update: { enabled: 1, cos_domain: 'https://releases-b.example.test' },
+        product_improvement: { enabled: 1 },
+        scode_auto_model: 'org-b-model',
+        recharge_mode: 'approve',
+        credit_application: { min_points: 200, max_points: 2000, allow_duplicate_pending: true },
+      })
+
+      const platformPolicy = policies.getPlatform()
+      assert.equal(platformPolicy.scodeAutoModel, 'platform-model')
+      assert.equal(platformPolicy.rechargeMode, 'pay')
+      assert.equal(platformPolicy.logReport, undefined)
+
+      const orgPolicy = policies.getOrganization(orgB.organizationId)
+      assert.equal(orgPolicy.scodeAutoModel, 'org-b-model')
+      assert.deepEqual(orgPolicy.logReport, {
+        enabled: 1, protocol: 'https', domain: 'logs-b.example.test', keySet: true,
+      })
+
+      const orgConfig = service.getAdminConfig(scopedRoot) as any
+      assert.equal(orgConfig.scope_type, 'organization')
+      assert.equal(orgConfig.scode_auto_model, 'org-b-model')
+      assert.equal(orgConfig.log_report.domain, 'logs-b.example.test')
+
+      const defaultConfig = service.getPublicConfig(org.organizationId)
+      assert.equal(defaultConfig.scode_auto_model, 'platform-model')
+      assert.equal(defaultConfig.recharge_mode, 'pay')
+      assert.equal(service.getCreditApplicationPolicy(orgB.organizationId).rechargeMode, 'approve')
+      assert.equal(service.getCreditApplicationPolicy(orgB.organizationId).minPoints, 200)
+      assert.equal(service.getCreditApplicationPolicy(org.organizationId).rechargeMode, 'payment')
+      assert.deepEqual(service.getCredentialData(orgB.organizationId), {
+        log_report: { key: 'platform-log-key' },
+        product_improvement: { api_key: 'qms-api-key', public_key: 'qms-public-key' },
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域不能修改部署级基础设施和全局日志密钥', async () => {
+    const { db, org, service } = await setup()
+    const scopedRoot = {
+      userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+    }
+    try {
+      await assert.rejects(service.update(scopedRoot, {
+        sms: { provider: 'tencent' },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      await assert.rejects(service.update(scopedRoot, {
+        billing: { enabled: true },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      await assert.rejects(service.update(scopedRoot, {
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'org-secret' },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      assert.deepEqual(new ClientPolicyRepository(db).getOrganization(org.organizationId), {})
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域 CAS 更新只替换本组织 Provider', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      identities.putIntegrationConnection({
+        id: 'cas-a-old',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A 旧 CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      identities.putIntegrationConnection({
+        id: 'cas-b-old',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B 旧 CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      const scopedRoot = {
+        userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      await service.update(scopedRoot, {
+        third_party_auth: {
+          enabled: 1,
+          default_provider: 'cas-a-new',
+          providers: [{
+            id: 'cas-a-new', name: '企业 A 新 CAS', type: 'cas', enabled: 1,
+            cas_url: 'https://cas-a.example.test/', login_path: '/cas/login',
+            validate_path: '/cas/p3/serviceValidate', logout_path: '/cas/logout',
+            logout_service_url: 'https://moss.example.test/api/v1/auth/third-party/cas/logout/callback/cas-a-new',
+            service_param: 'service', service_encode_mode: 'component',
+            callback_mode: 'server_callback',
+            server_callback_url: 'https://moss.example.test/api/v1/auth/third-party/cas/callback/cas-a-new',
+            app_callback_url: 'sudowork://cas-callback/cas-a-new/callback',
+            enterprise_code: 'ENT-A', auto_provision: 1,
+          }],
+        },
+      })
+
+      assert.equal(identities.getIntegrationConnection('cas-a-old')?.enabled, false)
+      assert.equal(identities.getIntegrationConnection('cas-a-new')?.orgId, org.organizationId)
+      assert.equal(identities.getIntegrationConnection('cas-b-old')?.enabled, true)
+      assert.equal((service.getAdminConfig(scopedRoot).third_party_auth as any).providers.length, 2)
+      assert.equal((service.getPublicConfig(orgB.organizationId).third_party_auth as any).providers[0].id, 'cas-b-old')
+
+      await assert.rejects(service.update(scopedRoot, {
+        third_party_auth: {
+          enabled: 1,
+          default_provider: 'cas-b-new',
+          providers: [{
+            id: 'cas-b-new', name: '企业 B CAS', type: 'cas', enabled: 1,
+            cas_url: 'https://cas-b.example.test/', login_path: '/cas/login',
+            validate_path: '/cas/p3/serviceValidate', logout_path: '/cas/logout',
+            service_param: 'service',
+            callback_mode: 'server_callback',
+            server_callback_url: 'https://moss.example.test/callback',
+            app_callback_url: 'sudowork://cas-callback/cas-b-new/callback',
+            enterprise_code: 'ENT-B',
+          }],
+        },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      await assert.rejects(service.update(scopedRoot, {
+        third_party_auth: {
+          enabled: 1,
+          default_provider: 'cas-b-old',
+          providers: [{
+            id: 'cas-b-old', name: '复用企业 B Provider ID', type: 'cas', enabled: 1,
+            cas_url: 'https://cas-a.example.test/', login_path: '/cas/login',
+            validate_path: '/cas/p3/serviceValidate', logout_path: '/cas/logout',
+            service_param: 'service',
+            callback_mode: 'server_callback',
+            server_callback_url: 'https://moss.example.test/callback',
+            app_callback_url: 'sudowork://cas-callback/cas-b-old/callback',
+            enterprise_code: 'ENT-A',
+          }],
+        },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
     } finally {
       db.close()
     }

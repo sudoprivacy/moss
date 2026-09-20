@@ -620,7 +620,7 @@ function createBillingCompatibilityService(
   return authService.createSudoworkBillingService({
     sudorouter,
     payment,
-    getCreditPolicy: () => systemConfiguration.getCreditApplicationPolicy(),
+    getCreditPolicy: orgId => systemConfiguration.getCreditApplicationPolicy(orgId),
     testPaymentAmountCents: runtime.testMode ? 1 : undefined,
   })
 }

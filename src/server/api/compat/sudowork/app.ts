@@ -249,7 +249,7 @@ export interface SudoworkSystemConfigPort {
   getPublicConfig(orgId?: string): ReturnType<SudoworkSystemConfigService['getPublicConfig']>
   getAdminConfig(actor: IdentityActor): ReturnType<SudoworkSystemConfigService['getAdminConfig']>
   update(actor: IdentityActor, body: Record<string, unknown>): ReturnType<SudoworkSystemConfigService['update']>
-  getCredentialData(): ReturnType<SudoworkSystemConfigService['getCredentialData']>
+  getCredentialData(orgId?: string): ReturnType<SudoworkSystemConfigService['getCredentialData']>
 }
 
 const EMPTY_PROJECTION: SudoworkUserProjection = {
@@ -1302,7 +1302,7 @@ export function createSudoworkCompatibilityApp(options: {
       success: true,
       ...encryptLegacyCredentials({
         skillhub: { token: `Bearer ${token}` },
-        ...(options.systemConfiguration?.getCredentialData() ?? {}),
+        ...(options.systemConfiguration?.getCredentialData(actor.orgId) ?? {}),
       }),
     })
   })
