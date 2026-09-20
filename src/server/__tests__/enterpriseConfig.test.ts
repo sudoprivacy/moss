@@ -27,7 +27,7 @@ describe('enterprise configuration organization isolation', () => {
 
   it('copies pre-migration defaults only when an organization first saves', async () => {
     const store = new DirectConnectStore(':memory:')
-    store.db.prepare(`
+    store.requireSqliteDb().prepare(`
       UPDATE enterprises SET app_name = ?, top_name = ? WHERE id = 'default'
     `).run('Legacy deployment name', 'Legacy')
 

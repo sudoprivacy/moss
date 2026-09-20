@@ -4,10 +4,10 @@ import { describe, it } from 'node:test'
 import { QmsAuthorizationError, QmsAuthorizationService } from './qmsAuthorization.js'
 
 const organizations = {
-  getCode(orgId: string) {
+  async getCode(orgId: string) {
     return orgId === 'org-a' ? 'tenant-a' : orgId === 'org-b' ? 'tenant-b' : null
   },
-  hasCode(code: string) {
+  async hasCode(code: string) {
     return code === 'tenant-a' || code === 'tenant-b'
   },
 }
@@ -29,10 +29,10 @@ void describe('QMS authorization', () => {
       error instanceof QmsAuthorizationError && error.status === 500 && error.code === 'API_KEY_NOT_CONFIGURED')
   })
 
-  void it('maps organization administrators to their permanent tenant code', () => {
+  void it('maps organization administrators to their permanent tenant code', async () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
 
-    assert.deepEqual(auth.adminScope({ userId: 'u1', orgId: 'org-a', role: 'admin' }, 'tenant-b'), {
+    assert.deepEqual(await auth.adminScope({ userId: 'u1', orgId: 'org-a', role: 'admin' }, 'tenant-b'), {
       userId: 'u1',
       orgId: 'org-a',
       tenantId: 'tenant-a',
@@ -41,23 +41,23 @@ void describe('QMS authorization', () => {
     })
   })
 
-  void it('allows super administrators to select a known tenant or query globally', () => {
+  void it('allows super administrators to select a known tenant or query globally', async () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
     const actor = { userId: 'root', orgId: 'root-org', role: 'super_admin' }
 
-    assert.equal(auth.adminScope(actor).tenantId, null)
-    assert.equal(auth.adminScope(actor, 'tenant-b').tenantId, 'tenant-b')
-    assert.throws(() => auth.adminScope(actor, 'missing'), (error: unknown) =>
+    assert.equal((await auth.adminScope(actor)).tenantId, null)
+    assert.equal((await auth.adminScope(actor, 'tenant-b')).tenantId, 'tenant-b')
+    await assert.rejects(auth.adminScope(actor, 'missing'), (error: unknown) =>
       error instanceof QmsAuthorizationError && error.code === 'TENANT_NOT_FOUND')
   })
 
-  void it('scopes a Moss operations super administrator to the selected organization tenant', () => {
+  void it('scopes a Moss operations super administrator to the selected organization tenant', async () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
     const actor = {
       userId: 'root', orgId: 'org-b', role: 'super_admin', organizationScoped: true,
     }
 
-    assert.deepEqual(auth.adminScope(actor, 'tenant-a'), {
+    assert.deepEqual(await auth.adminScope(actor, 'tenant-a'), {
       userId: 'root',
       orgId: 'org-b',
       tenantId: 'tenant-b',
@@ -66,10 +66,10 @@ void describe('QMS authorization', () => {
     })
   })
 
-  void it('rejects ordinary users and administrators without an organization mapping', () => {
+  void it('rejects ordinary users and administrators without an organization mapping', async () => {
     const auth = new QmsAuthorizationService({ apiKey: 'secret-key', organizations })
-    assert.throws(() => auth.adminScope({ userId: 'u2', orgId: 'org-a', role: 'user' }), /Insufficient permissions/)
-    assert.throws(() => auth.adminScope({ userId: 'u3', orgId: 'missing', role: 'admin' }), (error: unknown) =>
+    await assert.rejects(auth.adminScope({ userId: 'u2', orgId: 'org-a', role: 'user' }), /Insufficient permissions/)
+    await assert.rejects(auth.adminScope({ userId: 'u3', orgId: 'missing', role: 'admin' }), (error: unknown) =>
       error instanceof QmsAuthorizationError && error.code === 'TENANT_NOT_FOUND')
   })
 })

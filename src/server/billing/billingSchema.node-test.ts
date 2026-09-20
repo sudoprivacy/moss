@@ -2,14 +2,17 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { ensureCompatibilityCoreSchema } from '../db/compatibilitySchema.js'
+import { SqliteDriver } from '../db/driver.js'
+import { ensureIdentitySchema } from '../identity/identityRepository.js'
+import { BillingRepository } from './billingRepository.js'
 import { ensureBillingSchema } from './billingSchema.js'
 
 function setup(): DatabaseSync {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   new AuthCenterDb(db)
-  new IdentityRepository(db)
+  ensureIdentitySchema(db)
   db.prepare("INSERT INTO organizations (id, name, created_at) VALUES ('org1', 'Org 1', 1)").run()
   db.prepare(`
     INSERT INTO users (id, org_id, email, name, role, status, local_auth, created_at)
@@ -94,7 +97,7 @@ void describe('Billing Schema', () => {
     db.close()
   })
 
-  void test('旧账本表升级时补齐稳定数字 ID 并恢复只追加约束', () => {
+  void test('旧账本表升级时补齐稳定数字 ID 并恢复只追加约束', async () => {
     const db = setup()
     db.exec(`
       CREATE TABLE billing_ledger_entries (
@@ -126,9 +129,47 @@ void describe('Billing Schema', () => {
       { id: 'old-1', legacy_id: 2_000_000_000 },
       { id: 'old-2', legacy_id: 2_000_000_001 },
     ])
+    ensureCompatibilityCoreSchema(db)
+    const repository = new BillingRepository(new SqliteDriver(db))
+    await repository.insertLedgerEntry({
+      id: 'after-upgrade', ownerType: 'user', ownerId: 'u1', deltaUnits: 1,
+      balanceBeforeUnits: 300, balanceAfterUnits: 301, entryType: 'BONUS',
+      sourceType: 'test', sourceId: 'after-upgrade', idempotencyKey: 'after-upgrade',
+      contextSource: 'online', createdAt: 3,
+    })
+    const nextEntry = await repository.getLedgerEntry('after-upgrade')
+    assert(nextEntry)
+    assert.ok(nextEntry.legacyId > 2_000_000_001)
     assert.throws(
       () => db.prepare("UPDATE billing_ledger_entries SET legacy_id = 1 WHERE id = 'old-1'").run(),
       /billing ledger entries are append-only/,
+    )
+    db.close()
+  })
+
+  void test('旧 Sudorouter 开户表升级后支持跨实例 PROCESSING 抢占状态', () => {
+    const db = setup()
+    db.exec(`
+      CREATE TABLE billing_sudorouter_provisioning (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL UNIQUE, org_id TEXT NOT NULL,
+        username TEXT NOT NULL, display_name TEXT NOT NULL, initial_quota_units INTEGER NOT NULL,
+        external_account_id TEXT, quota_units INTEGER, used_quota_units INTEGER, token_secret_ref TEXT,
+        status TEXT NOT NULL CHECK (status IN ('PENDING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'COMPLETED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+        idempotency_key TEXT NOT NULL UNIQUE, request_fingerprint TEXT NOT NULL,
+        context_source TEXT NOT NULL, error_text TEXT, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, completed_at INTEGER
+      );
+      INSERT INTO billing_sudorouter_provisioning (
+        id, owner_id, org_id, username, display_name, initial_quota_units,
+        status, idempotency_key, request_fingerprint, context_source, created_at, updated_at
+      ) VALUES ('legacy', 'u1', 'org1', 'u1', 'U1', 0, 'PENDING', 'legacy-key', 'fingerprint', 'online', 1, 1);
+    `)
+
+    ensureBillingSchema(db)
+    db.prepare("UPDATE billing_sudorouter_provisioning SET status = 'PROCESSING' WHERE id = 'legacy'").run()
+    assert.equal(
+      (db.prepare("SELECT status FROM billing_sudorouter_provisioning WHERE id = 'legacy'").get() as { status: string }).status,
+      'PROCESSING',
     )
     db.close()
   })

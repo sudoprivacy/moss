@@ -77,7 +77,7 @@ export async function runP5QmsMigrationCli(
     await assertDifferentDatabases(source, options.targetUrl)
     const targetState = await targetStore.start()
     const organizations = {
-      hasCode: (code: string) => Boolean(mossDb.prepare(
+      hasCode: async (code: string) => Boolean(mossDb.prepare(
         'SELECT 1 FROM organization_profiles WHERE code = ? LIMIT 1',
       ).get(code)),
     }

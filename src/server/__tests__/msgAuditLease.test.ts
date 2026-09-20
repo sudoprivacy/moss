@@ -31,7 +31,7 @@ describe("E2: msgaudit per-corpApp lease claim/release", () => {
     await store.releaseMsgAuditLease("c1", "B"); // owner releases
     assert.equal(await store.claimMsgAuditLease("c1", "A", now + 3 * ttl, now + 1_000), true, "reclaimable after release");
 
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("independent corpApps do not contend", async () => {
@@ -39,6 +39,6 @@ describe("E2: msgaudit per-corpApp lease claim/release", () => {
     const now = 1_000;
     assert.equal(await store.claimMsgAuditLease("c1", "A", now + 60_000, now), true);
     assert.equal(await store.claimMsgAuditLease("c2", "B", now + 60_000, now), true);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });

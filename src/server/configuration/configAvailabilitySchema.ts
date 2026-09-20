@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../db/driver.js'
 
 export function ensureConfigAvailabilitySchema(db: DatabaseSync): void {
   const columns = db.prepare('PRAGMA table_info(config_items)').all() as Array<{ name: string }>
@@ -9,10 +10,6 @@ export function ensureConfigAvailabilitySchema(db: DatabaseSync): void {
     `)
   }
   db.exec(`
-    UPDATE config_items
-    SET availability = 'all'
-    WHERE scope = 'user' AND org_id IS NULL AND availability = 'organization';
-
     CREATE TABLE IF NOT EXISTS config_item_org_assignments (
       config_item_id INTEGER NOT NULL,
       org_id TEXT NOT NULL,
@@ -23,5 +20,13 @@ export function ensureConfigAvailabilitySchema(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_config_item_org_assignments_org
       ON config_item_org_assignments (org_id, config_item_id);
+  `)
+}
+
+export async function repairConfigAvailability(driver: DbDriver): Promise<void> {
+  await driver.run(`
+    UPDATE config_items
+    SET availability = 'all'
+    WHERE scope = 'user' AND org_id IS NULL AND availability = 'organization'
   `)
 }

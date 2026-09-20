@@ -2,24 +2,30 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
-import { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
-import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
+import { ClientPolicyRepository, ensureClientPolicySchema } from '../../../configuration/clientPolicyRepository.js'
+import {
+  ensurePlatformIntegrationSettingsSchema,
+  PlatformIntegrationSettingsRepository,
+} from '../../../configuration/platformIntegrationSettingsRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import { migrationCommandContext } from '../../../application/commandContext.js'
+import { createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkSystemConfigError, SudoworkSystemConfigService } from './systemConfigService.js'
 
 async function setup(secretFailure = false) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  const unified = new UnifiedIdentityService(db, authDb, identities)
+  const identities = createIdentityTestRepository(db, {}, authDb.driver)
+  const unified = new UnifiedIdentityService(authDb, identities)
   const org = await unified.createOrganization({ name: '企业 A', code: 'ENT-A' }, migrationCommandContext('test', 'org-a'))
   const secrets = new Map<string, string>()
+  ensureClientPolicySchema(db)
+  ensurePlatformIntegrationSettingsSchema(db)
+  const policies = new ClientPolicyRepository(authDb.driver)
   const service = new SudoworkSystemConfigService({
-    db,
-    policies: new ClientPolicyRepository(db),
-    infrastructureSettings: new PlatformIntegrationSettingsRepository(db),
+    db: authDb.driver,
+    policies,
+    infrastructureSettings: new PlatformIntegrationSettingsRepository(authDb.driver),
     identities,
     defaults: {
       loginMethod: 'password',
@@ -49,7 +55,7 @@ async function setup(secretFailure = false) {
       async remove(key: string) { secrets.delete(key) },
     },
   } as never)
-  return { db, identities, org, secrets, service }
+  return { db, identities, org, policies, secrets, service }
 }
 
 void describe('Sudowork 系统配置统一服务', () => {
@@ -82,23 +88,23 @@ void describe('Sudowork 系统配置统一服务', () => {
         credit_application: { min_points: 200, max_points: 2000, allow_duplicate_pending: false },
       })
 
-      assert.equal(identities.getIntegrationConnection('cas-main')?.orgId, org.organizationId)
+      assert.equal((await identities.getIntegrationConnection('cas-main'))?.orgId, org.organizationId)
       assert.equal(secrets.get('client.log-report-key'), 'log-secret')
       assert.equal(db.prepare(`SELECT instr(policy_json, 'log-secret') AS found FROM client_delivery_policies`).get()?.found, 0)
 
-      const publicConfig = service.getPublicConfig()
+      const publicConfig = await service.getPublicConfig()
       assert.equal(publicConfig.login_method, 2)
       assert.deepEqual(publicConfig.log_report, { enabled: 1, baseurl: 'https://logs.example.test' })
       assert.equal((publicConfig.third_party_auth as any).providers[0].enterprise_code, '')
       assert.equal((publicConfig.third_party_auth as any).providers[0].auto_provision, 0)
       assert.equal(publicConfig.skillhub_baseurl, 'https://moss.example.test')
 
-      const adminConfig = service.getAdminConfig(root)
+      const adminConfig = await service.getAdminConfig(root)
       assert.equal((adminConfig.third_party_auth as any).providers[0].enterprise_code, 'ENT-A')
       assert.deepEqual(adminConfig.log_report, {
         enabled: 1, protocol: 'https', domain: 'logs.example.test', key: '', key_set: true,
       })
-      assert.deepEqual(service.getCredentialData(), {
+      assert.deepEqual(await service.getCredentialData(), {
         log_report: { key: 'log-secret' },
         product_improvement: { api_key: 'qms-api-key', public_key: 'qms-public-key' },
       })
@@ -108,7 +114,7 @@ void describe('Sudowork 系统配置统一服务', () => {
   })
 
   void test('权限、短信前置条件和 Nexus 失败不会留下部分策略', async () => {
-    const { db, org, service } = await setup(true)
+    const { db, org, policies, service } = await setup(true)
     try {
       await assert.rejects(
         service.update({ userId: 'admin', orgId: org.organizationId, role: 'admin' }, { login_method: 1 }),
@@ -120,7 +126,7 @@ void describe('Sudowork 系统配置统一服务', () => {
         }),
         /nexus unavailable/,
       )
-      assert.deepEqual(new ClientPolicyRepository(db).getPlatform(), {})
+      assert.deepEqual(await policies.getPlatform(), {})
     } finally {
       db.close()
     }
@@ -152,7 +158,7 @@ void describe('Sudowork 系统配置统一服务', () => {
         },
       })
 
-      const config = service.getAdminConfig(root) as any
+      const config = await service.getAdminConfig(root) as any
       assert.equal(config.restart_required, true)
       assert.equal(config.sms.provider, 'tencent')
       assert.equal(config.sms.expire_minutes, 8)
@@ -161,7 +167,7 @@ void describe('Sudowork 系统配置统一服务', () => {
       assert.equal(config.billing.sudorouter.base_url, 'https://router.test')
       assert.equal(config.billing.sudorouter.initial_quota, 50_000_000)
       assert.equal(config.billing.sudorouter.model_service_url, 'https://router.test/v1')
-      assert.equal(service.getPublicConfig().sudorouter_baseurl, 'https://router.test')
+      assert.equal((await service.getPublicConfig()).sudorouter_baseurl, 'https://router.test')
       assert.equal(db.prepare(`
         SELECT instr(policy_json, 'billingInfrastructure') + instr(policy_json, 'smsInfrastructure') AS leaked
         FROM client_delivery_policies WHERE scope_type = 'platform' AND scope_id = 'default'
@@ -170,7 +176,7 @@ void describe('Sudowork 系统配置统一服务', () => {
         SELECT COUNT(*) AS count FROM platform_integration_settings
         WHERE setting_key IN ('sudowork.sms', 'sudowork.billing')
       `).get()?.count, 2)
-      assert.deepEqual((service as any).getInfrastructureConfig(), {
+      assert.deepEqual(await (service as any).getInfrastructureConfig(), {
         sms: {
           provider: 'tencent', sdkAppId: '1400000000', signName: '企业签名',
           templateId: '123456', signId: '654321', region: 'ap-guangzhou',
@@ -189,7 +195,7 @@ void describe('Sudowork 系统配置统一服务', () => {
           },
         },
       })
-      const legacyConfig = service.getAdminConfig(legacyRoot) as any
+      const legacyConfig = await service.getAdminConfig(legacyRoot) as any
       assert.equal(legacyConfig.sms, undefined)
       assert.equal(legacyConfig.billing, undefined)
       assert.equal(legacyConfig.restart_required, undefined)

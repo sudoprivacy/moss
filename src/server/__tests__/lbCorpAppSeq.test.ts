@@ -48,13 +48,13 @@ describe("appendCorpAppInbound — single-writer seq correctness (HA anchor)", (
       assert.deepEqual(seqs, [1, 2, 3, 4, 5]);
       assert.equal(new Set(seqs).size, 5, "no duplicate seq across instances");
 
-      const rows = storeA.db
+      const rows = storeA.requireSqliteDb()
         .prepare("SELECT seq FROM corp_app_inbound WHERE corp_app_id = ? ORDER BY seq")
         .all("app1") as Array<{ seq: number }>;
       assert.deepEqual(rows.map(r => r.seq), [1, 2, 3, 4, 5]);
 
-      storeA.db.close();
-      storeB.db.close();
+      storeA.requireSqliteDb().close();
+      storeB.requireSqliteDb().close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -62,7 +62,7 @@ describe("appendCorpAppInbound — single-writer seq correctness (HA anchor)", (
 
   it("the (corp_app_id, seq) unique index rejects duplicate seq inserts", () => {
     const store = new DirectConnectStore(":memory:");
-    store.db
+    store.requireSqliteDb()
       .prepare(
         `INSERT INTO corp_app_inbound (id, corp_app_id, org_id, seq, from_user, msg_type, text, received_at)
          VALUES ('r1', 'app1', 'o1', 7, 'u', 'text', 'x', 0)`,
@@ -70,7 +70,7 @@ describe("appendCorpAppInbound — single-writer seq correctness (HA anchor)", (
       .run();
     assert.throws(
       () =>
-        store.db
+        store.requireSqliteDb()
           .prepare(
             `INSERT INTO corp_app_inbound (id, corp_app_id, org_id, seq, from_user, msg_type, text, received_at)
              VALUES ('r2', 'app1', 'o1', 7, 'u', 'text', 'y', 0)`,
@@ -79,7 +79,7 @@ describe("appendCorpAppInbound — single-writer seq correctness (HA anchor)", (
       /UNIQUE constraint failed/i,
     );
     // Different corp app reusing the same seq is fine — the scope is per-app.
-    store.db
+    store.requireSqliteDb()
       .prepare(
         `INSERT INTO corp_app_inbound (id, corp_app_id, org_id, seq, from_user, msg_type, text, received_at)
          VALUES ('r3', 'app2', 'o1', 7, 'u', 'text', 'z', 0)`,

@@ -1232,6 +1232,765 @@ ALTER TABLE enterprises ADD COLUMN IF NOT EXISTS client_show_tool_calls BIGINT;
 ALTER TABLE enterprises ADD COLUMN IF NOT EXISTS workspace_upload_limit_bytes BIGINT;
 `
 
+/** Sudowork compatibility domains and cross-instance legacy-id counters. */
+const MIGRATION_0006_COMPATIBILITY = `
+-- ============ Identity compatibility ============
+
+CREATE TABLE IF NOT EXISTS organization_profiles (
+  org_id TEXT CONSTRAINT organization_profiles_pkey PRIMARY KEY REFERENCES organizations(id),
+  code TEXT NOT NULL CONSTRAINT organization_profiles_code_key UNIQUE,
+  login_method TEXT NOT NULL DEFAULT 'password'
+    CONSTRAINT organization_profiles_login_method_check CHECK (login_method IN ('sms', 'password', 'cas')),
+  local_enabled BIGINT NOT NULL DEFAULT 1,
+  cloud_enabled BIGINT NOT NULL DEFAULT 1,
+  client_cron_enabled BIGINT NOT NULL DEFAULT 1,
+  logo TEXT,
+  app_name TEXT,
+  top_name TEXT,
+  about_name TEXT,
+  app_company_name TEXT,
+  login_description TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_auth_identities (
+  id TEXT CONSTRAINT user_auth_identities_pkey PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  provider TEXT NOT NULL,
+  issuer TEXT NOT NULL,
+  normalized_subject TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT user_auth_identities_subject_key UNIQUE (provider, issuer, normalized_subject),
+  CONSTRAINT user_auth_identities_user_provider_key UNIQUE (user_id, provider, issuer)
+);
+CREATE INDEX IF NOT EXISTS user_auth_identities_org_idx
+  ON user_auth_identities (org_id, user_id);
+
+CREATE TABLE IF NOT EXISTS resource_numeric_aliases (
+  namespace TEXT NOT NULL,
+  legacy_id BIGINT NOT NULL,
+  resource_id TEXT NOT NULL,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  migration_run_id TEXT,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT resource_numeric_aliases_pkey PRIMARY KEY (namespace, legacy_id),
+  CONSTRAINT resource_numeric_aliases_resource_key UNIQUE (namespace, resource_id)
+);
+CREATE INDEX IF NOT EXISTS resource_numeric_aliases_org_idx
+  ON resource_numeric_aliases (org_id, namespace, resource_id);
+
+CREATE TABLE IF NOT EXISTS invitations (
+  id TEXT CONSTRAINT invitations_pkey PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  code TEXT NOT NULL CONSTRAINT invitations_code_key UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CONSTRAINT invitations_status_check CHECK (status IN ('pending', 'used', 'revoked')),
+  initial_credit_units BIGINT NOT NULL DEFAULT 0,
+  legacy_initial_quota_usd DOUBLE PRECISION,
+  used_by_user_id TEXT REFERENCES users(id),
+  created_at BIGINT NOT NULL,
+  used_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS invitations_org_status_idx
+  ON invitations (org_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS wallets (
+  owner_type TEXT NOT NULL
+    CONSTRAINT wallets_owner_type_check CHECK (owner_type IN ('organization', 'user')),
+  owner_id TEXT NOT NULL,
+  balance_units BIGINT NOT NULL DEFAULT 0,
+  version BIGINT NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT wallets_pkey PRIMARY KEY (owner_type, owner_id)
+);
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+  id TEXT CONSTRAINT outbox_events_pkey PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  aggregate_type TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL
+    CONSTRAINT outbox_events_status_check CHECK (status IN ('pending', 'suppressed', 'completed', 'failed')),
+  context_source TEXT NOT NULL
+    CONSTRAINT outbox_events_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  idempotency_key TEXT NOT NULL CONSTRAINT outbox_events_idempotency_key_key UNIQUE,
+  suppress_reason TEXT,
+  attempts BIGINT NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL,
+  completed_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS outbox_events_status_idx ON outbox_events (status, created_at);
+
+CREATE TABLE IF NOT EXISTS command_executions (
+  command_type TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  context_source TEXT NOT NULL
+    CONSTRAINT command_executions_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  request_fingerprint TEXT,
+  result_json TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT command_executions_pkey PRIMARY KEY (command_type, idempotency_key)
+);
+ALTER TABLE command_executions ADD COLUMN IF NOT EXISTS request_fingerprint TEXT;
+
+CREATE TABLE IF NOT EXISTS operation_audit_events (
+  id TEXT CONSTRAINT operation_audit_events_pkey PRIMARY KEY,
+  legacy_id BIGINT NOT NULL CONSTRAINT operation_audit_events_legacy_id_key UNIQUE,
+  org_id TEXT NOT NULL,
+  actor_user_id TEXT,
+  actor_legacy_id BIGINT,
+  actor_name TEXT,
+  action TEXT NOT NULL,
+  resource TEXT NOT NULL,
+  resource_id TEXT,
+  method TEXT,
+  path TEXT,
+  legacy_params_raw TEXT,
+  legacy_request_data_raw TEXT,
+  legacy_response_data_raw TEXT,
+  request_data_json TEXT,
+  response_data_json TEXT,
+  response_status BIGINT,
+  ip_address TEXT,
+  user_agent TEXT,
+  duration_ms BIGINT,
+  error_message TEXT,
+  idempotency_key TEXT NOT NULL CONSTRAINT operation_audit_events_idempotency_key_key UNIQUE,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS operation_audit_org_time_idx
+  ON operation_audit_events (org_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS operation_audit_actor_time_idx
+  ON operation_audit_events (actor_user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS operation_audit_action_time_idx
+  ON operation_audit_events (action, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS integration_connections (
+  id TEXT CONSTRAINT integration_connections_pkey PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  provider_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  enabled BIGINT NOT NULL DEFAULT 1,
+  secret_ref TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT integration_connections_org_provider_key UNIQUE (org_id, provider_type, id)
+);
+CREATE INDEX IF NOT EXISTS integration_connections_org_provider_idx
+  ON integration_connections (org_id, provider_type, enabled);
+
+-- ============ Catalog compatibility ============
+
+ALTER TABLE tenant_assistants
+  ADD COLUMN IF NOT EXISTS provider_type TEXT NOT NULL DEFAULT 'moss_runtime',
+  ADD COLUMN IF NOT EXISTS provider_binding TEXT,
+  ADD COLUMN IF NOT EXISTS supported_modes TEXT NOT NULL DEFAULT 'both',
+  ADD COLUMN IF NOT EXISTS availability TEXT NOT NULL DEFAULT 'organization',
+  ADD COLUMN IF NOT EXISTS source_provider TEXT NOT NULL DEFAULT 'moss',
+  ADD COLUMN IF NOT EXISTS source_resource_id TEXT,
+  ADD COLUMN IF NOT EXISTS profession TEXT,
+  ADD COLUMN IF NOT EXISTS prompt_file TEXT,
+  ADD COLUMN IF NOT EXISTS sort_order BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE tenant_skills
+  ADD COLUMN IF NOT EXISTS supported_modes TEXT NOT NULL DEFAULT 'both',
+  ADD COLUMN IF NOT EXISTS availability TEXT NOT NULL DEFAULT 'organization',
+  ADD COLUMN IF NOT EXISTS source_provider TEXT NOT NULL DEFAULT 'moss',
+  ADD COLUMN IF NOT EXISTS source_resource_id TEXT,
+  ADD COLUMN IF NOT EXISTS category TEXT,
+  ADD COLUMN IF NOT EXISTS categories TEXT,
+  ADD COLUMN IF NOT EXISTS emoji TEXT,
+  ADD COLUMN IF NOT EXISTS icon TEXT,
+  ADD COLUMN IF NOT EXISTS homepage TEXT,
+  ADD COLUMN IF NOT EXISTS applicable_scenarios TEXT,
+  ADD COLUMN IF NOT EXISTS core_features TEXT,
+  ADD COLUMN IF NOT EXISTS sort_order BIGINT NOT NULL DEFAULT 0;
+
+UPDATE tenant_assistants SET source_resource_id = id WHERE source_resource_id IS NULL;
+UPDATE tenant_skills SET source_resource_id = id WHERE source_resource_id IS NULL;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_assistants_provider_type_check') THEN
+    ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check
+      CHECK (provider_type IN ('local', 'moss_runtime', 'dify'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_assistants_supported_modes_check') THEN
+    ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_supported_modes_check
+      CHECK (supported_modes IN ('local', 'cloud', 'both'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_assistants_availability_check') THEN
+    ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_availability_check
+      CHECK (availability IN ('organization', 'all', 'assigned'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_skills_supported_modes_check') THEN
+    ALTER TABLE tenant_skills ADD CONSTRAINT tenant_skills_supported_modes_check
+      CHECK (supported_modes IN ('local', 'cloud', 'both'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_skills_availability_check') THEN
+    ALTER TABLE tenant_skills ADD CONSTRAINT tenant_skills_availability_check
+      CHECK (availability IN ('organization', 'all', 'assigned'));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_tenant_assistants_org_mode
+  ON tenant_assistants (org_id, availability, supported_modes, status, enabled);
+CREATE INDEX IF NOT EXISTS idx_tenant_assistants_provider
+  ON tenant_assistants (provider_type, source_provider, source_resource_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_assistants_availability
+  ON tenant_assistants (availability, status, enabled);
+CREATE INDEX IF NOT EXISTS idx_tenant_skills_org_mode
+  ON tenant_skills (org_id, availability, supported_modes, status, enabled);
+CREATE INDEX IF NOT EXISTS idx_tenant_skills_availability
+  ON tenant_skills (availability, status, enabled);
+
+CREATE OR REPLACE FUNCTION moss_catalog_source_resource_id()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.source_resource_id IS NULL THEN NEW.source_resource_id := NEW.id; END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_tenant_assistants_source_id ON tenant_assistants;
+CREATE TRIGGER trg_tenant_assistants_source_id
+  BEFORE INSERT ON tenant_assistants
+  FOR EACH ROW EXECUTE FUNCTION moss_catalog_source_resource_id();
+DROP TRIGGER IF EXISTS trg_tenant_skills_source_id ON tenant_skills;
+CREATE TRIGGER trg_tenant_skills_source_id
+  BEFORE INSERT ON tenant_skills
+  FOR EACH ROW EXECUTE FUNCTION moss_catalog_source_resource_id();
+
+CREATE TABLE IF NOT EXISTS catalog_resource_org_assignments (
+  resource_type TEXT NOT NULL
+    CONSTRAINT catalog_resource_org_assignments_type_check CHECK (resource_type IN ('agent', 'skill')),
+  resource_id TEXT NOT NULL,
+  org_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT catalog_resource_org_assignments_pkey PRIMARY KEY (resource_type, resource_id, org_id)
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_resource_org_assignments_org
+  ON catalog_resource_org_assignments (org_id, resource_type, resource_id);
+
+CREATE OR REPLACE FUNCTION moss_catalog_assignment_parent()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.resource_type = 'agent'
+    AND NOT EXISTS (SELECT 1 FROM tenant_assistants WHERE id = NEW.resource_id) THEN
+    RAISE EXCEPTION 'catalog resource not found' USING ERRCODE = '23503';
+  END IF;
+  IF NEW.resource_type = 'skill'
+    AND NOT EXISTS (SELECT 1 FROM tenant_skills WHERE id = NEW.resource_id) THEN
+    RAISE EXCEPTION 'catalog resource not found' USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_catalog_assignment_parent ON catalog_resource_org_assignments;
+CREATE TRIGGER trg_catalog_assignment_parent
+  BEFORE INSERT ON catalog_resource_org_assignments
+  FOR EACH ROW EXECUTE FUNCTION moss_catalog_assignment_parent();
+
+CREATE TABLE IF NOT EXISTS resource_external_aliases (
+  id TEXT CONSTRAINT resource_external_aliases_pkey PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  resource_type TEXT NOT NULL
+    CONSTRAINT resource_external_aliases_type_check CHECK (resource_type IN ('agent', 'skill')),
+  resource_id TEXT NOT NULL,
+  provider_type TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT resource_external_aliases_external_key
+    UNIQUE (resource_type, provider_type, provider_id, external_id),
+  CONSTRAINT resource_external_aliases_resource_key
+    UNIQUE (resource_type, resource_id, provider_type, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resource_external_aliases_org
+  ON resource_external_aliases (org_id, resource_type, resource_id);
+
+-- ============ Configuration compatibility ============
+
+ALTER TABLE config_items
+  ADD COLUMN IF NOT EXISTS availability TEXT NOT NULL DEFAULT 'organization';
+UPDATE config_items
+SET availability = 'all'
+WHERE scope = 'user' AND org_id IS NULL AND availability = 'organization';
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'config_items_availability_check') THEN
+    ALTER TABLE config_items ADD CONSTRAINT config_items_availability_check
+      CHECK (availability IN ('organization', 'all', 'assigned'));
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS config_item_org_assignments (
+  config_item_id BIGINT NOT NULL REFERENCES config_items(id) ON DELETE CASCADE,
+  org_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT config_item_org_assignments_pkey PRIMARY KEY (config_item_id, org_id)
+);
+CREATE INDEX IF NOT EXISTS idx_config_item_org_assignments_org
+  ON config_item_org_assignments (org_id, config_item_id);
+
+CREATE TABLE IF NOT EXISTS client_delivery_policies (
+  scope_type TEXT NOT NULL
+    CONSTRAINT client_delivery_policies_scope_type_check CHECK (scope_type IN ('platform', 'organization')),
+  scope_id TEXT NOT NULL,
+  policy_json TEXT NOT NULL DEFAULT '{}',
+  updated_by TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT client_delivery_policies_pkey PRIMARY KEY (scope_type, scope_id)
+);
+CREATE INDEX IF NOT EXISTS client_delivery_policies_scope_idx
+  ON client_delivery_policies (scope_type, scope_id);
+
+CREATE TABLE IF NOT EXISTS platform_integration_settings (
+  setting_key TEXT CONSTRAINT platform_integration_settings_pkey PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+-- ============ Dify compatibility ============
+
+CREATE TABLE IF NOT EXISTS dify_provider_resources (
+  id TEXT CONSTRAINT dify_provider_resources_pkey PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  resource_type TEXT NOT NULL
+    CONSTRAINT dify_provider_resources_type_check CHECK (resource_type IN ('dataset')),
+  external_id TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT dify_provider_resources_external_key
+    UNIQUE (org_id, connection_id, resource_type, external_id)
+);
+CREATE INDEX IF NOT EXISTS dify_provider_resources_org_idx
+  ON dify_provider_resources (org_id, resource_type, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS dify_provider_operations (
+  id TEXT CONSTRAINT dify_provider_operations_pkey PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  operation_type TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL CONSTRAINT dify_provider_operations_idempotency_key_key UNIQUE,
+  status TEXT NOT NULL
+    CONSTRAINT dify_provider_operations_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+  request_json TEXT NOT NULL,
+  result_json TEXT,
+  context_source TEXT NOT NULL
+    CONSTRAINT dify_provider_operations_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  error_message TEXT,
+  attempts BIGINT NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dify_provider_operations_status_idx
+  ON dify_provider_operations (status, updated_at, id);
+CREATE INDEX IF NOT EXISTS dify_provider_operations_aggregate_idx
+  ON dify_provider_operations (org_id, operation_type, aggregate_id);
+
+CREATE TABLE IF NOT EXISTS dify_migration_checkpoints (
+  migration_run_id TEXT NOT NULL,
+  source_checksum TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  cursor TEXT,
+  status TEXT NOT NULL
+    CONSTRAINT dify_migration_checkpoints_status_check CHECK (status IN ('planned', 'running', 'completed', 'failed')),
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT dify_migration_checkpoints_pkey PRIMARY KEY (migration_run_id, phase)
+);
+
+-- ============ Billing compatibility ============
+
+CREATE TABLE IF NOT EXISTS billing_ledger_entries (
+  id TEXT CONSTRAINT billing_ledger_entries_pkey PRIMARY KEY,
+  legacy_id BIGINT,
+  owner_type TEXT NOT NULL
+    CONSTRAINT billing_ledger_entries_owner_type_check CHECK (owner_type IN ('organization', 'user')),
+  owner_id TEXT NOT NULL,
+  delta_units BIGINT NOT NULL,
+  balance_before_units BIGINT NOT NULL,
+  balance_after_units BIGINT NOT NULL,
+  entry_type TEXT NOT NULL,
+  memo TEXT,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_ledger_entries_idempotency_key_key UNIQUE,
+  context_source TEXT NOT NULL
+    CONSTRAINT billing_ledger_entries_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  actor_user_id TEXT,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT billing_ledger_entries_balance_check
+    CHECK (balance_after_units = balance_before_units + delta_units)
+);
+ALTER TABLE billing_ledger_entries ADD COLUMN IF NOT EXISTS legacy_id BIGINT;
+CREATE INDEX IF NOT EXISTS billing_ledger_owner_idx
+  ON billing_ledger_entries (owner_type, owner_id, created_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS billing_ledger_source_idx
+  ON billing_ledger_entries (source_type, source_id, entry_type);
+
+CREATE TABLE IF NOT EXISTS billing_usage_records (
+  id TEXT CONSTRAINT billing_usage_records_pkey PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  model TEXT,
+  input_tokens BIGINT NOT NULL CONSTRAINT billing_usage_records_input_tokens_check CHECK (input_tokens >= 0),
+  output_tokens BIGINT NOT NULL CONSTRAINT billing_usage_records_output_tokens_check CHECK (output_tokens >= 0),
+  cost_units BIGINT NOT NULL CONSTRAINT billing_usage_records_cost_units_check CHECK (cost_units >= 0),
+  balance_after_units BIGINT NOT NULL,
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_usage_records_idempotency_key_key UNIQUE,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS billing_usage_user_time_idx
+  ON billing_usage_records (user_id, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS billing_packages (
+  id TEXT CONSTRAINT billing_packages_pkey PRIMARY KEY,
+  amount_usd_micros BIGINT NOT NULL CONSTRAINT billing_packages_amount_check CHECK (amount_usd_micros > 0),
+  points_units BIGINT NOT NULL CONSTRAINT billing_packages_points_check CHECK (points_units > 0),
+  bonus_units BIGINT NOT NULL DEFAULT 0 CONSTRAINT billing_packages_bonus_check CHECK (bonus_units >= 0),
+  description TEXT NOT NULL,
+  enabled BIGINT NOT NULL DEFAULT 1 CONSTRAINT billing_packages_enabled_check CHECK (enabled IN (0, 1)),
+  sort_order BIGINT NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS billing_orders (
+  id TEXT CONSTRAINT billing_orders_pkey PRIMARY KEY,
+  legacy_id BIGINT CONSTRAINT billing_orders_legacy_id_key UNIQUE,
+  order_no TEXT NOT NULL CONSTRAINT billing_orders_order_no_key UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  user_phone TEXT,
+  amount_usd_micros BIGINT NOT NULL CONSTRAINT billing_orders_amount_usd_check CHECK (amount_usd_micros > 0),
+  amount_cents BIGINT NOT NULL CONSTRAINT billing_orders_amount_cents_check CHECK (amount_cents > 0),
+  exchange_rate_micros BIGINT NOT NULL CONSTRAINT billing_orders_exchange_rate_check CHECK (exchange_rate_micros > 0),
+  quota_units BIGINT NOT NULL CONSTRAINT billing_orders_quota_check CHECK (quota_units >= 0),
+  points_units BIGINT NOT NULL CONSTRAINT billing_orders_points_check CHECK (points_units > 0),
+  bonus_units BIGINT NOT NULL DEFAULT 0 CONSTRAINT billing_orders_bonus_check CHECK (bonus_units >= 0),
+  payment_method TEXT NOT NULL
+    CONSTRAINT billing_orders_payment_method_check CHECK (payment_method IN ('ALIPAY', 'WECHAT')),
+  order_date TEXT NOT NULL,
+  provider_order_info TEXT,
+  status TEXT NOT NULL
+    CONSTRAINT billing_orders_status_check
+      CHECK (status IN ('PENDING', 'PAYING', 'SUCCESS', 'FAILED', 'CANCELLED', 'REFUNDED', 'PARTIAL_REFUNDED')),
+  callback_payload_json TEXT,
+  callback_time BIGINT,
+  callback_amount_cents BIGINT,
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_orders_idempotency_key_key UNIQUE,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  expired_at BIGINT NOT NULL,
+  remark TEXT
+);
+CREATE INDEX IF NOT EXISTS billing_orders_user_idx ON billing_orders (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS billing_orders_org_status_idx ON billing_orders (org_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS billing_payment_attempts (
+  id TEXT CONSTRAINT billing_payment_attempts_pkey PRIMARY KEY,
+  order_id TEXT NOT NULL REFERENCES billing_orders(id),
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL
+    CONSTRAINT billing_payment_attempts_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_payment_attempts_idempotency_key_key UNIQUE,
+  request_json TEXT,
+  response_json TEXT,
+  error_text TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  completed_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS billing_payment_attempts_order_idx
+  ON billing_payment_attempts (order_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS billing_provider_events (
+  id TEXT CONSTRAINT billing_provider_events_pkey PRIMARY KEY,
+  provider TEXT NOT NULL,
+  provider_event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL
+    CONSTRAINT billing_provider_events_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+  error_text TEXT,
+  received_at BIGINT NOT NULL,
+  processed_at BIGINT,
+  CONSTRAINT billing_provider_events_provider_event_key UNIQUE (provider, provider_event_id)
+);
+
+CREATE TABLE IF NOT EXISTS billing_external_accounts (
+  provider TEXT NOT NULL,
+  owner_type TEXT NOT NULL
+    CONSTRAINT billing_external_accounts_owner_type_check CHECK (owner_type IN ('organization', 'user')),
+  owner_id TEXT NOT NULL,
+  external_account_id TEXT NOT NULL,
+  quota_units BIGINT NOT NULL DEFAULT 0,
+  used_quota_units BIGINT NOT NULL DEFAULT 0,
+  token_secret_ref TEXT,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT billing_external_accounts_pkey PRIMARY KEY (provider, owner_type, owner_id),
+  CONSTRAINT billing_external_accounts_external_key UNIQUE (provider, external_account_id)
+);
+ALTER TABLE billing_external_accounts ADD COLUMN IF NOT EXISTS token_secret_ref TEXT;
+
+CREATE TABLE IF NOT EXISTS billing_sudorouter_provisioning (
+  id TEXT CONSTRAINT billing_sudorouter_provisioning_pkey PRIMARY KEY,
+  owner_id TEXT NOT NULL CONSTRAINT billing_sudorouter_provisioning_owner_key UNIQUE,
+  org_id TEXT NOT NULL,
+  username TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  initial_quota_units BIGINT NOT NULL
+    CONSTRAINT billing_sudorouter_provisioning_initial_quota_check CHECK (initial_quota_units >= 0),
+  external_account_id TEXT,
+  quota_units BIGINT,
+  used_quota_units BIGINT,
+  token_secret_ref TEXT,
+  status TEXT NOT NULL
+    CONSTRAINT billing_sudorouter_provisioning_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'COMPLETED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_sudorouter_provisioning_idempotency_key_key UNIQUE,
+  request_fingerprint TEXT NOT NULL,
+  context_source TEXT NOT NULL
+    CONSTRAINT billing_sudorouter_provisioning_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  error_text TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  completed_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS billing_sudorouter_provisioning_status_idx
+  ON billing_sudorouter_provisioning (status, updated_at);
+
+CREATE TABLE IF NOT EXISTS billing_quota_operations (
+  id TEXT CONSTRAINT billing_quota_operations_pkey PRIMARY KEY,
+  owner_type TEXT NOT NULL
+    CONSTRAINT billing_quota_operations_owner_type_check CHECK (owner_type IN ('organization', 'user')),
+  owner_id TEXT NOT NULL,
+  external_user_id TEXT NOT NULL,
+  delta_units BIGINT NOT NULL,
+  observed_quota_units BIGINT,
+  observed_used_units BIGINT,
+  status TEXT NOT NULL
+    CONSTRAINT billing_quota_operations_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_quota_operations_idempotency_key_key UNIQUE,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  org_id TEXT,
+  actor_user_id TEXT,
+  reason TEXT,
+  request_fingerprint TEXT NOT NULL,
+  context_source TEXT NOT NULL
+    CONSTRAINT billing_quota_operations_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  provider_response_json TEXT,
+  error_text TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  completed_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS billing_quota_owner_idx
+  ON billing_quota_operations (owner_type, owner_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS billing_credit_applications (
+  id TEXT CONSTRAINT billing_credit_applications_pkey PRIMARY KEY,
+  legacy_id BIGINT CONSTRAINT billing_credit_applications_legacy_id_key UNIQUE,
+  application_no TEXT NOT NULL CONSTRAINT billing_credit_applications_no_key UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  requested_units BIGINT NOT NULL
+    CONSTRAINT billing_credit_applications_requested_check CHECK (requested_units > 0),
+  approved_units BIGINT CONSTRAINT billing_credit_applications_approved_check CHECK (approved_units IS NULL OR approved_units > 0),
+  quota_units BIGINT,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL
+    CONSTRAINT billing_credit_applications_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'APPROVED', 'REJECTED', 'SYNC_FAILED', 'SYNC_UNKNOWN')),
+  admin_user_id TEXT REFERENCES users(id),
+  admin_comment TEXT,
+  quota_operation_id TEXT REFERENCES billing_quota_operations(id),
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_credit_applications_idempotency_key_key UNIQUE,
+  request_fingerprint TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  reviewed_at BIGINT,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS billing_credit_org_status_idx
+  ON billing_credit_applications (org_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS billing_credit_user_idx
+  ON billing_credit_applications (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS billing_activity_records (
+  id TEXT CONSTRAINT billing_activity_records_pkey PRIMARY KEY,
+  legacy_id BIGINT NOT NULL,
+  activity_type TEXT NOT NULL
+    CONSTRAINT billing_activity_records_type_check CHECK (activity_type IN ('CLIENT', 'ADMIN')),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  org_id TEXT NOT NULL REFERENCES organizations(id),
+  order_id TEXT REFERENCES billing_orders(id),
+  actor_user_id TEXT REFERENCES users(id),
+  application_id TEXT REFERENCES billing_credit_applications(id),
+  points_units BIGINT NOT NULL,
+  quota_units BIGINT NOT NULL,
+  amount_cents BIGINT,
+  payment_method TEXT
+    CONSTRAINT billing_activity_records_payment_method_check CHECK (payment_method IS NULL OR payment_method IN ('ALIPAY', 'WECHAT')),
+  reason TEXT,
+  payment_reference TEXT,
+  source_type TEXT NOT NULL,
+  source_id TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_activity_records_idempotency_key_key UNIQUE,
+  created_at BIGINT NOT NULL,
+  processed_at BIGINT NOT NULL,
+  CONSTRAINT billing_activity_records_legacy_key UNIQUE (activity_type, legacy_id)
+);
+CREATE INDEX IF NOT EXISTS billing_activity_org_created_idx
+  ON billing_activity_records (org_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS billing_activity_user_created_idx
+  ON billing_activity_records (user_id, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS billing_refunds (
+  id TEXT CONSTRAINT billing_refunds_pkey PRIMARY KEY,
+  legacy_id BIGINT CONSTRAINT billing_refunds_legacy_id_key UNIQUE,
+  refund_no TEXT NOT NULL CONSTRAINT billing_refunds_refund_no_key UNIQUE,
+  order_id TEXT NOT NULL REFERENCES billing_orders(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  refund_amount_cents BIGINT NOT NULL
+    CONSTRAINT billing_refunds_amount_check CHECK (refund_amount_cents > 0),
+  refund_quota_units BIGINT NOT NULL
+    CONSTRAINT billing_refunds_quota_check CHECK (refund_quota_units >= 0),
+  refund_points_units BIGINT NOT NULL
+    CONSTRAINT billing_refunds_points_check CHECK (refund_points_units >= 0),
+  reason TEXT,
+  refund_type TEXT NOT NULL,
+  status TEXT NOT NULL
+    CONSTRAINT billing_refunds_status_check
+      CHECK (status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+  provider_refund_no TEXT,
+  provider_response_json TEXT,
+  quota_operation_id TEXT REFERENCES billing_quota_operations(id),
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_refunds_idempotency_key_key UNIQUE,
+  request_fingerprint TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  processed_at BIGINT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS billing_refunds_order_once_idx
+  ON billing_refunds (order_id) WHERE status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'UNKNOWN');
+
+CREATE TABLE IF NOT EXISTS billing_reconciliations (
+  id TEXT CONSTRAINT billing_reconciliations_pkey PRIMARY KEY,
+  scope_type TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  reconciliation_type TEXT NOT NULL,
+  expected_units BIGINT NOT NULL,
+  actual_units BIGINT NOT NULL,
+  difference_units BIGINT NOT NULL,
+  status TEXT NOT NULL
+    CONSTRAINT billing_reconciliations_status_check CHECK (status IN ('MATCHED', 'MISMATCH', 'RESOLVED')),
+  details_json TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  resolved_at BIGINT,
+  CONSTRAINT billing_reconciliations_scope_key
+    UNIQUE (scope_type, scope_id, reconciliation_type, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS billing_audit_events (
+  id TEXT CONSTRAINT billing_audit_events_pkey PRIMARY KEY,
+  action TEXT NOT NULL,
+  aggregate_type TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  actor_user_id TEXT,
+  org_id TEXT,
+  context_source TEXT NOT NULL
+    CONSTRAINT billing_audit_events_context_source_check CHECK (context_source IN ('online', 'migration', 'replay')),
+  idempotency_key TEXT NOT NULL CONSTRAINT billing_audit_events_idempotency_key_key UNIQUE,
+  payload_json TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS billing_audit_aggregate_idx
+  ON billing_audit_events (aggregate_type, aggregate_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS billing_migration_checkpoints (
+  source_checksum TEXT CONSTRAINT billing_migration_checkpoints_pkey PRIMARY KEY,
+  migration_run_id TEXT NOT NULL,
+  report_json TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  verified_at BIGINT NOT NULL
+);
+
+-- Backfill legacy ledger IDs before installing the append-only trigger.
+WITH base AS (
+  SELECT GREATEST(COALESCE(MAX(legacy_id), 0), 1999999999)::BIGINT AS value
+  FROM billing_ledger_entries
+), numbered AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS sequence
+  FROM billing_ledger_entries
+  WHERE legacy_id IS NULL
+)
+UPDATE billing_ledger_entries AS ledger
+SET legacy_id = base.value + numbered.sequence
+FROM base, numbered
+WHERE ledger.id = numbered.id;
+CREATE UNIQUE INDEX IF NOT EXISTS billing_ledger_legacy_id_idx
+  ON billing_ledger_entries (legacy_id);
+
+CREATE OR REPLACE FUNCTION moss_reject_billing_ledger_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'billing ledger entries are append-only';
+END $$;
+DROP TRIGGER IF EXISTS billing_ledger_entries_no_update ON billing_ledger_entries;
+CREATE TRIGGER billing_ledger_entries_no_update
+  BEFORE UPDATE ON billing_ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION moss_reject_billing_ledger_mutation();
+DROP TRIGGER IF EXISTS billing_ledger_entries_no_delete ON billing_ledger_entries;
+CREATE TRIGGER billing_ledger_entries_no_delete
+  BEFORE DELETE ON billing_ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION moss_reject_billing_ledger_mutation();
+
+-- ============ Cross-instance compatibility ID allocation ============
+
+CREATE TABLE IF NOT EXISTS compatibility_id_counters (
+  counter_key TEXT CONSTRAINT compatibility_id_counters_pkey PRIMARY KEY,
+  last_value BIGINT NOT NULL
+);
+
+INSERT INTO compatibility_id_counters (counter_key, last_value)
+SELECT 'resource_numeric_aliases:' || namespace,
+       GREATEST(COALESCE(MAX(legacy_id), 0), 1999999999)
+FROM resource_numeric_aliases
+GROUP BY namespace
+ON CONFLICT (counter_key) DO UPDATE
+SET last_value = GREATEST(compatibility_id_counters.last_value, EXCLUDED.last_value);
+
+INSERT INTO compatibility_id_counters (counter_key, last_value)
+VALUES
+  ('operation_audit_events', GREATEST(COALESCE((SELECT MAX(legacy_id) FROM operation_audit_events), 0), 1999999999)),
+  ('billing_ledger_entries', GREATEST(COALESCE((SELECT MAX(legacy_id) FROM billing_ledger_entries), 0), 1999999999))
+ON CONFLICT (counter_key) DO UPDATE
+SET last_value = GREATEST(compatibility_id_counters.last_value, EXCLUDED.last_value);
+
+INSERT INTO compatibility_id_counters (counter_key, last_value)
+SELECT 'billing_activity_records:' || activity_type,
+       GREATEST(COALESCE(MAX(legacy_id), 0), 1999999999)
+FROM billing_activity_records
+GROUP BY activity_type
+ON CONFLICT (counter_key) DO UPDATE
+SET last_value = GREATEST(compatibility_id_counters.last_value, EXCLUDED.last_value);
+`
+
 interface PgMigration {
   version: number
   name: string
@@ -1244,6 +2003,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
   { version: 4, name: 'recharge-orders-2026-09', sql: MIGRATION_0004_RECHARGE },
   { version: 5, name: 'enterprise-policy-2026-09', sql: MIGRATION_0005_ENTERPRISE_POLICY },
+  { version: 6, name: 'sudowork-compatibility-2026-09', sql: MIGRATION_0006_COMPATIBILITY },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

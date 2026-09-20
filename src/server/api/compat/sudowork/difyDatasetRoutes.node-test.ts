@@ -18,7 +18,7 @@ function setup(actor: IdentityActor | null = { userId: 'admin-a', orgId: 'org-a'
   registerSudoworkDifyDatasetRoutes(app, {
     dataset: dataset as never,
     getActor: () => actor,
-    resolveEnterpriseAlias(legacyId) {
+    async resolveEnterpriseAlias(legacyId) {
       return legacyId === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null
     },
     idempotencyKey: () => 'request-key',

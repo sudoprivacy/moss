@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import type { AuthCenterDb } from '../../../authCenter/db.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import type { BillingRepository, BillingUsageRecord, LedgerEntryRecord } from '../../../billing/billingRepository.js'
@@ -17,7 +16,7 @@ import {
   hasGlobalOrganizationAccess,
   type IdentityActor,
 } from '../../../identity/organizationIdentityService.js'
-import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../../../db/driver.js'
 import type { SudoworkLegacyUsagePort } from './legacyUsageRoutes.js'
 
 interface ModelDescriptor {
@@ -40,7 +39,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   private readonly clock: () => number
 
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     auth: AuthCenterDb
     identities: IdentityRepository
     repository: BillingRepository
@@ -79,8 +78,8 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     const createdAt = this.clock()
 
     try {
-      return runInTransaction(this.options.db, () => {
-        const result = this.options.wallet.post({
+      return await this.options.db.transaction(async () => {
+        const result = await this.options.wallet.post({
           ownerType: 'user',
           ownerId: user.id,
           deltaUnits: -cost,
@@ -92,14 +91,14 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
           orgId: user.orgId,
         }, onlineCommandContext(commandKey))
 
-        const previous = this.options.repository.getUsageRecord(commandKey)
+        const previous = await this.options.repository.getUsageRecord(commandKey)
         if (previous) {
           if (!sameUsage(previous, input, cost)) {
             throw new SudoworkLegacyUsageError(409, '幂等键已用于不同的用量上报')
           }
           return { success: true as const, deducted: previous.costUnits, newBalance: previous.balanceAfterUnits }
         }
-        this.options.repository.insertUsageRecord({
+        await this.options.repository.insertUsageRecord({
           id: randomUUID(),
           userId: user.id,
           orgId: user.orgId,
@@ -116,7 +115,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     } catch (error) {
       if (error instanceof SudoworkLegacyUsageError) throw error
       if (error instanceof BillingDomainError && error.code === 'INSUFFICIENT_BALANCE') {
-        const balance = this.options.repository.getWallet('user', user.id)?.balanceUnits ?? 0
+        const balance = (await this.options.repository.getWallet('user', user.id))?.balanceUnits ?? 0
         throw new SudoworkLegacyUsageError(400, '积分不足', { balance, required: cost })
       }
       throw error
@@ -128,7 +127,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     if (external) return external
     const stats = await this.buildStats(actor)
     const now = this.clock()
-    const recentUsage = this.options.repository.listUsageRecords({
+    const recentUsage = await this.options.repository.listUsageRecords({
       userId: actor.userId,
       from: now - 30 * 86_400_000,
       to: now,
@@ -146,7 +145,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
 
   async listLedger(input: { actor: IdentityActor; timeFrom?: number; timeTo?: number }): Promise<{ data: unknown[]; total: number }> {
     await this.requireUser(input.actor.userId)
-    const account = this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
+    const account = await this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
     if (account && this.options.sudorouter) {
       try {
         const nowSeconds = Math.floor(this.clock() / 1000)
@@ -158,14 +157,14 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
           pageSize: 100,
         })
         return {
-          data: result.list.filter(validModelLog).map(log => this.toExternalLegacyLedger(log, input.actor.userId)),
+          data: await Promise.all(result.list.filter(validModelLog).map(log => this.toExternalLegacyLedger(log, input.actor.userId))),
           total: result.total,
         }
       } catch {
         // Keep the old local fallback when Sudorouter is temporarily unavailable.
       }
     }
-    const entries = this.options.repository.listLedgerEntries({
+    const entries = await this.options.repository.listLedgerEntries({
       userId: input.actor.userId,
       excludeEntryType: 'OPENING',
       limit: 100,
@@ -176,7 +175,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     const filtered = entries.list.filter(entry => (
       (from === undefined || entry.createdAt >= from) && (to === undefined || entry.createdAt <= to)
     ))
-    return { data: filtered.map(entry => this.toLegacyLedger(entry)), total: filtered.length }
+    return { data: await Promise.all(filtered.map(entry => this.toLegacyLedger(entry))), total: filtered.length }
   }
 
   async getStats(actor: IdentityActor): Promise<Record<string, unknown>> {
@@ -189,7 +188,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     await this.requireUser(input.actor.userId)
     const from = parseLocalDate(input.startDate!, false)
     const to = parseLocalDate(input.endDate!, true)
-    const account = this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
+    const account = await this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
     if (account && this.options.sudorouter) {
       try {
         const logs = await this.getAllExternalLogs(account.externalAccountId, Math.floor(from / 1000), Math.floor(to / 1000))
@@ -202,13 +201,13 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
         // Keep the local compatibility records as a fallback.
       }
     }
-    const records = this.options.repository.listUsageRecords({
+    const records = (await this.options.repository.listUsageRecords({
       userId: input.actor.userId,
       from,
       to,
       limit: 100_000,
       offset: 0,
-    }).list.filter(record => Boolean(record.model))
+    })).list.filter(record => Boolean(record.model))
     return buildModelStats(records.map(record => ({
       model: record.model!, createdAt: record.createdAt, inputTokens: record.inputTokens,
       outputTokens: record.outputTokens, costUnits: record.costUnits,
@@ -217,7 +216,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
 
   private async getExternalDashboard(actor: IdentityActor, includeLedger: boolean): Promise<Record<string, unknown> | null> {
     await this.requireUser(actor.userId)
-    const account = this.options.repository.getExternalAccount('sudorouter', 'user', actor.userId)
+    const account = await this.options.repository.getExternalAccount('sudorouter', 'user', actor.userId)
     if (!account || !this.options.sudorouter) return null
     try {
       const now = this.clock()
@@ -235,10 +234,10 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
         }) : Promise.resolve(null),
       ])
       if (!snapshot) return null
-      this.saveExternalSnapshot(actor.userId, snapshot)
+      await this.saveExternalSnapshot(actor.userId, snapshot)
       const validToday = todayLogs.filter(validModelLog)
       const todayQuota = sum(validToday.map(log => log.costQuotaUnits))
-      const bonus = this.options.repository.sumUserLedgerByEntryType(actor.userId, 'BONUS')
+      const bonus = await this.options.repository.sumUserLedgerByEntryType(actor.userId, 'BONUS')
       const result: Record<string, unknown> = {
         points: {
           total: roundPoints(quotaToPoints(snapshot.quotaUnits + snapshot.usedQuotaUnits)),
@@ -281,18 +280,18 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     return result
   }
 
-  private saveExternalSnapshot(userId: string, snapshot: QuotaSnapshot): void {
-    this.options.repository.upsertExternalAccount({
+  private async saveExternalSnapshot(userId: string, snapshot: QuotaSnapshot): Promise<void> {
+    await this.options.repository.upsertExternalAccount({
       provider: 'sudorouter', ownerType: 'user', ownerId: userId,
       externalAccountId: snapshot.externalUserId, quotaUnits: snapshot.quotaUnits,
       usedQuotaUnits: snapshot.usedQuotaUnits, updatedAt: this.clock(),
     })
   }
 
-  private toExternalLegacyLedger(log: SudorouterUsageLog, userId: string): Record<string, unknown> {
+  private async toExternalLegacyLedger(log: SudorouterUsageLog, userId: string): Promise<Record<string, unknown>> {
     return {
       id: log.id,
-      user_id: this.options.identities.getNumericAlias('user', userId),
+      user_id: await this.options.identities.getNumericAlias('user', userId),
       amount: -quotaToPoints(log.costQuotaUnits),
       type: 'CONSUME',
       memo: `${log.model || 'unknown'} (${log.inputTokens}+${log.outputTokens} tokens)`,
@@ -304,39 +303,39 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     }
   }
 
-  listAdminUserLedger(input: { actor: IdentityActor; legacyUserId: number; limit: number }): unknown[] {
+  async listAdminUserLedger(input: { actor: IdentityActor; legacyUserId: number; limit: number }): Promise<unknown[]> {
     this.assertAdmin(input.actor)
-    const alias = this.options.identities.resolveNumericAliasGlobal('user', input.legacyUserId)
+    const alias = await this.options.identities.resolveNumericAliasGlobal('user', input.legacyUserId)
     if (!alias) throw new SudoworkLegacyUsageError(404, '用户不存在')
     if (!hasGlobalOrganizationAccess(input.actor) && alias.orgId !== input.actor.orgId) {
       throw new SudoworkLegacyUsageError(403, '无权操作该用户')
     }
-    return this.options.repository.listLedgerEntries({
+    return Promise.all((await this.options.repository.listLedgerEntries({
       userId: alias.resourceId,
       excludeEntryType: 'OPENING',
       limit: Math.max(1, Math.min(input.limit, 100)),
       offset: 0,
-    }).list.map(entry => this.toLegacyLedger(entry, input.legacyUserId))
+    })).list.map(entry => this.toLegacyLedger(entry, input.legacyUserId)))
   }
 
   private async buildStats(actor: IdentityActor): Promise<Record<string, unknown>> {
     await this.requireUser(actor.userId)
-    const wallet = this.options.repository.getWallet('user', actor.userId)
+    const wallet = await this.options.repository.getWallet('user', actor.userId)
     if (!wallet) throw new SudoworkLegacyUsageError(404, '用户不存在')
-    const allUsage = this.options.repository.listUsageRecords({
+    const allUsage = (await this.options.repository.listUsageRecords({
       userId: actor.userId,
       limit: 100_000,
       offset: 0,
-    }).list
+    })).list
     const todayStart = startOfLocalDay(this.clock())
     const today = allUsage.filter(record => record.createdAt >= todayStart && record.createdAt <= this.clock())
     const used = sum(allUsage.map(record => record.costUnits))
-    const bonuses = this.options.repository.listLedgerEntries({
+    const bonuses = (await this.options.repository.listLedgerEntries({
       userId: actor.userId,
       entryType: 'BONUS',
       limit: 100_000,
       offset: 0,
-    }).list
+    })).list
     return {
       points: {
         total: roundPoints(wallet.balanceUnits + used),
@@ -368,10 +367,10 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     }
   }
 
-  private toLegacyLedger(entry: LedgerEntryRecord, legacyUserId?: number): Record<string, unknown> {
+  private async toLegacyLedger(entry: LedgerEntryRecord, legacyUserId?: number): Promise<Record<string, unknown>> {
     return {
       id: entry.legacyId,
-      user_id: legacyUserId ?? this.options.identities.getNumericAlias('user', entry.ownerId),
+      user_id: legacyUserId ?? await this.options.identities.getNumericAlias('user', entry.ownerId),
       amount: entry.deltaUnits,
       type: entry.entryType,
       memo: entry.memo,

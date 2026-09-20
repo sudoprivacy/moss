@@ -105,8 +105,8 @@ function createApp(
   extra: Partial<Parameters<typeof createSudoworkCompatibilityApp>[0]> = {},
 ) {
   const systemConfiguration: SudoworkSystemConfigPort = {
-    getLoginMethod() { return loginMethod },
-    getPublicConfig() {
+    async getLoginMethod() { return loginMethod },
+    async getPublicConfig() {
       return {
         login_method: loginMethod === 'sms' ? 0 : loginMethod === 'password' ? 1 : 2,
         log_report: { enabled: 0 }, version_update: { enabled: 0 },
@@ -120,9 +120,9 @@ function createApp(
         recharge_mode: 'disabled', credit_application: { enabled: 0 },
       }
     },
-    getAdminConfig() { return { login_method: 1, sms_configured: true } },
+    async getAdminConfig() { return { login_method: 1, sms_configured: true } },
     async update() {},
-    getCredentialData() { return {} },
+    async getCredentialData() { return {} },
   }
   const managedImages: SudoworkManagedImagePort = {
     async put(input) {
@@ -157,7 +157,7 @@ function createApp(
       }
     },
     createInvitationCodes() { return { codes: ['CODE-A'], count: 1 } },
-    deleteInvitationCode() { return true },
+    async deleteInvitationCode() { return true },
     listUsers() {
       return [{
         id: 17, phone: '13800000000', nickname: '旧用户', enterprise_id: 9,
@@ -248,8 +248,8 @@ function createApp(
           expiresIn: 7_200, user,
         }
       },
-      logoutCallbackUrl() { return 'sudowork://cas-callback/cas-main/logout' },
-      listPublicProviders() { return [{ id: 'cas-main', name: '统一认证', type: 'cas', enabled: 1 }] },
+      async logoutCallbackUrl() { return 'sudowork://cas-callback/cas-main/logout' },
+      async listPublicProviders() { return [{ id: 'cas-main', name: '统一认证', type: 'cas', enabled: 1 }] },
     },
     loginMethod,
     systemConfig,
@@ -341,7 +341,7 @@ void describe('Sudowork compatibility Hono app', () => {
   void test('registers Dify administration routes through the compatibility app', async () => {
     const app = createApp('password', undefined, {
       difyAdministration: { getBinding: () => ({ dify_tenant_id: 'tenant-a' }) } as never,
-      resolveEnterpriseAlias: id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
+      resolveEnterpriseAlias: async id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
     })
     const response = await app.request('/api/v1/admin/dify/binding?enterprise_id=9', {
       headers: { Authorization: 'Bearer admin-access' },
@@ -941,7 +941,7 @@ void describe('Sudowork compatibility Hono app', () => {
         apiKeyHeader: 'X-QMS-Key',
         authorization: new QmsAuthorizationService({
           apiKey: 'qms-secret',
-          organizations: { getCode: () => 'ENT-A', hasCode: code => code === 'ENT-A' },
+          organizations: { async getCode() { return 'ENT-A' }, async hasCode(code) { return code === 'ENT-A' } },
         }),
         encryption: { encryptionRequired: false },
         operations: {

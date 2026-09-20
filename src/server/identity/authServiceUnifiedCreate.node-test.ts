@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { AuthService } from '../auth/service.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from './identityRepository.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
 void test('Moss native user creation uses the unified identity command', async () => {
   const db = new DatabaseSync(':memory:')
@@ -11,7 +11,9 @@ void test('Moss native user creation uses the unified identity command', async (
   await authDb.createOrganization('org-a', 'Org A', 1)
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   const authService = new AuthService(authDb, 3600)
+  await authService.initializeCompatibilityRecords()
 
   const created = await authService.createUser({
     orgId: 'org-a',
@@ -20,12 +22,11 @@ void test('Moss native user creation uses the unified identity command', async (
     role: 'user',
     idempotencyKey: 'native-user-1',
   })
-  const repository = new IdentityRepository(db)
-  const alias = repository.getNumericAlias('user', created.user.id)
+  const alias = await repository.getNumericAlias('user', created.user.id)
   assert(alias !== null)
-  assert.deepEqual(repository.getWallet('user', created.user.id), { balanceUnits: 0, version: 0 })
-  assert.equal(repository.findAuthIdentity('password', 'moss', 'new-moss-user')?.userId, created.user.id)
-  assert.equal(repository.getOutboxEvent('welcome:native-user-1')?.status, 'pending')
+  assert.deepEqual(await repository.getWallet('user', created.user.id), { balanceUnits: 0, version: 0 })
+  assert.equal((await repository.findAuthIdentity('password', 'moss', 'new-moss-user'))?.userId, created.user.id)
+  assert.equal((await repository.getOutboxEvent('welcome:native-user-1'))?.status, 'pending')
 
   authService.destroy()
   db.close()
@@ -37,7 +38,9 @@ void test('Moss native user creation provisions Sudorouter before activating the
   await authDb.createOrganization('org-a', 'Org A', 1)
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   const authService = new AuthService(authDb, 3600)
+  await authService.initializeCompatibilityRecords()
   const observedStatuses: string[] = []
   const provisionedOwners: string[] = []
   authService.configureSudorouterAccounts({
@@ -60,16 +63,15 @@ void test('Moss native user creation provisions Sudorouter before activating the
   }
   const created = await authService.createProvisionedUser(input)
   const retried = await authService.createProvisionedUser(input)
-  const repository = new IdentityRepository(db)
 
   assert.deepEqual(observedStatuses, ['pending', 'active'])
   assert.deepEqual(provisionedOwners, [created.user.id, created.user.id])
   assert.equal(retried.user.id, created.user.id)
   assert.equal((await authDb.listUsersByOrg('org-a')).length, 1)
   assert.equal((await authDb.getUserById(created.user.id))?.status, 'active')
-  assert.deepEqual(repository.getWallet('user', created.user.id), { balanceUnits: 100_000, version: 0 })
+  assert.deepEqual(await repository.getWallet('user', created.user.id), { balanceUnits: 100_000, version: 0 })
   assert.equal(
-    repository.findAuthIdentity('phone', 'sudowork', '13800000000')?.userId,
+    (await repository.findAuthIdentity('phone', 'sudowork', '13800000000'))?.userId,
     created.user.id,
   )
 
@@ -83,19 +85,20 @@ void test('Moss native organization creation gets a profile, numeric alias, and 
   await authDb.createOrganization('bootstrap-org', 'Bootstrap', 1)
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   const authService = new AuthService(authDb, 3600)
+  await authService.initializeCompatibilityRecords()
 
   const created = await authService.createOrganization({
     name: 'New Organization',
     code: 'new-org',
     idempotencyKey: 'native-org-1',
   })
-  const repository = new IdentityRepository(db)
-  assert.equal(repository.getOrganizationProfileByCode('new-org')?.orgId, created.organization.id)
-  assert(repository.getNumericAlias('enterprise', created.organization.id) !== null)
-  assert.deepEqual(repository.getWallet('organization', created.organization.id), { balanceUnits: 0, version: 0 })
+  assert.equal((await repository.getOrganizationProfileByCode('new-org'))?.orgId, created.organization.id)
+  assert(await repository.getNumericAlias('enterprise', created.organization.id) !== null)
+  assert.deepEqual(await repository.getWallet('organization', created.organization.id), { balanceUnits: 0, version: 0 })
   const listed = (await authService.listAllOrganizations()).organizations.find(item => item.id === created.organization.id)
-  assert.equal(listed?.legacyId, repository.getNumericAlias('enterprise', created.organization.id))
+  assert.equal(listed?.legacyId, await repository.getNumericAlias('enterprise', created.organization.id))
   assert.equal(listed?.code, 'new-org')
 
   authService.destroy()
@@ -120,16 +123,17 @@ void test('AuthService startup backfills compatibility records without external 
   })
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   const authService = new AuthService(authDb, 3600)
-  const repository = new IdentityRepository(db)
+  await authService.initializeCompatibilityRecords()
 
-  assert(repository.getNumericAlias('enterprise', 'org-existing') !== null)
-  assert(repository.getNumericAlias('user', 'user-existing') !== null)
-  assert(repository.getOrganizationProfileByCode('moss-org-existing'))
-  assert.deepEqual(repository.getWallet('organization', 'org-existing'), { balanceUnits: 0, version: 0 })
-  assert.deepEqual(repository.getWallet('user', 'user-existing'), { balanceUnits: 0, version: 0 })
-  assert.equal(repository.findAuthIdentity('password', 'moss', 'existing')?.userId, 'user-existing')
-  assert.equal(repository.findAuthIdentityByUser('user-oauth', 'password', 'moss'), null)
+  assert(await repository.getNumericAlias('enterprise', 'org-existing') !== null)
+  assert(await repository.getNumericAlias('user', 'user-existing') !== null)
+  assert(await repository.getOrganizationProfileByCode('moss-org-existing'))
+  assert.deepEqual(await repository.getWallet('organization', 'org-existing'), { balanceUnits: 0, version: 0 })
+  assert.deepEqual(await repository.getWallet('user', 'user-existing'), { balanceUnits: 0, version: 0 })
+  assert.equal((await repository.findAuthIdentity('password', 'moss', 'existing'))?.userId, 'user-existing')
+  assert.equal(await repository.findAuthIdentityByUser('user-oauth', 'password', 'moss'), null)
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM outbox_events').get() as { count: number }).count, 0)
 
   authService.destroy()
@@ -148,9 +152,10 @@ void test('Moss native user list exposes stable legacy alias, wallet summary and
   })
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   const authService = new AuthService(authDb, 3600)
-  const repository = new IdentityRepository(db)
-  const legacyId = repository.getNumericAlias('user', 'pending-user')
+  await authService.initializeCompatibilityRecords()
+  const legacyId = await repository.getNumericAlias('user', 'pending-user')
   db.prepare("UPDATE wallets SET balance_units = ? WHERE owner_type = 'user' AND owner_id = ?")
     .run(125_000, 'pending-user')
 
@@ -175,8 +180,9 @@ void test('Moss /me organization carries the active organization legacy alias an
   })
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   const authService = new AuthService(authDb, 3600)
-  const repository = new IdentityRepository(db)
+  await authService.initializeCompatibilityRecords()
   const response = await authService.getMe({
     rawToken: 'token',
     userId: 'admin-a',
@@ -187,8 +193,8 @@ void test('Moss /me organization carries the active organization legacy alias an
     jti: 'jti',
     exp: 1,
   })
-  assert.equal(response.organization?.legacyId, repository.getNumericAlias('enterprise', 'org-a'))
-  assert.equal(response.organization?.code, repository.getOrganizationProfile('org-a')?.code)
+  assert.equal(response.organization?.legacyId, await repository.getNumericAlias('enterprise', 'org-a'))
+  assert.equal(response.organization?.code, (await repository.getOrganizationProfile('org-a'))?.code)
   authService.destroy()
   db.close()
 })

@@ -13,7 +13,7 @@ describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)
     const rec = await store.registerServerInstance("hostA", 101, "a");
     assert.equal(rec.instanceId, "a");
     assert.equal(rec.status, "running");
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT instance_id, status FROM server_instances WHERE instance_id = ?")
       .get("a") as { instance_id: string; status: string };
     assert.equal(row.status, "running");
@@ -33,7 +33,7 @@ describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)
     await store.registerServerInstance("hostA", 101, "a");
     await store.stopServerInstance("a");
 
-    const stoppedRow = store.db
+    const stoppedRow = store.requireSqliteDb()
       .prepare("SELECT status, stopped_at FROM server_instances WHERE instance_id = ?")
       .get("a") as { status: string; stopped_at: number };
     assert.equal(stoppedRow.status, "stopped");
@@ -44,7 +44,7 @@ describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)
     assert.equal(rec.instanceId, "a");
     assert.equal(rec.status, "running");
 
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT status, stopped_at, host, pid FROM server_instances WHERE instance_id = ?")
       .get("a") as { status: string; stopped_at: number | null; host: string; pid: number };
     assert.equal(row.status, "running");
@@ -53,7 +53,7 @@ describe("registerServerInstance — stable MOSS_INSTANCE_ID (LB multi-instance)
     assert.equal(row.pid, 202);
 
     // Only one row for the fixed id — no duplicates.
-    const count = store.db
+    const count = store.requireSqliteDb()
       .prepare("SELECT COUNT(*) AS n FROM server_instances WHERE instance_id = ?")
       .get("a") as { n: number };
     assert.equal(count.n, 1);

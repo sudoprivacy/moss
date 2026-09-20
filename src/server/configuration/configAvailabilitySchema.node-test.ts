@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
-import { ensureConfigAvailabilitySchema } from './configAvailabilitySchema.js'
+import { SqliteDriver } from '../db/driver.js'
+import { ensureConfigAvailabilitySchema, repairConfigAvailability } from './configAvailabilitySchema.js'
 
 void describe('统一配置项组织可用范围', () => {
-  void test('幂等升级并保留现有组织项与全局用户项语义', () => {
+  void test('幂等升级并保留现有组织项与全局用户项语义', async () => {
     const db = new DatabaseSync(':memory:')
     db.exec(`
       CREATE TABLE config_items (id INTEGER PRIMARY KEY, scope TEXT NOT NULL, org_id TEXT);
@@ -12,6 +13,7 @@ void describe('统一配置项组织可用范围', () => {
     `)
     ensureConfigAvailabilitySchema(db)
     ensureConfigAvailabilitySchema(db)
+    await repairConfigAvailability(new SqliteDriver(db))
     assert.deepEqual(db.prepare('SELECT id, availability FROM config_items ORDER BY id').all().map(row => ({ ...row })), [
       { id: 1, availability: 'organization' },
       { id: 2, availability: 'all' },

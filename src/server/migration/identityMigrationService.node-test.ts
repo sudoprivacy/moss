@@ -3,8 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { IdentityMergePlanner, type LegacyIdentitySnapshot } from './identityMergePlanner.js'
 import {
   IdentityMigrationBlockedError,
@@ -37,12 +37,12 @@ const source: LegacyIdentitySnapshot = {
 function setup(snapshot: LegacyIdentitySnapshot = source) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  const unified = new UnifiedIdentityService(db, auth, identities)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
+  const unified = new UnifiedIdentityService(auth, identities)
   const runs = new MigrationRunStore(db, { idFactory: () => 'run-identity' })
   runs.createRun({ sourceFingerprint: 'sha256:source', sourceMetadata: {} })
   const planner = new IdentityMergePlanner({ organizations: [], users: [] })
-  const service = new IdentityMigrationService({ db, auth, identities, unified, runs, source: { readSnapshot: () => snapshot }, planner })
+  const service = new IdentityMigrationService({ db: auth.driver, auth, identities, unified, runs, source: { readSnapshot: () => snapshot }, planner })
   return { db, auth, identities, runs, service }
 }
 
@@ -50,7 +50,7 @@ void describe('IdentityMigrationService', () => {
   void test('组织与用户阶段可独立执行并分别形成恢复边界', async () => {
     const fixture = setup()
     try {
-      const plan = fixture.service.plan([])
+      const plan = await fixture.service.plan([])
       const organization = await fixture.service.executeOrganizations(
         plan,
         migrationCommandContext('run-identity', 'organizations-phase'),
@@ -73,7 +73,7 @@ void describe('IdentityMigrationService', () => {
   void test('imports organizations and users through unified commands with stable aliases and suppressed effects', async () => {
     const fixture = setup()
     try {
-      const plan = fixture.service.plan([])
+      const plan = await fixture.service.plan([])
       assert.equal(plan.status, 'ready')
       const context = migrationCommandContext('run-identity', 'identity-phase')
       const first = await fixture.service.execute(plan, context)
@@ -82,16 +82,16 @@ void describe('IdentityMigrationService', () => {
       assert.equal(first.organizationsCreated, 1)
       assert.equal(first.usersCreated, 1)
       assert.deepEqual(replay, first)
-      const org = fixture.identities.resolveNumericAliasGlobal('enterprise', 7)
-      const user = fixture.identities.resolveNumericAliasGlobal('user', 17)
+      const org = await fixture.identities.resolveNumericAliasGlobal('enterprise', 7)
+      const user = await fixture.identities.resolveNumericAliasGlobal('user', 17)
       assert(org)
       assert(user)
       assert.equal(user.orgId, org.resourceId)
       assert.equal((await fixture.auth.getUserById(user.resourceId))?.passwordHash, '$2b$10$legacy-hash')
       assert.equal((await fixture.auth.getUserById(user.resourceId))?.role, 'admin')
-      assert.equal(fixture.identities.findAuthIdentity('cas', 'cas-main', 'subject-a')?.userId, user.resourceId)
-      assert.equal(fixture.identities.findAuthIdentity('cas', 'cas-other', 'subject-b')?.userId, user.resourceId)
-      assert.equal(fixture.identities.getOutboxEvent('welcome:migration:identity:user:17')?.status, 'suppressed')
+      assert.equal((await fixture.identities.findAuthIdentity('cas', 'cas-main', 'subject-a'))?.userId, user.resourceId)
+      assert.equal((await fixture.identities.findAuthIdentity('cas', 'cas-other', 'subject-b'))?.userId, user.resourceId)
+      assert.equal((await fixture.identities.getOutboxEvent('welcome:migration:identity:user:17'))?.status, 'suppressed')
       assert.equal(fixture.runs.listSuppressedEffects('run-identity').length, 1)
       assert.equal(first.deliverableExternalOutboxCount, 0)
       assert.equal((await fixture.auth.listOrganizations()).length, 1)
@@ -104,8 +104,8 @@ void describe('IdentityMigrationService', () => {
   void test('reuses mapped Moss identities and only assigns permanent legacy aliases', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
-    const identities = new IdentityRepository(db)
-    const unified = new UnifiedIdentityService(db, auth, identities)
+    const identities = createIdentityTestRepository(db, {}, auth.driver)
+    const unified = new UnifiedIdentityService(auth, identities)
     const existingOrg = await unified.createOrganization(
       { name: 'Moss 企业', code: 'NEWCO', legacyEnterpriseId: 7 },
       migrationCommandContext('bootstrap', 'bootstrap-org'),
@@ -133,14 +133,14 @@ void describe('IdentityMigrationService', () => {
       }],
     })
     const service = new IdentityMigrationService({
-      db, auth, identities, unified, runs, source: { readSnapshot: () => withProvider }, planner,
+      db: auth.driver, auth, identities, unified, runs, source: { readSnapshot: () => withProvider }, planner,
     })
     try {
-      const report = await service.execute(service.plan([]), migrationCommandContext('run-identity', 'identity-phase'))
+      const report = await service.execute(await service.plan([]), migrationCommandContext('run-identity', 'identity-phase'))
       assert.equal(report.organizationsReused, 1)
       assert.equal(report.usersReused, 1)
-      assert.equal(identities.resolveNumericAliasGlobal('enterprise', 7)?.resourceId, existingOrg.organizationId)
-      assert.equal(identities.resolveNumericAliasGlobal('user', 17)?.resourceId, existingUser.userId)
+      assert.equal((await identities.resolveNumericAliasGlobal('enterprise', 7))?.resourceId, existingOrg.organizationId)
+      assert.equal((await identities.resolveNumericAliasGlobal('user', 17))?.resourceId, existingUser.userId)
       assert.equal((await auth.listOrganizations()).length, 1)
       assert.equal((await auth.listUsersByOrg(existingOrg.organizationId)).length, 1)
     } finally {
@@ -151,7 +151,7 @@ void describe('IdentityMigrationService', () => {
   void test('blocks execution when merge planning contains unresolved conflicts', async () => {
     const fixture = setup()
     try {
-      const blocked = fixture.service.plan([{ kind: 'organization', sourceId: '7', targetId: 'missing' }])
+      const blocked = await fixture.service.plan([{ kind: 'organization', sourceId: '7', targetId: 'missing' }])
       assert.equal(blocked.status, 'blocked')
       await assert.rejects(
         () => fixture.service.execute(blocked, migrationCommandContext('run-identity', 'identity-phase')),

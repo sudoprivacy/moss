@@ -19,7 +19,7 @@ function setup() {
     apiKeyHeader: 'X-API-Key',
     authorization: new QmsAuthorizationService({
       apiKey: 'secret',
-      organizations: { getCode: id => id === 'org-a' ? 'tenant-a' : null, hasCode: code => code === 'tenant-a' },
+      organizations: { async getCode(id) { return id === 'org-a' ? 'tenant-a' : null }, async hasCode(code) { return code === 'tenant-a' } },
     }),
     getActor: header => header === 'admin'
       ? { userId: 'u1', orgId: 'org-a', role: 'admin' }

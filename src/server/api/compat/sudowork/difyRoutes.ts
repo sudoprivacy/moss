@@ -10,7 +10,7 @@ interface DifyRuntimeRouteOptions {
   runtime: DifyRuntimeService
   enhancement: DifyEnhancementService
   getActor: (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
-  buildVisibility: (actor: IdentityActor) => VisibilityFilter
+  buildVisibility: (actor: IdentityActor) => Promise<VisibilityFilter>
   upstreamBaseUrl: string
 }
 
@@ -26,7 +26,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     if (!actor) return context.json({ success: false, msg: '未授权，请先登录' }, 401)
     return {
       actor,
-      visibility: options.buildVisibility(actor),
+      visibility: await options.buildVisibility(actor),
       assistantId: context.req.param('assistantId') ?? '',
     }
   }

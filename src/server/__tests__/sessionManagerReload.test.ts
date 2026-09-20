@@ -36,6 +36,6 @@ describe("B7: SessionManager whenReady + reload", () => {
     assert.ok(s, "reload picks up the peer-created row");
     assert.equal(s!.id, "sess-peer");
 
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });

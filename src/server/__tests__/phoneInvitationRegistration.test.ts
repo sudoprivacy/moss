@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { AuthCenterDb } from "../authCenter/db.js";
 import { AuthService, AuthServiceError } from "../auth/service.js";
+import { createIdentityTestRepository } from "../testing/compatibilityRepositories.js";
 
 let raw: DatabaseSync;
 let db: AuthCenterDb;
@@ -12,6 +13,7 @@ let auth: AuthService;
 beforeEach(() => {
   raw = new DatabaseSync(":memory:");
   db = new AuthCenterDb(raw, ":memory:");
+  createIdentityTestRepository(raw, {}, db.driver);
   auth = new AuthService(db, 3600);
 });
 
@@ -41,7 +43,7 @@ describe("invited phone registration", () => {
       "Alice",
     );
     assert.equal(
-      organizations.listInvitations({ orgId }).items[0]?.status,
+      (await organizations.listInvitations({ orgId })).items[0]?.status,
       "used",
     );
   });

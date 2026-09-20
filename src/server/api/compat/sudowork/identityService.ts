@@ -57,7 +57,7 @@ interface ServiceOptions {
   identities: IdentityRepository
   tokenStore: LegacyKeyValueStore
   legacyJwtSecret: string
-  nativeActorResolver?: (token: string) => IdentityActor | null
+  nativeActorResolver?: (token: string) => Promise<IdentityActor | null>
   refreshTokenFactory?: () => string
   registrationTokenFactory?: () => string
   accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
@@ -94,7 +94,6 @@ export class SudoworkIdentityService {
       REFRESH_TOKEN_TTL_SECONDS,
     )
     this.unifiedIdentity = new UnifiedIdentityService(
-      options.authDb.db,
       options.authDb,
       options.identities,
     )
@@ -108,7 +107,7 @@ export class SudoworkIdentityService {
     | { needRegistration: false; session: SudoworkLegacySession }
   > {
     const phone = input.phone.trim()
-    const identity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const identity = await this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     if (!identity) {
       const registerToken = this.registrationTokenFactory()
       await this.options.tokenStore.setex(
@@ -151,7 +150,7 @@ export class SudoworkIdentityService {
     if (!phone) {
       throw new SudoworkIdentityError(400, '注册凭证无效或已过期，请重新获取验证码')
     }
-    const existingIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const existingIdentity = await this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     const existingUser = existingIdentity
       ? await this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
       : null
@@ -159,7 +158,7 @@ export class SudoworkIdentityService {
       await this.options.tokenStore.del(registerKey)
       throw new SudoworkIdentityError(400, '该手机号已注册，请直接登录')
     }
-    const invitation = this.options.identities.getInvitationByCode(input.invitationCode)
+    const invitation = await this.options.identities.getInvitationByCode(input.invitationCode)
     if (!existingUser && !invitation) throw new SudoworkIdentityError(400, '邀请码不存在')
     if (!existingUser && invitation?.status !== 'pending') {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
@@ -197,14 +196,14 @@ export class SudoworkIdentityService {
     const passwordError = validateLegacyPassword(input.password)
     if (passwordError) throw new SudoworkIdentityError(400, passwordError)
     const phone = input.phone.trim()
-    const existingIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const existingIdentity = await this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     const existingUser = existingIdentity
       ? await this.options.authDb.getUserByIdAndOrg(existingIdentity.userId, existingIdentity.orgId)
       : null
     if (existingUser && (existingUser.status !== 'pending' || !this.options.accountProvisioner)) {
       throw new SudoworkIdentityError(400, '用户名已存在')
     }
-    const invitation = this.options.identities.getInvitationByCode(input.invitationCode)
+    const invitation = await this.options.identities.getInvitationByCode(input.invitationCode)
     if (!existingUser && !invitation) throw new SudoworkIdentityError(400, '邀请码不存在')
     if (!existingUser && invitation?.status !== 'pending') {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
@@ -243,7 +242,7 @@ export class SudoworkIdentityService {
   ): Promise<void> {
     if (!this.options.accountProvisioner) return
     const user = await this.options.authDb.getUserById(userId)
-    const wallet = this.options.identities.getWallet('user', userId)
+    const wallet = await this.options.identities.getWallet('user', userId)
     if (!user || !wallet) throw new SudoworkIdentityError(500, '用户初始化失败')
     try {
       await this.options.accountProvisioner.ensureAccount({
@@ -266,7 +265,7 @@ export class SudoworkIdentityService {
     nowSeconds?: number
   }): Promise<SudoworkLegacySession> {
     const phone = input.phone.trim()
-    const identity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const identity = await this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     const user = identity ? await this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId) : null
     if (!user || !verifyPassword(input.password, user.passwordHash)) {
       throw new SudoworkIdentityError(401, '账号或密码错误')
@@ -292,7 +291,7 @@ export class SudoworkIdentityService {
     nowSeconds?: number
   }): Promise<SudoworkLegacySession> {
     const phone = input.phone.trim()
-    const identity = this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
+    const identity = await this.options.identities.findAuthIdentity('phone', 'sudowork', phone)
     const user = identity ? await this.options.authDb.getUserByIdAndOrg(identity.userId, identity.orgId) : null
     if (!user || (user.role !== 'admin' && user.role !== 'super_admin')) {
       throw new SudoworkIdentityError(404, '账号不存在')
@@ -363,8 +362,8 @@ export class SudoworkIdentityService {
     const displayName = nickname.trim()
     if (!displayName) throw new SudoworkIdentityError(400, '昵称不能为空')
     await this.options.authDb.updateUser(user.id, { displayName })
-    const phone = this.options.identities
-      .findAuthIdentityByUser(user.id, 'phone', 'sudowork')?.normalizedSubject
+    const phone = (await this.options.identities
+      .findAuthIdentityByUser(user.id, 'phone', 'sudowork'))?.normalizedSubject
     if (!phone) throw new SudoworkIdentityError(500, '用户企业信息异常')
     return this.resolveLegacyUser({ ...user, displayName }, phone)
   }
@@ -375,7 +374,7 @@ export class SudoworkIdentityService {
     deviceId?: string,
     nowSeconds?: number,
   ): Promise<SudoworkLegacySession> {
-    const legacyUser = this.resolveLegacyUser(user, phone)
+    const legacyUser = await this.resolveLegacyUser(user, phone)
     const refreshToken = this.tokenFactory()
     await this.options.tokenStore.setex(
       `refresh_token:${legacyUser.id}:${deviceId || 'default'}:${refreshToken}`,
@@ -440,7 +439,7 @@ export class SudoworkIdentityService {
       this.options.authDb,
       nowSeconds,
     )
-    if (!principal) return this.options.nativeActorResolver?.(accessToken) ?? null
+    if (!principal) return await this.options.nativeActorResolver?.(accessToken) ?? null
     const user = await this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
     if (!user || user.status !== 'active') return null
     return { userId: user.id, orgId: user.orgId, role: user.role }
@@ -469,10 +468,10 @@ export class SudoworkIdentityService {
     }
   }
 
-  private resolveLegacyUser(user: AuthCenterUser, phone: string): SudoworkLegacyUser {
-    const profile = this.options.identities.getOrganizationProfile(user.orgId)
-    const userId = this.options.identities.getNumericAlias('user', user.id)
-    const enterpriseId = this.options.identities.getNumericAlias('enterprise', user.orgId)
+  private async resolveLegacyUser(user: AuthCenterUser, phone: string): Promise<SudoworkLegacyUser> {
+    const profile = await this.options.identities.getOrganizationProfile(user.orgId)
+    const userId = await this.options.identities.getNumericAlias('user', user.id)
+    const enterpriseId = await this.options.identities.getNumericAlias('enterprise', user.orgId)
     if (!profile || userId === null || enterpriseId === null) {
       throw new SudoworkIdentityError(500, '用户企业信息异常')
     }

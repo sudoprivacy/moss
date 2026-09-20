@@ -3,10 +3,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext, onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { BillingCoordinator } from './billingCoordinator.js'
-import { BillingRepository } from './billingRepository.js'
-import { ensureBillingSchema } from './billingSchema.js'
+import type { BillingRepository } from './billingRepository.js'
 import type { QuotaSnapshot, SudorouterPort } from './sudorouterAdapter.js'
 import { WalletService } from './walletService.js'
 
@@ -39,25 +38,24 @@ async function setup(): Promise<{
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org1', 'Org 1', 1)
   await auth.createUser({
     id: 'u1', orgId: 'org1', email: 'u1@example.test', name: 'u1', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   })
-  identities.createWallet('user', 'u1', 0)
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
-  repository.upsertExternalAccount({
+  await identities.createWallet('user', 'u1', 0)
+  const repository = createBillingTestRepository(db, auth.driver)
+  await repository.upsertExternalAccount({
     provider: 'sudorouter', ownerType: 'user', ownerId: 'u1', externalAccountId: '9',
     quotaUnits: 1_000, usedQuotaUnits: 20, updatedAt: 1,
   })
   const fake = new FakeSudorouter()
-  const wallet = new WalletService(db, repository, () => 100)
+  const wallet = new WalletService(auth.driver, repository, () => 100)
   return {
     db, repository, fake,
-    coordinator: new BillingCoordinator(db, repository, wallet, fake, { clock: () => 100, idGenerator: () => 'operation-1' }),
+    coordinator: new BillingCoordinator(auth.driver, repository, wallet, fake, { clock: () => 100, idGenerator: () => 'operation-1' }),
   }
 }
 
@@ -83,8 +81,8 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
     assert.deepEqual(first, { operationId: 'operation-1', status: 'SUCCEEDED', newBalanceUnits: 50, newQuotaUnits: 26_000 })
     assert.deepEqual(replay, first)
     assert.equal(fake.changeCalls, 1)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 50)
-    assert.equal(repository.getQuotaOperationById('operation-1')?.status, 'SUCCEEDED')
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 50)
+    assert.equal((await repository.getQuotaOperationById('operation-1'))?.status, 'SUCCEEDED')
     db.close()
   })
 
@@ -95,8 +93,8 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
     assert.equal(result.status, 'SUPPRESSED')
     assert.equal(fake.getUserCalls, 0)
     assert.equal(fake.changeCalls, 0)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 50)
-    assert.equal(repository.getQuotaOperationById('operation-1')?.status, 'SUPPRESSED')
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 50)
+    assert.equal((await repository.getQuotaOperationById('operation-1'))?.status, 'SUPPRESSED')
     db.close()
   })
 
@@ -112,8 +110,8 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
       () => coordinator.adjustPoints(adjustment, migrationCommandContext('batch-1', 'adjust-migration-fail')),
       /injected migration ledger failure/,
     )
-    assert.equal(repository.getQuotaOperationById('operation-1'), null)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 0)
+    assert.equal(await repository.getQuotaOperationById('operation-1'), null)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
     db.close()
   })
 
@@ -129,13 +127,13 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
     assert.equal(first.status, 'UNKNOWN')
     assert.equal(fake.changeCalls, 1)
     assert.equal(fake.quotaUnits, 26_000)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 0)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
 
     db.exec('DROP TRIGGER fail_quota_finalize')
     const recovered = await coordinator.retry('operation-1')
     assert.equal(recovered.status, 'SUCCEEDED')
     assert.equal(fake.changeCalls, 1)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 50)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 50)
     db.close()
   })
 
@@ -146,17 +144,17 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
     const result = await coordinator.syncQuota('user', 'u1', '9')
 
     assert.deepEqual(result, { externalUserId: '9', quotaUnits: 2_000, usedQuotaUnits: 40 })
-    assert.deepEqual(repository.getExternalAccount('sudorouter', 'user', 'u1'), {
+    assert.deepEqual(await repository.getExternalAccount('sudorouter', 'user', 'u1'), {
       provider: 'sudorouter', ownerType: 'user', ownerId: 'u1', externalAccountId: '9',
       quotaUnits: 2_000, usedQuotaUnits: 40, updatedAt: 100,
     })
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 0)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
     db.close()
   })
 
   void test('可恢复进程退出前留下的 PENDING 操作', async () => {
     const { db, repository, fake, coordinator } = await setup()
-    repository.insertQuotaOperation({
+    await repository.insertQuotaOperation({
       id: 'pending-operation', ownerType: 'user', ownerId: 'u1', externalUserId: '9',
       deltaUnits: 5_000, status: 'PENDING', idempotencyKey: 'pending-key',
       sourceType: 'admin_adjustment', sourceId: 'pending-source', orgId: 'org1',
@@ -168,7 +166,7 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
     assert.equal(result.status, 'SUCCEEDED')
     assert.equal(fake.changeCalls, 1)
     assert.equal(fake.quotaUnits, 6_000)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 10)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 10)
     db.close()
   })
 })

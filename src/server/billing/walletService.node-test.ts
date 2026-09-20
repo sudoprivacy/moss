@@ -3,9 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext, onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
-import { BillingRepository } from './billingRepository.js'
-import { ensureBillingSchema } from './billingSchema.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
+import type { BillingRepository } from './billingRepository.js'
 import { BillingDomainError } from './types.js'
 import { WalletService } from './walletService.js'
 
@@ -17,17 +16,16 @@ async function setup(initialBalance = 0): Promise<{
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org1', 'Org 1', 1)
   await auth.createUser({
     id: 'u1', orgId: 'org1', email: 'u1@example.test', name: 'u1', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   })
-  identities.createWallet('user', 'u1', initialBalance)
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
-  return { db, repository, service: new WalletService(db, repository) }
+  await identities.createWallet('user', 'u1', initialBalance)
+  const repository = createBillingTestRepository(db, auth.driver)
+  return { db, repository, service: new WalletService(auth.driver, repository) }
 }
 
 void describe('WalletService', () => {
@@ -45,36 +43,36 @@ void describe('WalletService', () => {
       actorUserId: 'admin1',
     }
 
-    const first = service.post(command, context)
-    const replay = service.post(command, context)
+    const first = await service.post(command, context)
+    const replay = await service.post(command, context)
 
     assert.deepEqual(replay, first)
     assert.deepEqual(first, { balanceBeforeUnits: 0, balanceAfterUnits: 100, deltaUnits: 100, version: 1 })
-    assert.equal(repository.countLedgerEntries('wallet:admin-bonus-1'), 1)
-    assert.equal(repository.countAuditEvents('wallet:admin-bonus-1'), 1)
-    assert.deepEqual(service.rebuild('user', 'u1'), { stored: 100, rebuilt: 100, difference: 0 })
+    assert.equal(await repository.countLedgerEntries('wallet:admin-bonus-1'), 1)
+    assert.equal(await repository.countAuditEvents('wallet:admin-bonus-1'), 1)
+    assert.deepEqual(await service.rebuild('user', 'u1'), { stored: 100, rebuilt: 100, difference: 0 })
     db.close()
   })
 
   void test('余额不足时不写钱包、流水或审计', async () => {
     const { db, repository, service } = await setup(20)
 
-    assert.throws(() => service.post({
+    await assert.rejects(service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: -21, entryType: 'CONSUME',
       sourceType: 'usage', sourceId: 'usage-1',
     }, onlineCommandContext('consume-1')), (error: unknown) =>
       error instanceof BillingDomainError && error.code === 'INSUFFICIENT_BALANCE')
 
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 20)
-    assert.equal(repository.countLedgerEntries('wallet:consume-1'), 0)
-    assert.equal(repository.countAuditEvents('wallet:consume-1'), 0)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 20)
+    assert.equal(await repository.countLedgerEntries('wallet:consume-1'), 0)
+    assert.equal(await repository.countAuditEvents('wallet:consume-1'), 0)
     db.close()
   })
 
   void test('按百分之一积分精确入账并可从流水重建余额', async () => {
     const { db, repository, service } = await setup(1)
 
-    const result = service.post({
+    const result = await service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: -0.01, entryType: 'CONSUME',
       sourceType: 'usage', sourceId: 'usage-centipoint-1',
     }, onlineCommandContext('usage-centipoint-1'))
@@ -85,26 +83,26 @@ void describe('WalletService', () => {
       deltaUnits: -0.01,
       version: 1,
     })
-    assert.equal(repository.getLedgerEntry('wallet:usage-centipoint-1')?.deltaUnits, -0.01)
-    assert.deepEqual(service.rebuild('user', 'u1'), { stored: 0.99, rebuilt: 0.99, difference: 0 })
+    assert.equal((await repository.getLedgerEntry('wallet:usage-centipoint-1'))?.deltaUnits, -0.01)
+    assert.deepEqual(await service.rebuild('user', 'u1'), { stored: 0.99, rebuilt: 0.99, difference: 0 })
     db.close()
   })
 
   void test('同一幂等键绑定不同财务命令时拒绝而不是返回旧结果', async () => {
     const { db, repository, service } = await setup()
     const context = onlineCommandContext('conflicting-key')
-    service.post({
+    await service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: 10, entryType: 'BONUS',
       sourceType: 'admin_adjustment', sourceId: 'adjustment-1',
     }, context)
 
-    assert.throws(() => service.post({
+    await assert.rejects(service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: 20, entryType: 'BONUS',
       sourceType: 'admin_adjustment', sourceId: 'adjustment-2',
     }, context), (error: unknown) =>
       error instanceof BillingDomainError && error.code === 'IDEMPOTENCY_CONFLICT')
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 10)
-    assert.equal(repository.countLedgerEntries('wallet:conflicting-key'), 1)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 10)
+    assert.equal(await repository.countLedgerEntries('wallet:conflicting-key'), 1)
     db.close()
   })
 
@@ -116,26 +114,26 @@ void describe('WalletService', () => {
       BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;
     `)
 
-    assert.throws(() => service.post({
+    await assert.rejects(service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: 30, entryType: 'BONUS',
       sourceType: 'test', sourceId: 'rollback-1',
     }, onlineCommandContext('rollback-1')), /injected ledger failure/)
 
-    assert.deepEqual(repository.getWallet('user', 'u1'), { balanceUnits: 0, version: 0 })
-    assert.equal(repository.countLedgerEntries('wallet:rollback-1'), 0)
+    assert.deepEqual(await repository.getWallet('user', 'u1'), { balanceUnits: 0, version: 0 })
+    assert.equal(await repository.countLedgerEntries('wallet:rollback-1'), 0)
     db.close()
   })
 
   void test('余额重建只报告差异而不偷偷修复快照', async () => {
     const { db, repository, service } = await setup()
-    service.post({
+    await service.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: 40, entryType: 'BONUS',
       sourceType: 'test', sourceId: 'rebuild-1',
     }, onlineCommandContext('rebuild-1'))
     db.prepare("UPDATE wallets SET balance_units = 4100 WHERE owner_type = 'user' AND owner_id = 'u1'").run()
 
-    assert.deepEqual(service.rebuild('user', 'u1'), { stored: 41, rebuilt: 40, difference: 1 })
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 41)
+    assert.deepEqual(await service.rebuild('user', 'u1'), { stored: 41, rebuilt: 40, difference: 1 })
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 41)
     db.close()
   })
 
@@ -150,14 +148,14 @@ void describe('WalletService', () => {
       ],
     }
 
-    const first = service.importLegacySnapshot(input, context)
-    const replay = service.importLegacySnapshot(input, context)
+    const first = await service.importLegacySnapshot(input, context)
+    const replay = await service.importLegacySnapshot(input, context)
 
     assert.deepEqual(first, { balanceUnits: 100, importedEntries: 3, version: 0 })
     assert.deepEqual(replay, first)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 100)
-    assert.equal(repository.countOwnerLedgerEntries('user', 'u1'), 3)
-    assert.deepEqual(service.rebuild('user', 'u1'), { stored: 100, rebuilt: 100, difference: 0 })
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 100)
+    assert.equal(await repository.countOwnerLedgerEntries('user', 'u1'), 3)
+    assert.deepEqual(await service.rebuild('user', 'u1'), { stored: 100, rebuilt: 100, difference: 0 })
     db.close()
   })
 
@@ -169,8 +167,8 @@ void describe('WalletService', () => {
       entries: [{ legacyId: 1, deltaUnits: 99, entryType: 'RECHARGE', memo: null, createdAt: 10 }],
     }, migrationCommandContext('p3-run', 'p3-wallet-bad')), /流水合计与余额不一致/)
 
-    assert.deepEqual(repository.getWallet('user', 'u1'), { balanceUnits: 0, version: 0 })
-    assert.equal(repository.countOwnerLedgerEntries('user', 'u1'), 0)
+    assert.deepEqual(await repository.getWallet('user', 'u1'), { balanceUnits: 0, version: 0 })
+    assert.equal(await repository.countOwnerLedgerEntries('user', 'u1'), 0)
     db.close()
   })
 })

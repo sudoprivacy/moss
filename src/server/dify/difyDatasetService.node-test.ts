@@ -2,13 +2,15 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext, onlineCommandContext } from '../application/commandContext.js'
+import { SqliteDriver } from '../db/driver.js'
+import { createDifyTestRepository } from '../testing/compatibilityRepositories.js'
 import { DifyDatasetService } from './difyDatasetService.js'
 import { DifyHttpAdapter } from './difyHttpAdapter.js'
-import { DifyRepository } from './difyRepository.js'
 
 function setup(responseFor?: (url: string, init: RequestInit) => Response) {
   const db = new DatabaseSync(':memory:')
-  const repository = new DifyRepository(db)
+  const driver = new SqliteDriver(db)
+  const repository = createDifyTestRepository(db, driver)
   const calls: Array<{ url: string; init: RequestInit }> = []
   const ensureCalls: Array<{ orgId: string; context: Record<string, unknown> }> = []
   const adapter = new DifyHttpAdapter({
@@ -20,7 +22,7 @@ function setup(responseFor?: (url: string, init: RequestInit) => Response) {
     }) as typeof fetch,
   })
   const service = new DifyDatasetService({
-    db,
+    db: driver,
     repository,
     adapter,
     connections: {
@@ -77,8 +79,8 @@ void describe('DifyDatasetService', () => {
     assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), {
       name: 'Knowledge', permission: 'all_team_members',
     })
-    assert.equal(repository.getResourceByExternalId('org-a', 'connection-org-a', 'dataset', 'dataset-1')?.metadata.name, 'Knowledge')
-    assert.equal(repository.getOperationByIdempotencyKey('dataset:create:1')?.status, 'SUCCEEDED')
+    assert.equal((await repository.getResourceByExternalId('org-a', 'connection-org-a', 'dataset', 'dataset-1'))?.metadata.name, 'Knowledge')
+    assert.equal((await repository.getOperationByIdempotencyKey('dataset:create:1'))?.status, 'SUCCEEDED')
     db.close()
   })
 
@@ -130,7 +132,7 @@ void describe('DifyDatasetService', () => {
     const result = await service.create('org-a', { name: 'Historical' }, migrationCommandContext('run-1', 'dataset:migrate:1'))
     assert.deepEqual(result, { suppressed: true })
     assert.equal(calls.length, 0)
-    assert.equal(repository.getOperationByIdempotencyKey('dataset:migrate:1')?.status, 'SUPPRESSED')
+    assert.equal((await repository.getOperationByIdempotencyKey('dataset:migrate:1'))?.status, 'SUPPRESSED')
     db.close()
   })
 

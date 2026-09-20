@@ -48,10 +48,10 @@ export interface AccessSourcePort {
 }
 
 export interface NumericAliasPort {
-  resolveNumericAliasGlobal(kind: 'user' | 'enterprise', legacyId: number): {
+  resolveNumericAliasGlobal(kind: 'user' | 'enterprise', legacyId: number): Promise<{
     resourceId: string
     orgId: string
-  } | null
+  } | null>
 }
 
 export interface AccessMigrationPlan extends MigrationPhasePlan {
@@ -189,7 +189,7 @@ export class AccessMigrationPhase implements MigrationPhase {
         skippedExpired += 1
         continue
       }
-      const user = this.options.identities.resolveNumericAliasGlobal('user', handoff.userId)!
+      const user = (await this.options.identities.resolveNumericAliasGlobal('user', handoff.userId))!
       const value = JSON.stringify({
         providerId: handoff.providerId,
         userId: user.resourceId,
@@ -210,7 +210,7 @@ export class AccessMigrationPhase implements MigrationPhase {
     }
     for (const handoff of source.handoffs) {
       if (handoff.expiresAt <= this.nowSeconds()) continue
-      const alias = this.options.identities.resolveNumericAliasGlobal('user', handoff.userId)
+      const alias = await this.options.identities.resolveNumericAliasGlobal('user', handoff.userId)
       if (!alias) continue
       const expected = JSON.stringify({ providerId: handoff.providerId, userId: alias.resourceId, account: handoff.account })
       if (await this.options.target.get(`cas_handoff:${handoff.codeHash}`) !== expected) {
@@ -229,7 +229,7 @@ export class AccessMigrationPhase implements MigrationPhase {
     }
 
     for (const entry of source.redisEntries) {
-      if (entry.key.startsWith('refresh_token:')) this.validateRefreshToken(entry, issues)
+      if (entry.key.startsWith('refresh_token:')) await this.validateRefreshToken(entry, issues)
       else if (entry.key.startsWith('register_token:')) validateRegisterHandoff(entry, issues)
       else issues.push({ code: 'UNSUPPORTED_ACCESS_KEY', resourceType: 'redis_key', resourceId: entry.key, message: `不支持的访问态 key: ${entry.key}` })
       if (checkTarget) {
@@ -239,8 +239,8 @@ export class AccessMigrationPhase implements MigrationPhase {
     }
 
     for (const handoff of source.handoffs) {
-      const user = this.options.identities.resolveNumericAliasGlobal('user', handoff.userId)
-      const organization = this.options.identities.resolveNumericAliasGlobal('enterprise', handoff.enterpriseId)
+      const user = await this.options.identities.resolveNumericAliasGlobal('user', handoff.userId)
+      const organization = await this.options.identities.resolveNumericAliasGlobal('enterprise', handoff.enterpriseId)
       if (!user || !organization || user.orgId !== organization.resourceId) {
         issues.push({
           code: 'CAS_HANDOFF_IDENTITY_ORPHAN', resourceType: 'third_party_auth_handoff',
@@ -258,14 +258,14 @@ export class AccessMigrationPhase implements MigrationPhase {
     return issues
   }
 
-  private validateRefreshToken(entry: AccessRedisEntry, issues: MigrationPhaseIssue[]): void {
+  private async validateRefreshToken(entry: AccessRedisEntry, issues: MigrationPhaseIssue[]): Promise<void> {
     const match = entry.key.match(/^refresh_token:(\d+):([^:]+):([^:]+)$/)
     if (!match) {
       issues.push({ code: 'INVALID_REFRESH_TOKEN', resourceType: 'redis_key', resourceId: entry.key, message: `Refresh Token key 格式非法: ${entry.key}` })
       return
     }
     const userId = Number(match[1])
-    const user = this.options.identities.resolveNumericAliasGlobal('user', userId)
+    const user = await this.options.identities.resolveNumericAliasGlobal('user', userId)
     if (!user) {
       issues.push({ code: 'REFRESH_TOKEN_USER_ORPHAN', resourceType: 'redis_key', resourceId: entry.key, message: `Refresh Token 引用未迁移用户: ${userId}` })
       return
@@ -275,7 +275,7 @@ export class AccessMigrationPhase implements MigrationPhase {
       if (typeof claims.phone !== 'string' || typeof claims.role !== 'string') throw new Error('claims')
       if (claims.enterprise_id !== null && (!Number.isSafeInteger(claims.enterprise_id) || Number(claims.enterprise_id) <= 0)) throw new Error('enterprise_id')
       if (typeof claims.enterprise_id === 'number') {
-        const organization = this.options.identities.resolveNumericAliasGlobal('enterprise', claims.enterprise_id)
+        const organization = await this.options.identities.resolveNumericAliasGlobal('enterprise', claims.enterprise_id)
         if (!organization || organization.resourceId !== user.orgId) throw new Error('organization mapping')
       }
     } catch {
