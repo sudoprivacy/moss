@@ -541,7 +541,14 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
       await store.remove(IMAGE_API_KEY_KEY)
     }
   }
-  await saveProviderApiKeys(providerApiKeysFromInput(patch && isRecord(patch) ? patch.modelProviders : undefined, getStoredProviderApiKeys()))
+  // Provider credentials are write-only. Just like the legacy text/image
+  // credentials above, do not touch their Nexus record unless this PATCH
+  // explicitly includes the Provider list; otherwise an unrelated settings
+  // save would create/delete a secret record and violate partial-update
+  // semantics.
+  if (Array.isArray(source.modelProviders)) {
+    await saveProviderApiKeys(providerApiKeysFromInput(source.modelProviders, getStoredProviderApiKeys()))
+  }
   // Discovery entries are credential- and endpoint-bound. A settings update
   // may replace either, so never serve the old Provider's catalog afterward.
   clearProviderModelCache()
