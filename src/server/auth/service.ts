@@ -336,7 +336,7 @@ export class AuthService {
         resendCooldownSec: 60,
         maxSendsPerHour: 5,
         maxVerifyAttempts: 5,
-        autoCreateOrg: true,
+        autoCreateOrg: false,
       },
       // Same trust root as access tokens: codes and register tokens are
       // server-minted artefacts, and a deployment that rotates its JWT
@@ -797,11 +797,8 @@ export class AuthService {
   }
 
   /**
-   * Look up the account a verified phone number belongs to.
-   *
-   * Returns null when the number has never signed in — the caller turns that
-   * into the `need_register` response rather than an error, because "no account
-   * yet" is the normal first step of self-service signup, not a failure.
+   * Look up the account a verified phone number belongs to. The login route
+   * rejects a missing account; registration is handled by its own endpoint.
    */
   async findUserByPhone(phone: string): Promise<AuthCenterUser | null> {
     return this.db.getUserByPhone(phone)
@@ -836,22 +833,12 @@ export class AuthService {
     })
   }
 
-  /**
-   * Create an account for a verified phone number and log it in.
-   *
-   * With `autoCreateOrg` (the public-cloud default) the person also gets their
-   * own organisation and is its admin — the one-person-company model, where an
-   * individual is not a special case but an organisation of one. That keeps a
-   * single tenancy model instead of two, and it is what makes later merging or
-   * splitting a matter of org membership rather than of moving anybody's data.
-   *
-   * Without it, the person joins the single existing organisation as a plain
-   * user, which is what a self-hosted deployment with one company wants.
-   */
+  /** Create an invited account for a verified phone number and log it in. */
   async registerWithPhone(input: {
     phone: string
     nickname?: string
-    autoCreateOrg: boolean
+    invitationCode: string
+    idempotencyKey?: string
   }): Promise<{
     access_token: string
     refresh_token: string
@@ -861,15 +848,47 @@ export class AuthService {
     organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
-    const existing = await this.db.getUserByPhone(input.phone)
+    const phone = input.phone.trim()
+    const invitationCode = input.invitationCode.trim()
+    const existing = await this.db.getUserByPhone(phone)
     if (existing) {
       // Racing double-submit, or a client that kept a stale register token.
       // Logging them in is both correct and kinder than a 409.
-      return this.issueTokenFromPhone(input.phone)
+      return this.issueTokenFromPhone(phone)
     }
 
-    await this.provisionPhoneUser(input)
-    return this.issueTokenFromPhone(input.phone)
+    const invitation = this.identityRepository.getInvitationByCode(invitationCode)
+    if (!invitation) {
+      throw new AuthServiceError(400, 'Invitation code does not exist')
+    }
+    if (invitation.status !== 'pending') {
+      throw new AuthServiceError(409, 'Invitation code has already been used')
+    }
+
+    try {
+      await this.unifiedIdentity.createUser({
+        orgId: invitation.orgId,
+        username: phone,
+        displayName: input.nickname,
+        phone,
+        role: 'user',
+        status: 'active',
+        invitationCode,
+      }, onlineCommandContext(
+        input.idempotencyKey ?? `phone-register:${phone}:${invitation.id}`,
+      ))
+    } catch (error) {
+      if (error instanceof AuthServiceError) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      if (/Invitation is not available/i.test(message)) {
+        throw new AuthServiceError(409, 'Invitation code has already been used')
+      }
+      if (/Username already exists|UNIQUE constraint failed/i.test(message)) {
+        throw new AuthServiceError(409, 'This phone number is already registered')
+      }
+      throw error
+    }
+    return this.issueTokenFromPhone(phone)
   }
 
   /**

@@ -81,6 +81,8 @@ export interface CronServiceConfig {
   workspace?: string
   /** Get user auth context (role, scopes) for session creation */
   getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[] } | null>
+  /** Resolve the organization override, falling back to deployment policy. */
+  getClientCronEnabled?: (orgId: string) => Promise<boolean>
   /**
    * B-3 cluster awareness: count of live peer instances, excluding self.
    * Optional because CronService only holds the driver, not the Store —
@@ -426,7 +428,10 @@ export class CronService {
       // separate path behind the admin-bypassed API route. (#83)
       const creatorAuth =
         executorId === job.userId ? userAuth : await this.config.getUserAuth(job.userId, job.orgId)
-      if (!getSystemSettings().clientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
+      const isClientCronEnabled = this.config.getClientCronEnabled
+        ? await this.config.getClientCronEnabled(job.orgId)
+        : getSystemSettings().clientCronEnabled
+      if (!isClientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
         await this.store.updateRunStatus(run.id, {
           status: 'skipped',
           summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',
