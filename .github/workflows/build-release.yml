@@ -250,6 +250,12 @@ jobs:
           grep -Fq -- '--progress-bar' dist/install.sh
           grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
 
+      # The build job never runs `bun install` (it only packages); the PG smoke
+      # is its first step needing a Node module. Install just `pg` — the only
+      # external import in packaged-pg-ha-smoke.mjs — instead of a full install.
+      - name: Install pg driver for the packaged PG smoke
+        run: npm install --no-save pg
+
       - name: Run packaged PostgreSQL dual-instance smoke
         env:
           VERSION: ${{ steps.release.outputs.version }}
