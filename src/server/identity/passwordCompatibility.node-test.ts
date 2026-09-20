@@ -4,8 +4,12 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthService, AuthServiceError } from '../auth/service.js'
 import { AuthCenterDb, type AuthCenterUser } from '../authCenter/db.js'
+import { IdentityRepository, type OrganizationLoginMethod } from './identityRepository.js'
 
-async function setup(status: AuthCenterUser['status'] = 'active'): Promise<{
+async function setup(
+  status: AuthCenterUser['status'] = 'active',
+  loginMethod: OrganizationLoginMethod = 'password',
+): Promise<{
   db: DatabaseSync
   authDb: AuthCenterDb
   authService: AuthService
@@ -16,6 +20,13 @@ async function setup(status: AuthCenterUser['status'] = 'active'): Promise<{
   await authDb.createOrganization('org-a', 'Org A', 1)
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
+  new IdentityRepository(db).putOrganizationProfile({
+    orgId: 'org-a',
+    code: 'ORG-A',
+    loginMethod,
+    localEnabled: true,
+    cloudEnabled: true,
+  })
   const legacyHash = hashSync('StrongPass123', 4)
   await authDb.createUser({
     id: 'legacy-user', orgId: 'org-a', email: 'legacy@example.test', name: 'legacy',
@@ -58,5 +69,29 @@ void describe('legacy bcrypt password compatibility', () => {
       current.authService.destroy()
       current.db.close()
     }
+  })
+
+  void test('rejects password login and refresh after organization switches away from password login', async () => {
+    const { db, authService } = await setup()
+    const issued = await authService.issueTokenFromPassword({ username: 'legacy', password: 'StrongPass123' })
+    const repository = new IdentityRepository(db)
+    const profile = repository.getOrganizationProfile('org-a')
+    assert(profile)
+    repository.putOrganizationProfile({
+      ...profile,
+      loginMethod: 'cas',
+    })
+
+    await assert.rejects(
+      authService.issueTokenFromPassword({ username: 'legacy', password: 'StrongPass123' }),
+      (error: unknown) => error instanceof AuthServiceError && error.statusCode === 403,
+    )
+    await assert.rejects(
+      authService.refreshToken(issued.refresh_token),
+      (error: unknown) => error instanceof AuthServiceError && error.statusCode === 403,
+    )
+
+    authService.destroy()
+    db.close()
   })
 })
