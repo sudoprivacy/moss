@@ -17,6 +17,10 @@ import {
   buildAvailableSkillSnapshot,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
+import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
+import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
 import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
 
 const execFileAsync = promisify(execFile)
@@ -357,7 +361,18 @@ export class K8sBackend implements SessionBackend {
       '--model', model,
     ]
 
-    const child = spawn('kubectl', execArgs, {
+    // With MOSS_SPAWN_VIA_NEXUS on, nexus runs that same kubectl and owns the
+    // process record; otherwise this process does, exactly as before.
+    const viaNexus = await maybeStartViaNexus({
+      execArgs,
+      env,
+      cwd: safeCwd,
+      agentId: options.assistantName || 'scode-standard',
+      model,
+      ownerId: options.userId,
+    })
+
+    const child: AcpChildProcessLike = viaNexus ?? spawn('kubectl', execArgs, {
       cwd: safeCwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -428,6 +443,75 @@ export class K8sBackend implements SessionBackend {
 
     return handle
   }
+}
+
+/** `MOSS_SPAWN_VIA_NEXUS=1|true` routes the launch through nexus. */
+function isSpawnViaNexusEnabled(): boolean {
+  const raw = process.env.MOSS_SPAWN_VIA_NEXUS
+  if (!raw) return false
+  const value = raw.trim().toLowerCase()
+  return value === '1' || value === 'true'
+}
+
+/** A SpawnSpec env is a string map; ProcessEnv allows undefined values. */
+function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string') out[key] = value
+  }
+  return out
+}
+
+/**
+ * Hand the launch to nexus rather than running it here.
+ *
+ * The pod and its Secret are still created by moss above — nexus executes a
+ * subprocess and has no Kubernetes concept of its own. What moves is only the
+ * final step: `kubectl exec` runs on the nexus host, so the agent gets a real
+ * `/proc/{pid}` record, a mailbox and a kernel-owned identity, while scode
+ * itself keeps running inside the gvisor pod.
+ *
+ * Returns null whenever the flag is off or nexus is not in external mode, so
+ * the local-spawn path stays exactly what it was.
+ */
+async function maybeStartViaNexus(input: {
+  execArgs: string[]
+  env: NodeJS.ProcessEnv
+  cwd: string
+  agentId: string
+  model: string
+  ownerId?: string
+}): Promise<NexusSpawnHandle | null> {
+  if (!isSpawnViaNexusEnabled()) return null
+
+  const config = resolveNexusConfigFromEnv()
+  if (config.mode !== 'external') {
+    process.stderr.write(
+      '[K8sBackend] MOSS_SPAWN_VIA_NEXUS is set but nexus mode is embedded — spawning locally\n',
+    )
+    return null
+  }
+
+  const client = config.tls
+    ? NexusVfsClient.withMtls(config.endpoint, config.tls)
+    : new NexusVfsClient(config.endpoint)
+  const agent = new ManagedAgentClient(client, config.authToken)
+
+  const { sessionId, osPid } = await agent.startSession({
+    agentId: input.agentId,
+    model: input.model,
+    ownerId: input.ownerId,
+    spawnSpec: {
+      cmd: 'kubectl',
+      args: input.execArgs,
+      env: toStringEnv(input.env),
+      cwd: input.cwd,
+    },
+  })
+  process.stderr.write(
+    `[K8sBackend] nexus start_session ok (session=${sessionId}, os_pid=${osPid ?? 'n/a'})\n`,
+  )
+  return new NexusSpawnHandle(agent, sessionId, osPid)
 }
 
 export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
