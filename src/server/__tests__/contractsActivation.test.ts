@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, realpathSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'bun:test'
@@ -68,6 +69,96 @@ describe('@sudo/contracts activation', () => {
           /refusing to start nexusd/,
         )
       }
+    }
+  })
+})
+
+describe('embedded Nexus ZoneId deployment surfaces', () => {
+  it('exposes an opt-in value only on single-instance embedded deployments', () => {
+    const compose = readFileSync(resolve(root, 'deploy/docker-compose.yml'), 'utf8')
+    const installer = readFileSync(resolve(root, 'deploy/install.sh'), 'utf8')
+    const deploymentDocs = readFileSync(resolve(root, 'deploy/README.md'), 'utf8')
+
+    expect(compose).toContain('- MOSS_NEXUS_ZONE_ID')
+    expect(compose).not.toMatch(/MOSS_NEXUS_ZONE_ID=/)
+    expect(installer).toContain(
+      'MOSS_NEXUS_ZONE_ID (optional, embedded Nexus only; immutable after first use)',
+    )
+    expect(installer).toContain('[ "${MOSS_NEXUS_ZONE_ID+x}" = x ]')
+    expect(installer).toContain('MOSS_NEXUS_ZONE_ID_OVERRIDE_SET=1')
+    expect(installer).toContain("MOSS_NEXUS_ZONE_ID_LINE=\"MOSS_NEXUS_ZONE_ID='$MOSS_NEXUS_ZONE_ID_VALUE'\"")
+    expect(installer).toContain('/^[[:space:]]*MOSS_NEXUS_ZONE_ID=/ {')
+    expect(installer).toContain('block = block ORS $0')
+    expect(installer).toContain('cp -L -p "$ENV_PATH" "$ENV_BACKUP"')
+    expect(installer).toContain('ENV_BACKUP="$WORK_DIR/moss-server.env.backup"')
+    expect(installer.match(/restore_install_config/g)).toHaveLength(4)
+    expect(installer.indexOf('characters unsafe for the systemd EnvironmentFile')).toBeLessThan(
+      installer.indexOf('systemctl stop "$SERVICE_NAME.service"'),
+    )
+    expect(installer.lastIndexOf('assert_nexus_zone_id_upgrade_safe')).toBeLessThan(
+      installer.indexOf('systemctl stop "$SERVICE_NAME.service"'),
+    )
+
+    const upgradeGuard = installer.match(/assert_nexus_zone_id_upgrade_safe\(\) \{[\s\S]*?\n\}/)?.[0]
+    expect(upgradeGuard).toBeDefined()
+    const guardDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-upgrade-'))
+    const envPath = resolve(guardDir, 'moss-server.env')
+    const lockPath = resolve(guardDir, 'nexus', 'data.zone-id.lock.json')
+    const runUpgradeGuard = (existingInstall: '0' | '1', explicitDeclaration: '0' | '1') =>
+      spawnSync('bash', ['-c', [
+        upgradeGuard,
+        'die() { return 1; }',
+        'assert_nexus_zone_id_upgrade_safe "$EXISTING_INSTALL" "$ENV_PATH" "$LOCK_PATH" "$EXPLICIT_DECLARATION"',
+      ].join('\n')], {
+        env: {
+          ...process.env,
+          EXISTING_INSTALL: existingInstall,
+          EXPLICIT_DECLARATION: explicitDeclaration,
+          ENV_PATH: envPath,
+          LOCK_PATH: lockPath,
+        },
+      })
+    try {
+      expect(runUpgradeGuard('1', '1').status).not.toBe(0)
+      writeFileSync(envPath, 'MOSS_NEXUS_ZONE_ID=existing-zone\n')
+      expect(runUpgradeGuard('1', '0').status).not.toBe(0)
+      mkdirSync(resolve(guardDir, 'nexus'))
+      writeFileSync(lockPath, '{}')
+      expect(runUpgradeGuard('1', '0').status).toBe(0)
+      rmSync(lockPath)
+      expect(runUpgradeGuard('0', '1').status).toBe(0)
+    } finally {
+      rmSync(guardDir, { recursive: true, force: true })
+    }
+
+    const assignmentExtractor = installer.match(
+      /MOSS_NEXUS_ZONE_ID_LINE="\$\(awk '([\s\S]*?)' "\$ENV_PATH"\)"/,
+    )?.[1]
+    expect(assignmentExtractor).toBeDefined()
+    for (const [source, preserved] of [
+      ['MOSS_NEXUS_ZONE_ID="customer-a"\n', 'MOSS_NEXUS_ZONE_ID="customer-a"'],
+      ['MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
+      ['MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
+    ] as const) {
+      const result = spawnSync('awk', [assignmentExtractor!], { input: source, encoding: 'utf8' })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toBe(preserved)
+    }
+
+    expect(deploymentDocs).toContain('data.zone-id.lock.json')
+    expect(deploymentDocs).toContain('整个 Nexus 目录作为一个单元')
+    expect(deploymentDocs).toContain('不得只恢复')
+    expect(deploymentDocs).toContain('moss-server.env')
+    expect(deploymentDocs).toContain('MOSS_NEXUS_MODE=external')
+
+    for (const externalManifest of [
+      'deploy/docker-compose.ha.yml',
+      'deploy/docker-compose.ha-crosshost.yml',
+      'deploy/docker-compose.nexus-host.yml',
+      'deploy/k8s/moss-server-statefulset.yaml',
+      'deploy/k8s/moss-nexus.yaml',
+    ]) {
+      expect(readFileSync(resolve(root, externalManifest), 'utf8')).not.toContain('MOSS_NEXUS_ZONE_ID')
     }
   })
 })

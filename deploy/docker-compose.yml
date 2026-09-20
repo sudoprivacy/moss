@@ -30,6 +30,9 @@ services:
       # 因此 Docker 部署必须显式指向本容器名。
       - MOSS_SERVER_URL=http://moss-server:43127
       - MOSS_HOME=/root/.moss
+      # Optional embedded-only ZoneId. List-form pass-through leaves it absent
+      # inside the container unless the operator explicitly exports it.
+      - MOSS_NEXUS_ZONE_ID
       - MOSS_HOST_PATH_MAP={"/data/moss/data":"/app/data","/data/moss/.moss":"/root/.moss"}
       - MOSS_CALLBACK_PORT=43128
       # 企微会话存档拉取节奏。间隔下限 30 秒；MAX_PAGES 限制每实例每轮的
