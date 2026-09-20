@@ -445,12 +445,20 @@ export class K8sBackend implements SessionBackend {
   }
 }
 
-/** `MOSS_SPAWN_VIA_NEXUS=1|true` routes the launch through nexus. */
+/**
+ * Nexus owns the agent process by default; `MOSS_SPAWN_VIA_NEXUS=0|false|off`
+ * is the escape hatch back to spawning it here.
+ *
+ * Default-on so a deployment cannot quietly fall back to the direct launch and
+ * end up with agents that exist nowhere outside this process. A deployment that
+ * has no external nexus is still handled — {@link maybeStartViaNexus} returns
+ * null for embedded mode and the local path runs unchanged.
+ */
 function isSpawnViaNexusEnabled(): boolean {
   const raw = process.env.MOSS_SPAWN_VIA_NEXUS
-  if (!raw) return false
+  if (raw === undefined) return true
   const value = raw.trim().toLowerCase()
-  return value === '1' || value === 'true'
+  return !(value === '0' || value === 'false' || value === 'off' || value === '')
 }
 
 /** A SpawnSpec env is a string map; ProcessEnv allows undefined values. */
