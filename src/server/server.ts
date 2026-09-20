@@ -1861,7 +1861,7 @@ async function readWorkspaceTree(
 async function writeWorkspaceFileTo(
   workspaceRoot: string,
   params: { path: string | null; contentBase64: string | null },
-  configuredUploadLimit?: number,
+  uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
   if (!relativePath) throw new HttpError(400, 'Missing path')
@@ -1875,10 +1875,10 @@ async function writeWorkspaceFileTo(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  // Organization policy is supplied by the authenticated route. Internal
-  // callers without one retain the deployment-wide settings fallback.
-  const configuredLimit =
-    configuredUploadLimit ?? getSystemSettings().workspaceUploadLimitBytes
+  // Admin-configurable cap, read per request so changes take effect without a
+  // restart. Callers may pass an org-scoped value; otherwise settings.json is
+  // the deployment fallback.
+  const configuredLimit = uploadLimitBytes ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1914,9 +1914,9 @@ async function writeWorkspaceFile(
   session: SessionRecord,
   params: { path: string | null; contentBase64: string | null },
   remote: WorkspaceFileAccess | null,
-  configuredUploadLimit?: number,
+  uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
-  if (!remote) return writeWorkspaceFileTo(session.cwd, params, configuredUploadLimit)
+  if (!remote) return writeWorkspaceFileTo(session.cwd, params, uploadLimitBytes)
 
   // Same validation as the direct-fs path, applied before the upload leaves
   // moss: an oversized or malformed body should be rejected here rather than
@@ -1932,8 +1932,7 @@ async function writeWorkspaceFile(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  const configuredLimit =
-    configuredUploadLimit ?? getSystemSettings().workspaceUploadLimitBytes
+  const configuredLimit = uploadLimitBytes ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1945,6 +1944,14 @@ async function writeWorkspaceFile(
 
   await remote.writeFile(relativePath, buffer)
   return { relativePath, size: buffer.length }
+}
+
+function resolveWorkspaceUploadLimitBytes(value: unknown): number {
+  const configured = Number.parseInt(String(value), 10)
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(configured, 1024 * 1024 * 1024)
+  }
+  return getSystemSettings().workspaceUploadLimitBytes
 }
 
 function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
@@ -2099,6 +2106,10 @@ export function startServer(
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
+    getClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
+    setClientCronEnabled: (orgId, enabled) => authService.setOrganizationClientCronEnabled(orgId, enabled),
+    getClientPolicy: orgId => authService.getOrganizationClientPolicy(orgId),
+    putClientPolicy: (orgId, patch, updatedBy) => authService.putOrganizationClientPolicy(orgId, patch, updatedBy),
   })
   const configItemsApi = createConfigItemsApi(runtime.store)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, async (userId: string) => {
@@ -7973,7 +7984,7 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/enterprise') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await enterpriseApi.updateConfig(auth.orgId, body))
+        writeJson(res, 200, await enterpriseApi.updateConfig(auth.orgId, body, auth.userId))
         return
       }
 

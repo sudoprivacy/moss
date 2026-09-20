@@ -5,6 +5,7 @@ import type { ConfigKey } from '../../../configStore/configStore.js'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
 import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
+import { getSystemSettings } from '../../../systemSettings.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
 
@@ -85,12 +86,12 @@ export class SudoworkSystemConfigService {
       ?? new PlatformIntegrationSettingsRepository(options.db)
   }
 
-  getLoginMethod(): LoginMethod {
-    return loginMethodFromNumber(this.policy().loginMethod, this.options.defaults.loginMethod)
+  getLoginMethod(orgId?: string): LoginMethod {
+    return loginMethodFromNumber(this.policy(orgId).loginMethod, this.options.defaults.loginMethod)
   }
 
-  getPublicConfig(): Json {
-    const policy = this.policy()
+  getPublicConfig(orgId?: string): Json {
+    const policy = this.policy(orgId)
     const infrastructure = this.getInfrastructureConfig()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
@@ -98,8 +99,9 @@ export class SudoworkSystemConfigService {
     const enabledLogReport = flag(logReport.enabled)
     const enabledVersionUpdate = flag(versionUpdate.enabled)
     const enabledProductImprovement = flag(productImprovement.enabled)
+    const systemSettings = getSystemSettings()
     return {
-      login_method: loginMethodToNumber(this.getLoginMethod()),
+      login_method: loginMethodToNumber(this.getLoginMethod(orgId)),
       log_report: enabledLogReport === 1
         ? { enabled: 1, baseurl: `${string(logReport.protocol, 'https')}://${string(logReport.domain)}` }
         : { enabled: 0 },
@@ -115,9 +117,16 @@ export class SudoworkSystemConfigService {
       )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
-      third_party_auth: this.thirdPartyAuth(false),
+      third_party_auth: this.thirdPartyAuth(false, orgId),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
+      client_cron_enabled: orgId
+        ? this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled ?? systemSettings.clientCronEnabled
+        : systemSettings.clientCronEnabled,
+      client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspace_upload_limit_bytes: workspaceUploadLimit(policy.workspaceUploadLimitBytes, systemSettings.workspaceUploadLimitBytes),
     }
   }
 
@@ -341,18 +350,25 @@ export class SudoworkSystemConfigService {
       ))
   }
 
-  private policy(): Json {
-    return this.options.policies.getEffective()
+  private policy(orgId?: string): Json {
+    return this.options.policies.getEffective(orgId)
   }
 
-  private thirdPartyAuth(admin: boolean): Json {
-    const policy = object(this.policy().thirdPartyAuth)
-    const providers = this.options.identities.listOrganizationProfiles().flatMap(profile =>
+  private thirdPartyAuth(admin: boolean, orgId?: string): Json {
+    const policy = object(this.policy(orgId).thirdPartyAuth)
+    const profiles = orgId
+      ? this.options.identities.listOrganizationProfiles().filter(profile => profile.orgId === orgId)
+      : this.options.identities.listOrganizationProfiles()
+    const providers = profiles.flatMap(profile =>
       this.options.identities.listIntegrationConnections(profile.orgId, 'cas').map(connection =>
         legacyProvider(connection, profile.code, admin)),
     )
-    const defaultProvider = string(policy.defaultProvider, providers[0]?.id as string | undefined)
-    return { enabled: flag(policy.enabled), default_provider: defaultProvider, providers: providers.filter(item => admin || item.enabled === 1) }
+    const visibleProviders = providers.filter(item => admin || item.enabled === 1)
+    const configuredDefault = string(policy.defaultProvider)
+    const defaultProvider = visibleProviders.some(provider => provider.id === configuredDefault)
+      ? configuredDefault
+      : string(visibleProviders[0]?.id as string | undefined)
+    return { enabled: flag(policy.enabled), default_provider: defaultProvider, providers: visibleProviders }
   }
 
   private validateProvider(provider: NormalizedProvider): NormalizedProvider {
@@ -497,6 +513,14 @@ function string(value: unknown, fallback = ''): string {
 
 function flag(value: unknown): 0 | 1 {
   return value === true || value === 1 || value === '1' ? 1 : 0
+}
+
+function workspaceUploadLimit(value: unknown, fallback: number): number {
+  const limit = Number.parseInt(String(value), 10)
+  if (Number.isFinite(limit) && limit >= 1) {
+    return Math.min(limit, 1024 * 1024 * 1024)
+  }
+  return fallback
 }
 
 function rechargeMode(value: unknown): RechargeMode {

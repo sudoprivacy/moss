@@ -246,7 +246,7 @@ export interface SudoworkManagedImagePort {
 
 export interface SudoworkSystemConfigPort {
   getLoginMethod(): ReturnType<SudoworkSystemConfigService['getLoginMethod']>
-  getPublicConfig(): ReturnType<SudoworkSystemConfigService['getPublicConfig']>
+  getPublicConfig(orgId?: string): ReturnType<SudoworkSystemConfigService['getPublicConfig']>
   getAdminConfig(actor: IdentityActor): ReturnType<SudoworkSystemConfigService['getAdminConfig']>
   update(actor: IdentityActor, body: Record<string, unknown>): ReturnType<SudoworkSystemConfigService['update']>
   getCredentialData(): ReturnType<SudoworkSystemConfigService['getCredentialData']>

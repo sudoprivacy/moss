@@ -198,6 +198,57 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
+  void test('公开配置可按组织合并客户端策略并过滤三方认证 Provider', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({
+        loginMethod: 1,
+        skillhubBaseUrl: 'https://moss.example.test',
+        clientShowToolCalls: true,
+        workspaceUploadLimitBytes: 8192,
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'cas-a' },
+      }, 'root')
+      policies.putOrganization(orgB.organizationId, {
+        loginMethod: 2,
+        scodeAutoModel: 'org-b-model',
+        clientShowToolCalls: false,
+        workspaceUploadLimitBytes: 4096,
+      }, 'admin-b')
+      identities.putIntegrationConnection({
+        id: 'cas-a',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      identities.putIntegrationConnection({
+        id: 'cas-b',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+
+      const config = service.getPublicConfig(orgB.organizationId)
+      assert.equal(config.login_method, 2)
+      assert.equal(config.scode_auto_model, 'org-b-model')
+      assert.equal(config.client_show_tool_calls, false)
+      assert.equal(config.workspace_upload_limit_bytes, 4096)
+      assert.equal((config.third_party_auth as any).default_provider, 'cas-b')
+      assert.equal((config.third_party_auth as any).providers.length, 1)
+      assert.equal((config.third_party_auth as any).providers[0].id, 'cas-b')
+    } finally {
+      db.close()
+    }
+  })
+
   void test('拒绝非法短信和支付基础设施参数', async () => {
     const { db, org, service } = await setup()
     const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }

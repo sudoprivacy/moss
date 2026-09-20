@@ -2,16 +2,27 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
-import { getSystemSettings } from '../systemSettings.js'
+import { getSystemSettings, updateSystemSettings } from '../systemSettings.js'
 
-type EnterpriseConfigPatch = Partial<
+type EnterpriseBrandingPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
 >
+
+type ClientFacingPolicy = {
+  clientShowToolCalls?: unknown
+  workspaceUploadLimitBytes?: unknown
+}
 
 export function createEnterpriseApi(
   db: DirectConnectStore,
   runtimeDir: string,
-  options: { cabinEnabled?: boolean } = {},
+  options: {
+    cabinEnabled?: boolean
+    getClientCronEnabled?: (orgId: string) => boolean
+    setClientCronEnabled?: (orgId: string, enabled: boolean) => void
+    getClientPolicy?: (orgId: string) => ClientFacingPolicy
+    putClientPolicy?: (orgId: string, patch: ClientFacingPolicy, updatedBy: string) => void
+  } = {},
 ) {
   function enterpriseLogoDir(orgId: string): string {
     return orgId === 'default'
@@ -20,27 +31,35 @@ export function createEnterpriseApi(
   }
 
   const getEffectivePolicy = async (orgId = 'default') => {
-    const enterprise = await db.getEnterprise(orgId)
+    const requestedOrgId = orgId.trim() || 'default'
     const systemSettings = getSystemSettings()
+    const policy = requestedOrgId !== 'default' && options.getClientPolicy
+      ? options.getClientPolicy(requestedOrgId)
+      : {}
     return {
-      clientCronEnabled:
-        enterprise.client_cron_enabled ?? systemSettings.clientCronEnabled,
-      clientShowToolCalls:
-        enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,
-      workspaceUploadLimitBytes:
-        enterprise.workspace_upload_limit_bytes ?? systemSettings.workspaceUploadLimitBytes,
+      clientCronEnabled: requestedOrgId !== 'default' && options.getClientCronEnabled
+        ? options.getClientCronEnabled(requestedOrgId)
+        : systemSettings.clientCronEnabled,
+      clientShowToolCalls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspaceUploadLimitBytes: normalizeUploadLimit(
+        policy.workspaceUploadLimitBytes,
+        systemSettings.workspaceUploadLimitBytes,
+      ),
     }
   }
 
   const api = {
     /**
-     * Get enterprise configuration. Branding fields come from the DB
-     * (enterprises table). Organization policy overrides are stored on the same
-     * row; null values inherit the legacy deployment-wide settings.json values.
+     * Get enterprise configuration. Branding fields come from the enterprises
+     * table; client-facing policy fields are resolved from organization scope
+     * first and fall back to deployment defaults from settings.json.
      */
     getConfig: async (orgId?: string) => {
       try {
-        const enterprise = await db.getEnterprise(orgId)
+        const requestedOrgId = orgId?.trim() || ''
+        const enterprise = await db.getEnterprise(requestedOrgId || undefined)
         let logoBase64: string | null = null
 
         if (enterprise.logo) {
@@ -70,7 +89,7 @@ export function createEnterpriseApi(
           }
         }
 
-        const policy = await getEffectivePolicy(orgId)
+        const policy = await getEffectivePolicy(requestedOrgId || 'default')
         return {
           success: true,
           data: {
@@ -92,48 +111,59 @@ export function createEnterpriseApi(
     },
 
     /**
-     * Update one organization's configuration. Deployment settings remain the
-     * fallback for organizations that have not saved an override.
+     * Update enterprise configuration. Branding columns persist to the
+     * enterprises table; client-facing policy fields are routed to organization
+     * policy hooks when available and fall back to settings.json for legacy
+     * embeddings. Any other key is ignored.
      */
-    updateConfig: async (
-      ...args:
-        | [orgId: string, patch: unknown]
-        | [patch: unknown, orgId?: string]
-    ) => {
+    updateConfig: async (orgId: string, patch: unknown, updatedBy = orgId) => {
       try {
-        const [first, second] = args
-        const usesOrgFirst = typeof first === 'string' && args.length > 1
-        const orgId = usesOrgFirst
-          ? first
-          : typeof second === 'string' && second.trim()
-            ? second
-            : 'default'
-        const patch = usesOrgFirst ? second : first
-
         if (patch && typeof patch === 'object') {
           const patchRecord = patch as Record<string, unknown>
-          for (const key of ['client_cron_enabled', 'client_show_tool_calls'] as const) {
-            if (patchRecord[key] !== undefined && typeof patchRecord[key] !== 'boolean') {
-              throw new Error(`${key} must be a boolean`)
+          const {
+            client_cron_enabled,
+            client_show_tool_calls,
+            workspace_upload_limit_bytes,
+          } = patchRecord
+
+          const settingsPatch: Record<string, unknown> = {}
+          const policyPatch: ClientFacingPolicy = {}
+          if (client_cron_enabled !== undefined) {
+            if (options.setClientCronEnabled) {
+              options.setClientCronEnabled(orgId, Boolean(client_cron_enabled))
+            } else {
+              settingsPatch.clientCronEnabled = Boolean(client_cron_enabled)
             }
           }
-          if (
-            patchRecord.workspace_upload_limit_bytes !== undefined &&
-            (!Number.isInteger(patchRecord.workspace_upload_limit_bytes) ||
-              Number(patchRecord.workspace_upload_limit_bytes) <= 0 ||
-              Number(patchRecord.workspace_upload_limit_bytes) > 1024 * 1024 * 1024)
-          ) {
-            throw new Error('workspace_upload_limit_bytes must be an integer between 1 and 1073741824')
+          if (client_show_tool_calls !== undefined) {
+            if (options.putClientPolicy) {
+              policyPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
+            } else {
+              settingsPatch.clientShowToolCalls = Boolean(client_show_tool_calls)
+            }
+          }
+          if (workspace_upload_limit_bytes !== undefined) {
+            const normalized = parseUploadLimit(workspace_upload_limit_bytes)
+            if (options.putClientPolicy) {
+              policyPatch.workspaceUploadLimitBytes = normalized
+            } else {
+              settingsPatch.workspaceUploadLimitBytes = normalized
+            }
+          }
+          if (Object.keys(settingsPatch).length > 0) {
+            await updateSystemSettings(settingsPatch)
+          }
+          if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
+            options.putClientPolicy(orgId, policyPatch, updatedBy)
           }
 
-          // Whitelist actual columns so round-tripped read-only fields cannot
-          // reach dynamically constructed SQL.
+          // Whitelist the actual `enterprises` columns so read-only /
+          // settings-sourced fields in the round-tripped config can't reach SQL.
           const ENTERPRISE_COLUMNS = [
             'logo', 'app_name', 'top_name', 'about_name',
-            'app_company_name', 'login_desp', 'client_cron_enabled',
-            'client_show_tool_calls', 'workspace_upload_limit_bytes',
+            'app_company_name', 'login_desp',
           ] as const
-          const dbPatch: EnterpriseConfigPatch = {}
+          const dbPatch: EnterpriseBrandingPatch = {}
           for (const col of ENTERPRISE_COLUMNS) {
             if (patchRecord[col] !== undefined) {
               ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
@@ -162,3 +192,17 @@ export function createEnterpriseApi(
 }
 
 export type EnterpriseApi = ReturnType<typeof createEnterpriseApi>
+
+function normalizeUploadLimit(value: unknown, fallback?: number): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (Number.isSafeInteger(limit) && limit >= 1 && limit <= 1024 * 1024 * 1024) return limit
+  return fallback ?? getSystemSettings().workspaceUploadLimitBytes
+}
+
+function parseUploadLimit(value: unknown): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024 * 1024 * 1024) {
+    throw new Error('workspace_upload_limit_bytes must be an integer between 1 and 1073741824')
+  }
+  return limit
+}

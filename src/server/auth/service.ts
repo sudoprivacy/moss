@@ -394,6 +394,14 @@ export class AuthService {
     this.identityRepository.setOrganizationClientCronEnabled(orgId, enabled)
   }
 
+  getOrganizationClientPolicy(orgId: string): Record<string, unknown> {
+    return new ClientPolicyRepository(this.db.db).getEffective(orgId)
+  }
+
+  putOrganizationClientPolicy(orgId: string, patch: Record<string, unknown>, updatedBy: string): Record<string, unknown> {
+    return new ClientPolicyRepository(this.db.db).putOrganization(orgId, patch, updatedBy)
+  }
+
   createSudoworkAdministrationService(input: {
     getDifyFeatureFlags?: () => { enabled: boolean; missingEnv: string[] }
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
@@ -439,7 +447,7 @@ export class AuthService {
   createSudoworkUserProjectionService(input: {
     secrets: Pick<NexusClient, 'getSecret'>
     listModels: () => Promise<Array<{ id: string }>> | Array<{ id: string }>
-    getRuntimeConfig: () => { modelServiceUrl: string; scodeAutoModel: string }
+    getRuntimeConfig: (orgId?: string) => { modelServiceUrl: string; scodeAutoModel: string }
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }): SudoworkUserProjectionService {
     return new SudoworkUserProjectionService({
@@ -541,13 +549,18 @@ export class AuthService {
     }
   }
 
-  createSudoworkConfigService(store: DirectConnectStore, managedImages?: ManagedImageStore): SudoworkConfigService {
+  createSudoworkConfigService(
+    store: DirectConnectStore,
+    managedImages?: ManagedImageStore,
+    clientPolicy?: { getPublicConfig(orgId?: string): Record<string, unknown> },
+  ): SudoworkConfigService {
     return new SudoworkConfigService({
       db: this.db.db,
       configItems: createConfigItemsApi(store),
       identities: this.identityRepository,
       authDb: this.db,
       managedImages,
+      clientPolicy,
     })
   }
 

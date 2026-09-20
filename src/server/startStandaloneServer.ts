@@ -316,7 +316,6 @@ async function finishStandaloneServerStartup(
     artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
     publicBaseUrl,
   })
-  const configuration = authService.createSudoworkConfigService(store, managedImages)
   const systemConfiguration = authService.createSudoworkSystemConfigService({
     secrets: configStore,
     loginMethod: config.sudoworkCompatibility.loginMethod,
@@ -349,6 +348,7 @@ async function finishStandaloneServerStartup(
     },
     productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
   })
+  const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
   const infrastructure = systemConfiguration.getInfrastructureConfig()
   const sudorouterRuntime = resolveSudorouterRuntimeConfig({
     infrastructure: infrastructure.billing.sudorouter,
@@ -427,9 +427,9 @@ async function finishStandaloneServerStartup(
     secrets: nexusClient,
     listModels: getAvailableModels,
     quotaReader: sudorouter,
-    getRuntimeConfig: () => ({
+    getRuntimeConfig: orgId => ({
       modelServiceUrl: systemConfiguration.getInfrastructureConfig().billing.sudorouter.modelServiceUrl,
-      scodeAutoModel: String(systemConfiguration.getPublicConfig().scode_auto_model ?? ''),
+      scodeAutoModel: String(systemConfiguration.getPublicConfig(orgId).scode_auto_model ?? ''),
     }),
   })
   qmsRuntime = await startQmsRuntime({

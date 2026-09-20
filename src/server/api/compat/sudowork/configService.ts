@@ -51,6 +51,9 @@ export class SudoworkConfigService {
     managedImages?: {
       read(kind: 'enterprise', filename: string): Promise<{ bytes: Buffer; mimeType: string }>
     }
+    clientPolicy?: {
+      getPublicConfig(orgId?: string): Record<string, unknown>
+    }
   }) {
     ensureConfigAvailabilitySchema(options.db)
   }
@@ -378,6 +381,7 @@ export class SudoworkConfigService {
       about_name: profile.aboutName,
       app_company_name: profile.appCompanyName,
       login_desp: profile.loginDescription,
+      ...(this.options.clientPolicy?.getPublicConfig(profile.orgId) ?? {}),
     }
   }
 

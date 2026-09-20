@@ -81,8 +81,8 @@ export interface CronServiceConfig {
   workspace?: string
   /** Get user auth context (role, scopes) for session creation */
   getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[] } | null>
-  /** Resolve the organization override, falling back to deployment policy. */
-  getClientCronEnabled?: (orgId: string) => Promise<boolean>
+  /** Resolve the effective organization client cron policy. */
+  getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>
   /**
    * B-3 cluster awareness: count of live peer instances, excluding self.
    * Optional because CronService only holds the driver, not the Store —
@@ -424,14 +424,14 @@ export class CronService {
       // its executor is transferred to a normal user — while the run still uses
       // the executor's credentials. Promotions/demotions take effect at the next
       // fire, and the schedule still advances so the job resumes cleanly when the
-      // flag is re-enabled. Manual triggers are unaffected — triggerJob() is a
-      // separate path behind the admin-bypassed API route. (#83)
+      // flag is re-enabled. Manual triggers run through triggerJob(), which
+      // repeats the same org-policy gate as defense-in-depth. (#83)
       const creatorAuth =
         executorId === job.userId ? userAuth : await this.config.getUserAuth(job.userId, job.orgId)
-      const isClientCronEnabled = this.config.getClientCronEnabled
-        ? await this.config.getClientCronEnabled(job.orgId)
-        : getSystemSettings().clientCronEnabled
-      if (!isClientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
+      const clientCronEnabled = await (this.config.getClientCronEnabled?.(job.orgId)
+        ?? getSystemSettings().clientCronEnabled
+      )
+      if (!clientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
         await this.store.updateRunStatus(run.id, {
           status: 'skipped',
           summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',

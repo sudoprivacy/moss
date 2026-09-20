@@ -67,6 +67,41 @@ describe('enterprise configuration API', () => {
     }
   })
 
+  it('uses organization-scoped client policy before deployment defaults', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'moss-enterprise-policy-'))
+    const orgPolicies = new Map<string, Record<string, unknown>>()
+    const cronEnabled = new Map<string, boolean>()
+    try {
+      const api = createEnterpriseApi(new DirectConnectStore(':memory:'), runtimeDir, {
+        getClientCronEnabled: orgId => cronEnabled.get(orgId) ?? true,
+        setClientCronEnabled: (orgId, enabled) => { cronEnabled.set(orgId, enabled) },
+        getClientPolicy: orgId => orgPolicies.get(orgId) ?? {},
+        putClientPolicy: (orgId, patch) => {
+          orgPolicies.set(orgId, { ...(orgPolicies.get(orgId) ?? {}), ...patch })
+        },
+      })
+
+      await api.updateConfig('org-a', {
+        client_cron_enabled: false,
+        client_show_tool_calls: false,
+        workspace_upload_limit_bytes: 4096,
+      }, 'admin-a')
+
+      const orgA = await api.getConfig('org-a')
+      const orgB = await api.getConfig('org-b')
+
+      assert.ok(orgA.data)
+      assert.ok(orgB.data)
+      assert.equal(orgA.data.client_cron_enabled, false)
+      assert.equal(orgA.data.client_show_tool_calls, false)
+      assert.equal(orgA.data.workspace_upload_limit_bytes, 4096)
+      assert.equal(orgB.data.client_cron_enabled, true)
+      assert.equal(orgB.data.client_show_tool_calls, true)
+    } finally {
+      await rm(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
   it('reads each organization logo from its own storage directory', async () => {
     const runtimeDir = await mkdtemp(join(tmpdir(), 'moss-enterprise-logo-'))
     try {

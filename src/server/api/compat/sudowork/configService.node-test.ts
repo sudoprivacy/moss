@@ -12,7 +12,10 @@ import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import { SudoworkConfigError, SudoworkConfigService } from './configService.js'
 
-async function setup(options: { managedImages?: { read(kind: 'enterprise', filename: string): Promise<{ bytes: Buffer; mimeType: string }> } } = {}) {
+async function setup(options: {
+  managedImages?: { read(kind: 'enterprise', filename: string): Promise<{ bytes: Buffer; mimeType: string }> }
+  clientPolicy?: { getPublicConfig(orgId?: string): Record<string, unknown> }
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'moss-config-compat-'))
   const store = new DirectConnectStore(join(dir, 'moss.db'))
   const authDb = new AuthCenterDb(store.db)
@@ -26,6 +29,7 @@ async function setup(options: { managedImages?: { read(kind: 'enterprise', filen
     identities,
     authDb,
     managedImages: options.managedImages,
+    clientPolicy: options.clientPolicy,
   })
   return { dir, store, service, orgA, orgB }
 }
@@ -154,6 +158,32 @@ void describe('Sudowork 配置项兼容服务', () => {
         'ENT-A',
       )
       assert.equal(result.logo, `data:image/png;base64,${Buffer.from('brand-image').toString('base64')}`)
+    } finally {
+      await store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  void test('租户配置按目标组织合并客户端公开策略', async () => {
+    const seenOrgIds: string[] = []
+    const { dir, store, service, orgA, orgB } = await setup({
+      clientPolicy: {
+        getPublicConfig(orgId) {
+          seenOrgIds.push(orgId ?? '')
+          return orgId === orgB.organizationId
+            ? { scode_auto_model: 'org-b-model', workspace_upload_limit_bytes: 4096 }
+            : { scode_auto_model: 'org-a-model', workspace_upload_limit_bytes: 8192 }
+        },
+      },
+    })
+    try {
+      const result = await service.getTenantConfig(
+        { userId: 'root', orgId: orgA.organizationId, role: 'super_admin' },
+        'ENT-B',
+      )
+      assert.equal((result as any).scode_auto_model, 'org-b-model')
+      assert.equal((result as any).workspace_upload_limit_bytes, 4096)
+      assert.deepEqual(seenOrgIds, [orgB.organizationId])
     } finally {
       await store.close()
       rmSync(dir, { recursive: true, force: true })

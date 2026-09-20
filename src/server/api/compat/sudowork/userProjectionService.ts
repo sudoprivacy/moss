@@ -29,7 +29,7 @@ export class SudoworkUserProjectionService {
     billing: BillingRepository
     secrets: ProjectionSecretPort
     listModels: () => Promise<ModelDescriptor[]> | ModelDescriptor[]
-    getRuntimeConfig: () => { modelServiceUrl: string; scodeAutoModel: string }
+    getRuntimeConfig: (orgId?: string) => { modelServiceUrl: string; scodeAutoModel: string }
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }) {}
 
@@ -71,7 +71,7 @@ export class SudoworkUserProjectionService {
 
     const [models, runtime] = await Promise.all([
       this.options.listModels(),
-      Promise.resolve(this.options.getRuntimeConfig()),
+      Promise.resolve(this.options.getRuntimeConfig(alias.orgId)),
     ])
     const usedPoints = quotaToPoints(account.usedQuotaUnits)
     const remainingPoints = quotaToPoints(account.quotaUnits)
