@@ -207,7 +207,7 @@ export function getSettingsChanges(settings: SystemSettings, draft: SettingsDraf
     }
     if (field === 'apiKey' || field === 'imageApiKey') {
       const value = draft[field]
-      const configured = field === 'apiKey' ? Boolean(settings.apiKey) : Boolean(settings.image.apiKey)
+      const configured = field === 'apiKey' ? settings.apiKeyConfigured : settings.image.apiKeyConfigured
       if (value.action !== 'keep' && !(value.action === 'clear' && !configured)) changes.push({
         field,
         label: FIELD_LABELS[field],
@@ -250,7 +250,7 @@ function isHttpUrl(value: string): boolean {
 export function getRedactedSettings(settings: SystemSettings) {
   return {
     ...settings,
-    apiKey: settings.apiKey ? '[已配置，已隐藏]' : '[未配置]',
-    image: { ...settings.image, apiKey: settings.image.apiKey ? '[已配置，已隐藏]' : '[未配置]' },
+    apiKey: settings.apiKeyConfigured ? '[已配置，已隐藏]' : '[未配置]',
+    image: { ...settings.image, apiKey: settings.image.apiKeyConfigured ? '[已配置，已隐藏]' : '[未配置]' },
   }
 }

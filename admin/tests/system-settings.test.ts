@@ -4,8 +4,8 @@ import type { SystemSettings } from '../lib/api/types'
 import { buildSystemSettingsPatch, createSettingsDraft, FIELD_LABELS, getRedactedSettings, getSettingsChanges, MIB, TAB_FIELDS, validateSettingsDraft } from '../lib/system-settings'
 
 const settings: SystemSettings = {
-  model: 'test-model', url: '', apiKey: 'fixture-text-key',
-  image: { provider: 'openai', url: '', apiKey: 'fixture-image-key', model: 'test-image' },
+  model: 'test-model', url: '', apiKey: '', apiKeyConfigured: true,
+  image: { provider: 'openai', url: '', apiKey: '', apiKeyConfigured: true, model: 'test-image' },
   bypassPermissions: false, maxTurns: 100, thinkingMode: 'adaptive', thinkingBudgetTokens: 16000,
   skillStore: { tenantId: '' }, oauth2: { enabled: false, requireState: true, authorizeUrlTemplate: '', scriptPath: '/opt/oauth.sh' },
   clientCronEnabled: true, clientShowToolCalls: true, workspaceUploadLimitBytes: 20 * MIB + 7,
@@ -28,7 +28,7 @@ test('malformed server configuration cannot be rewritten by the form', () => {
 
 test('all editable fields are categorized exactly once', () => {
   const fields = Object.values(TAB_FIELDS).flat().sort()
-  assert.equal(fields.length, 20)
+  assert.equal(fields.length, 22)
   assert.equal(new Set(fields).size, fields.length)
   assert.deepEqual(fields, Object.keys(FIELD_LABELS).sort())
   assert.deepEqual(fields, Object.keys(fresh()).sort())
@@ -68,11 +68,9 @@ test('secrets default to keep without hydrating raw values; replace and clear ar
 test('review and saved configuration never serialize secret contents', () => {
   const text = JSON.stringify(getSettingsChanges(settings, { ...fresh(), apiKey: { action: 'replace', value: 'replacement-secret' } }))
   assert.ok(!text.includes('replacement-secret'))
-  assert.ok(!text.includes(settings.apiKey))
   const redacted = JSON.stringify(getRedactedSettings(settings))
-  assert.ok(!redacted.includes(settings.apiKey))
-  assert.ok(!redacted.includes(settings.image.apiKey))
-  assert.equal(settings.apiKey, 'fixture-text-key')
+  assert.ok(redacted.includes('[已配置，已隐藏]'))
+  assert.equal(settings.apiKey, '')
 })
 
 test('whole-byte uploads from one byte through one GiB round-trip without mutation', () => {

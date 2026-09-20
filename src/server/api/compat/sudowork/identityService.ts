@@ -554,7 +554,7 @@ export class SudoworkIdentityService {
       return
     }
     const actual = this.options.getLoginMethod?.(orgId)
-    if (actual !== 'cas') return
+    if (!actual || actual === 'password') return
     throw new SudoworkIdentityError(403, '当前企业未开启用户名密码登录')
   }
 

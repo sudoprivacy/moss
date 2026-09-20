@@ -63,7 +63,25 @@ export const CONFIG_KEYS = [
   'server.qms-smtp-url',
 ] as const
 
-export type ConfigKey = (typeof CONFIG_KEYS)[number]
+export type OrganizationConfigKey =
+  | `organization.${string}.settings.anthropic-auth-token`
+  | `organization.${string}.settings.model-provider-api-keys`
+  | `organization.${string}.settings.image-api-key`
+export type ConfigKey = (typeof CONFIG_KEYS)[number] | OrganizationConfigKey
+
+export function organizationConfigKey(
+  orgId: string,
+  suffix:
+    | 'settings.anthropic-auth-token'
+    | 'settings.model-provider-api-keys'
+    | 'settings.image-api-key',
+): OrganizationConfigKey {
+  const trimmed = orgId.trim()
+  if (!trimmed) throw new Error('Organization id is required for scoped config key')
+  const safe = trimmed.replace(/[^a-zA-Z0-9_.-]/g, '_')
+  const hash = createHash('sha256').update(trimmed).digest('hex').slice(0, 12)
+  return `organization.${safe}.${hash}.${suffix}`
+}
 
 /** 供 server-credentials API 使用的脱敏规则：长值显示尾 4 位，短值只显示已设置。 */
 export function maskConfigValue(value: string): string {
@@ -392,18 +410,26 @@ export class ConfigStore {
     if (!this.client) return
     await this.probe()
     for (const key of CONFIG_KEYS) {
-      const record = await this.client.getSecret(CONFIG_NAMESPACE, key)
-      if (record === null) continue
-      if (record.value === null) {
-        throw new Error(
-          `[ConfigStore] Nexus 记录损坏（存在但无值）: ${key}。` +
-            `恢复方法：停止 moss-server，经加密服务删除该记录 ` +
-            `（password-vault.secret_delete，namespace=${CONFIG_NAMESPACE}）后重启重新录入`,
-        )
-      }
-      this.cache.set(key, record.value)
+      await this.refreshKey(key)
     }
     await this.probe()
+  }
+
+  async refreshKey(key: ConfigKey): Promise<void> {
+    if (!this.client) return
+    const record = await this.client.getSecret(CONFIG_NAMESPACE, key)
+    if (record === null) {
+      this.cache.delete(key)
+      return
+    }
+    if (record.value === null) {
+      throw new Error(
+        `[ConfigStore] Nexus 记录损坏（存在但无值）: ${key}。` +
+          `恢复方法：停止 moss-server，经加密服务删除该记录 ` +
+          `（password-vault.secret_delete，namespace=${CONFIG_NAMESPACE}）后重启重新录入`,
+      )
+    }
+    this.cache.set(key, record.value)
   }
 
   /** put→get→delete 探针：put/get 任一失败或读回值不符 → throw；delete 尽力而为。 */

@@ -301,8 +301,7 @@ export class SudoworkSystemConfigService {
       if (body.login_method === 0 && !this.isSmsConfigured()) {
         throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
       }
-      const thirdParty = object(patch.thirdPartyAuth ?? this.policy(orgId).thirdPartyAuth)
-      if (body.login_method === 2 && flag(thirdParty.enabled) !== 1) {
+      if (body.login_method === 2 && !this.hasEnabledThirdPartyAuth(orgId, patch.thirdPartyAuth, providers)) {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
       }
       patch.loginMethod = body.login_method
@@ -434,6 +433,34 @@ export class SudoworkSystemConfigService {
       default_provider: defaultProvider,
       providers: visibleProviders,
     }
+  }
+
+  private hasEnabledThirdPartyAuth(
+    orgId?: string,
+    policyOverride?: unknown,
+    providersOverride?: NormalizedProvider[],
+  ): boolean {
+    const policy = object(policyOverride ?? this.policy(orgId).thirdPartyAuth)
+    if (flag(policy.enabled) !== 1) return false
+    const enabledProviderIds = providersOverride
+      ? providersOverride
+        .filter(provider => provider.enabled && (!orgId || provider.orgId === orgId))
+        .map(provider => provider.id)
+      : this.enabledCasProviderIds(orgId)
+    if (enabledProviderIds.length === 0) return false
+    const defaultProvider = string(policy.defaultProvider)
+    return !defaultProvider || enabledProviderIds.includes(defaultProvider) || enabledProviderIds.length > 0
+  }
+
+  private enabledCasProviderIds(orgId?: string): string[] {
+    const profiles = orgId
+      ? this.options.identities.listOrganizationProfiles().filter(profile => profile.orgId === orgId)
+      : this.options.identities.listOrganizationProfiles()
+    return profiles.flatMap(profile =>
+      this.options.identities.listIntegrationConnections(profile.orgId, 'cas')
+        .filter(connection => connection.enabled)
+        .map(connection => connection.id),
+    )
   }
 
   private validateProvider(provider: NormalizedProvider, orgScopeId?: string): NormalizedProvider {

@@ -120,7 +120,7 @@ export function SystemSettingsFields({ settings, draft, errors, update }: Fields
         <Field field="url" description="仅供 legacy-default Provider 兼容配置使用；新服务应在上方 Provider 列表中配置。" error={errors.url}>
           <Input id="setting-url" name="url" value={draft.url} placeholder="https://api.anthropic.com" spellCheck={false} autoComplete="off" onChange={event => update('url', event.target.value)} />
         </Field>
-        <SecretField field="apiKey" configured={Boolean(settings.apiKey)} value={draft.apiKey} error={errors.apiKey} onChange={value => update('apiKey', value)} />
+        <SecretField field="apiKey" configured={settings.apiKeyConfigured} value={draft.apiKey} error={errors.apiKey} onChange={value => update('apiKey', value)} />
       </Section>
       <Section icon={Image} title="图片模型" description="供图片生成相关工具调用的提供商与模型配置。">
         <Field field="imageProvider" description="选择图片模型的 API 协议。">
@@ -131,7 +131,7 @@ export function SystemSettingsFields({ settings, draft, errors, update }: Fields
         </Field>
         {textField('imageUrl', '图片 API 的完整地址，留空保留默认行为。', { placeholder: 'https://api.openai.com/v1' })}
         {textField('imageModel', '填写图片服务实际支持的模型名称。', { placeholder: '例如 gpt-image-1' })}
-        <SecretField field="imageApiKey" configured={Boolean(settings.image.apiKey)} value={draft.imageApiKey} error={errors.imageApiKey} onChange={value => update('imageApiKey', value)} />
+        <SecretField field="imageApiKey" configured={settings.image.apiKeyConfigured} value={draft.imageApiKey} error={errors.imageApiKey} onChange={value => update('imageApiKey', value)} />
       </Section>
     </TabsContent>
     <TabsContent value="runtime" className="system-settings-tab-content">

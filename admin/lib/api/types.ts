@@ -189,6 +189,7 @@ export interface SystemSettingsImage {
   provider: string
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   model: string
 }
 
@@ -233,6 +234,7 @@ export interface SystemSettings {
   thinkingBudgetTokens: number
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   modelProviders: SystemSettingsModelProvider[]
   defaultModelProviderId: string
   image: SystemSettingsImage

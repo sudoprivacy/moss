@@ -76,7 +76,7 @@ describe('enterprise configuration API', () => {
       const api = createEnterpriseApi(new DirectConnectStore(':memory:'), runtimeDir, {
         getClientCronEnabled: orgId => cronEnabled.get(orgId) ?? true,
         setClientCronEnabled: (orgId, enabled) => { cronEnabled.set(orgId, enabled) },
-        getClientPolicy: orgId => orgPolicies.get(orgId) ?? {},
+        getClientPolicy: orgId => orgId ? orgPolicies.get(orgId) ?? {} : {},
         putClientPolicy: (orgId, patch) => {
           orgPolicies.set(orgId, { ...(orgPolicies.get(orgId) ?? {}), ...patch })
         },
@@ -128,7 +128,7 @@ describe('enterprise configuration API', () => {
     const orgPolicies = new Map<string, Record<string, unknown>>()
     try {
       const api = createEnterpriseApi(new DirectConnectStore(':memory:'), runtimeDir, {
-        getClientPolicy: orgId => orgPolicies.get(orgId) ?? {},
+        getClientPolicy: orgId => orgId ? orgPolicies.get(orgId) ?? {} : {},
         putClientPolicy: (orgId, patch) => {
           orgPolicies.set(orgId, { ...(orgPolicies.get(orgId) ?? {}), ...patch })
         },
@@ -157,7 +157,7 @@ describe('enterprise configuration API', () => {
           cronWrites += 1
           cronEnabled.set(orgId, enabled)
         },
-        getClientPolicy: orgId => orgPolicies.get(orgId) ?? {},
+        getClientPolicy: orgId => orgId ? orgPolicies.get(orgId) ?? {} : {},
         putClientPolicy: (orgId, patch) => {
           orgPolicies.set(orgId, { ...(orgPolicies.get(orgId) ?? {}), ...patch })
         },

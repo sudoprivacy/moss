@@ -6,11 +6,15 @@ import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrS
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
 import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
 import { onlineCommandContext } from '../application/commandContext.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { IdentityRepository, type OrganizationLoginMethod } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
 import { OrganizationIdentityService } from '../identity/organizationIdentityService.js'
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
-import { getSystemSettings } from '../systemSettings.js'
+import {
+  getOrganizationSystemSettings,
+  getSystemSettings,
+  updateOrganizationSystemSettings,
+} from '../systemSettings.js'
 import {
   newApplicationNo,
   type CreditApplication,
@@ -45,6 +49,7 @@ import { SudoworkConfigService } from '../api/compat/sudowork/configService.js'
 import { createConfigItemsApi } from '../api/configItems.js'
 import type { ManagedImageStore } from '../configuration/managedImageStore.js'
 import { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
+import { OrganizationModelSettingsRepository } from '../configuration/organizationModelSettingsRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../configuration/platformIntegrationSettingsRepository.js'
 import {
   SudoworkSystemConfigService,
@@ -128,6 +133,15 @@ export class AuthServiceError extends Error {
     super(message)
     this.name = 'AuthServiceError'
   }
+}
+
+type LoginPolicyMethod = OrganizationLoginMethod
+
+function loginMethodForTokenKey(keyId: string): LoginPolicyMethod | null {
+  if (keyId === 'password-login') return 'password'
+  if (keyId === 'phone-login') return 'sms'
+  if (keyId === 'oauth2-login') return 'cas'
+  return null
 }
 
 type NativeUserProjection = SanitizedAuthCenterUser & {
@@ -396,12 +410,35 @@ export class AuthService {
     this.identityRepository.setOrganizationClientCronEnabled(orgId, enabled)
   }
 
-  getOrganizationClientPolicy(orgId: string): Record<string, unknown> {
+  getOrganizationClientPolicy(orgId?: string): Record<string, unknown> {
     return new ClientPolicyRepository(this.db.db).getEffective(orgId)
   }
 
   putOrganizationClientPolicy(orgId: string, patch: Record<string, unknown>, updatedBy: string): Record<string, unknown> {
     return new ClientPolicyRepository(this.db.db).putOrganization(orgId, patch, updatedBy)
+  }
+
+  getOrganizationSystemSettings(orgId: string, options: { redactSecrets?: boolean } = {}) {
+    return getOrganizationSystemSettings(
+      orgId,
+      new OrganizationModelSettingsRepository(this.db.db),
+      options,
+    )
+  }
+
+  updateOrganizationSystemSettings(
+    orgId: string,
+    patch: unknown,
+    updatedBy: string,
+    options: { redactSecrets?: boolean } = {},
+  ) {
+    return updateOrganizationSystemSettings(
+      orgId,
+      new OrganizationModelSettingsRepository(this.db.db),
+      patch,
+      updatedBy,
+      options,
+    )
   }
 
   createSudoworkAdministrationService(input: {
@@ -741,12 +778,14 @@ export class AuthService {
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(401, 'User is invalid')
     }
+    this.assertRefreshLoginMethodAllowed(auth.orgId, auth.keyId)
 
     return this.issueToken({
       user,
       scopes: auth.scopes,
       keyId: auth.keyId,
       orgIdOverride: auth.orgId,
+      loginMethod: loginMethodForTokenKey(auth.keyId) ?? undefined,
     })
   }
 
@@ -802,6 +841,7 @@ export class AuthService {
       throw new AuthServiceError(401, 'Invalid username/email or password')
     }
 
+    this.assertOrganizationLoginMethod(user.orgId, 'password')
     if (isLegacyPasswordHash(user.passwordHash)) {
       await this.db.updateUserPassword(user.id, hashPassword(input.password), Date.now())
     }
@@ -810,6 +850,7 @@ export class AuthService {
       user,
       scopes: defaultScopesForRole(user.role),
       keyId: 'password-login',
+      loginMethod: 'password',
     })
   }
 
@@ -842,11 +883,13 @@ export class AuthService {
     if (user.status !== 'active') {
       throw new AuthServiceError(403, 'Account is disabled')
     }
+    this.assertOrganizationLoginMethod(user.orgId, 'sms')
     await this.db.updateUserLastLogin(user.id)
     return this.issueToken({
       user,
       scopes: defaultScopesForRole(user.role),
       keyId: 'phone-login',
+      loginMethod: 'sms',
     })
   }
 
@@ -856,6 +899,8 @@ export class AuthService {
     nickname?: string
     invitationCode: string
     idempotencyKey?: string
+    loginMethod?: Extract<LoginPolicyMethod, 'sms' | 'password'>
+    password?: string
   }): Promise<{
     access_token: string
     refresh_token: string
@@ -871,6 +916,10 @@ export class AuthService {
     if (existing) {
       // Racing double-submit, or a client that kept a stale register token.
       // Logging them in is both correct and kinder than a 409.
+      if (input.loginMethod === 'password') {
+        if (!input.password) throw new AuthServiceError(400, 'Missing password')
+        return this.issueTokenFromPassword({ username: phone, password: input.password })
+      }
       return this.issueTokenFromPhone(phone)
     }
 
@@ -881,6 +930,13 @@ export class AuthService {
     if (invitation.status !== 'pending') {
       throw new AuthServiceError(409, 'Invitation code has already been used')
     }
+    this.assertOrganizationLoginMethod(
+      invitation.orgId,
+      input.loginMethod ?? 'sms',
+    )
+    if (input.loginMethod === 'password' && !input.password) {
+      throw new AuthServiceError(400, 'Missing password')
+    }
 
     try {
       await this.unifiedIdentity.createUser({
@@ -888,6 +944,7 @@ export class AuthService {
         username: phone,
         displayName: input.nickname,
         phone,
+        password: input.password,
         role: 'user',
         status: 'active',
         invitationCode,
@@ -905,7 +962,17 @@ export class AuthService {
       }
       throw error
     }
-    return this.issueTokenFromPhone(phone)
+    const created = await this.db.getUserByPhone(phone)
+    if (!created) {
+      throw new AuthServiceError(500, 'User creation failed')
+    }
+    await this.db.updateUserLastLogin(created.id)
+    return this.issueToken({
+      user: created,
+      scopes: defaultScopesForRole(created.role),
+      keyId: input.loginMethod === 'password' ? 'password-login' : 'phone-login',
+      loginMethod: input.loginMethod ?? 'sms',
+    })
   }
 
   /**
@@ -1053,11 +1120,13 @@ export class AuthService {
       throw toAuthServiceError(error)
     }
     const { user, scopes } = await this.applyScriptIdentity(identity)
+    this.assertOrganizationLoginMethod(user.orgId, 'cas')
     await this.db.updateUserLastLogin(user.id)
     const issued = await this.issueToken({
       user,
       scopes,
       keyId: 'oauth2-login',
+      loginMethod: 'cas',
       accessTtlSec: identity.expiresIn,
     })
     // Stash the provider access_token server-side, keyed by user_id, so moss
@@ -1101,11 +1170,13 @@ export class AuthService {
       throw new AuthServiceError(401, 'OAuth2 session cannot be refreshed; please sign in again')
     }
     const { user, scopes } = await this.applyScriptIdentity(result)
+    this.assertOrganizationLoginMethod(user.orgId, 'cas')
     await this.db.updateUserLastLogin(user.id)
     const issued = await this.issueToken({
       user,
       scopes,
       keyId: 'oauth2-login',
+      loginMethod: 'cas',
       accessTtlSec: result.expiresIn,
     })
     // Store the rotated provider access_token (overwrites the user's row).
@@ -2137,6 +2208,7 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing password')
     }
     await this.assertCanManageExistingUser(user, auth)
+    this.assertOrganizationLoginMethod(input.orgId, 'password')
 
     await this.db.updateUserPassword(
       input.userId,
@@ -2420,6 +2492,7 @@ export class AuthService {
      *  Used by switchOrg so a super_admin can scope every org-scoped endpoint
      *  to a different org while remaining themselves. */
     orgIdOverride?: string
+    loginMethod?: LoginPolicyMethod
   }): Promise<{
     access_token: string
     refresh_token: string
@@ -2430,6 +2503,9 @@ export class AuthService {
     scopes: string[]
   }> {
     const orgId = input.orgIdOverride ?? input.user.orgId
+    if (input.loginMethod) {
+      this.assertOrganizationLoginMethod(orgId, input.loginMethod)
+    }
     const access = issueAccessToken(
       {
         iss: this.db.getIssuer(),
@@ -2471,6 +2547,24 @@ export class AuthService {
       organization: this.projectOrganization(await this.db.getOrganization(orgId)),
       scopes: input.scopes,
     }
+  }
+
+  private assertRefreshLoginMethodAllowed(orgId: string, keyId: string): void {
+    const loginMethod = loginMethodForTokenKey(keyId)
+    if (!loginMethod) return
+    this.assertOrganizationLoginMethod(orgId, loginMethod)
+  }
+
+  private assertOrganizationLoginMethod(orgId: string, expected: LoginPolicyMethod): void {
+    const actual = this.identityRepository.getOrganizationProfile(orgId)?.loginMethod ?? 'password'
+    if (actual === expected) return
+    if (expected === 'password') {
+      throw new AuthServiceError(403, 'Current organization does not allow password login')
+    }
+    if (expected === 'sms') {
+      throw new AuthServiceError(403, 'Current organization does not allow phone code login')
+    }
+    throw new AuthServiceError(403, 'Current organization does not allow third-party login')
   }
 
   private projectUser(user: AuthCenterUser): NativeUserProjection {

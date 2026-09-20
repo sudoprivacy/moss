@@ -47,6 +47,37 @@ describe('provider model discovery', () => {
     expect(authorization).toBe('Bearer temporary-key')
   })
 
+  it('keeps discovery cache entries separated by organization scope', async () => {
+    const provider: ModelProvider = {
+      id: 'shared-provider',
+      name: 'Shared Provider',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      discoveryUrl: 'http://127.0.0.1:8000/v1/models',
+      protocol: 'openai-completions',
+      enabled: true,
+    }
+    const seenAuth: string[] = []
+    globalThis.fetch = (async (_input, init) => {
+      const authorization = new Headers(init?.headers).get('authorization') || ''
+      seenAuth.push(authorization)
+      const suffix = authorization.endsWith('org-b-key') ? 'b' : 'a'
+      return new Response(JSON.stringify({ data: [{ id: `model-${suffix}` }] }), { status: 200 })
+    }) as typeof fetch
+
+    await expect(discoverProviderModels(provider, 'org-a-key', { orgId: 'org-a' })).resolves.toMatchObject([
+      { modelId: 'model-a' },
+    ])
+    await expect(discoverProviderModels(provider, 'org-b-key', { orgId: 'org-b' })).resolves.toMatchObject([
+      { modelId: 'model-b' },
+    ])
+    await expect(discoverProviderModels(provider, 'org-a-key', { orgId: 'org-a' })).resolves.toMatchObject([
+      { modelId: 'model-a' },
+    ])
+
+    expect(seenAuth).toEqual(['Bearer org-a-key', 'Bearer org-b-key'])
+  })
+
   it('routes a qualified user choice to its provider and keeps plain legacy choices backward compatible', () => {
     const providers: ModelProvider[] = [
       {

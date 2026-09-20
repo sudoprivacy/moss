@@ -1,4 +1,4 @@
-import { getConfigStore, type ConfigKey } from './configStore/configStore.js'
+import { getConfigStore, organizationConfigKey, type ConfigKey } from './configStore/configStore.js'
 
 export type ModelProviderKind = 'openai-compatible'
 /**
@@ -122,8 +122,18 @@ export function providerApiKeysFromInput(value: unknown, existing: Record<string
   return next
 }
 
-export function getStoredProviderApiKeys(): Record<string, string> {
-  const raw = getConfigStore().get(PROVIDER_API_KEYS_KEY)
+export function providerApiKeysConfigKey(orgId?: string): ConfigKey {
+  return orgId?.trim()
+    ? organizationConfigKey(orgId, 'settings.model-provider-api-keys')
+    : PROVIDER_API_KEYS_KEY
+}
+
+export async function refreshStoredProviderApiKeys(orgId?: string): Promise<void> {
+  await getConfigStore().refreshKey(providerApiKeysConfigKey(orgId))
+}
+
+export function getStoredProviderApiKeys(orgId?: string): Record<string, string> {
+  const raw = getConfigStore().get(providerApiKeysConfigKey(orgId))
   if (!raw) return {}
   try {
     const parsed = JSON.parse(raw)
@@ -134,10 +144,11 @@ export function getStoredProviderApiKeys(): Record<string, string> {
   }
 }
 
-export async function saveProviderApiKeys(keys: Record<string, string>): Promise<void> {
+export async function saveProviderApiKeys(keys: Record<string, string>, orgId?: string): Promise<void> {
   const store = getConfigStore()
-  if (Object.keys(keys).length === 0) await store.remove(PROVIDER_API_KEYS_KEY)
-  else await store.put(PROVIDER_API_KEYS_KEY, JSON.stringify(keys))
+  const key = providerApiKeysConfigKey(orgId)
+  if (Object.keys(keys).length === 0) await store.remove(key)
+  else await store.put(key, JSON.stringify(keys))
 }
 
 export function toPublicProviders(providers: ModelProvider[], apiKeys: Record<string, string>, legacyApiKey: string): PublicModelProvider[] {
@@ -171,9 +182,10 @@ export function resolveModelSelection(
 export async function discoverProviderModels(
   provider: ModelProvider,
   apiKey: string | undefined,
-  options: { forceRefresh?: boolean } = {},
+  options: { forceRefresh?: boolean; orgId?: string } = {},
 ): Promise<ProviderModelInfo[]> {
-  const cacheKey = `${provider.id}\u0000${provider.discoveryUrl}\u0000${apiKey ? 'key' : 'no-key'}`
+  const orgScope = options.orgId?.trim() || 'platform'
+  const cacheKey = `${orgScope}\u0000${provider.id}\u0000${provider.discoveryUrl}\u0000${apiKey ? 'key' : 'no-key'}`
   const cached = catalogCache.get(cacheKey)
   if (!options.forceRefresh && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.models
 

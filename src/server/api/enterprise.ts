@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import type { DatabaseSync } from 'node:sqlite'
 import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
 import { getSystemSettings } from '../systemSettings.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
 type EnterpriseBrandingPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
@@ -20,7 +22,7 @@ export function createEnterpriseApi(
     cabinEnabled?: boolean
     getClientCronEnabled?: (orgId: string) => boolean
     setClientCronEnabled?: (orgId: string, enabled: boolean) => void
-    getClientPolicy?: (orgId: string) => ClientFacingPolicy
+    getClientPolicy?: (orgId?: string) => ClientFacingPolicy
     putClientPolicy?: (orgId: string, patch: ClientFacingPolicy, updatedBy: string) => void
   } = {},
 ) {
@@ -34,8 +36,8 @@ export function createEnterpriseApi(
     const requestedOrgId = orgId.trim() || 'default'
     const enterprise = await db.getEnterprise(requestedOrgId === 'default' ? undefined : requestedOrgId)
     const systemSettings = getSystemSettings()
-    const policy = requestedOrgId !== 'default' && options.getClientPolicy
-      ? options.getClientPolicy(requestedOrgId)
+    const policy = options.getClientPolicy
+      ? options.getClientPolicy(requestedOrgId === 'default' ? undefined : requestedOrgId)
       : {}
     return {
       clientCronEnabled: requestedOrgId !== 'default' && options.getClientCronEnabled
@@ -153,9 +155,7 @@ export function createEnterpriseApi(
           const policyPatch: ClientFacingPolicy = {}
           const dbPolicyPatch: EnterpriseBrandingPatch = {}
           if (nextClientCronEnabled !== undefined) {
-            if (options.setClientCronEnabled) {
-              options.setClientCronEnabled(orgId, nextClientCronEnabled)
-            } else {
+            if (!options.setClientCronEnabled) {
               dbPolicyPatch.client_cron_enabled = nextClientCronEnabled
             }
           }
@@ -173,10 +173,6 @@ export function createEnterpriseApi(
               dbPolicyPatch.workspace_upload_limit_bytes = nextWorkspaceUploadLimitBytes
             }
           }
-          if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
-            options.putClientPolicy(orgId, policyPatch, updatedBy)
-          }
-
           // Whitelist the actual `enterprises` columns so read-only /
           // settings-sourced fields in the round-tripped config can't reach SQL.
           const ENTERPRISE_COLUMNS = [
@@ -190,8 +186,30 @@ export function createEnterpriseApi(
               ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
             }
           }
-          if (Object.keys(dbPatch).length > 0) {
-            await db.updateEnterprise(orgId, dbPatch)
+          const applyWrites = () => {
+            if (nextClientCronEnabled !== undefined && options.setClientCronEnabled) {
+              options.setClientCronEnabled(orgId, nextClientCronEnabled)
+            }
+            if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
+              options.putClientPolicy(orgId, policyPatch, updatedBy)
+            }
+            if (Object.keys(dbPatch).length > 0) {
+              updateEnterpriseSync(db.db, orgId, dbPatch)
+            }
+          }
+
+          if (db.db) {
+            runInTransaction(db.db, applyWrites)
+          } else {
+            if (nextClientCronEnabled !== undefined && options.setClientCronEnabled) {
+              options.setClientCronEnabled(orgId, nextClientCronEnabled)
+            }
+            if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
+              options.putClientPolicy(orgId, policyPatch, updatedBy)
+            }
+            if (Object.keys(dbPatch).length > 0) {
+              await db.updateEnterprise(orgId, dbPatch)
+            }
           }
         } else if (patch !== undefined && patch !== null) {
           throw new Error('Enterprise configuration patch must be an object')
@@ -232,4 +250,39 @@ function parseBoolean(value: unknown, fieldName: string): boolean {
   if (typeof value === 'boolean') return value
   if (value === 0 || value === 1) return value === 1
   throw new Error(`${fieldName} must be a boolean`)
+}
+
+function updateEnterpriseSync(
+  db: DatabaseSync,
+  orgId: string,
+  patch: EnterpriseBrandingPatch,
+): void {
+  const entries = Object.entries(patch)
+  if (entries.length === 0) return
+  const id = orgId.trim()
+  if (!id) throw new Error('Organization id is required for enterprise configuration')
+  const ts = Date.now()
+  db.prepare(`
+    INSERT INTO enterprises (
+      id, logo, app_name, top_name, about_name, app_company_name,
+      login_desp, client_cron_enabled, client_show_tool_calls,
+      workspace_upload_limit_bytes, created_at, updated_at
+    )
+    SELECT ?, logo, app_name, top_name, about_name, app_company_name,
+      login_desp, client_cron_enabled, client_show_tool_calls,
+      workspace_upload_limit_bytes, ?, ?
+    FROM enterprises
+    WHERE id = 'default'
+    ON CONFLICT(id) DO NOTHING
+  `).run(id, ts, ts)
+
+  const sets = entries.map(([key]) => `${key} = ?`).join(', ')
+  const values = entries.map(([, value]) =>
+    typeof value === 'boolean' ? (value ? 1 : 0) : value ?? null,
+  )
+  db.prepare(`
+    UPDATE enterprises
+    SET ${sets}, updated_at = ?
+    WHERE id = ?
+  `).run(...values, ts, id)
 }

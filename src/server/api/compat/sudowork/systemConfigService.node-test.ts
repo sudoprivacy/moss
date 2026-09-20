@@ -524,6 +524,48 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
+  void test('组织没有启用 CAS Provider 时不能保存 CAS-only 登录方式', async () => {
+    const { db, identities, org, service } = await setup()
+    try {
+      const orgB = await new UnifiedIdentityService(db, new AuthCenterDb(db), identities)
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      const policies = new ClientPolicyRepository(db)
+      policies.putPlatform({
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'cas-a' },
+      }, 'root')
+      identities.putIntegrationConnection({
+        id: 'cas-a',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      identities.putIntegrationConnection({
+        id: 'cas-b-disabled',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B 禁用 CAS',
+        enabled: false,
+        secretRef: null,
+        config: {},
+      })
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+
+      await assert.rejects(
+        service.update(scopedRoot, { login_method: 2 }),
+        (error: unknown) => error instanceof SudoworkSystemConfigError
+          && error.statusCode === 400
+          && /三方认证配置未启用/.test(error.message),
+      )
+    } finally {
+      db.close()
+    }
+  })
+
   void test('公开配置可按组织合并客户端策略并过滤三方认证 Provider', async () => {
     const { db, identities, org, service } = await setup()
     try {

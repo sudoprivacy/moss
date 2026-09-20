@@ -1,18 +1,23 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { getConfigStore } from './configStore/configStore.js'
+import { getConfigStore, organizationConfigKey } from './configStore/configStore.js'
 import type { ConfigKey } from './configStore/configStore.js'
 import {
   getStoredProviderApiKeys,
   clearProviderModelCache,
   normalizeModelProviders,
   providerApiKeysFromInput,
+  refreshStoredProviderApiKeys,
   saveProviderApiKeys,
   toPublicProviders,
   type ModelProvider,
   type PublicModelProvider,
 } from './modelProviders.js'
+import type {
+  OrganizationModelSettings,
+  OrganizationModelSettingsRepository,
+} from './configuration/organizationModelSettingsRepository.js'
 
 /** 敏感字段在 Nexus（namespace moss:config）中的 key。 */
 const AUTH_TOKEN_KEY: ConfigKey = 'settings.anthropic-auth-token'
@@ -24,6 +29,7 @@ export type SystemSettingsImage = {
   provider: string
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   model: string
 }
 
@@ -62,6 +68,7 @@ export type SystemSettingsPayload = {
   thinkingBudgetTokens: number
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   /** Provider metadata only. API keys stay in Nexus and are never returned. */
   modelProviders: SystemSettingsModelProvider[]
   /** The provider used for legacy/plain model IDs and the system default model. */
@@ -126,12 +133,14 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   thinkingBudgetTokens: 16000,
   url: '',
   apiKey: '',
+  apiKeyConfigured: false,
   modelProviders: [],
   defaultModelProviderId: 'legacy-default',
   image: {
     provider: 'openai',
     url: '',
     apiKey: '',
+    apiKeyConfigured: false,
     model: 'gpt-image-1',
   },
   skillStore: {
@@ -174,6 +183,17 @@ function normalizeThinkingMode(value: unknown): ThinkingMode | null {
   return null
 }
 
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (value === 0 || value === 1) return value === 1
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1') return true
+    if (normalized === 'false' || normalized === '0') return false
+  }
+  return undefined
+}
+
 function normalizeSystemSettings(
   input: unknown,
   existing: Record<string, unknown> = {},
@@ -197,19 +217,22 @@ function normalizeSystemSettings(
   }
 
   if (source.bypassPermissions !== undefined) {
-    result.bypassPermissions = Boolean(source.bypassPermissions)
+    const value = normalizeBoolean(source.bypassPermissions)
+    if (value !== undefined) result.bypassPermissions = value
   } else if (result.bypassPermissions === undefined) {
     result.bypassPermissions = DEFAULT_SYSTEM_SETTINGS.bypassPermissions
   }
 
   if (source.clientCronEnabled !== undefined) {
-    result.clientCronEnabled = Boolean(source.clientCronEnabled)
+    const value = normalizeBoolean(source.clientCronEnabled)
+    if (value !== undefined) result.clientCronEnabled = value
   } else if (result.clientCronEnabled === undefined) {
     result.clientCronEnabled = DEFAULT_SYSTEM_SETTINGS.clientCronEnabled
   }
 
   if (source.clientShowToolCalls !== undefined) {
-    result.clientShowToolCalls = Boolean(source.clientShowToolCalls)
+    const value = normalizeBoolean(source.clientShowToolCalls)
+    if (value !== undefined) result.clientShowToolCalls = value
   } else if (result.clientShowToolCalls === undefined) {
     result.clientShowToolCalls = DEFAULT_SYSTEM_SETTINGS.clientShowToolCalls
   }
@@ -327,6 +350,10 @@ function normalizeSystemSettings(
         : typeof existingImage.apiKey === 'string'
           ? existingImage.apiKey
           : DEFAULT_SYSTEM_SETTINGS.image.apiKey,
+    apiKeyConfigured:
+      typeof existingImage.apiKey === 'string'
+        ? existingImage.apiKey.length > 0
+        : DEFAULT_SYSTEM_SETTINGS.image.apiKeyConfigured,
     model:
       typeof sourceImage.model === 'string'
         ? sourceImage.model.trim()
@@ -359,7 +386,11 @@ function normalizeSystemSettings(
   result.oauth2 = {
     enabled:
       sourceOAuth2.enabled !== undefined
-        ? Boolean(sourceOAuth2.enabled)
+        ? normalizeBoolean(sourceOAuth2.enabled) ?? (
+          typeof existingOAuth2.enabled === 'boolean'
+            ? existingOAuth2.enabled
+            : DEFAULT_SYSTEM_SETTINGS.oauth2.enabled
+        )
         : typeof existingOAuth2.enabled === 'boolean'
           ? existingOAuth2.enabled
           : DEFAULT_SYSTEM_SETTINGS.oauth2.enabled,
@@ -375,7 +406,11 @@ function normalizeSystemSettings(
     ),
     requireState:
       sourceOAuth2.requireState !== undefined
-        ? Boolean(sourceOAuth2.requireState)
+        ? normalizeBoolean(sourceOAuth2.requireState) ?? (
+          typeof existingOAuth2.requireState === 'boolean'
+            ? existingOAuth2.requireState
+            : DEFAULT_SYSTEM_SETTINGS.oauth2.requireState
+        )
         : typeof existingOAuth2.requireState === 'boolean'
           ? existingOAuth2.requireState
           : DEFAULT_SYSTEM_SETTINGS.oauth2.requireState,
@@ -397,7 +432,12 @@ function readSystemSettingsState(): SystemSettingsState {
     value: {
       ...DEFAULT_SYSTEM_SETTINGS,
       apiKey: storedApiKey,
-      image: { ...DEFAULT_SYSTEM_SETTINGS.image, apiKey: storedImageApiKey },
+      apiKeyConfigured: Boolean(storedApiKey),
+      image: {
+        ...DEFAULT_SYSTEM_SETTINGS.image,
+        apiKey: storedImageApiKey,
+        apiKeyConfigured: Boolean(storedImageApiKey),
+      },
     },
   }
 
@@ -422,9 +462,11 @@ function readSystemSettingsState(): SystemSettingsState {
       ...normalized,
       url: urlFromEnv || normalized.url || DEFAULT_SYSTEM_SETTINGS.url,
       apiKey: storedApiKey,
+      apiKeyConfigured: Boolean(storedApiKey),
       image: {
         ...(normalized.image || { ...DEFAULT_SYSTEM_SETTINGS.image }),
         apiKey: storedImageApiKey,
+        apiKeyConfigured: Boolean(storedImageApiKey),
       },
       skillStore: normalized.skillStore || {
         ...DEFAULT_SYSTEM_SETTINGS.skillStore,
@@ -441,9 +483,10 @@ function readSystemSettingsState(): SystemSettingsState {
 
 function toSystemSettingsPayload(
   state: SystemSettingsState,
+  orgId?: string,
 ): SystemSettingsPayload {
   const providers = normalizeModelProviders(state.value.modelProviders, state.value.url)
-  const apiKeys = getStoredProviderApiKeys()
+  const apiKeys = getStoredProviderApiKeys(orgId)
   return {
     bypassPermissions: state.value.bypassPermissions,
     model: state.value.model,
@@ -452,11 +495,15 @@ function toSystemSettingsPayload(
     thinkingBudgetTokens: state.value.thinkingBudgetTokens,
     url: state.value.url,
     apiKey: state.value.apiKey,
+    apiKeyConfigured: Boolean(state.value.apiKey),
     modelProviders: toPublicProviders(providers, apiKeys, state.value.apiKey),
     defaultModelProviderId: providers.some(provider => provider.id === state.value.defaultModelProviderId && provider.enabled)
       ? state.value.defaultModelProviderId
       : providers.find(provider => provider.enabled)?.id || 'legacy-default',
-    image: state.value.image,
+    image: {
+      ...state.value.image,
+      apiKeyConfigured: Boolean(state.value.image.apiKey),
+    },
     skillStore: state.value.skillStore,
     oauth2: state.value.oauth2,
     clientCronEnabled: state.value.clientCronEnabled ?? DEFAULT_SYSTEM_SETTINGS.clientCronEnabled,
@@ -476,6 +523,21 @@ export function getSystemSettings(): SystemSettingsPayload {
   return toSystemSettingsPayload(readSystemSettingsState())
 }
 
+export async function getOrganizationSystemSettings(
+  orgId: string | undefined,
+  repository: OrganizationModelSettingsRepository,
+  options: { redactSecrets?: boolean } = {},
+): Promise<SystemSettingsPayload> {
+  if (!orgId?.trim()) {
+    const platform = getSystemSettings()
+    return options.redactSecrets ? redactSystemSettingsSecrets(platform) : platform
+  }
+  await refreshOrganizationModelCredentials(orgId)
+  const state = readOrganizationSystemSettingsState(orgId, repository.get(orgId))
+  const payload = toSystemSettingsPayload(state, orgId)
+  return options.redactSecrets ? redactSystemSettingsSecrets(payload) : payload
+}
+
 /**
  * updateSystemSettings — async 化 + 模块级 promise 链串行化。
  *
@@ -493,6 +555,165 @@ export function updateSystemSettings(patch: unknown): Promise<SystemSettingsPayl
   // 队列只保证顺序，不向后传播前一次的错误
   updateSystemSettingsQueue = run.then(() => undefined, () => undefined)
   return run
+}
+
+export function updateOrganizationSystemSettings(
+  orgId: string | undefined,
+  repository: OrganizationModelSettingsRepository,
+  patch: unknown,
+  updatedBy: string,
+  options: { redactSecrets?: boolean } = {},
+): Promise<SystemSettingsPayload> {
+  if (!orgId?.trim()) {
+    const run = updateSystemSettingsQueue.then(async () => {
+      const platform = await performUpdateSystemSettings(patch)
+      return options.redactSecrets ? redactSystemSettingsSecrets(platform) : platform
+    })
+    updateSystemSettingsQueue = run.then(() => undefined, () => undefined)
+    return run
+  }
+  const run = updateSystemSettingsQueue.then(async () => {
+    await performUpdateOrganizationModelSettings(orgId, repository, patch, updatedBy)
+    return getOrganizationSystemSettings(orgId, repository, options)
+  })
+  updateSystemSettingsQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
+function readOrganizationSystemSettingsState(
+  orgId: string,
+  organizationSettings: OrganizationModelSettings,
+): SystemSettingsState {
+  const state = readSystemSettingsState()
+  const store = getConfigStore()
+  const apiKey = store.get(organizationScopedConfigKey(orgId, 'settings.anthropic-auth-token')) || ''
+  const imageApiKey = store.get(organizationScopedConfigKey(orgId, 'settings.image-api-key')) || ''
+  const scoped = normalizeSystemSettings(organizationSettings, state.value)
+  return {
+    ...state,
+    value: {
+      ...state.value,
+      model: scoped.model,
+      url: scoped.url,
+      modelProviders: scoped.modelProviders,
+      defaultModelProviderId: scoped.defaultModelProviderId,
+      apiKey,
+      apiKeyConfigured: Boolean(apiKey),
+      image: {
+        ...scoped.image,
+        apiKey: imageApiKey,
+        apiKeyConfigured: Boolean(imageApiKey),
+      },
+    },
+  }
+}
+
+async function refreshOrganizationModelCredentials(orgId: string): Promise<void> {
+  const store = getConfigStore()
+  await store.refreshKey(organizationScopedConfigKey(orgId, 'settings.anthropic-auth-token'))
+  await store.refreshKey(organizationScopedConfigKey(orgId, 'settings.image-api-key'))
+  await refreshStoredProviderApiKeys(orgId)
+}
+
+async function performUpdateOrganizationModelSettings(
+  orgId: string,
+  repository: OrganizationModelSettingsRepository,
+  patch: unknown,
+  updatedBy: string,
+): Promise<void> {
+  const source = isRecord(patch) ? patch : {}
+  const globalPatch = deploymentSettingsPatchFromInput(source)
+  if (Object.keys(globalPatch).length > 0) {
+    await performUpdateSystemSettings(globalPatch)
+  }
+
+  await refreshOrganizationModelCredentials(orgId)
+  const currentState = readOrganizationSystemSettingsState(orgId, repository.get(orgId))
+  const currentSettings = currentState.value
+  const nextSettings = normalizeSystemSettings(source, currentSettings)
+  const store = getConfigStore()
+
+  if (typeof source.apiKey === 'string') {
+    const nextApiKey = source.apiKey.trim()
+    const key = organizationScopedConfigKey(orgId, 'settings.anthropic-auth-token')
+    if (nextApiKey) await store.put(key, nextApiKey)
+    else await store.remove(key)
+  }
+
+  const sourceImage = isRecord(source.image) ? source.image : {}
+  if (typeof sourceImage.apiKey === 'string') {
+    const nextApiKey = sourceImage.apiKey.trim()
+    const key = organizationScopedConfigKey(orgId, 'settings.image-api-key')
+    if (nextApiKey) await store.put(key, nextApiKey)
+    else await store.remove(key)
+  }
+
+  if (Array.isArray(source.modelProviders)) {
+    await saveProviderApiKeys(
+      providerApiKeysFromInput(source.modelProviders, getStoredProviderApiKeys(orgId)),
+      orgId,
+    )
+  }
+  clearProviderModelCache()
+
+  const organizationPatch = modelSettingsPatchFromInput(source, nextSettings)
+  if (Object.keys(organizationPatch).length > 0) {
+    repository.put(orgId, organizationPatch, updatedBy)
+  }
+}
+
+function deploymentSettingsPatchFromInput(source: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (isOrganizationModelSettingsKey(key)) continue
+    result[key] = value
+  }
+  return result
+}
+
+function isOrganizationModelSettingsKey(key: string): boolean {
+  return key === 'model'
+    || key === 'url'
+    || key === 'apiKey'
+    || key === 'modelProviders'
+    || key === 'defaultModelProviderId'
+    || key === 'image'
+}
+
+function modelSettingsPatchFromInput(
+  source: Record<string, unknown>,
+  nextSettings: PersistedSystemSettings,
+): OrganizationModelSettings {
+  const patch: OrganizationModelSettings = {}
+  if (typeof source.model === 'string' && source.model.trim()) patch.model = nextSettings.model
+  if (typeof source.url === 'string') patch.url = nextSettings.url
+  if (Array.isArray(source.modelProviders)) patch.modelProviders = nextSettings.modelProviders
+  if (typeof source.defaultModelProviderId === 'string') patch.defaultModelProviderId = nextSettings.defaultModelProviderId
+  const sourceImage = isRecord(source.image) ? source.image : {}
+  const imagePatch: Record<string, unknown> = {}
+  if (typeof sourceImage.provider === 'string') imagePatch.provider = nextSettings.image.provider
+  if (typeof sourceImage.url === 'string') imagePatch.url = nextSettings.image.url
+  if (typeof sourceImage.model === 'string') imagePatch.model = nextSettings.image.model
+  if (Object.keys(imagePatch).length > 0) patch.image = imagePatch
+  return patch
+}
+
+function organizationScopedConfigKey(
+  orgId: string,
+  suffix: 'settings.anthropic-auth-token' | 'settings.image-api-key',
+): ConfigKey {
+  return organizationConfigKey(orgId, suffix)
+}
+
+function redactSystemSettingsSecrets(settings: SystemSettingsPayload): SystemSettingsPayload {
+  return {
+    ...settings,
+    apiKey: '',
+    image: {
+      ...settings.image,
+      apiKey: '',
+    },
+  }
 }
 
 async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettingsPayload> {
@@ -559,7 +780,11 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
   }
 
   // 文件落盘：image 剥离 apiKey（保留 provider/url/model）
-  const { apiKey: _strippedImageApiKey, ...imageToSave } = nextSettings.image
+  const {
+    apiKey: _strippedImageApiKey,
+    apiKeyConfigured: _strippedImageApiKeyConfigured,
+    ...imageToSave
+  } = nextSettings.image
   const toSave: Record<string, unknown> = {
     ...existingFile,
     ...nextSettings,
@@ -569,6 +794,7 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
 
   delete toSave.url
   delete toSave.apiKey
+  delete toSave.apiKeyConfigured
   if (Object.keys(env).length === 0) {
     delete toSave.env
   }
@@ -584,13 +810,17 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
     thinkingBudgetTokens: nextSettings.thinkingBudgetTokens,
     url: nextSettings.url,
     apiKey: nextSettings.apiKey,
+    apiKeyConfigured: Boolean(nextSettings.apiKey),
     modelProviders: toPublicProviders(
       normalizeModelProviders(nextSettings.modelProviders, nextSettings.url),
       getStoredProviderApiKeys(),
       nextSettings.apiKey,
     ),
     defaultModelProviderId: nextSettings.defaultModelProviderId,
-    image: nextSettings.image,
+    image: {
+      ...nextSettings.image,
+      apiKeyConfigured: Boolean(nextSettings.image.apiKey),
+    },
     skillStore: nextSettings.skillStore,
     oauth2: nextSettings.oauth2,
     clientCronEnabled: nextSettings.clientCronEnabled,
