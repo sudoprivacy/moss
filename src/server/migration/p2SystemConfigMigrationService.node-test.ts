@@ -4,9 +4,10 @@ import { describe, test } from 'node:test'
 import { migrationCommandContext } from '../application/commandContext.js'
 import { SudoworkSystemConfigService } from '../api/compat/sudowork/systemConfigService.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { ClientPolicyRepository, ensureClientPolicySchema } from '../configuration/clientPolicyRepository.js'
+import { ensurePlatformIntegrationSettingsSchema } from '../configuration/platformIntegrationSettingsRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import {
   P2SystemConfigMigrationBlockedError,
   P2SystemConfigMigrationService,
@@ -35,16 +36,18 @@ async function setup(
 ) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  const unified = new UnifiedIdentityService(db, authDb, identities)
+  const identities = createIdentityTestRepository(db, {}, authDb.driver)
+  const unified = new UnifiedIdentityService(authDb, identities)
   const org = await unified.createOrganization(
     { name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 1 },
     migrationCommandContext('identity', 'org-a'),
   )
   const secrets = new Map<string, string>()
-  const policies = new ClientPolicyRepository(db)
+  ensureClientPolicySchema(db)
+  ensurePlatformIntegrationSettingsSchema(db)
+  const policies = new ClientPolicyRepository(authDb.driver)
   const service = new SudoworkSystemConfigService({
-    db,
+    db: authDb.driver,
     policies,
     identities,
     defaults: {
@@ -65,7 +68,7 @@ async function setup(
     },
   })
   const migration = new P2SystemConfigMigrationService({
-    db,
+    db: authDb.driver,
     identities,
     service,
     platformOrgId: org.organizationId,
@@ -107,7 +110,7 @@ void describe('P2 系统配置迁移', () => {
       const plan = await fixture.migration.plan()
       assert.equal(plan.status, 'ready')
       assert.deepEqual(plan.deferredKeys, ['recharge_mode'])
-      assert.deepEqual(fixture.policies.getPlatform(), {})
+      assert.deepEqual(await fixture.policies.getPlatform(), {})
       assert.equal(fixture.secrets.size, 0)
 
       assert.deepEqual(await fixture.migration.execute('p2-system'), {
@@ -116,8 +119,8 @@ void describe('P2 系统配置迁移', () => {
       assert.deepEqual(await fixture.migration.execute('p2-system-resume'), {
         migrationRunId: 'p2-system-resume', imported: false, reused: true,
       })
-      assert.equal(fixture.service.getPublicConfig().login_method, 2)
-      assert.equal(fixture.identities.getIntegrationConnection('cas-main')?.orgId, fixture.org.organizationId)
+      assert.equal((await fixture.service.getPublicConfig()).login_method, 2)
+      assert.equal((await fixture.identities.getIntegrationConnection('cas-main'))?.orgId, fixture.org.organizationId)
       assert.equal(fixture.secrets.get('client.log-report-key'), 'legacy-log-secret')
       const stored = String(fixture.db.prepare('SELECT policy_json FROM client_delivery_policies').get()?.policy_json)
       assert.equal(stored.includes('legacy-log-secret'), false)
@@ -137,7 +140,7 @@ void describe('P2 系统配置迁移', () => {
         malformed.migration.execute('bad-json'),
         (error: unknown) => error instanceof P2SystemConfigMigrationBlockedError,
       )
-      assert.deepEqual(malformed.policies.getPlatform(), {})
+      assert.deepEqual(await malformed.policies.getPlatform(), {})
     } finally {
       malformed.db.close()
     }
@@ -163,8 +166,8 @@ void describe('P2 系统配置迁移', () => {
     }, true)
     try {
       await assert.rejects(nexusFailure.migration.execute('nexus-failure'), /nexus unavailable/)
-      assert.deepEqual(nexusFailure.policies.getPlatform(), {})
-      assert.equal(nexusFailure.identities.getCommandResult('configuration.import_system', 'system-config'), null)
+      assert.deepEqual(await nexusFailure.policies.getPlatform(), {})
+      assert.equal(await nexusFailure.identities.getCommandResult('configuration.import_system', 'system-config'), null)
     } finally {
       nexusFailure.db.close()
     }
@@ -178,7 +181,7 @@ void describe('P2 系统配置迁移', () => {
       const plan = await fixture.migration.plan()
       assert.equal(plan.status, 'blocked')
       assert.match(plan.conflicts.join('\n'), /QMS_DEFAULT_API_KEY/)
-      assert.deepEqual(fixture.policies.getPlatform(), {})
+      assert.deepEqual(await fixture.policies.getPlatform(), {})
       assert.equal(fixture.secrets.size, 0)
     } finally {
       fixture.db.close()

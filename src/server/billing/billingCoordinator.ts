@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, migrationCommandContext, onlineCommandContext, replayCommandContext, type CommandContext } from '../application/commandContext.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import { BillingRepository, type QuotaOperationRecord } from './billingRepository.js'
 import { BillingDomainError, type BillingOperationStatus, type BillingOwnerType } from './types.js'
 import { pointsToQuota, type QuotaSnapshot, type SudorouterPort } from './sudorouterAdapter.js'
@@ -37,7 +36,7 @@ export class BillingCoordinator {
   private readonly idGenerator: () => string
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly driver: DbDriver,
     private readonly repository: BillingRepository,
     private readonly walletService: WalletService,
     private readonly sudorouter: SudorouterPort,
@@ -50,7 +49,7 @@ export class BillingCoordinator {
   async adjustPoints(
     input: AdjustPointsInput,
     context: CommandContext,
-    finalizeLocal?: () => void,
+    finalizeLocal?: () => Promise<void>,
   ): Promise<AdjustmentResult> {
     assertTrustedCommandContext(context)
     if (!Number.isSafeInteger(input.pointsDelta) || input.pointsDelta === 0) {
@@ -62,8 +61,8 @@ export class BillingCoordinator {
       input.pointsDelta, input.reason, input.sourceType, input.sourceId, input.actorUserId ?? null,
     ])).digest('hex')
 
-    const prepared = runInTransaction(this.db, () => {
-      const existing = this.repository.getQuotaOperationByKey(context.idempotencyKey)
+    const prepared = await this.driver.transaction(async () => {
+      const existing = await this.repository.getQuotaOperationByKey(context.idempotencyKey)
       if (existing) {
         if (existing.requestFingerprint !== requestFingerprint) {
           throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的额度命令')
@@ -72,7 +71,7 @@ export class BillingCoordinator {
       }
       const status = context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'PENDING'
       const id = this.idGenerator()
-      this.repository.insertQuotaOperation({
+      const inserted = await this.repository.insertQuotaOperation({
         id, ownerType: input.ownerType, ownerId: input.ownerId,
         externalUserId: input.externalUserId, deltaUnits: quotaDelta, status,
         idempotencyKey: context.idempotencyKey, sourceType: input.sourceType,
@@ -80,17 +79,23 @@ export class BillingCoordinator {
         reason: input.reason, requestFingerprint, contextSource: context.source,
         createdAt: this.clock(),
       })
-      const operation = this.repository.getQuotaOperationById(id)!
+      const operation = await this.repository.getQuotaOperationByKey(context.idempotencyKey)
+      if (!operation) throw new Error('Quota operation was not persisted')
+      if (operation.requestFingerprint !== requestFingerprint) {
+        throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的额度命令')
+      }
       const posting = status === 'SUPPRESSED'
-        ? this.walletService.post(this.walletInput(operation), this.walletContext(context))
+        ? inserted ? await this.walletService.post(this.walletInput(operation), this.walletContext(context)) : undefined
         : undefined
-      if (status === 'SUPPRESSED') finalizeLocal?.()
-      return { operation, created: true, newBalanceUnits: posting?.balanceAfterUnits }
+      if (status === 'SUPPRESSED' && inserted) await finalizeLocal?.()
+      if (status === 'SUPPRESSED') return { operation, created: inserted, newBalanceUnits: posting?.balanceAfterUnits }
+      const claimed = await this.repository.claimQuotaOperation(operation.id)
+      return { operation: claimed ?? operation, created: claimed !== null, newBalanceUnits: undefined }
     })
 
     if (!prepared.created) {
       if ((prepared.operation.status === 'SUCCEEDED' || prepared.operation.status === 'SUPPRESSED') && finalizeLocal) {
-        runInTransaction(this.db, finalizeLocal)
+        await this.driver.transaction(finalizeLocal)
       }
       return this.resultFor(prepared.operation)
     }
@@ -103,7 +108,7 @@ export class BillingCoordinator {
 
     const baseline = await this.sudorouter.getUser(input.externalUserId)
     if (!baseline) return this.failOperation(prepared.operation.id, '获取 sudorouter 用户信息失败')
-    runInTransaction(this.db, () => this.repository.updateQuotaOperation({
+    await this.driver.transaction(async () => this.repository.updateQuotaOperation({
       id: prepared.operation.id, status: 'PROCESSING', observedQuotaUnits: baseline.quotaUnits,
       observedUsedUnits: baseline.usedQuotaUnits, updatedAt: this.clock(),
     }))
@@ -113,9 +118,9 @@ export class BillingCoordinator {
     })
     if (!changed.success) return this.failOperation(prepared.operation.id, changed.error || '更新额度失败')
     try {
-      return this.finalize(prepared.operation.id, baseline.quotaUnits + quotaDelta, baseline.usedQuotaUnits, finalizeLocal)
+      return await this.finalize(prepared.operation.id, baseline.quotaUnits + quotaDelta, baseline.usedQuotaUnits, finalizeLocal)
     } catch (error) {
-      runInTransaction(this.db, () => this.repository.updateQuotaOperation({
+      await this.driver.transaction(async () => this.repository.updateQuotaOperation({
         id: prepared.operation.id, status: 'UNKNOWN',
         errorText: `外部额度已返回成功，本地入账失败: ${error instanceof Error ? error.message : String(error)}`,
         updatedAt: this.clock(),
@@ -124,50 +129,52 @@ export class BillingCoordinator {
     }
   }
 
-  async retry(operationId: string, finalizeLocal?: () => void): Promise<AdjustmentResult> {
-    const operation = this.repository.getQuotaOperationById(operationId)
+  async retry(operationId: string, finalizeLocal?: () => Promise<void>): Promise<AdjustmentResult> {
+    const operation = await this.repository.getQuotaOperationById(operationId)
     if (!operation) throw new BillingDomainError('QUOTA_OPERATION_NOT_FOUND', '额度操作不存在')
     if (operation.status === 'SUCCEEDED' || operation.status === 'SUPPRESSED') {
-      if (finalizeLocal) runInTransaction(this.db, finalizeLocal)
+      if (finalizeLocal) await this.driver.transaction(finalizeLocal)
       return this.resultFor(operation)
     }
-    if (operation.status !== 'PENDING' && operation.status !== 'UNKNOWN'
-      && operation.status !== 'PROCESSING' && operation.status !== 'FAILED') {
+    if (operation.status === 'PROCESSING') return this.resultFor(operation)
+    if (operation.status !== 'PENDING' && operation.status !== 'UNKNOWN' && operation.status !== 'FAILED') {
       throw new BillingDomainError('QUOTA_OPERATION_NOT_RETRYABLE', '额度操作当前不可重试')
     }
-    const current = await this.sudorouter.getUser(operation.externalUserId)
+    const claimed = await this.driver.transaction(async () => this.repository.claimQuotaOperation(operation.id))
+    if (!claimed) return this.resultFor((await this.repository.getQuotaOperationById(operation.id)) ?? operation)
+    const current = await this.sudorouter.getUser(claimed.externalUserId)
     if (!current) {
       return { operationId, status: 'UNKNOWN', error: '无法确认 sudorouter 当前额度' }
     }
-    if (operation.observedQuotaUnits == null) {
-      runInTransaction(this.db, () => this.repository.updateQuotaOperation({
-        id: operation.id, status: 'PROCESSING', observedQuotaUnits: current.quotaUnits,
+    if (claimed.observedQuotaUnits == null) {
+      await this.driver.transaction(async () => this.repository.updateQuotaOperation({
+        id: claimed.id, status: 'PROCESSING', observedQuotaUnits: current.quotaUnits,
         observedUsedUnits: current.usedQuotaUnits, updatedAt: this.clock(),
       }))
       const changed = await this.sudorouter.changeQuota({
-        externalUserId: operation.externalUserId, deltaUnits: operation.deltaUnits,
-        comment: operation.reason ?? '额度恢复', idempotencyKey: operation.idempotencyKey,
+        externalUserId: claimed.externalUserId, deltaUnits: claimed.deltaUnits,
+        comment: claimed.reason ?? '额度恢复', idempotencyKey: claimed.idempotencyKey,
       })
-      if (!changed.success) return this.failOperation(operation.id, changed.error || '更新额度失败')
-      return this.finalize(operation.id, current.quotaUnits + operation.deltaUnits, current.usedQuotaUnits, finalizeLocal)
+      if (!changed.success) return this.failOperation(claimed.id, changed.error || '更新额度失败')
+      return this.finalize(claimed.id, current.quotaUnits + claimed.deltaUnits, current.usedQuotaUnits, finalizeLocal)
     }
-    const expected = operation.observedQuotaUnits + operation.deltaUnits
-    if (current.quotaUnits === expected) return this.finalize(operation.id, current.quotaUnits, current.usedQuotaUnits, finalizeLocal)
-    if (current.quotaUnits !== operation.observedQuotaUnits) {
+    const expected = claimed.observedQuotaUnits + claimed.deltaUnits
+    if (current.quotaUnits === expected) return this.finalize(claimed.id, current.quotaUnits, current.usedQuotaUnits, finalizeLocal)
+    if (current.quotaUnits !== claimed.observedQuotaUnits) {
       return { operationId, status: 'UNKNOWN', error: 'sudorouter 额度与基线及预期均不一致' }
     }
     const changed = await this.sudorouter.changeQuota({
-      externalUserId: operation.externalUserId, deltaUnits: operation.deltaUnits,
-      comment: operation.reason ?? '额度重试', idempotencyKey: operation.idempotencyKey,
+      externalUserId: claimed.externalUserId, deltaUnits: claimed.deltaUnits,
+      comment: claimed.reason ?? '额度重试', idempotencyKey: claimed.idempotencyKey,
     })
-    if (!changed.success) return this.failOperation(operation.id, changed.error || '更新额度失败')
-    return this.finalize(operation.id, expected, current.usedQuotaUnits, finalizeLocal)
+    if (!changed.success) return this.failOperation(claimed.id, changed.error || '更新额度失败')
+    return this.finalize(claimed.id, expected, current.usedQuotaUnits, finalizeLocal)
   }
 
   async syncQuota(ownerType: BillingOwnerType, ownerId: string, externalUserId: string): Promise<QuotaSnapshot> {
     const snapshot = await this.sudorouter.getUser(externalUserId)
     if (!snapshot) throw new BillingDomainError('SUDOROUTER_QUERY_FAILED', '获取 sudorouter 用户信息失败')
-    runInTransaction(this.db, () => this.repository.upsertExternalAccount({
+    await this.driver.transaction(async () => this.repository.upsertExternalAccount({
       provider: 'sudorouter', ownerType, ownerId, externalAccountId: externalUserId,
       quotaUnits: snapshot.quotaUnits, usedQuotaUnits: snapshot.usedQuotaUnits, updatedAt: this.clock(),
     }))
@@ -178,22 +185,22 @@ export class BillingCoordinator {
     operationId: string,
     quotaUnits: number,
     usedQuotaUnits: number,
-    finalizeLocal?: () => void,
-  ): AdjustmentResult {
-    return runInTransaction(this.db, () => {
-      const operation = this.repository.getQuotaOperationById(operationId)
+    finalizeLocal?: () => Promise<void>,
+  ): Promise<AdjustmentResult> {
+    return this.driver.transaction(async () => {
+      const operation = await this.repository.getQuotaOperationById(operationId)
       if (!operation) throw new BillingDomainError('QUOTA_OPERATION_NOT_FOUND', '额度操作不存在')
       if (operation.status === 'SUCCEEDED') return this.resultFor(operation)
-      const posting = this.walletService.post(this.walletInput(operation), this.childContext(operation))
-      this.repository.upsertExternalAccount({
+      const posting = await this.walletService.post(this.walletInput(operation), this.childContext(operation))
+      await this.repository.upsertExternalAccount({
         provider: 'sudorouter', ownerType: operation.ownerType, ownerId: operation.ownerId,
         externalAccountId: operation.externalUserId, quotaUnits, usedQuotaUnits, updatedAt: this.clock(),
       })
-      this.repository.updateQuotaOperation({
+      await this.repository.updateQuotaOperation({
         id: operation.id, status: 'SUCCEEDED', providerResponse: { quotaUnits, usedQuotaUnits },
         updatedAt: this.clock(),
       })
-      finalizeLocal?.()
+      await finalizeLocal?.()
       return {
         operationId: operation.id, status: 'SUCCEEDED',
         newBalanceUnits: posting.balanceAfterUnits, newQuotaUnits: quotaUnits,
@@ -201,16 +208,16 @@ export class BillingCoordinator {
     })
   }
 
-  private failOperation(operationId: string, error: string): AdjustmentResult {
-    runInTransaction(this.db, () => this.repository.updateQuotaOperation({
+  private async failOperation(operationId: string, error: string): Promise<AdjustmentResult> {
+    await this.driver.transaction(async () => this.repository.updateQuotaOperation({
       id: operationId, status: 'FAILED', errorText: error, updatedAt: this.clock(),
     }))
     return { operationId, status: 'FAILED', error }
   }
 
-  private resultFor(operation: QuotaOperationRecord): AdjustmentResult {
-    const wallet = this.repository.getWallet(operation.ownerType, operation.ownerId)
-    const account = this.repository.getExternalAccount('sudorouter', operation.ownerType, operation.ownerId)
+  private async resultFor(operation: QuotaOperationRecord): Promise<AdjustmentResult> {
+    const wallet = await this.repository.getWallet(operation.ownerType, operation.ownerId)
+    const account = await this.repository.getExternalAccount('sudorouter', operation.ownerType, operation.ownerId)
     return {
       operationId: operation.id, status: operation.status,
       ...(wallet ? { newBalanceUnits: wallet.balanceUnits } : {}),

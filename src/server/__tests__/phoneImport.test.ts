@@ -6,6 +6,7 @@ import { AuthCenterDb } from '../authCenter/db.js'
 import { AuthService } from '../auth/service.js'
 import { importPhoneUsers, parsePhoneImportRequest } from '../auth/phoneImport.js'
 import { resolveSessionApiKey } from '../backends/backendUtils.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
 let db: AuthCenterDb
 let raw: DatabaseSync
@@ -14,6 +15,7 @@ let auth: AuthService
 beforeEach(() => {
   raw = new DatabaseSync(':memory:')
   db = new AuthCenterDb(raw, ':memory:')
+  createIdentityTestRepository(raw, {}, db.driver)
   auth = new AuthService(db, 3600)
 })
 

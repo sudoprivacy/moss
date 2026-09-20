@@ -107,7 +107,7 @@ describe("A3: pagination clamp (SQLite)", () => {
       const byValid = await store.listConfigItems({ page: 5, pageSize: 20 });
       assert.equal(byValid.total, 1);
       assert.equal(byValid.items.length, 0);
-      store.db.close();
+      store.requireSqliteDb().close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -128,21 +128,21 @@ describe("C-7: escapeLike + ESCAPE clause", () => {
     const dir = mkdtempSync(join(tmpdir(), "moss-esc-"));
     try {
       const store = new DirectConnectStore(join(dir, "t.db"));
-      store.db.exec(`CREATE TABLE esc_probe (id TEXT PRIMARY KEY, name TEXT)`);
-      const ins = store.db.prepare(`INSERT INTO esc_probe (id, name) VALUES (?, ?)`);
+      store.requireSqliteDb().exec(`CREATE TABLE esc_probe (id TEXT PRIMARY KEY, name TEXT)`);
+      const ins = store.requireSqliteDb().prepare(`INSERT INTO esc_probe (id, name) VALUES (?, ?)`);
       ins.run("1", "100% done");
       ins.run("2", "100x done");
       ins.run("3", "a_b");
       ins.run("4", "axb");
       ins.run("5", "a\\b");
-      const sel = store.db.prepare(`SELECT id FROM esc_probe WHERE name LIKE ? ESCAPE '\\'`);
+      const sel = store.requireSqliteDb().prepare(`SELECT id FROM esc_probe WHERE name LIKE ? ESCAPE '\\'`);
       const like = (term: string) => sel.all(`%${escapeLike(term)}%`).map((r: { id: string }) => r.id);
 
       assert.deepEqual(like("100%"), ["1"], "literal % must not act as a wildcard");
       assert.deepEqual(like("100"), ["1", "2"]);
       assert.deepEqual(like("a_b"), ["3"], "literal _ must not act as a single-char wildcard");
       assert.deepEqual(like("a\\b"), ["5"], "literal backslash must match itself");
-      store.db.close();
+      store.requireSqliteDb().close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

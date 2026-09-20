@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver } from '../../../db/driver.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import type { AuthCenterDb, AuthCenterUser } from '../../../authCenter/db.js'
 import type { BillingCoordinator } from '../../../billing/billingCoordinator.js'
@@ -28,14 +28,14 @@ export interface SudoworkBillingPort {
   createOrder(input: { actor: IdentityActor; amount: number; paymentMethod: unknown; idempotencyKey?: string }): Promise<unknown>
   payOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown>
   handlePaymentCallback(payload: Record<string, unknown>): Promise<void>
-  queryOrder(actor: IdentityActor, orderNo: string): unknown
-  listUserOrders(input: { actor: IdentityActor; page: number; pageSize: number }): unknown
-  cancelOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): void
+  queryOrder(actor: IdentityActor, orderNo: string): Promise<unknown>
+  listUserOrders(input: { actor: IdentityActor; page: number; pageSize: number }): Promise<unknown>
+  cancelOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<void>
 
   listAdminOrders(input: { actor: IdentityActor; query: Record<string, string | undefined> }): Promise<unknown>
   getAdminOrder(actor: IdentityActor, orderNo: string): Promise<unknown>
-  getRechargeStats(actor: IdentityActor): unknown
-  calculateRefund(actor: IdentityActor, orderNo: string): unknown
+  getRechargeStats(actor: IdentityActor): Promise<unknown>
+  calculateRefund(actor: IdentityActor, orderNo: string): Promise<unknown>
   requestRefund(input: { actor: IdentityActor; orderNo: string; reason: string; idempotencyKey?: string }): Promise<unknown>
   simulatePayment(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown>
   listRechargeRecords(input: { actor: IdentityActor; query: Record<string, string | undefined> }): Promise<unknown>
@@ -54,7 +54,7 @@ export interface SudoworkBillingPort {
 
   createCreditApplication(input: {
     actor: IdentityActor; requestedPoints: number; reason: unknown; idempotencyKey?: string
-  }): unknown
+  }): Promise<unknown>
   listUserCreditApplications(input: { actor: IdentityActor; page: number; pageSize: number }): Promise<unknown>
   getUserCreditApplication(actor: IdentityActor, legacyApplicationId: number): Promise<unknown>
   listAdminCreditApplications(input: { actor: IdentityActor; query: Record<string, string | undefined> }): Promise<unknown>
@@ -65,7 +65,7 @@ export interface SudoworkBillingPort {
   }): Promise<unknown>
   rejectCreditApplication(input: {
     actor: IdentityActor; legacyApplicationId: number; adminComment: unknown; idempotencyKey?: string
-  }): unknown
+  }): Promise<unknown>
   retryCreditApplication(input: {
     actor: IdentityActor; legacyApplicationId: number; idempotencyKey?: string
   }): Promise<unknown>
@@ -96,7 +96,7 @@ export interface BillingPaymentPort {
 }
 
 interface SudoworkBillingServiceOptions {
-  db: DatabaseSync
+  db: DbDriver
   auth: AuthCenterDb
   identities: IdentityRepository
   repository: BillingRepository
@@ -131,9 +131,9 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async createOrder(input: { actor: IdentityActor; amount: number; paymentMethod: unknown; idempotencyKey?: string }): Promise<unknown> {
     const user = await this.requireUser(input.actor.userId)
-    const legacyUserId = this.ensureAlias('user', user.id, user.orgId)
-    const phone = this.options.identities.findAuthIdentityByUser(user.id, 'phone', 'sudowork')?.normalizedSubject ?? null
-    const order = this.options.recharge.createOrder({
+    const legacyUserId = await this.ensureAlias('user', user.id, user.orgId)
+    const phone = (await this.options.identities.findAuthIdentityByUser(user.id, 'phone', 'sudowork'))?.normalizedSubject ?? null
+    const order = await this.options.recharge.createOrder({
       userId: user.id, legacyUserId, orgId: user.orgId, userPhone: phone,
       amountUsd: input.amount, paymentMethod: input.paymentMethod as 'ALIPAY' | 'WECHAT',
     }, this.context(input.idempotencyKey, 'create-order'))
@@ -145,16 +145,16 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async payOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
     const context = this.context(input.idempotencyKey, 'pay-order')
-    const intent = this.options.recharge.preparePayment(input.orderNo, input.actor.userId, context)
+    const intent = await this.options.recharge.preparePayment(input.orderNo, input.actor.userId, context)
     try {
       const payment = await this.options.payment.createPayment(intent)
-      this.options.recharge.recordPaymentRequestResult({
+      await this.options.recharge.recordPaymentRequestResult({
         attemptId: intent.attemptId, orderId: intent.orderId, success: true,
         providerOrderInfo: payment.orderInfo,
       })
       return { order_no: input.orderNo, qr_code_url: payment.qrCodeUrl, order_info: payment.orderInfo }
     } catch (error) {
-      this.options.recharge.recordPaymentRequestResult({
+      await this.options.recharge.recordPaymentRequestResult({
         attemptId: intent.attemptId, orderId: intent.orderId, success: false,
         errorText: error instanceof Error ? error.message : String(error),
       })
@@ -167,27 +167,27 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     await this.options.recharge.acceptVerifiedCallbackWithCoordinator(event, this.options.coordinator)
   }
 
-  queryOrder(actor: IdentityActor, orderNo: string): unknown {
-    const order = this.options.repository.getOrderByOrderNo(orderNo, actor.userId)
+  async queryOrder(actor: IdentityActor, orderNo: string): Promise<unknown> {
+    const order = await this.options.repository.getOrderByOrderNo(orderNo, actor.userId)
     if (!order) throw new SudoworkBillingError(404, '订单不存在')
     return this.userOrderDto(order, true)
   }
 
-  listUserOrders(input: { actor: IdentityActor; page: number; pageSize: number }): unknown {
+  async listUserOrders(input: { actor: IdentityActor; page: number; pageSize: number }): Promise<unknown> {
     const { page, pageSize, offset } = normalizePage(input.page, input.pageSize)
-    const result = this.options.repository.listOrders({ userId: input.actor.userId, limit: pageSize, offset })
-    return { list: result.list.map(order => this.userOrderDto(order, false)), total: result.total, page, pageSize }
+    const result = await this.options.repository.listOrders({ userId: input.actor.userId, limit: pageSize, offset })
+    return { list: await Promise.all(result.list.map(order => this.userOrderDto(order, false))), total: result.total, page, pageSize }
   }
 
-  cancelOrder(input: { actor: IdentityActor; orderNo: string }): void {
-    this.options.recharge.cancelOrder(input.orderNo, input.actor.userId)
+  async cancelOrder(input: { actor: IdentityActor; orderNo: string }): Promise<void> {
+    await this.options.recharge.cancelOrder(input.orderNo, input.actor.userId)
   }
 
   async listAdminOrders(input: { actor: IdentityActor; query: Record<string, string | undefined> }): Promise<unknown> {
     const { page, pageSize, offset } = normalizePage(
       Number(input.query.page), Number(input.query.pageSize ?? input.query.page_size),
     )
-    const result = this.options.repository.listOrders({
+    const result = await this.options.repository.listOrders({
       orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       status: input.query.status ? LEGACY_TO_STATUS[input.query.status] : undefined,
       orderNo: input.query.order_no, userPhone: input.query.user_phone,
@@ -198,15 +198,15 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async getAdminOrder(actor: IdentityActor, orderNo: string): Promise<unknown> {
-    const order = this.requireScopedOrder(actor, orderNo)
+    const order = await this.requireScopedOrder(actor, orderNo)
     return await this.adminOrderDto(order, true)
   }
 
-  getRechargeStats(actor: IdentityActor): unknown {
-    const allOrders = this.options.repository.listOrders({
+  async getRechargeStats(actor: IdentityActor): Promise<unknown> {
+    const allOrders = (await this.options.repository.listOrders({
       orgId: hasGlobalOrganizationAccess(actor) ? undefined : actor.orgId,
       limit: 1_000_000, offset: 0,
-    }).list
+    })).list
     const startToday = startOfUtcDay(this.clock())
     const summarize = (orders: BillingOrderRecord[]) => ({
       orders: orders.length,
@@ -233,9 +233,9 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     }
   }
 
-  calculateRefund(actor: IdentityActor, orderNo: string): unknown {
-    this.requireScopedOrder(actor, orderNo)
-    const quote = this.options.refund.calculate(orderNo)
+  async calculateRefund(actor: IdentityActor, orderNo: string): Promise<unknown> {
+    await this.requireScopedOrder(actor, orderNo)
+    const quote = await this.options.refund.calculate(orderNo)
     return {
       order_points: quote.orderPoints, user_balance: quote.userBalance, used_points: quote.usedPoints,
       refund_amount: quote.refundAmountCents, refund_amount_yuan: (quote.refundAmountCents / 100).toFixed(2),
@@ -245,7 +245,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async requestRefund(input: { actor: IdentityActor; orderNo: string; reason: string; idempotencyKey?: string }): Promise<unknown> {
-    this.requireScopedOrder(input.actor, input.orderNo)
+    await this.requireScopedOrder(input.actor, input.orderNo)
     const result = await this.options.refund.request(
       { orderNo: input.orderNo, reason: input.reason }, input.actor,
       this.context(input.idempotencyKey, 'refund'),
@@ -255,7 +255,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async simulatePayment(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
     if (!this.options.payment.simulationEnabled) throw new SudoworkBillingError(400, '仅在测试模式下可用')
-    const order = this.requireScopedOrder(input.actor, input.orderNo)
+    const order = await this.requireScopedOrder(input.actor, input.orderNo)
     await this.options.recharge.acceptVerifiedCallbackWithCoordinator({
       providerEventId: `simulation:${order.orderNo}`, orderNo: order.orderNo,
       status: 'SUCCESS', amountCents: order.amountCents, orderDate: order.orderDate,
@@ -268,7 +268,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const { page, pageSize, offset } = normalizePage(Number(input.query.page), Number(input.query.pageSize))
     const activityType = input.query.type === 'CLIENT' || input.query.type === 'ADMIN'
       ? input.query.type : undefined
-    const result = this.options.repository.listRechargeActivities({
+    const result = await this.options.repository.listRechargeActivities({
       orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       activityType, keyword: input.query.keyword?.trim().slice(0, 50),
       paymentMethod: input.query.payment_method === 'ALIPAY' || input.query.payment_method === 'WECHAT'
@@ -282,10 +282,10 @@ export class SudoworkBillingService implements SudoworkBillingPort {
         return {
           id: item.legacyId, type: item.activityType,
           order_no: item.orderId
-            ? this.options.repository.getOrderByLegacyId(this.options.identities.getNumericAlias('billing_order', item.orderId) ?? -1)?.orderNo
+            ? (await this.options.repository.getOrderByLegacyId(await this.options.identities.getNumericAlias('billing_order', item.orderId) ?? -1))?.orderNo
               ?? (typeof item.details.orderNo === 'string' ? item.details.orderNo : null)
             : (typeof item.details.orderNo === 'string' ? item.details.orderNo : null),
-          user_phone: this.phoneFor(item.userId),
+          user_phone: await this.phoneFor(item.userId),
           user_nickname: user?.displayName ?? user?.name ?? null,
           points: item.pointsUnits, quota: item.quotaUnits,
           amount_cny: item.amountCents === null ? null : item.amountCents / 100,
@@ -297,17 +297,17 @@ export class SudoworkBillingService implements SudoworkBillingPort {
             ? item.sourceType === 'CREDIT_APPLICATION' ? '积分申请审批发放' : '后台手工充值'
             : null,
           application_id: item.applicationId
-            ? this.options.identities.getNumericAlias('credit_application', item.applicationId) : null,
+            ? await this.options.identities.getNumericAlias('credit_application', item.applicationId) : null,
           application_no: item.applicationId
-            ? this.options.repository.getCreditApplication(item.applicationId)?.applicationNo ?? null : null,
+            ? (await this.options.repository.getCreditApplication(item.applicationId))?.applicationNo ?? null : null,
           requested_points: item.applicationId
-            ? this.options.repository.getCreditApplication(item.applicationId)?.requestedUnits ?? null : null,
+            ? (await this.options.repository.getCreditApplication(item.applicationId))?.requestedUnits ?? null : null,
           approved_points: item.applicationId
-            ? this.options.repository.getCreditApplication(item.applicationId)?.approvedUnits ?? null : null,
+            ? (await this.options.repository.getCreditApplication(item.applicationId))?.approvedUnits ?? null : null,
           application_reason: item.applicationId
-            ? this.options.repository.getCreditApplication(item.applicationId)?.reason ?? null : null,
+            ? (await this.options.repository.getCreditApplication(item.applicationId))?.reason ?? null : null,
           admin_comment: item.applicationId
-            ? this.options.repository.getCreditApplication(item.applicationId)?.adminComment ?? null : null,
+            ? (await this.options.repository.getCreditApplication(item.applicationId))?.adminComment ?? null : null,
         }
       })),
       total: result.total, page, pageSize,
@@ -315,17 +315,17 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async retryOrder(input: { actor: IdentityActor; legacyOrderId: number; idempotencyKey?: string }): Promise<void> {
-    const order = this.options.repository.getOrderByLegacyId(input.legacyOrderId)
+    const order = await this.options.repository.getOrderByLegacyId(input.legacyOrderId)
     if (!order) throw new SudoworkBillingError(404, '订单不存在')
     this.assertOrgScope(input.actor, order.orgId)
     await this.syncOrder({ actor: input.actor, orderNo: order.orderNo, idempotencyKey: input.idempotencyKey })
   }
 
   async syncPendingOrders(input: { actor: IdentityActor; idempotencyKey?: string }): Promise<unknown> {
-    const orders = this.options.repository.listOrders({
+    const orders = (await this.options.repository.listOrders({
       orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       limit: 1_000, offset: 0,
-    }).list.filter(order => order.status === 'PENDING' || order.status === 'PAYING' || order.status === 'FAILED')
+    })).list.filter(order => order.status === 'PENDING' || order.status === 'PAYING' || order.status === 'FAILED')
     let successCount = 0
     let failedCount = 0
     for (const order of orders) {
@@ -338,7 +338,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async syncOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
-    const order = this.requireScopedOrder(input.actor, input.orderNo)
+    const order = await this.requireScopedOrder(input.actor, input.orderNo)
     const queried = await this.options.payment.queryPayment(order)
     if (queried.event) await this.options.recharge.acceptVerifiedCallbackWithCoordinator(queried.event, this.options.coordinator)
     return { order_no: order.orderNo, status: STATUS_TO_LEGACY[queried.status === 'PENDING' ? order.status : queried.status] }
@@ -353,15 +353,15 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const delta = input.operation === 'subtract' ? -input.amount : input.amount
     if (!Number.isSafeInteger(delta) || delta === 0) throw new SudoworkBillingError(400, '积分数量必须大于 0')
     if (!input.syncSudorouter) {
-      const result = this.options.wallet.post({
+      const result = await this.options.wallet.post({
         ownerType: 'user', ownerId: user.id, deltaUnits: delta,
         entryType: delta < 0 ? 'DEDUCT' : 'ADJUST', sourceType: 'admin_adjustment',
         sourceId: input.idempotencyKey ?? randomUUID(),
         memo: input.reason ?? '管理员调整', actorUserId: input.actor.userId, orgId: user.orgId,
       }, this.context(input.idempotencyKey, 'adjust-points'))
-      return { amount: delta, new_balance: result.balanceAfterUnits, quota_delta: 0, new_quota: this.externalQuota(user.id), sudorouter_success: true, sudorouter_error: null }
+      return { amount: delta, new_balance: result.balanceAfterUnits, quota_delta: 0, new_quota: await this.externalQuota(user.id), sudorouter_success: true, sudorouter_error: null }
     }
-    const external = this.requireExternal(user.id)
+    const external = await this.requireExternal(user.id)
     const result = await this.options.coordinator.adjustPoints({
       ownerType: 'user', ownerId: user.id, orgId: user.orgId,
       externalUserId: external.externalAccountId, pointsDelta: delta,
@@ -379,14 +379,14 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     if (input.actor.role !== 'super_admin') throw new SudoworkBillingError(403, '只有超级管理员可以为用户充值')
     const user = await this.requireLegacyUser(input.legacyUserId)
     this.assertOrgScope(input.actor, user.orgId)
-    const external = this.requireExternal(user.id)
+    const external = await this.requireExternal(user.id)
     const context = this.context(input.idempotencyKey, 'admin-recharge')
     const activityKey = `billing:activity:${context.idempotencyKey}`
-    const finalizeLocal = () => {
-      if (this.options.repository.getActivityByIdempotencyKey(activityKey)) return
+    const finalizeLocal = async () => {
+      if (await this.options.repository.getActivityByIdempotencyKey(activityKey)) return
       const timestamp = this.clock()
-      this.options.repository.insertActivityRecord({
-        id: randomUUID(), legacyId: this.options.repository.allocateActivityLegacyId('ADMIN'),
+      await this.options.repository.insertActivityRecord({
+        id: randomUUID(), legacyId: await this.options.repository.allocateActivityLegacyId('ADMIN'),
         activityType: 'ADMIN', userId: user.id, orgId: user.orgId, orderId: null,
         actorUserId: input.actor.userId, applicationId: null, pointsUnits: input.points,
         quotaUnits: pointsToQuota(input.points), amountCents: null, paymentMethod: null,
@@ -408,14 +408,14 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   async syncUserQuota(input: { actor: IdentityActor; legacyUserId: number }): Promise<unknown> {
     const user = await this.requireLegacyUser(input.legacyUserId)
     this.assertOrgScope(input.actor, user.orgId)
-    const external = this.requireExternal(user.id)
+    const external = await this.requireExternal(user.id)
     const snapshot = await this.options.coordinator.syncQuota('user', user.id, external.externalAccountId)
-    const balance = this.options.repository.getWallet('user', user.id)?.balanceUnits ?? 0
+    const balance = (await this.options.repository.getWallet('user', user.id))?.balanceUnits ?? 0
     return { quota: snapshot.quotaUnits, used_quota: snapshot.usedQuotaUnits, balance, total_points: quotaToPoints(snapshot.quotaUnits + snapshot.usedQuotaUnits) }
   }
 
-  createCreditApplication(input: { actor: IdentityActor; requestedPoints: number; reason: unknown; idempotencyKey?: string }): unknown {
-    const record = this.options.credit.createApplication({
+  async createCreditApplication(input: { actor: IdentityActor; requestedPoints: number; reason: unknown; idempotencyKey?: string }): Promise<unknown> {
+    const record = await this.options.credit.createApplication({
       requestedPoints: input.requestedPoints, reason: typeof input.reason === 'string' ? input.reason : '',
     }, input.actor, this.context(input.idempotencyKey, 'credit-create'))
     return this.creditDto(record)
@@ -423,12 +423,12 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async listUserCreditApplications(input: { actor: IdentityActor; page: number; pageSize: number }): Promise<unknown> {
     const { page, pageSize, offset } = normalizePage(input.page, input.pageSize)
-    const result = this.options.repository.listCreditApplications({ userId: input.actor.userId, limit: pageSize, offset })
+    const result = await this.options.repository.listCreditApplications({ userId: input.actor.userId, limit: pageSize, offset })
     return { list: await Promise.all(result.list.map(item => this.creditDto(item))), total: result.total, page, pageSize }
   }
 
   async getUserCreditApplication(actor: IdentityActor, legacyApplicationId: number): Promise<unknown> {
-    const record = this.requireCredit(legacyApplicationId)
+    const record = await this.requireCredit(legacyApplicationId)
     if (record.userId !== actor.userId) throw new SudoworkBillingError(404, '申请记录不存在')
     return await this.creditDto(record)
   }
@@ -436,13 +436,13 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   async listAdminCreditApplications(input: { actor: IdentityActor; query: Record<string, string | undefined> }): Promise<unknown> {
     const { page, pageSize, offset } = normalizePage(Number(input.query.page), Number(input.query.pageSize ?? input.query.page_size))
     const requestedOrg = input.query.enterprise_id
-      ? this.options.identities.resolveNumericAliasGlobal('enterprise', Number(input.query.enterprise_id))?.resourceId
+      ? (await this.options.identities.resolveNumericAliasGlobal('enterprise', Number(input.query.enterprise_id)))?.resourceId
       : undefined
     if (requestedOrg && !hasGlobalOrganizationAccess(input.actor) && requestedOrg !== input.actor.orgId) {
       throw new SudoworkBillingError(403, '权限不足')
     }
     const orgId = hasGlobalOrganizationAccess(input.actor) ? requestedOrg : input.actor.orgId
-    const result = this.options.repository.listCreditApplications({
+    const result = await this.options.repository.listCreditApplications({
       orgId, status: input.query.status as CreditApplicationStatus | undefined,
       keyword: input.query.keyword?.trim().slice(0, 50), limit: pageSize, offset,
     })
@@ -450,7 +450,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async getAdminCreditApplication(actor: IdentityActor, legacyApplicationId: number): Promise<unknown> {
-    const record = this.requireCredit(legacyApplicationId)
+    const record = await this.requireCredit(legacyApplicationId)
     this.assertOrgScope(actor, record.orgId)
     return await this.creditDto(record, true)
   }
@@ -459,7 +459,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     actor: IdentityActor; legacyApplicationId: number; approvedPoints?: number
     adminComment?: string; idempotencyKey?: string
   }): Promise<unknown> {
-    const record = this.requireCredit(input.legacyApplicationId)
+    const record = await this.requireCredit(input.legacyApplicationId)
     this.assertOrgScope(input.actor, record.orgId)
     const result = await this.options.credit.approveApplication({
       applicationId: record.id, approvedPoints: input.approvedPoints, adminComment: input.adminComment,
@@ -467,15 +467,15 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     return await this.creditDto(result, true)
   }
 
-  rejectCreditApplication(input: { actor: IdentityActor; legacyApplicationId: number; adminComment: unknown }): unknown {
-    const record = this.requireCredit(input.legacyApplicationId)
+  async rejectCreditApplication(input: { actor: IdentityActor; legacyApplicationId: number; adminComment: unknown }): Promise<unknown> {
+    const record = await this.requireCredit(input.legacyApplicationId)
     this.assertOrgScope(input.actor, record.orgId)
-    this.options.credit.rejectApplication(record.id, typeof input.adminComment === 'string' ? input.adminComment : '', input.actor)
+    await this.options.credit.rejectApplication(record.id, typeof input.adminComment === 'string' ? input.adminComment : '', input.actor)
     return undefined
   }
 
   async retryCreditApplication(input: { actor: IdentityActor; legacyApplicationId: number }): Promise<unknown> {
-    const record = this.requireCredit(input.legacyApplicationId)
+    const record = await this.requireCredit(input.legacyApplicationId)
     this.assertOrgScope(input.actor, record.orgId)
     return await this.creditDto(await this.options.credit.retryApplication(record.id, input.actor), true)
   }
@@ -487,19 +487,19 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   private async requireLegacyUser(legacyId: number): Promise<AuthCenterUser> {
-    const resolved = this.options.identities.resolveNumericAliasGlobal('user', legacyId)
+    const resolved = await this.options.identities.resolveNumericAliasGlobal('user', legacyId)
     if (!resolved) throw new SudoworkBillingError(404, '用户不存在')
     return await this.requireUser(resolved.resourceId)
   }
 
-  private requireCredit(legacyId: number): CreditApplicationRecord {
-    const record = this.options.repository.getCreditApplicationByLegacyId(legacyId)
+  private async requireCredit(legacyId: number): Promise<CreditApplicationRecord> {
+    const record = await this.options.repository.getCreditApplicationByLegacyId(legacyId)
     if (!record) throw new SudoworkBillingError(404, '申请记录不存在')
     return record
   }
 
-  private requireScopedOrder(actor: IdentityActor, orderNo: string): BillingOrderRecord {
-    const order = this.options.repository.getOrderByOrderNo(orderNo)
+  private async requireScopedOrder(actor: IdentityActor, orderNo: string): Promise<BillingOrderRecord> {
+    const order = await this.options.repository.getOrderByOrderNo(orderNo)
     if (!order) throw new SudoworkBillingError(404, '订单不存在')
     this.assertOrgScope(actor, order.orgId)
     return order
@@ -511,26 +511,26 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     }
   }
 
-  private requireExternal(userId: string) {
-    const external = this.options.repository.getExternalAccount('sudorouter', 'user', userId)
+  private async requireExternal(userId: string) {
+    const external = await this.options.repository.getExternalAccount('sudorouter', 'user', userId)
     if (!external) throw new SudoworkBillingError(400, '用户未绑定 sudorouter 账号')
     return external
   }
 
-  private externalQuota(userId: string): number {
-    return this.options.repository.getExternalAccount('sudorouter', 'user', userId)?.quotaUnits ?? 0
+  private async externalQuota(userId: string): Promise<number> {
+    return (await this.options.repository.getExternalAccount('sudorouter', 'user', userId))?.quotaUnits ?? 0
   }
 
-  private ensureAlias(namespace: string, resourceId: string, orgId: string): number {
-    return this.options.identities.getNumericAlias(namespace, resourceId)
-      ?? this.options.identities.allocateNumericAlias(namespace, resourceId, orgId)
+  private async ensureAlias(namespace: string, resourceId: string, orgId: string): Promise<number> {
+    return await this.options.identities.getNumericAlias(namespace, resourceId)
+      ?? await this.options.identities.allocateNumericAlias(namespace, resourceId, orgId)
   }
 
   private context(key: string | undefined, operation: string) {
     return onlineCommandContext(key?.trim() || `sudowork:${operation}:${randomUUID()}`)
   }
 
-  private userOrderDto(order: BillingOrderRecord, includeExpiry: boolean): Record<string, unknown> {
+  private async userOrderDto(order: BillingOrderRecord, includeExpiry: boolean): Promise<Record<string, unknown>> {
     const status = STATUS_TO_LEGACY[order.status]
     return {
       order_no: order.orderNo, amount_usd: order.amountUsdMicros / 1_000_000,
@@ -546,7 +546,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const status = STATUS_TO_LEGACY[order.status]
     const base = {
       id: order.legacyId, order_no: order.orderNo,
-      user_id: this.ensureAlias('user', order.userId, order.orgId), user_phone: order.userPhone,
+      user_id: await this.ensureAlias('user', order.userId, order.orgId), user_phone: order.userPhone,
       user_nickname: user?.displayName ?? user?.name ?? null,
       amount_usd: order.amountUsdMicros / 1_000_000, amount_cny: order.amountCents / 100,
       exchange_rate: order.exchangeRateMicros / 1_000_000, points: order.pointsUnits,
@@ -566,30 +566,30 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const adminUser = admin && record.adminUserId ? await this.options.auth.getUserById(record.adminUserId) : null
     const base: Record<string, unknown> = {
       id: record.legacyId, application_no: record.applicationNo,
-      user_id: this.ensureAlias('user', record.userId, record.orgId),
-      enterprise_id: this.ensureAlias('enterprise', record.orgId, record.orgId),
+      user_id: await this.ensureAlias('user', record.userId, record.orgId),
+      enterprise_id: await this.ensureAlias('enterprise', record.orgId, record.orgId),
       requested_points: record.requestedUnits, approved_points: record.approvedUnits,
       quota_amount: record.quotaUnits, reason: record.reason, status: record.status,
-      admin_id: record.adminUserId ? this.ensureAlias('user', record.adminUserId, record.orgId) : null,
+      admin_id: record.adminUserId ? await this.ensureAlias('user', record.adminUserId, record.orgId) : null,
       admin_comment: record.adminComment,
-      sudorouter_user_id: this.options.repository.getExternalAccount('sudorouter', 'user', record.userId)?.externalAccountId ?? null,
+      sudorouter_user_id: (await this.options.repository.getExternalAccount('sudorouter', 'user', record.userId))?.externalAccountId ?? null,
       sudorouter_success: record.status === 'APPROVED',
       sudorouter_error: record.status === 'SYNC_FAILED' || record.status === 'SYNC_UNKNOWN' ? '额度同步失败' : null,
       created_at: toSqlDate(record.createdAt), reviewed_at: record.reviewedAt ? toSqlDate(record.reviewedAt) : null,
       updated_at: toSqlDate(record.updatedAt),
     }
     if (admin) {
-      base.user_phone = this.phoneFor(record.userId)
+      base.user_phone = await this.phoneFor(record.userId)
       base.user_nickname = user?.displayName ?? user?.name ?? null
       base.enterprise_name = organization?.name ?? null
-      base.admin_phone = record.adminUserId ? this.phoneFor(record.adminUserId) : null
+      base.admin_phone = record.adminUserId ? await this.phoneFor(record.adminUserId) : null
       base.admin_nickname = adminUser?.displayName ?? null
     }
     return base
   }
 
-  private phoneFor(userId: string): string | null {
-    return this.options.identities.findAuthIdentityByUser(userId, 'phone', 'sudowork')?.normalizedSubject ?? null
+  private async phoneFor(userId: string): Promise<string | null> {
+    return (await this.options.identities.findAuthIdentityByUser(userId, 'phone', 'sudowork'))?.normalizedSubject ?? null
   }
 }
 

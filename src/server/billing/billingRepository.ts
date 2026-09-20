@@ -1,8 +1,6 @@
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver, SqlRow } from '../db/driver.js'
 import type { BillingContextSource, BillingOperationStatus, BillingOrderStatus, BillingOwnerType, CreditApplicationStatus } from './types.js'
 import { fromStoredPointUnits, toStoredPointUnits } from './pointUnits.js'
-
-type SqlRow = Record<string, unknown>
 
 export interface WalletSnapshot {
   balanceUnits: number
@@ -75,7 +73,7 @@ export interface ExternalBillingAccount {
 }
 
 export type SudorouterProvisioningStatus =
-  | 'PENDING' | 'ACCOUNT_READY' | 'QUOTA_READY' | 'TOKEN_READY'
+  | 'PENDING' | 'PROCESSING' | 'ACCOUNT_READY' | 'QUOTA_READY' | 'TOKEN_READY'
   | 'COMPLETED' | 'FAILED' | 'UNKNOWN' | 'SUPPRESSED'
 
 export interface SudorouterProvisioningRecord {
@@ -224,13 +222,13 @@ function mapUsageRecord(row: SqlRow): BillingUsageRecord {
 }
 
 export class BillingRepository {
-  constructor(readonly db: DatabaseSync) {}
+  constructor(readonly driver: DbDriver) {}
 
-  getWallet(ownerType: BillingOwnerType, ownerId: string): WalletSnapshot | null {
-    const row = this.db.prepare(`
+  async getWallet(ownerType: BillingOwnerType, ownerId: string): Promise<WalletSnapshot | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT balance_units, version FROM wallets
       WHERE owner_type = ? AND owner_id = ? LIMIT 1
-    `).get(ownerType, ownerId) as SqlRow | undefined
+    `, [ownerType, ownerId])
     return row ? {
       balanceUnits: fromStoredPointUnits(row.balance_units),
       version: Number(row.version),
@@ -243,29 +241,33 @@ export class BillingRepository {
     expectedVersion: number
     balanceUnits: number
     updatedAt: number
-  }): boolean {
-    const result = this.db.prepare(`
+  }): Promise<boolean> {
+    return this.updateWalletAsync(input)
+  }
+
+  private async updateWalletAsync(input: Parameters<BillingRepository['updateWallet']>[0]): Promise<boolean> {
+    const changes = await this.driver.run(`
       UPDATE wallets
       SET balance_units = ?, version = version + 1, updated_at = ?
       WHERE owner_type = ? AND owner_id = ? AND version = ?
-    `).run(toStoredPointUnits(input.balanceUnits), input.updatedAt, input.ownerType, input.ownerId, input.expectedVersion)
-    return Number(result.changes) === 1
+    `, [toStoredPointUnits(input.balanceUnits), input.updatedAt, input.ownerType, input.ownerId, input.expectedVersion])
+    return changes === 1
   }
 
-  countOwnerLedgerEntries(ownerType: BillingOwnerType, ownerId: string): number {
-    const row = this.db.prepare(`
+  async countOwnerLedgerEntries(ownerType: BillingOwnerType, ownerId: string): Promise<number> {
+    const row = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_ledger_entries
       WHERE owner_type = ? AND owner_id = ?
-    `).get(ownerType, ownerId) as { count: number }
-    return Number(row.count)
+    `, [ownerType, ownerId])
+    return Number(row?.count ?? 0)
   }
 
-  sumOwnerLedger(ownerType: BillingOwnerType, ownerId: string): number {
-    const row = this.db.prepare(`
+  async sumOwnerLedger(ownerType: BillingOwnerType, ownerId: string): Promise<number> {
+    const row = await this.driver.get<{ total: number }>(`
       SELECT COALESCE(SUM(delta_units), 0) AS total FROM billing_ledger_entries
       WHERE owner_type = ? AND owner_id = ?
-    `).get(ownerType, ownerId) as { total: number }
-    return fromStoredPointUnits(row.total)
+    `, [ownerType, ownerId])
+    return fromStoredPointUnits(row?.total ?? 0)
   }
 
   insertLedgerEntry(input: {
@@ -284,26 +286,33 @@ export class BillingRepository {
     contextSource: BillingContextSource
     actorUserId?: string | null
     createdAt: number
-  }): void {
-    const legacyId = input.legacyId ?? this.nextLedgerLegacyId()
-    this.db.prepare(`
-      INSERT INTO billing_ledger_entries (
-        id, legacy_id, owner_type, owner_id, delta_units, balance_before_units, balance_after_units,
-        entry_type, memo, source_type, source_id, idempotency_key, context_source,
-        actor_user_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.id, legacyId, input.ownerType, input.ownerId, toStoredPointUnits(input.deltaUnits),
-      toStoredPointUnits(input.balanceBeforeUnits), toStoredPointUnits(input.balanceAfterUnits), input.entryType,
-      input.memo ?? null, input.sourceType, input.sourceId, input.idempotencyKey,
-      input.contextSource, input.actorUserId ?? null, input.createdAt,
-    )
+  }): Promise<void> {
+    return this.insertLedgerEntryAsync(input)
   }
 
-  getLedgerEntry(idempotencyKey: string): LedgerEntryRecord | null {
-    const row = this.db.prepare(`
+  private async insertLedgerEntryAsync(input: Parameters<BillingRepository['insertLedgerEntry']>[0]): Promise<void> {
+    await this.driver.transaction(async () => {
+      const legacyId = input.legacyId ?? await this.nextLedgerLegacyId()
+      await this.driver.run(`
+        INSERT INTO billing_ledger_entries (
+          id, legacy_id, owner_type, owner_id, delta_units, balance_before_units, balance_after_units,
+          entry_type, memo, source_type, source_id, idempotency_key, context_source,
+          actor_user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        input.id, legacyId, input.ownerType, input.ownerId, toStoredPointUnits(input.deltaUnits),
+        toStoredPointUnits(input.balanceBeforeUnits), toStoredPointUnits(input.balanceAfterUnits), input.entryType,
+        input.memo ?? null, input.sourceType, input.sourceId, input.idempotencyKey,
+        input.contextSource, input.actorUserId ?? null, input.createdAt,
+      ])
+      await this.advanceCounter('billing_ledger_entries', legacyId)
+    })
+  }
+
+  async getLedgerEntry(idempotencyKey: string): Promise<LedgerEntryRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_ledger_entries WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? {
       id: String(row.id),
       legacyId: Number(row.legacy_id),
@@ -319,31 +328,31 @@ export class BillingRepository {
     } : null
   }
 
-  countLedgerEntries(idempotencyKey: string): number {
-    const row = this.db.prepare(`
+  async countLedgerEntries(idempotencyKey: string): Promise<number> {
+    const row = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_ledger_entries WHERE idempotency_key = ?
-    `).get(idempotencyKey) as { count: number }
-    return Number(row.count)
+    `, [idempotencyKey])
+    return Number(row?.count ?? 0)
   }
 
-  insertUsageRecord(input: BillingUsageRecord): void {
-    this.db.prepare(`
+  async insertUsageRecord(input: BillingUsageRecord): Promise<void> {
+    await this.driver.run(`
       INSERT INTO billing_usage_records (
         id, user_id, org_id, model, input_tokens, output_tokens,
         cost_units, balance_after_units, idempotency_key, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.userId, input.orgId, input.model,
       input.inputTokens, input.outputTokens,
       toStoredPointUnits(input.costUnits), toStoredPointUnits(input.balanceAfterUnits),
       input.idempotencyKey, input.createdAt,
-    )
+    ])
   }
 
-  getUsageRecord(idempotencyKey: string): BillingUsageRecord | null {
-    const row = this.db.prepare(`
+  async getUsageRecord(idempotencyKey: string): Promise<BillingUsageRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_usage_records WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? mapUsageRecord(row) : null
   }
 
@@ -353,37 +362,41 @@ export class BillingRepository {
     to?: number
     limit: number
     offset: number
-  }): { list: BillingUsageRecord[]; total: number } {
+  }): Promise<{ list: BillingUsageRecord[]; total: number }> {
+    return this.listUsageRecordsAsync(input)
+  }
+
+  private async listUsageRecordsAsync(input: Parameters<BillingRepository['listUsageRecords']>[0]): Promise<{ list: BillingUsageRecord[]; total: number }> {
     const clauses = ['user_id = ?']
     const params: Array<string | number> = [input.userId]
     if (input.from !== undefined) { clauses.push('created_at >= ?'); params.push(input.from) }
     if (input.to !== undefined) { clauses.push('created_at <= ?'); params.push(input.to) }
     const where = `WHERE ${clauses.join(' AND ')}`
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM billing_usage_records ${where}
       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const total = this.db.prepare(`
+    `, [...params, input.limit, input.offset])
+    const total = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_usage_records ${where}
-    `).get(...params) as { count: number }
-    return { list: rows.map(mapUsageRecord), total: Number(total.count) }
+    `, params)
+    return { list: rows.map(mapUsageRecord), total: Number(total?.count ?? 0) }
   }
 
-  sumUserUsageCost(userId: string): number {
-    const row = this.db.prepare(`
+  async sumUserUsageCost(userId: string): Promise<number> {
+    const row = await this.driver.get<{ total: number }>(`
       SELECT COALESCE(SUM(cost_units), 0) AS total
       FROM billing_usage_records WHERE user_id = ?
-    `).get(userId) as { total: number }
-    return fromStoredPointUnits(row.total)
+    `, [userId])
+    return fromStoredPointUnits(row?.total ?? 0)
   }
 
-  sumUserLedgerByEntryType(userId: string, entryType: string): number {
-    const row = this.db.prepare(`
+  async sumUserLedgerByEntryType(userId: string, entryType: string): Promise<number> {
+    const row = await this.driver.get<{ total: number }>(`
       SELECT COALESCE(SUM(delta_units), 0) AS total
       FROM billing_ledger_entries
       WHERE owner_type = 'user' AND owner_id = ? AND entry_type = ?
-    `).get(userId, entryType) as { total: number }
-    return fromStoredPointUnits(row.total)
+    `, [userId, entryType])
+    return fromStoredPointUnits(row?.total ?? 0)
   }
 
   insertAuditEvent(input: {
@@ -397,28 +410,28 @@ export class BillingRepository {
     idempotencyKey: string
     payload: Record<string, unknown>
     createdAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<boolean> {
+    return this.driver.run(`
       INSERT INTO billing_audit_events (
         id, action, aggregate_type, aggregate_id, actor_user_id, org_id,
         context_source, idempotency_key, payload_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.action, input.aggregateType, input.aggregateId,
       input.actorUserId ?? null, input.orgId ?? null, input.contextSource,
       input.idempotencyKey, JSON.stringify(input.payload), input.createdAt,
-    )
+    ]).then(() => undefined)
   }
 
-  countAuditEvents(idempotencyKey: string): number {
-    const row = this.db.prepare(`
+  async countAuditEvents(idempotencyKey: string): Promise<number> {
+    const row = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_audit_events WHERE idempotency_key = ?
-    `).get(idempotencyKey) as { count: number }
-    return Number(row.count)
+    `, [idempotencyKey])
+    return Number(row?.count ?? 0)
   }
 
-  insertOrder(input: BillingOrderRecord): void {
-    this.db.prepare(`
+  async insertOrder(input: BillingOrderRecord): Promise<void> {
+    await this.driver.run(`
       INSERT INTO billing_orders (
         id, legacy_id, order_no, user_id, org_id, user_phone,
         amount_usd_micros, amount_cents, exchange_rate_micros,
@@ -426,7 +439,7 @@ export class BillingRepository {
         provider_order_info, callback_payload_json, callback_time, callback_amount_cents,
         status, idempotency_key, created_at, updated_at, expired_at, remark
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.legacyId, input.orderNo, input.userId, input.orgId, input.userPhone,
       input.amountUsdMicros, input.amountCents, input.exchangeRateMicros,
       input.quotaUnits, input.pointsUnits, input.bonusUnits, input.paymentMethod,
@@ -434,23 +447,23 @@ export class BillingRepository {
       input.callbackData ?? null, input.callbackTime ?? null, input.callbackAmountCents ?? null,
       input.status, input.idempotencyKey,
       input.createdAt, input.updatedAt, input.expiredAt, input.remark,
-    )
+    ])
   }
 
-  getOrderByOrderNo(orderNo: string, userId?: string): BillingOrderRecord | null {
+  async getOrderByOrderNo(orderNo: string, userId?: string): Promise<BillingOrderRecord | null> {
     const row = (userId
-      ? this.db.prepare('SELECT * FROM billing_orders WHERE order_no = ? AND user_id = ? LIMIT 1').get(orderNo, userId)
-      : this.db.prepare('SELECT * FROM billing_orders WHERE order_no = ? LIMIT 1').get(orderNo)) as SqlRow | undefined
+      ? await this.driver.get<SqlRow>('SELECT * FROM billing_orders WHERE order_no = ? AND user_id = ? LIMIT 1', [orderNo, userId])
+      : await this.driver.get<SqlRow>('SELECT * FROM billing_orders WHERE order_no = ? LIMIT 1', [orderNo]))
     return row ? mapOrder(row) : null
   }
 
-  getOrderByLegacyId(legacyId: number): BillingOrderRecord | null {
-    const row = this.db.prepare('SELECT * FROM billing_orders WHERE legacy_id = ? LIMIT 1').get(legacyId) as SqlRow | undefined
+  async getOrderByLegacyId(legacyId: number): Promise<BillingOrderRecord | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM billing_orders WHERE legacy_id = ? LIMIT 1', [legacyId])
     return row ? mapOrder(row) : null
   }
 
-  assignOrderLegacyId(orderId: string, legacyId: number): void {
-    this.db.prepare('UPDATE billing_orders SET legacy_id = ? WHERE id = ? AND legacy_id IS NULL').run(legacyId, orderId)
+  async assignOrderLegacyId(orderId: string, legacyId: number): Promise<void> {
+    await this.driver.run('UPDATE billing_orders SET legacy_id = ? WHERE id = ? AND legacy_id IS NULL', [legacyId, orderId])
   }
 
   listOrders(input: {
@@ -463,7 +476,11 @@ export class BillingRepository {
     endAt?: number
     limit: number
     offset: number
-  }): { list: BillingOrderRecord[]; total: number } {
+  }): Promise<{ list: BillingOrderRecord[]; total: number }> {
+    return this.listOrdersAsync(input)
+  }
+
+  private async listOrdersAsync(input: Parameters<BillingRepository['listOrders']>[0]): Promise<{ list: BillingOrderRecord[]; total: number }> {
     const clauses: string[] = []
     const params: Array<string | number> = []
     const add = (clause: string, value: string | number | undefined) => {
@@ -479,16 +496,15 @@ export class BillingRepository {
     add('created_at >= ?', input.startAt)
     add('created_at <= ?', input.endAt)
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM billing_orders ${where}
       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const total = this.db.prepare(`SELECT COUNT(*) AS count FROM billing_orders ${where}`)
-      .get(...params) as { count: number }
-    return { list: rows.map(mapOrder), total: Number(total.count) }
+    `, [...params, input.limit, input.offset])
+    const total = await this.driver.get<{ count: number }>(`SELECT COUNT(*) AS count FROM billing_orders ${where}`, params)
+    return { list: rows.map(mapOrder), total: Number(total?.count ?? 0) }
   }
 
-  getOrderStatistics(since?: number): {
+  async getOrderStatistics(since?: number): Promise<{
     orders: number
     amountUsdMicros: number
     amountCents: number
@@ -497,10 +513,10 @@ export class BillingRepository {
     successCount: number
     failedCount: number
     pendingCount: number
-  } {
+  }> {
     const where = since === undefined ? '' : 'WHERE created_at >= ?'
     const params = since === undefined ? [] : [since]
-    const row = this.db.prepare(`
+    const row = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS orders,
         COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN amount_usd_micros ELSE 0 END), 0) AS amount_usd_micros,
         COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN amount_cents ELSE 0 END), 0) AS amount_cents,
@@ -510,12 +526,12 @@ export class BillingRepository {
         COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed_count,
         COALESCE(SUM(CASE WHEN status IN ('PENDING', 'PAYING') THEN 1 ELSE 0 END), 0) AS pending_count
       FROM billing_orders ${where}
-    `).get(...params) as SqlRow
+    `, params)
     return {
-      orders: Number(row.orders), amountUsdMicros: Number(row.amount_usd_micros),
-      amountCents: Number(row.amount_cents), pointsUnits: Number(row.points_units),
-      bonusUnits: Number(row.bonus_units), successCount: Number(row.success_count),
-      failedCount: Number(row.failed_count), pendingCount: Number(row.pending_count),
+      orders: Number(row?.orders ?? 0), amountUsdMicros: Number(row?.amount_usd_micros ?? 0),
+      amountCents: Number(row?.amount_cents ?? 0), pointsUnits: Number(row?.points_units ?? 0),
+      bonusUnits: Number(row?.bonus_units ?? 0), successCount: Number(row?.success_count ?? 0),
+      failedCount: Number(row?.failed_count ?? 0), pendingCount: Number(row?.pending_count ?? 0),
     }
   }
 
@@ -528,8 +544,8 @@ export class BillingRepository {
     callbackData?: string | null
     callbackTime?: number | null
     callbackAmountCents?: number | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_orders
       SET status = ?, updated_at = ?,
           remark = COALESCE(?, remark),
@@ -538,15 +554,15 @@ export class BillingRepository {
           callback_time = COALESCE(?, callback_time),
           callback_amount_cents = COALESCE(?, callback_amount_cents)
       WHERE id = ?
-    `).run(
+    `, [
       input.status, input.updatedAt, input.remark ?? null, input.providerOrderInfo ?? null,
       input.callbackData ?? null, input.callbackTime ?? null, input.callbackAmountCents ?? null,
       input.orderId,
-    )
+    ]).then(() => undefined)
   }
 
-  countOrders(): number {
-    return Number((this.db.prepare('SELECT COUNT(*) AS count FROM billing_orders').get() as { count: number }).count)
+  async countOrders(): Promise<number> {
+    return Number((await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_orders'))?.count ?? 0)
   }
 
   insertPaymentAttempt(input: {
@@ -557,15 +573,15 @@ export class BillingRepository {
     idempotencyKey: string
     request: Record<string, unknown>
     createdAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       INSERT INTO billing_payment_attempts (
         id, order_id, provider, status, idempotency_key, request_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.orderId, input.provider, input.status, input.idempotencyKey,
       JSON.stringify(input.request), input.createdAt, input.createdAt,
-    )
+    ]).then(() => undefined)
   }
 
   updatePaymentAttempt(input: {
@@ -574,32 +590,40 @@ export class BillingRepository {
     response?: Record<string, unknown> | null
     errorText?: string | null
     updatedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_payment_attempts
       SET status = ?, response_json = ?, error_text = ?, updated_at = ?, completed_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       input.status, input.response ? JSON.stringify(input.response) : null,
       input.errorText ?? null, input.updatedAt,
       ['SUCCEEDED', 'FAILED', 'SUPPRESSED'].includes(input.status) ? input.updatedAt : null,
       input.id,
-    )
+    ]).then(() => undefined)
   }
 
-  countPaymentAttempts(): number {
-    return Number((this.db.prepare('SELECT COUNT(*) AS count FROM billing_payment_attempts').get() as { count: number }).count)
+  async countPaymentAttempts(): Promise<number> {
+    return Number((await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_payment_attempts'))?.count ?? 0)
   }
 
-  getProviderEvent(provider: string, providerEventId: string): {
+  getProviderEvent(provider: string, providerEventId: string): Promise<{
     id: string
     payloadHash: string
     status: BillingOperationStatus
-  } | null {
-    const row = this.db.prepare(`
+  } | null> {
+    return this.getProviderEventAsync(provider, providerEventId)
+  }
+
+  private async getProviderEventAsync(provider: string, providerEventId: string): Promise<{
+    id: string
+    payloadHash: string
+    status: BillingOperationStatus
+  } | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT id, payload_hash, status FROM billing_provider_events
       WHERE provider = ? AND provider_event_id = ? LIMIT 1
-    `).get(provider, providerEventId) as SqlRow | undefined
+    `, [provider, providerEventId])
     return row ? {
       id: String(row.id),
       payloadHash: String(row.payload_hash),
@@ -616,16 +640,16 @@ export class BillingRepository {
     payload: Record<string, unknown>
     status: BillingOperationStatus
     receivedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       INSERT INTO billing_provider_events (
         id, provider, provider_event_id, event_type, payload_hash,
         payload_json, status, received_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.provider, input.providerEventId, input.eventType,
       input.payloadHash, JSON.stringify(input.payload), input.status, input.receivedAt,
-    )
+    ]).then(() => undefined)
   }
 
   updateProviderEvent(input: {
@@ -633,19 +657,19 @@ export class BillingRepository {
     status: BillingOperationStatus
     errorText?: string | null
     processedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_provider_events
       SET status = ?, error_text = ?, processed_at = ? WHERE id = ?
-    `).run(input.status, input.errorText ?? null, input.processedAt, input.id)
+    `, [input.status, input.errorText ?? null, input.processedAt, input.id]).then(() => undefined)
   }
 
-  countProviderEvents(): number {
-    return Number((this.db.prepare('SELECT COUNT(*) AS count FROM billing_provider_events').get() as { count: number }).count)
+  async countProviderEvents(): Promise<number> {
+    return Number((await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_provider_events'))?.count ?? 0)
   }
 
-  upsertExternalAccount(input: ExternalBillingAccount): void {
-    this.db.prepare(`
+  async upsertExternalAccount(input: ExternalBillingAccount): Promise<void> {
+    await this.driver.run(`
       INSERT INTO billing_external_accounts (
         provider, owner_type, owner_id, external_account_id,
         quota_units, used_quota_units, token_secret_ref, updated_at
@@ -656,17 +680,17 @@ export class BillingRepository {
         used_quota_units = excluded.used_quota_units,
         token_secret_ref = COALESCE(excluded.token_secret_ref, billing_external_accounts.token_secret_ref),
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       input.provider, input.ownerType, input.ownerId, input.externalAccountId,
       input.quotaUnits, input.usedQuotaUnits, input.tokenSecretRef ?? null, input.updatedAt,
-    )
+    ])
   }
 
-  getExternalAccount(provider: string, ownerType: BillingOwnerType, ownerId: string): ExternalBillingAccount | null {
-    const row = this.db.prepare(`
+  async getExternalAccount(provider: string, ownerType: BillingOwnerType, ownerId: string): Promise<ExternalBillingAccount | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_external_accounts
       WHERE provider = ? AND owner_type = ? AND owner_id = ? LIMIT 1
-    `).get(provider, ownerType, ownerId) as SqlRow | undefined
+    `, [provider, ownerType, ownerId])
     return row ? {
       provider: String(row.provider), ownerType: String(row.owner_type) as BillingOwnerType,
       ownerId: String(row.owner_id), externalAccountId: String(row.external_account_id),
@@ -688,31 +712,32 @@ export class BillingRepository {
     requestFingerprint: string
     contextSource: BillingContextSource
     createdAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<boolean> {
+    return this.driver.run(`
       INSERT INTO billing_sudorouter_provisioning (
         id, owner_id, org_id, username, display_name, initial_quota_units,
         status, idempotency_key, request_fingerprint, context_source,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      ON CONFLICT DO NOTHING
+    `, [
       input.id, input.ownerId, input.orgId, input.username, input.displayName,
       input.initialQuotaUnits, input.status, input.idempotencyKey,
       input.requestFingerprint, input.contextSource, input.createdAt, input.createdAt,
-    )
+    ]).then(changes => changes === 1)
   }
 
-  getSudorouterProvisioningByKey(idempotencyKey: string): SudorouterProvisioningRecord | null {
-    const row = this.db.prepare(`
+  async getSudorouterProvisioningByKey(idempotencyKey: string): Promise<SudorouterProvisioningRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_sudorouter_provisioning WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? this.mapSudorouterProvisioning(row) : null
   }
 
-  getSudorouterProvisioningByOwner(ownerId: string): SudorouterProvisioningRecord | null {
-    const row = this.db.prepare(`
+  async getSudorouterProvisioningByOwner(ownerId: string): Promise<SudorouterProvisioningRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_sudorouter_provisioning WHERE owner_id = ? LIMIT 1
-    `).get(ownerId) as SqlRow | undefined
+    `, [ownerId])
     return row ? this.mapSudorouterProvisioning(row) : null
   }
 
@@ -726,8 +751,8 @@ export class BillingRepository {
     errorText?: string | null
     updatedAt: number
     completedAt?: number | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_sudorouter_provisioning SET
         status = ?,
         external_account_id = COALESCE(?, external_account_id),
@@ -736,11 +761,11 @@ export class BillingRepository {
         token_secret_ref = COALESCE(?, token_secret_ref),
         error_text = ?, updated_at = ?, completed_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       input.status, input.externalAccountId ?? null, input.quotaUnits ?? null,
       input.usedQuotaUnits ?? null, input.tokenSecretRef ?? null,
       input.errorText ?? null, input.updatedAt, input.completedAt ?? null, input.id,
-    )
+    ]).then(() => undefined)
   }
 
   insertQuotaOperation(input: {
@@ -759,40 +784,57 @@ export class BillingRepository {
     requestFingerprint: string
     contextSource: BillingContextSource
     createdAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<boolean> {
+    return this.driver.run(`
       INSERT INTO billing_quota_operations (
         id, owner_type, owner_id, external_user_id, delta_units, status,
         idempotency_key, source_type, source_id, org_id, actor_user_id,
         reason, request_fingerprint, context_source, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      ON CONFLICT (idempotency_key) DO NOTHING
+    `, [
       input.id, input.ownerType, input.ownerId, input.externalUserId, input.deltaUnits,
       input.status, input.idempotencyKey, input.sourceType, input.sourceId,
       input.orgId ?? null, input.actorUserId ?? null, input.reason ?? null,
       input.requestFingerprint, input.contextSource, input.createdAt, input.createdAt,
-    )
+    ]).then(changes => changes === 1)
   }
 
-  getQuotaOperationById(id: string): QuotaOperationRecord | null {
-    const row = this.db.prepare('SELECT * FROM billing_quota_operations WHERE id = ? LIMIT 1').get(id) as SqlRow | undefined
+  async claimSudorouterProvisioning(id: string, updatedAt: number): Promise<SudorouterProvisioningRecord | null> {
+    const changed = await this.driver.run(`
+      UPDATE billing_sudorouter_provisioning
+      SET status = 'PROCESSING', error_text = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('PENDING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'FAILED', 'UNKNOWN')
+    `, [updatedAt, id])
+    return changed === 1 ? this.getSudorouterProvisioningById(id) : null
+  }
+
+  private async getSudorouterProvisioningById(id: string): Promise<SudorouterProvisioningRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
+      SELECT * FROM billing_sudorouter_provisioning WHERE id = ? LIMIT 1
+    `, [id])
+    return row ? this.mapSudorouterProvisioning(row) : null
+  }
+
+  async getQuotaOperationById(id: string): Promise<QuotaOperationRecord | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM billing_quota_operations WHERE id = ? LIMIT 1', [id])
     return row ? this.mapQuotaOperation(row) : null
   }
 
-  getQuotaOperationByKey(idempotencyKey: string): QuotaOperationRecord | null {
-    const row = this.db.prepare(`
+  async getQuotaOperationByKey(idempotencyKey: string): Promise<QuotaOperationRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_quota_operations WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? this.mapQuotaOperation(row) : null
   }
 
-  listRecoverableQuotaOperationIds(limit = 100): string[] {
+  async listRecoverableQuotaOperationIds(limit = 100): Promise<string[]> {
     const safeLimit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 1_000) : 100
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<{ id: string }>(`
       SELECT id FROM billing_quota_operations
       WHERE status IN ('PENDING', 'PROCESSING', 'UNKNOWN')
       ORDER BY created_at ASC, id ASC LIMIT ?
-    `).all(safeLimit) as Array<{ id: string }>
+    `, [safeLimit])
     return rows.map(row => String(row.id))
   }
 
@@ -804,20 +846,22 @@ export class BillingRepository {
     providerResponse?: Record<string, unknown> | null
     errorText?: string | null
     updatedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_quota_operations SET
         status = ?,
         observed_quota_units = COALESCE(?, observed_quota_units),
         observed_used_units = COALESCE(?, observed_used_units),
         provider_response_json = ?, error_text = ?, updated_at = ?,
-        completed_at = CASE WHEN ? IN ('SUCCEEDED', 'FAILED', 'SUPPRESSED') THEN ? ELSE NULL END
+        completed_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       input.status, input.observedQuotaUnits ?? null, input.observedUsedUnits ?? null,
       input.providerResponse ? JSON.stringify(input.providerResponse) : null,
-      input.errorText ?? null, input.updatedAt, input.status, input.updatedAt, input.id,
-    )
+      input.errorText ?? null, input.updatedAt,
+      ['SUCCEEDED', 'FAILED', 'SUPPRESSED'].includes(input.status) ? input.updatedAt : null,
+      input.id,
+    ]).then(() => undefined)
   }
 
   private mapQuotaOperation(row: SqlRow): QuotaOperationRecord {
@@ -837,89 +881,97 @@ export class BillingRepository {
     }
   }
 
-  getUserState(userId: string): { orgId: string; status: string } | null {
-    const row = this.db.prepare('SELECT org_id, status FROM users WHERE id = ? LIMIT 1').get(userId) as SqlRow | undefined
+  async getUserState(userId: string): Promise<{ orgId: string; status: string } | null> {
+    const row = await this.driver.get<SqlRow>('SELECT org_id, status FROM users WHERE id = ? LIMIT 1', [userId])
     return row ? { orgId: String(row.org_id), status: String(row.status) } : null
   }
 
-  countPendingCreditApplications(userId: string): number {
-    const row = this.db.prepare(`
+  async countPendingCreditApplications(userId: string): Promise<number> {
+    const row = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_credit_applications
       WHERE user_id = ? AND status IN ('PENDING', 'PROCESSING', 'SYNC_UNKNOWN')
-    `).get(userId) as { count: number }
-    return Number(row.count)
+    `, [userId])
+    return Number(row?.count ?? 0)
   }
 
-  insertCreditApplication(input: CreditApplicationRecord): void {
-    this.db.prepare(`
+  async claimQuotaOperation(id: string): Promise<QuotaOperationRecord | null> {
+    const changed = await this.driver.run(`
+      UPDATE billing_quota_operations
+      SET status = 'PROCESSING', error_text = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('PENDING', 'FAILED', 'UNKNOWN')
+    `, [Date.now(), id])
+    return changed === 1 ? this.getQuotaOperationById(id) : null
+  }
+
+  async insertCreditApplication(input: CreditApplicationRecord): Promise<void> {
+    await this.driver.run(`
       INSERT INTO billing_credit_applications (
         id, legacy_id, application_no, user_id, org_id, requested_units,
         approved_units, quota_units, reason, status, admin_user_id,
         admin_comment, quota_operation_id, idempotency_key, request_fingerprint,
         created_at, reviewed_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.legacyId, input.applicationNo, input.userId, input.orgId,
       input.requestedUnits, input.approvedUnits, input.quotaUnits, input.reason,
       input.status, input.adminUserId, input.adminComment, input.quotaOperationId,
       input.idempotencyKey, input.requestFingerprint, input.createdAt,
       input.reviewedAt, input.updatedAt,
-    )
+    ])
   }
 
-  getCreditApplication(id: string): CreditApplicationRecord | null {
-    const row = this.db.prepare('SELECT * FROM billing_credit_applications WHERE id = ? LIMIT 1').get(id) as SqlRow | undefined
+  async getCreditApplication(id: string): Promise<CreditApplicationRecord | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM billing_credit_applications WHERE id = ? LIMIT 1', [id])
     return row ? this.mapCreditApplication(row) : null
   }
 
-  getCreditApplicationByLegacyId(legacyId: number): CreditApplicationRecord | null {
-    const row = this.db.prepare(`
+  async getCreditApplicationByLegacyId(legacyId: number): Promise<CreditApplicationRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_credit_applications WHERE legacy_id = ? LIMIT 1
-    `).get(legacyId) as SqlRow | undefined
+    `, [legacyId])
     return row ? this.mapCreditApplication(row) : null
   }
 
-  countCreditApplications(): number {
-    return Number((this.db.prepare('SELECT COUNT(*) AS count FROM billing_credit_applications').get() as { count: number }).count)
+  async countCreditApplications(): Promise<number> {
+    return Number((await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_credit_applications'))?.count ?? 0)
   }
 
-  insertActivityRecord(input: BillingActivityRecord): void {
-    this.db.prepare(`
-      INSERT INTO billing_activity_records (
-        id, legacy_id, activity_type, user_id, org_id, order_id, actor_user_id,
-        application_id, points_units, quota_units, amount_cents, payment_method,
-        reason, payment_reference, source_type, source_id, details_json,
-        idempotency_key, created_at, processed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.id, input.legacyId, input.activityType, input.userId, input.orgId,
-      input.orderId, input.actorUserId, input.applicationId, input.pointsUnits,
-      input.quotaUnits, input.amountCents, input.paymentMethod, input.reason,
-      input.paymentReference, input.sourceType, input.sourceId,
-      JSON.stringify(input.details), input.idempotencyKey, input.createdAt, input.processedAt,
-    )
+  async insertActivityRecord(input: BillingActivityRecord): Promise<void> {
+    await this.driver.transaction(async () => {
+      await this.driver.run(`
+        INSERT INTO billing_activity_records (
+          id, legacy_id, activity_type, user_id, org_id, order_id, actor_user_id,
+          application_id, points_units, quota_units, amount_cents, payment_method,
+          reason, payment_reference, source_type, source_id, details_json,
+          idempotency_key, created_at, processed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        input.id, input.legacyId, input.activityType, input.userId, input.orgId,
+        input.orderId, input.actorUserId, input.applicationId, input.pointsUnits,
+        input.quotaUnits, input.amountCents, input.paymentMethod, input.reason,
+        input.paymentReference, input.sourceType, input.sourceId,
+        JSON.stringify(input.details), input.idempotencyKey, input.createdAt, input.processedAt,
+      ])
+      await this.advanceCounter(`billing_activity_records:${input.activityType}`, input.legacyId)
+    })
   }
 
-  getActivityByLegacyId(activityType: 'CLIENT' | 'ADMIN', legacyId: number): BillingActivityRecord | null {
-    const row = this.db.prepare(`
+  async getActivityByLegacyId(activityType: 'CLIENT' | 'ADMIN', legacyId: number): Promise<BillingActivityRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_activity_records WHERE activity_type = ? AND legacy_id = ? LIMIT 1
-    `).get(activityType, legacyId) as SqlRow | undefined
+    `, [activityType, legacyId])
     return row ? this.mapActivity(row) : null
   }
 
-  getActivityByIdempotencyKey(idempotencyKey: string): BillingActivityRecord | null {
-    const row = this.db.prepare(`
+  async getActivityByIdempotencyKey(idempotencyKey: string): Promise<BillingActivityRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_activity_records WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? this.mapActivity(row) : null
   }
 
-  allocateActivityLegacyId(activityType: 'CLIENT' | 'ADMIN'): number {
-    const row = this.db.prepare(`
-      SELECT COALESCE(MAX(legacy_id), 0) + 1 AS next_id
-      FROM billing_activity_records WHERE activity_type = ?
-    `).get(activityType) as { next_id: number }
-    return Math.max(Number(row.next_id), 2_000_000_000)
+  async allocateActivityLegacyId(activityType: 'CLIENT' | 'ADMIN'): Promise<number> {
+    return this.allocateCounter(`billing_activity_records:${activityType}`)
   }
 
   listRechargeActivities(input: {
@@ -930,7 +982,11 @@ export class BillingRepository {
     paymentMethod?: 'ALIPAY' | 'WECHAT'
     limit: number
     offset: number
-  }): { list: BillingActivityRecord[]; total: number } {
+  }): Promise<{ list: BillingActivityRecord[]; total: number }> {
+    return this.listRechargeActivitiesAsync(input)
+  }
+
+  private async listRechargeActivitiesAsync(input: Parameters<BillingRepository['listRechargeActivities']>[0]): Promise<{ list: BillingActivityRecord[]; total: number }> {
     const clauses: string[] = []
     const params: Array<string | number> = []
     if (input.orgId) { clauses.push('ar.org_id = ?'); params.push(input.orgId) }
@@ -942,26 +998,25 @@ export class BillingRepository {
       params.push(`%${input.keyword}%`, `%${input.keyword}%`, `%${input.keyword}%`)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT ar.* FROM billing_activity_records ar
       JOIN users u ON u.id = ar.user_id
       LEFT JOIN user_auth_identities phone
         ON phone.user_id = ar.user_id AND phone.provider = 'phone' AND phone.issuer = 'sudowork'
       ${where} ORDER BY ar.created_at DESC, ar.id DESC LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const total = this.db.prepare(`
+    `, [...params, input.limit, input.offset])
+    const total = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_activity_records ar
       JOIN users u ON u.id = ar.user_id
       LEFT JOIN user_auth_identities phone
         ON phone.user_id = ar.user_id AND phone.provider = 'phone' AND phone.issuer = 'sudowork'
       ${where}
-    `)
-      .get(...params) as { count: number }
-    return { list: rows.map(row => this.mapActivity(row)), total: Number(total.count) }
+    `, params)
+    return { list: rows.map(row => this.mapActivity(row)), total: Number(total?.count ?? 0) }
   }
 
-  countActivityRecords(): number {
-    return Number((this.db.prepare('SELECT COUNT(*) AS count FROM billing_activity_records').get() as { count: number }).count)
+  async countActivityRecords(): Promise<number> {
+    return Number((await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_activity_records'))?.count ?? 0)
   }
 
   listCreditApplications(input: {
@@ -971,7 +1026,11 @@ export class BillingRepository {
     keyword?: string
     limit: number
     offset: number
-  }): { list: CreditApplicationRecord[]; total: number } {
+  }): Promise<{ list: CreditApplicationRecord[]; total: number }> {
+    return this.listCreditApplicationsAsync(input)
+  }
+
+  private async listCreditApplicationsAsync(input: Parameters<BillingRepository['listCreditApplications']>[0]): Promise<{ list: CreditApplicationRecord[]; total: number }> {
     const clauses: string[] = []
     const params: Array<string | number> = []
     if (input.userId) { clauses.push('ca.user_id = ?'); params.push(input.userId) }
@@ -982,16 +1041,16 @@ export class BillingRepository {
       params.push(`%${input.keyword}%`, `%${input.keyword}%`, `%${input.keyword}%`)
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT ca.* FROM billing_credit_applications ca
       JOIN users u ON u.id = ca.user_id ${where}
       ORDER BY ca.created_at DESC, ca.id DESC LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const total = this.db.prepare(`
+    `, [...params, input.limit, input.offset])
+    const total = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_credit_applications ca
       JOIN users u ON u.id = ca.user_id ${where}
-    `).get(...params) as { count: number }
-    return { list: rows.map(row => this.mapCreditApplication(row)), total: Number(total.count) }
+    `, params)
+    return { list: rows.map(row => this.mapCreditApplication(row)), total: Number(total?.count ?? 0) }
   }
 
   listLedgerEntries(input: {
@@ -1002,7 +1061,11 @@ export class BillingRepository {
     excludeEntryType?: string
     limit: number
     offset: number
-  }): { list: Array<LedgerEntryRecord & { ownerName: string | null }>; total: number } {
+  }): Promise<{ list: Array<LedgerEntryRecord & { ownerName: string | null }>; total: number }> {
+    return this.listLedgerEntriesAsync(input)
+  }
+
+  private async listLedgerEntriesAsync(input: Parameters<BillingRepository['listLedgerEntries']>[0]): Promise<{ list: Array<LedgerEntryRecord & { ownerName: string | null }>; total: number }> {
     const clauses = ["le.owner_type = 'user'"]
     const params: Array<string | number> = []
     if (input.userId) { clauses.push('le.owner_id = ?'); params.push(input.userId) }
@@ -1014,15 +1077,15 @@ export class BillingRepository {
       params.push(`%${input.keyword}%`, `%${input.keyword}%`)
     }
     const where = `WHERE ${clauses.join(' AND ')}`
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT le.*, COALESCE(u.display_name, u.name) AS owner_name
       FROM billing_ledger_entries le JOIN users u ON u.id = le.owner_id
       ${where} ORDER BY le.created_at DESC, le.id DESC LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const total = this.db.prepare(`
+    `, [...params, input.limit, input.offset])
+    const total = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_ledger_entries le
       JOIN users u ON u.id = le.owner_id ${where}
-    `).get(...params) as { count: number }
+    `, params)
     return {
       list: rows.map(row => ({
         id: String(row.id), legacyId: Number(row.legacy_id), ownerType: String(row.owner_type) as BillingOwnerType,
@@ -1033,21 +1096,41 @@ export class BillingRepository {
         idempotencyKey: String(row.idempotency_key),
         createdAt: Number(row.created_at), ownerName: row.owner_name == null ? null : String(row.owner_name),
       })),
-      total: Number(total.count),
+      total: Number(total?.count ?? 0),
     }
   }
 
-  private nextLedgerLegacyId(): number {
-    const row = this.db.prepare('SELECT MAX(legacy_id) AS value FROM billing_ledger_entries').get() as {
-      value: number | null
-    }
-    return Math.max(2_000_000_000, Number(row.value ?? 1_999_999_999) + 1)
+  private async nextLedgerLegacyId(): Promise<number> {
+    return this.allocateCounter('billing_ledger_entries')
   }
 
-  getCreditApplicationByIdempotencyKey(idempotencyKey: string): CreditApplicationRecord | null {
-    const row = this.db.prepare(`
+  private async allocateCounter(counterKey: string): Promise<number> {
+    const row = await this.driver.get<{ last_value: number }>(`
+      INSERT INTO compatibility_id_counters (counter_key, last_value)
+      VALUES (?, 2000000000)
+      ON CONFLICT(counter_key) DO UPDATE SET last_value = compatibility_id_counters.last_value + 1
+      RETURNING last_value
+    `, [counterKey])
+    if (!row) throw new Error(`Failed to allocate compatibility ID: ${counterKey}`)
+    return Number(row.last_value)
+  }
+
+  private async advanceCounter(counterKey: string, value: number): Promise<void> {
+    await this.driver.run(`
+      INSERT INTO compatibility_id_counters (counter_key, last_value)
+      VALUES (?, ?)
+      ON CONFLICT(counter_key) DO UPDATE SET
+        last_value = CASE
+          WHEN compatibility_id_counters.last_value < excluded.last_value THEN excluded.last_value
+          ELSE compatibility_id_counters.last_value
+        END
+    `, [counterKey, value])
+  }
+
+  async getCreditApplicationByIdempotencyKey(idempotencyKey: string): Promise<CreditApplicationRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_credit_applications WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? this.mapCreditApplication(row) : null
   }
 
@@ -1061,8 +1144,8 @@ export class BillingRepository {
     quotaOperationId?: string | null
     reviewedAt?: number | null
     updatedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_credit_applications SET
         status = ?, approved_units = COALESCE(?, approved_units),
         quota_units = COALESCE(?, quota_units),
@@ -1071,12 +1154,12 @@ export class BillingRepository {
         quota_operation_id = COALESCE(?, quota_operation_id),
         reviewed_at = COALESCE(?, reviewed_at), updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       input.status, input.approvedUnits ?? null, input.quotaUnits ?? null,
       input.adminUserId ?? null, input.adminComment ?? null,
       input.quotaOperationId ?? null, input.reviewedAt ?? null,
       input.updatedAt, input.id,
-    )
+    ]).then(() => undefined)
   }
 
   private mapCreditApplication(row: SqlRow): CreditApplicationRecord {
@@ -1095,50 +1178,50 @@ export class BillingRepository {
     }
   }
 
-  insertRefund(input: RefundRecord): void {
-    this.db.prepare(`
+  async insertRefund(input: RefundRecord): Promise<void> {
+    await this.driver.run(`
       INSERT INTO billing_refunds (
         id, legacy_id, refund_no, order_id, user_id, refund_amount_cents,
         refund_quota_units, refund_points_units, reason, refund_type, status,
         provider_refund_no, quota_operation_id, idempotency_key,
         request_fingerprint, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.legacyId, input.refundNo, input.orderId, input.userId,
       input.refundAmountCents, input.refundQuotaUnits, input.refundPointsUnits,
       input.reason, input.refundType, input.status, input.providerRefundNo,
       input.quotaOperationId, input.idempotencyKey, input.requestFingerprint,
       input.createdAt, input.updatedAt,
-    )
+    ])
   }
 
-  getRefundById(id: string): RefundRecord | null {
-    const row = this.db.prepare('SELECT * FROM billing_refunds WHERE id = ? LIMIT 1').get(id) as SqlRow | undefined
+  async getRefundById(id: string): Promise<RefundRecord | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM billing_refunds WHERE id = ? LIMIT 1', [id])
     return row ? this.mapRefund(row) : null
   }
 
-  getRefundByLegacyId(legacyId: number): RefundRecord | null {
-    const row = this.db.prepare('SELECT * FROM billing_refunds WHERE legacy_id = ? LIMIT 1').get(legacyId) as SqlRow | undefined
+  async getRefundByLegacyId(legacyId: number): Promise<RefundRecord | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM billing_refunds WHERE legacy_id = ? LIMIT 1', [legacyId])
     return row ? this.mapRefund(row) : null
   }
 
-  countRefunds(): number {
-    return Number((this.db.prepare('SELECT COUNT(*) AS count FROM billing_refunds').get() as { count: number }).count)
+  async countRefunds(): Promise<number> {
+    return Number((await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_refunds'))?.count ?? 0)
   }
 
-  getRefundByIdempotencyKey(idempotencyKey: string): RefundRecord | null {
-    const row = this.db.prepare(`
+  async getRefundByIdempotencyKey(idempotencyKey: string): Promise<RefundRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_refunds WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? this.mapRefund(row) : null
   }
 
-  getActiveRefundForOrder(orderId: string): RefundRecord | null {
-    const row = this.db.prepare(`
+  async getActiveRefundForOrder(orderId: string): Promise<RefundRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM billing_refunds
       WHERE order_id = ? AND status IN ('PENDING', 'PROCESSING', 'SUCCEEDED', 'UNKNOWN')
       ORDER BY created_at DESC, id DESC LIMIT 1
-    `).get(orderId) as SqlRow | undefined
+    `, [orderId])
     return row ? this.mapRefund(row) : null
   }
 
@@ -1149,27 +1232,27 @@ export class BillingRepository {
     providerResponse?: Record<string, unknown> | null
     quotaOperationId?: string | null
     updatedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       UPDATE billing_refunds SET
         status = ?, provider_refund_no = COALESCE(?, provider_refund_no),
         provider_response_json = COALESCE(?, provider_response_json),
         quota_operation_id = COALESCE(?, quota_operation_id), updated_at = ?,
         processed_at = CASE WHEN ? IN ('SUCCEEDED', 'FAILED', 'SUPPRESSED') THEN ? ELSE processed_at END
       WHERE id = ?
-    `).run(
+    `, [
       input.status, input.providerRefundNo ?? null,
       input.providerResponse ? JSON.stringify(input.providerResponse) : null,
       input.quotaOperationId ?? null, input.updatedAt, input.status,
       input.updatedAt, input.id,
-    )
+    ]).then(() => undefined)
   }
 
-  countRefundsForOrder(orderId: string): number {
-    const row = this.db.prepare(`
+  async countRefundsForOrder(orderId: string): Promise<number> {
+    const row = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM billing_refunds WHERE order_id = ?
-    `).get(orderId) as { count: number }
-    return Number(row.count)
+    `, [orderId])
+    return Number(row?.count ?? 0)
   }
 
   insertReconciliation(input: {
@@ -1183,30 +1266,30 @@ export class BillingRepository {
     status: 'MATCHED' | 'MISMATCH' | 'RESOLVED'
     details: Record<string, unknown>
     createdAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       INSERT INTO billing_reconciliations (
         id, scope_type, scope_id, reconciliation_type, expected_units,
         actual_units, difference_units, status, details_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.scopeType, input.scopeId, input.reconciliationType,
       input.expectedUnits, input.actualUnits, input.differenceUnits,
       input.status, JSON.stringify(input.details), input.createdAt,
-    )
+    ]).then(() => undefined)
   }
 
-  countReconciliations(): number {
-    const row = this.db.prepare('SELECT COUNT(*) AS count FROM billing_reconciliations').get() as { count: number }
-    return Number(row.count)
+  async countReconciliations(): Promise<number> {
+    const row = await this.driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM billing_reconciliations')
+    return Number(row?.count ?? 0)
   }
 
-  countDeliverableExternalOutbox(): number {
-    const row = this.db.prepare(`
+  async countDeliverableExternalOutbox(): Promise<number> {
+    const row = await this.driver.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM outbox_events
       WHERE status = 'pending'
-    `).get() as { count: number }
-    return Number(row.count)
+    `)
+    return Number(row?.count ?? 0)
   }
 
   saveMigrationCheckpoint(input: {
@@ -1215,8 +1298,8 @@ export class BillingRepository {
     report: Record<string, unknown>
     createdAt: number
     verifiedAt: number
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       INSERT INTO billing_migration_checkpoints (
         source_checksum, migration_run_id, report_json, created_at, verified_at
       ) VALUES (?, ?, ?, ?, ?)
@@ -1224,17 +1307,17 @@ export class BillingRepository {
         migration_run_id = excluded.migration_run_id,
         report_json = excluded.report_json,
         verified_at = excluded.verified_at
-    `).run(
+    `, [
       input.sourceChecksum, input.migrationRunId, JSON.stringify(input.report),
       input.createdAt, input.verifiedAt,
-    )
+    ]).then(() => undefined)
   }
 
-  getMigrationCheckpoint(sourceChecksum: string): { migrationRunId: string; report: Record<string, unknown> } | null {
-    const row = this.db.prepare(`
+  async getMigrationCheckpoint(sourceChecksum: string): Promise<{ migrationRunId: string; report: Record<string, unknown> } | null> {
+    const row = await this.driver.get<{ migration_run_id: string; report_json: string }>(`
       SELECT migration_run_id, report_json FROM billing_migration_checkpoints
       WHERE source_checksum = ? LIMIT 1
-    `).get(sourceChecksum) as { migration_run_id: string; report_json: string } | undefined
+    `, [sourceChecksum])
     return row ? { migrationRunId: row.migration_run_id, report: JSON.parse(row.report_json) as Record<string, unknown> } : null
   }
 
@@ -1291,14 +1374,14 @@ export class BillingRepository {
     }
   }
 
-  getCommandResult<T>(commandType: string, idempotencyKey: string): {
+  async getCommandResult<T>(commandType: string, idempotencyKey: string): Promise<{
     requestFingerprint: string | null
     result: T
-  } | null {
-    const row = this.db.prepare(`
+  } | null> {
+    const row = await this.driver.get<{ request_fingerprint: string | null; result_json: string }>(`
       SELECT request_fingerprint, result_json FROM command_executions
       WHERE command_type = ? AND idempotency_key = ? LIMIT 1
-    `).get(commandType, idempotencyKey) as { request_fingerprint: string | null; result_json: string } | undefined
+    `, [commandType, idempotencyKey])
     return row ? {
       requestFingerprint: row.request_fingerprint,
       result: JSON.parse(row.result_json) as T,
@@ -1312,11 +1395,11 @@ export class BillingRepository {
     contextSource: BillingContextSource,
     result: unknown,
     createdAt: number,
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    return this.driver.run(`
       INSERT INTO command_executions (
         command_type, idempotency_key, context_source, request_fingerprint, result_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(commandType, idempotencyKey, contextSource, requestFingerprint, JSON.stringify(result), createdAt)
+    `, [commandType, idempotencyKey, contextSource, requestFingerprint, JSON.stringify(result), createdAt]).then(() => undefined)
   }
 }

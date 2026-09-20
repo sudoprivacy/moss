@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb, type AuthCenterUser } from '../authCenter/db.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { IdentityRepository } from './identityRepository.js'
 
 async function createStore(): Promise<{ db: DatabaseSync; authDb: AuthCenterDb; repository: IdentityRepository }> {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const repository = new IdentityRepository(db)
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   await authDb.createOrganization('org-a', 'Organization A', 1)
   await authDb.createOrganization('org-b', 'Organization B', 1)
   return { db, authDb, repository }
@@ -93,15 +94,15 @@ void describe('unified identity schema and repository', () => {
 
   void test('stores one organization profile and resolves its stable code', async () => {
     const { db, repository } = await createStore()
-    repository.putOrganizationProfile({
+    await repository.putOrganizationProfile({
       orgId: 'org-a',
       code: 'acme',
       loginMethod: 'password',
       localEnabled: true,
       cloudEnabled: true,
     })
-    assert.equal(repository.getOrganizationProfileByCode('acme')?.orgId, 'org-a')
-    assert.throws(() => repository.putOrganizationProfile({
+    assert.equal((await repository.getOrganizationProfileByCode('acme'))?.orgId, 'org-a')
+    await assert.rejects(repository.putOrganizationProfile({
       orgId: 'org-b',
       code: 'acme',
       loginMethod: 'password',
@@ -115,7 +116,7 @@ void describe('unified identity schema and repository', () => {
     const { db, authDb, repository } = await createStore()
     await authDb.createUser(user('user-a', 'org-a', 'active'))
     await authDb.createUser(user('user-b', 'org-b', 'active'))
-    repository.createAuthIdentity({
+    await repository.createAuthIdentity({
       id: 'identity-a',
       orgId: 'org-a',
       userId: 'user-a',
@@ -125,10 +126,10 @@ void describe('unified identity schema and repository', () => {
       metadata: { source: 'migration' },
     })
     assert.equal(
-      repository.findAuthIdentity('phone', 'sudowork', '+8613800000000')?.userId,
+      (await repository.findAuthIdentity('phone', 'sudowork', '+8613800000000'))?.userId,
       'user-a',
     )
-    assert.throws(() => repository.createAuthIdentity({
+    await assert.rejects(repository.createAuthIdentity({
       id: 'identity-b',
       orgId: 'org-b',
       userId: 'user-b',
@@ -144,11 +145,11 @@ void describe('unified identity schema and repository', () => {
     const { db, authDb, repository } = await createStore()
     await authDb.createUser(user('user-a', 'org-a', 'active'))
     await authDb.createUser(user('user-b', 'org-b', 'active'))
-    repository.assignNumericAlias({ namespace: 'user', legacyId: 42, resourceId: 'user-a', orgId: 'org-a' })
-    repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 42, resourceId: 'org-b', orgId: 'org-b' })
-    assert.equal(repository.resolveNumericAlias('user', 42, 'org-a'), 'user-a')
-    assert.equal(repository.resolveNumericAlias('user', 42, 'org-b'), null)
-    assert.throws(() => repository.assignNumericAlias({
+    await repository.assignNumericAlias({ namespace: 'user', legacyId: 42, resourceId: 'user-a', orgId: 'org-a' })
+    await repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 42, resourceId: 'org-b', orgId: 'org-b' })
+    assert.equal(await repository.resolveNumericAlias('user', 42, 'org-a'), 'user-a')
+    assert.equal(await repository.resolveNumericAlias('user', 42, 'org-b'), null)
+    await assert.rejects(repository.assignNumericAlias({
       namespace: 'user', legacyId: 42, resourceId: 'user-b', orgId: 'org-b',
     }), /UNIQUE constraint failed/)
     db.close()
@@ -156,71 +157,71 @@ void describe('unified identity schema and repository', () => {
 
   void test('updates organization policy and lists profiles without a global singleton', async () => {
     const { db, repository } = await createStore()
-    repository.putOrganizationProfile({
+    await repository.putOrganizationProfile({
       orgId: 'org-a', code: 'A', loginMethod: 'sms', localEnabled: true, cloudEnabled: false,
       appName: 'A App',
     })
-    repository.putOrganizationProfile({
+    await repository.putOrganizationProfile({
       orgId: 'org-b', code: 'B', loginMethod: 'cas', localEnabled: false, cloudEnabled: true,
     })
 
-    assert.deepEqual(repository.listOrganizationProfiles().map((profile) => profile.code), ['A', 'B'])
-    assert.equal(repository.getOrganizationProfile('org-a')?.appName, 'A App')
-    assert.equal(repository.getOrganizationProfile('org-b')?.loginMethod, 'cas')
+    assert.deepEqual((await repository.listOrganizationProfiles()).map((profile) => profile.code), ['A', 'B'])
+    assert.equal((await repository.getOrganizationProfile('org-a'))?.appName, 'A App')
+    assert.equal((await repository.getOrganizationProfile('org-b'))?.loginMethod, 'cas')
     db.close()
   })
 
   void test('lists, filters, revokes, and deletes invitations with stable ordering', async () => {
     const { db, repository } = await createStore()
-    repository.createInvitation({ id: 'invite-a', orgId: 'org-a', code: 'CODE-A', initialCreditUnits: 10 })
-    repository.createInvitation({ id: 'invite-b', orgId: 'org-b', code: 'CODE-B', initialCreditUnits: 20 })
-    repository.createInvitation({ id: 'invite-c', orgId: 'org-a', code: 'CODE-C', initialCreditUnits: 30 })
+    await repository.createInvitation({ id: 'invite-a', orgId: 'org-a', code: 'CODE-A', initialCreditUnits: 10 })
+    await repository.createInvitation({ id: 'invite-b', orgId: 'org-b', code: 'CODE-B', initialCreditUnits: 20 })
+    await repository.createInvitation({ id: 'invite-c', orgId: 'org-a', code: 'CODE-C', initialCreditUnits: 30 })
 
-    assert.equal(repository.listInvitations({ orgId: 'org-a', status: 'pending' }).total, 2)
+    assert.equal((await repository.listInvitations({ orgId: 'org-a', status: 'pending' })).total, 2)
     assert.deepEqual(
-      repository.listInvitations({ orgId: 'org-a', status: 'pending', limit: 1, offset: 1 }).items
+      (await repository.listInvitations({ orgId: 'org-a', status: 'pending', limit: 1, offset: 1 })).items
         .map((invitation) => invitation.code),
       ['CODE-A'],
     )
-    assert.equal(repository.revokeInvitation('invite-a'), true)
-    assert.equal(repository.getInvitationById('invite-a')?.status, 'revoked')
-    assert.equal(repository.deletePendingInvitation('invite-a'), false)
-    assert.equal(repository.deletePendingInvitation('invite-c'), true)
-    assert.equal(repository.getInvitationByCode('CODE-C'), null)
+    assert.equal(await repository.revokeInvitation('invite-a'), true)
+    assert.equal((await repository.getInvitationById('invite-a'))?.status, 'revoked')
+    assert.equal(await repository.deletePendingInvitation('invite-a'), false)
+    assert.equal(await repository.deletePendingInvitation('invite-c'), true)
+    assert.equal(await repository.getInvitationByCode('CODE-C'), null)
     db.close()
   })
 
   void test('moves every organization-scoped identity reference with its user', async () => {
     const { db, authDb, repository } = await createStore()
     await authDb.createUser(user('user-a', 'org-a', 'active'))
-    repository.createAuthIdentity({
+    await repository.createAuthIdentity({
       id: 'identity-a', orgId: 'org-a', userId: 'user-a', provider: 'phone',
       issuer: 'sudowork', normalizedSubject: '13800000000', metadata: {},
     })
-    repository.assignNumericAlias({
+    await repository.assignNumericAlias({
       namespace: 'user', legacyId: 42, resourceId: 'user-a', orgId: 'org-a',
     })
 
-    repository.moveUserOrganization('user-a', 'org-b')
+    await repository.moveUserOrganization('user-a', 'org-b')
 
-    assert.equal(repository.findAuthIdentity('phone', 'sudowork', '13800000000')?.orgId, 'org-b')
-    assert.equal(repository.resolveNumericAlias('user', 42, 'org-a'), null)
-    assert.equal(repository.resolveNumericAlias('user', 42, 'org-b'), 'user-a')
+    assert.equal((await repository.findAuthIdentity('phone', 'sudowork', '13800000000'))?.orgId, 'org-b')
+    assert.equal(await repository.resolveNumericAlias('user', 42, 'org-a'), null)
+    assert.equal(await repository.resolveNumericAlias('user', 42, 'org-b'), 'user-a')
     db.close()
   })
 
   void test('stores organization integration connections without provider-specific tables', async () => {
     const { db, repository } = await createStore()
-    repository.putIntegrationConnection({
+    await repository.putIntegrationConnection({
       id: 'cas-main', orgId: 'org-a', providerType: 'cas', name: '统一认证', enabled: true,
       secretRef: null, config: { casUrl: 'https://cas.example.test', autoProvision: true },
     })
-    assert.deepEqual(repository.getIntegrationConnection('cas-main'), {
+    assert.deepEqual(await repository.getIntegrationConnection('cas-main'), {
       id: 'cas-main', orgId: 'org-a', providerType: 'cas', name: '统一认证', enabled: true,
       secretRef: null, config: { casUrl: 'https://cas.example.test', autoProvision: true },
     })
-    assert.equal(repository.listIntegrationConnections('org-a', 'cas').length, 1)
-    assert.equal(repository.listIntegrationConnections('org-b', 'cas').length, 0)
+    assert.equal((await repository.listIntegrationConnections('org-a', 'cas')).length, 1)
+    assert.equal((await repository.listIntegrationConnections('org-b', 'cas')).length, 0)
     db.close()
   })
 })

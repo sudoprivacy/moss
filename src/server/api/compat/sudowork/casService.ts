@@ -121,8 +121,8 @@ export class SudoworkCasService {
     this.codeFactory = options.codeFactory ?? (() => randomBytes(32).toString('base64url'))
   }
 
-  getProvider(providerId: string): CasProvider {
-    const connection = this.options.identities.getIntegrationConnection(providerId)
+  async getProvider(providerId: string): Promise<CasProvider> {
+    const connection = await this.options.identities.getIntegrationConnection(providerId)
     if (!connection || connection.providerType !== 'cas' || !connection.enabled) {
       throw new SudoworkCasError(400, '无效的三方认证 Provider')
     }
@@ -130,11 +130,12 @@ export class SudoworkCasService {
   }
 
   async listPublicProviders(): Promise<Array<Record<string, unknown>>> {
-    return (await this.options.authDb.listOrganizations()).flatMap((org) =>
-      this.options.identities.listIntegrationConnections(org.id, 'cas')
+    const providers = await Promise.all((await this.options.authDb.listOrganizations()).map(async (org) =>
+      (await this.options.identities.listIntegrationConnections(org.id, 'cas'))
         .filter((connection) => connection.enabled)
         .map((connection) => toLegacyProvider(parseProvider(connection))),
-    )
+    ))
+    return providers.flat()
   }
 
   async login(input: {
@@ -152,7 +153,7 @@ export class SudoworkCasService {
   }
 
   async createHandoff(input: { providerId: string; ticket: string }): Promise<{ redirectUrl: string }> {
-    const provider = this.getProvider(input.providerId)
+    const provider = await this.getProvider(input.providerId)
     if (provider.callbackMode !== 'server_callback') {
       throw new SudoworkCasError(400, '当前 Provider 未启用服务端回调模式')
     }
@@ -172,7 +173,7 @@ export class SudoworkCasService {
   }
 
   async exchange(input: { providerId: string; code: string; deviceId?: string }): Promise<SudoworkLegacySession> {
-    const provider = this.getProvider(input.providerId)
+    const provider = await this.getProvider(input.providerId)
     const key = `cas_handoff:${hash(input.code)}`
     const raw = await this.options.tokenStore.get(key)
     if (!raw) throw new SudoworkCasError(401, '登录凭证无效，请重新登录')
@@ -189,8 +190,8 @@ export class SudoworkCasService {
     })
   }
 
-  logoutCallbackUrl(providerId: string): string {
-    const provider = this.getProvider(providerId)
+  async logoutCallbackUrl(providerId: string): Promise<string> {
+    const provider = await this.getProvider(providerId)
     const fallback = `sudowork://cas-callback/${encodeURIComponent(provider.id)}/logout`
     const rawUrl = provider.appCallbackUrl || fallback
     try {
@@ -208,14 +209,14 @@ export class SudoworkCasService {
     profile: CasProfile
     user: AuthCenterUser
   }> {
-    const provider = this.getProvider(providerId)
+    const provider = await this.getProvider(providerId)
     const profile = await this.validator.validate(provider, service, ticket)
     if (!profile.active) throw new SudoworkCasError(403, 'CAS 用户已被禁用')
-    const existingIdentity = this.options.identities.findAuthIdentity('cas', provider.id, profile.subject)
+    const existingIdentity = await this.options.identities.findAuthIdentity('cas', provider.id, profile.subject)
     let user = existingIdentity ? await this.options.authDb.getUserById(existingIdentity.userId) : null
     if (!user) {
-      const accountIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', profile.account)
-        ?? this.options.identities.findAuthIdentity('password', 'moss', profile.account)
+      const accountIdentity = await this.options.identities.findAuthIdentity('phone', 'sudowork', profile.account)
+        ?? await this.options.identities.findAuthIdentity('password', 'moss', profile.account)
       user = accountIdentity ? await this.options.authDb.getUserById(accountIdentity.userId) : null
       if (user && user.orgId !== provider.orgId) {
         throw new SudoworkCasError(409, 'CAS 账号对应的本地用户已存在但登录方式或企业不匹配，请联系管理员处理')
@@ -238,7 +239,7 @@ export class SudoworkCasService {
         }, onlineCommandContext(`cas-user:${provider.id}:${profile.subject}`))
         user = await this.options.authDb.getUserById(created.userId)
       } else {
-        this.options.identities.createAuthIdentity({
+        await this.options.identities.createAuthIdentity({
           id: randomUUID(), orgId: provider.orgId, userId: user.id,
           provider: 'cas', issuer: provider.id, normalizedSubject: profile.subject,
           metadata: profile.attributes,

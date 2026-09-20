@@ -1,10 +1,9 @@
-import type { DatabaseSync } from 'node:sqlite'
 import type { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
 import type { ConfigKey } from '../../../configStore/configStore.js'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
-import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../../../db/driver.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
 
@@ -58,7 +57,7 @@ export class SudoworkSystemConfigService {
   private readonly infrastructureSettings: PlatformIntegrationSettingsRepository
 
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     policies: ClientPolicyRepository
     infrastructureSettings?: PlatformIntegrationSettingsRepository
     identities: IdentityRepository
@@ -85,13 +84,13 @@ export class SudoworkSystemConfigService {
       ?? new PlatformIntegrationSettingsRepository(options.db)
   }
 
-  getLoginMethod(): LoginMethod {
-    return loginMethodFromNumber(this.policy().loginMethod, this.options.defaults.loginMethod)
+  async getLoginMethod(): Promise<LoginMethod> {
+    return loginMethodFromNumber((await this.policy()).loginMethod, this.options.defaults.loginMethod)
   }
 
-  getPublicConfig(): Json {
-    const policy = this.policy()
-    const infrastructure = this.getInfrastructureConfig()
+  async getPublicConfig(): Promise<Json> {
+    const policy = await this.policy()
+    const infrastructure = await this.getInfrastructureConfig()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
@@ -99,7 +98,7 @@ export class SudoworkSystemConfigService {
     const enabledVersionUpdate = flag(versionUpdate.enabled)
     const enabledProductImprovement = flag(productImprovement.enabled)
     return {
-      login_method: loginMethodToNumber(this.getLoginMethod()),
+      login_method: loginMethodToNumber(await this.getLoginMethod()),
       log_report: enabledLogReport === 1
         ? { enabled: 1, baseurl: `${string(logReport.protocol, 'https')}://${string(logReport.domain)}` }
         : { enabled: 0 },
@@ -115,19 +114,19 @@ export class SudoworkSystemConfigService {
       )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
-      third_party_auth: this.thirdPartyAuth(false),
+      third_party_auth: await this.thirdPartyAuth(false),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
     }
   }
 
-  getCreditApplicationPolicy(): {
+  async getCreditApplicationPolicy(): Promise<{
     rechargeMode: 'payment' | 'approve' | 'disabled'
     minPoints: number
     maxPoints: number
     allowDuplicatePending: boolean
-  } {
-    const policy = this.policy()
+  }> {
+    const policy = await this.policy()
     const credit = normalizeCreditApplication(policy.creditApplication)
     const mode = rechargeMode(policy.rechargeMode)
     return {
@@ -138,29 +137,29 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  getInfrastructureConfig(): SudoworkInfrastructureConfig {
+  async getInfrastructureConfig(): Promise<SudoworkInfrastructureConfig> {
     return {
       sms: normalizeSmsInfrastructure(
-        this.infrastructureSettings.get('sudowork.sms'),
+        await this.infrastructureSettings.get('sudowork.sms'),
         this.options.defaults.sms ?? DEFAULT_SMS_INFRASTRUCTURE,
       ),
       billing: normalizeBillingInfrastructure(
-        this.infrastructureSettings.get('sudowork.billing'),
+        await this.infrastructureSettings.get('sudowork.billing'),
         this.options.defaults.billing ?? DEFAULT_BILLING_INFRASTRUCTURE,
       ),
     }
   }
 
-  getAdminConfig(actor: IdentityActor): Json {
+  async getAdminConfig(actor: IdentityActor): Promise<Json> {
     this.assertAdmin(actor)
-    const policy = this.policy()
+    const policy = await this.policy()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
     const config: Json = {
-      login_method: loginMethodToNumber(this.getLoginMethod()),
-      sms_configured: this.isSmsConfigured(),
-      third_party_auth: this.thirdPartyAuth(true),
+      login_method: loginMethodToNumber(await this.getLoginMethod()),
+      sms_configured: await this.isSmsConfigured(),
+      third_party_auth: await this.thirdPartyAuth(true),
       log_report: {
         enabled: flag(logReport.enabled),
         protocol: string(logReport.protocol),
@@ -178,7 +177,7 @@ export class SudoworkSystemConfigService {
       credit_application: normalizeCreditApplication(policy.creditApplication),
     }
     if (!actor.organizationScoped) return config
-    const infrastructure = this.getInfrastructureConfig()
+    const infrastructure = await this.getInfrastructureConfig()
     return {
       ...config,
       restart_required: true,
@@ -187,12 +186,12 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  getCredentialData(): Json {
+  async getCredentialData(): Promise<Json> {
     const result: Json = {}
-    const logReport = object(this.policy().logReport)
+    const logReport = object((await this.policy()).logReport)
     const logKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (flag(logReport.enabled) === 1 && logKey) result.log_report = { key: logKey }
-    const productImprovement = object(this.policy().productImprovement)
+    const productImprovement = object((await this.policy()).productImprovement)
     if (flag(productImprovement.enabled) === 1) {
       const value: Json = { api_key: this.options.defaults.productImprovementApiKey ?? '' }
       if (this.options.defaults.productImprovementEncryptionRequired) {
@@ -206,19 +205,19 @@ export class SudoworkSystemConfigService {
   async update(actor: IdentityActor, body: Json): Promise<void> {
     const {
       patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure,
-    } = this.prepareUpdate(actor, body)
+    } = await this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
     try {
-      runInTransaction(this.options.db, () => {
-        this.options.policies.putPlatform(patch, actor.userId)
+      await this.options.db.transaction(async () => {
+        await this.options.policies.putPlatform(patch, actor.userId)
         if (smsInfrastructure) {
-          this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
+          await this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
         }
         if (billingInfrastructure) {
-          this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
+          await this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
         }
-        if (providers) this.replaceCasConnections(providers)
+        if (providers) await this.replaceCasConnections(providers)
       })
     } catch (error) {
       if (nextLogKey !== undefined) {
@@ -229,17 +228,17 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  validateUpdate(actor: IdentityActor, body: Json): void {
-    this.prepareUpdate(actor, body)
+  async validateUpdate(actor: IdentityActor, body: Json): Promise<void> {
+    await this.prepareUpdate(actor, body)
   }
 
-  private prepareUpdate(actor: IdentityActor, body: Json): {
+  private async prepareUpdate(actor: IdentityActor, body: Json): Promise<{
     patch: Json
     providers?: NormalizedProvider[]
     nextLogKey?: string
     smsInfrastructure?: SudoworkInfrastructureConfig['sms']
     billingInfrastructure?: SudoworkInfrastructureConfig['billing']
-  } {
+  }> {
     if (actor.role !== 'super_admin') throw new SudoworkSystemConfigError(403, '权限不足')
     const patch: Json = {}
     let providers: NormalizedProvider[] | undefined
@@ -248,7 +247,7 @@ export class SudoworkSystemConfigService {
 
     if (body.third_party_auth !== undefined) {
       const normalized = normalizeThirdPartyAuth(body.third_party_auth)
-      providers = normalized.providers.map(provider => this.validateProvider(provider))
+      providers = await Promise.all(normalized.providers.map(provider => this.validateProvider(provider)))
       if (normalized.enabled === 1 && !providers.some(provider => provider.id === normalized.defaultProvider && provider.enabled)) {
         throw new SudoworkSystemConfigError(400, '默认三方认证 Provider 不存在或未启用')
       }
@@ -259,10 +258,10 @@ export class SudoworkSystemConfigService {
       if (body.login_method !== 0 && body.login_method !== 1 && body.login_method !== 2) {
         throw new SudoworkSystemConfigError(400, '无效的登录方式')
       }
-      if (body.login_method === 0 && !this.isSmsConfigured()) {
+      if (body.login_method === 0 && !(await this.isSmsConfigured())) {
         throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
       }
-      const thirdParty = object(patch.thirdPartyAuth ?? this.policy().thirdPartyAuth)
+      const thirdParty = object(patch.thirdPartyAuth ?? (await this.policy()).thirdPartyAuth)
       if (body.login_method === 2 && flag(thirdParty.enabled) !== 1) {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
       }
@@ -317,21 +316,21 @@ export class SudoworkSystemConfigService {
     if (body.sms !== undefined) {
       smsInfrastructure = parseSmsInfrastructure(
         body.sms,
-        this.getInfrastructureConfig().sms,
+        (await this.getInfrastructureConfig()).sms,
       )
     }
     if (body.billing !== undefined) {
       billingInfrastructure = parseBillingInfrastructure(
         body.billing,
-        this.getInfrastructureConfig().billing,
+        (await this.getInfrastructureConfig()).billing,
       )
     }
     return { patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure }
   }
 
-  isSmsConfigured(): boolean {
+  async isSmsConfigured(): Promise<boolean> {
     if (this.options.smsConfigured !== undefined) return this.options.smsConfigured
-    const sms = this.getInfrastructureConfig().sms
+    const sms = (await this.getInfrastructureConfig()).sms
     return this.options.smsRuntimeAvailable === true
       && sms.provider === 'tencent'
       && [sms.sdkAppId, sms.signName, sms.templateId, sms.signId, sms.region].every(Boolean)
@@ -341,21 +340,22 @@ export class SudoworkSystemConfigService {
       ))
   }
 
-  private policy(): Json {
+  private policy(): Promise<Json> {
     return this.options.policies.getEffective()
   }
 
-  private thirdPartyAuth(admin: boolean): Json {
-    const policy = object(this.policy().thirdPartyAuth)
-    const providers = this.options.identities.listOrganizationProfiles().flatMap(profile =>
-      this.options.identities.listIntegrationConnections(profile.orgId, 'cas').map(connection =>
+  private async thirdPartyAuth(admin: boolean): Promise<Json> {
+    const policy = object((await this.policy()).thirdPartyAuth)
+    const groups = await Promise.all((await this.options.identities.listOrganizationProfiles()).map(async profile =>
+      (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')).map(connection =>
         legacyProvider(connection, profile.code, admin)),
-    )
+    ))
+    const providers = groups.flat()
     const defaultProvider = string(policy.defaultProvider, providers[0]?.id as string | undefined)
     return { enabled: flag(policy.enabled), default_provider: defaultProvider, providers: providers.filter(item => admin || item.enabled === 1) }
   }
 
-  private validateProvider(provider: NormalizedProvider): NormalizedProvider {
+  private async validateProvider(provider: NormalizedProvider): Promise<NormalizedProvider> {
     if (provider.type !== 'cas') throw new SudoworkSystemConfigError(400, '当前仅支持 CAS 类型 Provider')
     if (!provider.id || !provider.name) throw new SudoworkSystemConfigError(400, 'Provider ID 和名称不能为空')
     if (!validHttpUrl(provider.casUrl)) throw new SudoworkSystemConfigError(400, 'CAS URL 格式不正确')
@@ -369,20 +369,20 @@ export class SudoworkSystemConfigService {
       throw new SudoworkSystemConfigError(400, '登出回跳 URL 必须使用 http 或 https')
     }
     if (!provider.appCallbackUrl) throw new SudoworkSystemConfigError(400, 'App 回调 URL 不能为空')
-    const profile = this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
+    const profile = await this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
     if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
     return { ...provider, orgId: profile.orgId }
   }
 
-  private replaceCasConnections(providers: NormalizedProvider[]): void {
+  private async replaceCasConnections(providers: NormalizedProvider[]): Promise<void> {
     const ids = new Set(providers.map(provider => provider.id))
-    for (const profile of this.options.identities.listOrganizationProfiles()) {
-      for (const existing of this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
-        if (!ids.has(existing.id)) this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
+    for (const profile of await this.options.identities.listOrganizationProfiles()) {
+      for (const existing of await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
+        if (!ids.has(existing.id)) await this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
       }
     }
     for (const provider of providers) {
-      this.options.identities.putIntegrationConnection({
+      await this.options.identities.putIntegrationConnection({
         id: provider.id,
         orgId: provider.orgId!,
         providerType: 'cas',

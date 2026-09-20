@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import { BillingRepository } from './billingRepository.js'
 import type { BillingOwnerType } from './types.js'
 import type { WalletService } from './walletService.js'
@@ -24,7 +23,7 @@ export class ReconciliationService {
   private readonly idGenerator: () => string
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly driver: DbDriver,
     private readonly repository: BillingRepository,
     private readonly wallet: WalletService,
     options: ReconciliationOptions = {},
@@ -33,12 +32,12 @@ export class ReconciliationService {
     this.idGenerator = options.idGenerator ?? randomUUID
   }
 
-  run(
+  async run(
     scope: { ownerType: BillingOwnerType; ownerId: string },
     context: CommandContext,
-  ): ReconciliationReport {
+  ): Promise<ReconciliationReport> {
     assertTrustedCommandContext(context)
-    const rebuilt = this.wallet.rebuild(scope.ownerType, scope.ownerId)
+    const rebuilt = await this.wallet.rebuild(scope.ownerType, scope.ownerId)
     const report: ReconciliationReport = {
       id: this.idGenerator(),
       status: rebuilt.difference === 0 ? 'MATCHED' : 'MISMATCH',
@@ -46,7 +45,7 @@ export class ReconciliationService {
       actualUnits: rebuilt.stored,
       differenceUnits: rebuilt.difference,
     }
-    runInTransaction(this.db, () => this.repository.insertReconciliation({
+    await this.driver.transaction(async () => this.repository.insertReconciliation({
       id: report.id, scopeType: scope.ownerType, scopeId: scope.ownerId,
       reconciliationType: 'WALLET_LEDGER', expectedUnits: report.expectedUnits,
       actualUnits: report.actualUnits, differenceUnits: report.differenceUnits,

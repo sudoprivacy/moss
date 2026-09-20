@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from './identityRepository.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import {
   LegacyRefreshTokenService,
   issueLegacyJwt,
@@ -66,7 +66,7 @@ void describe('legacy Sudowork token profile', () => {
   void test('maps old numeric claims to one Moss principal and rejects cross-org aliases', async () => {
     const db = new DatabaseSync(':memory:')
     const authDb = new AuthCenterDb(db)
-    const repository = new IdentityRepository(db)
+    const repository = createIdentityTestRepository(db, {}, authDb.driver)
     await authDb.createOrganization('org-a', 'Org A', 1)
     await authDb.createOrganization('org-b', 'Org B', 1)
     await authDb.createUser({
@@ -74,8 +74,8 @@ void describe('legacy Sudowork token profile', () => {
       departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
-    repository.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
+    await repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
+    await repository.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
     const token = issueLegacyJwt({
       secret: 'explicit-production-secret', userId: 17, phone: '13800000000',
       role: 'USER', enterpriseId: 9, expiresInSec: 7200,
@@ -84,7 +84,7 @@ void describe('legacy Sudowork token profile', () => {
       userId: 'user-a', orgId: 'org-a', role: 'user', legacyUserId: 17, legacyEnterpriseId: 9,
     })
 
-    repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 10, resourceId: 'org-b', orgId: 'org-b' })
+    await repository.assignNumericAlias({ namespace: 'enterprise', legacyId: 10, resourceId: 'org-b', orgId: 'org-b' })
     const crossOrg = issueLegacyJwt({
       secret: 'explicit-production-secret', userId: 17, phone: '13800000000',
       role: 'USER', enterpriseId: 10, expiresInSec: 7200,

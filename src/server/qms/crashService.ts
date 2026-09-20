@@ -31,7 +31,7 @@ export interface CrashEvent {
 }
 
 export interface CrashTenantDirectory {
-  hasCode(code: string): boolean
+  hasCode(code: string): Promise<boolean>
 }
 
 export interface CrashSourceMapPort {
@@ -80,7 +80,7 @@ export function generateCrashIssueTitle(event: CrashEvent): string {
   return `Crash: ${event.type}`
 }
 
-function validateEvent(event: CrashEvent, tenants: CrashTenantDirectory): string {
+async function validateEvent(event: CrashEvent, tenants: CrashTenantDirectory): Promise<string> {
   for (const field of ['type', 'timestamp', 'version', 'platform', 'process_type'] as const) {
     if (event[field] === undefined || event[field] === null || event[field] === '') {
       throw new CrashServiceError(400, 'MISSING_REQUIRED_FIELDS', `QMS crash event requires ${field}`)
@@ -89,12 +89,12 @@ function validateEvent(event: CrashEvent, tenants: CrashTenantDirectory): string
   return validateTenant(event, tenants)
 }
 
-function validateTenant(event: CrashEvent, tenants: CrashTenantDirectory, item?: string): string {
+async function validateTenant(event: CrashEvent, tenants: CrashTenantDirectory, item?: string): Promise<string> {
   const tenantId = event.tenant_id?.trim()
   if (!tenantId) {
     throw new CrashServiceError(400, 'TENANT_ID_REQUIRED', 'tenant_id is required for QMS crash ingestion', item ? [item] : [])
   }
-  if (!tenants.hasCode(tenantId)) {
+  if (!(await tenants.hasCode(tenantId))) {
     throw new CrashServiceError(400, 'TENANT_NOT_FOUND', `Unknown QMS tenant: ${tenantId}`, item ? [item] : [])
   }
   return tenantId
@@ -109,7 +109,7 @@ export class CrashService {
   }) {}
 
   async ingest(event: CrashEvent, requestedIngestId?: string): Promise<{ issueId: number; duplicate: boolean }> {
-    const tenantId = validateEvent(event, this.options.tenants)
+    const tenantId = await validateEvent(event, this.options.tenants)
     const ingestId = requestedIngestId?.trim() || this.options.createId?.() || randomUUID()
     if (!ingestId) throw new Error('QMS crash ingest id is required')
     const fingerprint = generateCrashFingerprint(event)
@@ -177,7 +177,7 @@ export class CrashService {
     for (const [index, event] of events.entries()) {
       const tenantId = event.tenant_id?.trim()
       if (!tenantId) missingTenantItems.push(`events[${index}]`)
-      else if (!this.options.tenants.hasCode(tenantId)) unknownTenantItems.push(`events[${index}]`)
+      else if (!(await this.options.tenants.hasCode(tenantId))) unknownTenantItems.push(`events[${index}]`)
     }
     if (missingTenantItems.length > 0) {
       throw new CrashServiceError(400, 'TENANT_ID_REQUIRED', 'tenant_id is required for QMS crash ingestion', missingTenantItems)

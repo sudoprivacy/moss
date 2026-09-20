@@ -13,8 +13,8 @@ export class QmsAuthorizationError extends Error {
 }
 
 export interface QmsOrganizationDirectory {
-  getCode(orgId: string): string | null
-  hasCode(code: string): boolean
+  getCode(orgId: string): Promise<string | null>
+  hasCode(code: string): Promise<boolean>
 }
 
 export interface QmsAdminScope {
@@ -48,11 +48,11 @@ export class QmsAuthorizationService {
     }
   }
 
-  adminScope(actor: IdentityActor | null, requestedTenantCode?: string | null): QmsAdminScope {
+  async adminScope(actor: IdentityActor | null, requestedTenantCode?: string | null): Promise<QmsAdminScope> {
     if (!actor) throw new QmsAuthorizationError(401, 'UNAUTHORIZED', 'Unauthorized')
     if (hasGlobalOrganizationAccess(actor)) {
       const tenantId = requestedTenantCode?.trim() || null
-      if (tenantId && !this.options.organizations.hasCode(tenantId)) {
+      if (tenantId && !(await this.options.organizations.hasCode(tenantId))) {
         throw new QmsAuthorizationError(404, 'TENANT_NOT_FOUND', 'Tenant not found')
       }
       return {
@@ -64,7 +64,7 @@ export class QmsAuthorizationService {
       }
     }
     if (actor.role === 'super_admin') {
-      const tenantId = this.options.organizations.getCode(actor.orgId)
+      const tenantId = await this.options.organizations.getCode(actor.orgId)
       if (!tenantId) {
         throw new QmsAuthorizationError(403, 'TENANT_NOT_FOUND', 'Current administrator is not associated with a tenant')
       }
@@ -79,7 +79,7 @@ export class QmsAuthorizationService {
     if (actor.role !== 'admin') {
       throw new QmsAuthorizationError(403, 'FORBIDDEN', 'Insufficient permissions')
     }
-    const tenantId = this.options.organizations.getCode(actor.orgId)
+    const tenantId = await this.options.organizations.getCode(actor.orgId)
     if (!tenantId) {
       throw new QmsAuthorizationError(403, 'TENANT_NOT_FOUND', 'Current administrator is not associated with a tenant')
     }

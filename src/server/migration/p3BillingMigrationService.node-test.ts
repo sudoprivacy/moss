@@ -3,10 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { BillingRepository } from '../billing/billingRepository.js'
-import { ensureBillingSchema } from '../billing/billingSchema.js'
 import { WalletService } from '../billing/walletService.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import {
   P3BillingMigrationBlockedError,
   P3BillingMigrationService,
@@ -62,19 +60,18 @@ async function setup(initialBalance = 100) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org-3', '企业 3', 1)
   await auth.createUser({
     id: 'user-17', orgId: 'org-3', email: 'u17@example.test', name: 'u17', displayName: '用户 17',
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   })
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 3, resourceId: 'org-3', orgId: 'org-3' })
-  identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-17', orgId: 'org-3' })
-  identities.createWallet('user', 'user-17', initialBalance)
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
-  const wallet = new WalletService(db, repository, () => 1000)
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 3, resourceId: 'org-3', orgId: 'org-3' })
+  await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-17', orgId: 'org-3' })
+  await identities.createWallet('user', 'user-17', initialBalance)
+  const repository = createBillingTestRepository(db, auth.driver)
+  const wallet = new WalletService(auth.driver, repository, () => 1000)
   const secretValues = new Map<string, string>()
   const secrets = {
     async putSecret(namespace: string, key: string, value: string) {
@@ -86,7 +83,7 @@ async function setup(initialBalance = 100) {
     },
   }
   const service = new P3BillingMigrationService(
-    db, identities, repository, wallet, () => 1000, undefined, secrets,
+    auth.driver, identities, repository, wallet, () => 1000, undefined, secrets,
   )
   return { db, identities, repository, wallet, service, secretValues }
 }
@@ -95,13 +92,13 @@ void describe('P3BillingMigrationService', () => {
   void test('保留旧 ID、订单号和 Nexus Token，以可重建账本导入且不产生外部投递', async () => {
     const { db, identities, repository, wallet, service, secretValues } = await setup()
     const source = snapshot()
-    const plan = service.plan(source)
+    const plan = await service.plan(source)
     assert.equal(plan.status, 'ready')
 
     const context = migrationCommandContext('batch-p3', 'batch-p3-execute')
     const first = await service.execute(plan, context)
     const second = await service.execute(plan, context)
-    const freshPlan = service.plan(source)
+    const freshPlan = await service.plan(source)
     const third = await service.execute(freshPlan, migrationCommandContext('batch-p3-rerun', 'batch-p3-rerun-execute'))
     const verification = await service.verify(source)
 
@@ -110,15 +107,15 @@ void describe('P3BillingMigrationService', () => {
     assert.equal(first.importedLedgerEntries, 3)
     assert.equal(second.importedLedgerEntries, 0)
     assert.equal(third.importedLedgerEntries, 0)
-    assert.equal(repository.getOrderByLegacyId(7)?.orderNo, 'ORDER-7')
-    assert.equal(repository.getOrderByLegacyId(7)?.callbackAmountCents, 730)
-    assert.equal(repository.getOrderByLegacyId(7)?.callbackTime, 20)
-    assert.equal(identities.resolveNumericAliasGlobal('billing_order', 7)?.resourceId, repository.getOrderByOrderNo('ORDER-7')?.id)
-    assert.equal(identities.resolveNumericAliasGlobal('credit_application', 10)?.resourceId, repository.getCreditApplicationByLegacyId(10)?.id)
-    assert.equal(identities.resolveNumericAliasGlobal('billing_refund', 11)?.resourceId, repository.getRefundByLegacyId(11)?.id)
-    assert.deepEqual(wallet.rebuild('user', 'user-17'), { stored: 100, rebuilt: 100, difference: 0 })
-    assert.equal(repository.listRechargeActivities({ limit: 20, offset: 0 }).total, 2)
-    const account = repository.getExternalAccount('sudorouter', 'user', 'user-17')
+    assert.equal((await repository.getOrderByLegacyId(7))?.orderNo, 'ORDER-7')
+    assert.equal((await repository.getOrderByLegacyId(7))?.callbackAmountCents, 730)
+    assert.equal((await repository.getOrderByLegacyId(7))?.callbackTime, 20)
+    assert.equal((await identities.resolveNumericAliasGlobal('billing_order', 7))?.resourceId, (await repository.getOrderByOrderNo('ORDER-7'))?.id)
+    assert.equal((await identities.resolveNumericAliasGlobal('credit_application', 10))?.resourceId, (await repository.getCreditApplicationByLegacyId(10))?.id)
+    assert.equal((await identities.resolveNumericAliasGlobal('billing_refund', 11))?.resourceId, (await repository.getRefundByLegacyId(11))?.id)
+    assert.deepEqual(await wallet.rebuild('user', 'user-17'), { stored: 100, rebuilt: 100, difference: 0 })
+    assert.equal((await repository.listRechargeActivities({ limit: 20, offset: 0 })).total, 2)
+    const account = await repository.getExternalAccount('sudorouter', 'user', 'user-17')
     assert.equal(account?.externalAccountId, '91')
     assert.equal(account?.tokenSecretRef, 'nexus://moss:sudorouter-users/user-17')
     assert.equal(secretValues.get('moss:sudorouter-users:user-17'), 'sk-legacy-router-token')
@@ -131,17 +128,17 @@ void describe('P3BillingMigrationService', () => {
 
   void test('目标钱包为空时从已验证流水原子构建余额', async () => {
     const { db, repository, service } = await setup(0)
-    const plan = service.plan(snapshot())
+    const plan = await service.plan(snapshot())
     const report = await service.execute(plan, migrationCommandContext('batch-zero', 'batch-zero-execute'))
     assert.equal(report.financialDifferenceUnits, 0)
-    assert.deepEqual(repository.getWallet('user', 'user-17'), { balanceUnits: 100, version: 1 })
+    assert.deepEqual(await repository.getWallet('user', 'user-17'), { balanceUnits: 100, version: 1 })
     db.close()
   })
 
   void test('Nexus Token 缺失会阻断历史用户校验', async () => {
     const { db, service, secretValues } = await setup()
     const source = snapshot()
-    await service.execute(service.plan(source), migrationCommandContext('batch-token', 'batch-token-execute'))
+    await service.execute(await service.plan(source), migrationCommandContext('batch-token', 'batch-token-execute'))
     secretValues.clear()
     const verification = await service.verify(source)
     assert.equal(verification.status, 'mismatch')
@@ -153,7 +150,7 @@ void describe('P3BillingMigrationService', () => {
     const mismatchSetup = await setup()
     const mismatch = snapshot()
     mismatch.users[0]!.balanceUnits = 101
-    const mismatchPlan = mismatchSetup.service.plan(mismatch)
+    const mismatchPlan = await mismatchSetup.service.plan(mismatch)
     assert.equal(mismatchPlan.status, 'blocked')
     assert(mismatchPlan.issues.some(issue => issue.code === 'BALANCE_MISMATCH'))
     await assert.rejects(
@@ -167,13 +164,13 @@ void describe('P3BillingMigrationService', () => {
     pending.orders[0]!.status = 1
     pending.creditApplications[0]!.status = 'PROCESSING'
     pending.refunds[0]!.status = 0
-    const pendingPlan = pendingSetup.service.plan(pending)
+    const pendingPlan = await pendingSetup.service.plan(pending)
     assert(pendingPlan.issues.filter(issue => issue.code === 'IN_PROGRESS').length >= 3)
     pendingSetup.db.close()
 
     const orphanSetup = await setup()
     orphanSetup.db.prepare("DELETE FROM resource_numeric_aliases WHERE namespace = 'user'").run()
-    const orphanPlan = orphanSetup.service.plan(snapshot())
+    const orphanPlan = await orphanSetup.service.plan(snapshot())
     assert(orphanPlan.issues.some(issue => issue.code === 'IDENTITY_MAPPING_MISSING'))
     orphanSetup.db.close()
   })

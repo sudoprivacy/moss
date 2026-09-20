@@ -277,7 +277,8 @@ docker image rm "$RUNTIME_IMAGE" >/dev/null
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 ! docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1
 
-printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"browserUi":true,"agentHub":true,"skillStore":true,"credentials":true,"lifecycle":true}\n' \
+test -f "$DIAGNOSTICS_DIR/packaged-pg-ha.json"
+printf '{"ok":true,"version":"%s","arch":"%s","hostSession":true,"dockerSession":true,"postgresHa":true,"browserUi":true,"agentHub":true,"skillStore":true,"credentials":true,"lifecycle":true}\n' \
   "$VERSION" "$ARCH" > "$DIAGNOSTICS_DIR/release-smoke-result.json"
 
 node - "$DIAGNOSTICS_DIR" "$VERSION" "$ARCH" "$SCODE_VERSION" <<'NODE'
@@ -286,6 +287,12 @@ const path = require('node:path')
 const [diagnosticsDir, version, arch, scodeVersion] = process.argv.slice(2)
 const sessions = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'e2e-summary.json'), 'utf8'))
 const browser = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'browser-e2e-summary.json'), 'utf8'))
+const postgresHa = JSON.parse(fs.readFileSync(path.join(diagnosticsDir, 'packaged-pg-ha.json'), 'utf8'))
+if (postgresHa.status !== 'passed' || postgresHa.backend !== 'postgres' ||
+    postgresHa.instanceIds?.length !== 2 || !postgresHa.firstStart || !postgresHa.restart ||
+    postgresHa.keyRequests?.length < 5 || !/^[0-9a-f]{64}$/.test(postgresHa.bundleSha256 ?? '')) {
+  throw new Error('packaged PostgreSQL HA evidence is incomplete')
+}
 const runtime = name => sessions.runtimes.find(item => item.runtime === name)
 const resultRows = [
   ['离线安装、校验和、Docker 镜像加载', '✅'],
@@ -298,6 +305,7 @@ const resultRows = [
   [`Docker 会话聊天 \`${runtime('docker').sessionId}\``, '✅'],
   ['同版本升级不下载', '✅'],
   ['systemd 停止、启动、重启', '✅'],
+  [`PostgreSQL 双实例首启、互读写和并发重启（${postgresHa.instanceIds.join(' / ')}）`, '✅'],
   ['卸载并清理数据、容器、镜像', '✅'],
 ]
 const summaryLines = [
@@ -359,6 +367,7 @@ const reportLines = [
     '- `evidence/e2e-summary.json`：会话结果。',
     '- `evidence/browser-e2e-summary.json`：浏览器断言和截图清单。',
     '- `evidence/release-smoke-result.json`：整体验证结果。',
+    '- `evidence/packaged-pg-ha.json`：PostgreSQL 双实例启动、互读写、重启和 bundle SHA-256。',
     '- `evidence/host-scode-version.txt`、`runtime-scode-version.txt`：两种运行时版本。',
     '- `evidence/same-version-upgrade.log`：同版本升级不下载的日志。',
     '- `SHA256SUMS`：压缩包内所有证据文件的校验和。',
@@ -419,6 +428,7 @@ const htmlReport = `<!doctype html>
     <li><a href="evidence/e2e-summary.json">会话结果 JSON</a></li>
     <li><a href="evidence/browser-e2e-summary.json">浏览器断言 JSON</a></li>
     <li><a href="evidence/release-smoke-result.json">整体验证结果 JSON</a></li>
+    <li><a href="evidence/packaged-pg-ha.json">PostgreSQL 双实例验证 JSON</a></li>
     <li><a href="evidence/same-version-upgrade.log">同版本升级日志</a></li>
     <li><a href="SHA256SUMS">内部文件 SHA256</a></li>
   </ul></section>
@@ -436,6 +446,7 @@ cp "$DIAGNOSTICS_DIR/e2e-report.html" "$EVIDENCE_DIR/index.html"
 cp "$DIAGNOSTICS_DIR/e2e-summary.json" \
   "$DIAGNOSTICS_DIR/browser-e2e-summary.json" \
   "$DIAGNOSTICS_DIR/release-smoke-result.json" \
+  "$DIAGNOSTICS_DIR/packaged-pg-ha.json" \
   "$DIAGNOSTICS_DIR/host-scode-version.txt" \
   "$DIAGNOSTICS_DIR/runtime-scode-version.txt" \
   "$DIAGNOSTICS_DIR/same-version-upgrade.log" \

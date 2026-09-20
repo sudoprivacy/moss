@@ -119,6 +119,11 @@ describe('legacy session runtime schema migration', () => {
         resumeTranscriptSessionId: 'new-transcript',
         serverInstanceId: 'server-1',
       })
+
+      // Release the sqlite handle before the finally-block removes the temp
+      // directory: on Windows unlink of an open db file fails with EBUSY
+      // (Linux tolerates it, which is why this closes only on the happy path).
+      await store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

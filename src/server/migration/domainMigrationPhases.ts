@@ -70,7 +70,7 @@ export class ConfigurationMigrationPhase implements MigrationPhase {
 
   async plan(context: MigrationPlanningContext): Promise<WrappedPlan> {
     const managedImages = await this.services.managedImages.plan()
-    const configuration = this.services.configuration.plan()
+    const configuration = await this.services.configuration.plan()
     const systemConfiguration = await this.services.systemConfiguration.plan()
     const domainPlan = { managedImages, configuration, systemConfiguration }
     const issues = [managedImages, configuration, systemConfiguration].flatMap(domainIssues)
@@ -91,7 +91,7 @@ export class ConfigurationMigrationPhase implements MigrationPhase {
 
   async verify(_context: MigrationVerificationContext): Promise<MigrationPhaseVerification> {
     const managedImages = await this.services.managedImages.plan()
-    const configuration = this.services.configuration.plan()
+    const configuration = await this.services.configuration.plan()
     const systemConfiguration = await this.services.systemConfiguration.plan()
     const issues = [managedImages, configuration, systemConfiguration].flatMap(domainIssues).map(issue => issue.message)
     if (managedImages.status === 'ready' && managedImages.counts.imports > 0) {
@@ -110,12 +110,12 @@ export class DifyMigrationPhase implements MigrationPhase {
   constructor(private readonly service: DifyService) {}
 
   async plan(_context: MigrationPlanningContext): Promise<WrappedPlan> {
-    const domainPlan = this.service.plan()
+    const domainPlan = await this.service.plan()
     return wrapPlan(domainPlan, domainPlan.sourceChecksum)
   }
 
   async execute(context: MigrationExecutionContext, plan: MigrationPhasePlan) {
-    const domain = requireWrappedPlan(plan, 'Dify') as ReturnType<DifyService['plan']>
+    const domain = requireWrappedPlan(plan, 'Dify') as Awaited<ReturnType<DifyService['plan']>>
     return this.service.execute(
       domain,
       context.commandContext(`migration:phase:dify:${domain.sourceChecksum}`),
@@ -133,12 +133,12 @@ export class BillingMigrationPhase implements MigrationPhase {
   constructor(private readonly service: BillingService, private readonly source: BillingSource) {}
 
   async plan(_context: MigrationPlanningContext): Promise<WrappedPlan> {
-    const domainPlan = this.service.plan(this.source.readSnapshot())
+    const domainPlan = await this.service.plan(this.source.readSnapshot())
     return wrapPlan(domainPlan, domainPlan.sourceChecksum)
   }
 
   async execute(context: MigrationExecutionContext, plan: MigrationPhasePlan) {
-    const domain = requireWrappedPlan(plan, 'Billing') as ReturnType<BillingService['plan']>
+    const domain = requireWrappedPlan(plan, 'Billing') as Awaited<ReturnType<BillingService['plan']>>
     return this.service.execute(
       domain,
       context.commandContext(`migration:phase:billing:${domain.sourceChecksum}`),

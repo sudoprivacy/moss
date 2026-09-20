@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'node:test'
 
-import { IdentityRepository } from './identityRepository.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
 function createLegacyDatabase(): DatabaseSync {
   const db = new DatabaseSync(':memory:')
@@ -30,32 +30,32 @@ function createLegacyDatabase(): DatabaseSync {
 }
 
 void describe('Organization 企业自动化策略', () => {
-  void it('升级旧 Profile 时继承旧全局开关，之后各组织独立修改', () => {
-    const repository = new IdentityRepository(createLegacyDatabase(), {
+  void it('升级旧 Profile 时继承旧全局开关，之后各组织独立修改', async () => {
+    const repository = createIdentityTestRepository(createLegacyDatabase(), {
       legacyClientCronEnabled: false,
     })
 
-    assert.equal(repository.getOrganizationProfile('org-a')?.clientCronEnabled, false)
-    assert.equal(repository.getOrganizationProfile('org-b')?.clientCronEnabled, false)
+    assert.equal((await repository.getOrganizationProfile('org-a'))?.clientCronEnabled, false)
+    assert.equal((await repository.getOrganizationProfile('org-b'))?.clientCronEnabled, false)
 
-    repository.setOrganizationClientCronEnabled('org-a', true)
+    await repository.setOrganizationClientCronEnabled('org-a', true)
 
-    assert.equal(repository.getOrganizationProfile('org-a')?.clientCronEnabled, true)
-    assert.equal(repository.getOrganizationProfile('org-b')?.clientCronEnabled, false)
+    assert.equal((await repository.getOrganizationProfile('org-a'))?.clientCronEnabled, true)
+    assert.equal((await repository.getOrganizationProfile('org-b'))?.clientCronEnabled, false)
   })
 
-  void it('新 Organization 默认允许本地 Cron，更新其他资料不会覆盖策略', () => {
-    const repository = new IdentityRepository(createLegacyDatabase())
-    repository.putOrganizationProfile({
+  void it('新 Organization 默认允许本地 Cron，更新其他资料不会覆盖策略', async () => {
+    const repository = createIdentityTestRepository(createLegacyDatabase())
+    await repository.putOrganizationProfile({
       orgId: 'org-c', code: 'C', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })
-    assert.equal(repository.getOrganizationProfile('org-c')?.clientCronEnabled, true)
+    assert.equal((await repository.getOrganizationProfile('org-c'))?.clientCronEnabled, true)
 
-    repository.setOrganizationClientCronEnabled('org-c', false)
-    repository.putOrganizationProfile({
+    await repository.setOrganizationClientCronEnabled('org-c', false)
+    await repository.putOrganizationProfile({
       orgId: 'org-c', code: 'C', loginMethod: 'cas', localEnabled: true, cloudEnabled: true,
     })
 
-    assert.equal(repository.getOrganizationProfile('org-c')?.clientCronEnabled, false)
+    assert.equal((await repository.getOrganizationProfile('org-c'))?.clientCronEnabled, false)
   })
 })

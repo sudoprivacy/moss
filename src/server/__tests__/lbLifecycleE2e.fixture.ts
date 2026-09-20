@@ -13,6 +13,11 @@ import { RuntimeService } from '../runtimeService.js'
 import { createAuthService } from '../auth/service.js'
 import { startServer } from '../server.js'
 import type { SessionRuntimeInfo } from '../types.js'
+import {
+  ensureCompatibilityCoreSchema,
+  ensureSqliteCompatibilityDomainSchemas,
+} from '../db/compatibilitySchema.js'
+import { repairConfigAvailability } from '../configuration/configAvailabilitySchema.js'
 
 const configPath = process.env.MOSS_SERVER_CONFIG
 if (!configPath) {
@@ -23,8 +28,13 @@ const { config } = await readServerConfig(configPath)
 await ensureServerDirectories(config)
 
 const store = new DirectConnectStore(config.dbPath)
+const sqliteDb = store.requireSqliteDb()
+ensureSqliteCompatibilityDomainSchemas(sqliteDb)
+ensureCompatibilityCoreSchema(sqliteDb)
+await store.ensureDefaultConfigItems()
+await repairConfigAvailability(store.driver)
 const { service: authService } = await createAuthService({
-  db: store.db,
+  db: store,
   dbPath: config.dbPath,
   tokenTtlSec: config.tokenTtlSec,
   bootstrapAdmin: config.bootstrapAdmin,

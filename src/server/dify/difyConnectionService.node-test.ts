@@ -2,8 +2,7 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb, type AuthCenterUser } from '../authCenter/db.js'
-import { CatalogRepository } from '../catalog/catalogRepository.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { createCatalogTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { DifyConnectionService, DifyDomainError, parseNexusSecretRef } from './difyConnectionService.js'
 
 async function setup() {
@@ -11,41 +10,22 @@ async function setup() {
   const auth = new AuthCenterDb(db)
   await auth.createOrganization('org-a', 'Org A', 1)
   await auth.createOrganization('org-b', 'Org B', 1)
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      default_init_prompt TEXT, prompts_i18n TEXT, categories TEXT, avatar TEXT, skills TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, enabled_skills TEXT,
-      publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT,
-      review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
-  const identities = new IdentityRepository(db)
-  const catalog = new CatalogRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
+  const catalog = createCatalogTestRepository(db, auth.driver)
   const user: AuthCenterUser = {
     id: 'user-a', orgId: 'org-a', email: 'user-a@example.test', name: 'user-a', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   }
   await auth.createUser(user)
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
-  identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
-  identities.putIntegrationConnection({
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
+  await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
+  await identities.putIntegrationConnection({
     id: 'dify-org-a', orgId: 'org-a', providerType: 'dify', name: 'Dify A', enabled: true,
     secretRef: 'nexus://org:org-a:dify/service-api-key',
     config: { tenantId: 'tenant-a', systemAccountId: 'account-a', baseUrl: 'https://dify.example.test' },
   })
-  catalog.createAgent({
+  await catalog.createAgent({
     id: 'agent-a', orgId: 'org-a', name: 'Agent A', authorId: 'admin-a', status: 'approved',
     providerType: 'dify', supportedModes: 'cloud',
     providerBinding: { connectionId: 'dify-org-a', appId: 'app-a', mode: 'agent-chat', tenantId: 'tenant-a' },
@@ -86,7 +66,7 @@ void describe('DifyConnectionService', () => {
     const { db, catalog, service, reads } = await setup()
     db.prepare('UPDATE tenant_assistants SET visible_to = ? WHERE id = ?')
       .run(JSON.stringify({ user_ids: ['someone-else'] }), 'agent-a')
-    assert(catalog.findAgent('agent-a'))
+    assert(await catalog.findAgent('agent-a'))
 
     await assert.rejects(
       () => service.resolveRuntimeContext(actor, 'agent-a', visibility),
@@ -98,13 +78,13 @@ void describe('DifyConnectionService', () => {
 
   void test('never falls back to a connection owned by another organization', async () => {
     const { db, identities, catalog, service, reads } = await setup()
-    identities.putIntegrationConnection({
+    await identities.putIntegrationConnection({
       id: 'dify-org-b', orgId: 'org-b', providerType: 'dify', name: 'Dify B', enabled: true,
       secretRef: 'nexus://org:org-b:dify/service-api-key', config: { tenantId: 'tenant-b' },
     })
     db.prepare('UPDATE tenant_assistants SET provider_binding = ? WHERE id = ?')
       .run(JSON.stringify({ connectionId: 'dify-org-b', appId: 'app-b', mode: 'agent-chat' }), 'agent-a')
-    assert(catalog.findAgent('agent-a'))
+    assert(await catalog.findAgent('agent-a'))
 
     await assert.rejects(
       () => service.resolveRuntimeContext(actor, 'agent-a', visibility),
@@ -117,7 +97,7 @@ void describe('DifyConnectionService', () => {
   void test('fails closed when a permanent legacy alias is missing', async () => {
     const { db, identities, service, reads } = await setup()
     db.prepare("DELETE FROM resource_numeric_aliases WHERE namespace = 'user' AND resource_id = 'user-a'").run()
-    assert.equal(identities.getNumericAlias('user', 'user-a'), null)
+    assert.equal(await identities.getNumericAlias('user', 'user-a'), null)
 
     await assert.rejects(
       () => service.resolveRuntimeContext(actor, 'agent-a', visibility),
@@ -140,7 +120,7 @@ void describe('DifyConnectionService', () => {
       connectionId: 'dify-org-a', appId: 'app-a', mode: 'workflow', tenantId: 'tenant-a',
       appSecretRef: 'nexus://org:org-a:dify/apps/app-a',
     }), 'agent-a')
-    assert(catalog.findAgent('agent-a'))
+    assert(await catalog.findAgent('agent-a'))
 
     const context = await service.resolveEnhancementContext(actor, 'agent-a', visibility)
 
@@ -153,7 +133,7 @@ void describe('DifyConnectionService', () => {
 
   void test('resolves pure dataset enhancement without requiring an app id or app key', async () => {
     const { db, catalog, service, reads } = await setup()
-    catalog.createAgent({
+    await catalog.createAgent({
       id: 'rag-a', orgId: 'org-a', name: 'RAG A', authorId: 'admin-a', status: 'approved',
       providerType: 'dify', supportedModes: 'both',
       providerBinding: { connectionId: 'dify-org-a', mode: 'rag-only', datasetIds: ['dataset-1', 'dataset-2'] },
@@ -183,7 +163,7 @@ void describe('DifyConnectionService', () => {
     assert.equal(resolved.connectionId, 'dify-org-a')
     assert.equal(resolved.apiKey, 'service-api-secret')
 
-    identities.putIntegrationConnection({
+    await identities.putIntegrationConnection({
       id: 'dify-org-a-second', orgId: 'org-a', providerType: 'dify', name: 'Dify A2', enabled: true,
       secretRef: 'nexus://org:org-a:dify/service-api-key-2', config: { tenantId: 'tenant-a2' },
     })

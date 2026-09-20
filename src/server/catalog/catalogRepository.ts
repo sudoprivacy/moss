@@ -1,7 +1,6 @@
-import type { DatabaseSync } from 'node:sqlite'
+import type { DbDriver, SqlRow } from '../db/driver.js'
 import type { VisibilityFilter, VisibleTo } from '../visibilityFilter.js'
 import { isVisibleTo } from '../visibilityFilter.js'
-import { ensureCatalogSchema } from './catalogSchema.js'
 
 export type CatalogProviderType = 'local' | 'moss_runtime' | 'dify'
 export type CatalogSupportedModes = 'local' | 'cloud' | 'both'
@@ -92,12 +91,8 @@ type ListOptions = {
   includeDisabled?: boolean
 }
 
-type SqlRow = Record<string, unknown>
-
 export class CatalogRepository {
-  constructor(private readonly db: DatabaseSync) {
-    ensureCatalogSchema(db)
-  }
+  constructor(readonly driver: DbDriver) {}
 
   createAgent(input: {
     id: string
@@ -131,10 +126,14 @@ export class CatalogRepository {
     authorName?: string | null
     createdAt?: number
     updatedAt?: number
-  }): CatalogAgent {
+  }): Promise<CatalogAgent> {
+    return this.createAgentAsync(input)
+  }
+
+  private async createAgentAsync(input: Parameters<CatalogRepository['createAgent']>[0]): Promise<CatalogAgent> {
     assertSafeProviderBinding(input.providerBinding)
     const timestamp = input.updatedAt ?? input.createdAt ?? Date.now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO tenant_assistants (
         id, name, display_name, profession, description, default_init_prompt, prompts_i18n,
         categories, avatar, skills, prompt_file, sort_order, version, author_id, author_name, status,
@@ -142,7 +141,7 @@ export class CatalogRepository {
         provider_type, provider_binding, supported_modes, availability, source_provider, source_resource_id,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id,
       input.name,
       input.displayName ?? null,
@@ -174,8 +173,8 @@ export class CatalogRepository {
       input.sourceResourceId ?? input.id,
       input.createdAt ?? timestamp,
       timestamp,
-    )
-    return this.getAgent(input.id, input.orgId)!
+    ])
+    return (await this.getAgent(input.id, input.orgId))!
   }
 
   createSkill(input: {
@@ -207,16 +206,20 @@ export class CatalogRepository {
     authorName?: string | null
     createdAt?: number
     updatedAt?: number
-  }): CatalogSkill {
+  }): Promise<CatalogSkill> {
+    return this.createSkillAsync(input)
+  }
+
+  private async createSkillAsync(input: Parameters<CatalogRepository['createSkill']>[0]): Promise<CatalogSkill> {
     const timestamp = input.updatedAt ?? input.createdAt ?? Date.now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO tenant_skills (
         id, name, display_name, description, category, categories, emoji, icon, homepage,
         applicable_scenarios, core_features, sort_order, version, author_id, author_name, status,
         source_url, checksum, file_path, enabled, visible_to, org_id,
         supported_modes, availability, source_provider, source_resource_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id,
       input.name,
       input.displayName ?? null,
@@ -245,41 +248,41 @@ export class CatalogRepository {
       input.sourceResourceId ?? input.id,
       input.createdAt ?? timestamp,
       timestamp,
-    )
-    return this.getSkill(input.id, input.orgId)!
+    ])
+    return (await this.getSkill(input.id, input.orgId))!
   }
 
-  getAgent(id: string, orgId: string): CatalogAgent | null {
-    const row = this.db.prepare('SELECT * FROM tenant_assistants WHERE id = ? AND org_id = ?').get(id, orgId) as SqlRow | undefined
+  async getAgent(id: string, orgId: string): Promise<CatalogAgent | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM tenant_assistants WHERE id = ? AND org_id = ?', [id, orgId])
     return row ? mapAgent(row) : null
   }
 
-  getSkill(id: string, orgId: string): CatalogSkill | null {
-    const row = this.db.prepare('SELECT * FROM tenant_skills WHERE id = ? AND org_id = ?').get(id, orgId) as SqlRow | undefined
+  async getSkill(id: string, orgId: string): Promise<CatalogSkill | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM tenant_skills WHERE id = ? AND org_id = ?', [id, orgId])
     return row ? mapSkill(row) : null
   }
 
-  findAgent(id: string): CatalogAgent | null {
-    const row = this.db.prepare('SELECT * FROM tenant_assistants WHERE id = ?').get(id) as SqlRow | undefined
+  async findAgent(id: string): Promise<CatalogAgent | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM tenant_assistants WHERE id = ?', [id])
     return row ? mapAgent(row) : null
   }
 
-  findSkill(id: string): CatalogSkill | null {
-    const row = this.db.prepare('SELECT * FROM tenant_skills WHERE id = ?').get(id) as SqlRow | undefined
+  async findSkill(id: string): Promise<CatalogSkill | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM tenant_skills WHERE id = ?', [id])
     return row ? mapSkill(row) : null
   }
 
-  findAgentByName(name: string, orgId: string): CatalogAgent | null {
-    const row = this.db.prepare(`
+  async findAgentByName(name: string, orgId: string): Promise<CatalogAgent | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM tenant_assistants WHERE org_id = ? AND name = ? LIMIT 1
-    `).get(orgId, name) as SqlRow | undefined
+    `, [orgId, name])
     return row ? mapAgent(row) : null
   }
 
-  findSkillByName(name: string, orgId: string): CatalogSkill | null {
-    const row = this.db.prepare(`
+  async findSkillByName(name: string, orgId: string): Promise<CatalogSkill | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM tenant_skills WHERE org_id = ? AND name = ? LIMIT 1
-    `).get(orgId, name) as SqlRow | undefined
+    `, [orgId, name])
     return row ? mapSkill(row) : null
   }
 
@@ -305,11 +308,19 @@ export class CatalogRepository {
     availability?: CatalogAvailability
     enabled?: boolean
     status?: string
-  }): CatalogAgent | null {
-    const current = this.getAgent(id, orgId)
+  }): Promise<CatalogAgent | null> {
+    return this.updateAgentConfigurationAsync(id, orgId, patch)
+  }
+
+  private async updateAgentConfigurationAsync(
+    id: string,
+    orgId: string,
+    patch: Parameters<CatalogRepository['updateAgentConfiguration']>[2],
+  ): Promise<CatalogAgent | null> {
+    const current = await this.getAgent(id, orgId)
     if (!current) return null
     assertSafeProviderBinding(patch.providerBinding)
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE tenant_assistants SET
         name = ?, display_name = ?, profession = ?, description = ?, default_init_prompt = ?,
         prompts_i18n = ?, categories = ?, avatar = ?, skills = ?, prompt_file = ?,
@@ -317,7 +328,7 @@ export class CatalogRepository {
         provider_type = ?, provider_binding = ?, supported_modes = ?, availability = ?,
         enabled = ?, status = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       patch.name ?? current.name,
       patch.displayName === undefined ? current.displayName : patch.displayName,
       patch.profession === undefined ? current.profession : patch.profession,
@@ -344,97 +355,97 @@ export class CatalogRepository {
       (patch.enabled ?? current.enabled) ? 1 : 0,
       patch.status ?? current.status,
       Date.now(), id, orgId,
-    )
+    ])
     return this.getAgent(id, orgId)
   }
 
-  reviewAgent(id: string, orgId: string, approved: boolean, reviewedBy: string, reviewNote?: string): boolean {
+  async reviewAgent(id: string, orgId: string, approved: boolean, reviewedBy: string, reviewNote?: string): Promise<boolean> {
     const timestamp = Date.now()
-    return this.db.prepare(`
+    return await this.driver.run(`
       UPDATE tenant_assistants
       SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       approved ? 'approved' : 'rejected', reviewedBy, timestamp, reviewNote ?? null,
       timestamp, id, orgId,
-    ).changes === 1
+    ]) === 1
   }
 
-  reviewSkill(id: string, orgId: string, approved: boolean, reviewedBy: string, reviewNote?: string): boolean {
+  async reviewSkill(id: string, orgId: string, approved: boolean, reviewedBy: string, reviewNote?: string): Promise<boolean> {
     const timestamp = Date.now()
-    return this.db.prepare(`
+    return await this.driver.run(`
       UPDATE tenant_skills
       SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
-    `).run(
+    `, [
       approved ? 'approved' : 'rejected', reviewedBy, timestamp, reviewNote ?? null,
       timestamp, id, orgId,
-    ).changes === 1
+    ]) === 1
   }
 
-  deleteAgent(id: string, orgId: string): boolean {
-    const deleted = this.db.prepare('DELETE FROM tenant_assistants WHERE id = ? AND org_id = ?').run(id, orgId).changes === 1
+  async deleteAgent(id: string, orgId: string): Promise<boolean> {
+    const deleted = await this.driver.run('DELETE FROM tenant_assistants WHERE id = ? AND org_id = ?', [id, orgId]) === 1
     if (!deleted) return false
-    this.db.prepare(`
+    await this.driver.run(`
       DELETE FROM resource_external_aliases
       WHERE resource_type = 'agent' AND resource_id = ? AND org_id = ?
-    `).run(id, orgId)
-    this.db.prepare(`
+    `, [id, orgId])
+    await this.driver.run(`
       DELETE FROM catalog_resource_org_assignments WHERE resource_type = 'agent' AND resource_id = ?
-    `).run(id)
+    `, [id])
     return true
   }
 
-  deleteSkill(id: string, orgId: string): boolean {
-    const deleted = this.db.prepare('DELETE FROM tenant_skills WHERE id = ? AND org_id = ?').run(id, orgId).changes === 1
+  async deleteSkill(id: string, orgId: string): Promise<boolean> {
+    const deleted = await this.driver.run('DELETE FROM tenant_skills WHERE id = ? AND org_id = ?', [id, orgId]) === 1
     if (!deleted) return false
-    this.db.prepare(`
+    await this.driver.run(`
       DELETE FROM resource_external_aliases
       WHERE resource_type = 'skill' AND resource_id = ? AND org_id = ?
-    `).run(id, orgId)
-    this.db.prepare(`
+    `, [id, orgId])
+    await this.driver.run(`
       DELETE FROM catalog_resource_org_assignments WHERE resource_type = 'skill' AND resource_id = ?
-    `).run(id)
+    `, [id])
     return true
   }
 
-  listAgents(options: ListOptions): { items: CatalogAgent[]; hasMore: boolean; nextCursor: string | null } {
+  async listAgents(options: ListOptions): Promise<{ items: CatalogAgent[]; hasMore: boolean; nextCursor: string | null }> {
     return paginate(
-      this.db.prepare(`
+      await this.driver.all<SqlRow>(`
         SELECT * FROM tenant_assistants resource
         WHERE resource.org_id = ? OR resource.availability = 'all' OR EXISTS (
           SELECT 1 FROM catalog_resource_org_assignments assignment
           WHERE assignment.resource_type = 'agent' AND assignment.resource_id = resource.id AND assignment.org_id = ?
         )
         ORDER BY resource.updated_at DESC, resource.id DESC
-      `).all(options.orgId, options.orgId) as SqlRow[],
+      `, [options.orgId, options.orgId]),
       options,
       mapAgent,
     )
   }
 
-  listSkills(options: ListOptions): { items: CatalogSkill[]; hasMore: boolean; nextCursor: string | null } {
+  async listSkills(options: ListOptions): Promise<{ items: CatalogSkill[]; hasMore: boolean; nextCursor: string | null }> {
     return paginate(
-      this.db.prepare(`
+      await this.driver.all<SqlRow>(`
         SELECT * FROM tenant_skills resource
         WHERE resource.org_id = ? OR resource.availability = 'all' OR EXISTS (
           SELECT 1 FROM catalog_resource_org_assignments assignment
           WHERE assignment.resource_type = 'skill' AND assignment.resource_id = resource.id AND assignment.org_id = ?
         )
         ORDER BY resource.updated_at DESC, resource.id DESC
-      `).all(options.orgId, options.orgId) as SqlRow[],
+      `, [options.orgId, options.orgId]),
       options,
       mapSkill,
     )
   }
 
-  listCategories(options: Omit<ListOptions, 'category' | 'cursor' | 'limit'> & { type: CatalogResourceType }): string[] {
+  async listCategories(options: Omit<ListOptions, 'category' | 'cursor' | 'limit'> & { type: CatalogResourceType }): Promise<string[]> {
     const categories = new Set<string>()
     let cursor: string | undefined
     do {
       const page = options.type === 'agent'
-        ? this.listAgents({ ...options, cursor, limit: 100 })
-        : this.listSkills({ ...options, cursor, limit: 100 })
+        ? await this.listAgents({ ...options, cursor, limit: 100 })
+        : await this.listSkills({ ...options, cursor, limit: 100 })
       for (const item of page.items) {
         if ('category' in item && item.category) categories.add(item.category)
         for (const category of item.categories) if (category) categories.add(category)
@@ -444,37 +455,46 @@ export class CatalogRepository {
     return [...categories]
   }
 
-  assignToOrganization(resourceType: CatalogResourceType, resourceId: string, orgId: string): void {
-    this.db.prepare(`
-      INSERT OR IGNORE INTO catalog_resource_org_assignments (resource_type, resource_id, org_id, created_at)
+  async assignToOrganization(resourceType: CatalogResourceType, resourceId: string, orgId: string): Promise<void> {
+    await this.driver.run(`
+      INSERT INTO catalog_resource_org_assignments (resource_type, resource_id, org_id, created_at)
       VALUES (?, ?, ?, ?)
-    `).run(resourceType, resourceId, orgId, Date.now())
+      ON CONFLICT (resource_type, resource_id, org_id) DO NOTHING
+    `, [resourceType, resourceId, orgId, Date.now()])
   }
 
   replaceOrganizationAssignments(
     resourceType: CatalogResourceType,
     resourceId: string,
     orgIds: string[],
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    return this.replaceOrganizationAssignmentsAsync(resourceType, resourceId, orgIds)
+  }
+
+  private async replaceOrganizationAssignmentsAsync(
+    resourceType: CatalogResourceType,
+    resourceId: string,
+    orgIds: string[],
+  ): Promise<void> {
+    await this.driver.run(`
       DELETE FROM catalog_resource_org_assignments
       WHERE resource_type = ? AND resource_id = ?
-    `).run(resourceType, resourceId)
+    `, [resourceType, resourceId])
     for (const orgId of new Set(orgIds.filter(Boolean))) {
-      this.assignToOrganization(resourceType, resourceId, orgId)
+      await this.assignToOrganization(resourceType, resourceId, orgId)
     }
   }
 
-  listAssignedOrganizationIds(resourceType: CatalogResourceType, resourceId: string): string[] {
-    return (this.db.prepare(`
+  async listAssignedOrganizationIds(resourceType: CatalogResourceType, resourceId: string): Promise<string[]> {
+    return (await this.driver.all<{ org_id: string }>(`
       SELECT org_id FROM catalog_resource_org_assignments
       WHERE resource_type = ? AND resource_id = ? ORDER BY org_id
-    `).all(resourceType, resourceId) as Array<{ org_id: string }>).map(row => row.org_id)
+    `, [resourceType, resourceId])).map(row => row.org_id)
   }
 
-  isAvailableToOrganization(resourceType: CatalogResourceType, resourceId: string, orgId: string): boolean {
+  async isAvailableToOrganization(resourceType: CatalogResourceType, resourceId: string, orgId: string): Promise<boolean> {
     const table = resourceType === 'agent' ? 'tenant_assistants' : 'tenant_skills'
-    return Boolean(this.db.prepare(`
+    return Boolean(await this.driver.get<SqlRow>(`
       SELECT 1 FROM ${table} resource
       WHERE resource.id = ? AND (
         resource.org_id = ? OR resource.availability = 'all' OR EXISTS (
@@ -482,7 +502,7 @@ export class CatalogRepository {
           WHERE assignment.resource_type = ? AND assignment.resource_id = resource.id AND assignment.org_id = ?
         )
       )
-    `).get(resourceId, orgId, resourceType, orgId))
+    `, [resourceId, orgId, resourceType, orgId]))
   }
 
   bindExternalIdentity(input: {
@@ -494,19 +514,23 @@ export class CatalogRepository {
     providerId: string
     externalId: string
     createdAt?: number
-  }): void {
+  }): Promise<void> {
+    return this.bindExternalIdentityAsync(input)
+  }
+
+  private async bindExternalIdentityAsync(input: Parameters<CatalogRepository['bindExternalIdentity']>[0]): Promise<void> {
     const exists = input.resourceType === 'agent'
-      ? this.getAgent(input.resourceId, input.orgId)
-      : this.getSkill(input.resourceId, input.orgId)
+      ? await this.getAgent(input.resourceId, input.orgId)
+      : await this.getSkill(input.resourceId, input.orgId)
     if (!exists) throw new CatalogPolicyError('RESOURCE_NOT_FOUND', '目录资源不存在')
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO resource_external_aliases (
         id, org_id, resource_type, resource_id, provider_type, provider_id, external_id, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.orgId, input.resourceType, input.resourceId, input.providerType,
       input.providerId, input.externalId, input.createdAt ?? Date.now(),
-    )
+    ])
   }
 
   resolveExternalIdentity(input: {
@@ -515,21 +539,27 @@ export class CatalogRepository {
     providerType: string
     providerId: string
     externalId: string
-  }): string | null {
-    const row = this.db.prepare(`
+  }): Promise<string | null> {
+    return this.resolveExternalIdentityAsync(input)
+  }
+
+  private async resolveExternalIdentityAsync(
+    input: Parameters<CatalogRepository['resolveExternalIdentity']>[0],
+  ): Promise<string | null> {
+    const row = await this.driver.get<{ resource_id: string }>(`
       SELECT resource_id FROM resource_external_aliases
       WHERE org_id = ? AND resource_type = ? AND provider_type = ? AND provider_id = ? AND external_id = ?
-    `).get(
+    `, [
       input.orgId, input.resourceType, input.providerType, input.providerId, input.externalId,
-    ) as { resource_id: string } | undefined
+    ])
     return row?.resource_id ?? null
   }
 
-  getCommandResult<T>(commandType: string, idempotencyKey: string): T | null {
-    const row = this.db.prepare(`
+  async getCommandResult<T>(commandType: string, idempotencyKey: string): Promise<T | null> {
+    const row = await this.driver.get<{ result_json: string }>(`
       SELECT result_json FROM command_executions
       WHERE command_type = ? AND idempotency_key = ? LIMIT 1
-    `).get(commandType, idempotencyKey) as { result_json: string } | undefined
+    `, [commandType, idempotencyKey])
     return row ? JSON.parse(row.result_json) as T : null
   }
 
@@ -538,17 +568,17 @@ export class CatalogRepository {
     idempotencyKey: string,
     contextSource: 'online' | 'migration' | 'replay',
     result: unknown,
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    return this.driver.run(`
       INSERT INTO command_executions (command_type, idempotency_key, context_source, result_json, created_at)
       VALUES (?, ?, ?, ?, ?)
-    `).run(commandType, idempotencyKey, contextSource, JSON.stringify(result), Date.now())
+    `, [commandType, idempotencyKey, contextSource, JSON.stringify(result), Date.now()]).then(() => undefined)
   }
 
-  clearCommandResult(commandType: string, idempotencyKey: string): void {
-    this.db.prepare(`
+  async clearCommandResult(commandType: string, idempotencyKey: string): Promise<void> {
+    await this.driver.run(`
       DELETE FROM command_executions WHERE command_type = ? AND idempotency_key = ?
-    `).run(commandType, idempotencyKey)
+    `, [commandType, idempotencyKey])
   }
 }
 

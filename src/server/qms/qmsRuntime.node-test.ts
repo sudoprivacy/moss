@@ -58,7 +58,7 @@ void describe('QMS runtime lifecycle', () => {
     let created = false
     const result = await startQmsRuntime({
       config: { ...config(), enabled: false }, ownerId: 'instance-1',
-      organizations: { getCode: () => null, hasCode: () => false },
+      organizations: { async getCode() { return null }, async hasCode() { return false } },
       secrets: { get: () => undefined, put: async () => undefined },
       dependencies: {
         createStore: () => { created = true; return new FakeStore() },
@@ -74,7 +74,7 @@ void describe('QMS runtime lifecycle', () => {
     const redis = new FakeRedis()
     const runtime = await startQmsRuntime({
       config: config(), ownerId: 'instance-1',
-      organizations: { getCode: orgId => orgId === 'org-a' ? 'tenant-a' : null, hasCode: code => code === 'tenant-a' },
+      organizations: { async getCode(orgId) { return orgId === 'org-a' ? 'tenant-a' : null }, async hasCode(code) { return code === 'tenant-a' } },
       secrets: { get: () => undefined, put: async () => undefined },
       dependencies: { createStore: () => store, createRedis: () => redis },
     })
@@ -99,7 +99,7 @@ void describe('QMS runtime lifecycle', () => {
 
     await assert.rejects(() => startQmsRuntime({
       config: config(), ownerId: 'instance-1',
-      organizations: { getCode: () => null, hasCode: () => false },
+      organizations: { async getCode() { return null }, async hasCode() { return false } },
       secrets: { get: () => undefined, put: async () => undefined },
       dependencies: { createStore: () => store, createRedis: () => redis },
     }), /redis unavailable/)

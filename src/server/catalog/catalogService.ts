@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import type { VisibilityFilter, VisibleTo } from '../visibilityFilter.js'
 import {
   CatalogRepository,
+  type CatalogAgent,
   type CatalogProviderType,
+  type CatalogSkill,
   type CatalogSupportedModes,
 } from './catalogRepository.js'
 
@@ -19,7 +19,6 @@ export class CatalogDomainError extends Error {
 
 export class CatalogService {
   constructor(
-    private readonly db: DatabaseSync,
     private readonly repository: CatalogRepository,
   ) {}
 
@@ -47,27 +46,34 @@ export class CatalogService {
     supportedModes: CatalogSupportedModes
     availability?: 'organization' | 'all' | 'assigned'
     externalIdentity?: { providerType: string; providerId: string; externalId: string }
-  }, context: CommandContext) {
+  }, context: CommandContext): Promise<Awaited<ReturnType<CatalogRepository['createAgent']>>> {
+    return this.createAgentAsync(input, context)
+  }
+
+  private async createAgentAsync(
+    input: Parameters<CatalogService['createAgent']>[0],
+    context: CommandContext,
+  ): Promise<Awaited<ReturnType<CatalogRepository['createAgent']>>> {
     assertTrustedCommandContext(context)
-    const previous = this.repository.getCommandResult<{ resourceId: string }>(
+    const previous = await this.repository.getCommandResult<{ resourceId: string }>(
       'catalog.create_agent', context.idempotencyKey,
     )
     const orgId = input.orgId ?? input.actor.orgId
     this.assertCanCreate(input.actor, orgId)
     if (previous) {
-      const existing = this.repository.getAgent(previous.resourceId, orgId)
+      const existing = await this.repository.getAgent(previous.resourceId, orgId)
       if (existing) return existing
     }
     const id = input.id ?? randomUUID()
-    return runInTransaction(this.db, () => {
-      const repeated = this.repository.getCommandResult<{ resourceId: string }>(
+    return this.repository.driver.transaction(async () => {
+      const repeated = await this.repository.getCommandResult<{ resourceId: string }>(
         'catalog.create_agent', context.idempotencyKey,
       )
       if (repeated) {
-        const existing = this.repository.getAgent(repeated.resourceId, orgId)
+        const existing = await this.repository.getAgent(repeated.resourceId, orgId)
         if (existing) return existing
       }
-      const agent = this.repository.createAgent({
+      const agent = await this.repository.createAgent({
         id,
         orgId,
         name: input.name,
@@ -95,7 +101,7 @@ export class CatalogService {
         sourceResourceId: input.externalIdentity?.externalId ?? id,
       })
       if (input.externalIdentity) {
-        this.repository.bindExternalIdentity({
+        await this.repository.bindExternalIdentity({
           id: randomUUID(),
           orgId,
           resourceType: 'agent',
@@ -103,7 +109,7 @@ export class CatalogService {
           ...input.externalIdentity,
         })
       }
-      this.repository.recordCommandResult(
+      await this.repository.recordCommandResult(
         'catalog.create_agent', context.idempotencyKey, context.source, { resourceId: agent.id },
       )
       return agent
@@ -132,27 +138,34 @@ export class CatalogService {
     supportedModes: CatalogSupportedModes
     availability?: 'organization' | 'all' | 'assigned'
     externalIdentity?: { providerType: string; providerId: string; externalId: string }
-  }, context: CommandContext) {
+  }, context: CommandContext): Promise<Awaited<ReturnType<CatalogRepository['createSkill']>>> {
+    return this.createSkillAsync(input, context)
+  }
+
+  private async createSkillAsync(
+    input: Parameters<CatalogService['createSkill']>[0],
+    context: CommandContext,
+  ): Promise<Awaited<ReturnType<CatalogRepository['createSkill']>>> {
     assertTrustedCommandContext(context)
-    const previous = this.repository.getCommandResult<{ resourceId: string }>(
+    const previous = await this.repository.getCommandResult<{ resourceId: string }>(
       'catalog.create_skill', context.idempotencyKey,
     )
     const orgId = input.orgId ?? input.actor.orgId
     this.assertCanCreate(input.actor, orgId)
     if (previous) {
-      const existing = this.repository.getSkill(previous.resourceId, orgId)
+      const existing = await this.repository.getSkill(previous.resourceId, orgId)
       if (existing) return existing
     }
     const id = input.id ?? randomUUID()
-    return runInTransaction(this.db, () => {
-      const repeated = this.repository.getCommandResult<{ resourceId: string }>(
+    return this.repository.driver.transaction(async () => {
+      const repeated = await this.repository.getCommandResult<{ resourceId: string }>(
         'catalog.create_skill', context.idempotencyKey,
       )
       if (repeated) {
-        const existing = this.repository.getSkill(repeated.resourceId, orgId)
+        const existing = await this.repository.getSkill(repeated.resourceId, orgId)
         if (existing) return existing
       }
-      const skill = this.repository.createSkill({
+      const skill = await this.repository.createSkill({
         id,
         orgId,
         name: input.name,
@@ -178,11 +191,11 @@ export class CatalogService {
         sourceResourceId: input.externalIdentity?.externalId ?? id,
       })
       if (input.externalIdentity) {
-        this.repository.bindExternalIdentity({
+        await this.repository.bindExternalIdentity({
           id: randomUUID(), orgId, resourceType: 'skill', resourceId: id, ...input.externalIdentity,
         })
       }
-      this.repository.recordCommandResult(
+      await this.repository.recordCommandResult(
         'catalog.create_skill', context.idempotencyKey, context.source, { resourceId: skill.id },
       )
       return skill
@@ -283,51 +296,51 @@ export class CatalogService {
     })
   }
 
-  reviewSkill(input: {
+  async reviewSkill(input: {
     actor: IdentityActor
     orgId?: string
     skillId: string
     approved: boolean
     reviewNote?: string
-  }): void {
+  }): Promise<void> {
     const orgId = input.orgId ?? input.actor.orgId
     this.assertCanManage(input.actor, orgId)
-    runInTransaction(this.db, () => {
-      if (!this.repository.reviewSkill(input.skillId, orgId, input.approved, input.actor.userId, input.reviewNote)) {
+    await this.repository.driver.transaction(async () => {
+      if (!(await this.repository.reviewSkill(input.skillId, orgId, input.approved, input.actor.userId, input.reviewNote))) {
         throw new CatalogDomainError('SKILL_NOT_FOUND', 'Skill 不存在')
       }
     })
   }
 
-  reviewAgent(input: {
+  async reviewAgent(input: {
     actor: IdentityActor
     orgId?: string
     agentId: string
     approved: boolean
     reviewNote?: string
-  }): void {
+  }): Promise<void> {
     const orgId = input.orgId ?? input.actor.orgId
     this.assertCanManage(input.actor, orgId)
-    runInTransaction(this.db, () => {
-      if (!this.repository.reviewAgent(input.agentId, orgId, input.approved, input.actor.userId, input.reviewNote)) {
+    await this.repository.driver.transaction(async () => {
+      if (!(await this.repository.reviewAgent(input.agentId, orgId, input.approved, input.actor.userId, input.reviewNote))) {
         throw new CatalogDomainError('AGENT_NOT_FOUND', 'Agent 不存在')
       }
     })
   }
 
-  deleteAgent(actor: IdentityActor, agentId: string, orgId = actor.orgId): void {
+  async deleteAgent(actor: IdentityActor, agentId: string, orgId = actor.orgId): Promise<void> {
     this.assertCanManage(actor, orgId)
-    runInTransaction(this.db, () => {
-      if (!this.repository.deleteAgent(agentId, orgId)) {
+    await this.repository.driver.transaction(async () => {
+      if (!(await this.repository.deleteAgent(agentId, orgId))) {
         throw new CatalogDomainError('AGENT_NOT_FOUND', 'Agent 不存在')
       }
     })
   }
 
-  deleteSkill(actor: IdentityActor, skillId: string, orgId = actor.orgId): void {
+  async deleteSkill(actor: IdentityActor, skillId: string, orgId = actor.orgId): Promise<void> {
     this.assertCanManage(actor, orgId)
-    runInTransaction(this.db, () => {
-      if (!this.repository.deleteSkill(skillId, orgId)) {
+    await this.repository.driver.transaction(async () => {
+      if (!(await this.repository.deleteSkill(skillId, orgId))) {
         throw new CatalogDomainError('SKILL_NOT_FOUND', 'Skill 不存在')
       }
     })
@@ -351,7 +364,7 @@ export class CatalogService {
     }
   }
 
-  private importResource<T extends 'agent' | 'skill'>(
+  private async importResource<T extends 'agent' | 'skill'>(
     kind: T,
     input: T extends 'agent'
       ? Parameters<CatalogRepository['createAgent']>[0] & {
@@ -365,46 +378,46 @@ export class CatalogService {
           externalIdentity?: { providerType: string; providerId: string; externalId: string }
         },
     context: CommandContext,
-  ): T extends 'agent' ? ReturnType<CatalogRepository['createAgent']> : ReturnType<CatalogRepository['createSkill']> {
+  ): Promise<T extends 'agent' ? CatalogAgent : CatalogSkill> {
     const commandType = `catalog.import_${kind}`
-    const previous = this.repository.getCommandResult<{ resourceId: string }>(commandType, context.idempotencyKey)
+    const previous = await this.repository.getCommandResult<{ resourceId: string }>(commandType, context.idempotencyKey)
     if (previous) {
       const existing = kind === 'agent'
-        ? this.repository.getAgent(previous.resourceId, input.orgId)
-        : this.repository.getSkill(previous.resourceId, input.orgId)
+        ? await this.repository.getAgent(previous.resourceId, input.orgId)
+        : await this.repository.getSkill(previous.resourceId, input.orgId)
       if (existing) return existing as never
     }
 
-    return runInTransaction(this.db, () => {
-      const repeated = this.repository.getCommandResult<{ resourceId: string }>(commandType, context.idempotencyKey)
+    return this.repository.driver.transaction(async () => {
+      const repeated = await this.repository.getCommandResult<{ resourceId: string }>(commandType, context.idempotencyKey)
       if (repeated) {
         const existing = kind === 'agent'
-          ? this.repository.getAgent(repeated.resourceId, input.orgId)
-          : this.repository.getSkill(repeated.resourceId, input.orgId)
+          ? await this.repository.getAgent(repeated.resourceId, input.orgId)
+          : await this.repository.getSkill(repeated.resourceId, input.orgId)
         if (existing) return existing as never
       }
       const { actor: _actor, assignedOrgIds, externalIdentity, ...record } = input
       const resource = kind === 'agent'
-        ? this.repository.createAgent({
+        ? await this.repository.createAgent({
             ...(record as Parameters<CatalogRepository['createAgent']>[0]),
             sourceProvider: externalIdentity?.providerType ?? record.sourceProvider ?? 'moss',
             sourceResourceId: externalIdentity?.externalId ?? record.sourceResourceId ?? record.id,
           })
-        : this.repository.createSkill({
+        : await this.repository.createSkill({
             ...(record as Parameters<CatalogRepository['createSkill']>[0]),
             sourceProvider: externalIdentity?.providerType ?? record.sourceProvider ?? 'moss',
             sourceResourceId: externalIdentity?.externalId ?? record.sourceResourceId ?? record.id,
           })
       if (externalIdentity) {
-        this.repository.bindExternalIdentity({
+        await this.repository.bindExternalIdentity({
           id: randomUUID(), orgId: input.orgId, resourceType: kind,
           resourceId: resource.id, ...externalIdentity,
         })
       }
       for (const orgId of new Set(assignedOrgIds ?? [])) {
-        if (orgId !== input.orgId) this.repository.assignToOrganization(kind, resource.id, orgId)
+        if (orgId !== input.orgId) await this.repository.assignToOrganization(kind, resource.id, orgId)
       }
-      this.repository.recordCommandResult(commandType, context.idempotencyKey, context.source, { resourceId: resource.id })
+      await this.repository.recordCommandResult(commandType, context.idempotencyKey, context.source, { resourceId: resource.id })
       return resource as never
     })
   }

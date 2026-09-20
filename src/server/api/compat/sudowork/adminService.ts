@@ -5,7 +5,6 @@ import { IdentityRepository, type InvitationRecord, type OperationAuditRecord } 
 import type { AuthCenterDb, AuthCenterUser } from '../../../authCenter/db.js'
 import { BillingRepository } from '../../../billing/billingRepository.js'
 import { WalletService } from '../../../billing/walletService.js'
-import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
 import { sudoworkQuotaToCreditUnits, sudoworkUsdToCreditUnits } from '../../../identity/sudoworkCreditConversion.js'
 import type { SudorouterAccountService } from '../../../billing/sudorouterAccountService.js'
 import { pointsToQuota } from '../../../billing/sudorouterAdapter.js'
@@ -90,13 +89,13 @@ export class SudoworkAdministrationService {
       accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     } = {},
   ) {
-    this.billing = new BillingRepository(authDb.db)
-    this.wallet = new WalletService(authDb.db, this.billing)
+    this.billing = new BillingRepository(authDb.driver)
+    this.wallet = new WalletService(authDb.driver, this.billing)
   }
 
   async listEnterprises(actor: IdentityActor): Promise<LegacyEnterpriseDto[]> {
-    return (await this.organizations.listOrganizations(actor)).map((item) => ({
-      id: this.requireLegacyId('enterprise', item.organization.id),
+    return Promise.all((await this.organizations.listOrganizations(actor)).map(async (item) => ({
+      id: await this.requireLegacyId('enterprise', item.organization.id),
       name: item.organization.name,
       code: item.profile.code,
       credit_pool: item.wallet?.balanceUnits ?? 0,
@@ -107,7 +106,7 @@ export class SudoworkAdministrationService {
       app_company_name: item.profile.appCompanyName,
       login_desp: item.profile.loginDescription,
       userCount: item.userCount,
-    }))
+    })))
   }
 
   async createEnterprise(input: {
@@ -160,7 +159,7 @@ export class SudoworkAdministrationService {
     appCompanyName?: string | null
     loginDescription?: string | null
   }): Promise<void> {
-    const orgId = this.requireOrganizationId(input.enterpriseId)
+    const orgId = await this.requireOrganizationId(input.enterpriseId)
     await this.organizations.updateOrganization(orgId, {
       name: input.name,
       logo: input.logo,
@@ -173,7 +172,7 @@ export class SudoworkAdministrationService {
   }
 
   async deleteEnterprise(actor: IdentityActor, enterpriseId: number): Promise<void> {
-    await this.organizations.deleteOrganization(this.requireOrganizationId(enterpriseId), actor)
+    await this.organizations.deleteOrganization(await this.requireOrganizationId(enterpriseId), actor)
   }
 
   async createInvitationCodes(input: {
@@ -184,7 +183,7 @@ export class SudoworkAdministrationService {
   }, codeFactory?: () => string): Promise<{ codes: string[]; count: number }> {
     const orgId = input.enterpriseId === undefined
       ? input.actor.orgId
-      : this.requireOrganizationId(input.enterpriseId)
+      : await this.requireOrganizationId(input.enterpriseId)
     const invitations = await this.organizations.createInvitations({
       orgId,
       count: Math.min(Math.max(input.count || 1, 1), 100),
@@ -207,8 +206,8 @@ export class SudoworkAdministrationService {
     const pageSize = Math.max(1, Math.min(input.pageSize ?? 20, 100))
     const orgId = input.enterpriseId === undefined
       ? undefined
-      : this.requireOrganizationId(input.enterpriseId)
-    const result = this.organizations.listInvitations({
+      : await this.requireOrganizationId(input.enterpriseId)
+    const result = await this.organizations.listInvitations({
       orgId,
       status: input.status === undefined ? undefined : this.fromLegacyInvitationStatus(input.status),
       limit: pageSize,
@@ -222,8 +221,8 @@ export class SudoworkAdministrationService {
     }
   }
 
-  deleteInvitationCode(actor: IdentityActor, legacyId: number): boolean {
-    const resolved = this.identities.resolveNumericAliasGlobal('invitation', legacyId)
+  async deleteInvitationCode(actor: IdentityActor, legacyId: number): Promise<boolean> {
+    const resolved = await this.identities.resolveNumericAliasGlobal('invitation', legacyId)
     if (!resolved) throw new IdentityDomainError('INVITATION_NOT_FOUND', 'Invitation not found')
     return this.organizations.deleteInvitation(resolved.resourceId, actor)
   }
@@ -237,13 +236,14 @@ export class SudoworkAdministrationService {
   }): Promise<LegacyManagedUserDto[]> {
     const orgId = input.enterpriseId === undefined
       ? undefined
-      : this.requireOrganizationId(input.enterpriseId)
-    return (await this.organizations.listUsers(input.actor, {
+      : await this.requireOrganizationId(input.enterpriseId)
+    const users = (await this.organizations.listUsers(input.actor, {
       orgId,
       status: input.status === undefined ? undefined : this.fromLegacyUserStatus(input.status),
       role: input.role === undefined ? undefined : this.organizations.mapLegacyRole(input.role),
       keyword: input.keyword,
     })).map((user) => this.toLegacyUser(user))
+    return Promise.all(users)
   }
 
   async createPasswordUser(input: {
@@ -255,15 +255,15 @@ export class SudoworkAdministrationService {
     invitationCodeId: number
     idempotencyKey?: string
   }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> {
-    const orgId = this.requireOrganizationId(input.enterpriseId)
-    const invitationAlias = this.identities.resolveNumericAliasGlobal('invitation', input.invitationCodeId)
+    const orgId = await this.requireOrganizationId(input.enterpriseId)
+    const invitationAlias = await this.identities.resolveNumericAliasGlobal('invitation', input.invitationCodeId)
     const invitation = invitationAlias
-      ? this.identities.getInvitationById(invitationAlias.resourceId)
+      ? await this.identities.getInvitationById(invitationAlias.resourceId)
       : null
     const createKey = input.idempotencyKey?.trim()
       || `admin-user:${orgId}:${input.phone.trim()}:${input.invitationCodeId}`
     const retryUser = await this.retryableProvisioningUser(createKey, orgId, input.phone, invitation)
-    if (this.identities.findAuthIdentity('phone', 'sudowork', input.phone) && !retryUser) {
+    if (await this.identities.findAuthIdentity('phone', 'sudowork', input.phone) && !retryUser) {
       throw new IdentityDomainError('USERNAME_EXISTS', 'Username already exists')
     }
     if (!invitation || (invitation.status !== 'pending' && !retryUser)) {
@@ -292,15 +292,15 @@ export class SudoworkAdministrationService {
     invitationCodeId: number
     idempotencyKey?: string
   }): Promise<{ id: number; phone: string; sudorouter_user_id: number | null; initial_points: number }> {
-    const orgId = this.requireOrganizationId(input.enterpriseId)
-    const invitationAlias = this.identities.resolveNumericAliasGlobal('invitation', input.invitationCodeId)
+    const orgId = await this.requireOrganizationId(input.enterpriseId)
+    const invitationAlias = await this.identities.resolveNumericAliasGlobal('invitation', input.invitationCodeId)
     const invitation = invitationAlias
-      ? this.identities.getInvitationById(invitationAlias.resourceId)
+      ? await this.identities.getInvitationById(invitationAlias.resourceId)
       : null
     const createKey = input.idempotencyKey?.trim()
       || `admin-user:${orgId}:${input.phone.trim()}:${input.invitationCodeId}`
     const retryUser = await this.retryableProvisioningUser(createKey, orgId, input.phone, invitation)
-    if (this.identities.findAuthIdentity('phone', 'sudowork', input.phone) && !retryUser) {
+    if (await this.identities.findAuthIdentity('phone', 'sudowork', input.phone) && !retryUser) {
       throw new IdentityDomainError('PHONE_EXISTS', 'Phone already exists')
     }
     if (!invitation || (invitation.status !== 'pending' && !retryUser)) {
@@ -326,7 +326,7 @@ export class SudoworkAdministrationService {
     username: string,
     invitation: InvitationRecord | null,
   ): Promise<AuthCenterUser | null> {
-    const previous = this.identities.getCommandResult<{ userId: string }>('identity.create_user', idempotencyKey)
+    const previous = await this.identities.getCommandResult<{ userId: string }>('identity.create_user', idempotencyKey)
     if (!previous) return null
     const user = await this.authDb.getUserById(previous.userId)
     if (!user || user.status !== 'pending' || user.orgId !== orgId || user.name !== username.trim()) return null
@@ -352,7 +352,7 @@ export class SudoworkAdministrationService {
       authIdentity: input.authIdentity,
       status: this.options.accountProvisioner ? 'pending' : 'active',
     }, this.context(createKey), input.actor)
-    const wallet = this.identities.getWallet('user', created.userId)
+    const wallet = await this.identities.getWallet('user', created.userId)
     let externalUserId: number | null = null
     if (this.options.accountProvisioner) {
       try {
@@ -381,11 +381,11 @@ export class SudoworkAdministrationService {
     status?: 0 | 1 | 2
     enterpriseId?: number
   }): Promise<void> {
-    const resolved = this.requireUser(input.userId)
+    const resolved = await this.requireUser(input.userId)
     await this.organizations.updateUser(resolved.resourceId, {
       displayName: input.nickname,
       status: input.status === undefined ? undefined : this.fromLegacyUserStatus(input.status),
-      orgId: input.enterpriseId === undefined ? undefined : this.requireOrganizationId(input.enterpriseId),
+      orgId: input.enterpriseId === undefined ? undefined : await this.requireOrganizationId(input.enterpriseId),
     }, input.actor)
   }
 
@@ -394,21 +394,21 @@ export class SudoworkAdministrationService {
     userId: number
     role: 'ENTERPRISE_ADMIN' | 'USER'
   }): Promise<void> {
-    const resolved = this.requireUser(input.userId)
+    const resolved = await this.requireUser(input.userId)
     await this.organizations.updateUser(resolved.resourceId, {
       role: this.organizations.mapLegacyRole(input.role) as 'admin' | 'user',
     }, input.actor)
   }
 
   async manageUser(input: { actor: IdentityActor; userId: number; action: 'enable' | 'disable' }): Promise<1 | 2> {
-    const resolved = this.requireUser(input.userId)
+    const resolved = await this.requireUser(input.userId)
     const status = input.action === 'enable' ? 'active' : 'disabled'
     await this.organizations.updateUser(resolved.resourceId, { status }, input.actor)
     return input.action === 'enable' ? 1 : 2
   }
 
   async deleteUser(actor: IdentityActor, legacyId: number): Promise<void> {
-    const resolved = this.requireUser(legacyId)
+    const resolved = await this.requireUser(legacyId)
     await this.organizations.deleteUser(resolved.resourceId, actor)
   }
 
@@ -420,15 +420,15 @@ export class SudoworkAdministrationService {
 
   async approveUser(input: { actor: IdentityActor; legacyUserId: number; idempotencyKey?: string }): Promise<void> {
     const key = `sudowork-admin:approve:${input.idempotencyKey?.trim() || randomUUID()}`
-    if (this.identities.hasOperationAudit(key)) return
+    if (await this.identities.hasOperationAudit(key)) return
     const target = await this.requireManagedUser(input.actor, input.legacyUserId)
     if (target.status !== 'pending') throw new SudoworkAdministrationError(400, '用户不是待审批状态')
     await this.authDb.driver.transaction(async () => {
-      const current = this.identities.getWallet('user', target.id)?.balanceUnits
+      const current = (await this.identities.getWallet('user', target.id))?.balanceUnits
       if (current === undefined) throw new SudoworkAdministrationError(404, '用户不存在')
       const adjustment = 100 - current
       if (adjustment !== 0) {
-        this.wallet.post({
+        await this.wallet.post({
           ownerType: 'user', ownerId: target.id, deltaUnits: adjustment,
           entryType: adjustment > 0 ? 'BONUS' : 'APPROVAL_ADJUSTMENT',
           memo: '审批通过赠送', sourceType: 'user_approval', sourceId: String(input.legacyUserId),
@@ -436,7 +436,7 @@ export class SudoworkAdministrationService {
         }, onlineCommandContext(key))
       }
       await this.organizations.updateUser(target.id, { status: 'active' }, input.actor)
-      this.writeUserAudit({
+      await this.writeUserAudit({
         key, actor: input.actor, target, legacyUserId: input.legacyUserId,
         action: 'USER_APPROVE', path: '/api/v1/admin/approve', response: { status: 1, balance: 100 },
       })
@@ -445,12 +445,12 @@ export class SudoworkAdministrationService {
 
   async rejectUser(input: { actor: IdentityActor; legacyUserId: number; idempotencyKey?: string }): Promise<void> {
     const key = `sudowork-admin:reject:${input.idempotencyKey?.trim() || randomUUID()}`
-    if (this.identities.hasOperationAudit(key)) return
+    if (await this.identities.hasOperationAudit(key)) return
     const target = await this.requireManagedUser(input.actor, input.legacyUserId)
     if (target.status !== 'pending') throw new SudoworkAdministrationError(400, '用户不是待审批状态')
     await this.authDb.driver.transaction(async () => {
       await this.organizations.updateUser(target.id, { status: 'disabled' }, input.actor)
-      this.writeUserAudit({
+      await this.writeUserAudit({
         key, actor: input.actor, target, legacyUserId: input.legacyUserId,
         action: 'USER_REJECT', path: '/api/v1/admin/reject', response: { status: 2 },
       })
@@ -459,18 +459,18 @@ export class SudoworkAdministrationService {
 
   async deletePendingUser(input: { actor: IdentityActor; legacyUserId: number; idempotencyKey?: string }): Promise<void> {
     const key = `sudowork-admin:delete:${input.idempotencyKey?.trim() || randomUUID()}`
-    if (this.identities.hasOperationAudit(key)) return
+    if (await this.identities.hasOperationAudit(key)) return
     const target = await this.requireManagedUser(input.actor, input.legacyUserId)
     if (target.status !== 'pending') throw new SudoworkAdministrationError(400, '只能删除待审批用户')
-    if (this.billing.countOwnerLedgerEntries('user', target.id) > 0) {
+    if (await this.billing.countOwnerLedgerEntries('user', target.id) > 0) {
       throw new SudoworkAdministrationError(409, '用户已有账本记录，不能删除')
     }
     await this.authDb.driver.transaction(async () => {
-      this.writeUserAudit({
+      await this.writeUserAudit({
         key, actor: input.actor, target, legacyUserId: input.legacyUserId,
         action: 'USER_DELETE', path: '/api/v1/admin/delete', response: { deleted: true },
       })
-      this.identities.deleteUserRecords(target.id)
+      await this.identities.deleteUserRecords(target.id)
       await this.authDb.deleteUser(target.id)
     })
   }
@@ -480,10 +480,10 @@ export class SudoworkAdministrationService {
     return { dify: this.options.getDifyFeatureFlags?.() ?? { enabled: false, missingEnv: [] } }
   }
 
-  listOperationLogs(input: {
+  async listOperationLogs(input: {
     actor: IdentityActor
     query: Record<string, string | undefined>
-  }): { items: Array<Record<string, unknown>>; total: number; page: number; page_size: number } {
+  }): Promise<{ items: Array<Record<string, unknown>>; total: number; page: number; page_size: number }> {
     this.assertAdmin(input.actor)
     const page = positiveInteger(input.query.page, 1)
     const pageSize = Math.min(positiveInteger(input.query.page_size, 20), 100)
@@ -491,14 +491,14 @@ export class SudoworkAdministrationService {
     if (input.query.user_id) {
       const legacyId = Number.parseInt(input.query.user_id, 10)
       const alias = Number.isFinite(legacyId)
-        ? this.identities.resolveNumericAliasGlobal('user', legacyId)
+        ? await this.identities.resolveNumericAliasGlobal('user', legacyId)
         : null
       if (!alias || (!hasGlobalOrganizationAccess(input.actor) && alias.orgId !== input.actor.orgId)) {
         return { items: [], total: 0, page, page_size: pageSize }
       }
       actorUserId = alias.resourceId
     }
-    const result = this.identities.listOperationAudits({
+    const result = await this.identities.listOperationAudits({
       orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       actorUserId,
       action: input.query.action,
@@ -519,16 +519,17 @@ export class SudoworkAdministrationService {
     this.assertAdmin(actor)
     const organizations = await this.organizations.listOrganizations(actor)
     const users = (await Promise.all(organizations.map(item => this.authDb.listUsersByOrg(item.organization.id)))).flat()
-    const points = users.reduce((total, user) => total + (this.identities.getWallet('user', user.id)?.balanceUnits ?? 0), 0)
+    const wallets = await Promise.all(users.map(user => this.identities.getWallet('user', user.id)))
+    const points = wallets.reduce((total, wallet) => total + (wallet?.balanceUnits ?? 0), 0)
     let bonus = 0
     let consumed = 0
     for (const organization of organizations) {
-      bonus += this.billing.listLedgerEntries({
+      bonus += (await this.billing.listLedgerEntries({
         orgId: organization.organization.id, entryType: 'BONUS', limit: 100_000, offset: 0,
-      }).list.reduce((total, entry) => total + entry.deltaUnits, 0)
-      consumed += this.billing.listLedgerEntries({
+      })).list.reduce((total, entry) => total + entry.deltaUnits, 0)
+      consumed += (await this.billing.listLedgerEntries({
         orgId: organization.organization.id, entryType: 'CONSUME', limit: 100_000, offset: 0,
-      }).list.reduce((total, entry) => total + Math.abs(entry.deltaUnits), 0)
+      })).list.reduce((total, entry) => total + Math.abs(entry.deltaUnits), 0)
     }
     return {
       enterprises: organizations.length,
@@ -540,7 +541,7 @@ export class SudoworkAdministrationService {
   }
 
   async resetUserPassword(input: { actor: IdentityActor; userId: number; password: string }): Promise<void> {
-    await this.organizations.resetUserPassword(this.requireUser(input.userId).resourceId, input.password, input.actor)
+    await this.organizations.resetUserPassword((await this.requireUser(input.userId)).resourceId, input.password, input.actor)
   }
 
   async updatePasswordUser(input: {
@@ -551,14 +552,14 @@ export class SudoworkAdministrationService {
     enterpriseId?: number
     password?: string
   }): Promise<void> {
-    const resolved = this.requireUser(input.userId)
-    if (!this.identities.findAuthIdentityByUser(resolved.resourceId, 'password', 'moss')) {
+    const resolved = await this.requireUser(input.userId)
+    if (!(await this.identities.findAuthIdentityByUser(resolved.resourceId, 'password', 'moss'))) {
       throw new IdentityDomainError('LOGIN_TYPE_MISMATCH', 'User is not a password account')
     }
     await this.organizations.updateUser(resolved.resourceId, {
       displayName: input.nickname,
       status: input.status === undefined ? undefined : this.fromLegacyUserStatus(input.status),
-      orgId: input.enterpriseId === undefined ? undefined : this.requireOrganizationId(input.enterpriseId),
+      orgId: input.enterpriseId === undefined ? undefined : await this.requireOrganizationId(input.enterpriseId),
       password: input.password,
     }, input.actor)
   }
@@ -568,14 +569,14 @@ export class SudoworkAdministrationService {
       .find((item) => item.organization.id === invitation.orgId)
     if (!organization) throw new Error('Invitation organization is missing')
     return {
-      id: this.requireLegacyId('invitation', invitation.id),
+      id: await this.requireLegacyId('invitation', invitation.id),
       code: invitation.code,
-      enterprise_id: this.requireLegacyId('enterprise', invitation.orgId),
+      enterprise_id: await this.requireLegacyId('enterprise', invitation.orgId),
       enterprise_name: organization.organization.name,
       initial_quota_usd: invitation.legacyInitialQuotaUsd,
       status: invitation.status === 'pending' ? 0 : invitation.status === 'used' ? 1 : 2,
       used_by_user_id: invitation.usedByUserId
-        ? this.identities.getNumericAlias('user', invitation.usedByUserId)
+        ? await this.identities.getNumericAlias('user', invitation.usedByUserId)
         : null,
       used_by_phone: null,
       used_by_nickname: null,
@@ -584,21 +585,21 @@ export class SudoworkAdministrationService {
     }
   }
 
-  private requireOrganizationId(legacyId: number): string {
-    const resolved = this.identities.resolveNumericAliasGlobal('enterprise', legacyId)
+  private async requireOrganizationId(legacyId: number): Promise<string> {
+    const resolved = await this.identities.resolveNumericAliasGlobal('enterprise', legacyId)
     if (!resolved) throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
     return resolved.resourceId
   }
 
-  private requireUser(legacyId: number): { resourceId: string; orgId: string } {
-    const resolved = this.identities.resolveNumericAliasGlobal('user', legacyId)
+  private async requireUser(legacyId: number): Promise<{ resourceId: string; orgId: string }> {
+    const resolved = await this.identities.resolveNumericAliasGlobal('user', legacyId)
     if (!resolved) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
     return resolved
   }
 
   private async requireManagedUser(actor: IdentityActor, legacyId: number): Promise<AuthCenterUser> {
     this.assertAdmin(actor)
-    const resolved = this.requireUser(legacyId)
+    const resolved = await this.requireUser(legacyId)
     if (!hasGlobalOrganizationAccess(actor) && resolved.orgId !== actor.orgId) {
       throw new SudoworkAdministrationError(403, '无权操作该用户')
     }
@@ -614,7 +615,7 @@ export class SudoworkAdministrationService {
     }
   }
 
-  private writeUserAudit(input: {
+  private async writeUserAudit(input: {
     key: string
     actor: IdentityActor
     target: AuthCenterUser
@@ -622,15 +623,16 @@ export class SudoworkAdministrationService {
     action: string
     path: string
     response: Record<string, unknown>
-  }): void {
-    const actorUser = this.authDb.db
-      .prepare('SELECT name FROM users WHERE id = ? LIMIT 1')
-      .get(input.actor.userId) as { name?: string } | undefined
-    this.identities.insertOperationAudit({
+  }): Promise<void> {
+    const actorUser = await this.authDb.driver.get<{ name?: string }>(
+      'SELECT name FROM users WHERE id = ? LIMIT 1',
+      [input.actor.userId],
+    )
+    await this.identities.insertOperationAudit({
       id: randomUUID(),
       orgId: input.target.orgId,
       actorUserId: input.actor.userId,
-      actorLegacyId: this.identities.getNumericAlias('user', input.actor.userId),
+      actorLegacyId: await this.identities.getNumericAlias('user', input.actor.userId),
       actorName: actorUser?.name ?? input.actor.userId,
       action: input.action,
       resource: 'user',
@@ -644,9 +646,9 @@ export class SudoworkAdministrationService {
     })
   }
 
-  private requireAvailableInvitation(legacyId: number, orgId: string): InvitationRecord {
-    const resolved = this.identities.resolveNumericAliasGlobal('invitation', legacyId)
-    const invitation = resolved ? this.identities.getInvitationById(resolved.resourceId) : null
+  private async requireAvailableInvitation(legacyId: number, orgId: string): Promise<InvitationRecord> {
+    const resolved = await this.identities.resolveNumericAliasGlobal('invitation', legacyId)
+    const invitation = resolved ? await this.identities.getInvitationById(resolved.resourceId) : null
     if (!invitation || invitation.status !== 'pending') {
       throw new IdentityDomainError('INVITATION_NOT_AVAILABLE', 'Invitation is not available')
     }
@@ -656,8 +658,8 @@ export class SudoworkAdministrationService {
     return invitation
   }
 
-  private requireLegacyId(namespace: string, resourceId: string): number {
-    const id = this.identities.getNumericAlias(namespace, resourceId)
+  private async requireLegacyId(namespace: string, resourceId: string): Promise<number> {
+    const id = await this.identities.getNumericAlias(namespace, resourceId)
     if (id === null) throw new Error(`Missing ${namespace} numeric alias`)
     return id
   }
@@ -674,20 +676,21 @@ export class SudoworkAdministrationService {
     return 'disabled'
   }
 
-  private toLegacyUser(user: AuthCenterUser): LegacyManagedUserDto {
-    const profile = this.identities.getOrganizationProfile(user.orgId)
-    const organization = this.authDb.db
-      .prepare('SELECT name FROM organizations WHERE id = ? LIMIT 1')
-      .get(user.orgId) as { name?: string } | undefined
-    const phoneIdentity = this.identities.findAuthIdentityByUser(user.id, 'phone', 'sudowork')
-    const invitation = this.identities.getInvitationByUser(user.id)
-    const wallet = this.identities.getWallet('user', user.id)
+  private async toLegacyUser(user: AuthCenterUser): Promise<LegacyManagedUserDto> {
+    const profile = await this.identities.getOrganizationProfile(user.orgId)
+    const organization = await this.authDb.driver.get<{ name?: string }>(
+      'SELECT name FROM organizations WHERE id = ? LIMIT 1',
+      [user.orgId],
+    )
+    const phoneIdentity = await this.identities.findAuthIdentityByUser(user.id, 'phone', 'sudowork')
+    const invitation = await this.identities.getInvitationByUser(user.id)
+    const wallet = await this.identities.getWallet('user', user.id)
     if (!profile || !organization) throw new Error('User organization profile is missing')
     return {
-      id: this.requireLegacyId('user', user.id),
+      id: await this.requireLegacyId('user', user.id),
       phone: phoneIdentity?.normalizedSubject ?? user.name,
       nickname: user.displayName,
-      enterprise_id: this.requireLegacyId('enterprise', user.orgId),
+      enterprise_id: await this.requireLegacyId('enterprise', user.orgId),
       enterprise_name: organization.name ?? profile.appName ?? user.orgId,
       role: user.role === 'super_admin' ? 'SUPER_ADMIN' : user.role === 'admin' ? 'ENTERPRISE_ADMIN' : 'USER',
       status: user.status === 'pending' ? 0 : user.status === 'active' ? 1 : 2,
@@ -695,7 +698,7 @@ export class SudoworkAdministrationService {
       quota: wallet?.balanceUnits ?? 0,
       used_quota: 0,
       balance: wallet?.balanceUnits ?? 0,
-      login_type: this.identities.findAuthIdentityByUser(user.id, 'password', 'moss') ? 1 : 0,
+      login_type: await this.identities.findAuthIdentityByUser(user.id, 'password', 'moss') ? 1 : 0,
       created_at: user.createdAt,
     }
   }

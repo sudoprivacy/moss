@@ -109,7 +109,7 @@ export function createSudoworkQmsRoutes(options: {
           options.authorization.requireApiKey(context.req.header(options.apiKeyHeader))
         } else {
           const actor = await options.getActor(bearer(context.req.header('Authorization')) ?? undefined)
-          scope = options.authorization.adminScope(actor, context.req.query('tenant_id'))
+          scope = await options.authorization.adminScope(actor, context.req.query('tenant_id'))
           if (requiresAdmin(key) && scope.qmsRole !== 'admin') {
             throw new QmsAuthorizationError(403, 'FORBIDDEN', 'Insufficient permissions')
           }

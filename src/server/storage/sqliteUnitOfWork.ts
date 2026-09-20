@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
+import { beginImmediateWithBoundedWait } from '../db/driver.js'
 
 export interface TransactionContext {
   depth: number
@@ -11,9 +12,6 @@ interface ActiveTransaction {
 }
 
 const activeTransactions = new WeakMap<DatabaseSync, ActiveTransaction>()
-const busySleepBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
-const BEGIN_BUSY_TIMEOUT_MS = 5_000
-const BEGIN_BUSY_RETRY_MS = 10
 
 export class AsyncTransactionCallbackError extends Error {
   constructor() {
@@ -26,27 +24,6 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return (
     (typeof value === 'object' && value !== null) || typeof value === 'function'
   ) && typeof (value as { then?: unknown }).then === 'function'
-}
-
-function isSqliteBusy(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  const sqliteError = error as Error & { errcode?: number; errstr?: string }
-  return sqliteError.errcode === 5
-    || sqliteError.errstr === 'database is locked'
-    || /database is (?:locked|busy)/i.test(error.message)
-}
-
-function beginImmediateWithBoundedWait(db: DatabaseSync): void {
-  const deadline = Date.now() + BEGIN_BUSY_TIMEOUT_MS
-  while (true) {
-    try {
-      db.exec('BEGIN IMMEDIATE')
-      return
-    } catch (error) {
-      if (!isSqliteBusy(error) || Date.now() >= deadline) throw error
-      Atomics.wait(busySleepBuffer, 0, 0, BEGIN_BUSY_RETRY_MS)
-    }
-  }
 }
 
 export function runInTransaction<T>(

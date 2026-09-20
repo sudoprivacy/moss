@@ -79,7 +79,7 @@ export class P2MigrationService {
       for (const source of rows) {
         const tenantOrgIds: string[] = []
         for (const tenantCode of new Set(source.tenantIds)) {
-          const profile = this.options.identities.getOrganizationProfileByCode(tenantCode)
+          const profile = await this.options.identities.getOrganizationProfileByCode(tenantCode)
           if (!profile) {
             orphans.push({ kind, sourceId: source.id, reason: `企业码 ${tenantCode} 未映射到 Moss Organization` })
           } else {
@@ -89,7 +89,7 @@ export class P2MigrationService {
         if (source.tenantIds.length > 0 && tenantOrgIds.length !== new Set(source.tenantIds).size) continue
 
         const orgId = tenantOrgIds[0] ?? this.options.platformCatalogOrgId
-        const authorId = resolveAuthor(this.options.identities, source.authorId, orgId)
+        const authorId = await resolveAuthor(this.options.identities, source.authorId, orgId)
         if (!authorId) {
           orphans.push({ kind, sourceId: source.id, reason: `作者 ${source.authorId} 未映射到 Moss User` })
           continue
@@ -109,7 +109,7 @@ export class P2MigrationService {
         }
 
         const providerId = manifest.source.hubProviderId
-        const resolvedId = this.options.repository.resolveExternalIdentity({
+        const resolvedId = await this.options.repository.resolveExternalIdentity({
           orgId,
           resourceType: kind,
           providerType: 'sudohub',
@@ -117,7 +117,7 @@ export class P2MigrationService {
           externalId: source.id,
         })
         if (resolvedId) {
-          const existing = this.find(kind, resolvedId)
+          const existing = await this.find(kind, resolvedId)
           if (!existing || existing.name !== source.name
             || (source.checksum && existing.checksum !== normalizeChecksum(source.checksum))) {
             conflicts.push({ kind, sourceId: source.id, reason: '已有 Provider 映射与源资源内容不一致' })
@@ -131,14 +131,14 @@ export class P2MigrationService {
           continue
         }
 
-        const idCollision = this.find(kind, source.id)
+        const idCollision = await this.find(kind, source.id)
         if (idCollision) {
           conflicts.push({ kind, sourceId: source.id, reason: `目标主键 ${source.id} 已存在且无对应 Provider 映射` })
           continue
         }
         const nameCollision = kind === 'agent'
-          ? this.options.repository.findAgentByName(source.name, orgId)
-          : this.options.repository.findSkillByName(source.name, orgId)
+          ? await this.options.repository.findAgentByName(source.name, orgId)
+          : await this.options.repository.findSkillByName(source.name, orgId)
         if (nameCollision) {
           conflicts.push({ kind, sourceId: source.id, reason: `名称 ${source.name} 已被目标资源 ${nameCollision.id} 使用` })
           continue
@@ -242,14 +242,14 @@ export class P2MigrationService {
     }
   }
 
-  private find(kind: CatalogResourceType, id: string): CatalogAgent | CatalogSkill | null {
+  private find(kind: CatalogResourceType, id: string): Promise<CatalogAgent | CatalogSkill | null> {
     return kind === 'agent' ? this.options.repository.findAgent(id) : this.options.repository.findSkill(id)
   }
 }
 
-function resolveAuthor(identities: IdentityRepository, sourceId: string, orgId: string): string | null {
+async function resolveAuthor(identities: IdentityRepository, sourceId: string, orgId: string): Promise<string | null> {
   if (/^\d+$/.test(sourceId)) return identities.resolveNumericAlias('user', Number(sourceId), orgId)
-  const identity = identities.findAuthIdentity('sudohub', 'legacy', sourceId)
+  const identity = await identities.findAuthIdentity('sudohub', 'legacy', sourceId)
   return identity?.orgId === orgId ? identity.userId : null
 }
 

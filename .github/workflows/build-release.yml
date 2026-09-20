@@ -24,6 +24,20 @@ jobs:
   test:
     name: server-tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MOSS_PG_TEST_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
 
     steps:
       - name: Checkout moss
@@ -46,6 +60,15 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Lint server and node tests
+        run: bun run lint
+
+      # Z-1: the PG suite's only switch is `{ skip: !MOSS_PG_TEST_URL }`
+      # (pgBackend.test.ts). Without this gate an env rename/removal would
+      # silently skip every PG case and the job would stay green.
+      - name: Require real PostgreSQL for the server suite
+        run: test -n "$MOSS_PG_TEST_URL"
+
       - name: Run server tests
         run: bun run test
 
@@ -64,7 +87,22 @@ jobs:
 
   build:
     name: build-amd64
+    needs: test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MOSS_PG_TEST_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
 
     steps:
       - name: Checkout moss
@@ -106,6 +144,7 @@ jobs:
           node --check scripts/e2e/mock-openai-server.mjs
           node --check scripts/e2e/server-release-smoke.mjs
           node --check scripts/e2e/server-admin-browser-smoke.mjs
+          node --check scripts/e2e/packaged-pg-ha-smoke.mjs
           chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh \
             scripts/e2e/mock-openai-server.mjs scripts/e2e/server-release-smoke.mjs \
             scripts/e2e/server-admin-browser-smoke.mjs \
@@ -210,6 +249,35 @@ jobs:
           grep -Fq 'packages/$RELEASE_TAG' dist/install.sh
           grep -Fq -- '--progress-bar' dist/install.sh
           grep -Fq 'sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/$RELEASE_TAG' dist/install.sh
+
+      # The build job never runs `bun install` (it only packages); the PG smoke
+      # is its first step needing a Node module. Install just `pg` — the only
+      # external import in packaged-pg-ha-smoke.mjs — instead of a full install.
+      - name: Install pg driver for the packaged PG smoke
+        run: npm install --no-save pg
+
+      - name: Run packaged PostgreSQL dual-instance smoke
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          ARCH: amd64
+        run: |
+          set -euo pipefail
+          test -n "$MOSS_PG_TEST_URL"
+          mkdir -p "$RUNNER_TEMP/moss-server-e2e"
+          node scripts/e2e/packaged-pg-ha-smoke.mjs \
+            --archive "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" \
+            --database-url "$MOSS_PG_TEST_URL" \
+            --work-dir "$RUNNER_TEMP/moss-server-pg-ha" \
+            --report "$RUNNER_TEMP/moss-server-e2e/packaged-pg-ha.json"
+          node -e '
+            const fs = require("node:fs");
+            const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (report.status !== "passed" || report.backend !== "postgres" ||
+                report.instanceIds?.length !== 2 || !report.firstStart || !report.restart ||
+                report.keyRequests?.length < 5 || !/^[0-9a-f]{64}$/.test(report.bundleSha256 ?? "")) {
+              throw new Error("packaged PostgreSQL HA evidence is incomplete");
+            }
+          ' "$RUNNER_TEMP/moss-server-e2e/packaged-pg-ha.json"
 
       - name: Install CJK fonts for browser evidence
         run: |

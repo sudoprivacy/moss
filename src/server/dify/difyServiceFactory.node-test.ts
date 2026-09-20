@@ -3,6 +3,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { AuthService } from '../auth/service.js'
 import { AuthCenterDb } from '../authCenter/db.js'
+import {
+  createCatalogTestRepository,
+  createDifyTestRepository,
+  createIdentityTestRepository,
+} from '../testing/compatibilityRepositories.js'
 import { DifyAdministrationService } from './difyAdministrationService.js'
 import { DifyDatasetService } from './difyDatasetService.js'
 import { DifyEnhancementService } from './difyEnhancementService.js'
@@ -12,24 +17,9 @@ void test('AuthService creates one unified Dify service graph for Sudowork compa
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   await authDb.createOrganization('org-a', 'Organization A', Date.now())
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, enabled_skills TEXT,
-      publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT,
-      review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
+  createIdentityTestRepository(db, {}, authDb.driver)
+  createCatalogTestRepository(db, authDb.driver)
+  createDifyTestRepository(db, authDb.driver)
   const auth = new AuthService(authDb, 3600)
   const services = auth.createSudoworkDifyServices({
     baseUrl: 'https://dify.example.test',
@@ -49,8 +39,8 @@ void test('AuthService creates one unified Dify service graph for Sudowork compa
   assert(services.enhancement instanceof DifyEnhancementService)
   assert(services.dataset instanceof DifyDatasetService)
   assert(services.administration instanceof DifyAdministrationService)
-  assert.equal(services.resolveEnterpriseAlias(404), null)
-  assert.deepEqual(services.buildVisibility({ userId: 'u', orgId: 'org-a', role: 'admin' }), {
+  assert.equal(await services.resolveEnterpriseAlias(404), null)
+  assert.deepEqual(await services.buildVisibility({ userId: 'u', orgId: 'org-a', role: 'admin' }), {
     userId: 'u', role: 'admin', departmentId: null, visibleDepartmentIds: null, isAdmin: true,
   })
   auth.destroy()

@@ -23,6 +23,31 @@ import type { DatabaseSync } from 'node:sqlite'
 export type SqlParam = string | number | bigint | null | Uint8Array
 export type SqlRow = Record<string, unknown>
 
+const SQLITE_BEGIN_BUSY_TIMEOUT_MS = 5_000
+const SQLITE_BEGIN_BUSY_RETRY_MS = 10
+const sqliteBusySleepBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+
+function isSqliteBusy(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const sqliteError = error as Error & { errcode?: number; errstr?: string }
+  return sqliteError.errcode === 5
+    || sqliteError.errstr === 'database is locked'
+    || /database is (?:locked|busy)/i.test(error.message)
+}
+
+export function beginImmediateWithBoundedWait(db: DatabaseSync): void {
+  const deadline = Date.now() + SQLITE_BEGIN_BUSY_TIMEOUT_MS
+  while (true) {
+    try {
+      db.exec('BEGIN IMMEDIATE')
+      return
+    } catch (error) {
+      if (!isSqliteBusy(error) || Date.now() >= deadline) throw error
+      Atomics.wait(sqliteBusySleepBuffer, 0, 0, SQLITE_BEGIN_BUSY_RETRY_MS)
+    }
+  }
+}
+
 /**
  * Cross-dialect unique-constraint violation test (SQLite raises an error whose
  * message contains "UNIQUE constraint failed"; PostgreSQL raises SQLSTATE
@@ -102,7 +127,7 @@ export interface DbDriver {
 
 export class SqliteDriver implements DbDriver {
   readonly kind = 'sqlite' as const
-  private readonly txStorage = new AsyncLocalStorage<{ db: DatabaseSync }>()
+  private readonly txStorage = new AsyncLocalStorage<{ db: DatabaseSync; nextSavepoint: number }>()
   /** In-flight top-level transaction, or null. Ordinary (non-tx) statements
    *  wait for it to clear: on the single shared handle they would otherwise
    *  interleave INTO the open transaction. Mirrors PgDriver's per-tx
@@ -159,12 +184,26 @@ export class SqliteDriver implements DbDriver {
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
     const current = this.txStorage.getStore()
-    if (current) return fn() // nested: join the outer transaction
+    if (current) {
+      const savepoint = `moss_driver_${current.nextSavepoint++}`
+      current.db.exec(`SAVEPOINT ${savepoint}`)
+      try {
+        const result = await fn()
+        current.db.exec(`RELEASE SAVEPOINT ${savepoint}`)
+        return result
+      } catch (error) {
+        if (current.db.isTransaction) {
+          current.db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+          current.db.exec(`RELEASE SAVEPOINT ${savepoint}`)
+        }
+        throw error
+      }
+    }
     if (this.activeTx !== null) await this.waitOutTx() // serialize concurrent top-level txns
     const run = (async () => {
-      this.db.exec('BEGIN TRANSACTION')
+      beginImmediateWithBoundedWait(this.db)
       try {
-        const result = await this.txStorage.run({ db: this.db }, fn)
+        const result = await this.txStorage.run({ db: this.db, nextSavepoint: 1 }, fn)
         this.db.exec('COMMIT')
         return result
       } catch (error) {

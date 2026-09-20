@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { AuthCenterDb } from "../authCenter/db.js";
 import { AuthService } from "../auth/service.js";
 import { verifyAccessToken, hasExactScope } from "../auth/token.js";
+import { createIdentityTestRepository } from "../testing/compatibilityRepositories.js";
 
 describe("D1: internal-channel token scope", () => {
   it("hasExactScope rejects wildcard tokens that hasScope would admit (admin '*' / prefix)", () => {
@@ -26,6 +27,7 @@ describe("D1: internal-channel token scope", () => {
   it("mints a token scoped to internal:channel only (no sessions:attach:any)", async () => {
     const raw = new DatabaseSync(":memory:");
     const db = new AuthCenterDb(raw, ":memory:");
+    createIdentityTestRepository(raw, {}, db.driver);
     await db.loadSecretCache();
     await db.setConfig("jwt_secret", "test-secret-value");
 
@@ -64,6 +66,7 @@ describe("D1: internal-channel token scope", () => {
   it("returns null for a non-active user", async () => {
     const raw = new DatabaseSync(":memory:");
     const db = new AuthCenterDb(raw, ":memory:");
+    createIdentityTestRepository(raw, {}, db.driver);
     await db.loadSecretCache();
     await db.setConfig("jwt_secret", "test-secret-value");
     await db.createOrganization("o1", "Org", Date.now(), null);

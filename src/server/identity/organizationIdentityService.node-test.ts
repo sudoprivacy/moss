@@ -4,6 +4,7 @@ import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { verifyPassword } from '../authCenter/db.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { IdentityRepository } from './identityRepository.js'
 import {
   IdentityDomainError,
@@ -14,9 +15,9 @@ import { UnifiedIdentityService } from './unifiedIdentityService.js'
 function setup() {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const repository = new IdentityRepository(db)
-  const unified = new UnifiedIdentityService(db, authDb, repository)
-  const service = new OrganizationIdentityService(db, authDb, repository, unified)
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
+  const unified = new UnifiedIdentityService(authDb, repository)
+  const service = new OrganizationIdentityService(authDb, repository, unified)
   return { db, authDb, repository, unified, service }
 }
 
@@ -54,7 +55,7 @@ void describe('organization identity service', () => {
 
     assert.deepEqual(created.map((item) => item.code), ['CODE-A', 'CODE-B'])
     assert.equal((await service.listInvitations({ orgId: org.organization.id, status: 'pending' })).total, 2)
-    assert.equal(service.deleteInvitation(created[0]!.id), true)
+    assert.equal(await service.deleteInvitation(created[0]!.id), true)
     assert.equal((await service.listInvitations({ orgId: org.organization.id })).total, 1)
     db.close()
   })
@@ -176,12 +177,12 @@ void describe('organization identity service', () => {
     )
     await service.deleteUser(created.userId, actor)
     assert.equal(await authDb.getUserById(created.userId), null)
-    assert.equal(repository.getNumericAlias('user', created.userId), null)
-    assert.equal(repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
+    assert.equal(await repository.getNumericAlias('user', created.userId), null)
+    assert.equal(await repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
     await service.deleteOrganization(first.organization.id, actor)
     await service.deleteOrganization(second.organization.id, actor)
     assert.equal(await authDb.getOrganization(first.organization.id), null)
-    assert.equal(repository.getOrganizationProfile(second.organization.id), null)
+    assert.equal(await repository.getOrganizationProfile(second.organization.id), null)
     db.close()
   })
 })

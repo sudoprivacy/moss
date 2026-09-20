@@ -6,28 +6,31 @@ import { describe, test } from 'node:test'
 import { migrationCommandContext, onlineCommandContext } from '../../../application/commandContext.js'
 import { AuthCenterDb } from '../../../authCenter/db.js'
 import { AuthService } from '../../../auth/service.js'
+import { ensureConfigAvailabilitySchema } from '../../../configuration/configAvailabilitySchema.js'
 import { createConfigItemsApi } from '../../configItems.js'
 import { DirectConnectStore } from '../../../db.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
+import { createIdentityTestRepository, requireSqliteTestDatabase } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkConfigError, SudoworkConfigService } from './configService.js'
 
 async function setup(options: { managedImages?: { read(kind: 'enterprise', filename: string): Promise<{ bytes: Buffer; mimeType: string }> } } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'moss-config-compat-'))
   const store = new DirectConnectStore(join(dir, 'moss.db'))
-  const authDb = new AuthCenterDb(store.db)
-  const identities = new IdentityRepository(store.db)
-  const unified = new UnifiedIdentityService(store.db, authDb, identities)
+  const db = requireSqliteTestDatabase(store)
+  ensureConfigAvailabilitySchema(db)
+  const authDb = new AuthCenterDb(store)
+  const identities = createIdentityTestRepository(db, {}, store.driver)
+  const unified = new UnifiedIdentityService(authDb, identities)
   const orgA = await unified.createOrganization({ name: '企业 A', code: 'ENT-A' }, migrationCommandContext('test', 'org-a'))
   const orgB = await unified.createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
   const service = new SudoworkConfigService({
-    db: store.db,
+    db: store.driver,
     configItems: createConfigItemsApi(store),
     identities,
     authDb,
     managedImages: options.managedImages,
   })
-  return { dir, store, service, orgA, orgB }
+  return { dir, store, db, service, orgA, orgB }
 }
 
 void describe('Sudowork 配置项兼容服务', () => {
@@ -37,15 +40,15 @@ void describe('Sudowork 配置项兼容服务', () => {
       const root = { userId: 'root', orgId: orgA.organizationId, role: 'super_admin' }
       const global = await service.create(root, { name: '全局令牌', visible_to_all: 1 })
       await service.replaceEntries(root, global.id, [{ config_key: 'token', name: 'Token', required: 1 }])
-      assert.equal(Number(service.entriesFor(root, global.id)[0]?.id) >= 2_000_000_000, true)
+      assert.equal(Number((await service.entriesFor(root, global.id))[0]?.id) >= 2_000_000_000, true)
       assert.equal((await service.listForUser({ userId: 'user-b', orgId: orgB.organizationId, role: 'user' })).length, 1)
 
       const assigned = await service.create(root, { name: '指定企业', visible_to_all: 0 })
       await service.replaceEntries(root, assigned.id, [{ config_key: 'key', name: 'Key', required: 1 }])
-      service.associate(root, assigned.id, orgB.legacyEnterpriseId)
+      await service.associate(root, assigned.id, orgB.legacyEnterpriseId)
       assert.equal((await service.get(root, assigned.id)).enterprises.some(row => row.id === orgB.legacyEnterpriseId), true)
       assert.equal((await service.listForUser({ userId: 'user-b', orgId: orgB.organizationId, role: 'user' })).length, 2)
-      service.dissociate(root, assigned.id, orgB.legacyEnterpriseId)
+      await service.dissociate(root, assigned.id, orgB.legacyEnterpriseId)
       assert.equal((await service.listForUser({ userId: 'user-b', orgId: orgB.organizationId, role: 'user' })).length, 1)
     } finally {
       await store.close()
@@ -59,8 +62,8 @@ void describe('Sudowork 配置项兼容服务', () => {
       const admin = { userId: 'admin-a', orgId: orgA.organizationId, role: 'admin' }
       const created = await service.create(admin, { name: '本企业配置', visible_to_all: 1 })
       assert.equal((await service.get(admin, created.id) as any).visible_to_all, 0)
-      assert.throws(
-        () => service.associate(admin, created.id, orgB.legacyEnterpriseId),
+      await assert.rejects(
+        service.associate(admin, created.id, orgB.legacyEnterpriseId),
         (error: unknown) => error instanceof SudoworkConfigError && error.statusCode === 403,
       )
     } finally {
@@ -70,10 +73,10 @@ void describe('Sudowork 配置项兼容服务', () => {
   })
 
   void test('创建和更新配置项时可用范围写入失败会回滚统一配置数据', async () => {
-    const { dir, store, service, orgA } = await setup()
+    const { dir, store, db, service, orgA } = await setup()
     try {
       const root = { userId: 'root', orgId: orgA.organizationId, role: 'super_admin' }
-      store.db.exec(`
+      db.exec(`
         CREATE TRIGGER reject_config_availability_update
         BEFORE UPDATE OF availability ON config_items
         BEGIN
@@ -85,17 +88,17 @@ void describe('Sudowork 配置项兼容服务', () => {
         /availability write rejected/,
       )
       assert.equal(
-        Number((store.db.prepare('SELECT COUNT(*) AS count FROM config_items WHERE name = ?').get('不能残留') as { count: number }).count),
+        Number((db.prepare('SELECT COUNT(*) AS count FROM config_items WHERE name = ?').get('不能残留') as { count: number }).count),
         0,
       )
       assert.equal(
-        Number((store.db.prepare(`SELECT COUNT(*) AS count FROM resource_numeric_aliases WHERE namespace = 'config_item'`).get() as { count: number }).count),
+        Number((db.prepare(`SELECT COUNT(*) AS count FROM resource_numeric_aliases WHERE namespace = 'config_item'`).get() as { count: number }).count),
         0,
       )
 
-      store.db.exec('DROP TRIGGER reject_config_availability_update')
+      db.exec('DROP TRIGGER reject_config_availability_update')
       const created = await service.create(root, { name: '更新前', visible_to_all: 0 })
-      store.db.exec(`
+      db.exec(`
         CREATE TRIGGER reject_config_availability_update
         BEFORE UPDATE OF availability ON config_items
         BEGIN
@@ -115,7 +118,7 @@ void describe('Sudowork 配置项兼容服务', () => {
 
   void test('AuthService 从 Moss 主存储创建同一套配置兼容服务', async () => {
     const { dir, store, orgA } = await setup()
-    const authService = new AuthService(new AuthCenterDb(store.db), 3600)
+    const authService = new AuthService(new AuthCenterDb(store), 3600)
     try {
       const service = authService.createSudoworkConfigService(store)
       const created = await service.create(
@@ -134,7 +137,7 @@ void describe('Sudowork 配置项兼容服务', () => {
   })
 
   void test('租户配置把统一组织 Logo 文件投影成旧客户端使用的 data URL', async () => {
-    const { dir, store, service, orgA } = await setup({
+    const { dir, store, db, service, orgA } = await setup({
       managedImages: {
         async read(kind, filename) {
           assert.equal(kind, 'enterprise')
@@ -144,9 +147,9 @@ void describe('Sudowork 配置项兼容服务', () => {
       },
     })
     try {
-      const identities = new IdentityRepository(store.db)
-      identities.putOrganizationProfile({
-        ...identities.getOrganizationProfile(orgA.organizationId)!,
+      const identities = createIdentityTestRepository(db, {}, store.driver)
+      await identities.putOrganizationProfile({
+        ...(await identities.getOrganizationProfile(orgA.organizationId))!,
         logo: 'brand.png',
       })
       const result = await service.getTenantConfig(
@@ -200,6 +203,39 @@ void describe('Sudowork 配置项兼容服务', () => {
         legacyId: 8, ownerOrgId: orgA.organizationId, assignedOrgIds: [],
         name: '非法在线导入', pinyin: 'bad', visibleToAll: false, status: 1, entries: [],
       }, onlineCommandContext('bad-import')), /迁移导入命令/)
+    } finally {
+      await store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  void test('迁移导入中途失败整体回滚，不留部分写入', async () => {
+    const { dir, store, db, service, orgA } = await setup()
+    try {
+      const root = { userId: 'root', orgId: orgA.organizationId, role: 'super_admin' as const }
+      const ok = await service.importConfigItem(root, {
+        legacyId: 21, ownerOrgId: orgA.organizationId, assignedOrgIds: [],
+        name: '占位配置', pinyin: 'dup-first', visibleToAll: false, status: 1,
+        entries: [],
+      }, migrationCommandContext('run-p2', 'config-item:21'))
+      assert.equal(ok.id, 21)
+
+      // 不同幂等键导入同一 legacyId：resource_numeric_aliases 唯一冲突，
+      // 整个导入事务必须回滚（不残留 config item，也不写幂等记录）
+      await assert.rejects(service.importConfigItem(root, {
+        legacyId: 21, ownerOrgId: orgA.organizationId, assignedOrgIds: [],
+        name: '冲突残留探测', pinyin: 'dup-second', visibleToAll: false, status: 1,
+        entries: [],
+      }, migrationCommandContext('run-p2', 'config-item:21-dup')), /UNIQUE constraint failed/)
+
+      const leftover = db.prepare(
+        "SELECT COUNT(*) AS count FROM config_items WHERE pinyin = 'dup-second'",
+      ).get() as { count: number }
+      assert.equal(leftover.count, 0, '冲突导入不得残留 config item')
+      const command = db.prepare(
+        "SELECT COUNT(*) AS count FROM command_executions WHERE idempotency_key = 'config-item:21-dup'",
+      ).get() as { count: number }
+      assert.equal(command.count, 0, '失败命令不得写入幂等记录')
     } finally {
       await store.close()
       rmSync(dir, { recursive: true, force: true })

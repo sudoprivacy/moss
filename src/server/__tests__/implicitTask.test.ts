@@ -45,7 +45,7 @@ describe('implicit task compatibility metadata', () => {
       status: 'active',
       desiredState: 'active',
     })
-    store.db.prepare('UPDATE sessions SET client_metadata = NULL WHERE session_id = ?').run(
+    store.requireSqliteDb().prepare('UPDATE sessions SET client_metadata = NULL WHERE session_id = ?').run(
       'legacy-session',
     )
 

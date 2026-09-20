@@ -13,30 +13,30 @@ type JsonObject = Record<string, unknown>
 
 interface AdministrationPort {
   buildSsoLink(input: { actor: IdentityActor; orgId: string; next?: string }): Promise<{ url: string; expiresAt: number }>
-  getBinding(orgId: string): unknown
+  getBinding(orgId: string): Promise<unknown>
   provision(orgId: string, context: CommandContext): Promise<unknown>
-  listAgents(orgId: string): DifyAgentSummary[]
+  listAgents(orgId: string): Promise<DifyAgentSummary[]>
   createAgent(input: JsonObject & { actor: IdentityActor; orgId: string; name: string }, context: CommandContext): Promise<unknown>
-  getAgent(orgId: string, assistantId: string): DifyAgentSummary | null
+  getAgent(orgId: string, assistantId: string): Promise<DifyAgentSummary | null>
   deleteAgent(orgId: string, assistantId: string, context: CommandContext): Promise<void>
-  listAcl(orgId: string, assistantId: string): DifyAclEntry[]
-  replaceAcl(orgId: string, assistantId: string, entries: DifyAclEntry[]): DifyAclEntry[]
+  listAcl(orgId: string, assistantId: string): Promise<DifyAclEntry[]>
+  replaceAcl(orgId: string, assistantId: string, entries: DifyAclEntry[]): Promise<DifyAclEntry[]>
   listEnterpriseAssistants(orgId: string): Promise<unknown>
   listShareableOrganizations(): Promise<unknown> | unknown
   listAvailableDatasets(orgId: string): Promise<unknown>
   createEnterpriseAssistant(input: { actor: IdentityActor; orgId: string; form: FormData }, context: CommandContext): Promise<unknown>
   getEnterpriseAssistant(orgId: string, assistantId: string): Promise<unknown>
   updateEnterpriseAssistant(input: { actor: IdentityActor; orgId: string; assistantId: string; form: FormData }, context: CommandContext): Promise<unknown>
-  getEnhancement(orgId: string, assistantId: string): { enabled: boolean; mode?: string }
+  getEnhancement(orgId: string, assistantId: string): Promise<{ enabled: boolean; mode?: string }>
   setEnhancement(input: { actor: IdentityActor; orgId: string; assistantId: string; enable: boolean; mode?: string; appName?: string }, context: CommandContext): Promise<unknown>
-  listDatasets(orgId: string, assistantId: string): string[]
-  replaceDatasets(orgId: string, assistantId: string, datasetIds: string[]): string[]
+  listDatasets(orgId: string, assistantId: string): Promise<string[]>
+  replaceDatasets(orgId: string, assistantId: string, datasetIds: string[]): Promise<string[]>
 }
 
 interface DifyAdministrationRouteOptions {
   administration: AdministrationPort
   getActor: (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
-  resolveEnterpriseAlias: (legacyId: number) => { resourceId: string; orgId: string } | null
+  resolveEnterpriseAlias: (legacyId: number) => Promise<{ resourceId: string; orgId: string } | null>
   idempotencyKey?: (context: Context) => string
 }
 
@@ -46,7 +46,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   )
 
   app.get('/api/v1/admin/dify/sso', context => withAdmin(context, options, async actor => {
-    const orgId = resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
     if (orgId instanceof Response) return orgId
     try {
       const link = await options.administration.buildSsoLink({
@@ -60,27 +60,27 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   }))
 
   app.get('/api/v1/admin/dify/binding', context => withAdmin(context, options, async actor => {
-    const orgId = resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
     if (orgId instanceof Response) return orgId
-    return context.json({ success: true, data: options.administration.getBinding(orgId) })
+    return context.json({ success: true, data: await options.administration.getBinding(orgId) })
   }))
 
   app.post('/api/v1/admin/dify/binding/provision', context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
-    const orgId = resolveOrganization(context, actor, options, body?.enterprise_id)
+    const orgId = await resolveOrganization(context, actor, options, body?.enterprise_id)
     if (orgId instanceof Response) return orgId
     return await jsonOperation(context, () => options.administration.provision(orgId, commandContext(context)), 500)
   }))
 
   app.get('/api/v1/admin/dify/agents', context => withAdmin(context, options, async actor => {
-    const orgId = resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
     if (orgId instanceof Response) return orgId
-    return context.json({ success: true, data: options.administration.listAgents(orgId) })
+    return context.json({ success: true, data: await options.administration.listAgents(orgId) })
   }))
 
   app.post('/api/v1/admin/dify/agents', context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
-    const orgId = resolveOrganization(context, actor, options, body?.enterprise_id)
+    const orgId = await resolveOrganization(context, actor, options, body?.enterprise_id)
     if (orgId instanceof Response) return orgId
     if (!body?.name) return failure(context, 400, 'name is required')
     return await jsonOperation(context, () => options.administration.createAgent({
@@ -92,17 +92,17 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   }))
 
   app.get('/api/v1/admin/dify/agents/:assistantId', context => withAdmin(context, options, async actor => {
-    const orgId = resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
     if (orgId instanceof Response) return orgId
     const assistantId = context.req.param('assistantId')
-    const agent = options.administration.getAgent(orgId, assistantId)
+    const agent = await options.administration.getAgent(orgId, assistantId)
     if (!agent) return failure(context, 404, 'not found')
     return context.json({
       success: true,
       data: {
         ...agent,
-        acl: options.administration.listAcl(orgId, assistantId),
-        datasets: options.administration.listDatasets(orgId, assistantId),
+        acl: await options.administration.listAcl(orgId, assistantId),
+        datasets: await options.administration.listDatasets(orgId, assistantId),
       },
     })
   }))
@@ -110,7 +110,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   app.delete('/api/v1/admin/dify/agents/:assistantId', context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
     const raw = context.req.query('enterprise_id') ?? body?.enterprise_id
-    const orgId = resolveOrganization(context, actor, options, raw)
+    const orgId = await resolveOrganization(context, actor, options, raw)
     if (orgId instanceof Response) return orgId
     return await successOperation(context, () => options.administration.deleteAgent(
       orgId, context.req.param('assistantId'), commandContext(context),
@@ -119,7 +119,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
 
   app.put('/api/v1/admin/dify/agents/:assistantId/acl', context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
-    const orgId = resolveOrganization(context, actor, options, body?.enterprise_id)
+    const orgId = await resolveOrganization(context, actor, options, body?.enterprise_id)
     if (orgId instanceof Response) return orgId
     if (!Array.isArray(body?.entries)) return failure(context, 400, 'entries is required')
     const entries = body.entries.map(entry => objectValue(entry)).map(entry => ({
@@ -129,7 +129,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
     try {
       return context.json({
         success: true,
-        data: options.administration.replaceAcl(orgId, context.req.param('assistantId'), entries),
+        data: await options.administration.replaceAcl(orgId, context.req.param('assistantId'), entries),
       })
     } catch (error) {
       return providerError(context, error, 500)
@@ -151,7 +151,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   app.post('/api/v1/admin/dify/enterprise-assistants', context => withAdmin(context, options, async actor => {
     const form = await context.req.formData().catch(() => null)
     if (!form) return failure(context, 400, 'expected multipart/form-data')
-    const orgId = resolveOrganization(context, actor, options, form.get('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, form.get('enterprise_id'))
     if (orgId instanceof Response) return orgId
     if (!formString(form, 'name') || !formString(form, 'profession')) {
       return failure(context, 400, 'name and profession are required')
@@ -174,7 +174,7 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   app.put('/api/v1/admin/dify/enterprise-assistants/:assistantId', context => withAdmin(context, options, async actor => {
     const form = await context.req.formData().catch(() => null)
     if (!form) return failure(context, 400, 'expected multipart/form-data')
-    const orgId = resolveOrganization(context, actor, options, form.get('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, form.get('enterprise_id'))
     if (orgId instanceof Response) return orgId
     if (!formString(form, 'name') || !formString(form, 'profession')) {
       return failure(context, 400, 'name and profession are required')
@@ -187,11 +187,11 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
   app.put('/api/v1/admin/dify/enterprise-assistants/:assistantId/enhancement', context => withAdmin(
     context, options, async actor => {
       const body = await context.req.json<JsonObject>().catch(() => null)
-      const orgId = resolveOrganization(context, actor, options, body?.enterprise_id)
+      const orgId = await resolveOrganization(context, actor, options, body?.enterprise_id)
       if (orgId instanceof Response) return orgId
       if (!body || typeof body.enable !== 'boolean') return failure(context, 400, 'enable (boolean) required')
       const enable = body.enable
-      const current = options.administration.getEnhancement(orgId, context.req.param('assistantId'))
+      const current = await options.administration.getEnhancement(orgId, context.req.param('assistantId'))
       const mode = optionalString(body.mode)
       const changes = current.enabled !== enable
         || (current.enabled && enable && mode !== undefined && mode !== current.mode)
@@ -205,23 +205,23 @@ export function registerSudoworkDifyAdministrationRoutes(app: Hono, options: Dif
 
   app.get('/api/v1/admin/dify/enterprise-assistants/:assistantId/enhancement', context => withResolvedQuery(
     context, options, async orgId => context.json({
-      success: true, data: options.administration.getEnhancement(orgId, context.req.param('assistantId')),
+      success: true, data: await options.administration.getEnhancement(orgId, context.req.param('assistantId')),
     }),
   ))
 
   app.get('/api/v1/admin/dify/agents/:assistantId/datasets', context => withResolvedQuery(
     context, options, async orgId => context.json({
-      success: true, data: options.administration.listDatasets(orgId, context.req.param('assistantId')),
+      success: true, data: await options.administration.listDatasets(orgId, context.req.param('assistantId')),
     }),
   ))
 
   app.put('/api/v1/admin/dify/agents/:assistantId/datasets', context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
-    const orgId = resolveOrganization(context, actor, options, body?.enterprise_id)
+    const orgId = await resolveOrganization(context, actor, options, body?.enterprise_id)
     if (orgId instanceof Response) return orgId
     if (!Array.isArray(body?.dataset_ids)) return failure(context, 400, 'dataset_ids is required')
     try {
-      return context.json({ success: true, data: options.administration.replaceDatasets(
+      return context.json({ success: true, data: await options.administration.replaceDatasets(
         orgId, context.req.param('assistantId'), body.dataset_ids.filter((id): id is string => typeof id === 'string'),
       ) })
     } catch (error) {
@@ -236,7 +236,7 @@ async function withResolvedQuery(
   operation: (orgId: string, actor: IdentityActor) => Promise<Response>,
 ): Promise<Response> {
   return await withAdmin(context, options, async actor => {
-    const orgId = resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
+    const orgId = await resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
     return orgId instanceof Response ? orgId : await operation(orgId, actor)
   })
 }
@@ -252,20 +252,20 @@ async function withAdmin(
   return await operation(actor)
 }
 
-function resolveOrganization(
+async function resolveOrganization(
   context: Context,
   actor: IdentityActor,
   options: DifyAdministrationRouteOptions,
   raw: unknown,
-): string | Response {
+): Promise<string | Response> {
   const legacyId = parseEnterpriseId(raw)
   if (hasGlobalOrganizationAccess(actor)) {
     if (legacyId === null) return failure(context, 400, 'super admin must specify enterprise_id')
-    const resolved = options.resolveEnterpriseAlias(legacyId)
+    const resolved = await options.resolveEnterpriseAlias(legacyId)
     return resolved?.resourceId ?? failure(context, 400, `enterprise ${legacyId} not found`)
   }
   if (legacyId !== null) {
-    const resolved = options.resolveEnterpriseAlias(legacyId)
+    const resolved = await options.resolveEnterpriseAlias(legacyId)
     if (!resolved || resolved.resourceId !== actor.orgId) return failure(context, 403, 'cannot operate on another enterprise')
   }
   return actor.orgId

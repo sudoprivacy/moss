@@ -3,8 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext, onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import {
   GovernanceMigrationBlockedError,
   GovernanceMigrationService,
@@ -48,8 +48,8 @@ const snapshot: SudoworkGovernanceSnapshot = {
 async function setup(source: SudoworkGovernanceSnapshot = snapshot) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  const unified = new UnifiedIdentityService(db, auth, identities)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
+  const unified = new UnifiedIdentityService(auth, identities)
   const organization = await unified.createOrganization({
     name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 7,
   }, migrationCommandContext('identity-bootstrap', 'organization-7'))
@@ -64,7 +64,6 @@ async function setup(source: SudoworkGovernanceSnapshot = snapshot) {
   const runs = new MigrationRunStore(db, { idFactory: () => 'run-governance' })
   runs.createRun({ sourceFingerprint: 'source-fingerprint', sourceMetadata: {} })
   const service = new GovernanceMigrationService({
-    db,
     identities,
     runs,
     source: { readSnapshot: () => source },
@@ -77,11 +76,11 @@ void describe('GovernanceMigrationService', () => {
   void test('通过统一仓储幂等导入邀请码和完整审计且不产生外部副作用', async () => {
     const context = await setup()
     try {
-      const plan = context.service.plan()
+      const plan = await context.service.plan()
       assert.equal(plan.status, 'ready')
       const command = migrationCommandContext('run-governance', 'governance-phase')
-      const first = context.service.execute(plan, command)
-      const repeated = context.service.execute(plan, command)
+      const first = await context.service.execute(plan, command)
+      const repeated = await context.service.execute(plan, command)
 
       assert.deepEqual(repeated, first)
       assert.deepEqual(first, {
@@ -91,9 +90,9 @@ void describe('GovernanceMigrationService', () => {
         operationLogsImported: 1,
         deliverableExternalOutboxCount: 0,
       })
-      const pendingId = context.identities.resolveNumericAliasGlobal('invitation', 1)!.resourceId
-      const usedId = context.identities.resolveNumericAliasGlobal('invitation', 2)!.resourceId
-      assert.deepEqual(context.identities.getInvitationById(pendingId), {
+      const pendingId = (await context.identities.resolveNumericAliasGlobal('invitation', 1))!.resourceId
+      const usedId = (await context.identities.resolveNumericAliasGlobal('invitation', 2))!.resourceId
+      assert.deepEqual(await context.identities.getInvitationById(pendingId), {
         id: pendingId,
         orgId: context.organization.organizationId,
         code: 'PENDING',
@@ -104,10 +103,10 @@ void describe('GovernanceMigrationService', () => {
         createdAt: 100,
         usedAt: null,
       })
-      assert.equal(context.identities.getInvitationById(usedId)?.initialCreditUnits, 12_500)
-      assert.equal(context.identities.getInvitationById(usedId)?.usedByUserId, context.user.userId)
-      assert.equal(context.identities.getInvitationById(usedId)?.usedAt, 300)
-      const audit = context.identities.listOperationAudits({ limit: 10, offset: 0 }).items[0]!
+      assert.equal((await context.identities.getInvitationById(usedId))?.initialCreditUnits, 12_500)
+      assert.equal((await context.identities.getInvitationById(usedId))?.usedByUserId, context.user.userId)
+      assert.equal((await context.identities.getInvitationById(usedId))?.usedAt, 300)
+      const audit = (await context.identities.listOperationAudits({ limit: 10, offset: 0 })).items[0]!
       assert.equal(audit.legacyId, 9)
       assert.equal(audit.orgId, context.organization.organizationId)
       assert.equal(audit.actorUserId, context.user.userId)
@@ -127,10 +126,10 @@ void describe('GovernanceMigrationService', () => {
     }
     const context = await setup(source)
     try {
-      const plan = context.service.plan()
+      const plan = await context.service.plan()
       assert.equal(plan.status, 'ready')
-      context.service.execute(plan, migrationCommandContext('run-governance', 'governance-phone-log'))
-      const audit = context.identities.listOperationAudits({ limit: 10, offset: 0 }).items[0]!
+      await context.service.execute(plan, migrationCommandContext('run-governance', 'governance-phone-log'))
+      const audit = (await context.identities.listOperationAudits({ limit: 10, offset: 0 })).items[0]!
       assert.equal(audit.actorUserId, context.user.userId)
       assert.equal(audit.actorLegacyId, 0)
     } finally {
@@ -146,21 +145,21 @@ void describe('GovernanceMigrationService', () => {
     }
     const context = await setup(source)
     try {
-      const blocked = context.service.plan()
+      const blocked = await context.service.plan()
       assert.equal(blocked.status, 'blocked')
       assert.deepEqual(blocked.issues.map(item => item.code).sort(), [
         'IDENTITY_MAPPING_MISSING',
         'OPERATION_ORGANIZATION_REQUIRED',
       ])
-      assert.throws(
-        () => context.service.execute(blocked, migrationCommandContext('run-governance', 'blocked')),
+      await assert.rejects(
+        context.service.execute(blocked, migrationCommandContext('run-governance', 'blocked')),
         GovernanceMigrationBlockedError,
       )
 
       const onlyLog = { ...source, invitations: [], checksum: 'manual-log' }
       const manual = await setup(onlyLog)
       try {
-        const plan = manual.service.plan({ operationLogEnterpriseIds: { 11: 7 } })
+        const plan = await manual.service.plan({ operationLogEnterpriseIds: { 11: 7 } })
         assert.equal(plan.status, 'ready')
       } finally {
         manual.db.close()
@@ -173,17 +172,17 @@ void describe('GovernanceMigrationService', () => {
   void test('拒绝在线上下文和已被其他目标占用的邀请码代码', async () => {
     const context = await setup()
     try {
-      context.identities.createInvitation({
+      await context.identities.createInvitation({
         id: 'native-invitation',
         orgId: context.organization.organizationId,
         code: 'PENDING',
         initialCreditUnits: 1,
       })
-      const plan = context.service.plan()
+      const plan = await context.service.plan()
       assert.equal(plan.status, 'blocked')
       assert(plan.issues.some(item => item.code === 'TARGET_CONFLICT'))
-      assert.throws(
-        () => context.service.execute(plan, onlineCommandContext('not-migration')),
+      await assert.rejects(
+        context.service.execute(plan, onlineCommandContext('not-migration')),
         /migration/,
       )
     } finally {

@@ -3,9 +3,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import { AuthCenterDb } from '../../../authCenter/db.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
 import type { LegacyKeyValueStore } from '../../../identity/legacyToken.js'
+import { createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkIdentityService } from './identityService.js'
 import { HttpCasTicketValidator, SudoworkCasError, SudoworkCasService } from './casService.js'
 import type { CasProvider } from './casService.js'
@@ -102,12 +102,12 @@ void describe('Sudowork CAS compatibility service', () => {
   void test('auto-provisions one canonical user and atomically exchanges a handoff code', async () => {
     const db = new DatabaseSync(':memory:')
     const authDb = new AuthCenterDb(db)
-    const identities = new IdentityRepository(db)
-    const unified = new UnifiedIdentityService(db, authDb, identities)
+    const identities = createIdentityTestRepository(db, {}, authDb.driver)
+    const unified = new UnifiedIdentityService(authDb, identities)
     const organization = await unified.createOrganization({
       name: '企业 A', code: 'ENT-A', loginMethod: 'cas',
     }, onlineCommandContext('org-a'))
-    identities.putIntegrationConnection({
+    await identities.putIntegrationConnection({
       id: 'cas-main', orgId: organization.organizationId, providerType: 'cas',
       name: '统一认证', enabled: true, config: {
         casUrl: 'https://cas.example.test', validatePath: '/serviceValidate',
@@ -149,11 +149,11 @@ void describe('Sudowork CAS compatibility service', () => {
     assert.equal(callback.redirectUrl, 'sudowork://cas-callback/cas-main/callback?code=handoff-code')
     const session = await service.exchange({ providerId: 'cas-main', code: 'handoff-code', deviceId: 'desktop-a' })
     assert.equal(session.user.phone, 'cas-user')
-    assert(identities.findAuthIdentity('cas', 'cas-main', 'external-1'))
+    assert(await identities.findAuthIdentity('cas', 'cas-main', 'external-1'))
     assert.equal(accountCalls.length, 1)
     assert.equal(accountCalls[0]?.input.initialQuotaUnits, 500_000)
     assert.equal((await authDb.getUserById(accountCalls[0]!.input.ownerId))?.status, 'active')
-    assert.equal(identities.getWallet('user', accountCalls[0]!.input.ownerId)?.balanceUnits, 1_000)
+    assert.equal((await identities.getWallet('user', accountCalls[0]!.input.ownerId))?.balanceUnits, 1_000)
     await assert.rejects(() => service.exchange({
       providerId: 'cas-main', code: 'handoff-code', deviceId: 'desktop-a',
     }))

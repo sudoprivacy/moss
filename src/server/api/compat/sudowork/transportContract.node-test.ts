@@ -69,7 +69,7 @@ void describe('Sudowork transport contract', () => {
       difyAdministration: {
         async buildSsoLink() { return { url: 'https://dify.example/sso', expiresAt: 1 } },
       } as never,
-      resolveEnterpriseAlias: () => ({ resourceId: 'org', orgId: 'org' }),
+      resolveEnterpriseAlias: async () => ({ resourceId: 'org', orgId: 'org' }),
       difyRuntime: {
         async chat() { return new Response('data: ok\n\n') },
         async textToAudio() {

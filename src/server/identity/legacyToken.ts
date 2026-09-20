@@ -112,10 +112,10 @@ export async function resolveLegacyPrincipal(
 ): Promise<LegacyPrincipal | null> {
   const claims = verifyLegacyJwt(token, secret, nowSeconds)
   if (!claims) return null
-  const userAlias = repository.resolveNumericAliasGlobal('user', claims.id)
+  const userAlias = await repository.resolveNumericAliasGlobal('user', claims.id)
   if (!userAlias) return null
   if (claims.enterprise_id !== null) {
-    const orgAlias = repository.resolveNumericAliasGlobal('enterprise', claims.enterprise_id)
+    const orgAlias = await repository.resolveNumericAliasGlobal('enterprise', claims.enterprise_id)
     if (!orgAlias || orgAlias.resourceId !== userAlias.orgId) return null
   }
   const user = await authDb.getUserByIdAndOrg(userAlias.resourceId, userAlias.orgId)

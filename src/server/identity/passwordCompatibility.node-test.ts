@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthService, AuthServiceError } from '../auth/service.js'
 import { AuthCenterDb, type AuthCenterUser } from '../authCenter/db.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
 async function setup(status: AuthCenterUser['status'] = 'active'): Promise<{
   db: DatabaseSync
@@ -13,6 +14,7 @@ async function setup(status: AuthCenterUser['status'] = 'active'): Promise<{
 }> {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
+  createIdentityTestRepository(db, {}, authDb.driver)
   await authDb.createOrganization('org-a', 'Org A', 1)
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
