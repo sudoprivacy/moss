@@ -86,6 +86,7 @@ const NODE = [
   'phoneInvitationRegistration.test.ts',
   'phoneImport.test.ts',
   'rechargeDb.test.ts',
+  'zoneBinding.test.ts',
   'tokenQuota.test.ts',
   'transcriptGuard.test.ts',
   // LB/HA branch suites (node:sqlite / driver seam reach-through)

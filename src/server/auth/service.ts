@@ -20,6 +20,9 @@ import {
   getSystemSettings,
   updateOrganizationSystemSettings,
 } from '../systemSettings.js'
+import { NexusZoneClient } from '../nexus/nexusZoneClient.js'
+import { resolveZoneBindingConfig } from '../zones/binding/config.js'
+import { ZoneDelegationService } from '../zones/binding/delegationService.js'
 import {
   newApplicationNo,
   type CreditApplication,
@@ -363,6 +366,9 @@ export class AuthService {
   private sudorouterAccountReader?: Pick<SudorouterAccountService, 'getAccount'>
   private organizationBilling?: OrganizationBillingService
   private organizationRecharge?: OrganizationRechargeService
+  // Zone delegation（§5.4/§6.4）：/v2 endpoint 未配置时为 null，全部钩子
+  // 空跳过——不影响无 Zone 部署的现有行为。
+  readonly zoneDelegation: ZoneDelegationService | null
   private sudorouterAccounts?: {
     accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'> & Partial<Pick<SudorouterAccountService, 'getAccount'>>
     initialQuotaUnits: number
@@ -389,6 +395,14 @@ export class AuthService {
       },
       isShared: orgId => this.organizationBilling?.isShared(orgId) ?? Promise.resolve(false),
     })
+    const zoneBindingConfig = resolveZoneBindingConfig()
+    this.zoneDelegation = zoneBindingConfig.zoneBindingEnabled
+      ? new ZoneDelegationService({
+          driver: this.db.driver,
+          client: new NexusZoneClient(zoneBindingConfig),
+          config: zoneBindingConfig,
+        })
+      : null
     this.cleanupTimer = setInterval(() => {
       void this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
@@ -2001,6 +2015,16 @@ export class AuthService {
       }
       throw err
     }
+    // Org delete 只撤销访问，不自动 deprovision Zone 数据（§8.7 验收）：
+    // binding desired_state → detached（远端 detach 由 05B 管理面处理），
+    // 已发 delegation 主动 revoke（best-effort；nexus membership 复查兜底）。
+    await this.db.driver.run(
+      `UPDATE org_zone_bindings SET desired_state = 'detached', updated_at = ? WHERE org_id = ?`,
+      [Date.now(), org.id],
+    )
+    if (this.zoneDelegation) {
+      void this.zoneDelegation.revokeForOrg(org.id).catch(() => {})
+    }
     return { ok: true }
   }
 
@@ -2529,6 +2553,12 @@ export class AuthService {
 
     await this.organizationBilling?.beforeMemberChange(user.orgId, user.id, patch.status ?? user.status)
     await withExtIdConflict(() => this.db.updateUser(user.id, patch))
+    // Membership 变化（role downgrade / suspend 等）→ 旧 delegation 的下一
+    // 次访问必须拒绝。nexus verify 的 membership 复查是安全兜底；这里的
+    // 主动 revoke 只加速收敛，best-effort 不阻塞管理操作。
+    if (this.zoneDelegation && (patch.role !== undefined || patch.status !== undefined)) {
+      void this.zoneDelegation.revokeForUser(nextOrgId, user.id).catch(() => {})
+    }
     return {
       user: sanitizeUser((await this.db.getUserByIdAndOrg(user.id, nextOrgId)) ?? user),
     }

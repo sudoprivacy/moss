@@ -36,6 +36,7 @@ import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
  */
 import type { DbDriver } from './driver.js'
 import { ORGANIZATION_MODEL_SETTINGS_SCHEMA } from '../configuration/organizationModelSettingsRepository.js'
+import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 
 /** Initial full schema (all stores, migrated-final shape). */
 const MIGRATION_0001_INITIAL_SCHEMA = `
@@ -1934,6 +1935,10 @@ interface PgMigration {
   sql: string
 }
 
+/** §8.7 zone binding 三表：DDL 与 SQLite 侧同源（zones/binding/schema.ts，
+ *  双方言兼容文本），不在本文件复制第二份。 */
+const MIGRATION_0005_ZONE_BINDING = ZONE_BINDING_TABLES_DDL
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
@@ -1965,6 +1970,7 @@ const MIGRATIONS: PgMigration[] = [
     ALTER TABLE tenant_assistants DROP CONSTRAINT IF EXISTS tenant_assistants_provider_type_check;
     ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
   ` },
+  { version: 13, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

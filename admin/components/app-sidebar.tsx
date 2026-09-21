@@ -33,6 +33,7 @@ import {
   Activity,
   ClipboardList,
   Database,
+  Boxes,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -121,6 +122,11 @@ const menuItems: NavItem[] = [
     url: '/agents',
     icon: Bot,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
+  },
+  {
+    title: 'Zone 管理',
+    url: '/zones',
+    icon: Boxes,
   },
   {
     title: '会话管理',
