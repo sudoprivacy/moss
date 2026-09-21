@@ -266,6 +266,12 @@ export class K8sBackend implements SessionBackend {
     podEnv.HOME = configDir
     podEnv.MOSS_HOME = MOSS_HOME
     podEnv.SUDO_CODE_CONFIG_HOME = scodeHomeDir
+    // moss authors this config fresh for every session and mounts
+    // sudocode.json / settings.json into it as read-only Secret files, so
+    // scode's config migration can only fail there: rewriting a Secret mount
+    // in place returns EBUSY, and every k8s session logs
+    // "left the config alone (Resource busy (os error 16))" on startup.
+    podEnv.SCODE_SKIP_CONFIG_MIGRATION = '1'
     podEnv.CLAUDE_CONFIG_DIR = configDir
     podEnv.CLAUDE_CODE_REMOTE_MEMORY_DIR = configDir
     podEnv.MOSS_SESSION_ID = options.sessionId
