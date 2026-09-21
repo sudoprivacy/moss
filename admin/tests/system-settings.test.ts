@@ -1,11 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { SystemSettings } from '../lib/api/types'
-import { buildSystemSettingsPatch, createSettingsDraft, FIELD_LABELS, getRedactedSettings, getSettingsChanges, MIB, TAB_FIELDS, validateSettingsDraft } from '../lib/system-settings'
+import { buildSystemSettingsPatch, createSettingsDraft, FIELD_LABELS, getRedactedSettings, getSettingsChanges, MIB, TAB_FIELDS, validateSettingsDraft as validateDraft } from '../lib/system-settings'
+
+const validateSettingsDraft = (draft: Parameters<typeof validateDraft>[0]) => validateDraft(draft, 'platform')
 
 const settings: SystemSettings = {
-  model: 'test-model', url: '', apiKey: 'fixture-text-key',
-  image: { provider: 'openai', url: '', apiKey: 'fixture-image-key', model: 'test-image' },
+  scopeType: 'platform', organizationId: '',
+  model: 'test-model', url: '', apiKey: '', apiKeyConfigured: true,
+  image: { provider: 'openai', url: '', apiKey: '', apiKeyConfigured: true, model: 'test-image' },
   bypassPermissions: false, maxTurns: 100, thinkingMode: 'adaptive', thinkingBudgetTokens: 16000,
   skillStore: { tenantId: '' }, oauth2: { enabled: false, requireState: true, authorizeUrlTemplate: '', scriptPath: '/opt/oauth.sh' },
   clientCronEnabled: true, clientShowToolCalls: true, workspaceUploadLimitBytes: 20 * MIB + 7,
@@ -28,7 +31,7 @@ test('malformed server configuration cannot be rewritten by the form', () => {
 
 test('all editable fields are categorized exactly once', () => {
   const fields = Object.values(TAB_FIELDS).flat().sort()
-  assert.equal(fields.length, 20)
+  assert.equal(fields.length, 22)
   assert.equal(new Set(fields).size, fields.length)
   assert.deepEqual(fields, Object.keys(FIELD_LABELS).sort())
   assert.deepEqual(fields, Object.keys(fresh()).sort())
@@ -68,11 +71,9 @@ test('secrets default to keep without hydrating raw values; replace and clear ar
 test('review and saved configuration never serialize secret contents', () => {
   const text = JSON.stringify(getSettingsChanges(settings, { ...fresh(), apiKey: { action: 'replace', value: 'replacement-secret' } }))
   assert.ok(!text.includes('replacement-secret'))
-  assert.ok(!text.includes(settings.apiKey))
   const redacted = JSON.stringify(getRedactedSettings(settings))
-  assert.ok(!redacted.includes(settings.apiKey))
-  assert.ok(!redacted.includes(settings.image.apiKey))
-  assert.equal(settings.apiKey, 'fixture-text-key')
+  assert.ok(redacted.includes('[已配置，已隐藏]'))
+  assert.equal(settings.apiKey, '')
 })
 
 test('whole-byte uploads from one byte through one GiB round-trip without mutation', () => {
@@ -109,4 +110,35 @@ test('URL validation permits blank defaults and OAuth placeholders but rejects u
   assert.ok(validateSettingsDraft({ ...fresh(), oauthEnabled: true }).authorizeUrlTemplate)
   assert.deepEqual(validateSettingsDraft({ ...fresh(), oauthEnabled: true, authorizeUrlTemplate: 'https://idp.example.invalid?redirect_uri={redirect_uri}&state={state}' }), {})
   assert.ok(validateSettingsDraft({ ...fresh(), model: '  ' }).model)
+})
+
+test('organization model edits ignore hidden invalid deployment fields and never submit them', () => {
+  const organizationSettings = { ...settings, scopeType: 'organization' as const, organizationId: 'org-a' }
+  const draft = {
+    ...fresh(), model: 'org-model', imageModel: 'org-image',
+    tenantId: 'forbidden', bypassPermissions: true, maxTurns: '', cronReuseMaxRuns: '-1',
+    imReuseMaxTurns: '', thinkingMode: 'enabled' as const, thinkingBudgetTokens: '',
+    clientCronEnabled: false, clientShowToolCalls: false, uploadLimitMiB: '',
+    oauthEnabled: true, oauthRequireState: false, authorizeUrlTemplate: 'invalid',
+  }
+  assert.deepEqual(validateDraft(draft, 'organization'), {})
+  assert.deepEqual(validateDraft(draft), {})
+  assert.deepEqual(buildSystemSettingsPatch(organizationSettings, draft), { model: 'org-model', image: { model: 'org-image' } })
+  assert.deepEqual(getSettingsChanges(organizationSettings, draft).map(change => change.field), ['model', 'imageModel'])
+  assert.throws(() => buildSystemSettingsPatch(settings, draft, 'platform'))
+  assert.deepEqual(buildSystemSettingsPatch({ ...settings, scopeType: undefined }, draft), { model: 'org-model', image: { model: 'org-image' } })
+})
+
+test('organization scope still validates and submits provider and secret changes', () => {
+  const provider = {
+    id: 'org-provider', name: 'Organization provider', kind: 'openai-compatible' as const,
+    baseUrl: 'https://model.example.invalid/v1', discoveryUrl: 'https://model.example.invalid/v1/models',
+    protocol: 'openai-completions' as const, enabled: true, apiKeyConfigured: true,
+  }
+  const baseline = { ...settings, scopeType: 'organization' as const, organizationId: 'org-a', modelProviders: [provider], defaultModelProviderId: provider.id }
+  const draft = { ...createSettingsDraft(baseline), modelProviders: [{ ...provider, apiKey: ' new-provider-key ' }], imageApiKey: { action: 'clear' as const, value: '' } }
+  const { apiKeyConfigured: _, ...metadata } = provider
+  assert.deepEqual(buildSystemSettingsPatch(baseline, draft), { modelProviders: [{ ...metadata, apiKey: 'new-provider-key' }], image: { apiKey: '' } })
+  assert.ok(validateDraft({ ...draft, imageUrl: 'javascript:alert(1)' }).imageUrl)
+  assert.ok(validateDraft({ ...draft, modelProviders: [{ ...provider, baseUrl: 'invalid' }] }).modelProviders)
 })

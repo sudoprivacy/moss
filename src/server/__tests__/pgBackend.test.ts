@@ -43,6 +43,11 @@ import { IdentityMigrationService } from "../migration/identityMigrationService.
 import { MigrationRunStore } from "../migration/migrationRunStore.js";
 import { P2ConfigurationMigrationService } from "../migration/p2ConfigurationMigrationService.js";
 import { P4DifyMigrationService } from "../migration/p4DifyMigrationService.js";
+import { OrganizationModelSettingsRepository } from "../configuration/organizationModelSettingsRepository.js";
+import { getOrganizationSystemSettings } from "../systemSettings.js";
+import { migrateLegacyModelSettings } from "../configuration/migrateLegacyModelSettings.js";
+import { migrateLegacyEnterpriseCronPolicy } from "../migration/legacyEnterpriseCronPolicy.js";
+import { createEnterpriseApi } from "../api/enterprise.js";
 
 const PG_URL = process.env.MOSS_PG_TEST_URL ?? "";
 
@@ -129,6 +134,95 @@ const seedSession = async (store: DirectConnectStore, ownerInstanceId: string) =
   return { sessionId, attemptId: attempt.attemptId };
 };
 
+describe("organization configuration on PG", { skip: !PG_URL }, () => {
+  const admin = createAdminPool();
+  let dbName = "";
+  let fix!: PgFixture;
+  let peer: Awaited<ReturnType<typeof openPeer>>;
+  before(async () => {
+    dbName = await createFreshDatabase(admin);
+    fix = await openFixture(dbName);
+    peer = await openPeer(dbName);
+    await fix.driver.run(
+      "INSERT INTO enterprises (id, created_at, updated_at) VALUES ('default', ?, ?)",
+      [Date.now(), Date.now()],
+    );
+    const auth = new AuthCenterDb(fix.store);
+    const identities = new IdentityRepository(fix.driver);
+    for (const orgId of ["model-org-a", "model-org-b"]) {
+      await auth.createOrganization(orgId, orgId, Date.now());
+      await identities.putOrganizationProfile({
+        orgId, code: orgId, loginMethod: "password", localEnabled: true, cloudEnabled: true,
+      });
+    }
+  });
+  after(async () => {
+    await peer?.pool.end();
+    await fix?.release();
+    await dropDatabase(admin, dbName);
+    await admin.end();
+  });
+
+  it("isolates model settings across pools and serializes the one-time migration", async () => {
+    const repository = new OrganizationModelSettingsRepository(fix.driver);
+    const peerRepository = new OrganizationModelSettingsRepository(peer.driver);
+    await repository.put("model-org-a", { model: "a-model", image: { model: "a-image" } }, "admin");
+    await repository.put("model-org-b", { model: "b-model" }, "admin");
+    await Promise.all([
+      migrateLegacyModelSettings(fix.driver, "model-org-a"),
+      migrateLegacyModelSettings(peer.driver, "model-org-a"),
+    ]);
+    const a = await getOrganizationSystemSettings("model-org-a", peerRepository, { redactSecrets: true });
+    const b = await getOrganizationSystemSettings("model-org-b", repository, { redactSecrets: true });
+    assert.equal(a.model, "a-model");
+    assert.equal(a.image.model, "a-image");
+    assert.equal(b.model, "b-model");
+    assert.equal(a.apiKeyConfigured, false);
+    assert.equal(b.apiKeyConfigured, false);
+    assert.equal(Number((await fix.driver.get("SELECT COUNT(*) AS n FROM organization_model_settings_migrations"))?.n), 1);
+    await assert.rejects(fix.driver.transaction(async () => {
+      await repository.put("model-org-a", { model: "rolled-back" }, "admin");
+      throw new Error("model rollback");
+    }), /model rollback/);
+    assert.equal((await peerRepository.get("model-org-a")).model, "a-model");
+  });
+
+  it("migrates cron restrictions once and rolls back asynchronous enterprise policy writes", async () => {
+    const identities = new IdentityRepository(fix.driver);
+    const policies = new ClientPolicyRepository(fix.driver);
+    await fix.store.updateEnterprise("model-org-a", { client_cron_enabled: false, app_name: "A" });
+    await fix.store.updateEnterprise("model-org-b", { client_cron_enabled: true });
+    assert.equal((await fix.store.getEnterprise("model-org-a")).client_cron_enabled, false);
+    await identities.setOrganizationClientCronEnabled("model-org-b", false);
+    const results = await Promise.all([
+      migrateLegacyEnterpriseCronPolicy(fix.driver),
+      migrateLegacyEnterpriseCronPolicy(peer.driver),
+    ]);
+    assert.equal(results.reduce((sum, count) => sum + count, 0), 1);
+    assert.equal((await identities.getOrganizationProfile("model-org-a"))?.clientCronEnabled, false);
+    assert.equal((await identities.getOrganizationProfile("model-org-b"))?.clientCronEnabled, false);
+    const api = createEnterpriseApi(fix.store, "/tmp/moss-pg-enterprise", {
+      getClientCronEnabled: async orgId => (await identities.getOrganizationProfile(orgId))?.clientCronEnabled ?? true,
+      setClientCronEnabled: (orgId, enabled) => identities.setOrganizationClientCronEnabled(orgId, enabled),
+      getClientPolicy: orgId => policies.getEffective(orgId),
+      putClientPolicy: async (orgId, patch, updatedBy) => {
+        await policies.putOrganization(orgId, patch, updatedBy);
+        throw new Error("asynchronous policy failure");
+      },
+    });
+    const result = await api.updateConfig("model-org-a", {
+      app_name: "not-committed", client_cron_enabled: true, client_show_tool_calls: false,
+    });
+    assert.equal(result.success, false);
+    assert.equal((await fix.store.getEnterprise("model-org-a")).app_name, "A");
+    assert.equal((await identities.getOrganizationProfile("model-org-a"))?.clientCronEnabled, false);
+    assert.deepEqual(await policies.getOrganization("model-org-a"), {});
+    await identities.setOrganizationClientCronEnabled("model-org-a", true);
+    assert.equal(await migrateLegacyEnterpriseCronPolicy(peer.driver), 0);
+    assert.equal((await identities.getOrganizationProfile("model-org-a"))?.clientCronEnabled, true);
+  });
+});
+
 describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
   const admin = createAdminPool();
   let dbName = "";
@@ -149,7 +243,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -1094,10 +1188,10 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: still exactly [1, 2, 3, 4, 5, 6].
+        // Re-run is a no-op: all seven migrations remain applied exactly once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7]);
         // v3 (audit fixes): tenant-store org indexes (C-4) + the E-2
         // channel_sessions snapshot column.
         for (const idx of ["idx_tenant_skills_org", "idx_tenant_assistants_org"]) {

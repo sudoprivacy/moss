@@ -4,6 +4,7 @@ import { ensureCatalogSchema } from '../catalog/catalogSchema.js'
 import { ensureClientPolicySchema } from '../configuration/clientPolicyRepository.js'
 import { ensureConfigAvailabilitySchema } from '../configuration/configAvailabilitySchema.js'
 import { ensurePlatformIntegrationSettingsSchema } from '../configuration/platformIntegrationSettingsRepository.js'
+import { ensureOrganizationModelSettingsSchema } from '../configuration/organizationModelSettingsRepository.js'
 import { ensureDifySchema } from '../dify/difySchema.js'
 import { ensureIdentitySchema } from '../identity/identityRepository.js'
 
@@ -15,6 +16,7 @@ export function ensureSqliteCompatibilityDomainSchemas(
   ensureCatalogSchema(db)
   ensureConfigAvailabilitySchema(db)
   ensureClientPolicySchema(db)
+  ensureOrganizationModelSettingsSchema(db)
   ensurePlatformIntegrationSettingsSchema(db)
   ensureDifySchema(db)
   ensureBillingSchema(db)

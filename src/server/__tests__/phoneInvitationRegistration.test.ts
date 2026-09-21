@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { AuthCenterDb } from "../authCenter/db.js";
 import { AuthService, AuthServiceError } from "../auth/service.js";
 import { createIdentityTestRepository } from "../testing/compatibilityRepositories.js";
+import { ensureClientPolicySchema } from "../configuration/clientPolicyRepository.js";
 
 let raw: DatabaseSync;
 let db: AuthCenterDb;
@@ -14,6 +15,7 @@ beforeEach(() => {
   raw = new DatabaseSync(":memory:");
   db = new AuthCenterDb(raw, ":memory:");
   createIdentityTestRepository(raw, {}, db.driver);
+  ensureClientPolicySchema(raw);
   auth = new AuthService(db, 3600);
 });
 
@@ -26,6 +28,10 @@ describe("invited phone registration", () => {
   it("joins the invitation organization as a normal user without creating an organization", async () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;
+    const repository = createIdentityTestRepository(raw, {}, db.driver);
+    const profile = await repository.getOrganizationProfile(orgId);
+    assert(profile);
+    await repository.putOrganizationProfile({ ...profile, loginMethod: "sms" });
     const organizations = auth.createOrganizationIdentityService();
     await organizations.createInvitations({ orgId, count: 1 }, () => "JOINME");
 
@@ -51,6 +57,10 @@ describe("invited phone registration", () => {
   it("rejects a missing or already-used invitation without creating another organization", async () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;
+    const repository = createIdentityTestRepository(raw, {}, db.driver);
+    const profile = await repository.getOrganizationProfile(orgId);
+    assert(profile);
+    await repository.putOrganizationProfile({ ...profile, loginMethod: "sms" });
     const organizations = auth.createOrganizationIdentityService();
     await organizations.createInvitations({ orgId, count: 1 }, () => "ONCE01");
 

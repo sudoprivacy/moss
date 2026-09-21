@@ -4,15 +4,30 @@ import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
 import { getSystemSettings } from '../systemSettings.js'
 
-type EnterpriseConfigPatch = Partial<
+type EnterpriseBrandingPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
 >
+
+type ClientFacingPolicy = {
+  clientShowToolCalls?: unknown
+  workspaceUploadLimitBytes?: unknown
+}
 
 export function createEnterpriseApi(
   db: DirectConnectStore,
   runtimeDir: string,
-  options: { cabinEnabled?: boolean } = {},
+  options: {
+    cabinEnabled?: boolean
+    getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>
+    setClientCronEnabled?: (orgId: string, enabled: boolean) => void | Promise<void>
+    getClientPolicy?: (orgId?: string) => ClientFacingPolicy | Promise<ClientFacingPolicy>
+    /** Writes must use the store's Driver to join the enterprise transaction. */
+    putClientPolicy?: (orgId: string, patch: ClientFacingPolicy, updatedBy: string) => void | Promise<unknown>
+  } = {},
 ) {
+  // Startup awaits migrateLegacyEnterpriseCronPolicy after seeding profiles,
+  // before exposing hook-backed policy reads or starting the scheduler.
+
   function enterpriseLogoDir(orgId: string): string {
     return orgId === 'default'
       ? path.join(runtimeDir, 'uploads', 'enterprise')
@@ -20,27 +35,37 @@ export function createEnterpriseApi(
   }
 
   const getEffectivePolicy = async (orgId = 'default') => {
-    const enterprise = await db.getEnterprise(orgId)
+    const requestedOrgId = orgId.trim() || 'default'
+    const enterprise = await db.getEnterprise(requestedOrgId === 'default' ? undefined : requestedOrgId)
+    const policy = options.getClientPolicy
+      ? await options.getClientPolicy(requestedOrgId === 'default' ? undefined : requestedOrgId)
+      : {}
+    const orgCronEnabled = requestedOrgId !== 'default' && options.getClientCronEnabled
+      ? await options.getClientCronEnabled(requestedOrgId)
+      : enterprise.client_cron_enabled ?? true
     const systemSettings = getSystemSettings()
     return {
-      clientCronEnabled:
-        enterprise.client_cron_enabled ?? systemSettings.clientCronEnabled,
-      clientShowToolCalls:
-        enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,
-      workspaceUploadLimitBytes:
-        enterprise.workspace_upload_limit_bytes ?? systemSettings.workspaceUploadLimitBytes,
+      clientCronEnabled: systemSettings.clientCronEnabled && orgCronEnabled,
+      clientShowToolCalls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,
+      workspaceUploadLimitBytes: normalizeUploadLimit(
+        policy.workspaceUploadLimitBytes ?? enterprise.workspace_upload_limit_bytes,
+        systemSettings.workspaceUploadLimitBytes,
+      ),
     }
   }
 
   const api = {
     /**
-     * Get enterprise configuration. Branding fields come from the DB
-     * (enterprises table). Organization policy overrides are stored on the same
-     * row; null values inherit the legacy deployment-wide settings.json values.
+     * Get enterprise configuration. Branding fields come from the enterprises
+     * table; client-facing policy fields are resolved from organization scope
+     * first and fall back to deployment defaults from settings.json.
      */
     getConfig: async (orgId?: string) => {
       try {
-        const enterprise = await db.getEnterprise(orgId)
+        const requestedOrgId = orgId?.trim() || ''
+        const enterprise = await db.getEnterprise(requestedOrgId || undefined)
         let logoBase64: string | null = null
 
         if (enterprise.logo) {
@@ -70,7 +95,7 @@ export function createEnterpriseApi(
           }
         }
 
-        const policy = await getEffectivePolicy(orgId)
+        const policy = await getEffectivePolicy(requestedOrgId || 'default')
         return {
           success: true,
           data: {
@@ -92,16 +117,18 @@ export function createEnterpriseApi(
     },
 
     /**
-     * Update one organization's configuration. Deployment settings remain the
-     * fallback for organizations that have not saved an override.
+     * Update enterprise configuration. Branding columns persist to the
+     * enterprises table; client-facing policy fields are routed to organization
+     * policy hooks when available and fall back to enterprise columns for legacy
+     * embeddings. Any other key is ignored.
      */
     updateConfig: async (
       ...args:
-        | [orgId: string, patch: unknown]
+        | [orgId: string, patch: unknown, updatedBy?: string]
         | [patch: unknown, orgId?: string]
     ) => {
       try {
-        const [first, second] = args
+        const [first, second, third] = args
         const usesOrgFirst = typeof first === 'string' && args.length > 1
         const orgId = usesOrgFirst
           ? first
@@ -109,39 +136,70 @@ export function createEnterpriseApi(
             ? second
             : 'default'
         const patch = usesOrgFirst ? second : first
+        const updatedBy = typeof third === 'string' && third.trim() ? third : orgId
 
         if (patch && typeof patch === 'object') {
           const patchRecord = patch as Record<string, unknown>
-          for (const key of ['client_cron_enabled', 'client_show_tool_calls'] as const) {
-            if (patchRecord[key] !== undefined && typeof patchRecord[key] !== 'boolean') {
-              throw new Error(`${key} must be a boolean`)
+          const {
+            client_cron_enabled,
+            client_show_tool_calls,
+            workspace_upload_limit_bytes,
+          } = patchRecord
+          const nextClientCronEnabled = client_cron_enabled === undefined
+            ? undefined
+            : parseBoolean(client_cron_enabled, 'client_cron_enabled')
+          const nextClientShowToolCalls = client_show_tool_calls === undefined
+            ? undefined
+            : parseBoolean(client_show_tool_calls, 'client_show_tool_calls')
+          const nextWorkspaceUploadLimitBytes = workspace_upload_limit_bytes === undefined
+            ? undefined
+            : parseUploadLimit(workspace_upload_limit_bytes)
+
+          const policyPatch: ClientFacingPolicy = {}
+          const dbPolicyPatch: EnterpriseBrandingPatch = {}
+          if (nextClientCronEnabled !== undefined) {
+            if (!options.setClientCronEnabled) {
+              dbPolicyPatch.client_cron_enabled = nextClientCronEnabled
             }
           }
-          if (
-            patchRecord.workspace_upload_limit_bytes !== undefined &&
-            (!Number.isInteger(patchRecord.workspace_upload_limit_bytes) ||
-              Number(patchRecord.workspace_upload_limit_bytes) <= 0 ||
-              Number(patchRecord.workspace_upload_limit_bytes) > 1024 * 1024 * 1024)
-          ) {
-            throw new Error('workspace_upload_limit_bytes must be an integer between 1 and 1073741824')
+          if (nextClientShowToolCalls !== undefined) {
+            if (options.putClientPolicy) {
+              policyPatch.clientShowToolCalls = nextClientShowToolCalls
+            } else {
+              dbPolicyPatch.client_show_tool_calls = nextClientShowToolCalls
+            }
           }
-
-          // Whitelist actual columns so round-tripped read-only fields cannot
-          // reach dynamically constructed SQL.
+          if (nextWorkspaceUploadLimitBytes !== undefined) {
+            if (options.putClientPolicy) {
+              policyPatch.workspaceUploadLimitBytes = nextWorkspaceUploadLimitBytes
+            } else {
+              dbPolicyPatch.workspace_upload_limit_bytes = nextWorkspaceUploadLimitBytes
+            }
+          }
+          // Whitelist the actual `enterprises` columns so read-only /
+          // settings-sourced fields in the round-tripped config can't reach SQL.
           const ENTERPRISE_COLUMNS = [
             'logo', 'app_name', 'top_name', 'about_name',
-            'app_company_name', 'login_desp', 'client_cron_enabled',
-            'client_show_tool_calls', 'workspace_upload_limit_bytes',
+            'app_company_name', 'login_desp',
           ] as const
-          const dbPatch: EnterpriseConfigPatch = {}
+          const dbPatch: EnterpriseBrandingPatch = {}
+          Object.assign(dbPatch, dbPolicyPatch)
           for (const col of ENTERPRISE_COLUMNS) {
             if (patchRecord[col] !== undefined) {
               ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
             }
           }
-          if (Object.keys(dbPatch).length > 0) {
-            await db.updateEnterprise(orgId, dbPatch)
-          }
+          await db.driver.transaction(async () => {
+            if (nextClientCronEnabled !== undefined && options.setClientCronEnabled) {
+              await options.setClientCronEnabled(orgId, nextClientCronEnabled)
+            }
+            if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
+              await options.putClientPolicy(orgId, policyPatch, updatedBy)
+            }
+            if (Object.keys(dbPatch).length > 0) {
+              await db.updateEnterprise(orgId, dbPatch)
+            }
+          })
         } else if (patch !== undefined && patch !== null) {
           throw new Error('Enterprise configuration patch must be an object')
         }
@@ -162,3 +220,23 @@ export function createEnterpriseApi(
 }
 
 export type EnterpriseApi = ReturnType<typeof createEnterpriseApi>
+
+function normalizeUploadLimit(value: unknown, fallback?: number): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (Number.isSafeInteger(limit) && limit >= 1 && limit <= 1024 * 1024 * 1024) return limit
+  return fallback ?? getSystemSettings().workspaceUploadLimitBytes
+}
+
+function parseUploadLimit(value: unknown): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024 * 1024 * 1024) {
+    throw new Error('workspace_upload_limit_bytes must be an integer between 1 and 1073741824')
+  }
+  return limit
+}
+
+function parseBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value === 'boolean') return value
+  if (value === 0 || value === 1) return value === 1
+  throw new Error(`${fieldName} must be a boolean`)
+}

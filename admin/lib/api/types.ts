@@ -189,6 +189,7 @@ export interface SystemSettingsImage {
   provider: string
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   model: string
 }
 
@@ -225,7 +226,12 @@ export interface UpdateSystemSettingsModelProvider extends Omit<SystemSettingsMo
   apiKey?: string
 }
 
+export type ConfigScope = 'organization' | 'platform'
+
 export interface SystemSettings {
+  scopeType?: ConfigScope
+  /** Empty for platform configuration. */
+  organizationId?: string
   bypassPermissions: boolean
   model: string
   maxTurns: number
@@ -233,6 +239,7 @@ export interface SystemSettings {
   thinkingBudgetTokens: number
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   modelProviders: SystemSettingsModelProvider[]
   defaultModelProviderId: string
   image: SystemSettingsImage
@@ -540,6 +547,7 @@ export interface EnterpriseConfig {
    * the chat stream. Client users may override locally. null = unset → shown.
    */
   client_show_tool_calls: boolean | null;
+  workspace_upload_limit_bytes: number;
   /**
    * Whether Cabin AI gateway/admin features are enabled on this server.
    */

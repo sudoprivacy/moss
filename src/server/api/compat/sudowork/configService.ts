@@ -47,6 +47,9 @@ export class SudoworkConfigService {
     managedImages?: {
       read(kind: 'enterprise', filename: string): Promise<{ bytes: Buffer; mimeType: string }>
     }
+    clientPolicy?: {
+      getPublicConfig(orgId?: string): Promise<Record<string, unknown>> | Record<string, unknown>
+    }
   }) {}
 
   async list(input: {
@@ -379,6 +382,7 @@ export class SudoworkConfigService {
       about_name: profile.aboutName,
       app_company_name: profile.appCompanyName,
       login_desp: profile.loginDescription,
+      ...(await this.options.clientPolicy?.getPublicConfig(profile.orgId) ?? {}),
     }
   }
 

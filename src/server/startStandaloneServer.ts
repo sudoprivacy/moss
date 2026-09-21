@@ -35,10 +35,12 @@ import {
 import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
+import { getSystemSettings } from './systemSettings.js'
+import { migrateLegacyModelSettings } from './configuration/migrateLegacyModelSettings.js'
+import { migrateLegacyEnterpriseCronPolicy } from './migration/legacyEnterpriseCronPolicy.js'
 import type { LegacyKeyValueStore } from './identity/legacyToken.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
 import { assertSafeInstanceIdentity } from './startupGuards.js'
-import { getSystemSettings } from './systemSettings.js'
 
 export type StandaloneServerOptions = ServerConfig
 
@@ -247,7 +249,9 @@ async function finishStandaloneServerStartup(
   const defaultOrgId = (await authService.listAllOrganizations()).organizations[0]?.id
   if (defaultOrgId) {
     await store.backfillOrgScoping(defaultOrgId)
+    await migrateLegacyModelSettings(store.driver, defaultOrgId)
   }
+  await migrateLegacyEnterpriseCronPolicy(store.driver)
 
   // Token minter for login-type 凭据 (mints + caches a per-user access_token
   // from the user's stored credential), backed by the encrypted
@@ -325,7 +329,6 @@ async function finishStandaloneServerStartup(
     artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
     publicBaseUrl,
   })
-  const configuration = authService.createSudoworkConfigService(store, managedImages)
   const systemConfiguration = authService.createSudoworkSystemConfigService({
     secrets: configStore,
     loginMethod: config.sudoworkCompatibility.loginMethod,
@@ -358,6 +361,7 @@ async function finishStandaloneServerStartup(
     },
     productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
   })
+  const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
   const infrastructure = await systemConfiguration.getInfrastructureConfig()
   const sudorouterRuntime = resolveSudorouterRuntimeConfig({
     infrastructure: infrastructure.billing.sudorouter,
@@ -378,6 +382,7 @@ async function finishStandaloneServerStartup(
     tokenStore: legacyTokenStore,
     legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret ?? 'moss-operations-only',
     accountProvisioner,
+    getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
   })
   const administration = authService.createSudoworkAdministrationService({
     accountProvisioner,
@@ -389,6 +394,7 @@ async function finishStandaloneServerStartup(
         tokenStore: legacyTokenStore,
         accountProvisioner,
         initialQuotaUnits: sudorouterRuntime?.initialQuota,
+        getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
       })
     : undefined
   const dify = authService.createSudoworkDifyServices({
@@ -428,17 +434,23 @@ async function finishStandaloneServerStartup(
   const billing = billingRuntime && sudorouter
     ? createBillingCompatibilityService(authService, systemConfiguration, publicBaseUrl, billingRuntime, sudorouter)
     : undefined
+  const listOrganizationModels = async (orgId?: string) => {
+    const settings = orgId
+      ? await authService.getOrganizationSystemSettings(orgId)
+      : getSystemSettings()
+    return getAvailableModels({ settings, orgId })
+  }
   const legacyUsage = authService.createSudoworkLegacyUsageService({
-    listModels: getAvailableModels,
+    listModels: listOrganizationModels,
     sudorouter,
   })
   const userProjection = authService.createSudoworkUserProjectionService({
     secrets: nexusClient,
-    listModels: getAvailableModels,
+    listModels: listOrganizationModels,
     quotaReader: sudorouter,
-    getRuntimeConfig: async () => ({
+    getRuntimeConfig: async orgId => ({
       modelServiceUrl: (await systemConfiguration.getInfrastructureConfig()).billing.sudorouter.modelServiceUrl,
-      scodeAutoModel: String((await systemConfiguration.getPublicConfig()).scode_auto_model ?? ''),
+      scodeAutoModel: String((await systemConfiguration.getPublicConfig(orgId)).scode_auto_model ?? ''),
     }),
   })
   qmsRuntime = await startQmsRuntime({
@@ -629,7 +641,7 @@ function createBillingCompatibilityService(
   return authService.createSudoworkBillingService({
     sudorouter,
     payment,
-    getCreditPolicy: () => systemConfiguration.getCreditApplicationPolicy(),
+    getCreditPolicy: orgId => systemConfiguration.getCreditApplicationPolicy(orgId),
     testPaymentAmountCents: runtime.testMode ? 1 : undefined,
   })
 }

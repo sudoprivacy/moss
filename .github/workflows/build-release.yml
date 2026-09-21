@@ -85,6 +85,16 @@ jobs:
       - name: Typecheck ratchet (src/server)
         run: bun run typecheck
 
+      - name: Install admin dependencies
+        working-directory: admin
+        run: bun install --frozen-lockfile
+
+      - name: Check admin types and settings regressions
+        working-directory: admin
+        run: |
+          bun run check
+          bun run test:settings
+
   build:
     name: build-amd64
     needs: test

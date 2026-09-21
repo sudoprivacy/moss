@@ -8,20 +8,23 @@ import {
   resolveModelSelection,
   type ProviderModelInfo,
 } from './modelProviders.js'
+import type { SystemSettingsPayload } from './systemSettings.js'
 
 export type ModelInfo = ProviderModelInfo
 
-export function getModelProviderApiKey(providerId: string, legacyApiKey: string): string | undefined {
+export function getModelProviderApiKey(providerId: string, legacyApiKey: string, orgId?: string): string | undefined {
   return providerId === 'legacy-default'
     ? legacyApiKey || undefined
-    : getStoredProviderApiKeys()[providerId]
+    : getStoredProviderApiKeys(orgId)[providerId]
 }
 
-export async function getAvailableModels(options: { forceRefresh?: boolean } = {}): Promise<ModelInfo[]> {
-  const settings = getSystemSettings()
+export async function getAvailableModels(
+  options: { forceRefresh?: boolean; settings?: SystemSettingsPayload; orgId?: string } = {},
+): Promise<ModelInfo[]> {
+  const settings = options.settings ?? getSystemSettings()
   const results = await Promise.allSettled(
     settings.modelProviders.filter(provider => provider.enabled).map(provider =>
-      discoverProviderModels(provider, getModelProviderApiKey(provider.id, settings.apiKey), options),
+      discoverProviderModels(provider, getModelProviderApiKey(provider.id, settings.apiKey, options.orgId), options),
     ),
   )
   const models: ModelInfo[] = []
@@ -34,9 +37,9 @@ export async function getAvailableModels(options: { forceRefresh?: boolean } = {
 
 export async function getModelsForSelection(
   selection: string | undefined,
-  options: { forceRefresh?: boolean } = {},
+  options: { forceRefresh?: boolean; settings?: SystemSettingsPayload; orgId?: string } = {},
 ): Promise<{ selection: ReturnType<typeof resolveModelSelection>; models: ModelInfo[] }> {
-  const settings = getSystemSettings()
+  const settings = options.settings ?? getSystemSettings()
   const selectionInfo = resolveModelSelection(
     settings.modelProviders,
     settings.defaultModelProviderId,
@@ -45,7 +48,7 @@ export async function getModelsForSelection(
   )
   const models = await discoverProviderModels(
     selectionInfo.provider,
-    getModelProviderApiKey(selectionInfo.provider.id, settings.apiKey),
+    getModelProviderApiKey(selectionInfo.provider.id, settings.apiKey, options.orgId),
     options,
   )
   if (!models.some(model => model.modelId === selectionInfo.modelId)) {
@@ -56,13 +59,15 @@ export async function getModelsForSelection(
   return { selection: selectionInfo, models }
 }
 
-export function clearModelCache(providerId?: string): void {
-  clearProviderModelCache(providerId)
+export function clearModelCache(providerId?: string, orgId?: string): void {
+  clearProviderModelCache(providerId, orgId)
 }
 
-export async function refreshModelCache(): Promise<ModelInfo[]> {
-  clearModelCache()
-  return getAvailableModels({ forceRefresh: true })
+export async function refreshModelCache(
+  options: { settings?: SystemSettingsPayload; orgId?: string } = {},
+): Promise<ModelInfo[]> {
+  clearModelCache(undefined, options.orgId)
+  return getAvailableModels({ ...options, forceRefresh: true })
 }
 
 export function getCacheStatus(): { cached: boolean; age: number | null; count: number } {

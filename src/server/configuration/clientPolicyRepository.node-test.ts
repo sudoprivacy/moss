@@ -52,4 +52,55 @@ void describe('统一客户端策略仓库', () => {
     assert.deepEqual(await repository.getPlatform(), {})
     db.close()
   })
+
+  void test('异步清除组织覆盖后恢复平台继承，保留其他字段和组织', async () => {
+    const db = new DatabaseSync(':memory:')
+    const driver = new SqliteDriver(db)
+    ensureClientPolicySchema(db)
+    const repository = new ClientPolicyRepository(driver)
+    try {
+      await repository.putPlatform({ loginMethod: 'password', clientShowToolCalls: true }, 'root')
+      await repository.putOrganization('org-a', {
+        loginMethod: 'cas', clientShowToolCalls: false, scodeAutoModel: 'org-a-model',
+      }, 'admin-a')
+      await repository.putOrganization('org-b', { loginMethod: 'sms' }, 'admin-b')
+
+      assert.deepEqual(await repository.removeOrganizationKeys('org-a', [
+        'loginMethod', 'clientShowToolCalls', 'loginMethod', '', '  ',
+      ], 'admin-a-2'), { scodeAutoModel: 'org-a-model' })
+      assert.deepEqual(await repository.getEffective('org-a'), {
+        loginMethod: 'password', clientShowToolCalls: true, scodeAutoModel: 'org-a-model',
+      })
+      assert.deepEqual(await repository.getPlatform(), { loginMethod: 'password', clientShowToolCalls: true })
+      assert.deepEqual(await repository.getOrganization('org-b'), { loginMethod: 'sms' })
+      assert.equal((await driver.get(`
+        SELECT updated_by FROM client_delivery_policies WHERE scope_type = ? AND scope_id = ?
+      `, ['organization', 'org-a']))?.updated_by, 'admin-a-2')
+      assert.deepEqual(await repository.removeOrganizationKeys('org-a', [], 'ignored'), { scodeAutoModel: 'org-a-model' })
+      await assert.rejects(repository.removeOrganizationKeys(' ', ['loginMethod'], 'admin'), /Organization id is required/)
+    } finally {
+      await driver.close()
+    }
+  })
+
+  void test('清除组织覆盖参加 Driver 外层事务并在异步失败后回滚', async () => {
+    const db = new DatabaseSync(':memory:')
+    const driver = new SqliteDriver(db)
+    ensureClientPolicySchema(db)
+    const repository = new ClientPolicyRepository(driver)
+    try {
+      await repository.putOrganization('org-a', { loginMethod: 'cas', scodeAutoModel: 'org-model' }, 'admin')
+      await assert.rejects(driver.transaction(async () => {
+        await repository.removeOrganizationKeys('org-a', ['loginMethod'], 'admin')
+        assert.deepEqual(await repository.getOrganization('org-a'), { scodeAutoModel: 'org-model' })
+        await repository.putPlatform({ loginMethod: 'sms' }, 'root')
+        await Promise.resolve()
+        throw new Error('async rollback')
+      }), /async rollback/)
+      assert.deepEqual(await repository.getOrganization('org-a'), { loginMethod: 'cas', scodeAutoModel: 'org-model' })
+      assert.deepEqual(await repository.getPlatform(), {})
+    } finally {
+      await driver.close()
+    }
+  })
 })

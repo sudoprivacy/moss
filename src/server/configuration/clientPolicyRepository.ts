@@ -46,6 +46,27 @@ export class ClientPolicyRepository {
     return this.put('organization', orgId, patch, updatedBy)
   }
 
+  async removeOrganizationKeys(orgId: string, keys: string[], updatedBy: string): Promise<ClientDeliveryPolicy> {
+    if (!orgId.trim()) throw new Error('Organization id is required')
+    const uniqueKeys = [...new Set(keys.filter(key => key.trim()))]
+    if (uniqueKeys.length === 0) return this.getOrganization(orgId)
+    return this.driver.transaction(async () => {
+      const next = await this.getOrganization(orgId)
+      for (const key of uniqueKeys) delete next[key]
+      const timestamp = Date.now()
+      await this.driver.run(`
+        INSERT INTO client_delivery_policies (
+          scope_type, scope_id, policy_json, updated_by, created_at, updated_at
+        ) VALUES ('organization', ?, ?, ?, ?, ?)
+        ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+          policy_json = excluded.policy_json,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at
+      `, [orgId, JSON.stringify(next), updatedBy, timestamp, timestamp])
+      return next
+    })
+  }
+
   private async get(scopeType: PolicyScope, scopeId: string): Promise<ClientDeliveryPolicy> {
     const row = await this.driver.get<{ policy_json: string }>(`
       SELECT policy_json FROM client_delivery_policies WHERE scope_type = ? AND scope_id = ?

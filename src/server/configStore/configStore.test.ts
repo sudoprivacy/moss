@@ -26,8 +26,16 @@ mock.module('os', () => {
 })
 
 // mock 生效后再动态加载被测模块（systemSettings 的 SYSTEM_SETTINGS_PATH 基于 os.homedir()）。
-const { ConfigStore, initConfigStore, CONFIG_NAMESPACE } = await import('./configStore.js')
-const { getSystemSettings, SYSTEM_SETTINGS_PATH, updateSystemSettings } = await import('../systemSettings.js')
+const { ConfigStore, initConfigStore, CONFIG_NAMESPACE, organizationConfigKey } = await import('./configStore.js')
+const {
+  getOrganizationSystemSettings,
+  getSystemSettings,
+  SYSTEM_SETTINGS_PATH,
+  SystemSettingsScopeError,
+  updateOrganizationSystemSettings,
+  updateSystemSettings,
+} = await import('../systemSettings.js')
+const { getModelProviderApiKey } = await import('../modelListCache.js')
 
 // 必须在任何 settings 写入前确认隔离路径，模块 mock 失效时直接终止。
 expect(SYSTEM_SETTINGS_PATH).toBe(SETTINGS_PATH)
@@ -416,4 +424,121 @@ describe('updateSystemSettings 敏感字段写 Nexus、文件不落盘', () => {
     expect(fake.mutations).toEqual([])
     expectFileHasNoSecrets()
   })
+
+  it('parses string boolean settings without treating "false" as true', async () => {
+    const settings = await updateSystemSettings({
+      bypassPermissions: 'false',
+      clientCronEnabled: 'false',
+      clientShowToolCalls: 'false',
+      oauth2: {
+        enabled: 'false',
+        requireState: 'false',
+      },
+    })
+
+    expect(settings.bypassPermissions).toBe(false)
+    expect(settings.clientCronEnabled).toBe(false)
+    expect(settings.clientShowToolCalls).toBe(false)
+    expect(settings.oauth2.enabled).toBe(false)
+    expect(settings.oauth2.requireState).toBe(false)
+  })
+
+  it('组织模型设置按 orgId 隔离，并且 API 响应不返回密钥原文', async () => {
+    await updateSystemSettings({
+      model: 'platform-model',
+      apiKey: 'platform-text-key',
+      image: { apiKey: 'platform-image-key' },
+      modelProviders: [{
+        id: 'platform-provider',
+        name: 'Platform Provider',
+        kind: 'openai-compatible',
+        baseUrl: 'https://platform.example.invalid/v1',
+        discoveryUrl: 'https://platform.example.invalid/v1/models',
+        protocol: 'openai-completions',
+        enabled: true,
+        apiKey: 'platform-provider-key',
+      }],
+      defaultModelProviderId: 'platform-provider',
+    })
+    fake.mutations.length = 0
+
+    const repository = new FakeOrganizationModelSettingsRepository() as never
+    const orgA = await updateOrganizationSystemSettings('org-a', repository, {
+      model: 'org-a-model',
+      apiKey: 'org-a-text-key',
+      image: { model: 'org-a-image', apiKey: 'org-a-image-key' },
+      modelProviders: [{
+        id: 'org-a-provider',
+        name: 'Org A Provider',
+        kind: 'openai-compatible',
+        baseUrl: 'https://org-a.example.invalid/v1',
+        discoveryUrl: 'https://org-a.example.invalid/v1/models',
+        protocol: 'openai-responses',
+        enabled: true,
+        apiKey: 'org-a-provider-key',
+      }],
+      defaultModelProviderId: 'org-a-provider',
+    }, 'admin-a', { redactSecrets: true })
+
+    expect(orgA.model).toBe('org-a-model')
+    expect(orgA.apiKey).toBe('')
+    expect(orgA.apiKeyConfigured).toBe(true)
+    expect(orgA.image.apiKey).toBe('')
+    expect(orgA.image.apiKeyConfigured).toBe(true)
+    expect(orgA.image.model).toBe('org-a-image')
+    expect(orgA.modelProviders[0]?.id).toBe('org-a-provider')
+    expect(orgA.modelProviders[0]?.apiKeyConfigured).toBe(true)
+    expect(fake.read(organizationConfigKey('org-a', 'settings.anthropic-auth-token'))).toEqual({ value: 'org-a-text-key' })
+    expect(fake.read(organizationConfigKey('org-a', 'settings.image-api-key'))).toEqual({ value: 'org-a-image-key' })
+    expect(fake.read(organizationConfigKey('org-a', 'settings.model-provider-api-keys'))?.value).toContain('org-a-provider-key')
+    expect(getModelProviderApiKey('org-a-provider', orgA.apiKey, 'org-a')).toBe('org-a-provider-key')
+
+    const orgB = await getOrganizationSystemSettings('org-b', repository, { redactSecrets: true })
+    expect(orgB.model).toBe('platform-model')
+    expect(orgB.apiKey).toBe('')
+    expect(orgB.apiKeyConfigured).toBe(false)
+    expect(orgB.image.apiKeyConfigured).toBe(false)
+    expect(orgB.modelProviders[0]?.id).toBe('platform-provider')
+    expect(orgB.modelProviders[0]?.apiKeyConfigured).toBe(false)
+    expect(getModelProviderApiKey('platform-provider', orgB.apiKey, 'org-b')).toBeUndefined()
+  })
+
+  it('组织系统设置入口拒绝部署级字段且不修改全局设置', async () => {
+    await updateSystemSettings({ clientCronEnabled: false, bypassPermissions: false })
+    const repository = new FakeOrganizationModelSettingsRepository() as never
+
+    await expect(updateOrganizationSystemSettings('org-a', repository, {
+      model: 'org-a-model',
+      clientCronEnabled: true,
+    }, 'admin-a')).rejects.toThrow(SystemSettingsScopeError)
+
+    expect(getSystemSettings().clientCronEnabled).toBe(false)
+    expect(getSystemSettings().bypassPermissions).toBe(false)
+    expect((repository as FakeOrganizationModelSettingsRepository).get('org-a')).toEqual({})
+  })
 })
+
+class FakeOrganizationModelSettingsRepository {
+  private readonly records = new Map<string, Record<string, unknown>>()
+
+  get(orgId: string): Record<string, unknown> {
+    return this.records.get(orgId) ?? {}
+  }
+
+  put(orgId: string, patch: Record<string, unknown>): Record<string, unknown> {
+    const next = deepMerge(this.get(orgId), patch)
+    this.records.set(orgId, next)
+    return next
+  }
+}
+
+function deepMerge(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const result = structuredClone(base)
+  for (const [key, value] of Object.entries(patch)) {
+    result[key] = typeof value === 'object' && value !== null && !Array.isArray(value)
+      && typeof result[key] === 'object' && result[key] !== null && !Array.isArray(result[key])
+      ? deepMerge(result[key] as Record<string, unknown>, value as Record<string, unknown>)
+      : structuredClone(value)
+  }
+  return result
+}

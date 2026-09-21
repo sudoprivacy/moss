@@ -1,8 +1,20 @@
 // Runs under Node (the store uses node:sqlite, which Bun lacks): `tsx --test`.
 import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
-import { createEnterpriseApi } from '../api/enterprise.js'
-import { DirectConnectStore } from '../db.js'
+import { after, describe, it, mock } from 'node:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import os from 'node:os'
+import { join } from 'node:path'
+
+const settingsHome = mkdtempSync(join(os.tmpdir(), 'moss-enterprise-isolation-'))
+const homeMock = mock.method(os, 'homedir', () => settingsHome)
+const { createEnterpriseApi } = await import('../api/enterprise.js')
+const { DirectConnectStore } = await import('../db.js')
+const { SYSTEM_SETTINGS_PATH } = await import('../systemSettings.js')
+assert.equal(SYSTEM_SETTINGS_PATH, join(settingsHome, '.moss', 'settings.json'))
+after(() => {
+  homeMock.mock.restore()
+  rmSync(settingsHome, { recursive: true, force: true })
+})
 
 describe('enterprise configuration isolation', () => {
   it('stores independent branding and client policy per organization', async () => {

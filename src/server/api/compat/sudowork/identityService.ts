@@ -24,6 +24,8 @@ const ACCESS_TOKEN_TTL_SECONDS = 2 * 60 * 60
 const LEGACY_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
+type LoginMethod = 'sms' | 'password' | 'cas'
+
 export class SudoworkIdentityError extends Error {
   constructor(
     readonly statusCode: number,
@@ -57,6 +59,7 @@ interface ServiceOptions {
   identities: IdentityRepository
   tokenStore: LegacyKeyValueStore
   legacyJwtSecret: string
+  getLoginMethod?: (orgId: string) => LoginMethod | Promise<LoginMethod>
   nativeActorResolver?: (token: string) => Promise<IdentityActor | null>
   refreshTokenFactory?: () => string
   registrationTokenFactory?: () => string
@@ -122,9 +125,10 @@ export class SudoworkIdentityService {
     if (user.status !== 'active') {
       throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
     }
+    await this.assertLoginMethod(user.orgId, 'sms')
     return {
       needRegistration: false,
-      session: await this.startSession(user, phone, input.deviceId),
+      session: await this.startSession(user, phone, 'sms', input.deviceId),
     }
   }
 
@@ -163,6 +167,7 @@ export class SudoworkIdentityService {
     if (!existingUser && invitation?.status !== 'pending') {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
     }
+    await this.assertLoginMethod(existingUser?.orgId ?? invitation!.orgId, 'sms')
     const createKey = input.idempotencyKey ?? `sudowork-register:${phone}:${input.invitationCode}`
     const created = existingUser ? { userId: existingUser.id } : await this.unifiedIdentity.createUser({
       orgId: invitation!.orgId,
@@ -181,7 +186,7 @@ export class SudoworkIdentityService {
     if (!user) throw new SudoworkIdentityError(500, '用户企业信息异常')
     return {
       needRegistration: false,
-      session: await this.startSession(user, phone, input.deviceId),
+      session: await this.startSession(user, phone, 'sms', input.deviceId),
     }
   }
 
@@ -208,6 +213,7 @@ export class SudoworkIdentityService {
     if (!existingUser && invitation?.status !== 'pending') {
       throw new SudoworkIdentityError(400, '邀请码已被使用')
     }
+    await this.assertLoginMethod(existingUser?.orgId ?? invitation!.orgId, 'password')
     const createKey = input.idempotencyKey ?? `sudowork-register:${phone}:${input.invitationCode}`
     try {
       const created = existingUser ? { userId: existingUser.id } : await this.unifiedIdentity.createUser({
@@ -273,6 +279,7 @@ export class SudoworkIdentityService {
     if (user.status !== 'active') {
       throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
     }
+    await this.assertLoginMethod(user.orgId, 'password')
 
     await this.options.authDb.driver.transaction(async () => {
       if (isLegacyPasswordHash(user.passwordHash)) {
@@ -281,7 +288,7 @@ export class SudoworkIdentityService {
       await this.options.authDb.updateUserLastLogin(user.id)
     })
 
-    return this.startSession(user, phone, input.deviceId, input.nowSeconds)
+    return this.startSession(user, phone, 'password', input.deviceId, input.nowSeconds)
   }
 
   async loginAdminByPassword(input: {
@@ -302,13 +309,14 @@ export class SudoworkIdentityService {
     if (user.status !== 'active') {
       throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
     }
+    await this.assertLoginMethod(user.orgId, 'password')
     await this.options.authDb.driver.transaction(async () => {
       if (isLegacyPasswordHash(user.passwordHash)) {
         await this.options.authDb.updateUserPassword(user.id, hashPassword(input.password), Date.now())
       }
       await this.options.authDb.updateUserLastLogin(user.id)
     })
-    return this.startSession(user, phone, input.deviceId, input.nowSeconds)
+    return this.startSession(user, phone, 'password', input.deviceId, input.nowSeconds)
   }
 
   async startSessionForCanonicalUser(input: {
@@ -320,7 +328,8 @@ export class SudoworkIdentityService {
     const user = await this.options.authDb.getUserById(input.userId)
     if (!user) throw new SudoworkIdentityError(401, '登录凭证已失效，请重新登录')
     if (user.status !== 'active') throw new SudoworkIdentityError(403, 'CAS 用户已被禁用')
-    return this.startSession(user, input.account, input.deviceId, input.nowSeconds)
+    await this.assertLoginMethod(user.orgId, 'cas')
+    return this.startSession(user, input.account, 'cas', input.deviceId, input.nowSeconds)
   }
 
   async changePassword(input: {
@@ -342,6 +351,7 @@ export class SudoworkIdentityService {
     if (!principal) throw new SudoworkIdentityError(401, '未授权')
     const user = await this.options.authDb.getUserByIdAndOrg(principal.userId, principal.orgId)
     if (!user) throw new SudoworkIdentityError(404, '用户不存在')
+    await this.assertLoginMethod(user.orgId, 'password')
     if (!user.localAuth || !verifyPassword(input.oldPassword, user.passwordHash)) {
       throw new SudoworkIdentityError(401, input.oldPasswordError ?? '原始密码错误')
     }
@@ -371,6 +381,7 @@ export class SudoworkIdentityService {
   private async startSession(
     user: AuthCenterUser,
     phone: string,
+    loginMethod: LoginMethod,
     deviceId?: string,
     nowSeconds?: number,
   ): Promise<SudoworkLegacySession> {
@@ -383,6 +394,7 @@ export class SudoworkIdentityService {
         phone: legacyUser.phone,
         role: legacyUser.role,
         enterprise_id: legacyUser.enterpriseId,
+        login_method: loginMethod,
       }),
     )
     return this.issueSessionTokens(legacyUser, refreshToken, nowSeconds)
@@ -397,6 +409,13 @@ export class SudoworkIdentityService {
     if (!rotated) {
       throw new SudoworkIdentityError(401, 'refresh_token 无效或已过期')
     }
+    try {
+      await this.assertRefreshTokenStillAllowed(rotated.userId, rotated.claims.enterprise_id, rotated.claims.login_method)
+    } catch (error) {
+      await this.options.tokenStore.del(`refresh_token:${rotated.userId}:${rotated.deviceId}:${rotated.token}`)
+        .catch(() => undefined)
+      throw error
+    }
     return {
       accessToken: issueLegacyJwt({
         secret: this.options.legacyJwtSecret,
@@ -410,6 +429,26 @@ export class SudoworkIdentityService {
       refreshToken: rotated.token,
       expiresIn: ACCESS_TOKEN_TTL_SECONDS,
     }
+  }
+
+  private async assertRefreshTokenStillAllowed(
+    legacyUserId: number,
+    legacyEnterpriseId: number | null,
+    loginMethod?: LoginMethod,
+  ): Promise<void> {
+    const userAlias = await this.options.identities.resolveNumericAliasGlobal('user', legacyUserId)
+    if (!userAlias) throw new SudoworkIdentityError(401, 'refresh_token 无效或已过期')
+    if (legacyEnterpriseId !== null) {
+      const orgAlias = await this.options.identities.resolveNumericAliasGlobal('enterprise', legacyEnterpriseId)
+      if (!orgAlias || orgAlias.resourceId !== userAlias.orgId) {
+        throw new SudoworkIdentityError(401, 'refresh_token 无效或已过期')
+      }
+    }
+    const user = await this.options.authDb.getUserByIdAndOrg(userAlias.resourceId, userAlias.orgId)
+    if (!user || user.status !== 'active') {
+      throw new SudoworkIdentityError(403, '该账户已被禁用，请联系管理员')
+    }
+    await this.assertRefreshLoginMethod(user.orgId, loginMethod)
   }
 
   async getProfile(accessToken: string, nowSeconds?: number): Promise<SudoworkLegacyUser | null> {
@@ -506,6 +545,28 @@ export class SudoworkIdentityService {
       expiresIn: ACCESS_TOKEN_TTL_SECONDS,
       user,
     }
+  }
+
+  private async assertRefreshLoginMethod(orgId: string, originalMethod?: LoginMethod): Promise<void> {
+    if (originalMethod) {
+      await this.assertLoginMethod(orgId, originalMethod)
+      return
+    }
+    const actual = await this.options.getLoginMethod?.(orgId)
+    if (!actual || actual === 'password') return
+    throw new SudoworkIdentityError(403, '当前企业未开启用户名密码登录')
+  }
+
+  private async assertLoginMethod(orgId: string, expected: LoginMethod): Promise<void> {
+    const actual = await this.options.getLoginMethod?.(orgId)
+    if (!actual || actual === expected) return
+    if (expected === 'password') {
+      throw new SudoworkIdentityError(403, '当前企业未开启用户名密码登录')
+    }
+    if (expected === 'sms') {
+      throw new SudoworkIdentityError(403, '当前企业未开启手机验证码登录')
+    }
+    throw new SudoworkIdentityError(403, '当前企业未开启三方认证登录')
   }
 }
 

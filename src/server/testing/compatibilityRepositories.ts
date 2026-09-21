@@ -8,6 +8,8 @@ import { SqliteDriver, type DbDriver } from '../db/driver.js'
 import { ensureDifySchema } from '../dify/difySchema.js'
 import { DifyRepository } from '../dify/difyRepository.js'
 import { ensureIdentitySchema, IdentityRepository } from '../identity/identityRepository.js'
+import { ensureClientPolicySchema } from '../configuration/clientPolicyRepository.js'
+import { ensureOrganizationModelSettingsSchema } from '../configuration/organizationModelSettingsRepository.js'
 
 export function requireSqliteTestDatabase(store: { db: DatabaseSync | undefined }): DatabaseSync {
   if (!store.db) throw new Error('SQLite test database is unavailable')
@@ -20,6 +22,8 @@ export function createIdentityTestRepository(
   driver: DbDriver = new SqliteDriver(db),
 ): IdentityRepository {
   ensureIdentitySchema(db, options)
+  ensureClientPolicySchema(db)
+  ensureOrganizationModelSettingsSchema(db)
   ensureCompatibilityCounterTable(db)
   return new IdentityRepository(driver)
 }

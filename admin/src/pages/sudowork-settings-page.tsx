@@ -1,10 +1,12 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { KeyRound, Loader2, Save } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { ConfigScopeSelect } from '@/components/settings/config-scope-select'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -14,40 +16,118 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { operationsApi } from '@/lib/api/operations'
-import { SUDOWORK_LOGIN_METHODS } from '../sudowork-settings'
+import type { ConfigScope } from '@/lib/api/types'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { useSettingsNavigationGuard } from '@/lib/hooks/use-settings-navigation-guard'
+import { buildSudoworkConfigPatch, SUDOWORK_LOGIN_METHODS } from '../sudowork-settings'
 
 type Config = Record<string, unknown>
 type JsonObject = Record<string, unknown>
 
 export default function SudoworkSettingsPage() {
+  const { user, activeOrgId } = useAuth()
+  const [selectedScope, setScope] = useState<ConfigScope>('organization')
+  const allowPlatform = user?.role === 'super_admin'
+  const scope = allowPlatform ? selectedScope : 'organization'
+  return <ScopedSudoworkSettings key={`${activeOrgId}:${scope}`} scope={scope} organizationId={activeOrgId} allowPlatform={allowPlatform} onScopeChange={setScope} />
+}
+
+function ScopedSudoworkSettings({ scope, organizationId, allowPlatform, onScopeChange }: {
+  scope: ConfigScope
+  organizationId: string | null
+  allowPlatform: boolean
+  onScopeChange(scope: ConfigScope): void
+}) {
   const [config, setConfig] = useState<Config | null>(null)
+  const [baseline, setBaseline] = useState<Config | null>(null)
+  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const loadVersion = useRef(0)
+  const saveInFlight = useRef(false)
+  const discard = useCallback(() => {
+    setConfig(baseline)
+    setDirtyKeys(new Set())
+  }, [baseline])
+  const confirmDiscard = useSettingsNavigationGuard(dirtyKeys.size > 0, saving, discard)
+
+  async function changeScope(next: ConfigScope) {
+    if (next === scope || saveInFlight.current || !(await confirmDiscard())) return
+    onScopeChange(next)
+  }
+
+  const readConfig = useCallback(async () => {
+    const response = await operationsApi.getSudoworkSystemConfig(scope)
+    if (!response.success || !response.data) throw new Error(response.msg || '获取 Sudowork 策略失败')
+    if (response.data.scope_type !== scope || (scope === 'organization' && organizationId && response.data.organization_id !== organizationId)) {
+      throw new Error('服务器返回的配置范围不匹配，请重新加载。')
+    }
+    return response.data
+  }, [scope, organizationId])
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current
     setLoading(true)
-    try { setConfig((await operationsApi.getSudoworkSystemConfig()).data) }
-    catch (error) { toast.error(error instanceof Error ? error.message : '获取 Sudowork 策略失败') }
-    finally { setLoading(false) }
-  }, [])
+    setLoadError('')
+    setConfig(null)
+    setBaseline(null)
+    setDirtyKeys(new Set())
+    try {
+      const data = await readConfig()
+      if (version !== loadVersion.current) return
+      setConfig(data)
+      setBaseline(data)
+    }
+    catch (error) { if (version === loadVersion.current) setLoadError(error instanceof Error ? error.message : '获取 Sudowork 策略失败') }
+    finally { if (version === loadVersion.current) setLoading(false) }
+  }, [readConfig])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { loadVersion.current += 1 }
+  }, [load])
 
-  const patch = (value: Config) => setConfig(current => ({ ...(current ?? {}), ...value }))
+  const patch = (value: Config) => {
+    setDirtyKeys(current => {
+      const next = new Set(current)
+      for (const key of Object.keys(value)) {
+        if (JSON.stringify(value[key]) === JSON.stringify(baseline?.[key])) next.delete(key)
+        else next.add(key)
+      }
+      return next
+    })
+    setConfig(current => ({ ...(current ?? {}), ...value }))
+  }
   const nested = (key: string, value: JsonObject) => patch({ [key]: { ...object(config?.[key]), ...value } })
 
   const save = async () => {
-    if (!config) return
+    if (!config || !dirtyKeys.size || saveInFlight.current) return
+    saveInFlight.current = true
     setSaving(true)
+    const version = loadVersion.current
     try {
-      await operationsApi.updateSudoworkSystemConfig(config)
-      setConfig((await operationsApi.getSudoworkSystemConfig()).data)
-      toast.success('Sudowork 配置已保存；短信和支付基础设施变更需重启 Moss')
-    } catch (error) { toast.error(error instanceof Error ? error.message : '保存失败') }
-    finally { setSaving(false) }
+      const payload = buildSudoworkConfigPatch(config, dirtyKeys, scope)
+      const response = await operationsApi.updateSudoworkSystemConfig(payload, scope)
+      if (!response.success) throw new Error(response.msg || '保存失败')
+      if (version !== loadVersion.current) return
+      const data = await readConfig()
+      if (version !== loadVersion.current) return
+      setConfig(data)
+      setBaseline(data)
+      setDirtyKeys(new Set())
+      toast.success(scope === 'organization'
+        ? 'Sudowork 组织策略已保存'
+        : 'Sudowork 配置已保存；短信和支付基础设施变更需重启 Moss')
+    } catch (error) { if (version === loadVersion.current) toast.error(error instanceof Error ? error.message : '保存失败') }
+    finally {
+      saveInFlight.current = false
+      if (version === loadVersion.current) setSaving(false)
+    }
   }
 
-  if (loading || !config) return <DashboardLayout title="Sudowork 系统设置"><div className="space-y-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20" />)}</div></DashboardLayout>
+  const scopeControl = <ConfigScopeSelect scope={scope} allowPlatform={allowPlatform} disabled={saving} onChange={next => void changeScope(next)} />
+  if (loading || !config) return <DashboardLayout title="Sudowork 系统设置"><div className="space-y-5">{scopeControl}{loadError ? <Alert variant="destructive"><AlertTitle>无法加载 Sudowork 策略</AlertTitle><AlertDescription><p>{loadError}</p><Button variant="outline" size="sm" onClick={() => void load()}>重试</Button></AlertDescription></Alert> : <div className="space-y-3" role="status" aria-label="正在加载 Sudowork 策略">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20" />)}</div>}</div></DashboardLayout>
 
   const logReport = object(config.log_report)
   const versionUpdate = object(config.version_update)
@@ -58,38 +138,43 @@ export default function SudoworkSettingsPage() {
   const billing = object(config.billing)
   const fuiou = object(billing.fuiou)
   const sudorouter = object(billing.sudorouter)
+  const isPlatformScope = scope === 'platform'
   const nestedChild = (key: string, childKey: string, value: JsonObject) => {
     const parent = object(config[key])
     nested(key, { [childKey]: { ...object(parent[childKey]), ...value } })
   }
 
   return (
-    <DashboardLayout title="Sudowork 系统设置" description="统一管理客户端策略以及短信、支付和额度服务参数">
+    <DashboardLayout title="Sudowork 系统设置" description={isPlatformScope ? '平台客户端默认策略、短信和支付基础设施' : '当前组织的登录、客户端与充值策略'}>
       <div className="space-y-5">
+        {scopeControl}
+        <fieldset disabled={saving} className="space-y-5"><legend className="sr-only">{isPlatformScope ? '平台' : '当前组织'} Sudowork 策略</legend>
         <Card><CardHeader><CardTitle className="text-base">登录方式</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
           <Field label="默认登录方式"><Select value={String(config.login_method ?? 1)} onValueChange={value => patch({ login_method: Number(value) })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{SUDOWORK_LOGIN_METHODS.map(method => <SelectItem key={method.value} value={method.value}>{method.label}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="自动模型"><Input value={String(config.scode_auto_model ?? '')} onChange={event => patch({ scode_auto_model: event.target.value })} placeholder="留空使用 Moss 默认模型" /></Field>
           <Field label="CAS 配置（JSON）" wide><Textarea rows={10} value={JSON.stringify(thirdParty, null, 2)} onChange={event => { try { patch({ third_party_auth: JSON.parse(event.target.value) as JsonObject }) } catch { /* keep last valid value */ } }} /></Field>
         </CardContent></Card>
 
-        <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-base">短信服务</CardTitle><span className="text-xs text-muted-foreground">保存后需重启</span></div></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
-          <Field label="短信服务商"><Select value={String(sms.provider ?? 'disabled')} onValueChange={value => nested('sms', { provider: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="disabled">关闭</SelectItem><SelectItem value="tencent">腾讯云短信</SelectItem></SelectContent></Select></Field>
-          <Field label="地域"><Input value={String(sms.region ?? 'ap-beijing')} onChange={event => nested('sms', { region: event.target.value })} /></Field>
-          <Field label="SDK App ID"><Input value={String(sms.sdk_app_id ?? '')} onChange={event => nested('sms', { sdk_app_id: event.target.value })} /></Field>
-          <Field label="短信签名"><Input value={String(sms.sign_name ?? '')} onChange={event => nested('sms', { sign_name: event.target.value })} /></Field>
-          <Field label="模板 ID"><Input value={String(sms.template_id ?? '')} onChange={event => nested('sms', { template_id: event.target.value })} /></Field>
-          <Field label="签名 ID"><Input value={String(sms.sign_id ?? '')} onChange={event => nested('sms', { sign_id: event.target.value })} /></Field>
-          <Field label="验证码长度"><Input type="number" min={4} max={8} value={String(sms.code_length ?? 6)} onChange={event => nested('sms', { code_length: Number(event.target.value) })} /></Field>
-          <Field label="有效期（分钟）"><Input type="number" min={1} value={String(sms.expire_minutes ?? 5)} onChange={event => nested('sms', { expire_minutes: Number(event.target.value) })} /></Field>
-          <Field label="发送间隔（秒）"><Input type="number" min={1} value={String(sms.send_interval_seconds ?? 60)} onChange={event => nested('sms', { send_interval_seconds: Number(event.target.value) })} /></Field>
-          <Field label="每日发送上限"><Input type="number" min={1} value={String(sms.max_per_day ?? 10)} onChange={event => nested('sms', { max_per_day: Number(event.target.value) })} /></Field>
-        </CardContent></Card>
+        {isPlatformScope ? (
+          <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-base">短信服务</CardTitle><span className="text-xs text-muted-foreground">保存后需重启</span></div></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
+            <Field label="短信服务商"><Select value={String(sms.provider ?? 'disabled')} onValueChange={value => nested('sms', { provider: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="disabled">关闭</SelectItem><SelectItem value="tencent">腾讯云短信</SelectItem></SelectContent></Select></Field>
+            <Field label="地域"><Input value={String(sms.region ?? 'ap-beijing')} onChange={event => nested('sms', { region: event.target.value })} /></Field>
+            <Field label="SDK App ID"><Input value={String(sms.sdk_app_id ?? '')} onChange={event => nested('sms', { sdk_app_id: event.target.value })} /></Field>
+            <Field label="短信签名"><Input value={String(sms.sign_name ?? '')} onChange={event => nested('sms', { sign_name: event.target.value })} /></Field>
+            <Field label="模板 ID"><Input value={String(sms.template_id ?? '')} onChange={event => nested('sms', { template_id: event.target.value })} /></Field>
+            <Field label="签名 ID"><Input value={String(sms.sign_id ?? '')} onChange={event => nested('sms', { sign_id: event.target.value })} /></Field>
+            <Field label="验证码长度"><Input type="number" min={4} max={8} value={String(sms.code_length ?? 6)} onChange={event => nested('sms', { code_length: Number(event.target.value) })} /></Field>
+            <Field label="有效期（分钟）"><Input type="number" min={1} value={String(sms.expire_minutes ?? 5)} onChange={event => nested('sms', { expire_minutes: Number(event.target.value) })} /></Field>
+            <Field label="发送间隔（秒）"><Input type="number" min={1} value={String(sms.send_interval_seconds ?? 60)} onChange={event => nested('sms', { send_interval_seconds: Number(event.target.value) })} /></Field>
+            <Field label="每日发送上限"><Input type="number" min={1} value={String(sms.max_per_day ?? 10)} onChange={event => nested('sms', { max_per_day: Number(event.target.value) })} /></Field>
+          </CardContent></Card>
+        ) : null}
 
         <Card><CardHeader><CardTitle className="text-base">客户端上报与更新</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
           <Toggle label="日志上报" checked={Number(logReport.enabled) === 1} onChange={checked => nested('log_report', { enabled: checked ? 1 : 0 })} />
           <Field label="日志协议"><Select value={String(logReport.protocol ?? 'https')} onValueChange={value => nested('log_report', { protocol: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="https">HTTPS</SelectItem><SelectItem value="http">HTTP</SelectItem></SelectContent></Select></Field>
           <Field label="日志域名"><Input value={String(logReport.domain ?? '')} onChange={event => nested('log_report', { domain: event.target.value })} /></Field>
-          <Field label="新的日志密钥"><Input type="password" value={String(logReport.key ?? '')} onChange={event => nested('log_report', { key: event.target.value })} placeholder="留空表示不修改" /></Field>
+          {isPlatformScope ? <Field label="新的日志密钥"><Input type="password" value={String(logReport.key ?? '')} onChange={event => nested('log_report', { key: event.target.value })} placeholder="留空表示不修改" /></Field> : null}
           <Toggle label="版本更新" checked={Number(versionUpdate.enabled) === 1} onChange={checked => nested('version_update', { enabled: checked ? 1 : 0 })} />
           <Field label="版本资源域名"><Input value={String(versionUpdate.cos_domain ?? '')} onChange={event => nested('version_update', { cos_domain: event.target.value })} /></Field>
           <Toggle label="产品改进数据" checked={Number(productImprovement.enabled) === 1} onChange={checked => nested('product_improvement', { enabled: checked ? 1 : 0 })} />
@@ -102,24 +187,27 @@ export default function SudoworkSettingsPage() {
           <Toggle label="允许重复待审批申请" checked={credit.allow_duplicate_pending === true} onChange={checked => nested('credit_application', { allow_duplicate_pending: checked })} />
         </CardContent></Card>
 
-        <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-base">富友支付与 Sudorouter</CardTitle><Button asChild variant="outline" size="sm"><Link to="/settings/server-credentials"><KeyRound className="mr-2 size-4" />配置敏感凭据</Link></Button></div></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
-          <Toggle label="启用在线计费" checked={billing.enabled === true} onChange={checked => nested('billing', { enabled: checked })} />
-          <Toggle label="富友测试模式" checked={fuiou.test_mode === true} onChange={checked => nestedChild('billing', 'fuiou', { test_mode: checked })} />
-          <Field label="富友商户号"><Input value={String(fuiou.merchant_code ?? '')} onChange={event => nestedChild('billing', 'fuiou', { merchant_code: event.target.value })} /></Field>
-          <Field label="富友超时（毫秒）"><Input type="number" min={1} value={String(fuiou.timeout_ms ?? 10000)} onChange={event => nestedChild('billing', 'fuiou', { timeout_ms: Number(event.target.value) })} /></Field>
-          <Field label="测试支付地址"><Input type="url" value={String(fuiou.test_api_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { test_api_url: event.target.value })} /></Field>
-          <Field label="测试退款地址"><Input type="url" value={String(fuiou.test_refund_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { test_refund_url: event.target.value })} /></Field>
-          <Field label="生产支付地址"><Input type="url" value={String(fuiou.prod_api_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { prod_api_url: event.target.value })} /></Field>
-          <Field label="生产退款地址"><Input type="url" value={String(fuiou.prod_refund_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { prod_refund_url: event.target.value })} /></Field>
-          <Field label="Sudorouter 地址"><Input type="url" value={String(sudorouter.base_url ?? '')} onChange={event => nestedChild('billing', 'sudorouter', { base_url: event.target.value })} /></Field>
-          <Field label="Sudorouter 管理员 ID"><Input value={String(sudorouter.admin_user_id ?? '13')} onChange={event => nestedChild('billing', 'sudorouter', { admin_user_id: event.target.value })} /></Field>
-          <Field label="Sudorouter 超时（毫秒）"><Input type="number" min={1} value={String(sudorouter.timeout_ms ?? 10000)} onChange={event => nestedChild('billing', 'sudorouter', { timeout_ms: Number(event.target.value) })} /></Field>
-          <Field label="新用户初始模型额度"><Input type="number" min={0} value={String(sudorouter.initial_quota ?? 100000)} onChange={event => nestedChild('billing', 'sudorouter', { initial_quota: Number(event.target.value) })} /></Field>
-          <Field label="客户端模型服务地址"><Input type="url" value={String(sudorouter.model_service_url ?? '')} onChange={event => nestedChild('billing', 'sudorouter', { model_service_url: event.target.value })} placeholder="https://router.example.com/v1" /></Field>
-          <Field label="可用模型列表地址" wide><Input type="url" value={String(sudorouter.models_api_url ?? '')} onChange={event => nestedChild('billing', 'sudorouter', { models_api_url: event.target.value })} placeholder="https://router.example.com/api/specific_pricing" /></Field>
-        </CardContent></Card>
+        {isPlatformScope ? (
+          <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-base">富友支付与 Sudorouter</CardTitle><Button asChild variant="outline" size="sm"><Link to="/settings/server-credentials"><KeyRound className="mr-2 size-4" />配置敏感凭据</Link></Button></div></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
+            <Toggle label="启用在线计费" checked={billing.enabled === true} onChange={checked => nested('billing', { enabled: checked })} />
+            <Toggle label="富友测试模式" checked={fuiou.test_mode === true} onChange={checked => nestedChild('billing', 'fuiou', { test_mode: checked })} />
+            <Field label="富友商户号"><Input value={String(fuiou.merchant_code ?? '')} onChange={event => nestedChild('billing', 'fuiou', { merchant_code: event.target.value })} /></Field>
+            <Field label="富友超时（毫秒）"><Input type="number" min={1} value={String(fuiou.timeout_ms ?? 10000)} onChange={event => nestedChild('billing', 'fuiou', { timeout_ms: Number(event.target.value) })} /></Field>
+            <Field label="测试支付地址"><Input type="url" value={String(fuiou.test_api_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { test_api_url: event.target.value })} /></Field>
+            <Field label="测试退款地址"><Input type="url" value={String(fuiou.test_refund_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { test_refund_url: event.target.value })} /></Field>
+            <Field label="生产支付地址"><Input type="url" value={String(fuiou.prod_api_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { prod_api_url: event.target.value })} /></Field>
+            <Field label="生产退款地址"><Input type="url" value={String(fuiou.prod_refund_url ?? '')} onChange={event => nestedChild('billing', 'fuiou', { prod_refund_url: event.target.value })} /></Field>
+            <Field label="Sudorouter 地址"><Input type="url" value={String(sudorouter.base_url ?? '')} onChange={event => nestedChild('billing', 'sudorouter', { base_url: event.target.value })} /></Field>
+            <Field label="Sudorouter 管理员 ID"><Input value={String(sudorouter.admin_user_id ?? '13')} onChange={event => nestedChild('billing', 'sudorouter', { admin_user_id: event.target.value })} /></Field>
+            <Field label="Sudorouter 超时（毫秒）"><Input type="number" min={1} value={String(sudorouter.timeout_ms ?? 10000)} onChange={event => nestedChild('billing', 'sudorouter', { timeout_ms: Number(event.target.value) })} /></Field>
+            <Field label="新用户初始模型额度"><Input type="number" min={0} value={String(sudorouter.initial_quota ?? 100000)} onChange={event => nestedChild('billing', 'sudorouter', { initial_quota: Number(event.target.value) })} /></Field>
+            <Field label="客户端模型服务地址"><Input type="url" value={String(sudorouter.model_service_url ?? '')} onChange={event => nestedChild('billing', 'sudorouter', { model_service_url: event.target.value })} placeholder="https://router.example.com/v1" /></Field>
+            <Field label="可用模型列表地址" wide><Input type="url" value={String(sudorouter.models_api_url ?? '')} onChange={event => nestedChild('billing', 'sudorouter', { models_api_url: event.target.value })} placeholder="https://router.example.com/api/specific_pricing" /></Field>
+          </CardContent></Card>
+        ) : null}
 
-        <div className="flex justify-end"><Button onClick={() => void save()} disabled={saving}>{saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}保存策略</Button></div>
+        </fieldset>
+        <div className="flex justify-end gap-2"><Button variant="ghost" disabled={saving || !dirtyKeys.size} onClick={() => void confirmDiscard()}>取消</Button><Button onClick={() => void save()} disabled={saving || !dirtyKeys.size}>{saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}保存策略</Button></div>
       </div>
     </DashboardLayout>
   )

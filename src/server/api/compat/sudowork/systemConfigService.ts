@@ -1,9 +1,14 @@
 import type { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
+import { resolveEffectiveLoginMethod } from '../../../configuration/loginPolicy.js'
 import type { ConfigKey } from '../../../configStore/configStore.js'
-import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
 import type { DbDriver } from '../../../db/driver.js'
+import { getSystemSettings, updateSystemSettingsWithCommit } from '../../../systemSettings.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
 
@@ -84,12 +89,12 @@ export class SudoworkSystemConfigService {
       ?? new PlatformIntegrationSettingsRepository(options.db)
   }
 
-  async getLoginMethod(): Promise<LoginMethod> {
-    return loginMethodFromNumber((await this.policy()).loginMethod, this.options.defaults.loginMethod)
+  async getLoginMethod(orgId?: string): Promise<LoginMethod> {
+    return resolveEffectiveLoginMethod(this.options, orgId)
   }
 
-  async getPublicConfig(): Promise<Json> {
-    const policy = await this.policy()
+  async getPublicConfig(orgId?: string): Promise<Json> {
+    const policy = await this.policy(orgId)
     const infrastructure = await this.getInfrastructureConfig()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
@@ -97,8 +102,9 @@ export class SudoworkSystemConfigService {
     const enabledLogReport = flag(logReport.enabled)
     const enabledVersionUpdate = flag(versionUpdate.enabled)
     const enabledProductImprovement = flag(productImprovement.enabled)
+    const systemSettings = getSystemSettings()
     return {
-      login_method: loginMethodToNumber(await this.getLoginMethod()),
+      login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
       log_report: enabledLogReport === 1
         ? { enabled: 1, baseurl: `${string(logReport.protocol, 'https')}://${string(logReport.domain)}` }
         : { enabled: 0 },
@@ -114,19 +120,24 @@ export class SudoworkSystemConfigService {
       )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
-      third_party_auth: await this.thirdPartyAuth(false),
+      third_party_auth: await this.thirdPartyAuth(false, orgId),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
+      client_cron_enabled: await this.effectiveClientCronEnabled(orgId, systemSettings.clientCronEnabled),
+      client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspace_upload_limit_bytes: workspaceUploadLimit(policy.workspaceUploadLimitBytes, systemSettings.workspaceUploadLimitBytes),
     }
   }
 
-  async getCreditApplicationPolicy(): Promise<{
+  async getCreditApplicationPolicy(orgId?: string): Promise<{
     rechargeMode: 'payment' | 'approve' | 'disabled'
     minPoints: number
     maxPoints: number
     allowDuplicatePending: boolean
   }> {
-    const policy = await this.policy()
+    const policy = await this.policy(orgId)
     const credit = normalizeCreditApplication(policy.creditApplication)
     const mode = rechargeMode(policy.rechargeMode)
     return {
@@ -152,14 +163,17 @@ export class SudoworkSystemConfigService {
 
   async getAdminConfig(actor: IdentityActor): Promise<Json> {
     this.assertAdmin(actor)
-    const policy = await this.policy()
+    const orgId = this.policyOrgId(actor)
+    const policy = await this.policy(orgId)
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
     const config: Json = {
-      login_method: loginMethodToNumber(await this.getLoginMethod()),
+      scope_type: orgId ? 'organization' : 'platform',
+      organization_id: orgId ?? '',
+      login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
       sms_configured: await this.isSmsConfigured(),
-      third_party_auth: await this.thirdPartyAuth(true),
+      third_party_auth: await this.thirdPartyAuth(true, orgId),
       log_report: {
         enabled: flag(logReport.enabled),
         protocol: string(logReport.protocol),
@@ -175,8 +189,16 @@ export class SudoworkSystemConfigService {
       scode_auto_model: string(policy.scodeAutoModel),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
+      client_cron_enabled: await this.effectiveClientCronEnabled(orgId),
+      client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : getSystemSettings().clientShowToolCalls,
+      workspace_upload_limit_bytes: workspaceUploadLimit(
+        policy.workspaceUploadLimitBytes,
+        getSystemSettings().workspaceUploadLimitBytes,
+      ),
     }
-    if (!actor.organizationScoped) return config
+    if (orgId) return config
     const infrastructure = await this.getInfrastructureConfig()
     return {
       ...config,
@@ -186,12 +208,13 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  async getCredentialData(): Promise<Json> {
+  async getCredentialData(orgId?: string): Promise<Json> {
     const result: Json = {}
-    const logReport = object((await this.policy()).logReport)
+    const policy = await this.policy(orgId)
+    const logReport = object(policy.logReport)
     const logKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (flag(logReport.enabled) === 1 && logKey) result.log_report = { key: logKey }
-    const productImprovement = object((await this.policy()).productImprovement)
+    const productImprovement = object(policy.productImprovement)
     if (flag(productImprovement.enabled) === 1) {
       const value: Json = { api_key: this.options.defaults.productImprovementApiKey ?? '' }
       if (this.options.defaults.productImprovementEncryptionRequired) {
@@ -204,21 +227,33 @@ export class SudoworkSystemConfigService {
 
   async update(actor: IdentityActor, body: Json): Promise<void> {
     const {
-      patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure,
+      patch, inheritedKeys, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId, clientCronEnabled,
     } = await this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
-    if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
     try {
-      await this.options.db.transaction(async () => {
-        await this.options.policies.putPlatform(patch, actor.userId)
+      if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
+      const commit = () => this.options.db.transaction(async () => {
+        if (Object.keys(patch).length > 0) {
+          if (orgId) await this.options.policies.putOrganization(orgId, patch, actor.userId)
+          else await this.options.policies.putPlatform(patch, actor.userId)
+        }
+        if (orgId && inheritedKeys.length > 0) {
+          await this.options.policies.removeOrganizationKeys(orgId, inheritedKeys, actor.userId)
+        }
+        if (clientCronEnabled !== undefined && orgId !== undefined) {
+          await this.options.identities.setOrganizationClientCronEnabled(orgId, clientCronEnabled)
+        }
         if (smsInfrastructure) {
           await this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
         }
         if (billingInfrastructure) {
           await this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
         }
-        if (providers) await this.replaceCasConnections(providers)
+        if (providers) await this.replaceCasConnections(providers, orgId)
       })
+      if (clientCronEnabled !== undefined && orgId === undefined) {
+        await updateSystemSettingsWithCommit({ clientCronEnabled }, commit)
+      } else await commit()
     } catch (error) {
       if (nextLogKey !== undefined) {
         if (previousLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, previousLogKey)
@@ -234,20 +269,26 @@ export class SudoworkSystemConfigService {
 
   private async prepareUpdate(actor: IdentityActor, body: Json): Promise<{
     patch: Json
+    inheritedKeys: string[]
     providers?: NormalizedProvider[]
     nextLogKey?: string
     smsInfrastructure?: SudoworkInfrastructureConfig['sms']
     billingInfrastructure?: SudoworkInfrastructureConfig['billing']
+    orgId?: string
+    clientCronEnabled?: boolean
   }> {
-    if (actor.role !== 'super_admin') throw new SudoworkSystemConfigError(403, '权限不足')
+    this.assertAdmin(actor)
+    const orgId = this.policyOrgId(actor)
+    const platformActor = orgId === undefined
     const patch: Json = {}
     let providers: NormalizedProvider[] | undefined
     let smsInfrastructure: SudoworkInfrastructureConfig['sms'] | undefined
     let billingInfrastructure: SudoworkInfrastructureConfig['billing'] | undefined
+    let clientCronEnabled: boolean | undefined
 
     if (body.third_party_auth !== undefined) {
       const normalized = normalizeThirdPartyAuth(body.third_party_auth)
-      providers = await Promise.all(normalized.providers.map(provider => this.validateProvider(provider)))
+      providers = await Promise.all(normalized.providers.map(provider => this.validateProvider(provider, orgId)))
       if (normalized.enabled === 1 && !providers.some(provider => provider.id === normalized.defaultProvider && provider.enabled)) {
         throw new SudoworkSystemConfigError(400, '默认三方认证 Provider 不存在或未启用')
       }
@@ -261,8 +302,7 @@ export class SudoworkSystemConfigService {
       if (body.login_method === 0 && !(await this.isSmsConfigured())) {
         throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
       }
-      const thirdParty = object(patch.thirdPartyAuth ?? (await this.policy()).thirdPartyAuth)
-      if (body.login_method === 2 && flag(thirdParty.enabled) !== 1) {
+      if (body.login_method === 2 && !(await this.hasEnabledThirdPartyAuth(orgId, patch.thirdPartyAuth, providers))) {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
       }
       patch.loginMethod = body.login_method
@@ -275,6 +315,9 @@ export class SudoworkSystemConfigService {
       const protocol = string(value.protocol)
       const domain = string(value.domain)
       nextLogKey = typeof value.key === 'string' && value.key.length > 0 ? value.key : undefined
+      if (!platformActor && nextLogKey !== undefined) {
+        throw new SudoworkSystemConfigError(403, '日志上报密钥属于部署级配置,仅平台超级管理员可修改')
+      }
       if (enabled === 1 && protocol !== 'http' && protocol !== 'https') {
         throw new SudoworkSystemConfigError(400, '日志上报开启时,协议类型必须为 http 或 https')
       }
@@ -313,19 +356,46 @@ export class SudoworkSystemConfigService {
     }
     if (body.recharge_mode !== undefined) patch.rechargeMode = rechargeMode(body.recharge_mode)
     if (body.credit_application !== undefined) patch.creditApplication = normalizeCreditApplication(body.credit_application)
+    if (body.client_cron_enabled !== undefined) {
+      const requested = parseBoolean(body.client_cron_enabled, 'client_cron_enabled')
+      const current = orgId
+        ? (await this.options.identities.getOrganizationProfile(orgId))?.clientCronEnabled
+        : getSystemSettings().clientCronEnabled
+      if (current === undefined || requested !== current) clientCronEnabled = requested
+    }
+    if (body.client_show_tool_calls !== undefined) {
+      patch.clientShowToolCalls = parseBoolean(body.client_show_tool_calls, 'client_show_tool_calls')
+    }
+    if (body.workspace_upload_limit_bytes !== undefined) {
+      patch.workspaceUploadLimitBytes = parseWorkspaceUploadLimit(body.workspace_upload_limit_bytes)
+    }
     if (body.sms !== undefined) {
+      if (!platformActor) throw new SudoworkSystemConfigError(403, '短信基础设施属于部署级配置,仅平台超级管理员可修改')
       smsInfrastructure = parseSmsInfrastructure(
         body.sms,
         (await this.getInfrastructureConfig()).sms,
       )
     }
     if (body.billing !== undefined) {
+      if (!platformActor) throw new SudoworkSystemConfigError(403, '支付基础设施属于部署级配置,仅平台超级管理员可修改')
       billingInfrastructure = parseBillingInfrastructure(
         body.billing,
         (await this.getInfrastructureConfig()).billing,
       )
     }
-    return { patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure }
+    const scoped = orgId
+      ? splitPlatformInheritedValues(patch, await this.platformInheritedValues(orgId))
+      : { patch, inheritedKeys: [] }
+    return {
+      patch: scoped.patch,
+      inheritedKeys: scoped.inheritedKeys,
+      providers,
+      nextLogKey,
+      smsInfrastructure,
+      billingInfrastructure,
+      orgId,
+      clientCronEnabled,
+    }
   }
 
   async isSmsConfigured(): Promise<boolean> {
@@ -340,24 +410,98 @@ export class SudoworkSystemConfigService {
       ))
   }
 
-  private policy(): Promise<Json> {
-    return this.options.policies.getEffective()
+  private policy(orgId?: string): Promise<Json> {
+    return this.options.policies.getEffective(orgId)
   }
 
-  private async thirdPartyAuth(admin: boolean): Promise<Json> {
-    const policy = object((await this.policy()).thirdPartyAuth)
-    const groups = await Promise.all((await this.options.identities.listOrganizationProfiles()).map(async profile =>
+  private async platformInheritedValues(orgId: string): Promise<Json> {
+    const platform = await this.options.policies.getPlatform()
+    const systemSettings = getSystemSettings()
+    return {
+      ...platform,
+      loginMethod: loginMethodToNumber(await resolveEffectiveLoginMethod(this.options, orgId, { ignoreOrganizationPolicy: true })),
+      logReport: platform.logReport ?? { enabled: 0, protocol: '', domain: '', keySet: Boolean(this.options.secrets.get(LOG_REPORT_SECRET_KEY)) },
+      versionUpdate: platform.versionUpdate ?? { enabled: 0, cosDomain: '' },
+      productImprovement: platform.productImprovement ?? { enabled: 0 },
+      thirdPartyAuth: platform.thirdPartyAuth ?? { enabled: 0, defaultProvider: '' },
+      scodeAutoModel: string(platform.scodeAutoModel),
+      rechargeMode: rechargeMode(platform.rechargeMode),
+      creditApplication: normalizeCreditApplication(platform.creditApplication),
+      clientShowToolCalls: typeof platform.clientShowToolCalls === 'boolean'
+        ? platform.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspaceUploadLimitBytes: workspaceUploadLimit(
+        platform.workspaceUploadLimitBytes,
+        systemSettings.workspaceUploadLimitBytes,
+      ),
+    }
+  }
+
+  private async thirdPartyAuth(admin: boolean, orgId?: string): Promise<Json> {
+    const policy = object((await this.policy(orgId)).thirdPartyAuth)
+    const profiles = orgId
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgId)
+      : await this.options.identities.listOrganizationProfiles()
+    const groups = await Promise.all(profiles.map(async profile =>
       (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')).map(connection =>
         legacyProvider(connection, profile.code, admin)),
     ))
     const providers = groups.flat()
-    const defaultProvider = string(policy.defaultProvider, providers[0]?.id as string | undefined)
-    return { enabled: flag(policy.enabled), default_provider: defaultProvider, providers: providers.filter(item => admin || item.enabled === 1) }
+    const visibleProviders = providers.filter(item => admin || item.enabled === 1)
+    const enabledProviders = visibleProviders.filter(item => item.enabled === 1)
+    const configuredDefault = string(policy.defaultProvider)
+    const defaultProvider = enabledProviders.some(provider => provider.id === configuredDefault)
+      ? configuredDefault
+      : string(enabledProviders[0]?.id as string | undefined)
+    return {
+      enabled: enabledProviders.length > 0 ? flag(policy.enabled) : 0,
+      default_provider: defaultProvider,
+      providers: visibleProviders,
+    }
   }
 
-  private async validateProvider(provider: NormalizedProvider): Promise<NormalizedProvider> {
+  private async hasEnabledThirdPartyAuth(
+    orgId?: string,
+    policyOverride?: unknown,
+    providersOverride?: NormalizedProvider[],
+  ): Promise<boolean> {
+    const policy = object(policyOverride ?? (await this.policy(orgId)).thirdPartyAuth)
+    if (flag(policy.enabled) !== 1) return false
+    const enabledProviderIds = providersOverride
+      ? providersOverride
+        .filter(provider => provider.enabled && (!orgId || provider.orgId === orgId))
+        .map(provider => provider.id)
+      : await this.enabledCasProviderIds(orgId)
+    if (enabledProviderIds.length === 0) return false
+    const defaultProvider = string(policy.defaultProvider)
+    return !defaultProvider || enabledProviderIds.includes(defaultProvider) || enabledProviderIds.length > 0
+  }
+
+  private async enabledCasProviderIds(orgId?: string): Promise<string[]> {
+    const profiles = orgId
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgId)
+      : await this.options.identities.listOrganizationProfiles()
+    const groups = await Promise.all(profiles.map(async profile =>
+      (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas'))
+        .filter(connection => connection.enabled)
+        .map(connection => connection.id),
+    ))
+    return groups.flat()
+  }
+
+  private async validateProvider(provider: NormalizedProvider, orgScopeId?: string): Promise<NormalizedProvider> {
     if (provider.type !== 'cas') throw new SudoworkSystemConfigError(400, '当前仅支持 CAS 类型 Provider')
     if (!provider.id || !provider.name) throw new SudoworkSystemConfigError(400, 'Provider ID 和名称不能为空')
+    const profile = await this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
+    if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
+    const existing = await this.options.identities.getIntegrationConnection(provider.id)
+    if (orgScopeId && existing && existing.orgId !== orgScopeId) {
+      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
+    }
+    if (orgScopeId && profile.orgId !== orgScopeId) {
+      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
+    }
+    if (!provider.enabled) return { ...provider, orgId: profile.orgId }
     if (!validHttpUrl(provider.casUrl)) throw new SudoworkSystemConfigError(400, 'CAS URL 格式不正确')
     if (!provider.loginPath || !provider.validatePath || !provider.logoutPath || !provider.serviceParam) {
       throw new SudoworkSystemConfigError(400, 'CAS 登录地址、校验地址、登出地址和 service 参数名不能为空')
@@ -369,14 +513,15 @@ export class SudoworkSystemConfigService {
       throw new SudoworkSystemConfigError(400, '登出回跳 URL 必须使用 http 或 https')
     }
     if (!provider.appCallbackUrl) throw new SudoworkSystemConfigError(400, 'App 回调 URL 不能为空')
-    const profile = await this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
-    if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
     return { ...provider, orgId: profile.orgId }
   }
 
-  private async replaceCasConnections(providers: NormalizedProvider[]): Promise<void> {
+  private async replaceCasConnections(providers: NormalizedProvider[], orgScopeId?: string): Promise<void> {
     const ids = new Set(providers.map(provider => provider.id))
-    for (const profile of await this.options.identities.listOrganizationProfiles()) {
+    const profiles = orgScopeId
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgScopeId)
+      : await this.options.identities.listOrganizationProfiles()
+    for (const profile of profiles) {
       for (const existing of await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
         if (!ids.has(existing.id)) await this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
       }
@@ -410,6 +555,16 @@ export class SudoworkSystemConfigService {
     if (actor.role !== 'admin' && actor.role !== 'super_admin') {
       throw new SudoworkSystemConfigError(403, '权限不足')
     }
+  }
+
+  private policyOrgId(actor: IdentityActor): string | undefined {
+    return hasGlobalOrganizationAccess(actor) ? undefined : actor.orgId
+  }
+
+  private async effectiveClientCronEnabled(orgId?: string, global = getSystemSettings().clientCronEnabled): Promise<boolean> {
+    return orgId
+      ? global && ((await this.options.identities.getOrganizationProfile(orgId))?.clientCronEnabled ?? true)
+      : global
   }
 }
 
@@ -491,12 +646,46 @@ function object(value: unknown): Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Json : {}
 }
 
+function splitPlatformInheritedValues(patch: Json, platform: Json): { patch: Json; inheritedKeys: string[] } {
+  const result: Json = {}
+  const inheritedKeys: string[] = []
+  for (const [key, value] of Object.entries(patch)) {
+    if (jsonEqual(value, platform[key])) inheritedKeys.push(key)
+    else result[key] = value
+  }
+  return { patch: result, inheritedKeys }
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 function string(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value.trim() : fallback
 }
 
 function flag(value: unknown): 0 | 1 {
   return value === true || value === 1 || value === '1' ? 1 : 0
+}
+
+function parseBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value === 'boolean') return value
+  if (value === 0 || value === 1) return value === 1
+  throw new SudoworkSystemConfigError(400, `${fieldName} 必须为布尔值`)
+}
+
+function workspaceUploadLimit(value: unknown, fallback: number): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (Number.isSafeInteger(limit) && limit >= 1 && limit <= 1024 * 1024 * 1024) return limit
+  return fallback
+}
+
+function parseWorkspaceUploadLimit(value: unknown): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024 * 1024 * 1024) {
+    throw new SudoworkSystemConfigError(400, '工作区上传限制必须为 1 至 1073741824 字节之间的整数')
+  }
+  return limit
 }
 
 function rechargeMode(value: unknown): RechargeMode {
@@ -703,11 +892,6 @@ function adminOptionalUrl(value: unknown, fallback: string | undefined, label: s
   const normalized = value === undefined ? fallback : string(value)
   if (normalized && !validHttpUrl(normalized)) throw new SudoworkSystemConfigError(400, `${label}格式不正确`)
   return normalized || undefined
-}
-
-function loginMethodFromNumber(value: unknown, fallback: LoginMethod): LoginMethod {
-  return value === 0 ? 'sms' : value === 1 ? 'password' : value === 2 ? 'cas'
-    : value === 'sms' || value === 'password' || value === 'cas' ? value : fallback
 }
 
 function loginMethodToNumber(value: LoginMethod): 0 | 1 | 2 {

@@ -32,6 +32,7 @@
  * additionally make a re-run after a crash safe.
  */
 import type { DbDriver } from './driver.js'
+import { ORGANIZATION_MODEL_SETTINGS_SCHEMA } from '../configuration/organizationModelSettingsRepository.js'
 
 /** Initial full schema (all stores, migrated-final shape). */
 const MIGRATION_0001_INITIAL_SCHEMA = `
@@ -2004,6 +2005,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 4, name: 'recharge-orders-2026-09', sql: MIGRATION_0004_RECHARGE },
   { version: 5, name: 'enterprise-policy-2026-09', sql: MIGRATION_0005_ENTERPRISE_POLICY },
   { version: 6, name: 'sudowork-compatibility-2026-09', sql: MIGRATION_0006_COMPATIBILITY },
+  { version: 7, name: 'organization-model-settings-2026-09', sql: ORGANIZATION_MODEL_SETTINGS_SCHEMA },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

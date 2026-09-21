@@ -45,7 +45,6 @@ import {
   getTranscriptPath,
 } from './runtimePaths.js'
 import { errorMessage } from '../utils/errors.js'
-import { getSystemSettings } from './systemSettings.js'
 import { getUserModelPreference } from './userModelPreference.js'
 import { getModelProviderApiKey, getModelsForSelection } from './modelListCache.js'
 import type { AuthProxyServer } from './authProxy/authProxyServer.js'
@@ -2071,7 +2070,7 @@ export class RuntimeService {
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
     // Build environment for runner from system settings
-    const systemSettings = getSystemSettings()
+    const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
@@ -2088,7 +2087,10 @@ export class RuntimeService {
     // process-global endpoint when its catalog cannot be resolved: that would
     // make an unavailable/stale selection call a different Provider.
     const providerCatalog = !isCabinSession
-      ? await getModelsForSelection(requestedModel)
+      ? await getModelsForSelection(requestedModel, {
+        settings: systemSettings,
+        orgId: session.orgId,
+      })
       : null
     const defaultModel = providerCatalog?.selection.modelId || requestedModel
 
@@ -2119,7 +2121,7 @@ export class RuntimeService {
       ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
       : undefined
     const providerApiKey = providerCatalog
-      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey)
+      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey, session.orgId)
       : undefined
     // Per-user Sudorouter keys only apply to the legacy default provider. A
     // configured Provider must never receive a process-global or legacy key;
@@ -2128,7 +2130,7 @@ export class RuntimeService {
     const sessionApiKey = isLegacyProvider
       ? userModelKey || providerApiKey
       : providerApiKey
-    if (providerCatalog && !isLegacyProvider) {
+    if (providerCatalog) {
       delete runnerEnv.ANTHROPIC_AUTH_TOKEN
       delete runnerEnv.ANTHROPIC_API_KEY
     }

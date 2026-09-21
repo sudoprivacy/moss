@@ -1,18 +1,31 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import os from 'node:os'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, test } from 'node:test'
-import { AuthCenterDb } from '../../../authCenter/db.js'
-import { ClientPolicyRepository, ensureClientPolicySchema } from '../../../configuration/clientPolicyRepository.js'
-import {
-  ensurePlatformIntegrationSettingsSchema,
-  PlatformIntegrationSettingsRepository,
-} from '../../../configuration/platformIntegrationSettingsRepository.js'
-import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
-import { migrationCommandContext } from '../../../application/commandContext.js'
-import { createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
-import { SudoworkSystemConfigError, SudoworkSystemConfigService } from './systemConfigService.js'
+import { after, describe, mock, test } from 'node:test'
+import { setImmediate } from 'node:timers/promises'
 
-async function setup(secretFailure = false) {
+const testHome = fs.mkdtempSync(join(os.tmpdir(), 'moss-system-config-test-'))
+const homedirMock = mock.method(os, 'homedir', () => testHome)
+syncBuiltinESMExports()
+const { AuthCenterDb } = await import('../../../authCenter/db.js')
+const { ClientPolicyRepository, ensureClientPolicySchema } = await import('../../../configuration/clientPolicyRepository.js')
+const { PlatformIntegrationSettingsRepository, ensurePlatformIntegrationSettingsSchema } = await import('../../../configuration/platformIntegrationSettingsRepository.js')
+const { createIdentityTestRepository } = await import('../../../testing/compatibilityRepositories.js')
+const { UnifiedIdentityService } = await import('../../../identity/unifiedIdentityService.js')
+const { migrationCommandContext } = await import('../../../application/commandContext.js')
+const { SYSTEM_SETTINGS_PATH, getSystemSettings, updateSystemSettings } = await import('../../../systemSettings.js')
+const { SudoworkSystemConfigError, SudoworkSystemConfigService } = await import('./systemConfigService.js')
+assert.equal(SYSTEM_SETTINGS_PATH, join(testHome, '.moss', 'settings.json'))
+after(() => {
+  homedirMock.mock.restore()
+  syncBuiltinESMExports()
+  fs.rmSync(testHome, { recursive: true, force: true })
+})
+
+async function setup(secretFailure: false | 'before-write' | 'after-write' = false) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   const identities = createIdentityTestRepository(db, {}, authDb.driver)
@@ -49,13 +62,14 @@ async function setup(secretFailure = false) {
     secrets: {
       get(key: string) { return secrets.get(key) },
       async put(key: string, value: string) {
-        if (secretFailure) throw new Error('nexus unavailable')
+        if (secretFailure === 'before-write') throw new Error('nexus unavailable')
         secrets.set(key, value)
+        if (secretFailure === 'after-write' && value === 'new-secret') throw new Error('nexus unavailable after write')
       },
       async remove(key: string) { secrets.delete(key) },
     },
   } as never)
-  return { db, identities, org, policies, secrets, service }
+  return { db, driver: authDb.driver, unified, identities, org, policies, secrets, service }
 }
 
 void describe('Sudowork 系统配置统一服务', () => {
@@ -114,10 +128,10 @@ void describe('Sudowork 系统配置统一服务', () => {
   })
 
   void test('权限、短信前置条件和 Nexus 失败不会留下部分策略', async () => {
-    const { db, org, policies, service } = await setup(true)
+    const { db, org, service, policies } = await setup('before-write')
     try {
       await assert.rejects(
-        service.update({ userId: 'admin', orgId: org.organizationId, role: 'admin' }, { login_method: 1 }),
+        service.update({ userId: 'user', orgId: org.organizationId, role: 'user' }, { login_method: 1 }),
         (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403,
       )
       await assert.rejects(
@@ -132,11 +146,47 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  void test('短信和支付基础设施非敏感参数写入统一平台策略并要求重启', async () => {
+  void test('组织管理员可保存客户端策略但不能修改部署级基础设施', async () => {
+    const { db, org, service, policies } = await setup()
+    try {
+      const actor = { userId: 'admin', orgId: org.organizationId, role: 'admin' }
+      await service.update(actor, { scode_auto_model: 'organization-model', client_show_tool_calls: false })
+
+      assert.deepEqual((await policies.getPlatform()), {})
+      assert.deepEqual((await policies.getOrganization(org.organizationId)), {
+        scodeAutoModel: 'organization-model', clientShowToolCalls: false,
+      })
+      for (const body of [{ sms: { provider: 'disabled' } }, { billing: { enabled: false } }]) {
+        await assert.rejects(service.update(actor, body),
+          (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  for (const previousSecret of [undefined, 'previous-secret']) {
+    void test(`密钥写入后失败时恢复${previousSecret ? '原密钥' : '未配置状态'}`, async () => {
+      const { db, org, secrets, service, policies } = await setup('after-write')
+      try {
+        if (previousSecret) secrets.set('client.log-report-key', previousSecret)
+        await assert.rejects(service.update({ userId: 'root', orgId: org.organizationId, role: 'super_admin' }, {
+          scode_auto_model: 'should-not-save',
+          log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+        }), /nexus unavailable after write/)
+        assert.equal(secrets.get('client.log-report-key'), previousSecret)
+        assert.deepEqual((await policies.getPlatform()), {})
+      } finally {
+        db.close()
+      }
+    })
+  }
+
+  void test('平台超级管理员可更新短信和支付基础设施并要求重启', async () => {
     const { db, org, service } = await setup()
     try {
-      const legacyRoot = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
-      const root = { ...legacyRoot, organizationScoped: true }
+      const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin' }
+      const scopedRoot = { ...root, organizationScoped: true }
       await service.update(root, {
         sms: {
           provider: 'tencent', sdk_app_id: '1400000000', sign_name: '企业签名',
@@ -158,7 +208,8 @@ void describe('Sudowork 系统配置统一服务', () => {
         },
       })
 
-      const config = await service.getAdminConfig(root) as any
+      const config = (await service.getAdminConfig(root)) as any
+      assert.equal(config.scope_type, 'platform')
       assert.equal(config.restart_required, true)
       assert.equal(config.sms.provider, 'tencent')
       assert.equal(config.sms.expire_minutes, 8)
@@ -168,10 +219,10 @@ void describe('Sudowork 系统配置统一服务', () => {
       assert.equal(config.billing.sudorouter.initial_quota, 50_000_000)
       assert.equal(config.billing.sudorouter.model_service_url, 'https://router.test/v1')
       assert.equal((await service.getPublicConfig()).sudorouter_baseurl, 'https://router.test')
-      assert.equal(db.prepare(`
+      assert.equal((db.prepare(`
         SELECT instr(policy_json, 'billingInfrastructure') + instr(policy_json, 'smsInfrastructure') AS leaked
         FROM client_delivery_policies WHERE scope_type = 'platform' AND scope_id = 'default'
-      `).get()?.leaked, 0)
+      `).get() as { leaked: number } | undefined)?.leaked ?? 0, 0)
       assert.equal(db.prepare(`
         SELECT COUNT(*) AS count FROM platform_integration_settings
         WHERE setting_key IN ('sudowork.sms', 'sudowork.billing')
@@ -195,10 +246,614 @@ void describe('Sudowork 系统配置统一服务', () => {
           },
         },
       })
-      const legacyConfig = await service.getAdminConfig(legacyRoot) as any
-      assert.equal(legacyConfig.sms, undefined)
-      assert.equal(legacyConfig.billing, undefined)
-      assert.equal(legacyConfig.restart_required, undefined)
+      const scopedConfig = (await service.getAdminConfig(scopedRoot)) as any
+      assert.equal(scopedConfig.scope_type, 'organization')
+      assert.equal(scopedConfig.sms, undefined)
+      assert.equal(scopedConfig.billing, undefined)
+      assert.equal(scopedConfig.restart_required, undefined)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域系统配置写入本组织策略且不改平台默认', async () => {
+    const { db, unified, identities, org, secrets, service, policies } = await setup()
+    try {
+      secrets.set('client.log-report-key', 'platform-log-key')
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putPlatform({
+        loginMethod: 1,
+        scodeAutoModel: 'platform-model',
+        rechargeMode: 'pay',
+        creditApplication: { min_points: 100, max_points: 1000, allow_duplicate_pending: false },
+      }, 'root')
+
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      await service.update(scopedRoot, {
+        login_method: 1,
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs-b.example.test', key: '' },
+        version_update: { enabled: 1, cos_domain: 'https://releases-b.example.test' },
+        product_improvement: { enabled: 1 },
+        scode_auto_model: 'org-b-model',
+        recharge_mode: 'approve',
+        credit_application: { min_points: 200, max_points: 2000, allow_duplicate_pending: true },
+      })
+
+      const platformPolicy = (await policies.getPlatform())
+      assert.equal(platformPolicy.scodeAutoModel, 'platform-model')
+      assert.equal(platformPolicy.rechargeMode, 'pay')
+      assert.equal(platformPolicy.logReport, undefined)
+
+      const orgPolicy = (await policies.getOrganization(orgB.organizationId))
+      assert.equal(orgPolicy.scodeAutoModel, 'org-b-model')
+      assert.deepEqual(orgPolicy.logReport, {
+        enabled: 1, protocol: 'https', domain: 'logs-b.example.test', keySet: true,
+      })
+
+      const orgConfig = (await service.getAdminConfig(scopedRoot)) as any
+      assert.equal(orgConfig.scope_type, 'organization')
+      assert.equal(orgConfig.scode_auto_model, 'org-b-model')
+      assert.equal(orgConfig.log_report.domain, 'logs-b.example.test')
+
+      const defaultConfig = (await service.getPublicConfig(org.organizationId))
+      assert.equal(defaultConfig.scode_auto_model, 'platform-model')
+      assert.equal(defaultConfig.recharge_mode, 'pay')
+      assert.equal((await service.getCreditApplicationPolicy(orgB.organizationId)).rechargeMode, 'approve')
+      assert.equal((await service.getCreditApplicationPolicy(orgB.organizationId)).minPoints, 200)
+      assert.equal((await service.getCreditApplicationPolicy(org.organizationId)).rechargeMode, 'payment')
+      assert.deepEqual((await service.getCredentialData(orgB.organizationId)), {
+        log_report: { key: 'platform-log-key' },
+        product_improvement: { api_key: 'qms-api-key', public_key: 'qms-public-key' },
+      })
+
+      await service.update(scopedRoot, {
+        client_cron_enabled: false,
+        client_show_tool_calls: false,
+        workspace_upload_limit_bytes: 8192,
+      })
+      assert.equal((await identities.getOrganizationProfile(orgB.organizationId))?.clientCronEnabled, false)
+      assert.equal((await policies.getOrganization(orgB.organizationId)).clientShowToolCalls, false)
+      assert.equal((await policies.getOrganization(orgB.organizationId)).workspaceUploadLimitBytes, 8192)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织 cron 开关和全局 kill switch 组合生效', async () => {
+    const original = getSystemSettings()
+    const { db, identities, org, service } = await setup()
+    try {
+      await updateSystemSettings({ clientCronEnabled: false })
+      await identities.setOrganizationClientCronEnabled(org.organizationId, true)
+      assert.equal((await service.getPublicConfig(org.organizationId)).client_cron_enabled, false)
+
+      await updateSystemSettings({ clientCronEnabled: true })
+      assert.equal((await service.getPublicConfig(org.organizationId)).client_cron_enabled, true)
+
+      await identities.setOrganizationClientCronEnabled(org.organizationId, false)
+      assert.equal((await service.getPublicConfig(org.organizationId)).client_cron_enabled, false)
+
+      await service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+      }, { client_cron_enabled: true })
+      assert.equal((await identities.getOrganizationProfile(org.organizationId))?.clientCronEnabled, true)
+    } finally {
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
+    }
+  })
+
+  void test('组织作用域保存单字段不会复制继承的平台策略', async () => {
+    const { db, unified, service, policies } = await setup()
+    try {
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putPlatform({
+        loginMethod: 1,
+        logReport: { enabled: 0, protocol: '', domain: '', keySet: false },
+        versionUpdate: { enabled: 0, cosDomain: '' },
+        productImprovement: { enabled: 0 },
+        thirdPartyAuth: { enabled: 0, defaultProvider: '' },
+        scodeAutoModel: 'platform-model',
+        rechargeMode: 'pay',
+        creditApplication: { min_points: 100, max_points: 1000, allow_duplicate_pending: false },
+        clientShowToolCalls: false,
+        workspaceUploadLimitBytes: 4096,
+      }, 'root')
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      const roundTripped = (await service.getAdminConfig(scopedRoot)) as Record<string, unknown>
+      await service.update(scopedRoot, { ...roundTripped, scode_auto_model: 'org-b-model' })
+
+      assert.deepEqual((await policies.getOrganization(orgB.organizationId)), { scodeAutoModel: 'org-b-model' })
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域把已有 override 改回平台值时会清除 override', async () => {
+    const { db, unified, service, policies } = await setup()
+    try {
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putPlatform({ scodeAutoModel: 'platform-model', clientShowToolCalls: false }, 'root')
+      await policies.putOrganization(orgB.organizationId, {
+        scodeAutoModel: 'org-b-model',
+        clientShowToolCalls: true,
+      }, 'admin-b')
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+
+      await service.update(scopedRoot, {
+        scode_auto_model: 'platform-model',
+        client_show_tool_calls: false,
+      })
+
+      assert.deepEqual((await policies.getOrganization(orgB.organizationId)), {})
+      const config = (await service.getAdminConfig(scopedRoot)) as any
+      assert.equal(config.scode_auto_model, 'platform-model')
+      assert.equal(config.client_show_tool_calls, false)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域把已有 override 改回部署默认值时会清除 override', async () => {
+    const original = getSystemSettings()
+    const { db, unified, service, policies } = await setup()
+    try {
+      await updateSystemSettings({
+        clientShowToolCalls: false,
+        workspaceUploadLimitBytes: 20 * 1024 * 1024,
+      })
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putOrganization(orgB.organizationId, {
+        clientShowToolCalls: true,
+        workspaceUploadLimitBytes: 4096,
+      }, 'admin-b')
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+
+      await service.update(scopedRoot, {
+        client_show_tool_calls: false,
+        workspace_upload_limit_bytes: 20 * 1024 * 1024,
+      })
+
+      assert.deepEqual((await policies.getOrganization(orgB.organizationId)), {})
+      const config = (await service.getAdminConfig(scopedRoot)) as any
+      assert.equal(config.client_show_tool_calls, false)
+      assert.equal(config.workspace_upload_limit_bytes, 20 * 1024 * 1024)
+    } finally {
+      await updateSystemSettings({
+        clientShowToolCalls: original.clientShowToolCalls,
+        workspaceUploadLimitBytes: original.workspaceUploadLimitBytes,
+      })
+      db.close()
+    }
+  })
+
+  void test('平台未配置登录方式时恢复组织 profile 的 CAS 会清除 override', async () => {
+    const { db, identities, org, service, policies } = await setup()
+    try {
+      const profile = (await identities.getOrganizationProfile(org.organizationId))
+      assert(profile)
+      await identities.putOrganizationProfile({ ...profile, loginMethod: 'cas' })
+
+      await policies.putOrganization(org.organizationId, {
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'org-cas' },
+      }, 'admin')
+      await identities.putIntegrationConnection({
+        id: 'org-cas', orgId: org.organizationId, providerType: 'cas', name: 'Org CAS',
+        enabled: true, secretRef: null, config: {},
+      })
+      const actor = { userId: 'admin', orgId: org.organizationId, role: 'admin' }
+      assert.equal((await service.getLoginMethod()), 'password')
+      assert.equal((await service.getLoginMethod(org.organizationId)), 'cas')
+      assert.equal((await service.getAdminConfig(actor)).login_method, 2)
+      assert.equal((await service.getPublicConfig(org.organizationId)).login_method, 2)
+
+      await service.update(actor, { login_method: 1 })
+      assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, 1)
+      assert.equal((await service.getLoginMethod(org.organizationId)), 'password')
+      await service.update(actor, { login_method: 2 })
+      assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, undefined)
+      assert.equal((await service.getLoginMethod(org.organizationId)), 'cas')
+      assert.deepEqual((await policies.getPlatform()), {})
+
+      await policies.putPlatform({ loginMethod: 1 }, 'root')
+      assert.equal((await service.getLoginMethod(org.organizationId)), 'password')
+      await service.update(actor, { login_method: 2 })
+      assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, 2)
+      assert.equal((await service.getLoginMethod(org.organizationId)), 'cas')
+      await service.update(actor, { login_method: 1 })
+      assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, undefined)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('平台 cron 写入在数据库事务失败时恢复文件、策略和密钥', async () => {
+    const original = getSystemSettings()
+    const { db, org, secrets, service, policies } = await setup()
+    try {
+      await updateSystemSettings({ clientCronEnabled: true })
+      const previousFile = fs.readFileSync(SYSTEM_SETTINGS_PATH)
+      secrets.set('client.log-report-key', 'previous-secret')
+
+      await policies.putPlatform({ scodeAutoModel: 'previous-model' }, 'root')
+      db.exec(`
+        CREATE TRIGGER fail_infrastructure_insert BEFORE INSERT ON platform_integration_settings
+        BEGIN SELECT RAISE(ABORT, 'infrastructure database failure'); END;
+      `)
+
+      await assert.rejects(service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin',
+      }, {
+        client_cron_enabled: false,
+        scode_auto_model: 'should-roll-back',
+        sms: { provider: 'disabled' },
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+      }), /infrastructure database failure/)
+
+      assert.equal(getSystemSettings().clientCronEnabled, true)
+      assert.deepEqual(fs.readFileSync(SYSTEM_SETTINGS_PATH), previousFile)
+      assert.deepEqual((await policies.getPlatform()), { scodeAutoModel: 'previous-model' })
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM platform_integration_settings').get()?.count, 0)
+      assert.equal(secrets.get('client.log-report-key'), 'previous-secret')
+    } finally {
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
+    }
+  })
+
+  void test('平台 cron 文件写入失败时不提交数据库并恢复密钥', async () => {
+    const original = getSystemSettings()
+    const { db, org, secrets, service, policies } = await setup()
+    await updateSystemSettings({ clientCronEnabled: true })
+    const previousFile = fs.readFileSync(SYSTEM_SETTINGS_PATH)
+
+    await policies.putPlatform({ scodeAutoModel: 'previous-model' }, 'root')
+    secrets.set('client.log-report-key', 'previous-secret')
+    const writeFile = fs.writeFileSync
+    const writeMock = mock.method(fs, 'writeFileSync', (...args: Parameters<typeof fs.writeFileSync>) => {
+      if (String(args[0]).startsWith(`${SYSTEM_SETTINGS_PATH}.`)) throw new Error('settings file write failure')
+      return writeFile(...args)
+    })
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin',
+      }, {
+        client_cron_enabled: false,
+        scode_auto_model: 'should-not-save',
+        sms: { provider: 'disabled' },
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+      }), /settings file write failure/)
+      assert.deepEqual((await policies.getPlatform()), { scodeAutoModel: 'previous-model' })
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM platform_integration_settings').get()?.count, 0)
+      assert.equal(secrets.get('client.log-report-key'), 'previous-secret')
+      assert.equal(getSystemSettings().clientCronEnabled, true)
+      assert.deepEqual(fs.readFileSync(SYSTEM_SETTINGS_PATH), previousFile)
+    } finally {
+      writeMock.mock.restore()
+      syncBuiltinESMExports()
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
+    }
+  })
+
+  void test('平台 cron 等待 Driver 异步写入拒绝后恢复文件、数据库和密钥', async (context) => {
+    const original = getSystemSettings()
+    const { db, driver, org, secrets, service, policies } = await setup()
+    try {
+      await updateSystemSettings({ clientCronEnabled: true })
+      const previousFile = fs.readFileSync(SYSTEM_SETTINGS_PATH)
+      await policies.putPlatform({ scodeAutoModel: 'previous-model' }, 'root')
+      secrets.set('client.log-report-key', 'previous-secret')
+      const run = driver.run.bind(driver)
+      let reachedAsyncFailure = false
+      context.mock.method(driver, 'run', async (...args: Parameters<typeof driver.run>) => {
+        const [sql, params] = args
+        if (sql.includes('INSERT INTO platform_integration_settings')) {
+          await setImmediate()
+          assert.equal(getSystemSettings().clientCronEnabled, false)
+          assert.equal((await policies.getPlatform()).scodeAutoModel, 'pending-model')
+          reachedAsyncFailure = true
+          throw new Error('async driver write failure')
+        }
+        return run(sql, params)
+      })
+
+      await assert.rejects(service.update({
+        userId: 'root', orgId: org.organizationId, role: 'super_admin',
+      }, {
+        client_cron_enabled: false,
+        scode_auto_model: 'pending-model',
+        sms: { provider: 'disabled' },
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'new-secret' },
+      }), /async driver write failure/)
+      assert.equal(reachedAsyncFailure, true)
+      assert.deepEqual(fs.readFileSync(SYSTEM_SETTINGS_PATH), previousFile)
+      assert.deepEqual(await policies.getPlatform(), { scodeAutoModel: 'previous-model' })
+      assert.equal(secrets.get('client.log-report-key'), 'previous-secret')
+    } finally {
+      await updateSystemSettings({ clientCronEnabled: original.clientCronEnabled })
+      db.close()
+    }
+  })
+
+  void test('组织作用域拒绝字符串布尔值避免 Boolean 字符串误判', async () => {
+    const { db, org, service } = await setup()
+    const scopedRoot = {
+      userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+    }
+    try {
+      await assert.rejects(
+        service.update(scopedRoot, { client_cron_enabled: 'false' }),
+        (error: unknown) => error instanceof SudoworkSystemConfigError
+          && error.statusCode === 400
+          && /client_cron_enabled/.test(error.message),
+      )
+      await assert.rejects(
+        service.update(scopedRoot, { client_show_tool_calls: 'false' }),
+        (error: unknown) => error instanceof SudoworkSystemConfigError
+          && error.statusCode === 400
+          && /client_show_tool_calls/.test(error.message),
+      )
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域不能修改部署级基础设施和全局日志密钥', async () => {
+    const { db, org, service, policies } = await setup()
+    const scopedRoot = {
+      userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+    }
+    try {
+      await assert.rejects(service.update(scopedRoot, {
+        sms: { provider: 'tencent' },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      await assert.rejects(service.update(scopedRoot, {
+        billing: { enabled: true },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      await assert.rejects(service.update(scopedRoot, {
+        log_report: { enabled: 1, protocol: 'https', domain: 'logs.example.test', key: 'org-secret' },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      assert.deepEqual((await policies.getOrganization(org.organizationId)), {})
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织作用域 CAS 更新只替换本组织 Provider', async () => {
+    const { db, unified, identities, org, service } = await setup()
+    try {
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+      await identities.putIntegrationConnection({
+        id: 'cas-a-old',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A 旧 CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      await identities.putIntegrationConnection({
+        id: 'cas-b-old',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B 旧 CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      const scopedRoot = {
+        userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      await service.update(scopedRoot, {
+        third_party_auth: {
+          enabled: 1,
+          default_provider: 'cas-a-new',
+          providers: [{
+            id: 'cas-a-new', name: '企业 A 新 CAS', type: 'cas', enabled: 1,
+            cas_url: 'https://cas-a.example.test/', login_path: '/cas/login',
+            validate_path: '/cas/p3/serviceValidate', logout_path: '/cas/logout',
+            logout_service_url: 'https://moss.example.test/api/v1/auth/third-party/cas/logout/callback/cas-a-new',
+            service_param: 'service', service_encode_mode: 'component',
+            callback_mode: 'server_callback',
+            server_callback_url: 'https://moss.example.test/api/v1/auth/third-party/cas/callback/cas-a-new',
+            app_callback_url: 'sudowork://cas-callback/cas-a-new/callback',
+            enterprise_code: 'ENT-A', auto_provision: 1,
+          }],
+        },
+      })
+
+      assert.equal((await identities.getIntegrationConnection('cas-a-old'))?.enabled, false)
+      assert.equal((await identities.getIntegrationConnection('cas-a-new'))?.orgId, org.organizationId)
+      assert.equal((await identities.getIntegrationConnection('cas-b-old'))?.enabled, true)
+      assert.equal(((await service.getAdminConfig(scopedRoot)).third_party_auth as any).providers.length, 2)
+      assert.equal(((await service.getPublicConfig(orgB.organizationId)).third_party_auth as any).providers[0].id, 'cas-b-old')
+
+      await assert.rejects(service.update(scopedRoot, {
+        third_party_auth: {
+          enabled: 1,
+          default_provider: 'cas-b-new',
+          providers: [{
+            id: 'cas-b-new', name: '企业 B CAS', type: 'cas', enabled: 1,
+            cas_url: 'https://cas-b.example.test/', login_path: '/cas/login',
+            validate_path: '/cas/p3/serviceValidate', logout_path: '/cas/logout',
+            service_param: 'service',
+            callback_mode: 'server_callback',
+            server_callback_url: 'https://moss.example.test/callback',
+            app_callback_url: 'sudowork://cas-callback/cas-b-new/callback',
+            enterprise_code: 'ENT-B',
+          }],
+        },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+      await assert.rejects(service.update(scopedRoot, {
+        third_party_auth: {
+          enabled: 1,
+          default_provider: 'cas-b-old',
+          providers: [{
+            id: 'cas-b-old', name: '复用企业 B Provider ID', type: 'cas', enabled: 1,
+            cas_url: 'https://cas-a.example.test/', login_path: '/cas/login',
+            validate_path: '/cas/p3/serviceValidate', logout_path: '/cas/logout',
+            service_param: 'service',
+            callback_mode: 'server_callback',
+            server_callback_url: 'https://moss.example.test/callback',
+            app_callback_url: 'sudowork://cas-callback/cas-b-old/callback',
+            enterprise_code: 'ENT-A',
+          }],
+        },
+      }), (error: unknown) => error instanceof SudoworkSystemConfigError && error.statusCode === 403)
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织继承平台 CAS 但没有启用 Provider 时可 GET 后原样 PUT', async () => {
+    const { db, unified, identities, org, service, policies } = await setup()
+    try {
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putPlatform({
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'cas-a' },
+      }, 'root')
+      await identities.putIntegrationConnection({
+        id: 'cas-a',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      await identities.putIntegrationConnection({
+        id: 'cas-b-disabled',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B 禁用 CAS',
+        enabled: false,
+        secretRef: null,
+        config: {},
+      })
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+      const config = (await service.getAdminConfig(scopedRoot)) as any
+      assert.equal(config.third_party_auth.enabled, 0)
+      assert.equal(config.third_party_auth.default_provider, '')
+      assert.equal(config.third_party_auth.providers.length, 1)
+
+      await service.update(scopedRoot, { ...config, scode_auto_model: 'org-b-model' })
+      assert.equal((await policies.getOrganization(orgB.organizationId)).scodeAutoModel, 'org-b-model')
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('组织没有启用 CAS Provider 时不能保存 CAS-only 登录方式', async () => {
+    const { db, unified, identities, org, service, policies } = await setup()
+    try {
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putPlatform({
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'cas-a' },
+      }, 'root')
+      await identities.putIntegrationConnection({
+        id: 'cas-a',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      await identities.putIntegrationConnection({
+        id: 'cas-b-disabled',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B 禁用 CAS',
+        enabled: false,
+        secretRef: null,
+        config: {},
+      })
+      const scopedRoot = {
+        userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
+      }
+
+      await assert.rejects(
+        service.update(scopedRoot, { login_method: 2 }),
+        (error: unknown) => error instanceof SudoworkSystemConfigError
+          && error.statusCode === 400
+          && /三方认证配置未启用/.test(error.message),
+      )
+    } finally {
+      db.close()
+    }
+  })
+
+  void test('公开配置可按组织合并客户端策略并过滤三方认证 Provider', async () => {
+    const { db, unified, identities, org, service, policies } = await setup()
+    try {
+      const orgB = await unified
+        .createOrganization({ name: '企业 B', code: 'ENT-B' }, migrationCommandContext('test', 'org-b'))
+
+      await policies.putPlatform({
+        loginMethod: 1,
+        skillhubBaseUrl: 'https://moss.example.test',
+        clientShowToolCalls: true,
+        workspaceUploadLimitBytes: 8192,
+        thirdPartyAuth: { enabled: 1, defaultProvider: 'cas-a' },
+      }, 'root')
+      await policies.putOrganization(orgB.organizationId, {
+        loginMethod: 2,
+        scodeAutoModel: 'org-b-model',
+        clientShowToolCalls: false,
+        workspaceUploadLimitBytes: 4096,
+      }, 'admin-b')
+      await identities.putIntegrationConnection({
+        id: 'cas-a',
+        orgId: org.organizationId,
+        providerType: 'cas',
+        name: '企业 A CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+      await identities.putIntegrationConnection({
+        id: 'cas-b',
+        orgId: orgB.organizationId,
+        providerType: 'cas',
+        name: '企业 B CAS',
+        enabled: true,
+        secretRef: null,
+        config: {},
+      })
+
+      const config = (await service.getPublicConfig(orgB.organizationId))
+      assert.equal(config.login_method, 2)
+      assert.equal(config.scode_auto_model, 'org-b-model')
+      assert.equal(config.client_show_tool_calls, false)
+      assert.equal(config.workspace_upload_limit_bytes, 4096)
+      assert.equal((config.third_party_auth as any).default_provider, 'cas-b')
+      assert.equal((config.third_party_auth as any).providers.length, 1)
+      assert.equal((config.third_party_auth as any).providers[0].id, 'cas-b')
     } finally {
       db.close()
     }

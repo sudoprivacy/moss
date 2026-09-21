@@ -8,7 +8,7 @@ import { Cron } from 'croner'
 import path from 'path'
 import type { DbDriver } from '../../db/driver.js'
 import { CronStore, resolveExecutorId, type CronJob, type CronJobRun, type CronJobSchedule } from './CronStore.js'
-import type { RuntimeService } from '../runtimeService.js'
+import type { RuntimeService } from '../../runtimeService.js'
 import { MOSS_HOME } from '../../../utils/skills/localSkillDirectories.js'
 import { getSystemSettings } from '../../systemSettings.js'
 import { isCronAdminCapable } from '../../auth/token.js'
@@ -73,16 +73,24 @@ function computeNextRunAt(schedule: CronJobSchedule, fromTs: number): number | n
   }
 }
 
+/** Authentication supplied by a trusted server caller, never by job input. */
+export interface CronActor {
+  userId: string
+  orgId: string
+  role: string
+  scopes: string[]
+}
+
 export interface CronServiceConfig {
   runtimeService: RuntimeService
   runtimeDir: string
   defaultRuntime: 'host' | 'docker'
   dockerContainerMode: 'session' | 'user'
   workspace?: string
-  /** Get user auth context (role, scopes) for session creation */
-  getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[] } | null>
-  /** Resolve the organization override, falling back to deployment policy. */
-  getClientCronEnabled?: (orgId: string) => Promise<boolean>
+  /** Resolve current active user auth; missing/disabled users must return null. */
+  getUserAuth: (userId: string, orgId: string) => Promise<{ role: string; scopes: string[]; status?: string } | null>
+  /** Resolve the effective organization client cron policy. */
+  getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>
   /**
    * B-3 cluster awareness: count of live peer instances, excluding self.
    * Optional because CronService only holds the driver, not the Store —
@@ -414,7 +422,7 @@ export class CronService {
     try {
       // Get the EXECUTOR's auth context — this is what the session runs as.
       const userAuth = await this.config.getUserAuth(executorId, job.orgId)
-      if (!userAuth) {
+      if (!userAuth || (userAuth.status !== undefined && userAuth.status !== 'active')) {
         throw new Error(`User auth not found for executor ${executorId}`)
       }
 
@@ -424,14 +432,14 @@ export class CronService {
       // its executor is transferred to a normal user — while the run still uses
       // the executor's credentials. Promotions/demotions take effect at the next
       // fire, and the schedule still advances so the job resumes cleanly when the
-      // flag is re-enabled. Manual triggers are unaffected — triggerJob() is a
-      // separate path behind the admin-bypassed API route. (#83)
+      // flag is re-enabled. Manual triggers run through triggerJob(), which
+      // repeats the same org-policy gate as defense-in-depth. (#83)
       const creatorAuth =
         executorId === job.userId ? userAuth : await this.config.getUserAuth(job.userId, job.orgId)
-      const isClientCronEnabled = this.config.getClientCronEnabled
-        ? await this.config.getClientCronEnabled(job.orgId)
-        : getSystemSettings().clientCronEnabled
-      if (!isClientCronEnabled && !(creatorAuth && isCronAdminCapable(creatorAuth))) {
+      const clientCronEnabled = await this.isClientCronEnabled(job.orgId)
+      if (!clientCronEnabled && !(creatorAuth
+        && (creatorAuth.status === undefined || creatorAuth.status === 'active')
+        && isCronAdminCapable(creatorAuth))) {
         await this.store.updateRunStatus(run.id, {
           status: 'skipped',
           summary: 'Skipped: scheduled tasks are disabled for client users by organization policy',
@@ -779,10 +787,13 @@ export class CronService {
    * When `actor` is omitted, falls back to the executor (used by internal
    * callers/tests that have no human triggerer).
    */
-  async triggerJob(jobId: string, actor?: { userId: string; orgId: string }): Promise<CronJobRun> {
+  async triggerJob(jobId: string, actor?: CronActor): Promise<CronJobRun> {
     const job = await this.store.getById(jobId)
     if (!job) {
       throw new Error(`Job ${jobId} not found`)
+    }
+    if (actor && actor.orgId !== job.orgId) {
+      throw new Error('Access denied: cron actor organization mismatch')
     }
 
     // Same concurrency guard as scheduled fires, but surface it to the caller
@@ -794,6 +805,17 @@ export class CronService {
 
     // The clicking user's identity drives this run; fall back to the executor.
     const runUserId = actor?.userId ?? resolveExecutorId(job)
+    const liveAuth = await this.config.getUserAuth(runUserId, job.orgId)
+    if (!liveAuth || (liveAuth.status !== undefined && liveAuth.status !== 'active')) {
+      throw new Error(`User auth not found for ${runUserId}`)
+    }
+    // Live lookup enforces account liveness; the authenticated request carries
+    // the actual token capability, which may be narrower or wider than defaults.
+    const actorAuth = actor ?? liveAuth
+    const clientCronEnabled = await this.isClientCronEnabled(job.orgId)
+    if (!clientCronEnabled && !isCronAdminCapable(actorAuth)) {
+      throw new Error('cron_disabled_by_org')
+    }
 
     // Create run record (attributed to whoever triggered it)
     const run = await this.store.createRun(job.id, job.orgId, runUserId)
@@ -802,13 +824,7 @@ export class CronService {
     await this.store.startRun(run.id)
 
     try {
-      // Get the triggering user's auth context — this is what the session runs as.
-      const userAuth = await this.config.getUserAuth(runUserId, job.orgId)
-      if (!userAuth) {
-        throw new Error(`User auth not found for ${runUserId}`)
-      }
-
-      const sessionId = await this.resolveSessionForRun(job, run, userAuth, `manual trigger of job ${job.id}`)
+      const sessionId = await this.resolveSessionForRun(job, run, actorAuth, `manual trigger of job ${job.id}`)
       await this.markRunSessionStarted(job, run, sessionId)
 
       void this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`)
@@ -825,6 +841,11 @@ export class CronService {
    */
   getStore(): CronStore {
     return this.store
+  }
+
+  private async isClientCronEnabled(orgId: string): Promise<boolean> {
+    const orgEnabled = await this.config.getClientCronEnabled?.(orgId) ?? true
+    return getSystemSettings().clientCronEnabled && orgEnabled
   }
 
   private async markRunSessionStarted(job: CronJob, run: CronJobRun, sessionId: string): Promise<void> {

@@ -20,7 +20,8 @@ import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
-import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
+import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
+import { ConfigurationScopeError, resolveConfigurationActor } from './configuration/adminScope.js'
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
@@ -1124,17 +1125,36 @@ async function authenticateRequest(
  * to the login response only when the user has local authorization.
  * Format matches sudowork-server for sudowork code reuse.
  */
-function attachSudocodeFields<T extends Record<string, unknown>>(
+async function attachSudocodeFields<T extends Record<string, unknown>>(
   tokenResult: T,
-): T {
-  const user = tokenResult.user as { localAuth?: boolean } | undefined
+  authService: AuthService,
+): Promise<T> {
+  const user = tokenResult.user as { localAuth?: boolean; orgId?: string } | undefined
   if (!user?.localAuth) return tokenResult
-  const settings = getSystemSettings()
+  const settings = user.orgId
+    ? await authService.getOrganizationSystemSettings(user.orgId)
+    : getSystemSettings()
   return {
     ...tokenResult,
     sudorouter_key: settings.apiKey || null,
     model_service_url: settings.url || 'https://hk.sudorouter.ai/v1',
     models: [settings.model],
+  }
+}
+
+async function resolveSystemSettingsOrgScope(
+  auth: AuthContext,
+  authService: AuthService,
+  requestedScope: string | null,
+): Promise<string | undefined> {
+  const actor = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
+  if (!actor) throw new HttpError(401, 'User is invalid')
+  try {
+    const scoped = resolveConfigurationActor({ userId: auth.userId, orgId: auth.orgId, role: actor.role }, requestedScope)
+    return scoped.organizationScoped ? auth.orgId : undefined
+  } catch (error) {
+    if (error instanceof ConfigurationScopeError) throw new HttpError(error.statusCode, error.message)
+    throw error
   }
 }
 
@@ -1861,7 +1881,7 @@ async function readWorkspaceTree(
 async function writeWorkspaceFileTo(
   workspaceRoot: string,
   params: { path: string | null; contentBase64: string | null },
-  configuredUploadLimit?: number,
+  uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
   if (!relativePath) throw new HttpError(400, 'Missing path')
@@ -1875,10 +1895,10 @@ async function writeWorkspaceFileTo(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  // Organization policy is supplied by the authenticated route. Internal
-  // callers without one retain the deployment-wide settings fallback.
-  const configuredLimit =
-    configuredUploadLimit ?? getSystemSettings().workspaceUploadLimitBytes
+  // Admin-configurable cap, read per request so changes take effect without a
+  // restart. Callers may pass an org-scoped value; otherwise settings.json is
+  // the deployment fallback.
+  const configuredLimit = uploadLimitBytes ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1914,9 +1934,9 @@ async function writeWorkspaceFile(
   session: SessionRecord,
   params: { path: string | null; contentBase64: string | null },
   remote: WorkspaceFileAccess | null,
-  configuredUploadLimit?: number,
+  uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
-  if (!remote) return writeWorkspaceFileTo(session.cwd, params, configuredUploadLimit)
+  if (!remote) return writeWorkspaceFileTo(session.cwd, params, uploadLimitBytes)
 
   // Same validation as the direct-fs path, applied before the upload leaves
   // moss: an oversized or malformed body should be rejected here rather than
@@ -1932,8 +1952,7 @@ async function writeWorkspaceFile(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  const configuredLimit =
-    configuredUploadLimit ?? getSystemSettings().workspaceUploadLimitBytes
+  const configuredLimit = uploadLimitBytes ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1945,6 +1964,14 @@ async function writeWorkspaceFile(
 
   await remote.writeFile(relativePath, buffer)
   return { relativePath, size: buffer.length }
+}
+
+function resolveWorkspaceUploadLimitBytes(value: unknown): number {
+  const configured = Number.parseInt(String(value), 10)
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(configured, 1024 * 1024 * 1024)
+  }
+  return getSystemSettings().workspaceUploadLimitBytes
 }
 
 function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
@@ -2099,6 +2126,10 @@ export function startServer(
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
+    getClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
+    setClientCronEnabled: (orgId, enabled) => authService.setOrganizationClientCronEnabled(orgId, enabled),
+    getClientPolicy: orgId => authService.getOrganizationClientPolicy(orgId),
+    putClientPolicy: (orgId, patch, updatedBy) => authService.putOrganizationClientPolicy(orgId, patch, updatedBy),
   })
   const configItemsApi = createConfigItemsApi(runtime.store)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, async (userId: string) => {
@@ -2120,7 +2151,7 @@ export function startServer(
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
-        if (!user) return null
+        if (!user || user.status !== 'active') return null
         return {
           role: user.role,
           scopes: user.scopes || [],
@@ -2160,7 +2191,7 @@ export function startServer(
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
-        if (!user) return null
+        if (!user || user.status !== 'active') return null
         return { role: user.role, scopes: user.scopes || [] }
       } catch {
         return null
@@ -2680,11 +2711,11 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/auth/login-by-config') {
         const body = await readJsonBody(req)
         try {
-          const result = authService.issueTokenFromPassword({
+          const result = await authService.issueTokenFromPassword({
             username: typeof body.phone === 'string' ? body.phone : (typeof body.username === 'string' ? body.username : ''),
             password: typeof body.password === 'string' ? body.password : '',
           })
-          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+          writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
         } catch (err) {
           const status = err instanceof AuthServiceError ? err.statusCode : 401
           // Deliberately the same message for an unknown account and a wrong
@@ -2720,6 +2751,8 @@ export function startServer(
           phone: username,
           nickname,
           invitationCode,
+          loginMethod: 'password',
+          password,
         })
         const user = registered.user
         await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
@@ -2730,7 +2763,10 @@ export function startServer(
         })
         writeJson(res, 200, {
           success: true,
-          data: attachSudocodeFields(authService.issueTokenFromPhone(username)),
+          data: await attachSudocodeFields(await authService.issueTokenFromPassword({
+            username,
+            password,
+          }), authService),
         })
         return
       }
@@ -2789,7 +2825,7 @@ export function startServer(
           username: phone,
           displayName: nickname,
         })
-        writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+        writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
         return
       }
 
@@ -2847,7 +2883,7 @@ export function startServer(
             userId: result.user.id,
             username: phone,
           })
-          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+          writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
           return
         }
 
@@ -2861,7 +2897,7 @@ export function startServer(
           const result = await authService.issueTokenFromApiKey(
             typeof body.api_key === 'string' ? body.api_key : '',
           )
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2871,7 +2907,7 @@ export function startServer(
             email: typeof body.email === 'string' ? body.email : '',
             password: typeof body.password === 'string' ? body.password : '',
           })
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2884,7 +2920,7 @@ export function startServer(
             throw new HttpError(400, 'Missing refresh_token')
           }
           const result = await authService.refreshToken(refreshToken)
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2894,7 +2930,7 @@ export function startServer(
             throw new HttpError(400, 'Missing oauth2 params')
           }
           const result = await authService.issueTokenFromOAuth2({ params })
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2904,7 +2940,7 @@ export function startServer(
             throw new HttpError(400, 'Missing oauth2 params')
           }
           const result = await authService.refreshOAuth2Token({ params })
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -6240,7 +6276,7 @@ export function startServer(
         try {
           writeJson(res, 200, {
             success: true,
-            data: attachSudocodeFields(authService.refreshToken(refreshToken)),
+            data: await attachSudocodeFields(await authService.refreshToken(refreshToken), authService),
           })
         } catch (err) {
           // A dead refresh token is the normal end of a long absence, not a
@@ -6278,7 +6314,7 @@ export function startServer(
       // binding that only the previous server had. Claiming otherwise would
       // have the client wrap chats with something that does not exist here.
       if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         const installed = await getInstalledAssistants()
         writeJson(res, 200, {
           success: true,
@@ -6565,7 +6601,7 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           data: {
-            list: result.list.map(order => toAdminOrderPayload(order, authService.getUserName(order.userId))),
+            list: await Promise.all(result.list.map(async order => toAdminOrderPayload(order, await authService.getUserName(order.userId)))),
             total: result.total,
             page,
             pageSize,
@@ -6736,7 +6772,7 @@ export function startServer(
         }
         writeJson(res, 200, {
           success: true,
-          data: toAdminOrderPayload(order, authService.getUserName(order.userId)),
+          data: toAdminOrderPayload(order, await authService.getUserName(order.userId)),
         })
         return
       }
@@ -7029,7 +7065,7 @@ export function startServer(
 
         if (req.method === 'GET') {
           const preference = await getUserModelPreference(userId)
-          const systemSettings = getSystemSettings()
+          const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
           console.log(`[ModelPreference] GET /api/v1/users/${userId}/model - userPref: ${JSON.stringify(preference)}, systemDefault: ${systemSettings.model}`)
           writeJson(res, 200, {
             success: true,
@@ -7049,7 +7085,11 @@ export function startServer(
           }
           let resolvedModelId: string
           try {
-            resolvedModelId = (await getModelsForSelection(modelId)).selection.selectionId
+            const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
+            resolvedModelId = (await getModelsForSelection(modelId, {
+              settings: systemSettings,
+              orgId: auth.orgId,
+            })).selection.selectionId
           } catch (error) {
             throw new HttpError(
               400,
@@ -7068,7 +7108,8 @@ export function startServer(
 
       // Available models endpoint
       if (req.method === 'GET' && pathname === '/api/v1/models/available') {
-        const models = await getAvailableModels()
+        const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
+        const models = await getAvailableModels({ settings: systemSettings, orgId: auth.orgId })
         writeJson(res, 200, {
           success: true,
           data: models,
@@ -7090,7 +7131,9 @@ export function startServer(
       // Model cache refresh endpoint (admin only)
       if (req.method === 'POST' && pathname === '/api/v1/models/refresh-cache') {
         authService.requireScope(auth, 'admin:settings')
-        const models = await refreshModelCache()
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        const systemSettings = await authService.getOrganizationSystemSettings(settingsOrgId)
+        const models = await refreshModelCache({ settings: systemSettings, orgId: settingsOrgId })
         writeJson(res, 200, {
           success: true,
           data: models,
@@ -7889,12 +7932,14 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
-        writeJson(res, 200, getSystemSettings())
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        writeJson(res, 200, await authService.getOrganizationSystemSettings(settingsOrgId, { redactSecrets: true }))
         return
       }
 
       // Non-secret store config for the skills/agents pages. GET /settings/system
-      // requires admin:settings (it returns model API keys); dept_admins/users
+      // requires admin:settings (it returns full model/provider metadata);
+      // dept_admins/users
       // with store:read need only skillStore.tenantId to fetch hub content, so
       // expose that slim, secret-free subset behind store:read (admins too).
       if (req.method === 'GET' && pathname === '/api/v1/store/config') {
@@ -7907,7 +7952,18 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await updateSystemSettings(body))
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        try {
+          writeJson(res, 200, await authService.updateOrganizationSystemSettings(
+            settingsOrgId,
+            body,
+            auth.userId,
+            { redactSecrets: true },
+          ))
+        } catch (error) {
+          if (error instanceof SystemSettingsScopeError) throw new HttpError(400, error.message)
+          throw error
+        }
         return
       }
 
@@ -7973,7 +8029,8 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/enterprise') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await enterpriseApi.updateConfig(auth.orgId, body))
+        const result = await enterpriseApi.updateConfig(auth.orgId, body, auth.userId)
+        writeJson(res, result.success ? 200 : 400, result)
         return
       }
 

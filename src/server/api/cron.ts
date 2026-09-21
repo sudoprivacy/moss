@@ -35,11 +35,11 @@ export function isCronMutationBlocked(clientCronEnabled: boolean, auth: CronAuth
  */
 async function cronDisabledError(
   auth: CronAuth,
-  getClientCronEnabled?: (orgId: string) => Promise<boolean>,
+  getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>,
+  orgId = auth.orgId,
 ): Promise<{ success: false; message: string } | null> {
-  const isEnabled = getClientCronEnabled
-    ? await getClientCronEnabled(auth.orgId)
-    : getSystemSettings().clientCronEnabled
+  const orgEnabled = getClientCronEnabled ? await getClientCronEnabled(orgId) : true
+  const isEnabled = getSystemSettings().clientCronEnabled && orgEnabled
   if (isCronMutationBlocked(isEnabled, auth)) {
     return { success: false, message: 'cron_disabled_by_org' }
   }
@@ -229,7 +229,7 @@ export interface CronApiConfig {
    */
   isOrgUser?: (userId: string, orgId: string) => Promise<boolean>
   /** Resolve the organization override, falling back to deployment policy. */
-  getClientCronEnabled?: (orgId: string) => Promise<boolean>
+  getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>
 }
 
 export function createCronApi(driver: DbDriver, config: CronApiConfig) {
@@ -286,14 +286,14 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
       auth: { orgId: string; userId: string; scopes?: string[] },
       jobId: string,
       subtreeUserIds?: Set<string> | null,
-    ): Promise<{ success: boolean; message?: string; workspace?: string }> => {
+    ): Promise<{ success: boolean; message?: string; workspace?: string; orgId?: string }> => {
       const job = await store.getById(jobId)
       if (!job) return { success: false, message: 'Job not found' }
       if (!canManageJob(auth, job, subtreeUserIds)) {
         return { success: false, message: 'Access denied' }
       }
       try {
-        return { success: true, workspace: config.cronService.resolveWorkspaceFor(job) }
+        return { success: true, workspace: config.cronService.resolveWorkspaceFor(job), orgId: job.orgId }
       } catch (err) {
         // resolveCronWorkspace throws when a configured workspace is not
         // mounted in docker user-container mode; surface that verbatim so the
@@ -381,10 +381,8 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
         if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
-        // NOTE: the cron_disabled_by_org gate (#83) is intentionally NOT applied
-        // here. It gates *creating* jobs while client cron is off; managing an
-        // EXISTING job is allowed for anyone who passes canManageJob (owner,
-        // co-owner, admin), regardless of the flag.
+        const blocked = await cronDisabledError(auth, config.getClientCronEnabled, existing.orgId)
+        if (blocked) return blocked
 
         // Resolve the effective co-owner set + executor after this update, so the
         // constraint is checked against the post-update state (a caller may edit
@@ -481,8 +479,8 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
         if (!canManageJob(auth, existing, subtreeUserIds)) {
           return { success: false, message: 'Access denied' }
         }
-        // cron_disabled_by_org (#83) gates creation, not manual runs of an
-        // existing job — owner/co-owner/admin may trigger regardless of the flag.
+        const blocked = await cronDisabledError(auth, config.getClientCronEnabled, existing.orgId)
+        if (blocked) return blocked
 
         // Manual runs execute under the identity of whoever clicked (auth),
         // not the job's scheduled executor. canManageJob above guarantees the
@@ -490,6 +488,8 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
         const run = await config.cronService.triggerJob(jobId, {
           userId: auth.userId,
           orgId: auth.orgId,
+          role: auth.role,
+          scopes: [...(auth.scopes ?? [])],
         })
         return {
           success: true,

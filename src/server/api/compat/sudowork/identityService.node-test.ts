@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb, type AuthCenterUser } from '../../../authCenter/db.js'
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import type { OrganizationLoginMethod } from '../../../identity/identityRepository.js'
 import { verifyLegacyJwt, type LegacyKeyValueStore } from '../../../identity/legacyToken.js'
 import { createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import type { EnsureSudorouterAccountInput } from '../../../billing/sudorouterAccountService.js'
@@ -67,6 +68,7 @@ async function setup(
   status: AuthCenterUser['status'] = 'active',
   role = 'user',
   nativeActorResolver?: (token: string) => Promise<IdentityActor | null>,
+  getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas' | Promise<'sms' | 'password' | 'cas'>,
 ) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
@@ -104,6 +106,7 @@ async function setup(
     tokenStore: tokens,
     legacyJwtSecret: 'legacy-production-secret',
     nativeActorResolver,
+    getLoginMethod,
     refreshTokenFactory: () => 'refresh-one',
     registrationTokenFactory: () => 'register-one',
     accountProvisioner: accounts,
@@ -140,7 +143,7 @@ void describe('Sudowork unified identity service', () => {
     assert.equal(tokens.ttls.get('refresh_token:17:desktop-a:refresh-one'), 30 * 24 * 60 * 60)
     assert.deepEqual(
       JSON.parse(tokens.values.get('refresh_token:17:desktop-a:refresh-one') ?? ''),
-      { phone: '13800000000', role: 'USER', enterprise_id: 9 },
+      { phone: '13800000000', role: 'USER', enterprise_id: 9, login_method: 'password' },
     )
     const updated = await authDb.getUserById('user-a')
     assert.notEqual(updated?.passwordHash, legacyHash)
@@ -174,6 +177,39 @@ void describe('Sudowork unified identity service', () => {
     }
   })
 
+  void test('enforces organization login policy after resolving the user', async () => {
+    const passwordBlocked = await setup('active', 'user', undefined, async (): Promise<OrganizationLoginMethod> => 'cas')
+    await assert.rejects(
+      passwordBlocked.service.loginByPassword({
+        phone: '13800000000', password: 'StrongPass123', deviceId: 'default',
+      }),
+      (error: unknown) => error instanceof SudoworkIdentityError
+        && error.statusCode === 403
+        && error.message === '当前企业未开启用户名密码登录',
+    )
+    passwordBlocked.db.close()
+
+    const smsBlocked = await setup('active', 'user', undefined, async (): Promise<OrganizationLoginMethod> => 'password')
+    await assert.rejects(
+      smsBlocked.service.loginByVerifiedPhone({ phone: '13800000000', deviceId: 'default' }),
+      (error: unknown) => error instanceof SudoworkIdentityError
+        && error.statusCode === 403
+        && error.message === '当前企业未开启手机验证码登录',
+    )
+    smsBlocked.db.close()
+
+    const casBlocked = await setup('active', 'user', undefined, async (): Promise<OrganizationLoginMethod> => 'password')
+    await assert.rejects(
+      casBlocked.service.startSessionForCanonicalUser({
+        userId: 'user-a', account: 'legacy-account', deviceId: 'default',
+      }),
+      (error: unknown) => error instanceof SudoworkIdentityError
+        && error.statusCode === 403
+        && error.message === '当前企业未开启三方认证登录',
+    )
+    casBlocked.db.close()
+  })
+
   void test('rotates an existing legacy refresh token and rejects a wrong device', async () => {
     const { db, tokens, service } = await setup()
     await tokens.setex(
@@ -197,6 +233,44 @@ void describe('Sudowork unified identity service', () => {
         && error.statusCode === 401
         && error.message === 'refresh_token 无效或已过期',
     )
+    db.close()
+  })
+
+  void test('blocks refresh token renewal when the organization login policy changes', async () => {
+    let loginMethod: 'sms' | 'password' | 'cas' = 'password'
+    const { db, tokens, service } = await setup('active', 'user', undefined, async () => loginMethod)
+    const session = await service.loginByPassword({
+      phone: '13800000000', password: 'StrongPass123', deviceId: 'desktop-a',
+    })
+
+    loginMethod = 'cas'
+
+    await assert.rejects(
+      service.refresh({ refreshToken: session.refreshToken, deviceId: 'desktop-a' }),
+      (error: unknown) => error instanceof SudoworkIdentityError
+        && error.statusCode === 403
+        && error.message === '当前企业未开启用户名密码登录',
+    )
+    assert.equal(tokens.values.has('refresh_token:17:desktop-a:refresh-one'), false)
+    db.close()
+  })
+
+  void test('blocks legacy refresh tokens without a login-method claim after switching to CAS-only', async () => {
+    const { db, tokens, service } = await setup('active', 'user', undefined, async (): Promise<OrganizationLoginMethod> => 'cas')
+    await tokens.setex(
+      'refresh_token:17:desktop-a:refresh-old',
+      30 * 24 * 60 * 60,
+      JSON.stringify({ phone: '13800000000', role: 'USER', enterprise_id: 9 }),
+    )
+
+    await assert.rejects(
+      service.refresh({ refreshToken: 'refresh-old', deviceId: 'desktop-a' }),
+      (error: unknown) => error instanceof SudoworkIdentityError
+        && error.statusCode === 403
+        && error.message === '当前企业未开启用户名密码登录',
+    )
+    assert.equal(tokens.values.has('refresh_token:17:desktop-a:refresh-one'), false)
+    assert.equal(tokens.values.has('refresh_token:17:desktop-a:refresh-old'), false)
     db.close()
   })
 
