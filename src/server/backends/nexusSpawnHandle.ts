@@ -27,6 +27,33 @@ const READ_LONG_POLL_MS = 30_000
 const IDLE_BACKOFF_MS = 25
 
 /**
+ * gRPC statuses that say something about the transport, not about the writer.
+ *
+ * A blocking read asks the daemon to hold the response, so the call is meant
+ * to sit idle for its whole timeout. If the client's own deadline expires
+ * first the RPC rejects with DEADLINE_EXCEEDED — which reports nothing at all
+ * about the child. Treating that as a disconnect tore down healthy sessions a
+ * fixed ~30s after they started, because the client deadline and the poll
+ * budget were the same number.
+ */
+const TRANSIENT_READ_STATUSES = [
+  'DEADLINE_EXCEEDED',
+  'UNAVAILABLE',
+  'RESOURCE_EXHAUSTED',
+  'ABORTED',
+]
+
+/**
+ * A stream that is really gone surfaces the daemon's own error payload; a
+ * transport hiccup surfaces the gRPC status name the client put in the
+ * message. Only the former ends the session.
+ */
+function isTransientReadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return TRANSIENT_READ_STATUSES.some(status => message.includes(status))
+}
+
+/**
  * The subset of `ChildProcess` the ACP bridge and the k8s backend actually
  * touch. Narrow on purpose: a real `ChildProcess` satisfies it structurally, so
  * the docker and host paths keep passing theirs with no change.
@@ -90,7 +117,14 @@ export class NexusSpawnHandle implements AcpChildProcessLike {
           blocking: true,
           timeoutMs: READ_LONG_POLL_MS,
         })
-      } catch {
+      } catch (error) {
+        // Only a genuine stream close ends the session. A transport-level
+        // rejection — most often the client deadline beating the long poll it
+        // just requested — says nothing about the writer, so re-read instead.
+        if (isTransientReadError(error) && !this.#readersStopped) {
+          await new Promise(resolve => setTimeout(resolve, IDLE_BACKOFF_MS))
+          continue
+        }
         // The stream closed or the writer exited — the disconnect signal.
         this.#emitClose()
         return
