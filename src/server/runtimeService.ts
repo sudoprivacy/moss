@@ -734,6 +734,39 @@ export class RuntimeService {
       channelChatId: input.channelChatId,
     })
 
+    // P1a (§8.10 R5.1/R5.3)：home Zone 由 Org binding policy 解析；payload 的
+    // zone 只是提示，仅当与 policy 一致才被接受。Nexus 权威写入失败时投影
+    // 记 observed=null（后台补写），session 创建不被 Nexus 可用性阻塞。
+    try {
+      const { resolveHomeZoneWithHint, establishNexusSession } = await import(
+        './zones/runtime/sessionZoneBridge.js'
+      )
+      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+      const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
+      const zoneConfig = resolveZoneBindingConfig()
+      const resolution = await resolveHomeZoneWithHint(
+        this.store.driver,
+        input.orgId,
+        input.zoneHint,
+        zoneConfig,
+      )
+      if (resolution.homeZoneId) {
+        const observed = zoneConfig.zoneBindingEnabled
+          ? await establishNexusSession(
+              new NexusZoneClient(zoneConfig),
+              { sessionId: created.sessionId, homeZoneId: resolution.homeZoneId },
+            )
+          : null
+        await this.store.driver.run(
+          `UPDATE sessions SET home_zone_id = ?, home_zone_observed_at = ? WHERE session_id = ?`,
+          [resolution.homeZoneId, observed ? observed.observedAt : null, created.sessionId],
+        )
+      }
+    } catch (zoneError) {
+      // Zone 解析/写入失败不阻塞 session 创建（P1a 渐进语义），记录即可。
+      console.warn('[RuntimeService] session zone bridge failed:', zoneError)
+    }
+
     // Ensure config directory exists for scode sessions (which don't use session-runner which normally creates it)
     if (runtime.engine === 'scode') {
       try {
@@ -1702,6 +1735,39 @@ export class RuntimeService {
     })
     await this.store.setCurrentAttempt(session.sessionId, attempt.attemptId)
 
+    // P1a (§8.10 R5.2)：runner generation 记录 execution_zone_id 并与 Nexus
+    // PID/runtime descriptor 对账。execution zone 默认 = session home zone；
+    // Nexus 不可达时本地仍记录（对账由后台补写），不阻塞 spawn。
+    try {
+      const sessionRow = await this.store.driver.get(
+        `SELECT home_zone_id FROM sessions WHERE session_id = ? LIMIT 1`,
+        [session.sessionId],
+      )
+      const homeZoneId = sessionRow?.home_zone_id
+      if (typeof homeZoneId === 'string' && homeZoneId) {
+        const { reconcileRunnerGeneration } = await import(
+          './zones/runtime/sessionZoneBridge.js'
+        )
+        const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+        const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
+        const zoneConfig = resolveZoneBindingConfig()
+        let executionZoneId: string = homeZoneId
+        if (zoneConfig.zoneBindingEnabled) {
+          const reconciled = await reconcileRunnerGeneration(
+            new NexusZoneClient(zoneConfig),
+            { attemptId: attempt.attemptId, sessionId: session.sessionId, homeZoneId },
+          )
+          if (reconciled) executionZoneId = reconciled.executionZoneId
+        }
+        await this.store.driver.run(
+          `UPDATE session_attempts SET execution_zone_id = ? WHERE attempt_id = ?`,
+          [executionZoneId, attempt.attemptId],
+        )
+      }
+    } catch (zoneError) {
+      console.warn('[RuntimeService] runner generation zone reconcile failed:', zoneError)
+    }
+
     // Resume path: if the session was previously idle-killed (status=ended,
     // desired_state=active, ended_at set), clear those terminal markers so
     // the row reads as a live session again.
@@ -2092,6 +2158,29 @@ export class RuntimeService {
     const runnerEnv: Record<string, string> = {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
+    }
+    // P1a (§8.10 R5.4/R5.5)：runner 的 Zone context。仅注入 NEXUS_ZONE_ID、
+    // /v2 endpoint 与短期**用户** delegation ref——service/global admin
+    // credential 永不进入 runner env。
+    try {
+      const { runnerZoneContext } = await import('./zones/runtime/sessionZoneBridge.js')
+      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+      const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
+      const zoneConfig = resolveZoneBindingConfig()
+      if (zoneConfig.zoneBindingEnabled) {
+        const zoneContext = await runnerZoneContext(
+          this.store.driver,
+          new NexusZoneClient(zoneConfig),
+          { sessionId: session.sessionId },
+        )
+        if (zoneContext) {
+          runnerEnv.NEXUS_ZONE_ID = zoneContext.NEXUS_ZONE_ID
+          runnerEnv.NEXUS_V2_BASE_URL = zoneConfig.nexusV2BaseUrl
+          runnerEnv.NEXUS_DELEGATION_REF = zoneContext.NEXUS_DELEGATION_REF
+        }
+      }
+    } catch (zoneError) {
+      console.warn('[RuntimeService] runner zone context unavailable:', zoneError)
     }
     // Pass settings.json env vars to runner
     if (systemSettings.url) {

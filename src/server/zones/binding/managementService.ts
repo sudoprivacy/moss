@@ -164,7 +164,7 @@ export class ZoneManagementService {
     viewer: { role: string; orgId: string },
   ): Promise<{ generation: number }> {
     const row = await this.driver.get(
-      `SELECT org_id, desired_state FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
+      `SELECT org_id, zone_id, desired_state FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
       [bindingId],
     )
     if (!row) throw new ZoneManagementError('binding not found', 'BINDING_NOT_FOUND', 404)
@@ -175,6 +175,14 @@ export class ZoneManagementService {
       throw new ZoneManagementError('binding already detached', 'ALREADY_DETACHED', 409)
     }
     const { generation } = await insertDetachIntent(this.driver, { bindingId, now: Date.now() })
+    // P1a (§8.10 R5.7)：解绑即隔离——该 zone 上 active 的 runner generation
+    // 在 Nexus 打成 revocation_pending（不再获得新资源）。
+    if (this.client) {
+      try {
+        const { parkRunsForZone } = await import('../runtime/sessionZoneBridge.js')
+        await parkRunsForZone(this.driver, this.client, String(row.zone_id))
+      } catch { /* best-effort：Nexus 侧 verify 的 grant/epoch 复查兜底 */ }
+    }
     return { generation }
   }
 

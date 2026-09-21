@@ -206,6 +206,9 @@ export class DirectConnectStore {
         container_name TEXT,
         attach_path TEXT,
         resume_transcript_session_id TEXT NOT NULL,
+        -- P1a (§8.10 R5.2)：runner generation 的 execution zone。本表仍是
+        -- runtime generation（R5.9）；真正 Attempt.execution_zone_id 属 P1b。
+        execution_zone_id TEXT,
         started_at INTEGER NOT NULL,
         last_heartbeat_at INTEGER,
         stopped_at INTEGER,
@@ -322,6 +325,25 @@ export class DirectConnectStore {
     if (!sessionsColumns.some(col => col.name === 'assistant_name')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN assistant_name TEXT`)
       console.log('[DB] Added assistant_name column to sessions')
+    }
+
+    // P1a expand-only (SW-20260915-002 §8.10)：home Zone 投影列。home_zone_id
+    // 由 Org binding policy 解析（永不取 org_id 字符串，R5.8）；
+    // home_zone_observed_at 为 null 表示 Nexus 权威写入未确认（后台补写）。
+    if (!sessionsColumns.some(col => col.name === 'home_zone_id')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_id TEXT`)
+      console.log('[DB] Added home_zone_id column to sessions')
+    }
+    if (!sessionsColumns.some(col => col.name === 'home_zone_observed_at')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_observed_at TEXT`)
+      console.log('[DB] Added home_zone_observed_at column to sessions')
+    }
+
+    // P1a：老库的 session_attempts 补 execution_zone_id（表内注释见 DDL）。
+    const attemptsColumns = this.db.prepare(`PRAGMA table_info(session_attempts)`).all() as { name: string }[]
+    if (!attemptsColumns.some(col => col.name === 'execution_zone_id')) {
+      this.db.exec(`ALTER TABLE session_attempts ADD COLUMN execution_zone_id TEXT`)
+      console.log('[DB] Added execution_zone_id column to session_attempts')
     }
 
     // Migration: add source and channel_chat_id columns if they don't exist

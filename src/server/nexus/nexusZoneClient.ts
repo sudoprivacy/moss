@@ -344,4 +344,79 @@ export class NexusZoneClient {
   static zoneOperationContractValid(payload: unknown): boolean {
     return validateZoneOperation(payload)
   }
+
+  // ── P1a Session/Runtime 面（runtime.sudo.dev/v2，§8.9/§8.10）────────────
+
+  /** POST /v2/sessions —— 权威 home zone 写入（§8.10 R5.1）。 */
+  async createSession(sessionId: string, homeZoneId: string): Promise<{ session_id: string; home_zone_id: string; updated_at: string }> {
+    const payload = await this.request('POST', '/v2/sessions', {
+      body: { session_id: sessionId, home_zone_id: homeZoneId },
+    })
+    if (typeof payload !== 'object' || payload === null) {
+      throw new NexusZoneApiError('malformed session payload', 'CONTRACT', false, 0)
+    }
+    const s = payload as Record<string, unknown>
+    if (typeof s.home_zone_id !== 'string') {
+      throw new NexusZoneApiError('session payload missing home_zone_id', 'CONTRACT', false, 0)
+    }
+    return {
+      session_id: String(s.session_id),
+      home_zone_id: String(s.home_zone_id),
+      updated_at: String(s.updated_at ?? ''),
+    }
+  }
+
+  /** GET /v2/sessions/{id} —— 权威回读（对账/测试）。 */
+  async getSession(sessionId: string): Promise<{ session_id: string; home_zone_id: string; updated_at: string }> {
+    const payload = await this.request('GET', `/v2/sessions/${encodeURIComponent(sessionId)}`)
+    const s = payload as Record<string, unknown>
+    return {
+      session_id: String(s.session_id),
+      home_zone_id: String(s.home_zone_id),
+      updated_at: String(s.updated_at ?? ''),
+    }
+  }
+
+  /** POST /v2/runtime/start —— runner generation 固化 execution zone（R5.2）。 */
+  async startRuntimeRun(input: {
+    pid: string
+    sessionId: string
+    executionZoneHint?: string
+    delegationRef?: string
+  }): Promise<{ pid: string; execution_zone_id: string; state: string }> {
+    const payload = await this.request('POST', '/v2/runtime/start', {
+      body: {
+        pid: input.pid,
+        session_id: input.sessionId,
+        ...(input.executionZoneHint !== undefined ? { execution_zone_id: input.executionZoneHint } : {}),
+        ...(input.delegationRef !== undefined ? { delegation_ref: input.delegationRef } : {}),
+      },
+    })
+    const r = payload as Record<string, unknown>
+    return {
+      pid: String(r.pid),
+      execution_zone_id: String(r.execution_zone_id),
+      state: String(r.state),
+    }
+  }
+
+  /** GET /v2/runtime/runs/{pid} —— 对账回读。 */
+  async getRuntimeRun(pid: string): Promise<{ pid: string; execution_zone_id: string; state: string }> {
+    const payload = await this.request('GET', `/v2/runtime/runs/${encodeURIComponent(pid)}`)
+    const r = payload as Record<string, unknown>
+    return {
+      pid: String(r.pid),
+      execution_zone_id: String(r.execution_zone_id),
+      state: String(r.state),
+    }
+  }
+
+  /** POST /v2/runtime/runs/{pid}/cancel —— terminate | pending（R5.7）。 */
+  async cancelRuntimeRun(pid: string, mode: 'terminate' | 'pending'): Promise<{ pid: string; state: string }> {
+    const payload = await this.request('POST', `/v2/runtime/runs/${encodeURIComponent(pid)}/cancel`, {
+      body: { mode },
+    })
+    const r = payload as Record<string, unknown>
+    return { pid: String(r.pid), state: String(r.state) }
+  }
 }

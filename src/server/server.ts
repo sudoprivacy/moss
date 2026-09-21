@@ -10503,6 +10503,8 @@ export function startServer(
           scopes: auth.scopes,
           runtime: runtimeOptions,
           assistantName: assistantDisplayName,
+          // P1a R5.3：payload zone 提示（bridge 内与 binding policy 比对，仅一致时接受）
+          zoneHint: typeof body.zone_id === 'string' && body.zone_id.trim() ? body.zone_id.trim() : undefined,
           // 新增: 从请求体获取 enabled_skills
           enabledSkills: Array.isArray(body.enabled_skills)
             ? body.enabled_skills.filter((s: unknown) => typeof s === 'string')

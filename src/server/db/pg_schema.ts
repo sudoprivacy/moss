@@ -1236,12 +1236,20 @@ interface PgMigration {
  *  双方言兼容文本），不在本文件复制第二份。 */
 const MIGRATION_0005_ZONE_BINDING = ZONE_BINDING_TABLES_DDL
 
+/** P1a expand-only（§8.10）：home Zone 投影 + runner generation execution zone。 */
+const MIGRATION_0006_SESSION_ZONE = `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_at TEXT;
+ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS execution_zone_id TEXT;
+`
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
   { version: 4, name: 'recharge-orders-2026-09', sql: MIGRATION_0004_RECHARGE },
   { version: 5, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
+  { version: 6, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

@@ -13,6 +13,7 @@ import { NexusClient } from './nexus/nexusClient.js'
 import { NexusZoneClient } from './nexus/nexusZoneClient.js'
 import { resolveZoneBindingConfig } from './zones/binding/config.js'
 import { ZoneBindingReconciler } from './zones/binding/bindingService.js'
+import { reconcilePendingNexusSessions } from './zones/runtime/sessionZoneBridge.js'
 import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
@@ -555,6 +556,12 @@ async function finishStandaloneServerStartup(
       config: zoneBindingConfig,
     })
     const zoneBindingTimer = setInterval(() => {
+      // P1a（§8.10 R5.1）：Nexus session 权威写入补写（离线期创建的 session）。
+      void reconcilePendingNexusSessions(store.driver, new NexusZoneClient(zoneBindingConfig))
+        .then((written) => {
+          if (written > 0) console.log(`[ZoneBinding] nexus sessions backfilled: ${written}`)
+        })
+        .catch(() => { /* 下一轮重试 */ })
       void zoneBindingReconciler.reconcileOnce().then(
         (result) => {
           if (result.claimed > 0) {

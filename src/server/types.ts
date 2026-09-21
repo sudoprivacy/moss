@@ -933,6 +933,11 @@ export type SessionCreateInput = {
   channelChatId?: string
   /** Enabled skill names (optional, for non-agent sessions) */
   enabledSkills?: string[]
+  /**
+   * P1a (§8.10 R5.3)：client payload 的 Zone 目标提示。仅当与 Org binding
+   * policy 解析出的 home Zone 一致时才被接受；永不覆盖 policy 结果。
+   */
+  zoneHint?: string
 }
 
 export type EnterpriseRecord = {
