@@ -113,3 +113,38 @@ void test('a close listener registered after close still fires', async () => {
 
   assert.equal(fired, true)
 })
+
+void test('a deadline on the long poll is not a disconnect', async () => {
+  // Regression: the client deadline and the poll budget were the same number,
+  // so every healthy session died a fixed ~30s in. A DEADLINE_EXCEEDED says
+  // nothing about the writer -- re-read instead of reporting a disconnect.
+  const { agent } = fakeAgent({
+    '/proc/sid-6/fd/1': [
+      new Error('gRPC stream read failed: DEADLINE_EXCEEDED: Deadline exceeded'),
+      frame('after the deadline\n', '19'),
+    ],
+  })
+  const handle = new NexusSpawnHandle(agent, 'sid-6', null)
+
+  let closes = 0
+  handle.on('close', () => { closes += 1 })
+  const seen: string[] = []
+  handle.stdout.on('data', (chunk: Buffer) => seen.push(chunk.toString()))
+  await settle(150)
+
+  assert.equal(closes, 0, 'a transport deadline must not end the session')
+  assert.equal(seen.join(''), 'after the deadline\n', 'the follow loop resumes')
+})
+
+void test('a stream-closed error still ends the session once', async () => {
+  const { agent } = fakeAgent({
+    '/proc/sid-7/fd/1': [new Error('stream closed: writer exited')],
+  })
+  const handle = new NexusSpawnHandle(agent, 'sid-7', null)
+
+  let closes = 0
+  handle.on('close', () => { closes += 1 })
+  await settle(120)
+
+  assert.equal(closes, 1)
+})
