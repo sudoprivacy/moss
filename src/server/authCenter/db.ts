@@ -7,7 +7,6 @@ import { SqliteDriver, type DbDriver, type SqlParam } from '../db/driver.js'
 import type { DirectConnectStore } from '../db.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import type { RechargeOrder, RechargeSyncStatus, RefundRecord } from '../credits/recharge.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -295,7 +294,7 @@ export function getDefaultAuthCenterJsonPath(): string {
 }
 
 export class AuthCenterDb {
-  readonly db: DatabaseSync
+  readonly db: DatabaseSync | undefined
   // Async DB seam (HA PostgreSQL support). In the shared-store construction
   // form this is the DirectConnectStore's driver, so every store shares one
   // sqlite connection / one PG Pool and transactions can span stores. In the
@@ -322,7 +321,7 @@ export class AuthCenterDb {
     if (typeof dbOrPath !== 'string' && !(dbOrPath instanceof DatabaseSync)) {
       const store = dbOrPath as DirectConnectStore
       this.dbPath = store.dbPath
-      this.db = store.db ?? (undefined as unknown as DatabaseSync)
+      this.db = store.db
       this.#ownsConnection = false
       this.driver = store.driver
       if (store.db) {
@@ -330,23 +329,25 @@ export class AuthCenterDb {
       }
       return
     }
+    let sqliteDb: DatabaseSync
     if (typeof dbOrPath === 'string') {
       this.dbPath = dbOrPath
       mkdirSync(dirname(dbOrPath), { recursive: true })
-      this.db = new DatabaseSync(dbOrPath)
+      sqliteDb = new DatabaseSync(dbOrPath)
       this.#ownsConnection = true
     } else {
-      this.db = dbOrPath
+      sqliteDb = dbOrPath
       this.dbPath = dbPath ?? ':memory:'
       this.#ownsConnection = false
     }
-    this.db.exec(`
+    this.db = sqliteDb
+    sqliteDb.exec(`
       PRAGMA journal_mode=WAL;
       PRAGMA synchronous=FULL;
       PRAGMA foreign_keys=ON;
       PRAGMA busy_timeout=5000;
     `)
-    this.driver = new SqliteDriver(this.db)
+    this.driver = new SqliteDriver(sqliteDb)
     this.initTables()
   }
 
@@ -362,6 +363,7 @@ export class AuthCenterDb {
   }
 
   private initTables(): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS organizations (
         id TEXT PRIMARY KEY,
@@ -719,6 +721,7 @@ export class AuthCenterDb {
     columnName: string,
     statement: string,
   ): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
     const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as SqlRow[]
     const hasColumn = columns.some(column => String(column.name) === columnName)
     if (!hasColumn) {
@@ -727,6 +730,7 @@ export class AuthCenterDb {
   }
 
   private dropColumn(tableName: string, columnName: string): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
     const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as SqlRow[]
     const hasColumn = columns.some(column => String(column.name) === columnName)
     if (hasColumn) {
@@ -735,6 +739,7 @@ export class AuthCenterDb {
   }
 
   private ensureUserStatusCompatibility(): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
     const row = this.db.prepare(`
       SELECT sql
       FROM sqlite_master
@@ -784,7 +789,7 @@ export class AuthCenterDb {
   }
 
   close(): void {
-    if (this.#ownsConnection) {
+    if (this.#ownsConnection && this.db) {
       this.db.close()
     }
   }

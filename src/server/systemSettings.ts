@@ -545,7 +545,7 @@ export async function getOrganizationSystemSettings(
     return options.redactSecrets ? redactSystemSettingsSecrets(scoped) : scoped
   }
   await refreshOrganizationModelCredentials(orgId)
-  const state = readOrganizationSystemSettingsState(orgId, repository.get(orgId))
+  const state = readOrganizationSystemSettingsState(orgId, await repository.get(orgId))
   const payload = { ...toSystemSettingsPayload(state, orgId), scopeType: 'organization' as const, organizationId: orgId }
   return options.redactSecrets ? redactSystemSettingsSecrets(payload) : payload
 }
@@ -572,7 +572,7 @@ export function updateSystemSettings(patch: unknown): Promise<SystemSettingsPayl
 /** Serialize the file and DB commit with other settings writes, restoring the file on failure. */
 export function updateSystemSettingsWithCommit(
   patch: unknown,
-  commit: () => void,
+  commit: () => void | Promise<void>,
 ): Promise<SystemSettingsPayload> {
   const source = isRecord(patch) ? patch : {}
   if (Object.keys(source).some(key => key !== 'clientCronEnabled')) {
@@ -582,7 +582,7 @@ export function updateSystemSettingsWithCommit(
     const previous = existsSync(SYSTEM_SETTINGS_PATH) ? readFileSync(SYSTEM_SETTINGS_PATH) : undefined
     const settings = await performUpdateSystemSettings(source)
     try {
-      commit()
+      await commit()
     } catch (error) {
       try {
         if (previous) writeSettingsFile(previous)
@@ -667,7 +667,7 @@ async function performUpdateOrganizationModelSettings(
   assertOnlyOrganizationModelSettings(source)
 
   await refreshOrganizationModelCredentials(orgId)
-  const currentState = readOrganizationSystemSettingsState(orgId, repository.get(orgId))
+  const currentState = readOrganizationSystemSettingsState(orgId, await repository.get(orgId))
   const currentSettings = currentState.value
   const nextSettings = normalizeSystemSettings(source, currentSettings)
   const store = getConfigStore()
@@ -708,7 +708,7 @@ async function performUpdateOrganizationModelSettings(
     const organizationPatch = modelSettingsPatchFromInput(source, nextSettings)
     // An explicit credential clear also marks this organization as initialized.
     if (Object.keys(source).length > 0) {
-      repository.put(orgId, organizationPatch, updatedBy)
+      await repository.put(orgId, organizationPatch, updatedBy)
     }
   } catch (error) {
     const failures: unknown[] = [error]

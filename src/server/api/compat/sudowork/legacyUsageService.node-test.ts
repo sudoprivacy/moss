@@ -2,10 +2,8 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
-import { BillingRepository } from '../../../billing/billingRepository.js'
-import { ensureBillingSchema } from '../../../billing/billingSchema.js'
 import { WalletService } from '../../../billing/walletService.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkLegacyUsageService } from './legacyUsageService.js'
 import type { SudorouterPort, SudorouterUsagePort } from '../../../billing/sudorouterAdapter.js'
 
@@ -13,7 +11,7 @@ async function setup(initialBalance = 10, sudorouter?: SudorouterPort & Sudorout
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org-1', '企业一', 1)
   await auth.createOrganization('org-2', '企业二', 1)
   for (const [id, orgId, role] of [
@@ -27,13 +25,12 @@ async function setup(initialBalance = 10, sudorouter?: SudorouterPort & Sudorout
       departmentId: null, role, status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    identities.createWallet('user', id, id === 'user-1' ? initialBalance : 0)
+    await identities.createWallet('user', id, id === 'user-1' ? initialBalance : 0)
   }
-  identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
+  await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
+  const repository = createBillingTestRepository(db, auth.driver)
   if (sudorouter) {
-    repository.upsertExternalAccount({
+    await repository.upsertExternalAccount({
       provider: 'sudorouter', ownerType: 'user', ownerId: 'user-1', externalAccountId: '91',
       quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 1,
     })
@@ -41,11 +38,11 @@ async function setup(initialBalance = 10, sudorouter?: SudorouterPort & Sudorout
   let now = Date.parse('2026-09-07T10:00:00Z')
   const modelOrgIds: Array<string | undefined> = []
   const service = new SudoworkLegacyUsageService({
-    db,
+    db: auth.driver,
     auth,
     identities,
     repository,
-    wallet: new WalletService(db, repository, () => now),
+    wallet: new WalletService(auth.driver, repository, () => now),
     listModels: async orgId => {
       modelOrgIds.push(orgId)
       return [{ id: orgId ? `${orgId}-model` : 'model-1', name: '模型一' }]
@@ -75,8 +72,8 @@ void describe('SudoworkLegacyUsageService', () => {
 
     assert.deepEqual(await service.reportUsage(input), { success: true, deducted: 0.01, newBalance: 9.99 })
     assert.deepEqual(await service.reportUsage(input), { success: true, deducted: 0.01, newBalance: 9.99 })
-    assert.equal(repository.getWallet('user', 'user-1')?.balanceUnits, 9.99)
-    assert.equal(repository.listUsageRecords({ userId: 'user-1', limit: 20, offset: 0 }).total, 1)
+    assert.equal((await repository.getWallet('user', 'user-1'))?.balanceUnits, 9.99)
+    assert.equal((await repository.listUsageRecords({ userId: 'user-1', limit: 20, offset: 0 })).total, 1)
     db.close()
   })
 
@@ -86,7 +83,7 @@ void describe('SudoworkLegacyUsageService', () => {
       service.reportUsage({ actor: userActor, inputTokens: 1, outputTokens: 0, idempotencyKey: 'usage-low' }),
       /积分不足/,
     )
-    assert.equal(repository.listUsageRecords({ userId: 'user-1', limit: 20, offset: 0 }).total, 0)
+    assert.equal((await repository.listUsageRecords({ userId: 'user-1', limit: 20, offset: 0 })).total, 0)
     db.close()
   })
 

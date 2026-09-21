@@ -1,11 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { DatabaseSync } from 'node:sqlite'
 import type { DirectConnectStore } from '../db.js'
 import type { EnterpriseRecord } from '../types.js'
 import { getSystemSettings } from '../systemSettings.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
-import { migrateLegacyEnterpriseCronPolicy } from '../migration/legacyEnterpriseCronPolicy.js'
 
 type EnterpriseBrandingPatch = Partial<
   Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>
@@ -21,17 +18,15 @@ export function createEnterpriseApi(
   runtimeDir: string,
   options: {
     cabinEnabled?: boolean
-    getClientCronEnabled?: (orgId: string) => boolean
-    setClientCronEnabled?: (orgId: string, enabled: boolean) => void
-    getClientPolicy?: (orgId?: string) => ClientFacingPolicy
-    putClientPolicy?: (orgId: string, patch: ClientFacingPolicy, updatedBy: string) => void
+    getClientCronEnabled?: (orgId: string) => boolean | Promise<boolean>
+    setClientCronEnabled?: (orgId: string, enabled: boolean) => void | Promise<void>
+    getClientPolicy?: (orgId?: string) => ClientFacingPolicy | Promise<ClientFacingPolicy>
+    /** Writes must use the store's Driver to join the enterprise transaction. */
+    putClientPolicy?: (orgId: string, patch: ClientFacingPolicy, updatedBy: string) => void | Promise<unknown>
   } = {},
 ) {
-  // Production auth seeds profiles before this factory is created. Only the
-  // hook-backed API switches policy ownership away from the legacy columns.
-  if (db.db && options.getClientCronEnabled && options.setClientCronEnabled) {
-    migrateLegacyEnterpriseCronPolicy(db.db)
-  }
+  // Startup awaits migrateLegacyEnterpriseCronPolicy after seeding profiles,
+  // before exposing hook-backed policy reads or starting the scheduler.
 
   function enterpriseLogoDir(orgId: string): string {
     return orgId === 'default'
@@ -42,14 +37,15 @@ export function createEnterpriseApi(
   const getEffectivePolicy = async (orgId = 'default') => {
     const requestedOrgId = orgId.trim() || 'default'
     const enterprise = await db.getEnterprise(requestedOrgId === 'default' ? undefined : requestedOrgId)
-    const systemSettings = getSystemSettings()
     const policy = options.getClientPolicy
-      ? options.getClientPolicy(requestedOrgId === 'default' ? undefined : requestedOrgId)
+      ? await options.getClientPolicy(requestedOrgId === 'default' ? undefined : requestedOrgId)
       : {}
+    const orgCronEnabled = requestedOrgId !== 'default' && options.getClientCronEnabled
+      ? await options.getClientCronEnabled(requestedOrgId)
+      : enterprise.client_cron_enabled ?? true
+    const systemSettings = getSystemSettings()
     return {
-      clientCronEnabled: systemSettings.clientCronEnabled && (requestedOrgId !== 'default' && options.getClientCronEnabled
-        ? options.getClientCronEnabled(requestedOrgId)
-        : enterprise.client_cron_enabled ?? true),
+      clientCronEnabled: systemSettings.clientCronEnabled && orgCronEnabled,
       clientShowToolCalls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
         : enterprise.client_show_tool_calls ?? systemSettings.clientShowToolCalls,
@@ -123,7 +119,7 @@ export function createEnterpriseApi(
     /**
      * Update enterprise configuration. Branding columns persist to the
      * enterprises table; client-facing policy fields are routed to organization
-     * policy hooks when available and fall back to settings.json for legacy
+     * policy hooks when available and fall back to enterprise columns for legacy
      * embeddings. Any other key is ignored.
      */
     updateConfig: async (
@@ -193,31 +189,17 @@ export function createEnterpriseApi(
               ;(dbPatch as Record<string, unknown>)[col] = patchRecord[col]
             }
           }
-          const applyWrites = () => {
+          await db.driver.transaction(async () => {
             if (nextClientCronEnabled !== undefined && options.setClientCronEnabled) {
-              options.setClientCronEnabled(orgId, nextClientCronEnabled)
+              await options.setClientCronEnabled(orgId, nextClientCronEnabled)
             }
             if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
-              options.putClientPolicy(orgId, policyPatch, updatedBy)
-            }
-            if (Object.keys(dbPatch).length > 0) {
-              updateEnterpriseSync(db.db, orgId, dbPatch)
-            }
-          }
-
-          if (db.db) {
-            runInTransaction(db.db, applyWrites)
-          } else {
-            if (nextClientCronEnabled !== undefined && options.setClientCronEnabled) {
-              options.setClientCronEnabled(orgId, nextClientCronEnabled)
-            }
-            if (Object.keys(policyPatch).length > 0 && options.putClientPolicy) {
-              options.putClientPolicy(orgId, policyPatch, updatedBy)
+              await options.putClientPolicy(orgId, policyPatch, updatedBy)
             }
             if (Object.keys(dbPatch).length > 0) {
               await db.updateEnterprise(orgId, dbPatch)
             }
-          }
+          })
         } else if (patch !== undefined && patch !== null) {
           throw new Error('Enterprise configuration patch must be an object')
         }
@@ -257,39 +239,4 @@ function parseBoolean(value: unknown, fieldName: string): boolean {
   if (typeof value === 'boolean') return value
   if (value === 0 || value === 1) return value === 1
   throw new Error(`${fieldName} must be a boolean`)
-}
-
-function updateEnterpriseSync(
-  db: DatabaseSync,
-  orgId: string,
-  patch: EnterpriseBrandingPatch,
-): void {
-  const entries = Object.entries(patch)
-  if (entries.length === 0) return
-  const id = orgId.trim()
-  if (!id) throw new Error('Organization id is required for enterprise configuration')
-  const ts = Date.now()
-  db.prepare(`
-    INSERT INTO enterprises (
-      id, logo, app_name, top_name, about_name, app_company_name,
-      login_desp, client_cron_enabled, client_show_tool_calls,
-      workspace_upload_limit_bytes, created_at, updated_at
-    )
-    SELECT ?, logo, app_name, top_name, about_name, app_company_name,
-      login_desp, client_cron_enabled, client_show_tool_calls,
-      workspace_upload_limit_bytes, ?, ?
-    FROM enterprises
-    WHERE id = 'default'
-    ON CONFLICT(id) DO NOTHING
-  `).run(id, ts, ts)
-
-  const sets = entries.map(([key]) => `${key} = ?`).join(', ')
-  const values = entries.map(([, value]) =>
-    typeof value === 'boolean' ? (value ? 1 : 0) : value ?? null,
-  )
-  db.prepare(`
-    UPDATE enterprises
-    SET ${sets}, updated_at = ?
-    WHERE id = ?
-  `).run(...values, ts, id)
 }

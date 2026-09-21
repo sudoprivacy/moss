@@ -6314,7 +6314,7 @@ export function startServer(
       // binding that only the previous server had. Claiming otherwise would
       // have the client wrap chats with something that does not exist here.
       if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         const installed = await getInstalledAssistants()
         writeJson(res, 200, {
           success: true,
@@ -6601,7 +6601,7 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           data: {
-            list: result.list.map(order => toAdminOrderPayload(order, authService.getUserName(order.userId))),
+            list: await Promise.all(result.list.map(async order => toAdminOrderPayload(order, await authService.getUserName(order.userId)))),
             total: result.total,
             page,
             pageSize,
@@ -6772,7 +6772,7 @@ export function startServer(
         }
         writeJson(res, 200, {
           success: true,
-          data: toAdminOrderPayload(order, authService.getUserName(order.userId)),
+          data: toAdminOrderPayload(order, await authService.getUserName(order.userId)),
         })
         return
       }

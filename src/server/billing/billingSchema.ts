@@ -145,7 +145,7 @@ export function ensureBillingSchema(db: DatabaseSync): void {
       quota_units INTEGER CHECK (quota_units IS NULL OR typeof(quota_units) = 'integer'),
       used_quota_units INTEGER CHECK (used_quota_units IS NULL OR typeof(used_quota_units) = 'integer'),
       token_secret_ref TEXT,
-      status TEXT NOT NULL CHECK (status IN ('PENDING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'COMPLETED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+      status TEXT NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'COMPLETED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
       idempotency_key TEXT NOT NULL UNIQUE,
       request_fingerprint TEXT NOT NULL,
       context_source TEXT NOT NULL CHECK (context_source IN ('online', 'migration', 'replay')),
@@ -299,6 +299,40 @@ export function ensureBillingSchema(db: DatabaseSync): void {
       verified_at INTEGER NOT NULL
     );
   `)
+
+  const provisioningSql = (db.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'billing_sudorouter_provisioning'
+  `).get() as { sql?: string } | undefined)?.sql ?? ''
+  if (provisioningSql && !provisioningSql.includes("'PROCESSING'")) {
+    db.exec(`
+      DROP INDEX IF EXISTS billing_sudorouter_provisioning_status_idx;
+      ALTER TABLE billing_sudorouter_provisioning RENAME TO billing_sudorouter_provisioning_legacy;
+      CREATE TABLE billing_sudorouter_provisioning (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL UNIQUE,
+        org_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        initial_quota_units INTEGER NOT NULL CHECK (typeof(initial_quota_units) = 'integer' AND initial_quota_units >= 0),
+        external_account_id TEXT,
+        quota_units INTEGER CHECK (quota_units IS NULL OR typeof(quota_units) = 'integer'),
+        used_quota_units INTEGER CHECK (used_quota_units IS NULL OR typeof(used_quota_units) = 'integer'),
+        token_secret_ref TEXT,
+        status TEXT NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'ACCOUNT_READY', 'QUOTA_READY', 'TOKEN_READY', 'COMPLETED', 'FAILED', 'UNKNOWN', 'SUPPRESSED')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        request_fingerprint TEXT NOT NULL,
+        context_source TEXT NOT NULL CHECK (context_source IN ('online', 'migration', 'replay')),
+        error_text TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER
+      );
+      INSERT INTO billing_sudorouter_provisioning SELECT * FROM billing_sudorouter_provisioning_legacy;
+      DROP TABLE billing_sudorouter_provisioning_legacy;
+      CREATE INDEX billing_sudorouter_provisioning_status_idx
+        ON billing_sudorouter_provisioning (status, updated_at);
+    `)
+  }
 
   const ledgerColumns = db.prepare('PRAGMA table_info(billing_ledger_entries)').all() as Array<{ name: string }>
   if (!ledgerColumns.some(column => column.name === 'legacy_id')) {

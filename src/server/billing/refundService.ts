@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, migrationCommandContext, onlineCommandContext, replayCommandContext, type CommandContext } from '../application/commandContext.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import { BillingCoordinator } from './billingCoordinator.js'
 import { BillingRepository, type RefundRecord } from './billingRepository.js'
 import { pointsToQuota } from './sudorouterAdapter.js'
@@ -46,7 +45,7 @@ export class RefundService {
   private readonly suffixGenerator: () => string
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly driver: DbDriver,
     private readonly repository: BillingRepository,
     private readonly identities: IdentityRepository,
     private readonly wallet: WalletService,
@@ -59,11 +58,11 @@ export class RefundService {
     this.suffixGenerator = options.suffixGenerator ?? (() => Math.random().toString(36).slice(2, 8).toUpperCase())
   }
 
-  calculate(orderNo: string): RefundQuote {
-    const order = this.repository.getOrderByOrderNo(orderNo)
+  async calculate(orderNo: string): Promise<RefundQuote> {
+    const order = await this.repository.getOrderByOrderNo(orderNo)
     if (!order) throw new BillingDomainError('ORDER_NOT_FOUND', '订单不存在')
     if (order.status !== 'SUCCESS') throw new BillingDomainError('ORDER_NOT_REFUNDABLE', '订单状态不支持退款')
-    const wallet = this.repository.getWallet('user', order.userId)
+    const wallet = await this.repository.getWallet('user', order.userId)
     if (!wallet) throw new BillingDomainError('WALLET_NOT_FOUND', '用户不存在')
 
     // pointsUnits 已经是实际到账总积分，bonusUnits 仅用于展示，不能再次相加。
@@ -90,29 +89,29 @@ export class RefundService {
     assertTrustedCommandContext(context)
     const reason = input.reason?.trim() || '用户申请退款'
     if (reason.length > 500) throw new BillingDomainError('REFUND_REASON_TOO_LONG', '退款原因不能超过 500 个字符')
-    const order = this.repository.getOrderByOrderNo(input.orderNo)
+    const order = await this.repository.getOrderByOrderNo(input.orderNo)
     if (!order) throw new BillingDomainError('ORDER_NOT_FOUND', '订单不存在')
     this.requireReviewer(order.orgId, actor)
-    const quote = this.calculate(input.orderNo)
+    const quote = await this.calculate(input.orderNo)
     if (quote.refundAmountCents <= 0) throw new BillingDomainError('REFUND_AMOUNT_ZERO', '无可退款金额')
-    const external = this.repository.getExternalAccount('sudorouter', 'user', order.userId)
+    const external = await this.repository.getExternalAccount('sudorouter', 'user', order.userId)
     if (!external) throw new BillingDomainError('SUDOROUTER_NOT_BOUND', '用户未绑定 sudorouter 账号')
     const fingerprint = createHash('sha256').update(JSON.stringify([
       order.id, reason, actor.userId, actor.orgId,
     ])).digest('hex')
 
-    const prepared = runInTransaction(this.db, () => {
-      const previous = this.repository.getRefundByIdempotencyKey(context.idempotencyKey)
+    const prepared = await this.driver.transaction(async () => {
+      const previous = await this.repository.getRefundByIdempotencyKey(context.idempotencyKey)
       if (previous) {
         if (previous.requestFingerprint !== fingerprint) {
           throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的退款请求')
         }
         return { refund: previous, created: false }
       }
-      if (this.repository.getActiveRefundForOrder(order.id)) {
+      if (await this.repository.getActiveRefundForOrder(order.id)) {
         throw new BillingDomainError('REFUND_IN_PROGRESS', '该订单已有退款记录')
       }
-      const current = this.repository.getWallet('user', order.userId)
+      const current = await this.repository.getWallet('user', order.userId)
       if (!current || current.balanceUnits < quote.deductPoints) {
         throw new BillingDomainError('INSUFFICIENT_BALANCE', '用户积分不足，无法退款')
       }
@@ -120,7 +119,7 @@ export class RefundService {
       const id = this.idGenerator()
       const status = context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'PROCESSING'
       const refund: RefundRecord = {
-        id, legacyId: this.identities.allocateNumericAlias('billing_refund', id, order.orgId),
+        id, legacyId: await this.identities.allocateNumericAlias('billing_refund', id, order.orgId),
         refundNo: `RF${now}${this.suffixGenerator()}`,
         orderId: order.id, userId: order.userId,
         refundAmountCents: quote.refundAmountCents,
@@ -130,7 +129,7 @@ export class RefundService {
         idempotencyKey: context.idempotencyKey, requestFingerprint: fingerprint,
         createdAt: now, updatedAt: now,
       }
-      this.repository.insertRefund(refund)
+      await this.repository.insertRefund(refund)
       return { refund, created: true }
     })
 
@@ -147,7 +146,7 @@ export class RefundService {
         amountCents: quote.refundAmountCents,
       })
       if (!providerResult.success) {
-        runInTransaction(this.db, () => this.repository.updateRefund({
+        await this.driver.transaction(async () => this.repository.updateRefund({
           id: prepared.refund.id, status: 'FAILED', providerResponse: providerResult.raw,
           updatedAt: this.clock(),
         }))
@@ -161,25 +160,25 @@ export class RefundService {
       externalUserId: external.externalAccountId, pointsDelta: -quote.deductPoints,
       reason: `退款扣除: ${order.orderNo}`, sourceType: 'billing_refund',
       sourceId: prepared.refund.id, actorUserId: actor.userId,
-    }, childContext, () => {
-      this.repository.updateRefund({
+    }, childContext, async () => {
+      await this.repository.updateRefund({
         id: prepared.refund.id,
         status: context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'SUCCEEDED',
         providerRefundNo: providerResult.providerRefundNo,
         providerResponse: providerResult.raw,
-        quotaOperationId: this.repository.getQuotaOperationByKey(childContext.idempotencyKey)?.id,
+        quotaOperationId: (await this.repository.getQuotaOperationByKey(childContext.idempotencyKey))?.id,
         updatedAt: this.clock(),
       })
-      this.repository.updateOrderStatus({
+      await this.repository.updateOrderStatus({
         orderId: order.id, status: 'REFUNDED', updatedAt: this.clock(),
         remark: `退款原因: ${reason}`,
       })
     })
     if (adjustment.status !== 'SUCCEEDED' && adjustment.status !== 'SUPPRESSED') {
-      this.markUnknown(prepared.refund.id, providerResult, adjustment.operationId)
+      await this.markUnknown(prepared.refund.id, providerResult, adjustment.operationId)
       throw new BillingDomainError('REFUND_SYNC_UNKNOWN', '退款已受理，积分与额度同步状态待对账')
     }
-    return this.repository.getRefundById(prepared.refund.id)!
+    return (await this.repository.getRefundById(prepared.refund.id))!
   }
 
   private requireReviewer(orderOrgId: string, actor: IdentityActor): void {
@@ -191,12 +190,12 @@ export class RefundService {
     }
   }
 
-  private markUnknown(
+  private async markUnknown(
     refundId: string,
     providerResult: Awaited<ReturnType<FuiouRefundPort['refund']>>,
     quotaOperationId?: string,
-  ): void {
-    runInTransaction(this.db, () => this.repository.updateRefund({
+  ): Promise<void> {
+    await this.driver.transaction(async () => this.repository.updateRefund({
       id: refundId, status: 'UNKNOWN', providerRefundNo: providerResult.providerRefundNo,
       providerResponse: providerResult.raw, quotaOperationId, updatedAt: this.clock(),
     }))

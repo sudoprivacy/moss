@@ -1,11 +1,10 @@
 import { createHash } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
 import type { AuthCenterDb } from '../authCenter/db.js'
 import type { CatalogAgent, CatalogRepository } from '../catalog/catalogRepository.js'
 import type { DifyRepository } from '../dify/difyRepository.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import type { VisibleTo } from '../visibilityFilter.js'
 import type {
   SudoworkAssistantAclSource,
@@ -72,7 +71,7 @@ export class P4DifyMigrationBlockedError extends Error {
 
 export class P4DifyMigrationService {
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     auth: AuthCenterDb
     identities: IdentityRepository
     catalog: CatalogRepository
@@ -81,19 +80,19 @@ export class P4DifyMigrationService {
     secrets: P4SecretPort
   }) {}
 
-  plan(): P4DifyMigrationPlan {
+  async plan(): Promise<P4DifyMigrationPlan> {
     const source = this.options.source.readSnapshot()
     const issues: P4DifyMigrationIssue[] = []
     const organizations: OrganizationMapping[] = []
     const connectionByEnterprise = new Map(source.connections.map(item => [item.enterpriseId, item]))
 
     for (const connection of source.connections) {
-      const mapped = this.options.identities.resolveNumericAliasGlobal('enterprise', connection.enterpriseId)
+      const mapped = await this.options.identities.resolveNumericAliasGlobal('enterprise', connection.enterpriseId)
       if (!mapped) {
         issue(issues, 'ORGANIZATION_MAPPING_MISSING', `enterprise:${connection.enterpriseId}`, '旧企业未映射到 Moss Organization')
         continue
       }
-      const target = this.options.identities.getIntegrationConnection(connectionId(mapped.resourceId))
+      const target = await this.options.identities.getIntegrationConnection(connectionId(mapped.resourceId))
       if (target && (target.orgId !== mapped.resourceId || target.config.tenantId !== connection.tenantId)) {
         issue(issues, 'TARGET_CONFLICT', `enterprise:${connection.enterpriseId}`, '目标 Dify Connection 已绑定不同租户')
         continue
@@ -118,8 +117,8 @@ export class P4DifyMigrationService {
       if (!app.appApiKey) {
         issue(issues, 'CREDENTIAL_MISSING', `app:${app.id}`, '旧 Dify App API Key 缺失，无法保持增强功能可用')
       }
-      const agent = this.options.catalog.findAgent(app.assistantId)
-      if (!agent || !this.options.catalog.isAvailableToOrganization('agent', app.assistantId, organization.orgId)) {
+      const agent = await this.options.catalog.findAgent(app.assistantId)
+      if (!agent || !(await this.options.catalog.isAvailableToOrganization('agent', app.assistantId, organization.orgId))) {
         issue(issues, 'AGENT_MAPPING_MISSING', `app:${app.id}`, `Agent ${app.assistantId} 未迁入统一 Catalog`)
       } else {
         const binding = agent.providerBinding
@@ -138,7 +137,7 @@ export class P4DifyMigrationService {
         issue(issues, 'TARGET_CONFLICT', `app:${app.id}`, '同一 Dify App 在源数据中绑定了多个 Agent')
       }
       appAliases.set(aliasKey, app.assistantId)
-      const resolvedAlias = this.options.catalog.resolveExternalIdentity({
+      const resolvedAlias = await this.options.catalog.resolveExternalIdentity({
         orgId: organization.orgId,
         resourceType: 'agent',
         providerType: 'dify',
@@ -162,8 +161,8 @@ export class P4DifyMigrationService {
       if (connection.tenantId !== dataset.tenantId) {
         issue(issues, 'TENANT_MISMATCH', `dataset:${dataset.id}`, 'Dataset 租户与企业 Dify 租户不一致')
       }
-      const agent = this.options.catalog.findAgent(dataset.assistantId)
-      if (!agent || !this.options.catalog.isAvailableToOrganization('agent', dataset.assistantId, organization.orgId)) {
+      const agent = await this.options.catalog.findAgent(dataset.assistantId)
+      if (!agent || !(await this.options.catalog.isAvailableToOrganization('agent', dataset.assistantId, organization.orgId))) {
         issue(issues, 'AGENT_MAPPING_MISSING', `dataset:${dataset.id}`, `Agent ${dataset.assistantId} 未迁入统一 Catalog`)
       }
       if (appKeys.has(`${dataset.enterpriseId}:${dataset.assistantId}`)) {
@@ -174,8 +173,8 @@ export class P4DifyMigrationService {
     for (const item of [...source.acl, ...source.metadata]) {
       const organization = organizationByLegacyId.get(item.enterpriseId)
       if (!organization) continue
-      const agent = this.options.catalog.findAgent(item.assistantId)
-      if (!agent || !this.options.catalog.isAvailableToOrganization('agent', item.assistantId, organization.orgId)) {
+      const agent = await this.options.catalog.findAgent(item.assistantId)
+      if (!agent || !(await this.options.catalog.isAvailableToOrganization('agent', item.assistantId, organization.orgId))) {
         issue(issues, 'AGENT_MAPPING_MISSING', `${'subjectType' in item ? 'acl' : 'metadata'}:${item.id}`, `Agent ${item.assistantId} 未迁入统一 Catalog`)
       }
     }
@@ -183,7 +182,7 @@ export class P4DifyMigrationService {
     for (const acl of source.acl) {
       const organization = organizationByLegacyId.get(acl.enterpriseId)
       if (!organization || acl.subjectType === 'all' || acl.subjectType === 'role' || acl.subjectId === null) continue
-      if (!this.resolveAclSubject(acl, organization.orgId)) {
+      if (!(await this.resolveAclSubject(acl, organization.orgId))) {
         issue(issues, 'ACL_MAPPING_MISSING', `acl:${acl.id}`, `${acl.subjectType} ${acl.subjectId} 未映射到 Moss`)
       }
     }
@@ -212,7 +211,7 @@ export class P4DifyMigrationService {
     const source = this.options.source.readSnapshot()
     if (source.checksum !== plan.sourceChecksum) throw new Error('P4 Dify 源快照在预检后发生变化')
     const organizationByLegacyId = new Map(plan.organizations.map(item => [item.enterpriseId, item]))
-    const pendingOutboxBefore = this.pendingOutboxCount()
+    const pendingOutboxBefore = await this.pendingOutboxCount()
 
     for (const connection of source.connections) {
       const organization = organizationByLegacyId.get(connection.enterpriseId)!
@@ -227,10 +226,10 @@ export class P4DifyMigrationService {
       )
     }
 
-    runInTransaction(this.options.db, () => {
+    await this.options.db.transaction(async () => {
       for (const connection of source.connections) {
         const organization = organizationByLegacyId.get(connection.enterpriseId)!
-        this.options.identities.putIntegrationConnection({
+        await this.options.identities.putIntegrationConnection({
           id: organization.connectionId,
           orgId: organization.orgId,
           providerType: 'dify',
@@ -249,8 +248,8 @@ export class P4DifyMigrationService {
       const datasetsByAgent = groupBy(source.datasets, item => `${item.enterpriseId}:${item.assistantId}`)
       for (const app of source.apps) {
         const organization = organizationByLegacyId.get(app.enterpriseId)!
-        const agent = this.requireAgent(app.assistantId, organization.orgId)
-        this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
+        const agent = await this.requireAgent(app.assistantId, organization.orgId)
+        await this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
           providerType: 'dify',
           supportedModes: 'both',
           providerBinding: {
@@ -263,14 +262,14 @@ export class P4DifyMigrationService {
             datasetIds: [],
           },
         })
-        const resolved = this.options.catalog.resolveExternalIdentity({
+        const resolved = await this.options.catalog.resolveExternalIdentity({
           orgId: agent.orgId,
           resourceType: 'agent',
           providerType: 'dify',
           providerId: organization.connectionId,
           externalId: app.appId,
         })
-        if (!resolved) this.options.catalog.bindExternalIdentity({
+        if (!resolved) await this.options.catalog.bindExternalIdentity({
           id: stableId('p4-dify-app-alias', app.id),
           orgId: agent.orgId,
           resourceType: 'agent',
@@ -285,9 +284,9 @@ export class P4DifyMigrationService {
       for (const [key, bindings] of datasetsByAgent) {
         const [enterpriseIdText, assistantId] = splitKey(key)
         const organization = organizationByLegacyId.get(Number(enterpriseIdText))!
-        const agent = this.requireAgent(assistantId, organization.orgId)
+        const agent = await this.requireAgent(assistantId, organization.orgId)
         const datasetIds = [...new Set(bindings.map(item => item.datasetId))]
-        this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
+        await this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
           providerType: 'dify',
           supportedModes: 'both',
           providerBinding: {
@@ -298,7 +297,7 @@ export class P4DifyMigrationService {
             datasetIds,
           },
         })
-        for (const binding of bindings) this.options.dify.putResource({
+        for (const binding of bindings) await this.options.dify.putResource({
           id: stableId('p4-dify-dataset', `${organization.orgId}:${binding.datasetId}`),
           orgId: organization.orgId,
           connectionId: organization.connectionId,
@@ -312,8 +311,8 @@ export class P4DifyMigrationService {
 
       for (const metadata of source.metadata) {
         const organization = organizationByLegacyId.get(metadata.enterpriseId)!
-        const agent = this.requireAgent(metadata.assistantId, organization.orgId)
-        this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
+        const agent = await this.requireAgent(metadata.assistantId, organization.orgId)
+        await this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
           name: metadata.name,
           displayName: metadata.name,
           profession: metadata.profession,
@@ -331,13 +330,13 @@ export class P4DifyMigrationService {
       for (const [key, entries] of groupBy(source.acl, item => `${item.enterpriseId}:${item.assistantId}`)) {
         const [enterpriseIdText, assistantId] = splitKey(key)
         const organization = organizationByLegacyId.get(Number(enterpriseIdText))!
-        const agent = this.requireAgent(assistantId, organization.orgId)
-        this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
-          visibleTo: this.visibleTo(entries, organization.orgId),
+        const agent = await this.requireAgent(assistantId, organization.orgId)
+        await this.options.catalog.updateAgentConfiguration(agent.id, agent.orgId, {
+          visibleTo: await this.visibleTo(entries, organization.orgId),
         })
       }
 
-      this.options.dify.putMigrationCheckpoint({
+      await this.options.dify.putMigrationCheckpoint({
         migrationRunId: context.migrationRunId!,
         sourceChecksum: source.checksum,
         phase: 'p4-dify',
@@ -350,7 +349,7 @@ export class P4DifyMigrationService {
       migrationRunId: context.migrationRunId,
       sourceChecksum: source.checksum,
       ...plan.counts,
-      deliverableExternalOutboxCount: this.pendingOutboxCount() - pendingOutboxBefore,
+      deliverableExternalOutboxCount: await this.pendingOutboxCount() - pendingOutboxBefore,
     }
     const verification = await this.verify()
     if (verification.status !== 'matched') throw new Error(`P4 Dify 迁移校验失败: ${verification.issues.join('; ')}`)
@@ -359,12 +358,12 @@ export class P4DifyMigrationService {
 
   async verify(): Promise<P4DifyVerification> {
     const source = this.options.source.readSnapshot()
-    const plan = this.plan()
+    const plan = await this.plan()
     const issues = plan.issues.map(item => item.message)
     if (plan.status === 'ready') {
       for (const connection of source.connections) {
         const organization = plan.organizations.find(item => item.enterpriseId === connection.enterpriseId)!
-        const target = this.options.identities.getIntegrationConnection(organization.connectionId)
+        const target = await this.options.identities.getIntegrationConnection(organization.connectionId)
         if (!target || target.config.tenantId !== connection.tenantId
           || target.config.systemAccountId !== connection.systemAccountId
           || target.secretRef !== secretReference(secretNamespace(organization.orgId), 'service-api-key')) {
@@ -379,7 +378,7 @@ export class P4DifyMigrationService {
       }
       for (const app of source.apps) {
         const organization = plan.organizations.find(item => item.enterpriseId === app.enterpriseId)!
-        const agent = this.requireAgent(app.assistantId, organization.orgId)
+        const agent = await this.requireAgent(app.assistantId, organization.orgId)
         if (agent.providerType !== 'dify'
           || agent.providerBinding?.connectionId !== organization.connectionId
           || agent.providerBinding?.tenantId !== app.tenantId
@@ -390,7 +389,7 @@ export class P4DifyMigrationService {
           )) {
           issues.push(`Agent ${app.assistantId} 的 Dify App binding 不一致`)
         }
-        const alias = this.options.catalog.resolveExternalIdentity({
+        const alias = await this.options.catalog.resolveExternalIdentity({
           orgId: organization.orgId,
           resourceType: 'agent',
           providerType: 'dify',
@@ -406,7 +405,7 @@ export class P4DifyMigrationService {
       const datasetsByAgent = groupBy(source.datasets, item => `${item.enterpriseId}:${item.assistantId}`)
       for (const dataset of source.datasets) {
         const organization = plan.organizations.find(item => item.enterpriseId === dataset.enterpriseId)!
-        const resource = this.options.dify.getResourceByExternalId(
+        const resource = await this.options.dify.getResourceByExternalId(
           organization.orgId, organization.connectionId, 'dataset', dataset.datasetId,
         )
         if (!resource) issues.push(`Dataset ${dataset.datasetId} 未迁移`)
@@ -414,7 +413,7 @@ export class P4DifyMigrationService {
       for (const [key, bindings] of datasetsByAgent) {
         const [enterpriseIdText, assistantId] = splitKey(key)
         const organization = plan.organizations.find(item => item.enterpriseId === Number(enterpriseIdText))!
-        const agent = this.requireAgent(assistantId, organization.orgId)
+        const agent = await this.requireAgent(assistantId, organization.orgId)
         const expectedDatasetIds = [...new Set(bindings.map(item => item.datasetId))].sort()
         const actualDatasetIds = Array.isArray(agent.providerBinding?.datasetIds)
           ? agent.providerBinding.datasetIds.filter((item): item is string => typeof item === 'string').sort()
@@ -429,7 +428,7 @@ export class P4DifyMigrationService {
       }
       for (const metadata of source.metadata) {
         const organization = plan.organizations.find(item => item.enterpriseId === metadata.enterpriseId)!
-        const agent = this.requireAgent(metadata.assistantId, organization.orgId)
+        const agent = await this.requireAgent(metadata.assistantId, organization.orgId)
         const actual = {
           name: agent.name,
           displayName: agent.displayName,
@@ -461,8 +460,8 @@ export class P4DifyMigrationService {
       for (const [key, entries] of groupBy(source.acl, item => `${item.enterpriseId}:${item.assistantId}`)) {
         const [enterpriseIdText, assistantId] = splitKey(key)
         const organization = plan.organizations.find(item => item.enterpriseId === Number(enterpriseIdText))!
-        const agent = this.requireAgent(assistantId, organization.orgId)
-        if (!sameJson(agent.visibleTo, this.visibleTo(entries, organization.orgId))) {
+        const agent = await this.requireAgent(assistantId, organization.orgId)
+        if (!sameJson(agent.visibleTo, await this.visibleTo(entries, organization.orgId))) {
           issues.push(`Agent ${assistantId} 的 ACL 不一致`)
         }
       }
@@ -470,35 +469,42 @@ export class P4DifyMigrationService {
     return { status: issues.length === 0 ? 'matched' : 'mismatch', sourceChecksum: source.checksum, issues }
   }
 
-  private requireAgent(assistantId: string, orgId: string): CatalogAgent {
-    const agent = this.options.catalog.findAgent(assistantId)
-    if (!agent || !this.options.catalog.isAvailableToOrganization('agent', assistantId, orgId)) {
+  private async requireAgent(assistantId: string, orgId: string): Promise<CatalogAgent> {
+    const agent = await this.options.catalog.findAgent(assistantId)
+    if (!agent || !(await this.options.catalog.isAvailableToOrganization('agent', assistantId, orgId))) {
       throw new Error(`Agent ${assistantId} 未映射`)
     }
     return agent
   }
 
-  private resolveAclSubject(entry: SudoworkAssistantAclSource, orgId: string): string | null {
+  private async resolveAclSubject(entry: SudoworkAssistantAclSource, orgId: string): Promise<string | null> {
     if (entry.subjectId === null) return null
     if (entry.subjectType === 'role') return normalizeRole(entry.subjectId)
     if (!/^\d+$/.test(entry.subjectId)) return null
     return this.options.identities.resolveNumericAlias(entry.subjectType, Number(entry.subjectId), orgId)
   }
 
-  private visibleTo(entries: SudoworkAssistantAclSource[], orgId: string): VisibleTo {
+  private async visibleTo(entries: SudoworkAssistantAclSource[], orgId: string): Promise<VisibleTo> {
     if (entries.length === 0 || entries.some(item => item.subjectType === 'all')) return null
-    const values = (type: SudoworkAssistantAclSource['subjectType']) => {
-      const mapped = entries.filter(item => item.subjectType === type)
-        .flatMap(item => this.resolveAclSubject(item, orgId) ?? [])
+    const values = async (type: SudoworkAssistantAclSource['subjectType']) => {
+      const mapped = (await Promise.all(entries.filter(item => item.subjectType === type)
+        .map(item => this.resolveAclSubject(item, orgId))))
+        .flatMap(item => item ?? [])
       return mapped.length > 0 ? [...new Set(mapped)] : null
     }
-    return { user_ids: values('user'), department_ids: values('department'), role_ids: values('role') }
+    return {
+      user_ids: await values('user'),
+      department_ids: await values('department'),
+      role_ids: await values('role'),
+    }
   }
 
-  private pendingOutboxCount(): number {
-    const exists = this.options.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox_events'").get()
-    if (!exists) return 0
-    return Number((this.options.db.prepare("SELECT COUNT(*) AS count FROM outbox_events WHERE status='pending'").get() as { count: number }).count)
+  private async pendingOutboxCount(): Promise<number> {
+    const result = this.options.db.kind === 'postgres'
+      ? await this.options.db.get<{ table_exists: boolean }>("SELECT to_regclass('outbox_events') IS NOT NULL AS table_exists")
+      : await this.options.db.get<{ table_exists: number }>("SELECT 1 AS table_exists FROM sqlite_master WHERE type='table' AND name='outbox_events'")
+    if (!result?.table_exists) return 0
+    return Number((await this.options.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM outbox_events WHERE status='pending'"))?.count ?? 0)
   }
 }
 

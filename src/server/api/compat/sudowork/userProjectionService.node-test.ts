@@ -2,10 +2,8 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
-import { BillingRepository } from '../../../billing/billingRepository.js'
-import { ensureBillingSchema } from '../../../billing/billingSchema.js'
 import type { SudorouterPort } from '../../../billing/sudorouterAdapter.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import {
   SudoworkUserProjectionError,
   SudoworkUserProjectionService,
@@ -17,7 +15,7 @@ async function setup(
 ) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org-1', '企业一', 1)
   await auth.createUser({
     id: 'user-1', orgId: 'org-1', email: 'user@example.test', name: '13800000000',
@@ -25,24 +23,23 @@ async function setup(
     tokenLimit: null, createdAt: 1, passwordHash: null, passwordUpdatedAt: null,
     lastLoginAt: null, extUserId: null,
   })
-  identities.putOrganizationProfile({
+  await identities.putOrganizationProfile({
     orgId: 'org-1', code: 'ENT-A', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
   })
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 3, resourceId: 'org-1', orgId: 'org-1' })
-  identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
-  identities.createWallet('user', 'user-1', 75)
-  ensureBillingSchema(db)
-  const billing = new BillingRepository(db)
-  billing.upsertExternalAccount({
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 3, resourceId: 'org-1', orgId: 'org-1' })
+  await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
+  await identities.createWallet('user', 'user-1', 75)
+  const billing = createBillingTestRepository(db, auth.driver)
+  await billing.upsertExternalAccount({
     provider: 'sudorouter', ownerType: 'user', ownerId: 'user-1', externalAccountId: '71',
     quotaUnits: 37_500, usedQuotaUnits: 12_500, tokenSecretRef, updatedAt: 1,
   })
-  billing.insertUsageRecord({
+  await billing.insertUsageRecord({
     id: 'usage-1', userId: 'user-1', orgId: 'org-1', model: 'model-a', inputTokens: 100,
     outputTokens: 50, costUnits: 25, balanceAfterUnits: 75,
     idempotencyKey: 'usage-1', createdAt: 2,
   })
-  billing.insertLedgerEntry({
+  await billing.insertLedgerEntry({
     id: 'bonus-1', ownerType: 'user', ownerId: 'user-1', deltaUnits: 10,
     balanceBeforeUnits: 65, balanceAfterUnits: 75, entryType: 'BONUS', sourceType: 'admin',
     sourceId: 'bonus-1', idempotencyKey: 'bonus-1', contextSource: 'online', createdAt: 3,
@@ -117,7 +114,7 @@ void describe('SudoworkUserProjectionService', () => {
       total: projection.totalPoints, used: projection.usedPoints, remaining: projection.remainingPoints,
       quota: projection.quota, usedQuota: projection.usedQuota,
     }, { total: 10, used: 2, remaining: 8, quota: 4_000, usedQuota: 1_000 })
-    assert.equal(billing.getExternalAccount('sudorouter', 'user', 'user-1')?.quotaUnits, 4_000)
+    assert.equal((await billing.getExternalAccount('sudorouter', 'user', 'user-1'))?.quotaUnits, 4_000)
     db.close()
   })
 })

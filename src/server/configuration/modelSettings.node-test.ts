@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { after, beforeEach, test } from 'node:test'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import { resolveConfigurationActor, ConfigurationScopeError } from './adminScope.js'
+import { SqliteDriver } from '../db/driver.js'
 
 const testHome = mkdtempSync(join(os.tmpdir(), 'moss-model-policy-test-'))
 const originalHome = os.homedir
@@ -14,7 +15,7 @@ os.homedir = () => testHome
 syncBuiltinESMExports()
 const settings = await import('../systemSettings.js')
 const { ConfigStore, initConfigStore, organizationConfigKey } = await import('../configStore/configStore.js')
-const { OrganizationModelSettingsRepository } = await import('./organizationModelSettingsRepository.js')
+const { OrganizationModelSettingsRepository, ensureOrganizationModelSettingsSchema } = await import('./organizationModelSettingsRepository.js')
 const { migrateLegacyModelSettings } = await import('./migrateLegacyModelSettings.js')
 const { getModelsForSelection } = await import('../modelListCache.js')
 assert.equal(settings.SYSTEM_SETTINGS_PATH, join(testHome, '.moss', 'settings.json'))
@@ -57,7 +58,9 @@ after(() => {
 function database() {
   const db = new DatabaseSync(':memory:')
   db.exec("CREATE TABLE organizations (id TEXT PRIMARY KEY); INSERT INTO organizations VALUES ('org-a'), ('org-b')")
-  return { db, repository: new OrganizationModelSettingsRepository(db) }
+  ensureOrganizationModelSettingsSchema(db)
+  const driver = new SqliteDriver(db)
+  return { db, driver, repository: new OrganizationModelSettingsRepository(driver) }
 }
 
 void test('root can explicitly manage home organization or platform; org admin cannot select platform', () => {
@@ -72,14 +75,14 @@ void test('root can explicitly manage home organization or platform; org admin c
 })
 
 void test('migrates text, image and provider credentials only to default org and starts its authenticated model catalog', async () => {
-  const { db, repository } = database()
+  const { db, driver, repository } = database()
   try {
     await settings.updateSystemSettings({
       apiKey: 'legacy-text', image: { apiKey: 'legacy-image', model: 'image-model' }, model: 'fixture-model',
       modelProviders: [{ id: 'private', name: 'Private', baseUrl: 'https://example.invalid/v1', enabled: true, apiKey: 'private-key' }],
       defaultModelProviderId: 'private',
     })
-    await migrateLegacyModelSettings(db, 'org-a')
+    await migrateLegacyModelSettings(driver, 'org-a')
     const org = await settings.getOrganizationSystemSettings('org-a', repository)
     const other = await settings.getOrganizationSystemSettings('org-b', repository)
     assert.equal(org.apiKey, 'legacy-text')
@@ -99,31 +102,31 @@ void test('migrates text, image and provider credentials only to default org and
     assert.equal(publicSettings.apiKey, '')
     assert.equal(publicSettings.image.apiKey, '')
     assert(!JSON.stringify(publicSettings).includes('private-key'))
-    assert(!JSON.stringify(repository.get('org-a')).includes('legacy-text'))
+    assert(!JSON.stringify(await repository.get('org-a')).includes('legacy-text'))
     await settings.updateOrganizationSystemSettings('org-a', repository, { apiKey: '', image: { apiKey: '' }, modelProviders: [] }, 'admin')
-    await migrateLegacyModelSettings(db, 'org-a')
-    await migrateLegacyModelSettings(db, 'org-b')
+    await migrateLegacyModelSettings(driver, 'org-a')
+    await migrateLegacyModelSettings(driver, 'org-b')
     assert.equal((await settings.getOrganizationSystemSettings('org-a', repository)).apiKeyConfigured, false)
     assert.equal((await settings.getOrganizationSystemSettings('org-b', repository)).apiKeyConfigured, false)
   } finally { db.close() }
 })
 
 void test('migration respects previously configured or explicitly cleared organization credentials', async () => {
-  const { db, repository } = database()
+  const { db, driver, repository } = database()
   try {
     await settings.updateSystemSettings({ apiKey: 'platform-key' })
     await settings.updateOrganizationSystemSettings('org-a', repository, { apiKey: '' }, 'admin')
-    await migrateLegacyModelSettings(db, 'org-a')
+    await migrateLegacyModelSettings(driver, 'org-a')
     assert.equal((await settings.getOrganizationSystemSettings('org-a', repository)).apiKeyConfigured, false)
   } finally { db.close() }
 })
 
 void test('fresh installation marker prevents later platform credentials from becoming organization credentials', async () => {
-  const { db, repository } = database()
+  const { db, driver, repository } = database()
   try {
-    await migrateLegacyModelSettings(db, 'org-a')
+    await migrateLegacyModelSettings(driver, 'org-a')
     await settings.updateSystemSettings({ apiKey: 'later-platform-key' })
-    await migrateLegacyModelSettings(db, 'org-a')
+    await migrateLegacyModelSettings(driver, 'org-a')
     assert.equal((await settings.getOrganizationSystemSettings('org-a', repository)).apiKeyConfigured, false)
     await settings.updateOrganizationSystemSettings('org-a', repository, { apiKey: 'installer-org-key' }, 'installer')
     const own = await settings.getOrganizationSystemSettings('org-a', repository, { redactSecrets: true })

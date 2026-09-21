@@ -3,11 +3,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import { AuthCenterDb } from '../../../authCenter/db.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
 import { OrganizationIdentityService } from '../../../identity/organizationIdentityService.js'
 import { UnifiedIdentityService } from '../../../identity/unifiedIdentityService.js'
-import { ensureBillingSchema } from '../../../billing/billingSchema.js'
-import { BillingRepository } from '../../../billing/billingRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkAdministrationService } from './adminService.js'
 
 async function setup(options: {
@@ -16,10 +14,10 @@ async function setup(options: {
 } = {}) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  ensureBillingSchema(db)
-  const unified = new UnifiedIdentityService(db, authDb, identities)
-  const organizations = new OrganizationIdentityService(db, authDb, identities, unified)
+  const identities = createIdentityTestRepository(db, {}, authDb.driver)
+  const billing = createBillingTestRepository(db, authDb.driver)
+  const unified = new UnifiedIdentityService(authDb, identities)
+  const organizations = new OrganizationIdentityService(authDb, identities, unified)
   const service = new SudoworkAdministrationService(organizations, identities, authDb, {
     getDifyFeatureFlags: () => ({ enabled: true, missingEnv: [] }),
     defaultInitialQuota: options.defaultInitialQuota,
@@ -31,7 +29,7 @@ async function setup(options: {
   const second = await organizations.createOrganization({
     name: '企业 B', code: 'ENT-B', initialCreditUnits: 20_000,
   }, onlineCommandContext('org-b'))
-  return { db, authDb, identities, service, organizations, first, second }
+  return { db, authDb, identities, billing, service, organizations, first, second }
 }
 
 async function createUser(
@@ -55,10 +53,10 @@ async function createUser(
     lastLoginAt: null,
     extUserId: null,
   })
-  context.identities.assignNumericAlias({
+  await context.identities.assignNumericAlias({
     namespace: 'user', legacyId: input.legacyId, resourceId: input.id, orgId: input.orgId,
   })
-  context.identities.createWallet('user', input.id, input.balance ?? 0)
+  await context.identities.createWallet('user', input.id, input.balance ?? 0)
 }
 
 void describe('Sudowork administration compatibility service', () => {
@@ -110,7 +108,7 @@ void describe('Sudowork administration compatibility service', () => {
     assert.equal(listed.items[0]?.enterprise_id, first.legacyEnterpriseId)
     assert.equal(listed.items[0]?.status, 0)
     assert.equal(typeof listed.items[0]?.id, 'number')
-    assert.equal(service.deleteInvitationCode(actor, listed.items[0]!.id), true)
+    assert.equal(await service.deleteInvitationCode(actor, listed.items[0]!.id), true)
     db.close()
   })
 
@@ -126,8 +124,8 @@ void describe('Sudowork administration compatibility service', () => {
     const invitation = (await service.listInvitationCodes({ actor })).items[0]
     assert.equal(invitation?.enterprise_id, first.legacyEnterpriseId)
     assert.equal(invitation?.initial_quota_usd, 6)
-    const resourceId = identities.resolveNumericAliasGlobal('invitation', invitation!.id)!.resourceId
-    const stored = identities.getInvitationById(resourceId)!
+    const resourceId = (await identities.resolveNumericAliasGlobal('invitation', invitation!.id))!.resourceId
+    const stored = (await identities.getInvitationById(resourceId))!
     assert.equal(stored.initialCreditUnits, 6_000)
     assert.equal(stored.legacyInitialQuotaUsd, 6)
     db.close()
@@ -155,8 +153,8 @@ void describe('Sudowork administration compatibility service', () => {
     const firstInvitation = (await service.listInvitationCodes({
       actor: root, enterpriseId: first.legacyEnterpriseId,
     })).items[0]!
-    assert.throws(
-      () => service.deleteInvitationCode(scopedRoot, firstInvitation.id),
+    await assert.rejects(
+      service.deleteInvitationCode(scopedRoot, firstInvitation.id),
       /Administrator permission required for this organization/,
     )
     db.close()
@@ -169,8 +167,8 @@ void describe('Sudowork administration compatibility service', () => {
     await service.createInvitationCodes({ actor, count: 1, initialQuotaUsd: null }, () => 'DEFAULT-CODE')
 
     const invitation = (await service.listInvitationCodes({ actor })).items[0]!
-    const resourceId = identities.resolveNumericAliasGlobal('invitation', invitation.id)!.resourceId
-    const stored = identities.getInvitationById(resourceId)!
+    const resourceId = (await identities.resolveNumericAliasGlobal('invitation', invitation.id))!.resourceId
+    const stored = (await identities.getInvitationById(resourceId))!
     assert.equal(invitation.initial_quota_usd, null)
     assert.equal(stored.initialCreditUnits, 1_000)
     assert.equal(stored.legacyInitialQuotaUsd, null)
@@ -302,7 +300,7 @@ void describe('Sudowork administration compatibility service', () => {
     }
 
     await assert.rejects(context.service.createPasswordUser(input), /Sudorouter 用户初始化失败/)
-    const pending = context.identities.findAuthIdentity('phone', 'sudowork', 'admin-retry')
+    const pending = await context.identities.findAuthIdentity('phone', 'sudowork', 'admin-retry')
     assert(pending)
     assert.equal((await context.authDb.getUserById(pending.userId))?.status, 'pending')
     const recovered = await context.service.createPasswordUser(input)
@@ -317,7 +315,7 @@ void describe('Sudowork administration compatibility service', () => {
     await createUser(context, { id: 'pending-a', legacyId: 41, orgId: context.first.organization.id, name: 'a', status: 'pending' })
     await createUser(context, { id: 'pending-b', legacyId: 42, orgId: context.second.organization.id, name: 'b', status: 'pending' })
     for (const [id, orgId] of [['audit-a', context.first.organization.id], ['audit-b', context.second.organization.id]]) {
-      context.identities.insertOperationAudit({
+      await context.identities.insertOperationAudit({
         id,
         orgId,
         action: 'TEST_ACTION',
@@ -332,7 +330,7 @@ void describe('Sudowork administration compatibility service', () => {
       organizationScoped: true,
     }
 
-    assert.equal(context.service.listOperationLogs({ actor: scopedRoot, query: {} }).total, 1)
+    assert.equal((await context.service.listOperationLogs({ actor: scopedRoot, query: {} })).total, 1)
     await assert.rejects(
       context.service.rejectUser({ actor: scopedRoot, legacyUserId: 41 }),
       /无权操作该用户/,
@@ -351,8 +349,8 @@ void describe('Sudowork administration compatibility service', () => {
     await context.service.approveUser({ actor: admin, legacyUserId: 21, idempotencyKey: 'approve-21' })
     await context.service.approveUser({ actor: admin, legacyUserId: 21, idempotencyKey: 'approve-21' })
     assert.equal((await context.authDb.getUserById('pending-a'))?.status, 'active')
-    assert.equal(context.identities.getWallet('user', 'pending-a')?.balanceUnits, 100)
-    assert.equal(new BillingRepository(context.db).listLedgerEntries({ userId: 'pending-a', entryType: 'BONUS', limit: 20, offset: 0 }).total, 1)
+    assert.equal((await context.identities.getWallet('user', 'pending-a'))?.balanceUnits, 100)
+    assert.equal((await context.billing.listLedgerEntries({ userId: 'pending-a', entryType: 'BONUS', limit: 20, offset: 0 })).total, 1)
 
     await assert.rejects(
       context.service.rejectUser({ actor: admin, legacyUserId: 22, idempotencyKey: 'reject-22' }),
@@ -360,7 +358,7 @@ void describe('Sudowork administration compatibility service', () => {
     )
     await context.service.rejectUser({ actor: admin, legacyUserId: 23, idempotencyKey: 'reject-23' })
     assert.equal((await context.authDb.getUserById('reject-a'))?.status, 'disabled')
-    assert.equal(context.service.listOperationLogs({ actor: admin, query: { action: 'USER_REJECT' } }).total, 1)
+    assert.equal((await context.service.listOperationLogs({ actor: admin, query: { action: 'USER_REJECT' } })).total, 1)
     context.db.close()
   })
 
@@ -376,7 +374,7 @@ void describe('Sudowork administration compatibility service', () => {
     )
     await context.service.deletePendingUser({ actor: admin, legacyUserId: 31, idempotencyKey: 'delete-pending' })
     assert.equal(await context.authDb.getUserById('pending-a'), null)
-    const logs = context.service.listOperationLogs({ actor: admin, query: { page: '1', page_size: '10' } })
+    const logs = await context.service.listOperationLogs({ actor: admin, query: { page: '1', page_size: '10' } })
     assert.equal(logs.total, 1)
     assert.equal(logs.items[0]?.action, 'USER_DELETE')
     context.db.close()
@@ -384,7 +382,7 @@ void describe('Sudowork administration compatibility service', () => {
 
   void test('历史操作日志保留旧接口的完整字段和 JSON 原文', async () => {
     const context = await setup()
-    context.identities.insertOperationAudit({
+    await context.identities.insertOperationAudit({
       id: 'legacy-operation-77',
       legacyId: 77,
       orgId: context.first.organization.id,
@@ -405,10 +403,10 @@ void describe('Sudowork administration compatibility service', () => {
       createdAt: 1_700_000_000_000,
     })
 
-    const item = context.service.listOperationLogs({
+    const item = (await context.service.listOperationLogs({
       actor: { userId: 'root', orgId: context.first.organization.id, role: 'super_admin' },
       query: {},
-    }).items[0]
+    })).items[0]
     assert.deepEqual(item, {
       id: 77,
       user_id: null,

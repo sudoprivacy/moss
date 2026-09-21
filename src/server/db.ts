@@ -228,7 +228,7 @@ function migrateLegacyRuntimeTables(db: DatabaseSync): void {
 }
 
 export class DirectConnectStore {
-  readonly db: DatabaseSync
+  readonly db: DatabaseSync | undefined
   /**
    * Async driver seam (HA PG support). For sqlite this wraps `db` with async
    * signatures — zero behaviour change. Method bodies migrate from
@@ -244,7 +244,7 @@ export class DirectConnectStore {
     // undefined on purpose — sqlite-only consumers (tests, schema migration
     // code) never run on this form.
     if (pgDriver) {
-      this.db = undefined as unknown as DatabaseSync
+      this.db = undefined
       this.driver = pgDriver
       return
     }
@@ -1356,6 +1356,7 @@ export class DirectConnectStore {
    * org_id column + per-org partial unique indexes. Idempotent.
    */
   private migrateConfigItemsOrgScoping(): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
     try {
       const createSql = (this.db
         .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='config_items'`)
@@ -1502,6 +1503,11 @@ export class DirectConnectStore {
     // The postgres construction form leaves `db` undefined, so the old
     // `this.db.close()` crashed there and never released the connections.
     await this.driver.close()
+  }
+
+  requireSqliteDb(): DatabaseSync {
+    if (!this.db) throw new Error('SQLite database handle is unavailable for the PostgreSQL store')
+    return this.db
   }
 
   isOpen(): boolean {

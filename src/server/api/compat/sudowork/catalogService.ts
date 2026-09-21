@@ -39,11 +39,11 @@ export class SudoworkCatalogService {
     repository: CatalogRepository
     catalog: CatalogService
     identities: IdentityRepository
-    buildVisibility: (actor: IdentityActor) => VisibilityFilter
+    buildVisibility: (actor: IdentityActor) => Promise<VisibilityFilter>
     uploads?: CatalogUploadService
   }) {}
 
-  listAgents(input: {
+  async listAgents(input: {
     actor: IdentityActor
     tenantCode?: string
     cursor?: string
@@ -51,14 +51,14 @@ export class SudoworkCatalogService {
     query?: string
     category?: string
   }) {
-    const target = this.resolveOrganization(input.actor, input.tenantCode)
-    const page = this.options.repository.listAgents({
+    const target = await this.resolveOrganization(input.actor, input.tenantCode)
+    const page = await this.options.repository.listAgents({
       orgId: target.orgId,
       cursor: input.cursor,
       limit: input.limit,
       query: input.query,
       category: input.category,
-      ...this.listAccess(input.actor),
+      ...await this.listAccess(input.actor),
     })
     return {
       success: true as const,
@@ -71,7 +71,7 @@ export class SudoworkCatalogService {
     }
   }
 
-  listSkills(input: {
+  async listSkills(input: {
     actor: IdentityActor
     tenantCode?: string
     cursor?: string
@@ -79,14 +79,14 @@ export class SudoworkCatalogService {
     query?: string
     category?: string
   }) {
-    const target = this.resolveOrganization(input.actor, input.tenantCode)
-    const page = this.options.repository.listSkills({
+    const target = await this.resolveOrganization(input.actor, input.tenantCode)
+    const page = await this.options.repository.listSkills({
       orgId: target.orgId,
       cursor: input.cursor,
       limit: input.limit,
       query: input.query,
       category: input.category,
-      ...this.listAccess(input.actor),
+      ...await this.listAccess(input.actor),
     })
     return {
       success: true as const,
@@ -99,13 +99,13 @@ export class SudoworkCatalogService {
     }
   }
 
-  listVisibleAgents(actor: IdentityActor) {
-    const profile = this.options.identities.getOrganizationProfile(actor.orgId)
+  async listVisibleAgents(actor: IdentityActor) {
+    const profile = await this.options.identities.getOrganizationProfile(actor.orgId)
     if (!profile?.localEnabled) return { success: true as const, data: [] as LegacyAgentDto[] }
-    const page = this.options.catalog.listVisibleAgents({
+    const page = await this.options.catalog.listVisibleAgents({
       actor,
       mode: 'local',
-      visibility: this.options.buildVisibility(actor),
+      visibility: await this.options.buildVisibility(actor),
       limit: 100,
     })
     return {
@@ -114,13 +114,13 @@ export class SudoworkCatalogService {
     }
   }
 
-  listVisibleBindings(actor: IdentityActor) {
-    const profile = this.options.identities.getOrganizationProfile(actor.orgId)
+  async listVisibleBindings(actor: IdentityActor) {
+    const profile = await this.options.identities.getOrganizationProfile(actor.orgId)
     if (!profile?.localEnabled) return { success: true as const, data: [] }
-    const page = this.options.catalog.listVisibleAgents({
+    const page = await this.options.catalog.listVisibleAgents({
       actor,
       mode: 'local',
-      visibility: this.options.buildVisibility(actor),
+      visibility: await this.options.buildVisibility(actor),
       limit: 100,
     })
     return {
@@ -140,10 +140,10 @@ export class SudoworkCatalogService {
     }
   }
 
-  getAgentDetail(actor: IdentityActor, agentId: string) {
-    const agent = this.requireAgent(agentId)
-    this.assertCanRead(actor, agent)
-    const profile = this.options.identities.getOrganizationProfile(actor.orgId)
+  async getAgentDetail(actor: IdentityActor, agentId: string) {
+    const agent = await this.requireAgent(agentId)
+    await this.assertCanRead(actor, agent)
+    const profile = await this.options.identities.getOrganizationProfile(actor.orgId)
     if (!profile?.localEnabled) throw new SudoworkCatalogError(404, '智能体不存在')
     return {
       success: true as const,
@@ -154,10 +154,10 @@ export class SudoworkCatalogService {
     }
   }
 
-  getSkillDetail(actor: IdentityActor, skillId: string) {
-    const skill = this.requireSkill(skillId)
-    this.assertCanRead(actor, skill)
-    const profile = this.options.identities.getOrganizationProfile(actor.orgId)
+  async getSkillDetail(actor: IdentityActor, skillId: string) {
+    const skill = await this.requireSkill(skillId)
+    await this.assertCanRead(actor, skill)
+    const profile = await this.options.identities.getOrganizationProfile(actor.orgId)
     if (!profile?.localEnabled) throw new SudoworkCatalogError(404, '技能不存在')
     return {
       success: true as const,
@@ -168,11 +168,11 @@ export class SudoworkCatalogService {
     }
   }
 
-  listCategories(actor: IdentityActor, type: 'agent' | 'skill') {
-    const visibility = this.options.buildVisibility(actor)
-    const profile = this.options.identities.getOrganizationProfile(actor.orgId)
+  async listCategories(actor: IdentityActor, type: 'agent' | 'skill') {
+    const visibility = await this.options.buildVisibility(actor)
+    const profile = await this.options.identities.getOrganizationProfile(actor.orgId)
     if (!profile?.localEnabled) return { success: true as const, data: [] as string[] }
-    const categories = this.options.repository.listCategories({
+    const categories = await this.options.repository.listCategories({
       type, orgId: actor.orgId, mode: 'local', status: 'approved', visibility,
     })
     return { success: true as const, data: categories.sort((left, right) => left.localeCompare(right, 'zh-CN')) }
@@ -191,10 +191,10 @@ export class SudoworkCatalogService {
     bytes: Buffer
     idempotencyKey: string
   }) {
-    this.resolveOrganization(input.actor, input.tenantCode)
+    await this.resolveOrganization(input.actor, input.tenantCode)
     if (!this.options.uploads) throw new SudoworkCatalogError(500, '制品存储未配置')
     const agent = await this.options.uploads.uploadAgent(input)
-    const profile = this.options.identities.getOrganizationProfile(agent.orgId)
+    const profile = await this.options.identities.getOrganizationProfile(agent.orgId)
     return {
       success: true as const,
       message: 'success',
@@ -219,10 +219,10 @@ export class SudoworkCatalogService {
     bytes: Buffer
     idempotencyKey: string
   }) {
-    this.resolveOrganization(input.actor, input.tenantCode)
+    await this.resolveOrganization(input.actor, input.tenantCode)
     if (!this.options.uploads) throw new SudoworkCatalogError(500, '制品存储未配置')
     const skill = await this.options.uploads.uploadSkill(input)
-    const profile = this.options.identities.getOrganizationProfile(skill.orgId)
+    const profile = await this.options.identities.getOrganizationProfile(skill.orgId)
     return {
       success: true as const,
       message: 'success',
@@ -235,7 +235,7 @@ export class SudoworkCatalogService {
     filename: string
   }> {
     if (!this.options.uploads) throw new SudoworkCatalogError(404, '制品不存在')
-    const resource = kind === 'agent' ? this.requireAgent(resourceId) : this.requireSkill(resourceId)
+    const resource = kind === 'agent' ? await this.requireAgent(resourceId) : await this.requireSkill(resourceId)
     if (!resource.enabled || resource.status !== 'approved' || !resource.filePath || !resource.checksum) {
       throw new SudoworkCatalogError(404, '制品不存在')
     }
@@ -245,46 +245,46 @@ export class SudoworkCatalogService {
     }
   }
 
-  reviewAgent(actor: IdentityActor, agentId: string): void {
-    const resource = this.requireAgent(agentId)
+  async reviewAgent(actor: IdentityActor, agentId: string): Promise<void> {
+    const resource = await this.requireAgent(agentId)
     try {
-      this.options.catalog.reviewAgent({ actor, orgId: resource.orgId, agentId, approved: true })
+      await this.options.catalog.reviewAgent({ actor, orgId: resource.orgId, agentId, approved: true })
     } catch (error) {
       throw mapDomainError(error)
     }
   }
 
-  reviewSkill(actor: IdentityActor, skillId: string): void {
-    const resource = this.requireSkill(skillId)
+  async reviewSkill(actor: IdentityActor, skillId: string): Promise<void> {
+    const resource = await this.requireSkill(skillId)
     try {
-      this.options.catalog.reviewSkill({ actor, orgId: resource.orgId, skillId, approved: true })
+      await this.options.catalog.reviewSkill({ actor, orgId: resource.orgId, skillId, approved: true })
     } catch (error) {
       throw mapDomainError(error)
     }
   }
 
-  deleteAgent(actor: IdentityActor, agentId: string): void {
-    const resource = this.requireAgent(agentId)
+  async deleteAgent(actor: IdentityActor, agentId: string): Promise<void> {
+    const resource = await this.requireAgent(agentId)
     try {
-      this.options.catalog.deleteAgent(actor, agentId, resource.orgId)
+      await this.options.catalog.deleteAgent(actor, agentId, resource.orgId)
     } catch (error) {
       throw mapDomainError(error)
     }
   }
 
-  deleteSkill(actor: IdentityActor, skillId: string): void {
-    const resource = this.requireSkill(skillId)
+  async deleteSkill(actor: IdentityActor, skillId: string): Promise<void> {
+    const resource = await this.requireSkill(skillId)
     try {
-      this.options.catalog.deleteSkill(actor, skillId, resource.orgId)
+      await this.options.catalog.deleteSkill(actor, skillId, resource.orgId)
     } catch (error) {
       throw mapDomainError(error)
     }
   }
 
-  private resolveOrganization(actor: IdentityActor, tenantCode?: string): { orgId: string; code: string } {
+  private async resolveOrganization(actor: IdentityActor, tenantCode?: string): Promise<{ orgId: string; code: string }> {
     const profile = tenantCode
-      ? this.options.identities.getOrganizationProfileByCode(tenantCode)
-      : this.options.identities.getOrganizationProfile(actor.orgId)
+      ? await this.options.identities.getOrganizationProfileByCode(tenantCode)
+      : await this.options.identities.getOrganizationProfile(actor.orgId)
     if (!profile) throw new SudoworkCatalogError(404, '租户不存在')
     if (actor.role !== 'super_admin' && actor.orgId !== profile.orgId) {
       throw new SudoworkCatalogError(403, '权限不足')
@@ -292,36 +292,36 @@ export class SudoworkCatalogService {
     return { orgId: profile.orgId, code: profile.code }
   }
 
-  private listAccess(actor: IdentityActor) {
+  private async listAccess(actor: IdentityActor) {
     if (actor.role === 'admin' || actor.role === 'super_admin') return { includeDisabled: true as const }
     return {
       mode: 'local' as const,
       status: 'approved',
-      visibility: this.options.buildVisibility(actor),
+      visibility: await this.options.buildVisibility(actor),
     }
   }
 
-  private requireAgent(id: string): CatalogAgent {
-    const resource = this.options.repository.findAgent(id)
+  private async requireAgent(id: string): Promise<CatalogAgent> {
+    const resource = await this.options.repository.findAgent(id)
     if (!resource) throw new SudoworkCatalogError(404, '智能体不存在')
     return resource
   }
 
-  private requireSkill(id: string): CatalogSkill {
-    const resource = this.options.repository.findSkill(id)
+  private async requireSkill(id: string): Promise<CatalogSkill> {
+    const resource = await this.options.repository.findSkill(id)
     if (!resource) throw new SudoworkCatalogError(404, '技能不存在')
     return resource
   }
 
-  private assertCanRead(actor: IdentityActor, resource: CatalogAgent | CatalogSkill): void {
+  private async assertCanRead(actor: IdentityActor, resource: CatalogAgent | CatalogSkill): Promise<void> {
     if (actor.role === 'super_admin') return
     const type = 'providerType' in resource ? 'agent' : 'skill'
-    if (!this.options.repository.isAvailableToOrganization(type, resource.id, actor.orgId)) {
+    if (!(await this.options.repository.isAvailableToOrganization(type, resource.id, actor.orgId))) {
       throw new SudoworkCatalogError(404, '资源不存在')
     }
     if (actor.role === 'admin' || resource.authorId === actor.userId) return
     const visible = resource.enabled && resource.status === 'approved'
-      && isVisibleTo(resource.visibleTo, this.options.buildVisibility(actor))
+      && isVisibleTo(resource.visibleTo, await this.options.buildVisibility(actor))
     if (!visible) throw new SudoworkCatalogError(404, '资源不存在')
   }
 }

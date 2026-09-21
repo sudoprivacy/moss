@@ -168,7 +168,7 @@ export class P5QmsMigrationService {
         }
       }
       for (const tenant of metadata.tenants) {
-        if (!this.options.organizations.hasCode(tenant)) {
+        if (!(await this.options.organizations.hasCode(tenant))) {
           issues.push({ code: 'UNKNOWN_ORGANIZATION', table, message: `tenant_id ${tenant} 未映射到 Moss Organization` })
         }
       }

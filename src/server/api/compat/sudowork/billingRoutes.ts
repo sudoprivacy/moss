@@ -66,13 +66,13 @@ export function registerSudoworkBillingRoutes(
   app.get('/api/v1/recharge/query/:orderNo', async context => {
     const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().queryOrder(actor, context.req.param('orderNo')) })
+    return context.json({ success: true, data: await billing().queryOrder(actor, context.req.param('orderNo')) })
   })
 
   app.get('/api/v1/recharge/list', async context => {
     const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().listUserOrders({
+    return context.json({ success: true, data: await billing().listUserOrders({
       actor, page: page(context.req.query('page'), 1), pageSize: page(context.req.query('pageSize'), 20),
     }) })
   })
@@ -80,7 +80,7 @@ export function registerSudoworkBillingRoutes(
   app.post('/api/v1/recharge/cancel/:orderNo', async context => {
     const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    billing().cancelOrder({ actor, orderNo: context.req.param('orderNo'), idempotencyKey: idempotencyKey(context) })
+    await billing().cancelOrder({ actor, orderNo: context.req.param('orderNo'), idempotencyKey: idempotencyKey(context) })
     return context.json({ success: true, msg: '订单已取消' })
   })
 
@@ -97,12 +97,12 @@ export function registerSudoworkBillingRoutes(
   app.get('/api/v1/admin/recharge/stats', async context => {
     const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().getRechargeStats(actor) })
+    return context.json({ success: true, data: await billing().getRechargeStats(actor) })
   })
   app.get('/api/v1/admin/recharge/refund-calc/:orderNo', async context => {
     const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
-    return context.json({ success: true, data: billing().calculateRefund(actor, context.req.param('orderNo')) })
+    return context.json({ success: true, data: await billing().calculateRefund(actor, context.req.param('orderNo')) })
   })
   app.post('/api/v1/admin/recharge/orders/:orderNo/refund', async context => {
     const actor = await admin(context.req.header('Authorization'))
@@ -192,7 +192,7 @@ export function registerSudoworkBillingRoutes(
     const actor = await user(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
-    return context.json({ success: true, data: billing().createCreditApplication({
+    return context.json({ success: true, data: await billing().createCreditApplication({
       actor, requestedPoints: Number(value.requested_points), reason: value.reason,
       idempotencyKey: idempotencyKey(context),
     }) })
@@ -235,7 +235,7 @@ export function registerSudoworkBillingRoutes(
     const actor = await admin(context.req.header('Authorization'))
     if (!actor) return unauthorized(context)
     const value = await body(context)
-    billing().rejectCreditApplication({
+    await billing().rejectCreditApplication({
       actor, legacyApplicationId: Number(context.req.param('id')), adminComment: value.admin_comment,
       idempotencyKey: idempotencyKey(context),
     })

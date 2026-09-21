@@ -1,4 +1,3 @@
-import type { DatabaseSync } from 'node:sqlite'
 import type { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
 import { resolveEffectiveLoginMethod } from '../../../configuration/loginPolicy.js'
@@ -8,7 +7,7 @@ import {
   type IdentityActor,
 } from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
-import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../../../db/driver.js'
 import { getSystemSettings, updateSystemSettingsWithCommit } from '../../../systemSettings.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
@@ -63,7 +62,7 @@ export class SudoworkSystemConfigService {
   private readonly infrastructureSettings: PlatformIntegrationSettingsRepository
 
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     policies: ClientPolicyRepository
     infrastructureSettings?: PlatformIntegrationSettingsRepository
     identities: IdentityRepository
@@ -90,13 +89,13 @@ export class SudoworkSystemConfigService {
       ?? new PlatformIntegrationSettingsRepository(options.db)
   }
 
-  getLoginMethod(orgId?: string): LoginMethod {
+  async getLoginMethod(orgId?: string): Promise<LoginMethod> {
     return resolveEffectiveLoginMethod(this.options, orgId)
   }
 
-  getPublicConfig(orgId?: string): Json {
-    const policy = this.policy(orgId)
-    const infrastructure = this.getInfrastructureConfig()
+  async getPublicConfig(orgId?: string): Promise<Json> {
+    const policy = await this.policy(orgId)
+    const infrastructure = await this.getInfrastructureConfig()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
@@ -105,7 +104,7 @@ export class SudoworkSystemConfigService {
     const enabledProductImprovement = flag(productImprovement.enabled)
     const systemSettings = getSystemSettings()
     return {
-      login_method: loginMethodToNumber(this.getLoginMethod(orgId)),
+      login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
       log_report: enabledLogReport === 1
         ? { enabled: 1, baseurl: `${string(logReport.protocol, 'https')}://${string(logReport.domain)}` }
         : { enabled: 0 },
@@ -121,10 +120,10 @@ export class SudoworkSystemConfigService {
       )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
-      third_party_auth: this.thirdPartyAuth(false, orgId),
+      third_party_auth: await this.thirdPartyAuth(false, orgId),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
-      client_cron_enabled: this.effectiveClientCronEnabled(orgId, systemSettings.clientCronEnabled),
+      client_cron_enabled: await this.effectiveClientCronEnabled(orgId, systemSettings.clientCronEnabled),
       client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
         : systemSettings.clientShowToolCalls,
@@ -132,13 +131,13 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  getCreditApplicationPolicy(orgId?: string): {
+  async getCreditApplicationPolicy(orgId?: string): Promise<{
     rechargeMode: 'payment' | 'approve' | 'disabled'
     minPoints: number
     maxPoints: number
     allowDuplicatePending: boolean
-  } {
-    const policy = this.policy(orgId)
+  }> {
+    const policy = await this.policy(orgId)
     const credit = normalizeCreditApplication(policy.creditApplication)
     const mode = rechargeMode(policy.rechargeMode)
     return {
@@ -149,32 +148,32 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  getInfrastructureConfig(): SudoworkInfrastructureConfig {
+  async getInfrastructureConfig(): Promise<SudoworkInfrastructureConfig> {
     return {
       sms: normalizeSmsInfrastructure(
-        this.infrastructureSettings.get('sudowork.sms'),
+        await this.infrastructureSettings.get('sudowork.sms'),
         this.options.defaults.sms ?? DEFAULT_SMS_INFRASTRUCTURE,
       ),
       billing: normalizeBillingInfrastructure(
-        this.infrastructureSettings.get('sudowork.billing'),
+        await this.infrastructureSettings.get('sudowork.billing'),
         this.options.defaults.billing ?? DEFAULT_BILLING_INFRASTRUCTURE,
       ),
     }
   }
 
-  getAdminConfig(actor: IdentityActor): Json {
+  async getAdminConfig(actor: IdentityActor): Promise<Json> {
     this.assertAdmin(actor)
     const orgId = this.policyOrgId(actor)
-    const policy = this.policy(orgId)
+    const policy = await this.policy(orgId)
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
     const config: Json = {
       scope_type: orgId ? 'organization' : 'platform',
       organization_id: orgId ?? '',
-      login_method: loginMethodToNumber(this.getLoginMethod(orgId)),
-      sms_configured: this.isSmsConfigured(),
-      third_party_auth: this.thirdPartyAuth(true, orgId),
+      login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
+      sms_configured: await this.isSmsConfigured(),
+      third_party_auth: await this.thirdPartyAuth(true, orgId),
       log_report: {
         enabled: flag(logReport.enabled),
         protocol: string(logReport.protocol),
@@ -190,7 +189,7 @@ export class SudoworkSystemConfigService {
       scode_auto_model: string(policy.scodeAutoModel),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
-      client_cron_enabled: this.effectiveClientCronEnabled(orgId),
+      client_cron_enabled: await this.effectiveClientCronEnabled(orgId),
       client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
         ? policy.clientShowToolCalls
         : getSystemSettings().clientShowToolCalls,
@@ -200,7 +199,7 @@ export class SudoworkSystemConfigService {
       ),
     }
     if (orgId) return config
-    const infrastructure = this.getInfrastructureConfig()
+    const infrastructure = await this.getInfrastructureConfig()
     return {
       ...config,
       restart_required: true,
@@ -209,12 +208,13 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  getCredentialData(orgId?: string): Json {
+  async getCredentialData(orgId?: string): Promise<Json> {
     const result: Json = {}
-    const logReport = object(this.policy(orgId).logReport)
+    const policy = await this.policy(orgId)
+    const logReport = object(policy.logReport)
     const logKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (flag(logReport.enabled) === 1 && logKey) result.log_report = { key: logKey }
-    const productImprovement = object(this.policy(orgId).productImprovement)
+    const productImprovement = object(policy.productImprovement)
     if (flag(productImprovement.enabled) === 1) {
       const value: Json = { api_key: this.options.defaults.productImprovementApiKey ?? '' }
       if (this.options.defaults.productImprovementEncryptionRequired) {
@@ -228,32 +228,32 @@ export class SudoworkSystemConfigService {
   async update(actor: IdentityActor, body: Json): Promise<void> {
     const {
       patch, inheritedKeys, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId, clientCronEnabled,
-    } = this.prepareUpdate(actor, body)
+    } = await this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     try {
       if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
-      const commit = () => runInTransaction(this.options.db, () => {
+      const commit = () => this.options.db.transaction(async () => {
         if (Object.keys(patch).length > 0) {
-          if (orgId) this.options.policies.putOrganization(orgId, patch, actor.userId)
-          else this.options.policies.putPlatform(patch, actor.userId)
+          if (orgId) await this.options.policies.putOrganization(orgId, patch, actor.userId)
+          else await this.options.policies.putPlatform(patch, actor.userId)
         }
         if (orgId && inheritedKeys.length > 0) {
-          this.options.policies.removeOrganizationKeys(orgId, inheritedKeys, actor.userId)
+          await this.options.policies.removeOrganizationKeys(orgId, inheritedKeys, actor.userId)
         }
         if (clientCronEnabled !== undefined && orgId !== undefined) {
-          this.options.identities.setOrganizationClientCronEnabled(orgId, clientCronEnabled)
+          await this.options.identities.setOrganizationClientCronEnabled(orgId, clientCronEnabled)
         }
         if (smsInfrastructure) {
-          this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
+          await this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
         }
         if (billingInfrastructure) {
-          this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
+          await this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
         }
-        if (providers) this.replaceCasConnections(providers, orgId)
+        if (providers) await this.replaceCasConnections(providers, orgId)
       })
       if (clientCronEnabled !== undefined && orgId === undefined) {
         await updateSystemSettingsWithCommit({ clientCronEnabled }, commit)
-      } else commit()
+      } else await commit()
     } catch (error) {
       if (nextLogKey !== undefined) {
         if (previousLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, previousLogKey)
@@ -263,11 +263,11 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  validateUpdate(actor: IdentityActor, body: Json): void {
-    this.prepareUpdate(actor, body)
+  async validateUpdate(actor: IdentityActor, body: Json): Promise<void> {
+    await this.prepareUpdate(actor, body)
   }
 
-  private prepareUpdate(actor: IdentityActor, body: Json): {
+  private async prepareUpdate(actor: IdentityActor, body: Json): Promise<{
     patch: Json
     inheritedKeys: string[]
     providers?: NormalizedProvider[]
@@ -276,7 +276,7 @@ export class SudoworkSystemConfigService {
     billingInfrastructure?: SudoworkInfrastructureConfig['billing']
     orgId?: string
     clientCronEnabled?: boolean
-  } {
+  }> {
     this.assertAdmin(actor)
     const orgId = this.policyOrgId(actor)
     const platformActor = orgId === undefined
@@ -288,7 +288,7 @@ export class SudoworkSystemConfigService {
 
     if (body.third_party_auth !== undefined) {
       const normalized = normalizeThirdPartyAuth(body.third_party_auth)
-      providers = normalized.providers.map(provider => this.validateProvider(provider, orgId))
+      providers = await Promise.all(normalized.providers.map(provider => this.validateProvider(provider, orgId)))
       if (normalized.enabled === 1 && !providers.some(provider => provider.id === normalized.defaultProvider && provider.enabled)) {
         throw new SudoworkSystemConfigError(400, '默认三方认证 Provider 不存在或未启用')
       }
@@ -299,10 +299,10 @@ export class SudoworkSystemConfigService {
       if (body.login_method !== 0 && body.login_method !== 1 && body.login_method !== 2) {
         throw new SudoworkSystemConfigError(400, '无效的登录方式')
       }
-      if (body.login_method === 0 && !this.isSmsConfigured()) {
+      if (body.login_method === 0 && !(await this.isSmsConfigured())) {
         throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
       }
-      if (body.login_method === 2 && !this.hasEnabledThirdPartyAuth(orgId, patch.thirdPartyAuth, providers)) {
+      if (body.login_method === 2 && !(await this.hasEnabledThirdPartyAuth(orgId, patch.thirdPartyAuth, providers))) {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
       }
       patch.loginMethod = body.login_method
@@ -359,7 +359,7 @@ export class SudoworkSystemConfigService {
     if (body.client_cron_enabled !== undefined) {
       const requested = parseBoolean(body.client_cron_enabled, 'client_cron_enabled')
       const current = orgId
-        ? this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled
+        ? (await this.options.identities.getOrganizationProfile(orgId))?.clientCronEnabled
         : getSystemSettings().clientCronEnabled
       if (current === undefined || requested !== current) clientCronEnabled = requested
     }
@@ -373,18 +373,18 @@ export class SudoworkSystemConfigService {
       if (!platformActor) throw new SudoworkSystemConfigError(403, '短信基础设施属于部署级配置,仅平台超级管理员可修改')
       smsInfrastructure = parseSmsInfrastructure(
         body.sms,
-        this.getInfrastructureConfig().sms,
+        (await this.getInfrastructureConfig()).sms,
       )
     }
     if (body.billing !== undefined) {
       if (!platformActor) throw new SudoworkSystemConfigError(403, '支付基础设施属于部署级配置,仅平台超级管理员可修改')
       billingInfrastructure = parseBillingInfrastructure(
         body.billing,
-        this.getInfrastructureConfig().billing,
+        (await this.getInfrastructureConfig()).billing,
       )
     }
     const scoped = orgId
-      ? splitPlatformInheritedValues(patch, this.platformInheritedValues(orgId))
+      ? splitPlatformInheritedValues(patch, await this.platformInheritedValues(orgId))
       : { patch, inheritedKeys: [] }
     return {
       patch: scoped.patch,
@@ -398,9 +398,9 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  isSmsConfigured(): boolean {
+  async isSmsConfigured(): Promise<boolean> {
     if (this.options.smsConfigured !== undefined) return this.options.smsConfigured
-    const sms = this.getInfrastructureConfig().sms
+    const sms = (await this.getInfrastructureConfig()).sms
     return this.options.smsRuntimeAvailable === true
       && sms.provider === 'tencent'
       && [sms.sdkAppId, sms.signName, sms.templateId, sms.signId, sms.region].every(Boolean)
@@ -410,16 +410,16 @@ export class SudoworkSystemConfigService {
       ))
   }
 
-  private policy(orgId?: string): Json {
+  private policy(orgId?: string): Promise<Json> {
     return this.options.policies.getEffective(orgId)
   }
 
-  private platformInheritedValues(orgId: string): Json {
-    const platform = this.options.policies.getPlatform()
+  private async platformInheritedValues(orgId: string): Promise<Json> {
+    const platform = await this.options.policies.getPlatform()
     const systemSettings = getSystemSettings()
     return {
       ...platform,
-      loginMethod: loginMethodToNumber(resolveEffectiveLoginMethod(this.options, orgId, { ignoreOrganizationPolicy: true })),
+      loginMethod: loginMethodToNumber(await resolveEffectiveLoginMethod(this.options, orgId, { ignoreOrganizationPolicy: true })),
       logReport: platform.logReport ?? { enabled: 0, protocol: '', domain: '', keySet: Boolean(this.options.secrets.get(LOG_REPORT_SECRET_KEY)) },
       versionUpdate: platform.versionUpdate ?? { enabled: 0, cosDomain: '' },
       productImprovement: platform.productImprovement ?? { enabled: 0 },
@@ -437,15 +437,16 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  private thirdPartyAuth(admin: boolean, orgId?: string): Json {
-    const policy = object(this.policy(orgId).thirdPartyAuth)
+  private async thirdPartyAuth(admin: boolean, orgId?: string): Promise<Json> {
+    const policy = object((await this.policy(orgId)).thirdPartyAuth)
     const profiles = orgId
-      ? this.options.identities.listOrganizationProfiles().filter(profile => profile.orgId === orgId)
-      : this.options.identities.listOrganizationProfiles()
-    const providers = profiles.flatMap(profile =>
-      this.options.identities.listIntegrationConnections(profile.orgId, 'cas').map(connection =>
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgId)
+      : await this.options.identities.listOrganizationProfiles()
+    const groups = await Promise.all(profiles.map(async profile =>
+      (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')).map(connection =>
         legacyProvider(connection, profile.code, admin)),
-    )
+    ))
+    const providers = groups.flat()
     const visibleProviders = providers.filter(item => admin || item.enabled === 1)
     const enabledProviders = visibleProviders.filter(item => item.enabled === 1)
     const configuredDefault = string(policy.defaultProvider)
@@ -459,40 +460,41 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  private hasEnabledThirdPartyAuth(
+  private async hasEnabledThirdPartyAuth(
     orgId?: string,
     policyOverride?: unknown,
     providersOverride?: NormalizedProvider[],
-  ): boolean {
-    const policy = object(policyOverride ?? this.policy(orgId).thirdPartyAuth)
+  ): Promise<boolean> {
+    const policy = object(policyOverride ?? (await this.policy(orgId)).thirdPartyAuth)
     if (flag(policy.enabled) !== 1) return false
     const enabledProviderIds = providersOverride
       ? providersOverride
         .filter(provider => provider.enabled && (!orgId || provider.orgId === orgId))
         .map(provider => provider.id)
-      : this.enabledCasProviderIds(orgId)
+      : await this.enabledCasProviderIds(orgId)
     if (enabledProviderIds.length === 0) return false
     const defaultProvider = string(policy.defaultProvider)
     return !defaultProvider || enabledProviderIds.includes(defaultProvider) || enabledProviderIds.length > 0
   }
 
-  private enabledCasProviderIds(orgId?: string): string[] {
+  private async enabledCasProviderIds(orgId?: string): Promise<string[]> {
     const profiles = orgId
-      ? this.options.identities.listOrganizationProfiles().filter(profile => profile.orgId === orgId)
-      : this.options.identities.listOrganizationProfiles()
-    return profiles.flatMap(profile =>
-      this.options.identities.listIntegrationConnections(profile.orgId, 'cas')
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgId)
+      : await this.options.identities.listOrganizationProfiles()
+    const groups = await Promise.all(profiles.map(async profile =>
+      (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas'))
         .filter(connection => connection.enabled)
         .map(connection => connection.id),
-    )
+    ))
+    return groups.flat()
   }
 
-  private validateProvider(provider: NormalizedProvider, orgScopeId?: string): NormalizedProvider {
+  private async validateProvider(provider: NormalizedProvider, orgScopeId?: string): Promise<NormalizedProvider> {
     if (provider.type !== 'cas') throw new SudoworkSystemConfigError(400, '当前仅支持 CAS 类型 Provider')
     if (!provider.id || !provider.name) throw new SudoworkSystemConfigError(400, 'Provider ID 和名称不能为空')
-    const profile = this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
+    const profile = await this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
     if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
-    const existing = this.options.identities.getIntegrationConnection(provider.id)
+    const existing = await this.options.identities.getIntegrationConnection(provider.id)
     if (orgScopeId && existing && existing.orgId !== orgScopeId) {
       throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
     }
@@ -514,18 +516,18 @@ export class SudoworkSystemConfigService {
     return { ...provider, orgId: profile.orgId }
   }
 
-  private replaceCasConnections(providers: NormalizedProvider[], orgScopeId?: string): void {
+  private async replaceCasConnections(providers: NormalizedProvider[], orgScopeId?: string): Promise<void> {
     const ids = new Set(providers.map(provider => provider.id))
     const profiles = orgScopeId
-      ? this.options.identities.listOrganizationProfiles().filter(profile => profile.orgId === orgScopeId)
-      : this.options.identities.listOrganizationProfiles()
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgScopeId)
+      : await this.options.identities.listOrganizationProfiles()
     for (const profile of profiles) {
-      for (const existing of this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
-        if (!ids.has(existing.id)) this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
+      for (const existing of await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
+        if (!ids.has(existing.id)) await this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
       }
     }
     for (const provider of providers) {
-      this.options.identities.putIntegrationConnection({
+      await this.options.identities.putIntegrationConnection({
         id: provider.id,
         orgId: provider.orgId!,
         providerType: 'cas',
@@ -559,9 +561,9 @@ export class SudoworkSystemConfigService {
     return hasGlobalOrganizationAccess(actor) ? undefined : actor.orgId
   }
 
-  private effectiveClientCronEnabled(orgId?: string, global = getSystemSettings().clientCronEnabled): boolean {
+  private async effectiveClientCronEnabled(orgId?: string, global = getSystemSettings().clientCronEnabled): Promise<boolean> {
     return orgId
-      ? global && (this.options.identities.getOrganizationProfile(orgId)?.clientCronEnabled ?? true)
+      ? global && ((await this.options.identities.getOrganizationProfile(orgId))?.clientCronEnabled ?? true)
       : global
   }
 }

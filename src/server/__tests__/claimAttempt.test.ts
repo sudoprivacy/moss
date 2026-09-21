@@ -34,7 +34,7 @@ async function setup() {
 }
 
 function makeStale(store: DirectConnectStore, instanceId: string, ageMs: number): void {
-  store.db
+  store.requireSqliteDb()
     .prepare("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ?")
     .run(Date.now() - ageMs, instanceId);
 }
@@ -61,7 +61,7 @@ describe("claimAttempt — concurrent multi-instance HA", () => {
 
   it("does not rewrite an attempt that is already owned by this instance", async () => {
     const { store, a, attempt } = await setup();
-    store.db.exec(`
+    store.requireSqliteDb().exec(`
       CREATE TRIGGER reject_redundant_attempt_owner_update
       BEFORE UPDATE OF server_instance_id ON session_attempts
       WHEN OLD.attempt_id = '${attempt.attemptId}'

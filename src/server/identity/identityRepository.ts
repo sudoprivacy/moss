@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { fromStoredPointUnits, toStoredPointUnits } from '../billing/pointUnits.js'
+import type { DbDriver, SqlRow } from '../db/driver.js'
 
 export type OrganizationLoginMethod = 'sms' | 'password' | 'cas'
 
@@ -88,8 +89,6 @@ export interface OperationAuditRecord {
   createdAt: number
 }
 
-type SqlRow = Record<string, unknown>
-
 function now(): number {
   return Date.now()
 }
@@ -171,16 +170,11 @@ function mapIntegrationConnection(row: SqlRow): IntegrationConnection {
   }
 }
 
-export class IdentityRepository {
-  constructor(
-    readonly db: DatabaseSync,
-    options: { legacyClientCronEnabled?: boolean } = {},
-  ) {
-    this.initTables(options)
-  }
-
-  private initTables(options: { legacyClientCronEnabled?: boolean }): void {
-    this.db.exec(`
+export function ensureIdentitySchema(
+  db: DatabaseSync,
+  options: { legacyClientCronEnabled?: boolean } = {},
+): void {
+    db.exec(`
       CREATE TABLE IF NOT EXISTS organization_profiles (
         org_id TEXT PRIMARY KEY REFERENCES organizations(id),
         code TEXT NOT NULL UNIQUE,
@@ -323,18 +317,18 @@ export class IdentityRepository {
         ON integration_connections (org_id, provider_type, enabled);
     `)
 
-    const profileColumns = this.db.prepare('PRAGMA table_info(organization_profiles)').all() as SqlRow[]
+    const profileColumns = db.prepare('PRAGMA table_info(organization_profiles)').all() as SqlRow[]
     if (!profileColumns.some(column => column.name === 'client_cron_enabled')) {
       const legacyDefault = options.legacyClientCronEnabled === false ? 0 : 1
-      this.db.exec(
+      db.exec(
         `ALTER TABLE organization_profiles ADD COLUMN client_cron_enabled INTEGER NOT NULL DEFAULT ${legacyDefault}`,
       )
     }
-    const invitationColumns = this.db.prepare('PRAGMA table_info(invitations)').all() as SqlRow[]
+    const invitationColumns = db.prepare('PRAGMA table_info(invitations)').all() as SqlRow[]
     if (!invitationColumns.some(column => column.name === 'legacy_initial_quota_usd')) {
-      this.db.exec('ALTER TABLE invitations ADD COLUMN legacy_initial_quota_usd REAL')
+      db.exec('ALTER TABLE invitations ADD COLUMN legacy_initial_quota_usd REAL')
     }
-    const auditColumns = this.db.prepare('PRAGMA table_info(operation_audit_events)').all() as SqlRow[]
+    const auditColumns = db.prepare('PRAGMA table_info(operation_audit_events)').all() as SqlRow[]
     for (const column of [
       'legacy_params_raw',
       'legacy_request_data_raw',
@@ -343,10 +337,13 @@ export class IdentityRepository {
       'user_agent',
     ]) {
       if (!auditColumns.some(item => item.name === column)) {
-        this.db.exec(`ALTER TABLE operation_audit_events ADD COLUMN ${column} TEXT`)
+        db.exec(`ALTER TABLE operation_audit_events ADD COLUMN ${column} TEXT`)
       }
     }
-  }
+}
+
+export class IdentityRepository {
+  constructor(readonly driver: DbDriver) {}
 
   putOrganizationProfile(input: {
     orgId: string
@@ -360,9 +357,9 @@ export class IdentityRepository {
     aboutName?: string | null
     appCompanyName?: string | null
     loginDescription?: string | null
-  }): void {
+  }): Promise<void> {
     const timestamp = now()
-    this.db.prepare(`
+    return this.driver.run(`
       INSERT INTO organization_profiles (
         org_id, code, login_method, local_enabled, cloud_enabled, client_cron_enabled, logo, app_name,
         top_name, about_name, app_company_name, login_description, created_at, updated_at
@@ -379,7 +376,7 @@ export class IdentityRepository {
         app_company_name = excluded.app_company_name,
         login_description = excluded.login_description,
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       input.orgId,
       input.code,
       input.loginMethod,
@@ -393,35 +390,35 @@ export class IdentityRepository {
       input.loginDescription ?? null,
       timestamp,
       timestamp,
-    )
+    ]).then(() => undefined)
   }
 
-  getOrganizationProfileByCode(code: string): OrganizationProfile | null {
-    const row = this.db.prepare(`
+  async getOrganizationProfileByCode(code: string): Promise<OrganizationProfile | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM organization_profiles WHERE code = ? LIMIT 1
-    `).get(code) as SqlRow | undefined
+    `, [code])
     return row ? mapOrganizationProfile(row) : null
   }
 
-  getOrganizationProfile(orgId: string): OrganizationProfile | null {
-    const row = this.db.prepare(`
+  async getOrganizationProfile(orgId: string): Promise<OrganizationProfile | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM organization_profiles WHERE org_id = ? LIMIT 1
-    `).get(orgId) as SqlRow | undefined
+    `, [orgId])
     return row ? mapOrganizationProfile(row) : null
   }
 
-  listOrganizationProfiles(): OrganizationProfile[] {
-    const rows = this.db.prepare(`
+  async listOrganizationProfiles(): Promise<OrganizationProfile[]> {
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM organization_profiles ORDER BY created_at ASC, org_id ASC
-    `).all() as SqlRow[]
+    `)
     return rows.map(mapOrganizationProfile)
   }
 
-  setOrganizationClientCronEnabled(orgId: string, enabled: boolean): void {
-    const result = this.db.prepare(`
+  async setOrganizationClientCronEnabled(orgId: string, enabled: boolean): Promise<void> {
+    const changes = await this.driver.run(`
       UPDATE organization_profiles SET client_cron_enabled = ?, updated_at = ? WHERE org_id = ?
-    `).run(enabled ? 1 : 0, now(), orgId)
-    if (result.changes !== 1) throw new Error(`Organization profile not found: ${orgId}`)
+    `, [enabled ? 1 : 0, now(), orgId])
+    if (changes !== 1) throw new Error(`Organization profile not found: ${orgId}`)
   }
 
   createAuthIdentity(input: {
@@ -432,14 +429,14 @@ export class IdentityRepository {
     issuer: string
     normalizedSubject: string
     metadata: Record<string, unknown>
-  }): void {
+  }): Promise<void> {
     const timestamp = now()
-    this.db.prepare(`
+    return this.driver.run(`
       INSERT INTO user_auth_identities (
         id, org_id, user_id, provider, issuer, normalized_subject,
         metadata_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id,
       input.orgId,
       input.userId,
@@ -449,31 +446,35 @@ export class IdentityRepository {
       JSON.stringify(input.metadata),
       timestamp,
       timestamp,
-    )
+    ]).then(() => undefined)
   }
 
-  findAuthIdentity(provider: string, issuer: string, normalizedSubject: string): AuthIdentity | null {
-    const row = this.db.prepare(`
+  async findAuthIdentity(provider: string, issuer: string, normalizedSubject: string): Promise<AuthIdentity | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM user_auth_identities
       WHERE provider = ? AND issuer = ? AND normalized_subject = ?
       LIMIT 1
-    `).get(provider, issuer, normalizedSubject) as SqlRow | undefined
+    `, [provider, issuer, normalizedSubject])
     return row ? mapAuthIdentity(row) : null
   }
 
-  findAuthIdentityByUser(userId: string, provider: string, issuer: string): AuthIdentity | null {
-    const row = this.db.prepare(`
+  async findAuthIdentityByUser(userId: string, provider: string, issuer: string): Promise<AuthIdentity | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM user_auth_identities
       WHERE user_id = ? AND provider = ? AND issuer = ? LIMIT 1
-    `).get(userId, provider, issuer) as SqlRow | undefined
+    `, [userId, provider, issuer])
     return row ? mapAuthIdentity(row) : null
   }
 
-  moveUserOrganization(userId: string, orgId: string): void {
-    this.db.prepare(`UPDATE user_auth_identities SET org_id = ?, updated_at = ? WHERE user_id = ?`)
-      .run(orgId, now(), userId)
-    this.db.prepare(`UPDATE resource_numeric_aliases SET org_id = ? WHERE namespace = 'user' AND resource_id = ?`)
-      .run(orgId, userId)
+  async moveUserOrganization(userId: string, orgId: string): Promise<void> {
+    await this.driver.run(
+      `UPDATE user_auth_identities SET org_id = ?, updated_at = ? WHERE user_id = ?`,
+      [orgId, now(), userId],
+    )
+    await this.driver.run(
+      `UPDATE resource_numeric_aliases SET org_id = ? WHERE namespace = 'user' AND resource_id = ?`,
+      [orgId, userId],
+    )
   }
 
   assignNumericAlias(input: {
@@ -482,56 +483,72 @@ export class IdentityRepository {
     resourceId: string
     orgId: string
     migrationRunId?: string | null
-  }): void {
-    this.db.prepare(`
-      INSERT INTO resource_numeric_aliases (
-        namespace, legacy_id, resource_id, org_id, migration_run_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      input.namespace,
-      input.legacyId,
-      input.resourceId,
-      input.orgId,
-      input.migrationRunId ?? null,
-      now(),
-    )
+  }): Promise<void> {
+    return this.driver.transaction(async () => {
+      await this.driver.run(`
+        INSERT INTO resource_numeric_aliases (
+          namespace, legacy_id, resource_id, org_id, migration_run_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `, [
+        input.namespace,
+        input.legacyId,
+        input.resourceId,
+        input.orgId,
+        input.migrationRunId ?? null,
+        now(),
+      ])
+      await this.advanceCounter(`resource_numeric_aliases:${input.namespace}`, input.legacyId)
+    })
   }
 
-  resolveNumericAlias(namespace: string, legacyId: number, orgId: string): string | null {
-    const row = this.db.prepare(`
+  async resolveNumericAlias(namespace: string, legacyId: number, orgId: string): Promise<string | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT resource_id FROM resource_numeric_aliases
       WHERE namespace = ? AND legacy_id = ? AND org_id = ?
       LIMIT 1
-    `).get(namespace, legacyId, orgId) as SqlRow | undefined
+    `, [namespace, legacyId, orgId])
     return row ? String(row.resource_id) : null
   }
 
-  resolveNumericAliasGlobal(namespace: string, legacyId: number): { resourceId: string; orgId: string } | null {
-    const row = this.db.prepare(`
+  async resolveNumericAliasGlobal(namespace: string, legacyId: number): Promise<{ resourceId: string; orgId: string } | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT resource_id, org_id FROM resource_numeric_aliases
       WHERE namespace = ? AND legacy_id = ? LIMIT 1
-    `).get(namespace, legacyId) as SqlRow | undefined
+    `, [namespace, legacyId])
     return row ? { resourceId: String(row.resource_id), orgId: String(row.org_id) } : null
   }
 
-  getNumericAlias(namespace: string, resourceId: string): number | null {
-    const row = this.db.prepare(`
+  async getNumericAlias(namespace: string, resourceId: string): Promise<number | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT legacy_id FROM resource_numeric_aliases
       WHERE namespace = ? AND resource_id = ? LIMIT 1
-    `).get(namespace, resourceId) as SqlRow | undefined
+    `, [namespace, resourceId])
     return row ? Number(row.legacy_id) : null
   }
 
-  allocateNumericAlias(namespace: string, resourceId: string, orgId: string): number {
-    const existing = this.getNumericAlias(namespace, resourceId)
-    if (existing !== null) return existing
-    const row = this.db.prepare(`
-      SELECT COALESCE(MAX(legacy_id), 0) + 1 AS next_id
-      FROM resource_numeric_aliases WHERE namespace = ?
-    `).get(namespace) as SqlRow
-    const legacyId = Math.max(Number(row.next_id), 2_000_000_000)
-    this.assignNumericAlias({ namespace, legacyId, resourceId, orgId })
-    return legacyId
+  async allocateNumericAlias(namespace: string, resourceId: string, orgId: string): Promise<number> {
+    return this.driver.transaction(async () => {
+      const existing = await this.getNumericAlias(namespace, resourceId)
+      if (existing !== null) return existing
+      const counterKey = `resource_numeric_aliases:${namespace}`
+      const counter = await this.driver.get<{ last_value: number }>(`
+        INSERT INTO compatibility_id_counters (counter_key, last_value)
+        VALUES (?, 2000000000)
+        ON CONFLICT(counter_key) DO UPDATE SET last_value = compatibility_id_counters.last_value + 1
+        RETURNING last_value
+      `, [counterKey])
+      if (!counter) throw new Error(`Failed to allocate numeric alias for namespace ${namespace}`)
+      const legacyId = Number(counter.last_value)
+      await this.driver.run(`
+        INSERT INTO resource_numeric_aliases (
+          namespace, legacy_id, resource_id, org_id, migration_run_id, created_at
+        ) VALUES (?, ?, ?, ?, NULL, ?)
+        ON CONFLICT DO NOTHING
+      `, [namespace, legacyId, resourceId, orgId, now()])
+      const winner = await this.getNumericAlias(namespace, resourceId)
+      if (winner === null) throw new Error(`Failed to persist numeric alias for namespace ${namespace}`)
+      return winner
+    })
   }
 
   createInvitation(input: {
@@ -540,15 +557,15 @@ export class IdentityRepository {
     code: string
     initialCreditUnits: number
     legacyInitialQuotaUsd?: number | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       INSERT INTO invitations (
         id, org_id, code, initial_credit_units, legacy_initial_quota_usd, created_at
       ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.orgId, input.code, input.initialCreditUnits,
       input.legacyInitialQuotaUsd ?? null, now(),
-    )
+    ]).then(() => undefined)
   }
 
   importInvitation(input: {
@@ -561,40 +578,54 @@ export class IdentityRepository {
     usedByUserId: string | null
     createdAt: number
     usedAt: number | null
-  }): 'inserted' | 'reused' {
-    const byId = this.getInvitationById(input.id)
-    const byCode = this.getInvitationByCode(input.code)
+  }): Promise<'inserted' | 'reused'> {
+    return this.importInvitationAsync(input)
+  }
+
+  private async importInvitationAsync(input: {
+    id: string
+    orgId: string
+    code: string
+    status: InvitationRecord['status']
+    initialCreditUnits: number
+    legacyInitialQuotaUsd: number | null
+    usedByUserId: string | null
+    createdAt: number
+    usedAt: number | null
+  }): Promise<'inserted' | 'reused'> {
+    const byId = await this.getInvitationById(input.id)
+    const byCode = await this.getInvitationByCode(input.code)
     const existing = byId ?? byCode
     if (existing) {
       if (sameInvitation(existing, input)) return 'reused'
       throw new Error(`Invitation import conflicts with existing target: ${input.code}`)
     }
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO invitations (
         id, org_id, code, status, initial_credit_units, legacy_initial_quota_usd,
         used_by_user_id, created_at, used_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.orgId, input.code, input.status, input.initialCreditUnits,
       input.legacyInitialQuotaUsd, input.usedByUserId, input.createdAt, input.usedAt,
-    )
+    ])
     return 'inserted'
   }
 
-  getInvitationByCode(code: string): InvitationRecord | null {
-    const row = this.db.prepare(`SELECT * FROM invitations WHERE code = ? LIMIT 1`).get(code) as SqlRow | undefined
+  async getInvitationByCode(code: string): Promise<InvitationRecord | null> {
+    const row = await this.driver.get<SqlRow>(`SELECT * FROM invitations WHERE code = ? LIMIT 1`, [code])
     return row ? mapInvitation(row) : null
   }
 
-  getInvitationById(id: string): InvitationRecord | null {
-    const row = this.db.prepare(`SELECT * FROM invitations WHERE id = ? LIMIT 1`).get(id) as SqlRow | undefined
+  async getInvitationById(id: string): Promise<InvitationRecord | null> {
+    const row = await this.driver.get<SqlRow>(`SELECT * FROM invitations WHERE id = ? LIMIT 1`, [id])
     return row ? mapInvitation(row) : null
   }
 
-  getInvitationByUser(userId: string): InvitationRecord | null {
-    const row = this.db.prepare(`
+  async getInvitationByUser(userId: string): Promise<InvitationRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM invitations WHERE used_by_user_id = ? ORDER BY used_at DESC LIMIT 1
-    `).get(userId) as SqlRow | undefined
+    `, [userId])
     return row ? mapInvitation(row) : null
   }
 
@@ -603,7 +634,16 @@ export class IdentityRepository {
     status?: InvitationRecord['status']
     limit?: number
     offset?: number
-  } = {}): { items: InvitationRecord[]; total: number } {
+  } = {}): Promise<{ items: InvitationRecord[]; total: number }> {
+    return this.listInvitationsAsync(input)
+  }
+
+  private async listInvitationsAsync(input: {
+    orgId?: string
+    status?: InvitationRecord['status']
+    limit?: number
+    offset?: number
+  }): Promise<{ items: InvitationRecord[]; total: number }> {
     const clauses: string[] = []
     const params: Array<string | number> = []
     if (input.orgId) {
@@ -615,41 +655,39 @@ export class IdentityRepository {
       params.push(input.status)
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-    const totalRow = this.db.prepare(`SELECT COUNT(*) AS count FROM invitations ${where}`)
-      .get(...params) as SqlRow
+    const totalRow = await this.driver.get<SqlRow>(`SELECT COUNT(*) AS count FROM invitations ${where}`, params)
     const limit = Math.max(1, Math.min(input.limit ?? 20, 100))
     const offset = Math.max(0, input.offset ?? 0)
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM invitations ${where}
       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
-    `).all(...params, limit, offset) as SqlRow[]
-    return { items: rows.map(mapInvitation), total: Number(totalRow.count) }
+    `, [...params, limit, offset])
+    return { items: rows.map(mapInvitation), total: Number(totalRow?.count ?? 0) }
   }
 
-  revokeInvitation(id: string): boolean {
-    return this.db.prepare(`
+  async revokeInvitation(id: string): Promise<boolean> {
+    return await this.driver.run(`
       UPDATE invitations SET status = 'revoked' WHERE id = ? AND status = 'pending'
-    `).run(id).changes === 1
+    `, [id]) === 1
   }
 
-  deletePendingInvitation(id: string): boolean {
-    return this.db.prepare(`DELETE FROM invitations WHERE id = ? AND status = 'pending'`)
-      .run(id).changes === 1
+  async deletePendingInvitation(id: string): Promise<boolean> {
+    return await this.driver.run(`DELETE FROM invitations WHERE id = ? AND status = 'pending'`, [id]) === 1
   }
 
-  deleteUserRecords(userId: string): void {
-    this.db.prepare(`DELETE FROM invitations WHERE used_by_user_id = ?`).run(userId)
-    this.db.prepare(`DELETE FROM user_auth_identities WHERE user_id = ?`).run(userId)
-    this.db.prepare(`DELETE FROM resource_numeric_aliases WHERE namespace = 'user' AND resource_id = ?`).run(userId)
-    this.db.prepare(`DELETE FROM wallets WHERE owner_type = 'user' AND owner_id = ?`).run(userId)
+  async deleteUserRecords(userId: string): Promise<void> {
+    await this.driver.run(`DELETE FROM invitations WHERE used_by_user_id = ?`, [userId])
+    await this.driver.run(`DELETE FROM user_auth_identities WHERE user_id = ?`, [userId])
+    await this.driver.run(`DELETE FROM resource_numeric_aliases WHERE namespace = 'user' AND resource_id = ?`, [userId])
+    await this.driver.run(`DELETE FROM wallets WHERE owner_type = 'user' AND owner_id = ?`, [userId])
   }
 
-  deleteOrganizationRecords(orgId: string): void {
-    this.db.prepare(`DELETE FROM integration_connections WHERE org_id = ?`).run(orgId)
-    this.db.prepare(`DELETE FROM resource_numeric_aliases WHERE org_id = ?`).run(orgId)
-    this.db.prepare(`DELETE FROM invitations WHERE org_id = ?`).run(orgId)
-    this.db.prepare(`DELETE FROM wallets WHERE owner_type = 'organization' AND owner_id = ?`).run(orgId)
-    this.db.prepare(`DELETE FROM organization_profiles WHERE org_id = ?`).run(orgId)
+  async deleteOrganizationRecords(orgId: string): Promise<void> {
+    await this.driver.run(`DELETE FROM integration_connections WHERE org_id = ?`, [orgId])
+    await this.driver.run(`DELETE FROM resource_numeric_aliases WHERE org_id = ?`, [orgId])
+    await this.driver.run(`DELETE FROM invitations WHERE org_id = ?`, [orgId])
+    await this.driver.run(`DELETE FROM wallets WHERE owner_type = 'organization' AND owner_id = ?`, [orgId])
+    await this.driver.run(`DELETE FROM organization_profiles WHERE org_id = ?`, [orgId])
   }
 
   putIntegrationConnection(input: {
@@ -660,9 +698,9 @@ export class IdentityRepository {
     enabled: boolean
     secretRef?: string | null
     config: Record<string, unknown>
-  }): void {
+  }): Promise<void> {
     const timestamp = now()
-    this.db.prepare(`
+    return this.driver.run(`
       INSERT INTO integration_connections (
         id, org_id, provider_type, name, enabled, secret_ref, config_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -674,58 +712,58 @@ export class IdentityRepository {
         secret_ref = excluded.secret_ref,
         config_json = excluded.config_json,
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       input.id, input.orgId, input.providerType, input.name, input.enabled ? 1 : 0,
       input.secretRef ?? null, JSON.stringify(input.config), timestamp, timestamp,
-    )
+    ]).then(() => undefined)
   }
 
-  getIntegrationConnection(id: string): IntegrationConnection | null {
-    const row = this.db.prepare(`SELECT * FROM integration_connections WHERE id = ? LIMIT 1`)
-      .get(id) as SqlRow | undefined
+  async getIntegrationConnection(id: string): Promise<IntegrationConnection | null> {
+    const row = await this.driver.get<SqlRow>(`SELECT * FROM integration_connections WHERE id = ? LIMIT 1`, [id])
     return row ? mapIntegrationConnection(row) : null
   }
 
-  listIntegrationConnections(orgId: string, providerType?: string): IntegrationConnection[] {
+  async listIntegrationConnections(orgId: string, providerType?: string): Promise<IntegrationConnection[]> {
     const rows = providerType
-      ? this.db.prepare(`
+      ? await this.driver.all<SqlRow>(`
           SELECT * FROM integration_connections
           WHERE org_id = ? AND provider_type = ? ORDER BY created_at ASC, id ASC
-        `).all(orgId, providerType) as SqlRow[]
-      : this.db.prepare(`
+        `, [orgId, providerType])
+      : await this.driver.all<SqlRow>(`
           SELECT * FROM integration_connections WHERE org_id = ? ORDER BY created_at ASC, id ASC
-        `).all(orgId) as SqlRow[]
+        `, [orgId])
     return rows.map(mapIntegrationConnection)
   }
 
-  consumeInvitation(id: string, userId: string): void {
-    const result = this.db.prepare(`
+  async consumeInvitation(id: string, userId: string): Promise<void> {
+    const changes = await this.driver.run(`
       UPDATE invitations SET status = 'used', used_by_user_id = ?, used_at = ?
       WHERE id = ? AND status = 'pending'
-    `).run(userId, now(), id)
-    if (result.changes !== 1) throw new Error('Invitation is not available')
+    `, [userId, now(), id])
+    if (changes !== 1) throw new Error('Invitation is not available')
   }
 
-  createWallet(ownerType: 'organization' | 'user', ownerId: string, balanceUnits: number): void {
+  async createWallet(ownerType: 'organization' | 'user', ownerId: string, balanceUnits: number): Promise<void> {
     const timestamp = now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO wallets (owner_type, owner_id, balance_units, version, created_at, updated_at)
       VALUES (?, ?, ?, 0, ?, ?)
-    `).run(ownerType, ownerId, toStoredPointUnits(balanceUnits), timestamp, timestamp)
+    `, [ownerType, ownerId, toStoredPointUnits(balanceUnits), timestamp, timestamp])
   }
 
-  ensureWallet(ownerType: 'organization' | 'user', ownerId: string): void {
+  async ensureWallet(ownerType: 'organization' | 'user', ownerId: string): Promise<void> {
     const timestamp = now()
-    this.db.prepare(`
-      INSERT OR IGNORE INTO wallets (owner_type, owner_id, balance_units, version, created_at, updated_at)
+    await this.driver.run(`
+      INSERT INTO wallets (owner_type, owner_id, balance_units, version, created_at, updated_at)
       VALUES (?, ?, 0, 0, ?, ?)
-    `).run(ownerType, ownerId, timestamp, timestamp)
+      ON CONFLICT (owner_type, owner_id) DO NOTHING
+    `, [ownerType, ownerId, timestamp, timestamp])
   }
 
-  getWallet(ownerType: 'organization' | 'user', ownerId: string): { balanceUnits: number; version: number } | null {
-    const row = this.db.prepare(`
+  async getWallet(ownerType: 'organization' | 'user', ownerId: string): Promise<{ balanceUnits: number; version: number } | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT balance_units, version FROM wallets WHERE owner_type = ? AND owner_id = ? LIMIT 1
-    `).get(ownerType, ownerId) as SqlRow | undefined
+    `, [ownerType, ownerId])
     return row ? {
       balanceUnits: fromStoredPointUnits(row.balance_units),
       version: Number(row.version),
@@ -742,24 +780,24 @@ export class IdentityRepository {
     contextSource: OutboxEventRecord['contextSource']
     idempotencyKey: string
     suppressReason?: string | null
-  }): void {
-    this.db.prepare(`
+  }): Promise<void> {
+    return this.driver.run(`
       INSERT INTO outbox_events (
         id, event_type, aggregate_type, aggregate_id, payload_json, status,
         context_source, idempotency_key, suppress_reason, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       input.id, input.eventType, input.aggregateType, input.aggregateId,
       JSON.stringify(input.payload), input.status, input.contextSource,
       input.idempotencyKey, input.suppressReason ?? null, now(),
-    )
+    ]).then(() => undefined)
   }
 
-  getOutboxEvent(idempotencyKey: string): OutboxEventRecord | null {
-    const row = this.db.prepare(`
+  async getOutboxEvent(idempotencyKey: string): Promise<OutboxEventRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT id, status, context_source, idempotency_key, suppress_reason
       FROM outbox_events WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? {
       id: String(row.id),
       status: String(row.status) as OutboxEventRecord['status'],
@@ -769,11 +807,11 @@ export class IdentityRepository {
     } : null
   }
 
-  getCommandResult<T>(commandType: string, idempotencyKey: string): T | null {
-    const row = this.db.prepare(`
+  async getCommandResult<T>(commandType: string, idempotencyKey: string): Promise<T | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT result_json FROM command_executions
       WHERE command_type = ? AND idempotency_key = ? LIMIT 1
-    `).get(commandType, idempotencyKey) as SqlRow | undefined
+    `, [commandType, idempotencyKey])
     return row ? JSON.parse(String(row.result_json)) as T : null
   }
 
@@ -782,11 +820,11 @@ export class IdentityRepository {
     idempotencyKey: string,
     contextSource: 'online' | 'migration' | 'replay',
     result: unknown,
-  ): void {
-    this.db.prepare(`
+  ): Promise<void> {
+    return this.driver.run(`
       INSERT INTO command_executions (command_type, idempotency_key, context_source, result_json, created_at)
       VALUES (?, ?, ?, ?, ?)
-    `).run(commandType, idempotencyKey, contextSource, JSON.stringify(result), now())
+    `, [commandType, idempotencyKey, contextSource, JSON.stringify(result), now()]).then(() => undefined)
   }
 
   insertOperationAudit(input: {
@@ -813,17 +851,47 @@ export class IdentityRepository {
     errorMessage?: string | null
     idempotencyKey: string
     createdAt?: number
-  }): boolean {
-    const legacyId = input.legacyId ?? this.nextOperationAuditLegacyId()
-    const result = this.db.prepare(`
-      INSERT OR IGNORE INTO operation_audit_events (
+  }): Promise<boolean> {
+    return this.insertOperationAuditAsync(input)
+  }
+
+  private async insertOperationAuditAsync(input: {
+    id: string
+    legacyId?: number
+    orgId: string
+    actorUserId?: string | null
+    actorLegacyId?: number | null
+    actorName?: string | null
+    action: string
+    resource: string
+    resourceId?: string | null
+    method?: string | null
+    path?: string | null
+    legacyParamsRaw?: string | null
+    legacyRequestDataRaw?: string | null
+    legacyResponseDataRaw?: string | null
+    requestData?: unknown
+    responseData?: unknown
+    responseStatus?: number | null
+    ipAddress?: string | null
+    userAgent?: string | null
+    durationMs?: number | null
+    errorMessage?: string | null
+    idempotencyKey: string
+    createdAt?: number
+  }): Promise<boolean> {
+    return this.driver.transaction(async () => {
+      const legacyId = input.legacyId ?? await this.nextOperationAuditLegacyId()
+      const changes = await this.driver.run(`
+      INSERT INTO operation_audit_events (
         id, legacy_id, org_id, actor_user_id, actor_legacy_id, actor_name,
         action, resource, resource_id, method, path, legacy_params_raw,
         legacy_request_data_raw, legacy_response_data_raw, request_data_json,
         response_data_json, response_status, ip_address, user_agent, duration_ms,
         error_message, idempotency_key, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      ON CONFLICT DO NOTHING
+    `, [
       input.id, legacyId, input.orgId, input.actorUserId ?? null, input.actorLegacyId ?? null,
       input.actorName ?? null, input.action, input.resource, input.resourceId ?? null,
       input.method ?? null, input.path ?? null, input.legacyParamsRaw ?? null,
@@ -832,34 +900,36 @@ export class IdentityRepository {
       input.responseStatus ?? null, input.ipAddress ?? null, input.userAgent ?? null,
       input.durationMs ?? null, input.errorMessage ?? null, input.idempotencyKey,
       input.createdAt ?? now(),
-    )
-    return Number(result.changes) === 1
+    ])
+      if (changes === 1) await this.advanceCounter('operation_audit_events', legacyId)
+      return changes === 1
+    })
   }
 
-  hasOperationAudit(idempotencyKey: string): boolean {
-    return Boolean(this.db.prepare(`
+  async hasOperationAudit(idempotencyKey: string): Promise<boolean> {
+    return Boolean(await this.driver.get<SqlRow>(`
       SELECT 1 FROM operation_audit_events WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey))
+    `, [idempotencyKey]))
   }
 
-  getOperationAuditByLegacyId(legacyId: number): OperationAuditRecord | null {
-    const row = this.db.prepare(`
+  async getOperationAuditByLegacyId(legacyId: number): Promise<OperationAuditRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM operation_audit_events WHERE legacy_id = ? LIMIT 1
-    `).get(legacyId) as SqlRow | undefined
+    `, [legacyId])
     return row ? mapOperationAudit(row) : null
   }
 
-  getOperationAuditById(id: string): OperationAuditRecord | null {
-    const row = this.db.prepare(`
+  async getOperationAuditById(id: string): Promise<OperationAuditRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM operation_audit_events WHERE id = ? LIMIT 1
-    `).get(id) as SqlRow | undefined
+    `, [id])
     return row ? mapOperationAudit(row) : null
   }
 
-  getOperationAuditByIdempotencyKey(idempotencyKey: string): OperationAuditRecord | null {
-    const row = this.db.prepare(`
+  async getOperationAuditByIdempotencyKey(idempotencyKey: string): Promise<OperationAuditRecord | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM operation_audit_events WHERE idempotency_key = ? LIMIT 1
-    `).get(idempotencyKey) as SqlRow | undefined
+    `, [idempotencyKey])
     return row ? mapOperationAudit(row) : null
   }
 
@@ -871,7 +941,19 @@ export class IdentityRepository {
     to?: number
     limit: number
     offset: number
-  }): { items: OperationAuditRecord[]; total: number } {
+  }): Promise<{ items: OperationAuditRecord[]; total: number }> {
+    return this.listOperationAuditsAsync(input)
+  }
+
+  private async listOperationAuditsAsync(input: {
+    orgId?: string
+    actorUserId?: string
+    action?: string
+    from?: number
+    to?: number
+    limit: number
+    offset: number
+  }): Promise<{ items: OperationAuditRecord[]; total: number }> {
     const clauses: string[] = []
     const params: Array<string | number> = []
     if (input.orgId) { clauses.push('org_id = ?'); params.push(input.orgId) }
@@ -880,19 +962,37 @@ export class IdentityRepository {
     if (input.from !== undefined) { clauses.push('created_at >= ?'); params.push(input.from) }
     if (input.to !== undefined) { clauses.push('created_at <= ?'); params.push(input.to) }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-    const rows = this.db.prepare(`
+    const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM operation_audit_events ${where}
       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
-    `).all(...params, input.limit, input.offset) as SqlRow[]
-    const total = this.db.prepare(`
+    `, [...params, input.limit, input.offset])
+    const total = await this.driver.get<SqlRow>(`
       SELECT COUNT(*) AS count FROM operation_audit_events ${where}
-    `).get(...params) as SqlRow
-    return { items: rows.map(mapOperationAudit), total: Number(total.count) }
+    `, params)
+    return { items: rows.map(mapOperationAudit), total: Number(total?.count ?? 0) }
   }
 
-  private nextOperationAuditLegacyId(): number {
-    const row = this.db.prepare('SELECT MAX(legacy_id) AS value FROM operation_audit_events').get() as SqlRow
-    return Math.max(2_000_000_000, Number(row.value ?? 1_999_999_999) + 1)
+  private async nextOperationAuditLegacyId(): Promise<number> {
+    const row = await this.driver.get<{ last_value: number }>(`
+      INSERT INTO compatibility_id_counters (counter_key, last_value)
+      VALUES ('operation_audit_events', 2000000000)
+      ON CONFLICT(counter_key) DO UPDATE SET last_value = compatibility_id_counters.last_value + 1
+      RETURNING last_value
+    `)
+    if (!row) throw new Error('Failed to allocate operation audit legacy ID')
+    return Number(row.last_value)
+  }
+
+  private async advanceCounter(counterKey: string, value: number): Promise<void> {
+    await this.driver.run(`
+      INSERT INTO compatibility_id_counters (counter_key, last_value)
+      VALUES (?, ?)
+      ON CONFLICT(counter_key) DO UPDATE SET
+        last_value = CASE
+          WHEN compatibility_id_counters.last_value < excluded.last_value THEN excluded.last_value
+          ELSE compatibility_id_counters.last_value
+        END
+    `, [counterKey, value])
   }
 }
 

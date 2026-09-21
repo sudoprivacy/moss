@@ -1,27 +1,31 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 
 export type OrganizationModelSettings = Record<string, unknown>
 
-export class OrganizationModelSettingsRepository {
-  constructor(private readonly db: DatabaseSync) {
-    this.db.exec(`
+export const ORGANIZATION_MODEL_SETTINGS_SCHEMA = `
       CREATE TABLE IF NOT EXISTS organization_model_settings (
         org_id TEXT PRIMARY KEY,
         settings_json TEXT NOT NULL DEFAULT '{}',
         updated_by TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
       );
-    `)
-  }
+`
 
-  get(orgId: string): OrganizationModelSettings {
+export function ensureOrganizationModelSettingsSchema(db: DatabaseSync): void {
+  db.exec(ORGANIZATION_MODEL_SETTINGS_SCHEMA)
+}
+
+export class OrganizationModelSettingsRepository {
+  constructor(private readonly db: DbDriver) {}
+
+  async get(orgId: string): Promise<OrganizationModelSettings> {
     const id = orgId.trim()
     if (!id) return {}
-    const row = this.db.prepare(`
+    const row = await this.db.get<{ settings_json: string }>(`
       SELECT settings_json FROM organization_model_settings WHERE org_id = ? LIMIT 1
-    `).get(id) as { settings_json: string } | undefined
+    `, [id])
     if (!row) return {}
     try {
       const parsed = JSON.parse(row.settings_json) as unknown
@@ -31,17 +35,17 @@ export class OrganizationModelSettingsRepository {
     }
   }
 
-  has(orgId: string): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM organization_model_settings WHERE org_id = ?').get(orgId.trim()))
+  async has(orgId: string): Promise<boolean> {
+    return Boolean(await this.db.get('SELECT 1 FROM organization_model_settings WHERE org_id = ?', [orgId.trim()]))
   }
 
-  put(orgId: string, patch: OrganizationModelSettings, updatedBy: string): OrganizationModelSettings {
+  async put(orgId: string, patch: OrganizationModelSettings, updatedBy: string): Promise<OrganizationModelSettings> {
     const id = orgId.trim()
     if (!id) throw new Error('Organization id is required')
-    return runInTransaction(this.db, () => {
-      const next = deepMerge(this.get(id), patch)
+    return this.db.transaction(async () => {
+      const next = deepMerge(await this.get(id), patch)
       const timestamp = Date.now()
-      this.db.prepare(`
+      await this.db.run(`
         INSERT INTO organization_model_settings (
           org_id, settings_json, updated_by, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?)
@@ -49,7 +53,7 @@ export class OrganizationModelSettingsRepository {
           settings_json = excluded.settings_json,
           updated_by = excluded.updated_by,
           updated_at = excluded.updated_at
-      `).run(id, JSON.stringify(next), updatedBy, timestamp, timestamp)
+      `, [id, JSON.stringify(next), updatedBy, timestamp, timestamp])
       return next
     })
   }

@@ -26,7 +26,8 @@ const { QmsAuthorizationService } = await import('../../../qms/qmsAuthorization.
 const { createSudoworkCompatibilityApp } = await import('./app.js')
 const { AuthCenterDb, hashPassword } = await import('../../../authCenter/db.js')
 const { AuthService } = await import('../../../auth/service.js')
-const { IdentityRepository } = await import('../../../identity/identityRepository.js')
+const { createIdentityTestRepository } = await import('../../../testing/compatibilityRepositories.js')
+const { ensurePlatformIntegrationSettingsSchema } = await import('../../../configuration/platformIntegrationSettingsRepository.js')
 const { ClientPolicyRepository } = await import('../../../configuration/clientPolicyRepository.js')
 const { SudoworkSystemConfigService } = await import('./systemConfigService.js')
 const { SYSTEM_SETTINGS_PATH } = await import('../../../systemSettings.js')
@@ -40,13 +41,14 @@ after(() => {
 async function createNativeSystemConfigFixture() {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  const policies = new ClientPolicyRepository(db)
+  ensurePlatformIntegrationSettingsSchema(db)
+  const identities = createIdentityTestRepository(db, {}, authDb.driver)
+  const policies = new ClientPolicyRepository(authDb.driver)
   await authDb.setConfig('issuer', 'moss-compat-test')
   await authDb.setConfig('jwt_secret', 'moss-compat-test-secret')
   for (const orgId of ['org-a', 'org-b']) {
     await authDb.createOrganization(orgId, orgId, 1)
-    identities.putOrganizationProfile({
+    await identities.putOrganizationProfile({
       orgId, code: orgId.toUpperCase(), loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })
   }
@@ -59,11 +61,12 @@ async function createNativeSystemConfigFixture() {
     })
   }
   const auth = new AuthService(authDb, 3600)
+  await auth.initializeCompatibilityRecords()
   const identity = auth.createSudoworkIdentityService({
     legacyJwtSecret: 'moss-compat-legacy-test-secret', tokenStore: {} as never,
   })
   const systemConfiguration = new SudoworkSystemConfigService({
-    db, identities, policies, smsConfigured: true,
+    db: authDb.driver, identities, policies, smsConfigured: true,
     defaults: { loginMethod: 'password', skillhubBaseUrl: 'https://example.test' },
     secrets: { get: () => undefined, put: async () => {}, remove: async () => {} },
   })
@@ -169,8 +172,8 @@ function createApp(
   extra: Partial<Parameters<typeof createSudoworkCompatibilityApp>[0]> = {},
 ) {
   const systemConfiguration: SudoworkSystemConfigPort = {
-    getLoginMethod() { return loginMethod },
-    getPublicConfig() {
+    async getLoginMethod() { return loginMethod },
+    async getPublicConfig() {
       return {
         login_method: loginMethod === 'sms' ? 0 : loginMethod === 'password' ? 1 : 2,
         log_report: { enabled: 0 }, version_update: { enabled: 0 },
@@ -184,9 +187,9 @@ function createApp(
         recharge_mode: 'disabled', credit_application: { enabled: 0 },
       }
     },
-    getAdminConfig() { return { login_method: 1, sms_configured: true } },
+    async getAdminConfig() { return { login_method: 1, sms_configured: true } },
     async update() {},
-    getCredentialData() { return {} },
+    async getCredentialData() { return {} },
   }
   const managedImages: SudoworkManagedImagePort = {
     async put(input) {
@@ -221,7 +224,7 @@ function createApp(
       }
     },
     createInvitationCodes() { return { codes: ['CODE-A'], count: 1 } },
-    deleteInvitationCode() { return true },
+    async deleteInvitationCode() { return true },
     listUsers() {
       return [{
         id: 17, phone: '13800000000', nickname: '旧用户', enterprise_id: 9,
@@ -312,8 +315,8 @@ function createApp(
           expiresIn: 7_200, user,
         }
       },
-      logoutCallbackUrl() { return 'sudowork://cas-callback/cas-main/logout' },
-      listPublicProviders() { return [{ id: 'cas-main', name: '统一认证', type: 'cas', enabled: 1 }] },
+      async logoutCallbackUrl() { return 'sudowork://cas-callback/cas-main/logout' },
+      async listPublicProviders() { return [{ id: 'cas-main', name: '统一认证', type: 'cas', enabled: 1 }] },
     },
     loginMethod,
     systemConfig,
@@ -451,9 +454,9 @@ void describe('Sudowork compatibility Hono app', () => {
       for (const [index, scenario] of scenarios.entries()) {
         const headers = { authorization: `Bearer ${tokens[scenario.role]}`, 'content-type': 'application/json' }
         const url = `/api/v1/admin/system-config${scenario.scope}`
-        const previousPlatform = policies.getPlatform()
+        const previousPlatform = await policies.getPlatform()
         const otherOrg = scenario.orgId === 'org-a' ? 'org-b' : 'org-a'
-        const previousOtherOrg = policies.getOrganization(otherOrg)
+        const previousOtherOrg = await policies.getOrganization(otherOrg)
         const model = `model-${index}`
         const updated = await native.request(url, {
           method: 'PUT', headers, body: JSON.stringify({ scode_auto_model: model }),
@@ -467,12 +470,12 @@ void describe('Sudowork compatibility Hono app', () => {
         assert.equal(data.scode_auto_model, model)
         assert.equal(data.sms !== undefined, scenario.orgId === undefined)
         if (scenario.orgId) {
-          assert.equal(policies.getOrganization(scenario.orgId).scodeAutoModel, model)
-          assert.deepEqual(policies.getPlatform(), previousPlatform)
+          assert.equal((await policies.getOrganization(scenario.orgId)).scodeAutoModel, model)
+          assert.deepEqual(await policies.getPlatform(), previousPlatform)
         } else {
-          assert.equal(policies.getPlatform().scodeAutoModel, model)
+          assert.equal((await policies.getPlatform()).scodeAutoModel, model)
         }
-        assert.deepEqual(policies.getOrganization(otherOrg), previousOtherOrg)
+        assert.deepEqual(await policies.getOrganization(otherOrg), previousOtherOrg)
       }
 
       for (const role of ['admin', 'super_admin', 'switched_root']) {
@@ -519,9 +522,9 @@ void describe('Sudowork compatibility Hono app', () => {
           assert.equal((await response.json() as { success: boolean }).success, false)
         }
       }
-      assert.deepEqual(policies.getPlatform(), {})
-      assert.deepEqual(policies.getOrganization('org-a'), {})
-      assert.deepEqual(policies.getOrganization('org-b'), {})
+      assert.deepEqual(await policies.getPlatform(), {})
+      assert.deepEqual(await policies.getOrganization('org-a'), {})
+      assert.deepEqual(await policies.getOrganization('org-b'), {})
     } finally {
       auth.destroy()
       db.close()
@@ -549,7 +552,7 @@ void describe('Sudowork compatibility Hono app', () => {
         const { data } = await read.json() as { data: Record<string, unknown> }
         assert.equal(data.scope_type, scenario.orgId ? 'organization' : 'platform')
         assert.equal(data.organization_id, scenario.orgId ?? '')
-        assert.equal((scenario.orgId ? policies.getOrganization(scenario.orgId) : policies.getPlatform()).scodeAutoModel, model)
+        assert.equal((await (scenario.orgId ? policies.getOrganization(scenario.orgId) : policies.getPlatform())).scodeAutoModel, model)
       }
     } finally {
       auth.destroy()
@@ -560,7 +563,7 @@ void describe('Sudowork compatibility Hono app', () => {
   void test('registers Dify administration routes through the compatibility app', async () => {
     const app = createApp('password', undefined, {
       difyAdministration: { getBinding: () => ({ dify_tenant_id: 'tenant-a' }) } as never,
-      resolveEnterpriseAlias: id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
+      resolveEnterpriseAlias: async id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
     })
     const response = await app.request('/api/v1/admin/dify/binding?enterprise_id=9', {
       headers: { Authorization: 'Bearer admin-access' },
@@ -1198,7 +1201,7 @@ void describe('Sudowork compatibility Hono app', () => {
         apiKeyHeader: 'X-QMS-Key',
         authorization: new QmsAuthorizationService({
           apiKey: 'qms-secret',
-          organizations: { getCode: () => 'ENT-A', hasCode: code => code === 'ENT-A' },
+          organizations: { async getCode() { return 'ENT-A' }, async hasCode(code) { return code === 'ENT-A' } },
         }),
         encryption: { encryptionRequired: false },
         operations: {

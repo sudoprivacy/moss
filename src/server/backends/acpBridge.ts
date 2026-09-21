@@ -2,8 +2,8 @@ import { createInterface } from 'readline'
 import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
 import { dirname } from 'path'
 import { randomUUID } from 'crypto'
-import type { ChildProcess } from 'child_process'
 import type { BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
+import type { AcpChildProcessLike } from './nexusSpawnHandle.js'
 import { prepareFirstMessageForScode } from '../../utils/scodeBridge.js'
 import {
   appendSharedAgentMemory,
@@ -12,7 +12,13 @@ import {
 import { cleanupIntermediateFiles, ensureDraftsDirectory } from '../draftsCleanup.js'
 
 type AcpBridgeOptions = {
-  child: ChildProcess
+  /**
+   * The agent process's pipes. Narrowed from `ChildProcess` to the subset this
+   * bridge touches so a nexus-supervised agent — whose stdio lives on
+   * `/proc/{pid}/fd/*` rather than a local pipe — can be driven by the same
+   * code. A real `ChildProcess` satisfies it structurally.
+   */
+  child: AcpChildProcessLike
   sessionId: string
   cwd: string
   model: string

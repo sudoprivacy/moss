@@ -9,7 +9,7 @@ import { DirectConnectStore } from "../db.js";
 
 function insertPlugin(store: DirectConnectStore, id: string, userId: string) {
   const now = Date.now();
-  store.db
+  store.requireSqliteDb()
     .prepare(
       `INSERT INTO channel_plugins (id, type, name, enabled, status, user_id, created_at, updated_at)
        VALUES (?, 'telegram', 'n', 1, 'stopped', ?, ?, ?)`,
@@ -35,7 +35,7 @@ describe("B8: channel plugin lease claim/release", () => {
     await store.releaseAllChannelPluginLeases("B");
     assert.equal(await store.claimChannelPluginLease("tg", "u1", "A", now + 4 * ttl, now + 2 * ttl + 2), true, "reclaimable after release");
 
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("same plugin id under different users leases independently", async () => {
@@ -48,19 +48,19 @@ describe("B8: channel plugin lease claim/release", () => {
     assert.equal(await store.claimChannelPluginLease("tg", "u2", "B", now + ttl, now), true);
     // A cannot steal u2 (B holds it fresh).
     assert.equal(await store.claimChannelPluginLease("tg", "u2", "A", now + ttl, now + 1_000), false);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("does not claim a disabled row", async () => {
     const store = new DirectConnectStore(":memory:");
     const now = 100_000;
-    store.db
+    store.requireSqliteDb()
       .prepare(
         `INSERT INTO channel_plugins (id, type, name, enabled, status, user_id, created_at, updated_at)
          VALUES ('tg', 'telegram', 'n', 0, 'stopped', 'u1', ?, ?)`,
       )
       .run(now, now);
     assert.equal(await store.claimChannelPluginLease("tg", "u1", "A", now + 60_000, now), false, "disabled rows are never leased");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });

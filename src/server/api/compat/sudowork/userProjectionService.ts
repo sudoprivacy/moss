@@ -29,20 +29,20 @@ export class SudoworkUserProjectionService {
     billing: BillingRepository
     secrets: ProjectionSecretPort
     listModels: (orgId?: string) => Promise<ModelDescriptor[]> | ModelDescriptor[]
-    getRuntimeConfig: (orgId?: string) => { modelServiceUrl: string; scodeAutoModel: string }
+    getRuntimeConfig: (orgId?: string) => Promise<{ modelServiceUrl: string; scodeAutoModel: string }> | { modelServiceUrl: string; scodeAutoModel: string }
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }) {}
 
   async project(user: SudoworkLegacyUser): Promise<SudoworkUserProjection> {
-    const alias = this.options.identities.resolveNumericAliasGlobal('user', user.id)
+    const alias = await this.options.identities.resolveNumericAliasGlobal('user', user.id)
     const organizationId = alias
-      ? this.options.identities.resolveNumericAlias('enterprise', user.enterpriseId, alias.orgId)
+      ? await this.options.identities.resolveNumericAlias('enterprise', user.enterpriseId, alias.orgId)
       : null
     if (!alias || organizationId !== alias.orgId) {
       throw new SudoworkUserProjectionError(500, '用户企业信息异常')
     }
-    const wallet = this.options.billing.getWallet('user', alias.resourceId)
-    let account = this.options.billing.getExternalAccount('sudorouter', 'user', alias.resourceId)
+    const wallet = await this.options.billing.getWallet('user', alias.resourceId)
+    let account = await this.options.billing.getExternalAccount('sudorouter', 'user', alias.resourceId)
     if (!wallet || !account?.tokenSecretRef) {
       throw new SudoworkUserProjectionError(500, 'Sudorouter 用户 Token 不存在')
     }
@@ -58,14 +58,14 @@ export class SudoworkUserProjectionService {
     if (this.options.quotaReader) {
       const live = await this.options.quotaReader.getUser(account.externalAccountId).catch(() => null)
       if (live) {
-        this.options.billing.upsertExternalAccount({
+        await this.options.billing.upsertExternalAccount({
           ...account,
           externalAccountId: live.externalUserId,
           quotaUnits: live.quotaUnits,
           usedQuotaUnits: live.usedQuotaUnits,
           updatedAt: Date.now(),
         })
-        account = this.options.billing.getExternalAccount('sudorouter', 'user', alias.resourceId)!
+        account = (await this.options.billing.getExternalAccount('sudorouter', 'user', alias.resourceId))!
       }
     }
 
@@ -83,7 +83,7 @@ export class SudoworkUserProjectionService {
       totalPoints: roundPoints(quotaToPoints(account.quotaUnits + account.usedQuotaUnits)),
       usedPoints: roundPoints(usedPoints),
       remainingPoints,
-      bonusPoints: roundPoints(this.options.billing.sumUserLedgerByEntryType(alias.resourceId, 'BONUS')),
+      bonusPoints: roundPoints(await this.options.billing.sumUserLedgerByEntryType(alias.resourceId, 'BONUS')),
       quota: account.quotaUnits,
       usedQuota: account.usedQuotaUnits,
     }

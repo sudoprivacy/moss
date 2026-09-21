@@ -85,7 +85,7 @@ describe('provider model discovery', () => {
     globalThis.fetch = (async () => {
       calls += 1
       return new Response(JSON.stringify({ data: [{ id: `model-${calls}` }] }))
-    }) as typeof fetch
+    }) as unknown as typeof fetch
     const a = () => discoverProviderModels(provider, 'key-a', { orgId: 'org-a' })
     const b = () => discoverProviderModels(provider, 'key-b', { orgId: 'org-b' })
     const other = () => discoverProviderModels(otherProvider, 'key-a', { orgId: 'org-a' })

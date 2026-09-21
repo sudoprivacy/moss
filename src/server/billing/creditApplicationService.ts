@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { migrationCommandContext, onlineCommandContext, replayCommandContext, type CommandContext } from '../application/commandContext.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import { BillingCoordinator } from './billingCoordinator.js'
 import { BillingRepository, type CreditApplicationRecord } from './billingRepository.js'
 import { pointsToQuota } from './sudorouterAdapter.js'
@@ -17,7 +16,7 @@ export interface CreditApplicationPolicy {
 }
 
 interface CreditPolicyProvider {
-  getPolicy(orgId: string): CreditApplicationPolicy
+  getPolicy(orgId: string): Promise<CreditApplicationPolicy> | CreditApplicationPolicy
 }
 
 interface CreditServiceOptions {
@@ -32,7 +31,7 @@ export class CreditApplicationService {
   private readonly suffixGenerator: () => string
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly driver: DbDriver,
     private readonly repository: BillingRepository,
     private readonly identities: IdentityRepository,
     private readonly coordinator: BillingCoordinator,
@@ -44,12 +43,12 @@ export class CreditApplicationService {
     this.suffixGenerator = options.suffixGenerator ?? (() => Math.random().toString(36).slice(2, 8).toUpperCase())
   }
 
-  createApplication(
+  async createApplication(
     input: { requestedPoints: number; reason: string },
     actor: IdentityActor,
     context: CommandContext,
-  ): CreditApplicationRecord {
-    const policy = this.policies.getPolicy(actor.orgId)
+  ): Promise<CreditApplicationRecord> {
+    const policy = await this.policies.getPolicy(actor.orgId)
     this.requireApproveMode(policy)
     this.validatePoints(input.requestedPoints, policy, '申请')
     const reason = this.validateReason(input.reason, '申请原因')
@@ -57,24 +56,24 @@ export class CreditApplicationService {
       actor.userId, actor.orgId, input.requestedPoints, reason,
     ])).digest('hex')
 
-    return runInTransaction(this.db, () => {
-      const previous = this.repository.getCreditApplicationByIdempotencyKey(context.idempotencyKey)
+    return this.driver.transaction(async () => {
+      const previous = await this.repository.getCreditApplicationByIdempotencyKey(context.idempotencyKey)
       if (previous) {
         if (previous.requestFingerprint !== fingerprint) {
           throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的积分申请')
         }
         return previous
       }
-      const user = this.repository.getUserState(actor.userId)
+      const user = await this.repository.getUserState(actor.userId)
       if (!user) throw new BillingDomainError('USER_NOT_FOUND', '用户不存在')
       if (user.status !== 'active') throw new BillingDomainError('USER_STATUS_INVALID', '用户状态不可申请积分')
       if (user.orgId !== actor.orgId) throw new BillingDomainError('CREDIT_FORBIDDEN', '无权为其他组织申请积分')
-      if (!policy.allowDuplicatePending && this.repository.countPendingCreditApplications(actor.userId) > 0) {
+      if (!policy.allowDuplicatePending && await this.repository.countPendingCreditApplications(actor.userId) > 0) {
         throw new BillingDomainError('DUPLICATE_PENDING_APPLICATION', '已有待审批申请，请勿重复提交')
       }
       const now = this.clock()
       const id = this.idGenerator()
-      const legacyId = this.identities.allocateNumericAlias('credit_application', id, actor.orgId)
+      const legacyId = await this.identities.allocateNumericAlias('credit_application', id, actor.orgId)
       const application: CreditApplicationRecord = {
         id, legacyId, applicationNo: `CA${now}${this.suffixGenerator()}`,
         userId: actor.userId, orgId: actor.orgId, requestedUnits: input.requestedPoints,
@@ -83,7 +82,7 @@ export class CreditApplicationService {
         idempotencyKey: context.idempotencyKey, requestFingerprint: fingerprint,
         createdAt: now, reviewedAt: null, updatedAt: now,
       }
-      this.repository.insertCreditApplication(application)
+      await this.repository.insertCreditApplication(application)
       return application
     })
   }
@@ -93,20 +92,20 @@ export class CreditApplicationService {
     actor: IdentityActor,
     context: CommandContext,
   ): Promise<CreditApplicationRecord> {
-    const application = this.requireApplication(input.applicationId)
+    const application = await this.requireApplication(input.applicationId)
     this.requireReviewer(application, actor)
     if (application.status === 'APPROVED') return application
     if (application.status !== 'PENDING' && application.status !== 'SYNC_FAILED') {
       throw new BillingDomainError('CREDIT_STATUS_INVALID', '当前状态不可审批通过')
     }
-    const policy = this.policies.getPolicy(application.orgId)
+    const policy = await this.policies.getPolicy(application.orgId)
     this.requireApproveMode(policy)
     const approvedPoints = input.approvedPoints ?? application.requestedUnits
     this.validatePoints(approvedPoints, policy, '审批')
-    const external = this.repository.getExternalAccount('sudorouter', 'user', application.userId)
+    const external = await this.repository.getExternalAccount('sudorouter', 'user', application.userId)
     if (!external) throw new BillingDomainError('SUDOROUTER_NOT_BOUND', '用户未绑定 sudorouter 账号')
     const now = this.clock()
-    runInTransaction(this.db, () => this.repository.markCreditApplicationReview({
+    await this.driver.transaction(async () => this.repository.markCreditApplicationReview({
       id: application.id, status: 'PROCESSING', approvedUnits: approvedPoints,
       quotaUnits: pointsToQuota(approvedPoints), adminUserId: actor.userId,
       adminComment: input.adminComment ?? null, reviewedAt: now, updatedAt: now,
@@ -125,8 +124,8 @@ export class CreditApplicationService {
     const status = result.status === 'SUCCEEDED' || result.status === 'SUPPRESSED'
       ? 'APPROVED'
       : result.status === 'UNKNOWN' ? 'SYNC_UNKNOWN' : 'SYNC_FAILED'
-    runInTransaction(this.db, () => {
-      if (status !== 'APPROVED') this.repository.markCreditApplicationReview({
+    await this.driver.transaction(async () => {
+      if (status !== 'APPROVED') await this.repository.markCreditApplicationReview({
         id: application.id, status, quotaOperationId: result.operationId, updatedAt: this.clock(),
       })
     })
@@ -134,69 +133,69 @@ export class CreditApplicationService {
   }
 
   async retryApplication(applicationId: string, actor: IdentityActor): Promise<CreditApplicationRecord> {
-    const application = this.requireApplication(applicationId)
+    const application = await this.requireApplication(applicationId)
     this.requireReviewer(application, actor)
     if (application.status !== 'SYNC_FAILED' && application.status !== 'SYNC_UNKNOWN') {
       throw new BillingDomainError('CREDIT_STATUS_INVALID', '只有同步失败的申请可以重试')
     }
     if (!application.quotaOperationId) throw new BillingDomainError('QUOTA_OPERATION_NOT_FOUND', '额度操作不存在')
-    const result = await this.coordinator.retry(application.quotaOperationId, () => {
-      this.finalizeApprovedApplication(
+    const result = await this.coordinator.retry(application.quotaOperationId, async () => {
+      await this.finalizeApprovedApplication(
         application.id, application.adminUserId ?? actor.userId,
         application.approvedUnits ?? application.requestedUnits,
-        this.repository.getQuotaOperationById(application.quotaOperationId!)?.idempotencyKey
+        (await this.repository.getQuotaOperationById(application.quotaOperationId!))?.idempotencyKey
           ?? `credit:${application.id}`,
       )
     })
     const status = result.status === 'SUCCEEDED' ? 'APPROVED'
       : result.status === 'UNKNOWN' ? 'SYNC_UNKNOWN' : 'SYNC_FAILED'
-    runInTransaction(this.db, () => {
-      if (status !== 'APPROVED') this.repository.markCreditApplicationReview({
+    await this.driver.transaction(async () => {
+      if (status !== 'APPROVED') await this.repository.markCreditApplicationReview({
         id: application.id, status, updatedAt: this.clock(),
       })
     })
     return this.requireApplication(application.id)
   }
 
-  rejectApplication(applicationId: string, comment: string, actor: IdentityActor): CreditApplicationRecord {
-    const application = this.requireApplication(applicationId)
+  async rejectApplication(applicationId: string, comment: string, actor: IdentityActor): Promise<CreditApplicationRecord> {
+    const application = await this.requireApplication(applicationId)
     this.requireReviewer(application, actor)
     const reason = this.validateReason(comment, '拒绝原因')
     if (application.status !== 'PENDING') {
       throw new BillingDomainError('CREDIT_STATUS_INVALID', '当前状态不可拒绝')
     }
-    runInTransaction(this.db, () => this.repository.markCreditApplicationReview({
+    await this.driver.transaction(async () => this.repository.markCreditApplicationReview({
       id: application.id, status: 'REJECTED', adminUserId: actor.userId,
       adminComment: reason, reviewedAt: this.clock(), updatedAt: this.clock(),
     }))
     return this.requireApplication(application.id)
   }
 
-  private requireApplication(id: string): CreditApplicationRecord {
-    const application = this.repository.getCreditApplication(id)
+  private async requireApplication(id: string): Promise<CreditApplicationRecord> {
+    const application = await this.repository.getCreditApplication(id)
     if (!application) throw new BillingDomainError('CREDIT_NOT_FOUND', '申请记录不存在')
     return application
   }
 
-  private finalizeApprovedApplication(
+  private async finalizeApprovedApplication(
     applicationId: string,
     actorUserId: string,
     approvedPoints: number,
     operationKey: string,
-  ): void {
-    const application = this.requireApplication(applicationId)
-    const operation = this.repository.getQuotaOperationByKey(operationKey)
-    this.repository.markCreditApplicationReview({
+  ): Promise<void> {
+    const application = await this.requireApplication(applicationId)
+    const operation = await this.repository.getQuotaOperationByKey(operationKey)
+    await this.repository.markCreditApplicationReview({
       id: application.id, status: 'APPROVED', approvedUnits: approvedPoints,
       quotaUnits: pointsToQuota(approvedPoints), adminUserId: actorUserId,
       quotaOperationId: operation?.id ?? application.quotaOperationId,
       reviewedAt: application.reviewedAt ?? this.clock(), updatedAt: this.clock(),
     })
     const idempotencyKey = `billing:activity:credit:${application.id}`
-    if (this.repository.getActivityByIdempotencyKey(idempotencyKey)) return
+    if (await this.repository.getActivityByIdempotencyKey(idempotencyKey)) return
     const timestamp = this.clock()
-    this.repository.insertActivityRecord({
-      id: this.idGenerator(), legacyId: this.repository.allocateActivityLegacyId('ADMIN'),
+    await this.repository.insertActivityRecord({
+      id: this.idGenerator(), legacyId: await this.repository.allocateActivityLegacyId('ADMIN'),
       activityType: 'ADMIN', userId: application.userId, orgId: application.orgId,
       orderId: null, actorUserId, applicationId: application.id,
       pointsUnits: approvedPoints, quotaUnits: pointsToQuota(approvedPoints),

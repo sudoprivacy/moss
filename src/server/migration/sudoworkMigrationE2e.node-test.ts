@@ -2,11 +2,9 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { BillingRepository } from '../billing/billingRepository.js'
-import { ensureBillingSchema } from '../billing/billingSchema.js'
 import { WalletService } from '../billing/walletService.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { AccessMigrationPhase } from './accessMigrationPhase.js'
 import { AutomationMigrationPhase } from './automationMigrationPhase.js'
 import { GovernanceMigrationService } from './governanceMigrationService.js'
@@ -55,11 +53,11 @@ void describe('Sudowork migration end to end', () => {
   void test('空 Moss 可完成跨阶段预检、迁移、校验并安全重复执行', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
-    ensureBillingSchema(db)
-    const baseIdentities = new IdentityRepository(db)
+    const baseIdentities = createIdentityTestRepository(db, {}, auth.driver)
+    const billingRepository = createBillingTestRepository(db, auth.driver)
     const projection = new PlanningIdentityProjection(baseIdentities)
     const identities = projection.repository
-    const unified = new UnifiedIdentityService(db, auth, identities)
+    const unified = new UnifiedIdentityService(auth, identities)
     let runSequence = 0
     const runs = new MigrationRunStore(db, { idFactory: () => `run-${++runSequence}` })
     const identitySource: LegacyIdentitySnapshot = {
@@ -81,13 +79,13 @@ void describe('Sudowork migration end to end', () => {
       ],
     }
     const identity = new IdentityMigrationService({
-      db, auth, identities, unified, runs,
+      db: auth.driver, auth, identities, unified, runs,
       source: { readSnapshot: () => identitySource },
       planner: new IdentityMergePlanner({ organizations: [], users: [] }),
-      createPlanner: () => new IdentityMergePlanner(readTargetIdentitySnapshot(auth, baseIdentities)),
+      createPlanner: async () => new IdentityMergePlanner(await readTargetIdentitySnapshot(auth, baseIdentities)),
     })
     const governance = new GovernanceMigrationService({
-      db, identities, runs, defaultInitialQuota: 100000,
+      identities, runs, defaultInitialQuota: 100000,
       source: { readSnapshot: () => ({
         checksum: 'governance',
         invitations: [
@@ -103,7 +101,6 @@ void describe('Sudowork migration end to end', () => {
         operationLogs: [],
       }) },
     })
-    const billingRepository = new BillingRepository(db)
     const billingSource = {
       checksum: 'abcdef0123456789',
       users: [
@@ -113,7 +110,7 @@ void describe('Sudowork migration end to end', () => {
       ledger: [], orders: [], rechargeRecords: [], adminRechargeRecords: [], creditApplications: [], refunds: [],
     }
     const billing = new P3BillingMigrationService(
-      db, identities, billingRepository, new WalletService(db, billingRepository), Date.now, projection,
+      auth.driver, identities, billingRepository, new WalletService(auth.driver, billingRepository), Date.now, projection,
     )
     const emptyAccessStore = {
       async keys() { return [] as string[] }, async get() { return null }, async ttl() { return -2 },
@@ -127,7 +124,7 @@ void describe('Sudowork migration end to end', () => {
     const automation = new AutomationMigrationPhase({
       readSnapshot: () => ({ checksum: 'automation', detectedTables: [] }),
     })
-    const onIdentityPlanned = (plan: ReturnType<IdentityMigrationService['plan']>) => projection.install(plan, plan.source)
+    const onIdentityPlanned = (plan: Awaited<ReturnType<IdentityMigrationService['plan']>>) => projection.install(plan, plan.source)
     const phases = new MigrationPhaseRegistry([
       new OrganizationMigrationPhase(identity, [], onIdentityPlanned, () => projection.deactivate()),
       new UserIdentityMigrationPhase(identity, [], onIdentityPlanned, () => projection.deactivate()),
@@ -156,10 +153,10 @@ void describe('Sudowork migration end to end', () => {
     assert.equal(first.resumed, true)
     assert.equal(first.phases.length, 10)
     assert.equal((await coordinator.verify(first.runId)).status, 'matched')
-    const org = baseIdentities.resolveNumericAliasGlobal('enterprise', 7)
-    const user = baseIdentities.resolveNumericAliasGlobal('user', 17)
-    const orgB = baseIdentities.resolveNumericAliasGlobal('enterprise', 8)
-    const userB = baseIdentities.resolveNumericAliasGlobal('user', 18)
+    const org = await baseIdentities.resolveNumericAliasGlobal('enterprise', 7)
+    const user = await baseIdentities.resolveNumericAliasGlobal('user', 17)
+    const orgB = await baseIdentities.resolveNumericAliasGlobal('enterprise', 8)
+    const userB = await baseIdentities.resolveNumericAliasGlobal('user', 18)
     assert(org)
     assert(user)
     assert(orgB)
@@ -167,10 +164,10 @@ void describe('Sudowork migration end to end', () => {
     assert.equal(user.orgId, org.resourceId)
     assert.equal(userB.orgId, orgB.resourceId)
     assert.notEqual(user.orgId, userB.orgId)
-    assert.equal(baseIdentities.getInvitationByCode('INVITE-A')?.orgId, org.resourceId)
-    assert.equal(baseIdentities.getInvitationByCode('INVITE-B')?.usedByUserId, userB.resourceId)
-    assert.deepEqual(billingRepository.getWallet('user', user.resourceId), { balanceUnits: 0, version: 0 })
-    assert.deepEqual(billingRepository.getWallet('user', userB.resourceId), { balanceUnits: 0, version: 0 })
+    assert.equal((await baseIdentities.getInvitationByCode('INVITE-A'))?.orgId, org.resourceId)
+    assert.equal((await baseIdentities.getInvitationByCode('INVITE-B'))?.usedByUserId, userB.resourceId)
+    assert.deepEqual(await billingRepository.getWallet('user', user.resourceId), { balanceUnits: 0, version: 0 })
+    assert.deepEqual(await billingRepository.getWallet('user', userB.resourceId), { balanceUnits: 0, version: 0 })
     assert.equal(Number((db.prepare(`
       SELECT COUNT(*) AS count FROM outbox_events
       WHERE context_source = 'migration' AND status = 'pending'

@@ -4,7 +4,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthService, AuthServiceError } from '../auth/service.js'
 import { AuthCenterDb, type AuthCenterUser } from '../authCenter/db.js'
-import { IdentityRepository, type OrganizationLoginMethod } from './identityRepository.js'
+import type { OrganizationLoginMethod } from './identityRepository.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
+import { ensureClientPolicySchema } from '../configuration/clientPolicyRepository.js'
 
 async function setup(
   status: AuthCenterUser['status'] = 'active',
@@ -17,10 +19,12 @@ async function setup(
 }> {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
+  const identities = createIdentityTestRepository(db, {}, authDb.driver)
+  ensureClientPolicySchema(db)
   await authDb.createOrganization('org-a', 'Org A', 1)
   await authDb.setConfig('issuer', 'moss-test')
   await authDb.setConfig('jwt_secret', 'test-secret')
-  new IdentityRepository(db).putOrganizationProfile({
+  await identities.putOrganizationProfile({
     orgId: 'org-a',
     code: 'ORG-A',
     loginMethod,
@@ -34,7 +38,9 @@ async function setup(
     tokenLimit: null, createdAt: 1, passwordHash: legacyHash, passwordUpdatedAt: null,
     lastLoginAt: null, extUserId: null,
   })
-  return { db, authDb, authService: new AuthService(authDb, 3600), legacyHash }
+  const authService = new AuthService(authDb, 3600)
+  await authService.initializeCompatibilityRecords()
+  return { db, authDb, authService, legacyHash }
 }
 
 void describe('legacy bcrypt password compatibility', () => {
@@ -72,12 +78,12 @@ void describe('legacy bcrypt password compatibility', () => {
   })
 
   void test('rejects password login and refresh after organization switches away from password login', async () => {
-    const { db, authService } = await setup()
+    const { db, authDb, authService } = await setup()
     const issued = await authService.issueTokenFromPassword({ username: 'legacy', password: 'StrongPass123' })
-    const repository = new IdentityRepository(db)
-    const profile = repository.getOrganizationProfile('org-a')
+    const repository = createIdentityTestRepository(db, {}, authDb.driver)
+    const profile = await repository.getOrganizationProfile('org-a')
     assert(profile)
-    repository.putOrganizationProfile({
+    await repository.putOrganizationProfile({
       ...profile,
       loginMethod: 'cas',
     })

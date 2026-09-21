@@ -7,39 +7,22 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import JSZip from 'jszip'
 import { CatalogArtifactStore } from '../catalog/catalogArtifactStore.js'
-import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { CatalogService } from '../catalog/catalogService.js'
+import { SqliteDriver } from '../db/driver.js'
+import { createCatalogTestRepository } from '../testing/compatibilityRepositories.js'
 import { P2CatalogImportService } from './p2CatalogImport.js'
 
 function setup(root: string) {
   const db = new DatabaseSync(':memory:')
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      default_init_prompt TEXT, prompts_i18n TEXT, categories TEXT, avatar TEXT, skills TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, enabled_skills TEXT,
-      publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT,
-      review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
-  const repository = new CatalogRepository(db)
+  const driver = new SqliteDriver(db)
+  const repository = createCatalogTestRepository(db, driver)
   return {
     db,
     repository,
     importer: new P2CatalogImportService({
-      db,
+      db: driver,
       repository,
-      catalog: new CatalogService(db, repository),
+      catalog: new CatalogService(repository),
       artifacts: new CatalogArtifactStore(root),
       publicBaseUrl: 'https://moss.example.test',
     }),
@@ -80,7 +63,7 @@ void describe('P2 目录迁移编排', () => {
       assert.equal(repeated.filePath, first.filePath)
       assert.equal(first.sourceUrl, 'https://moss.example.test/api/catalog/artifacts/skill/legacy-skill-7')
       assert.deepEqual(await fixture.importer.readArtifact(first.filePath!, checksum), bytes)
-      assert.equal(fixture.repository.listSkills({ orgId: 'org-a' }).items.length, 1)
+      assert.equal((await fixture.repository.listSkills({ orgId: 'org-a' })).items.length, 1)
     } finally {
       fixture.db.close()
       await rm(root, { recursive: true, force: true })
@@ -103,8 +86,8 @@ void describe('P2 目录迁移编排', () => {
         },
         bytes,
       }), /checksum/)
-      assert.equal(fixture.repository.getSkill('bad-checksum', 'org-a'), null)
-      assert.equal(fixture.repository.getCommandResult('catalog.import_skill', 'p2:skill:legacy-prod:bad-checksum'), null)
+      assert.equal(await fixture.repository.getSkill('bad-checksum', 'org-a'), null)
+      assert.equal(await fixture.repository.getCommandResult('catalog.import_skill', 'p2:skill:legacy-prod:bad-checksum'), null)
     } finally {
       fixture.db.close()
       await rm(root, { recursive: true, force: true })

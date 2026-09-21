@@ -127,7 +127,7 @@ export interface SudoworkAdministrationPort {
     count: number
     initialQuotaUsd?: number | null
   }): Promise<{ codes: string[]; count: number }> | { codes: string[]; count: number }
-  deleteInvitationCode(actor: IdentityActor, legacyId: number): boolean
+  deleteInvitationCode(actor: IdentityActor, legacyId: number): Promise<boolean>
   listUsers(input: {
     actor: IdentityActor
     enterpriseId?: number
@@ -180,7 +180,7 @@ export interface SudoworkCasPort {
   login(input: { providerId: string; ticket: string; service: string; deviceId?: string }): Promise<SudoworkLegacySession>
   createHandoff(input: { providerId: string; ticket: string }): Promise<{ redirectUrl: string }>
   exchange(input: { providerId: string; code: string; deviceId?: string }): Promise<SudoworkLegacySession>
-  logoutCallbackUrl(providerId: string): string
+  logoutCallbackUrl(providerId: string): Promise<string>
   listPublicProviders(): Promise<Array<Record<string, unknown>>> | Array<Record<string, unknown>>
 }
 
@@ -219,10 +219,10 @@ export interface SudoworkCatalogPort {
   uploadAgent(input: Parameters<SudoworkCatalogService['uploadAgent']>[0]): ReturnType<SudoworkCatalogService['uploadAgent']>
   uploadSkill(input: Parameters<SudoworkCatalogService['uploadSkill']>[0]): ReturnType<SudoworkCatalogService['uploadSkill']>
   getArtifact(kind: 'agent' | 'skill', resourceId: string): ReturnType<SudoworkCatalogService['getArtifact']>
-  reviewAgent(actor: IdentityActor, agentId: string): void
-  reviewSkill(actor: IdentityActor, skillId: string): void
-  deleteAgent(actor: IdentityActor, agentId: string): void
-  deleteSkill(actor: IdentityActor, skillId: string): void
+  reviewAgent(actor: IdentityActor, agentId: string): Promise<void>
+  reviewSkill(actor: IdentityActor, skillId: string): Promise<void>
+  deleteAgent(actor: IdentityActor, agentId: string): Promise<void>
+  deleteSkill(actor: IdentityActor, skillId: string): Promise<void>
 }
 
 export interface SudoworkConfigPort {
@@ -234,8 +234,8 @@ export interface SudoworkConfigPort {
   entriesFor(actor: IdentityActor, id: number): ReturnType<SudoworkConfigService['entriesFor']>
   replaceEntries(actor: IdentityActor, id: number, entries: unknown): ReturnType<SudoworkConfigService['replaceEntries']>
   listEnterprises(actor: IdentityActor, id: number, page?: number, pageSize?: number): ReturnType<SudoworkConfigService['listEnterprises']>
-  associate(actor: IdentityActor, id: number, legacyEnterpriseId: number): void
-  dissociate(actor: IdentityActor, id: number, legacyEnterpriseId: number): void
+  associate(actor: IdentityActor, id: number, legacyEnterpriseId: number): Promise<void>
+  dissociate(actor: IdentityActor, id: number, legacyEnterpriseId: number): Promise<void>
   listForUser(actor: IdentityActor): ReturnType<SudoworkConfigService['listForUser']>
   getTenantConfig(actor: IdentityActor, code: string): ReturnType<SudoworkConfigService['getTenantConfig']>
 }
@@ -340,8 +340,8 @@ export function createSudoworkCompatibilityApp(options: {
   difyEnhancement?: DifyEnhancementService
   difyDataset?: DifyDatasetService
   difyAdministration?: DifyAdministrationService
-  resolveEnterpriseAlias?: (legacyId: number) => { resourceId: string; orgId: string } | null
-  buildVisibility?: (actor: IdentityActor) => VisibilityFilter
+  resolveEnterpriseAlias?: (legacyId: number) => Promise<{ resourceId: string; orgId: string } | null>
+  buildVisibility?: (actor: IdentityActor) => Promise<VisibilityFilter>
   difyUpstreamBaseUrl?: string
   cas?: SudoworkCasPort
   loginMethod?: 'sms' | 'password' | 'cas'
@@ -353,9 +353,9 @@ export function createSudoworkCompatibilityApp(options: {
   qms?: Omit<Parameters<typeof createSudoworkQmsRoutes>[0], 'getActor'>
 }): Hono {
   const app = new Hono()
-  const loginMethod = () => options.systemConfiguration?.getLoginMethod() ?? options.loginMethod ?? 'password'
+  const loginMethod = async () => await options.systemConfiguration?.getLoginMethod() ?? options.loginMethod ?? 'password'
   const getProjection = options.getUserProjection ?? (async () => EMPTY_PROJECTION)
-  const publicCasProviders = async () => loginMethod() === 'cas' ? await options.cas?.listPublicProviders() ?? [] : []
+  const publicCasProviders = async () => await loginMethod() === 'cas' ? await options.cas?.listPublicProviders() ?? [] : []
   const skillhubBaseUrl = options.systemConfig?.skillhubBaseUrl?.replace(/\/+$/, '') ?? ''
 
   app.use('*', cors())
@@ -549,7 +549,7 @@ export function createSudoworkCompatibilityApp(options: {
     const phone = typeof body.phone === 'string' ? body.phone : ''
     const password = typeof body.password === 'string' ? body.password : ''
     if (!phone || !password) {
-      if (loginMethod() === 'cas') {
+      if (await loginMethod() === 'cas') {
         return context.json({
           success: false,
           msg: '当前系统已开启三方认证登录，请使用 CAS 登录',
@@ -660,7 +660,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.listAgents({
+    return context.json(await options.catalog.listAgents({
       actor,
       tenantCode: context.req.query('tenant_id'),
       cursor: context.req.query('cursor'),
@@ -674,7 +674,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.getAgentDetail(actor, context.req.param('assistantId')))
+    return context.json(await options.catalog.getAgentDetail(actor, context.req.param('assistantId')))
   })
 
   app.post('/api/assistants', async (context) => {
@@ -703,7 +703,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.catalog.reviewAgent(actor, context.req.param('assistantId'))
+    await options.catalog.reviewAgent(actor, context.req.param('assistantId'))
     return context.json({ success: true, message: 'success' })
   })
 
@@ -711,7 +711,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.catalog.deleteAgent(actor, context.req.param('assistantId'))
+    await options.catalog.deleteAgent(actor, context.req.param('assistantId'))
     return context.json({ success: true, message: 'success' })
   })
 
@@ -719,7 +719,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.listSkills({
+    return context.json(await options.catalog.listSkills({
       actor,
       limit: cursorLimit(context.req.query('size')),
       query: context.req.query('query'),
@@ -731,7 +731,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.listSkills({
+    return context.json(await options.catalog.listSkills({
       actor,
       tenantCode: context.req.query('tenant_id'),
       cursor: context.req.query('cursor'),
@@ -745,7 +745,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.getSkillDetail(actor, context.req.param('skillId')))
+    return context.json(await options.catalog.getSkillDetail(actor, context.req.param('skillId')))
   })
 
   app.post('/api/skills', async (context) => {
@@ -777,7 +777,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.catalog.reviewSkill(actor, context.req.param('skillId'))
+    await options.catalog.reviewSkill(actor, context.req.param('skillId'))
     return context.json({ success: true, message: 'success' })
   })
 
@@ -785,7 +785,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.catalog.deleteSkill(actor, context.req.param('skillId'))
+    await options.catalog.deleteSkill(actor, context.req.param('skillId'))
     return context.json({ success: true, message: 'success' })
   })
 
@@ -793,21 +793,21 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.listVisibleBindings(actor))
+    return context.json(await options.catalog.listVisibleBindings(actor))
   })
 
   app.get('/api/v1/agents/visible', async (context) => {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.listVisibleAgents(actor))
+    return context.json(await options.catalog.listVisibleAgents(actor))
   })
 
   app.get('/api/categories', async (context) => {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json(options.catalog.listCategories(actor, context.req.query('type') === '1' ? 'agent' : 'skill'))
+    return context.json(await options.catalog.listCategories(actor, context.req.query('type') === '1' ? 'agent' : 'skill'))
   })
 
   app.get('/api/catalog/artifacts/:kind/:resourceId', async (context) => {
@@ -990,7 +990,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.administration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    const deleted = options.administration.deleteInvitationCode(actor, Number(context.req.param('id')))
+    const deleted = await options.administration.deleteInvitationCode(actor, Number(context.req.param('id')))
     if (!deleted) return context.json({ success: false, msg: '邀请码已被使用，无法删除' }, 400)
     return context.json({ success: true, msg: '邀请码删除成功' })
   })
@@ -1031,8 +1031,8 @@ export function createSudoworkCompatibilityApp(options: {
     if (!Number.isInteger(invitationCodeId)) {
       return context.json({ success: false, msg: '请选择邀请码' }, 400)
     }
-    const targetOrgId = options.resolveEnterpriseAlias?.(enterpriseId)?.orgId ?? actor.orgId
-    if (options.systemConfiguration?.getLoginMethod(targetOrgId) !== 'password') {
+    const targetOrgId = (await options.resolveEnterpriseAlias?.(enterpriseId))?.orgId ?? actor.orgId
+    if (await options.systemConfiguration?.getLoginMethod(targetOrgId) !== 'password') {
       return context.json({ success: false, msg: '当前企业未开启用户名密码登录' }, 403)
     }
     if (password) {
@@ -1063,8 +1063,8 @@ export function createSudoworkCompatibilityApp(options: {
     if (!Number.isInteger(invitationCodeId)) {
       return context.json({ success: false, msg: '请选择邀请码' }, 400)
     }
-    const targetOrgId = options.resolveEnterpriseAlias?.(enterpriseId)?.orgId ?? actor.orgId
-    if (options.systemConfiguration?.getLoginMethod(targetOrgId) !== 'sms') {
+    const targetOrgId = (await options.resolveEnterpriseAlias?.(enterpriseId))?.orgId ?? actor.orgId
+    if (await options.systemConfiguration?.getLoginMethod(targetOrgId) !== 'sms') {
       return context.json({ success: false, msg: '当前企业未开启手机验证码登录' }, 403)
     }
     const result = await options.administration.createPhoneUser({
@@ -1216,7 +1216,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json({ success: true, data: options.configuration.entriesFor(actor, Number(context.req.param('id'))) })
+    return context.json({ success: true, data: await options.configuration.entriesFor(actor, Number(context.req.param('id'))) })
   })
 
   app.put('/api/v1/admin/config-items/:id/entries', async (context) => {
@@ -1245,7 +1245,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.configuration.associate(actor, Number(context.req.param('id')), Number(context.req.param('enterpriseId')))
+    await options.configuration.associate(actor, Number(context.req.param('id')), Number(context.req.param('enterpriseId')))
     return context.json({ success: true, msg: '企业关联成功' })
   })
 
@@ -1253,7 +1253,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getAdminActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.configuration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    options.configuration.dissociate(actor, Number(context.req.param('id')), Number(context.req.param('enterpriseId')))
+    await options.configuration.dissociate(actor, Number(context.req.param('id')), Number(context.req.param('enterpriseId')))
     return context.json({ success: true, msg: '企业取消关联成功' })
   })
 
@@ -1277,7 +1277,7 @@ export function createSudoworkCompatibilityApp(options: {
     const actor = await getSystemConfigAdminActor(context.req.header('Authorization'), context.req.query('scope'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.systemConfiguration) return context.json({ success: false, msg: '服务器内部错误' }, 500)
-    return context.json({ success: true, data: options.systemConfiguration.getAdminConfig(actor) })
+    return context.json({ success: true, data: await options.systemConfiguration.getAdminConfig(actor) })
   })
 
   app.put('/api/v1/admin/system-config', async (context) => {
@@ -1293,12 +1293,12 @@ export function createSudoworkCompatibilityApp(options: {
     const casProviders = await publicCasProviders()
     return context.json({
       success: true,
-      data: options.systemConfiguration?.getPublicConfig(actor?.orgId) ?? {
-      login_method: loginMethod() === 'sms' ? 0 : loginMethod() === 'password' ? 1 : 2,
+      data: await options.systemConfiguration?.getPublicConfig(actor?.orgId) ?? {
+      login_method: await loginMethod() === 'sms' ? 0 : await loginMethod() === 'password' ? 1 : 2,
       log_report: { enabled: 0 }, version_update: { enabled: 0 }, product_improvement: { enabled: 0 },
       sudorouter_baseurl: '', skillhub_baseurl: skillhubBaseUrl, scode_auto_model: '',
       third_party_auth: {
-        enabled: loginMethod() === 'cas' && options.cas ? 1 : 0,
+        enabled: await loginMethod() === 'cas' && options.cas ? 1 : 0,
         default_provider: casProviders[0]?.id ?? '', providers: casProviders,
       },
       recharge_mode: 'disabled', credit_application: { enabled: 0 },
@@ -1316,7 +1316,7 @@ export function createSudoworkCompatibilityApp(options: {
       success: true,
       ...encryptLegacyCredentials({
         skillhub: { token: `Bearer ${token}` },
-        ...(options.systemConfiguration?.getCredentialData(actor.orgId) ?? {}),
+        ...(await options.systemConfiguration?.getCredentialData(actor.orgId) ?? {}),
       }),
     })
   })
@@ -1366,9 +1366,9 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json(await writeSession(session))
   })
 
-  app.get('/api/v1/auth/third-party/cas/logout/callback/:provider', (context) => {
+  app.get('/api/v1/auth/third-party/cas/logout/callback/:provider', async (context) => {
     const providerId = context.req.param('provider')
-    const redirectUrl = options.cas && providerId ? options.cas.logoutCallbackUrl(providerId) : undefined
+    const redirectUrl = options.cas && providerId ? await options.cas.logoutCallbackUrl(providerId) : undefined
     return renderCasCallback(
       '已退出登录',
       redirectUrl ? '正在打开 Sudowork，请在浏览器提示中确认。' : 'CAS 已完成退出登录，请返回 Sudowork。',

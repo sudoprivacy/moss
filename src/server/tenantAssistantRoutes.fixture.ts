@@ -15,7 +15,7 @@ await ensureServerDirectories(config)
 
 const store = new DirectConnectStore(config.dbPath)
 const { service: authService } = await createAuthService({
-  db: store.db,
+  db: store.requireSqliteDb(),
   dbPath: config.dbPath,
   tokenTtlSec: config.tokenTtlSec,
   bootstrapAdmin: config.bootstrapAdmin,

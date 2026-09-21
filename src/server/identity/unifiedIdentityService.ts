@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import type { CommandContext } from '../application/commandContext.js'
 import { assertTrustedCommandContext } from '../application/commandContext.js'
 import {
@@ -47,7 +46,6 @@ export interface CreateUnifiedOrganizationResult {
 
 export class UnifiedIdentityService {
   constructor(
-    private readonly db: DatabaseSync,
     private readonly authDb: AuthCenterDb,
     private readonly repository: IdentityRepository,
   ) {}
@@ -70,13 +68,13 @@ export class UnifiedIdentityService {
     initialCreditUnits?: number
   }, context: CommandContext): Promise<CreateUnifiedOrganizationResult> {
     assertTrustedCommandContext(context)
-    const previous = this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
+    const previous = await this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
       'identity.create_organization', context.idempotencyKey,
     )
     if (previous) return previous
 
     return await this.authDb.driver.transaction(async () => {
-      const repeated = this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
+      const repeated = await this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
         'identity.create_organization', context.idempotencyKey,
       )
       if (repeated) return repeated
@@ -88,7 +86,7 @@ export class UnifiedIdentityService {
       if (await this.authDb.getOrganization(organizationId)) throw new Error('Organization id already exists')
       const code = input.code?.trim() || `moss-${organizationId.slice(0, 8)}`
       await this.authDb.createOrganization(organizationId, name, Date.now(), input.extOrgId?.trim() || null)
-      this.repository.putOrganizationProfile({
+      await this.repository.putOrganizationProfile({
         orgId: organizationId,
         code,
         loginMethod: input.loginMethod ?? 'password',
@@ -103,18 +101,18 @@ export class UnifiedIdentityService {
       })
       let legacyEnterpriseId: number
       if (input.legacyEnterpriseId !== undefined) {
-        this.repository.assignNumericAlias({
+        await this.repository.assignNumericAlias({
           namespace: 'enterprise', legacyId: input.legacyEnterpriseId,
           resourceId: organizationId, orgId: organizationId,
           migrationRunId: context.migrationRunId,
         })
         legacyEnterpriseId = input.legacyEnterpriseId
       } else {
-        legacyEnterpriseId = this.repository.allocateNumericAlias('enterprise', organizationId, organizationId)
+        legacyEnterpriseId = await this.repository.allocateNumericAlias('enterprise', organizationId, organizationId)
       }
-      this.repository.createWallet('organization', organizationId, input.initialCreditUnits ?? 0)
+      await this.repository.createWallet('organization', organizationId, input.initialCreditUnits ?? 0)
       const result = { organizationId, legacyEnterpriseId, code }
-      this.repository.recordCommandResult(
+      await this.repository.recordCommandResult(
         'identity.create_organization', context.idempotencyKey, context.source, result,
       )
       return result
@@ -123,11 +121,11 @@ export class UnifiedIdentityService {
 
   async createUser(input: CreateUnifiedUserInput, context: CommandContext): Promise<CreateUnifiedUserResult> {
     assertTrustedCommandContext(context)
-    const previous = this.repository.getCommandResult<CreateUnifiedUserResult>('identity.create_user', context.idempotencyKey)
+    const previous = await this.repository.getCommandResult<CreateUnifiedUserResult>('identity.create_user', context.idempotencyKey)
     if (previous) return previous
 
     return await this.authDb.driver.transaction(async () => {
-      const repeated = this.repository.getCommandResult<CreateUnifiedUserResult>('identity.create_user', context.idempotencyKey)
+      const repeated = await this.repository.getCommandResult<CreateUnifiedUserResult>('identity.create_user', context.idempotencyKey)
       if (repeated) return repeated
       const organization = await this.authDb.getOrganization(input.orgId)
       if (!organization) throw new Error('Unknown organization')
@@ -141,7 +139,7 @@ export class UnifiedIdentityService {
       }
 
       const invitation = input.invitationCode
-        ? this.repository.getInvitationByCode(input.invitationCode)
+        ? await this.repository.getInvitationByCode(input.invitationCode)
         : null
       if (input.invitationCode && (!invitation || invitation.status !== 'pending')) {
         throw new Error('Invitation is not available')
@@ -172,7 +170,7 @@ export class UnifiedIdentityService {
       await this.authDb.createUser(user)
 
       if (hasLocalPassword) {
-        this.repository.createAuthIdentity({
+        await this.repository.createAuthIdentity({
           id: randomUUID(),
           orgId: input.orgId,
           userId,
@@ -184,7 +182,7 @@ export class UnifiedIdentityService {
       }
 
       if (input.authIdentity) {
-        this.repository.createAuthIdentity({
+        await this.repository.createAuthIdentity({
           id: randomUUID(),
           orgId: input.orgId,
           userId,
@@ -196,7 +194,7 @@ export class UnifiedIdentityService {
       }
 
       if (input.phone?.trim()) {
-        this.repository.createAuthIdentity({
+        await this.repository.createAuthIdentity({
           id: randomUUID(),
           orgId: input.orgId,
           userId,
@@ -209,7 +207,7 @@ export class UnifiedIdentityService {
 
       let legacyUserId: number
       if (input.legacyUserId !== undefined) {
-        this.repository.assignNumericAlias({
+        await this.repository.assignNumericAlias({
           namespace: 'user',
           legacyId: input.legacyUserId,
           resourceId: userId,
@@ -218,14 +216,14 @@ export class UnifiedIdentityService {
         })
         legacyUserId = input.legacyUserId
       } else {
-        legacyUserId = this.repository.allocateNumericAlias('user', userId, input.orgId)
+        legacyUserId = await this.repository.allocateNumericAlias('user', userId, input.orgId)
       }
 
-      this.repository.createWallet('user', userId, invitation?.initialCreditUnits ?? input.initialCreditUnits ?? 0)
-      if (invitation) this.repository.consumeInvitation(invitation.id, userId)
+      await this.repository.createWallet('user', userId, invitation?.initialCreditUnits ?? input.initialCreditUnits ?? 0)
+      if (invitation) await this.repository.consumeInvitation(invitation.id, userId)
 
       const suppressed = context.externalEffects === 'suppress_external'
-      this.repository.createOutboxEvent({
+      await this.repository.createOutboxEvent({
         id: randomUUID(),
         eventType: 'user.welcome',
         aggregateType: 'user',
@@ -238,7 +236,7 @@ export class UnifiedIdentityService {
       })
 
       const result = { userId, legacyUserId }
-      this.repository.recordCommandResult('identity.create_user', context.idempotencyKey, context.source, result)
+      await this.repository.recordCommandResult('identity.create_user', context.idempotencyKey, context.source, result)
       return result
     })
   }

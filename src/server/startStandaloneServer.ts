@@ -6,6 +6,8 @@ import { ensureServerDirectories } from './config.js'
 import { openStoreAsync } from './db.js'
 import { RuntimeService } from './runtimeService.js'
 import { createAuthService } from './auth/service.js'
+import { repairConfigAvailability } from './configuration/configAvailabilitySchema.js'
+import { ensureCompatibilityCoreSchema, ensureSqliteCompatibilityDomainSchemas } from './db/compatibilitySchema.js'
 import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
@@ -35,6 +37,7 @@ import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
 import { getSystemSettings } from './systemSettings.js'
 import { migrateLegacyModelSettings } from './configuration/migrateLegacyModelSettings.js'
+import { migrateLegacyEnterpriseCronPolicy } from './migration/legacyEnterpriseCronPolicy.js'
 import type { LegacyKeyValueStore } from './identity/legacyToken.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
 import { assertSafeInstanceIdentity } from './startupGuards.js'
@@ -145,7 +148,13 @@ async function finishStandaloneServerStartup(
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
   const store = await openStoreAsync(config)
+  const sqliteDb = store.db
+  if (sqliteDb) {
+    ensureSqliteCompatibilityDomainSchemas(sqliteDb, { legacyClientCronEnabled: getSystemSettings().clientCronEnabled })
+    ensureCompatibilityCoreSchema(sqliteDb)
+  }
   await store.ensureDefaultConfigItems()
+  await repairConfigAvailability(store.driver)
 
   // E-5: a live peer without MOSS_INSTANCE_ID → refuse to start.
   // The container-name suffix, docker label filter and wiki claim column all
@@ -240,8 +249,9 @@ async function finishStandaloneServerStartup(
   const defaultOrgId = (await authService.listAllOrganizations()).organizations[0]?.id
   if (defaultOrgId) {
     await store.backfillOrgScoping(defaultOrgId)
-    await migrateLegacyModelSettings(store.db, defaultOrgId)
+    await migrateLegacyModelSettings(store.driver, defaultOrgId)
   }
+  await migrateLegacyEnterpriseCronPolicy(store.driver)
 
   // Token minter for login-type 凭据 (mints + caches a per-user access_token
   // from the user's stored credential), backed by the encrypted
@@ -352,7 +362,7 @@ async function finishStandaloneServerStartup(
     productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
   })
   const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
-  const infrastructure = systemConfiguration.getInfrastructureConfig()
+  const infrastructure = await systemConfiguration.getInfrastructureConfig()
   const sudorouterRuntime = resolveSudorouterRuntimeConfig({
     infrastructure: infrastructure.billing.sudorouter,
     environment: process.env,
@@ -397,7 +407,7 @@ async function finishStandaloneServerStartup(
     secrets: nexusClient,
   })
   const smsConfig = infrastructure.sms
-  const sms = systemConfiguration.isSmsConfigured() && redisLegacyTokenStore
+  const sms = await systemConfiguration.isSmsConfigured() && redisLegacyTokenStore
     ? new SmsVerificationService({
         store: redisLegacyTokenStore,
         sender: createTencentSmsSender({
@@ -438,9 +448,9 @@ async function finishStandaloneServerStartup(
     secrets: nexusClient,
     listModels: listOrganizationModels,
     quotaReader: sudorouter,
-    getRuntimeConfig: orgId => ({
-      modelServiceUrl: systemConfiguration.getInfrastructureConfig().billing.sudorouter.modelServiceUrl,
-      scodeAutoModel: String(systemConfiguration.getPublicConfig(orgId).scode_auto_model ?? ''),
+    getRuntimeConfig: async orgId => ({
+      modelServiceUrl: (await systemConfiguration.getInfrastructureConfig()).billing.sudorouter.modelServiceUrl,
+      scodeAutoModel: String((await systemConfiguration.getPublicConfig(orgId)).scode_auto_model ?? ''),
     }),
   })
   qmsRuntime = await startQmsRuntime({

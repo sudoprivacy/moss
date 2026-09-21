@@ -1,13 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 
 export type ClientDeliveryPolicy = Record<string, unknown>
 
 type PolicyScope = 'platform' | 'organization'
 
-export class ClientPolicyRepository {
-  constructor(private readonly db: DatabaseSync) {
-    this.db.exec(`
+export function ensureClientPolicySchema(db: DatabaseSync): void {
+  db.exec(`
       CREATE TABLE IF NOT EXISTS client_delivery_policies (
         scope_type TEXT NOT NULL CHECK (scope_type IN ('platform', 'organization')),
         scope_id TEXT NOT NULL,
@@ -19,40 +18,43 @@ export class ClientPolicyRepository {
       );
       CREATE INDEX IF NOT EXISTS client_delivery_policies_scope_idx
         ON client_delivery_policies (scope_type, scope_id);
-    `)
-  }
+  `)
+}
 
-  getPlatform(): ClientDeliveryPolicy {
+export class ClientPolicyRepository {
+  constructor(private readonly driver: DbDriver) {}
+
+  getPlatform(): Promise<ClientDeliveryPolicy> {
     return this.get('platform', 'default')
   }
 
-  getOrganization(orgId: string): ClientDeliveryPolicy {
+  getOrganization(orgId: string): Promise<ClientDeliveryPolicy> {
     return this.get('organization', orgId)
   }
 
-  getEffective(orgId?: string): ClientDeliveryPolicy {
-    const platform = this.getPlatform()
-    return orgId ? deepMerge(platform, this.getOrganization(orgId)) : platform
+  async getEffective(orgId?: string): Promise<ClientDeliveryPolicy> {
+    const platform = await this.getPlatform()
+    return orgId ? deepMerge(platform, await this.getOrganization(orgId)) : platform
   }
 
-  putPlatform(patch: ClientDeliveryPolicy, updatedBy: string): ClientDeliveryPolicy {
+  putPlatform(patch: ClientDeliveryPolicy, updatedBy: string): Promise<ClientDeliveryPolicy> {
     return this.put('platform', 'default', patch, updatedBy)
   }
 
-  putOrganization(orgId: string, patch: ClientDeliveryPolicy, updatedBy: string): ClientDeliveryPolicy {
+  putOrganization(orgId: string, patch: ClientDeliveryPolicy, updatedBy: string): Promise<ClientDeliveryPolicy> {
     if (!orgId.trim()) throw new Error('Organization id is required')
     return this.put('organization', orgId, patch, updatedBy)
   }
 
-  removeOrganizationKeys(orgId: string, keys: string[], updatedBy: string): ClientDeliveryPolicy {
+  async removeOrganizationKeys(orgId: string, keys: string[], updatedBy: string): Promise<ClientDeliveryPolicy> {
     if (!orgId.trim()) throw new Error('Organization id is required')
     const uniqueKeys = [...new Set(keys.filter(key => key.trim()))]
     if (uniqueKeys.length === 0) return this.getOrganization(orgId)
-    return runInTransaction(this.db, () => {
-      const next = this.getOrganization(orgId)
+    return this.driver.transaction(async () => {
+      const next = await this.getOrganization(orgId)
       for (const key of uniqueKeys) delete next[key]
       const timestamp = Date.now()
-      this.db.prepare(`
+      await this.driver.run(`
         INSERT INTO client_delivery_policies (
           scope_type, scope_id, policy_json, updated_by, created_at, updated_at
         ) VALUES ('organization', ?, ?, ?, ?, ?)
@@ -60,15 +62,15 @@ export class ClientPolicyRepository {
           policy_json = excluded.policy_json,
           updated_by = excluded.updated_by,
           updated_at = excluded.updated_at
-      `).run(orgId, JSON.stringify(next), updatedBy, timestamp, timestamp)
+      `, [orgId, JSON.stringify(next), updatedBy, timestamp, timestamp])
       return next
     })
   }
 
-  private get(scopeType: PolicyScope, scopeId: string): ClientDeliveryPolicy {
-    const row = this.db.prepare(`
+  private async get(scopeType: PolicyScope, scopeId: string): Promise<ClientDeliveryPolicy> {
+    const row = await this.driver.get<{ policy_json: string }>(`
       SELECT policy_json FROM client_delivery_policies WHERE scope_type = ? AND scope_id = ?
-    `).get(scopeType, scopeId) as { policy_json: string } | undefined
+    `, [scopeType, scopeId])
     if (!row) return {}
     try {
       const value = JSON.parse(row.policy_json) as unknown
@@ -83,12 +85,21 @@ export class ClientPolicyRepository {
     scopeId: string,
     patch: ClientDeliveryPolicy,
     updatedBy: string,
-  ): ClientDeliveryPolicy {
+  ): Promise<ClientDeliveryPolicy> {
+    return this.putAsync(scopeType, scopeId, patch, updatedBy)
+  }
+
+  private async putAsync(
+    scopeType: PolicyScope,
+    scopeId: string,
+    patch: ClientDeliveryPolicy,
+    updatedBy: string,
+  ): Promise<ClientDeliveryPolicy> {
     assertNoSensitiveValues(patch)
-    return runInTransaction(this.db, () => {
-      const next = deepMerge(this.get(scopeType, scopeId), patch)
+    return this.driver.transaction(async () => {
+      const next = deepMerge(await this.get(scopeType, scopeId), patch)
       const timestamp = Date.now()
-      this.db.prepare(`
+      await this.driver.run(`
         INSERT INTO client_delivery_policies (
           scope_type, scope_id, policy_json, updated_by, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?)
@@ -96,7 +107,7 @@ export class ClientPolicyRepository {
           policy_json = excluded.policy_json,
           updated_by = excluded.updated_by,
           updated_at = excluded.updated_at
-      `).run(scopeType, scopeId, JSON.stringify(next), updatedBy, timestamp, timestamp)
+      `, [scopeType, scopeId, JSON.stringify(next), updatedBy, timestamp, timestamp])
       return next
     })
   }

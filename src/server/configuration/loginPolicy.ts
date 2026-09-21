@@ -4,7 +4,7 @@ import type { OrganizationLoginMethod } from '../identity/identityRepository.js'
 export interface LoginPolicySources {
   policies: Pick<ClientPolicyRepository, 'getOrganization' | 'getPlatform'>
   identities: {
-    getOrganizationProfile(orgId: string): { loginMethod: OrganizationLoginMethod } | null
+    getOrganizationProfile(orgId: string): Promise<{ loginMethod: OrganizationLoginMethod } | null>
   }
   defaults?: { loginMethod?: OrganizationLoginMethod }
 }
@@ -17,16 +17,16 @@ function loginMethod(value: unknown): OrganizationLoginMethod | undefined {
 }
 
 /** Stored delivery policies take precedence over legacy organization profiles. */
-export function resolveEffectiveLoginMethod(
+export async function resolveEffectiveLoginMethod(
   { policies, identities, defaults }: LoginPolicySources,
   orgId?: string,
   options: { ignoreOrganizationPolicy?: boolean } = {},
-): OrganizationLoginMethod {
+): Promise<OrganizationLoginMethod> {
   return (orgId && !options.ignoreOrganizationPolicy
-    ? loginMethod(policies.getOrganization(orgId).loginMethod)
+    ? loginMethod((await policies.getOrganization(orgId)).loginMethod)
     : undefined)
-    ?? loginMethod(policies.getPlatform().loginMethod)
-    ?? (orgId ? loginMethod(identities.getOrganizationProfile(orgId)?.loginMethod) : undefined)
+    ?? loginMethod((await policies.getPlatform()).loginMethod)
+    ?? (orgId ? loginMethod((await identities.getOrganizationProfile(orgId))?.loginMethod) : undefined)
     ?? defaults?.loginMethod
     ?? 'password'
 }

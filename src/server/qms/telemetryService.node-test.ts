@@ -12,7 +12,7 @@ class RecordingQueue implements TelemetryBatchQueue {
   }
 }
 
-const tenants = { hasCode: (code: string) => code === 'tenant-a' }
+const tenants = { async hasCode(code: string) { return code === 'tenant-a' } }
 
 void describe('TelemetryService', () => {
   void it('normalizes and atomically enqueues the five legacy batch arrays', async () => {

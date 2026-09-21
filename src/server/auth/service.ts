@@ -40,7 +40,6 @@ import {
   sanitizeUser,
   verifyPassword,
 } from '../authCenter/db.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import { SudoworkIdentityService } from '../api/compat/sudowork/identityService.js'
 import { SudoworkAdministrationService } from '../api/compat/sudowork/adminService.js'
 import { SudoworkCasService } from '../api/compat/sudowork/casService.js'
@@ -271,6 +270,28 @@ async function initializeStore(
   return db.ensureBootstrapAdmin(bootstrapAdmin)
 }
 
+const AUTH_BOOTSTRAP_LOCK_KEY = 'moss:auth-bootstrap'
+const AUTH_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
+const AUTH_BOOTSTRAP_LOCK_RETRY_MS = 50
+
+async function initializeStoreExclusively(
+  db: AuthCenterDb,
+  bootstrapAdmin: BootstrapAdminConfig,
+): Promise<AuthCenterBootstrap> {
+  const deadline = Date.now() + AUTH_BOOTSTRAP_LOCK_TIMEOUT_MS
+  while (true) {
+    const result = await db.driver.tryRunExclusive(
+      AUTH_BOOTSTRAP_LOCK_KEY,
+      () => initializeStore(db, bootstrapAdmin),
+    )
+    if (result) return result
+    if (Date.now() >= deadline) {
+      throw new Error('Timed out waiting for the authentication bootstrap lock')
+    }
+    await new Promise(resolve => setTimeout(resolve, AUTH_BOOTSTRAP_LOCK_RETRY_MS))
+  }
+}
+
 function isAuthRole(value: string): value is AuthRole {
   return (
     value === 'super_admin' ||
@@ -291,18 +312,16 @@ export async function createAuthService(
   bootstrap: AuthCenterBootstrap
 }> {
   const db = new AuthCenterDb(options.db, options.dbPath)
-  // Prime the immutable jwt_secret / issuer cache from an already-initialized
-  // DB before bootstrap (a fresh DB has none yet; bootstrap's setConfig fills
-  // the cache in that case). Keeps getJwtSecret()/getIssuer() synchronous.
-  await db.loadSecretCache()
-  const bootstrap = await initializeStore(
+  const bootstrap = await initializeStoreExclusively(
     db,
     options.bootstrapAdmin,
   )
-  return {
-    service: new AuthService(db, options.tokenTtlSec, options.phoneAuth, options.smsSender),
-    bootstrap,
-  }
+  // A competing instance may have created the immutable signing values while
+  // this instance waited for the lock, so refresh only after initialization.
+  await db.loadSecretCache()
+  const service = new AuthService(db, options.tokenTtlSec, options.phoneAuth, options.smsSender)
+  await service.initializeCompatibilityRecords()
+  return { service, bootstrap }
 }
 
 const REVOKED_TOKENS_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
@@ -332,14 +351,9 @@ export class AuthService {
     phoneAuthConfig?: PhoneAuthConfig,
     smsSender?: SmsSender,
   ) {
-    this.identityRepository = new IdentityRepository(this.db.db, {
-      legacyClientCronEnabled: getSystemSettings().clientCronEnabled,
-    })
-    this.clientPolicies = new ClientPolicyRepository(this.db.db)
-    this.unifiedIdentity = new UnifiedIdentityService(this.db.db, this.db, this.identityRepository)
-    void this.ensureCompatibilityRecords().catch((error) => {
-      console.warn('[AuthService] Failed to ensure Sudowork compatibility records:', error)
-    })
+    this.identityRepository = new IdentityRepository(this.db.driver)
+    this.clientPolicies = new ClientPolicyRepository(this.db.driver)
+    this.unifiedIdentity = new UnifiedIdentityService(this.db, this.identityRepository)
     this.cleanupTimer = setInterval(() => {
       void this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
@@ -368,7 +382,7 @@ export class AuthService {
     tokenStore: LegacyKeyValueStore
     legacyJwtSecret: string
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
-    getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas'
+    getLoginMethod?: (orgId: string) => LoginPolicyMethod | Promise<LoginPolicyMethod>
   }): SudoworkIdentityService {
     return new SudoworkIdentityService({
       authDb: this.db,
@@ -377,14 +391,15 @@ export class AuthService {
       legacyJwtSecret: input.legacyJwtSecret,
       accountProvisioner: input.accountProvisioner,
       getLoginMethod: input.getLoginMethod ?? (orgId => this.getEffectiveLoginMethod(orgId)),
-      nativeActorResolver: token => {
+      nativeActorResolver: async token => {
         const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer())
         if (!auth) return null
-        const user = this.db.db
-          .prepare('SELECT id, org_id, role, status FROM users WHERE id = ? AND (org_id = ? OR role = ?) LIMIT 1')
-          .get(auth.userId, auth.orgId, 'super_admin') as {
-            id: string; org_id: string; role: string; status: string
-          } | undefined
+        const user = await this.db.driver.get<{
+          id: string; org_id: string; role: string; status: string
+        }>(
+          'SELECT id, org_id, role, status FROM users WHERE id = ? AND (org_id = ? OR role = ?) LIMIT 1',
+          [auth.userId, auth.orgId, 'super_admin'],
+        )
         if (!user || user.status !== 'active') return null
         return {
           userId: user.id,
@@ -400,7 +415,6 @@ export class AuthService {
 
   createOrganizationIdentityService(): OrganizationIdentityService {
     return new OrganizationIdentityService(
-      this.db.db,
       this.db,
       this.identityRepository,
       this.unifiedIdentity,
@@ -409,32 +423,32 @@ export class AuthService {
 
   createQmsOrganizationDirectory(): QmsOrganizationDirectory {
     return {
-      getCode: orgId => this.identityRepository.getOrganizationProfile(orgId)?.code ?? null,
-      hasCode: code => this.identityRepository.getOrganizationProfileByCode(code) !== null,
+      getCode: async orgId => (await this.identityRepository.getOrganizationProfile(orgId))?.code ?? null,
+      hasCode: async code => (await this.identityRepository.getOrganizationProfileByCode(code)) !== null,
     }
   }
 
-  isOrganizationClientCronEnabled(orgId: string): boolean {
+  async isOrganizationClientCronEnabled(orgId: string): Promise<boolean> {
     return getSystemSettings().clientCronEnabled
-      && (this.identityRepository.getOrganizationProfile(orgId)?.clientCronEnabled ?? true)
+      && ((await this.identityRepository.getOrganizationProfile(orgId))?.clientCronEnabled ?? true)
   }
 
-  setOrganizationClientCronEnabled(orgId: string, enabled: boolean): void {
-    this.identityRepository.setOrganizationClientCronEnabled(orgId, enabled)
+  async setOrganizationClientCronEnabled(orgId: string, enabled: boolean): Promise<void> {
+    await this.identityRepository.setOrganizationClientCronEnabled(orgId, enabled)
   }
 
-  getOrganizationClientPolicy(orgId?: string): Record<string, unknown> {
-    return new ClientPolicyRepository(this.db.db).getEffective(orgId)
+  getOrganizationClientPolicy(orgId?: string): Promise<Record<string, unknown>> {
+    return this.clientPolicies.getEffective(orgId)
   }
 
-  putOrganizationClientPolicy(orgId: string, patch: Record<string, unknown>, updatedBy: string): Record<string, unknown> {
-    return new ClientPolicyRepository(this.db.db).putOrganization(orgId, patch, updatedBy)
+  putOrganizationClientPolicy(orgId: string, patch: Record<string, unknown>, updatedBy: string): Promise<Record<string, unknown>> {
+    return this.clientPolicies.putOrganization(orgId, patch, updatedBy)
   }
 
   getOrganizationSystemSettings(orgId: string | undefined, options: { redactSecrets?: boolean } = {}) {
     return getOrganizationSystemSettings(
       orgId,
-      new OrganizationModelSettingsRepository(this.db.db),
+      new OrganizationModelSettingsRepository(this.db.driver),
       options,
     )
   }
@@ -447,7 +461,7 @@ export class AuthService {
   ) {
     return updateOrganizationSystemSettings(
       orgId,
-      new OrganizationModelSettingsRepository(this.db.db),
+      new OrganizationModelSettingsRepository(this.db.driver),
       patch,
       updatedBy,
       options,
@@ -472,7 +486,7 @@ export class AuthService {
     tokenStore: LegacyKeyValueStore
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     initialQuotaUnits?: number
-    getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas'
+    getLoginMethod?: (orgId: string) => LoginPolicyMethod | Promise<LoginPolicyMethod>
   }): SudoworkCasService {
     return new SudoworkCasService({
       authDb: this.db,
@@ -491,8 +505,8 @@ export class AuthService {
     secrets: Pick<NexusClient, 'putSecret' | 'getSecret'>
   }): SudorouterAccountService {
     return new SudorouterAccountService(
-      this.db.db,
-      new BillingRepository(this.db.db),
+      this.db.driver,
+      new BillingRepository(this.db.driver),
       input.provider,
       input.secrets,
     )
@@ -501,12 +515,12 @@ export class AuthService {
   createSudoworkUserProjectionService(input: {
     secrets: Pick<NexusClient, 'getSecret'>
     listModels: (orgId?: string) => Promise<Array<{ id: string }>> | Array<{ id: string }>
-    getRuntimeConfig: (orgId?: string) => { modelServiceUrl: string; scodeAutoModel: string }
+    getRuntimeConfig: (orgId?: string) => Promise<{ modelServiceUrl: string; scodeAutoModel: string }> | { modelServiceUrl: string; scodeAutoModel: string }
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }): SudoworkUserProjectionService {
     return new SudoworkUserProjectionService({
       identities: this.identityRepository,
-      billing: new BillingRepository(this.db.db),
+      billing: new BillingRepository(this.db.driver),
       ...input,
     })
   }
@@ -522,11 +536,11 @@ export class AuthService {
     artifactsRoot?: string
     publicBaseUrl?: string
   }): SudoworkCatalogService {
-    const repository = new CatalogRepository(this.db.db)
-    const catalog = new CatalogService(this.db.db, repository)
+    const repository = new CatalogRepository(this.db.driver)
+    const catalog = new CatalogService(repository)
     const uploads = input?.artifactsRoot && input.publicBaseUrl
       ? new CatalogUploadService({
-          db: this.db.db,
+          db: this.db.driver,
           repository,
           catalog,
           artifacts: new CatalogArtifactStore(input.artifactsRoot),
@@ -555,12 +569,12 @@ export class AuthService {
     enhancement: DifyEnhancementService
     dataset: DifyDatasetService
     administration: DifyAdministrationService
-    resolveEnterpriseAlias: (legacyId: number) => { resourceId: string; orgId: string } | null
-    buildVisibility: (actor: import('../identity/organizationIdentityService.js').IdentityActor) => import('../visibilityFilter.js').VisibilityFilter
+    resolveEnterpriseAlias: (legacyId: number) => Promise<{ resourceId: string; orgId: string } | null>
+    buildVisibility: (actor: import('../identity/organizationIdentityService.js').IdentityActor) => Promise<import('../visibilityFilter.js').VisibilityFilter>
   } {
-    const catalog = new CatalogRepository(this.db.db)
-    const catalogService = new CatalogService(this.db.db, catalog)
-    const difyRepository = new DifyRepository(this.db.db)
+    const catalog = new CatalogRepository(this.db.driver)
+    const catalogService = new CatalogService(catalog)
+    const difyRepository = new DifyRepository(this.db.driver)
     const adapter = new DifyHttpAdapter({
       baseUrl: input.baseUrl,
       systemToken: input.systemToken,
@@ -574,7 +588,7 @@ export class AuthService {
     })
     const artifacts = new CatalogArtifactStore(input.artifactsRoot)
     const administration = new DifyAdministrationService({
-      db: this.db.db,
+      db: this.db.driver,
       auth: this.db,
       identities: this.identityRepository,
       catalog,
@@ -591,7 +605,7 @@ export class AuthService {
       runtime: new DifyRuntimeService({ adapter, connections }),
       enhancement: new DifyEnhancementService({ adapter, connections }),
       dataset: new DifyDatasetService({
-        db: this.db.db,
+        db: this.db.driver,
         repository: difyRepository,
         adapter,
         connections,
@@ -606,10 +620,10 @@ export class AuthService {
   createSudoworkConfigService(
     store: DirectConnectStore,
     managedImages?: ManagedImageStore,
-    clientPolicy?: { getPublicConfig(orgId?: string): Record<string, unknown> },
+    clientPolicy?: { getPublicConfig(orgId?: string): Promise<Record<string, unknown>> },
   ): SudoworkConfigService {
     return new SudoworkConfigService({
-      db: this.db.db,
+      db: this.db.driver,
       configItems: createConfigItemsApi(store),
       identities: this.identityRepository,
       authDb: this.db,
@@ -631,9 +645,9 @@ export class AuthService {
   }): SudoworkSystemConfigService {
     this.loginPolicyDefaults.loginMethod = input.loginMethod
     return new SudoworkSystemConfigService({
-      db: this.db.db,
+      db: this.db.driver,
       policies: this.clientPolicies,
-      infrastructureSettings: new PlatformIntegrationSettingsRepository(this.db.db),
+      infrastructureSettings: new PlatformIntegrationSettingsRepository(this.db.driver),
       identities: this.identityRepository,
       defaults: {
         loginMethod: input.loginMethod,
@@ -654,27 +668,27 @@ export class AuthService {
   createSudoworkBillingService(input: {
     sudorouter: SudorouterPort
     payment: BillingPaymentPort & FuiouRefundPort
-    getCreditPolicy(orgId: string): CreditApplicationPolicy
+    getCreditPolicy(orgId: string): Promise<CreditApplicationPolicy> | CreditApplicationPolicy
     testPaymentAmountCents?: number
   }): SudoworkBillingService {
-    const repository = new BillingRepository(this.db.db)
-    const wallet = new WalletService(this.db.db, repository)
-    const coordinator = new BillingCoordinator(this.db.db, repository, wallet, input.sudorouter)
-    const recharge = new RechargeService(this.db.db, repository, {
+    const repository = new BillingRepository(this.db.driver)
+    const wallet = new WalletService(this.db.driver, repository)
+    const coordinator = new BillingCoordinator(this.db.driver, repository, wallet, input.sudorouter)
+    const recharge = new RechargeService(this.db.driver, repository, {
       numericAliasAllocator: (orderId, orgId) => (
         this.identityRepository.allocateNumericAlias('billing_order', orderId, orgId)
       ),
       testPaymentAmountCents: input.testPaymentAmountCents,
     })
     const credit = new CreditApplicationService(
-      this.db.db, repository, this.identityRepository, coordinator,
+      this.db.driver, repository, this.identityRepository, coordinator,
       { getPolicy: input.getCreditPolicy },
     )
     const refund = new RefundService(
-      this.db.db, repository, this.identityRepository, wallet, coordinator, input.payment,
+      this.db.driver, repository, this.identityRepository, wallet, coordinator, input.payment,
     )
     return new SudoworkBillingService({
-      db: this.db.db, auth: this.db, identities: this.identityRepository,
+      db: this.db.driver, auth: this.db, identities: this.identityRepository,
       repository, wallet, recharge, coordinator, credit, refund, payment: input.payment,
     })
   }
@@ -683,26 +697,26 @@ export class AuthService {
     listModels: (orgId?: string) => Promise<Array<{ id: string; name?: string }>> | Array<{ id: string; name?: string }>
     sudorouter?: SudorouterPort & SudorouterUsagePort
   }): SudoworkLegacyUsageService {
-    const repository = new BillingRepository(this.db.db)
+    const repository = new BillingRepository(this.db.driver)
     return new SudoworkLegacyUsageService({
-      db: this.db.db,
+      db: this.db.driver,
       auth: this.db,
       identities: this.identityRepository,
       repository,
-      wallet: new WalletService(this.db.db, repository),
+      wallet: new WalletService(this.db.driver, repository),
       listModels: input.listModels,
       sudorouter: input.sudorouter,
     })
   }
 
   private async ensureCompatibilityRecords(): Promise<void> {
-    runInTransaction(this.db.db, () => {
-      const organizations = this.db.db
-        .prepare('SELECT id, name, ext_org_id AS extOrgId, created_at AS createdAt FROM organizations ORDER BY created_at ASC')
-        .all() as AuthCenterOrganization[]
+    await this.db.driver.transaction(async () => {
+      const organizations = await this.db.driver.all<AuthCenterOrganization & Record<string, unknown>>(
+        'SELECT id, name, ext_org_id AS "extOrgId", created_at AS "createdAt" FROM organizations ORDER BY created_at ASC',
+      )
       for (const organization of organizations) {
-        if (!this.identityRepository.getOrganizationProfile(organization.id)) {
-          this.identityRepository.putOrganizationProfile({
+        if (!(await this.identityRepository.getOrganizationProfile(organization.id))) {
+          await this.identityRepository.putOrganizationProfile({
             orgId: organization.id,
             code: `moss-${organization.id}`,
             loginMethod: 'password',
@@ -710,22 +724,22 @@ export class AuthService {
             cloudEnabled: true,
           })
         }
-        if (this.identityRepository.getNumericAlias('enterprise', organization.id) === null) {
-          this.identityRepository.allocateNumericAlias('enterprise', organization.id, organization.id)
+        if (await this.identityRepository.getNumericAlias('enterprise', organization.id) === null) {
+          await this.identityRepository.allocateNumericAlias('enterprise', organization.id, organization.id)
         }
-        this.identityRepository.ensureWallet('organization', organization.id)
+        await this.identityRepository.ensureWallet('organization', organization.id)
       }
-      const users = this.db.db
-        .prepare(`SELECT id, org_id AS orgId, email, name, display_name AS displayName, department_id AS departmentId,
-                         role, status, local_auth AS localAuth, token_limit AS tokenLimit, password_hash AS passwordHash,
-                         password_updated_at AS passwordUpdatedAt, last_login_at AS lastLoginAt, created_at AS createdAt,
-                         ext_user_id AS extUserId, phone
-                  FROM users ORDER BY created_at ASC`)
-        .all() as unknown as AuthCenterUser[]
+      const users = await this.db.driver.all<AuthCenterUser & Record<string, unknown>>(
+        `SELECT id, org_id AS "orgId", email, name, display_name AS "displayName", department_id AS "departmentId",
+                role, status, local_auth AS "localAuth", token_limit AS "tokenLimit", password_hash AS "passwordHash",
+                password_updated_at AS "passwordUpdatedAt", last_login_at AS "lastLoginAt", created_at AS "createdAt",
+                ext_user_id AS "extUserId", phone
+         FROM users ORDER BY created_at ASC`,
+      )
       for (const user of users) {
-        this.ensureUserCompatibilityRecords(user)
-        if (user.localAuth && !this.identityRepository.findAuthIdentityByUser(user.id, 'password', 'moss')) {
-          this.identityRepository.createAuthIdentity({
+        await this.ensureUserCompatibilityRecords(user)
+        if (user.localAuth && !(await this.identityRepository.findAuthIdentityByUser(user.id, 'password', 'moss'))) {
+          await this.identityRepository.createAuthIdentity({
             id: randomUUID(), orgId: user.orgId, userId: user.id,
             provider: 'password', issuer: 'moss', normalizedSubject: user.name, metadata: {},
           })
@@ -734,11 +748,15 @@ export class AuthService {
     })
   }
 
-  private ensureUserCompatibilityRecords(user: AuthCenterUser): void {
-    if (this.identityRepository.getNumericAlias('user', user.id) === null) {
-      this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
+  private async ensureUserCompatibilityRecords(user: AuthCenterUser): Promise<void> {
+    if (await this.identityRepository.getNumericAlias('user', user.id) === null) {
+      await this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
     }
-    this.identityRepository.ensureWallet('user', user.id)
+    await this.identityRepository.ensureWallet('user', user.id)
+  }
+
+  async initializeCompatibilityRecords(): Promise<void> {
+    await this.ensureCompatibilityRecords()
   }
 
   destroy(): void {
@@ -796,7 +814,7 @@ export class AuthService {
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(401, 'User is invalid')
     }
-    this.assertRefreshLoginMethodAllowed(user.orgId, auth.keyId)
+    await this.assertRefreshLoginMethodAllowed(user.orgId, auth.keyId)
 
     return this.issueToken({
       user,
@@ -859,7 +877,7 @@ export class AuthService {
       throw new AuthServiceError(401, 'Invalid username/email or password')
     }
 
-    this.assertOrganizationLoginMethod(user.orgId, 'password')
+    await this.assertOrganizationLoginMethod(user.orgId, 'password')
     if (isLegacyPasswordHash(user.passwordHash)) {
       await this.db.updateUserPassword(user.id, hashPassword(input.password), Date.now())
     }
@@ -901,7 +919,7 @@ export class AuthService {
     if (user.status !== 'active') {
       throw new AuthServiceError(403, 'Account is disabled')
     }
-    this.assertOrganizationLoginMethod(user.orgId, 'sms')
+    await this.assertOrganizationLoginMethod(user.orgId, 'sms')
     await this.db.updateUserLastLogin(user.id)
     return this.issueToken({
       user,
@@ -941,14 +959,14 @@ export class AuthService {
       return this.issueTokenFromPhone(phone)
     }
 
-    const invitation = this.identityRepository.getInvitationByCode(invitationCode)
+    const invitation = await this.identityRepository.getInvitationByCode(invitationCode)
     if (!invitation) {
       throw new AuthServiceError(400, 'Invitation code does not exist')
     }
     if (invitation.status !== 'pending') {
       throw new AuthServiceError(409, 'Invitation code has already been used')
     }
-    this.assertOrganizationLoginMethod(
+    await this.assertOrganizationLoginMethod(
       invitation.orgId,
       input.loginMethod ?? 'sms',
     )
@@ -1138,7 +1156,7 @@ export class AuthService {
       throw toAuthServiceError(error)
     }
     const { user, scopes } = await this.applyScriptIdentity(identity)
-    this.assertOrganizationLoginMethod(user.orgId, 'cas')
+    await this.assertOrganizationLoginMethod(user.orgId, 'cas')
     await this.db.updateUserLastLogin(user.id)
     const issued = await this.issueToken({
       user,
@@ -1188,7 +1206,7 @@ export class AuthService {
       throw new AuthServiceError(401, 'OAuth2 session cannot be refreshed; please sign in again')
     }
     const { user, scopes } = await this.applyScriptIdentity(result)
-    this.assertOrganizationLoginMethod(user.orgId, 'cas')
+    await this.assertOrganizationLoginMethod(user.orgId, 'cas')
     await this.db.updateUserLastLogin(user.id)
     const issued = await this.issueToken({
       user,
@@ -1268,7 +1286,7 @@ export class AuthService {
         const orgName = incomingOrgName || `org-${identity.extOrgId}`
         // Evaluate the intended CAS profile before provisioning anything. An
         // explicit delivery policy still overrides this onboarding default.
-        this.assertOrganizationLoginMethod(orgId, 'cas', 'cas')
+        await this.assertOrganizationLoginMethod(orgId, 'cas', 'cas')
         try {
           await this.unifiedIdentity.createOrganization({
             id: orgId,
@@ -1295,7 +1313,7 @@ export class AuthService {
     if (!targetOrg) {
       throw new AuthServiceError(500, 'No organization available for OAuth2 user')
     }
-    this.assertOrganizationLoginMethod(targetOrg.id, 'cas')
+    await this.assertOrganizationLoginMethod(targetOrg.id, 'cas')
     const incomingOrgName = identity.extOrgName?.trim() || ''
     if (identity.extOrgId && incomingOrgName && incomingOrgName !== targetOrg.name) {
       try {
@@ -1357,7 +1375,7 @@ export class AuthService {
       try {
         await this.db.driver.transaction(async () => {
           await this.db.createUser(newUser)
-          this.ensureUserCompatibilityRecords(newUser)
+          await this.ensureUserCompatibilityRecords(newUser)
         })
         user = newUser
       } catch (err) {
@@ -1463,7 +1481,7 @@ export class AuthService {
     if (user.status !== 'active') {
       throw new AuthServiceError(403, 'User account is disabled')
     }
-    this.ensureUserCompatibilityRecords(user)
+    await this.ensureUserCompatibilityRecords(user)
 
     // moss JWT scopes are moss's own permission vocabulary, derived from the
     // user's role — identical to the password/api_key paths. The provider's
@@ -1513,8 +1531,8 @@ export class AuthService {
     // currently-selected org (auth.orgId), which is what the UI should show.
     const actor = await this.db.getUserById(auth.userId)
     return {
-      user: actor ? this.projectUser(actor) : null,
-      organization: this.projectOrganization(await this.db.getOrganization(auth.orgId)),
+      user: actor ? await this.projectUser(actor) : null,
+      organization: await this.projectOrganization(await this.db.getOrganization(auth.orgId)),
       scopes: auth.scopes,
       role: auth.role,
       key_id: auth.keyId,
@@ -1560,7 +1578,7 @@ export class AuthService {
     users: NativeUserProjection[]
   }> {
     return {
-      users: (await this.listVisibleUsers(orgId, auth)).map(user => this.projectUser(user)),
+      users: await Promise.all((await this.listVisibleUsers(orgId, auth)).map(user => this.projectUser(user))),
     }
   }
 
@@ -1608,7 +1626,7 @@ export class AuthService {
     const orgs = await this.db.listOrganizations()
     return {
       organizations: await Promise.all(orgs.map(async org => ({
-        ...this.projectOrganization(org)!,
+        ...(await this.projectOrganization(org))!,
         userCount: await this.db.countUsersByOrg(org.id),
         departmentCount: await this.db.countDepartmentsByOrg(org.id),
       }))),
@@ -1639,19 +1657,19 @@ export class AuthService {
     const code = input.code?.trim() || `moss-${id}`
     await withExtIdConflict(async () => {
       await this.db.createOrganization(id, name, createdAt, extOrgId)
-      this.identityRepository.putOrganizationProfile({
+      await this.identityRepository.putOrganizationProfile({
         orgId: id,
         code,
         loginMethod: 'password',
         localEnabled: true,
         cloudEnabled: true,
       })
-      this.identityRepository.allocateNumericAlias('enterprise', id, id)
-      this.identityRepository.ensureWallet('organization', id)
+      await this.identityRepository.allocateNumericAlias('enterprise', id, id)
+      await this.identityRepository.ensureWallet('organization', id)
     })
     return {
       organization: {
-        ...this.projectOrganization({ id, name, extOrgId, createdAt })!,
+        ...(await this.projectOrganization({ id, name, extOrgId, createdAt }))!,
         userCount: 0,
         departmentCount: 0,
       },
@@ -2020,7 +2038,7 @@ export class AuthService {
     if (!this.sudorouterAccounts) return this.createUser(input, auth)
 
     const idempotencyKey = input.idempotencyKey ?? `moss-user:${randomUUID()}`
-    const previous = this.identityRepository.getCommandResult<{ userId: string }>(
+    const previous = await this.identityRepository.getCommandResult<{ userId: string }>(
       'identity.create_user', idempotencyKey,
     )
     let user = previous ? await this.db.getUserById(previous.userId) : null
@@ -2232,7 +2250,7 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing password')
     }
     await this.assertCanManageExistingUser(user, auth)
-    this.assertOrganizationLoginMethod(input.orgId, 'password')
+    await this.assertOrganizationLoginMethod(input.orgId, 'password')
 
     await this.db.updateUserPassword(
       input.userId,
@@ -2531,7 +2549,7 @@ export class AuthService {
     if (loginMethod) {
       // Authentication belongs to the user's home organization; orgId may be
       // a resource organization selected by a super admin.
-      this.assertOrganizationLoginMethod(input.user.orgId, loginMethod)
+      await this.assertOrganizationLoginMethod(input.user.orgId, loginMethod)
     }
     const access = issueAccessToken(
       {
@@ -2570,35 +2588,35 @@ export class AuthService {
       refresh_token: refresh.token,
       token_type: 'Bearer',
       expires_in: access.expiresAt - Math.floor(Date.now() / 1000),
-      user: this.projectUser(input.user),
-      organization: this.projectOrganization(await this.db.getOrganization(orgId)),
+      user: await this.projectUser(input.user),
+      organization: await this.projectOrganization(await this.db.getOrganization(orgId)),
       scopes: input.scopes,
     }
   }
 
-  private assertRefreshLoginMethodAllowed(orgId: string, keyId: string): void {
+  private async assertRefreshLoginMethodAllowed(orgId: string, keyId: string): Promise<void> {
     const loginMethod = loginMethodForTokenKey(keyId)
     if (!loginMethod) return
-    this.assertOrganizationLoginMethod(orgId, loginMethod)
+    await this.assertOrganizationLoginMethod(orgId, loginMethod)
   }
 
-  private getEffectiveLoginMethod(orgId: string, newProfileMethod?: LoginPolicyMethod): LoginPolicyMethod {
+  private getEffectiveLoginMethod(orgId: string, newProfileMethod?: LoginPolicyMethod): Promise<LoginPolicyMethod> {
     return resolveEffectiveLoginMethod({
       policies: this.clientPolicies,
       identities: {
-        getOrganizationProfile: id => this.identityRepository.getOrganizationProfile(id)
+        getOrganizationProfile: async id => (await this.identityRepository.getOrganizationProfile(id))
           ?? (newProfileMethod ? { loginMethod: newProfileMethod } : null),
       },
       defaults: this.loginPolicyDefaults,
     }, orgId)
   }
 
-  private assertOrganizationLoginMethod(
+  private async assertOrganizationLoginMethod(
     orgId: string,
     expected: LoginPolicyMethod,
     newProfileMethod?: LoginPolicyMethod,
-  ): void {
-    const actual = this.getEffectiveLoginMethod(orgId, newProfileMethod)
+  ): Promise<void> {
+    const actual = await this.getEffectiveLoginMethod(orgId, newProfileMethod)
     if (actual === expected) return
     if (expected === 'password') {
       throw new AuthServiceError(403, 'Current organization does not allow password login')
@@ -2609,29 +2627,29 @@ export class AuthService {
     throw new AuthServiceError(403, 'Current organization does not allow third-party login')
   }
 
-  private projectUser(user: AuthCenterUser): NativeUserProjection {
-    const wallet = this.identityRepository.getWallet('user', user.id)
+  private async projectUser(user: AuthCenterUser): Promise<NativeUserProjection> {
+    const wallet = await this.identityRepository.getWallet('user', user.id)
     return {
       ...sanitizeUser(user),
       name: resolveDisplayName(user),
       displayName: user.displayName ?? null,
-      legacyId: this.identityRepository.getNumericAlias('user', user.id),
+      legacyId: await this.identityRepository.getNumericAlias('user', user.id),
       balanceUnits: wallet?.balanceUnits ?? 0,
     }
   }
 
-  private projectOrganization(org: AuthCenterOrganization | null): NativeOrganizationProjection | null {
+  private async projectOrganization(org: AuthCenterOrganization | null): Promise<NativeOrganizationProjection | null> {
     if (!org) return null
     return {
       ...org,
-      legacyId: this.identityRepository.getNumericAlias('enterprise', org.id),
-      code: this.identityRepository.getOrganizationProfile(org.id)?.code ?? null,
+      legacyId: await this.identityRepository.getNumericAlias('enterprise', org.id),
+      code: (await this.identityRepository.getOrganizationProfile(org.id))?.code ?? null,
     }
   }
 
-  private buildSudoworkVisibilityFilter(
+  private async buildSudoworkVisibilityFilter(
     actor: import('../identity/organizationIdentityService.js').IdentityActor,
-  ): VisibilityFilter {
+  ): Promise<VisibilityFilter> {
     if (actor.role === 'admin' || actor.role === 'super_admin') {
       return {
         isAdmin: true,
@@ -2641,9 +2659,10 @@ export class AuthService {
         visibleDepartmentIds: null,
       }
     }
-    const row = this.db.db
-      .prepare('SELECT department_id FROM users WHERE id = ? AND org_id = ? LIMIT 1')
-      .get(actor.userId, actor.orgId) as { department_id?: string | null } | undefined
+    const row = await this.db.driver.get<{ department_id?: string | null }>(
+      'SELECT department_id FROM users WHERE id = ? AND org_id = ? LIMIT 1',
+      [actor.userId, actor.orgId],
+    )
     const departmentId = row?.department_id ?? null
     return {
       isAdmin: false,
