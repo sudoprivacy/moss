@@ -1,11 +1,244 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 
 const root = resolve(import.meta.dir, "../../..");
 
+function extractShellFunction(source: string, name: string): string {
+  const match = source.match(new RegExp(`(?:^|\\n)${name}\\(\\) \\{[\\s\\S]*?\\n\\}`));
+  expect(match, `${name} must remain extractable from deploy/install.sh`).not.toBeNull();
+  return match![0].replace(/^\n/, "");
+}
+
+type RollbackScenario = {
+  envExisted: boolean;
+  failureStatus: number;
+  previousRelease: boolean;
+  serviceStopped: boolean;
+};
+
+type RollbackResult = {
+  actionLog: string;
+  config: string;
+  currentTarget: string;
+  env: string | null;
+  newRelease: string;
+  nexusLock: string;
+  nexusState: string;
+  oldRelease: string;
+  previousTarget: string;
+  restartLog: string;
+  rollbackLinkExists: boolean;
+  status: number | null;
+};
+
+function runRollbackScenario(
+  restoreInstallConfig: string,
+  rollbackOnError: string,
+  scenario: RollbackScenario,
+): RollbackResult {
+  const tempRoot = mkdtempSync(resolve(tmpdir(), "moss-installer-rollback-"));
+  try {
+    const installDir = resolve(tempRoot, "install");
+    const oldRelease = resolve(installDir, "releases/old");
+    const newRelease = resolve(installDir, "releases/new");
+    const current = resolve(installDir, "current");
+    const configPath = resolve(installDir, "server.json");
+    const envPath = resolve(installDir, "moss-server.env");
+    const configBackup = resolve(tempRoot, "server.json.backup");
+    const envBackup = resolve(tempRoot, "moss-server.env.backup");
+    const actionLog = resolve(tempRoot, "actions.log");
+    const systemctlLog = resolve(tempRoot, "systemctl.log");
+    const nexusLock = resolve(installDir, ".moss/nexus/data.zone-id.lock.json");
+    const nexusState = resolve(installDir, ".moss/nexus/data/state.bin");
+
+    mkdirSync(oldRelease, { recursive: true });
+    mkdirSync(newRelease, { recursive: true });
+    mkdirSync(resolve(nexusLock, ".."), { recursive: true });
+    mkdirSync(resolve(nexusState, ".."), { recursive: true });
+    symlinkSync(newRelease, current);
+    writeFileSync(configBackup, "original-config\n");
+    writeFileSync(configPath, "mutated-config\n");
+    if (scenario.envExisted) writeFileSync(envBackup, "original-env\n");
+    writeFileSync(envPath, "mutated-env\n");
+    writeFileSync(nexusLock, "immutable-zone-lock\n");
+    writeFileSync(nexusState, "immutable-nexus-state\n");
+
+    const script = `
+set -u
+${restoreInstallConfig}
+${rollbackOnError}
+log() {
+  printf '%s\\n' "$*" >> "$ACTION_LOG"
+}
+systemctl() {
+  [ "$#" -eq 2 ] && [ "$1" = restart ] && [ "$2" = "$SERVICE_NAME.service" ] || return 91
+  printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+}
+# macOS mv has no GNU -T. This narrow shim accepts only the installer's expected
+# temporary-link replacement beneath this fixture; real systemd and target-host
+# filesystem behavior remains the packaged smoke/deployment gate's responsibility.
+mv() {
+  [ "$#" -eq 3 ] && [ "$1" = -Tf ] || return 92
+  [ "$2" = "$INSTALL_DIR/.current.rollback" ] || return 93
+  [ "$3" = "$INSTALL_DIR/current" ] || return 94
+  command rm -f -- "$3"
+  command mv -- "$2" "$3"
+}
+trap rollback_on_error ERR
+bash -c 'exit "$1"' _ "$FAILURE_STATUS"
+exit 99
+`;
+    const execution = spawnSync("bash", ["-c", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ACTION_LOG: actionLog,
+        CONFIG_BACKUP: configBackup,
+        CONFIG_PATH: configPath,
+        ENV_BACKUP: scenario.envExisted ? envBackup : "",
+        ENV_EXISTED: scenario.envExisted ? "1" : "0",
+        ENV_PATH: envPath,
+        EXISTING_INSTALL: "1",
+        FAILURE_STATUS: String(scenario.failureStatus),
+        HOME: tempRoot,
+        INSTALL_DIR: installDir,
+        PREVIOUS_TARGET: scenario.previousRelease ? oldRelease : "",
+        SERVICE_NAME: "moss-server-test",
+        SERVICE_STOPPED: scenario.serviceStopped ? "1" : "0",
+        SYSTEMCTL_LOG: systemctlLog,
+        TMPDIR: tempRoot,
+      },
+    });
+
+    return {
+      actionLog: existsSync(actionLog) ? readFileSync(actionLog, "utf8") : "",
+      config: readFileSync(configPath, "utf8"),
+      currentTarget: realpathSync(current),
+      env: existsSync(envPath) ? readFileSync(envPath, "utf8") : null,
+      newRelease: realpathSync(newRelease),
+      nexusLock: readFileSync(nexusLock, "utf8"),
+      nexusState: readFileSync(nexusState, "utf8"),
+      oldRelease: realpathSync(oldRelease),
+      previousTarget: oldRelease,
+      restartLog: existsSync(systemctlLog) ? readFileSync(systemctlLog, "utf8") : "",
+      rollbackLinkExists: existsSync(resolve(installDir, ".current.rollback")),
+      status: execution.status,
+    };
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario): void {
+  const switchesRelease = scenario.serviceStopped && scenario.previousRelease;
+  expect(result.status).toBe(scenario.failureStatus);
+  expect(result.config).toBe("original-config\n");
+  expect(result.env).toBe(scenario.envExisted ? "original-env\n" : null);
+  expect(result.currentTarget).toBe(switchesRelease ? result.oldRelease : result.newRelease);
+  expect(result.restartLog).toBe(switchesRelease ? "restart moss-server-test.service\n" : "");
+  expect(result.actionLog).toBe(
+    switchesRelease ? `Installation failed; restoring ${result.previousTarget}\n` : "",
+  );
+  expect(result.rollbackLinkExists).toBe(false);
+  expect(result.nexusLock).toBe("immutable-zone-lock\n");
+  expect(result.nexusState).toBe("immutable-nexus-state\n");
+}
+
 describe("packaged Server E2E smoke", () => {
+  it("restores failed upgrades without touching Nexus state", () => {
+    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");
+    const rollbackOnError = extractShellFunction(installer, "rollback_on_error");
+
+    for (const scenario of [
+      { envExisted: true, failureStatus: 17, previousRelease: true, serviceStopped: true },
+      { envExisted: false, failureStatus: 18, previousRelease: true, serviceStopped: true },
+      { envExisted: true, failureStatus: 19, previousRelease: true, serviceStopped: false },
+      { envExisted: true, failureStatus: 20, previousRelease: false, serviceStopped: true },
+    ] satisfies RollbackScenario[]) {
+      expectRollbackResult(
+        runRollbackScenario(restoreInstallConfig, rollbackOnError, scenario),
+        scenario,
+      );
+    }
+  });
+
+  it("detects rollback behavior removed from the test-local function copy", () => {
+    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");
+    const rollbackOnError = extractShellFunction(installer, "rollback_on_error");
+    const scenario: RollbackScenario = {
+      envExisted: true,
+      failureStatus: 29,
+      previousRelease: true,
+      serviceStopped: true,
+    };
+    const releaseSwitch = [
+      '    ln -sfn "$PREVIOUS_TARGET" "$INSTALL_DIR/.current.rollback"',
+      '    mv -Tf "$INSTALL_DIR/.current.rollback" "$INSTALL_DIR/current"',
+      "",
+    ].join("\n");
+    const restart = '    systemctl restart "$SERVICE_NAME.service" >/dev/null 2>&1 || true\n';
+    const mutations = [
+      {
+        name: "config restoration",
+        rollback: rollbackOnError.replace(
+          "  restore_install_config\n",
+          "  : # restoration removed by mutation probe\n",
+        ),
+      },
+      {
+        name: "release symlink restoration",
+        rollback: rollbackOnError.replace(
+          releaseSwitch,
+          "    : # release switch removed by mutation probe\n",
+        ),
+      },
+      {
+        name: "previous service restart",
+        rollback: rollbackOnError.replace(
+          restart,
+          "    : # restart removed by mutation probe\n",
+        ),
+      },
+      {
+        name: "Nexus data preservation",
+        rollback: rollbackOnError.replace(
+          "  restore_install_config\n",
+          '  restore_install_config\n  rm -rf -- "$INSTALL_DIR/.moss/nexus/data"\n',
+        ),
+      },
+      {
+        name: "Nexus lock preservation",
+        rollback: rollbackOnError.replace(
+          "  restore_install_config\n",
+          '  restore_install_config\n  printf "corrupted-lock\\n" > "$INSTALL_DIR/.moss/nexus/data.zone-id.lock.json"\n',
+        ),
+      },
+    ];
+
+    for (const mutation of mutations) {
+      expect(mutation.rollback, mutation.name).not.toBe(rollbackOnError);
+      expect(() => {
+        const result = runRollbackScenario(restoreInstallConfig, mutation.rollback, scenario);
+        expectRollbackResult(result, scenario);
+      }, mutation.name).toThrow();
+    }
+  });
+
   it("gates release asset upload on the packaged smoke test", () => {
     const workflow = readFileSync(
       resolve(root, ".github/workflows/build-release.yml"),
