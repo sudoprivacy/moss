@@ -1243,6 +1243,10 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_at TEXT;
 ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS execution_zone_id TEXT;
 `
 
+const MIGRATION_0007_SESSION_ZONE_REVISION = `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_revision TEXT;
+`
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
@@ -1250,6 +1254,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 4, name: 'recharge-orders-2026-09', sql: MIGRATION_0004_RECHARGE },
   { version: 5, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
   { version: 6, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
+  { version: 7, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

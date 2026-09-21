@@ -23,7 +23,13 @@ import { spawnSync } from 'node:child_process'
  * Suites this gates, by directory. Adding a directory here is what makes its
  * tests run in CI at all — a test outside these is not protecting anything.
  */
-const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__', 'src/server/zones/__tests__']
+const SUITES = [
+  'src/server/__tests__',
+  'src/channels/__tests__',
+  'src/server/nexus/__tests__',
+  'src/server/zones/__tests__',
+  'src/server/zones/__tests__/e2e',
+]
 
 const BUN = [
   // src/server/nexus/__tests__
@@ -98,6 +104,11 @@ const NODE = [
   'userContainerName.test.ts',
 ]
 
+// Real-process Zone suites share the nexus kernel's local control port and
+// therefore must run serially. Keeping them in a separate registered bucket
+// preserves UNLISTED coverage without introducing cross-file port races.
+const NODE_SERIAL = ['p0E2e.test.ts', 'p1aE2e.test.ts']
+
 /**
  * Currently unrunnable, excluded so the gate reflects a reachable bar.
  *
@@ -128,7 +139,7 @@ const present = SUITES.flatMap(dir =>
   acc.set(name, dir)
   return acc
 }, new Map())
-const accounted = new Set([...BUN, ...NODE, ...Object.keys(EXCLUDED)])
+const accounted = new Set([...BUN, ...NODE, ...NODE_SERIAL, ...Object.keys(EXCLUDED)])
 const unlisted = [...present.keys()].filter(name => !accounted.has(name))
 if (unlisted.length > 0) {
   console.error(
@@ -138,7 +149,7 @@ if (unlisted.length > 0) {
   process.exit(1)
 }
 
-const missing = [...BUN, ...NODE].filter(name => !present.has(name))
+const missing = [...BUN, ...NODE, ...NODE_SERIAL].filter(name => !present.has(name))
 if (missing.length > 0) {
   console.error(`Listed but absent from ${SUITES.join(' / ')}:\n  ${missing.join('\n  ')}`)
   process.exit(1)
@@ -160,6 +171,12 @@ function run(label, command, leadingArgs, names) {
 // later.
 const bunOk = run('bun:test', 'bun', ['test'], BUN)
 const nodeOk = run('node:test', 'npx', ['tsx', '--test'], NODE)
+const nodeSerialOk = run(
+  'node:test real-process',
+  'npx',
+  ['tsx', '--test', '--test-concurrency=1'],
+  NODE_SERIAL,
+)
 
 const skipped = Object.entries(EXCLUDED)
 if (skipped.length > 0) {
@@ -167,5 +184,5 @@ if (skipped.length > 0) {
   for (const [name, reason] of skipped) console.log(`  ${name} — ${reason}`)
 }
 
-if (!bunOk || !nodeOk) process.exit(1)
+if (!bunOk || !nodeOk || !nodeSerialOk) process.exit(1)
 console.log('\nserver suite: both runners passed')

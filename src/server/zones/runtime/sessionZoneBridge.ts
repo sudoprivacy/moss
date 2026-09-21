@@ -6,8 +6,8 @@
  *    （policy 在本地 binding 表）；client payload 里的 zone 只是目标提示，
  *    只有与 policy 解析结果一致时才被接受，永不覆盖（R5.3）；
  *  - 权威写入：调 Nexus `POST /v2/sessions` 写权威 `home_zone_id`；Moss 本地
- *    sessions 行仅作投影（`home_zone_id` + `home_zone_observed_at`——
- *    observed 为 null 表示尚未在 Nexus 确认，由后台补写，R5.1）；
+ *    sessions 行仅作投影（`home_zone_id` + observed time/revision——revision
+ *    为 null 表示尚未在 Nexus 确认，由后台补写，R5.1）；
  *  - runner generation 对账：session_attempts 记录 `execution_zone_id`
  *    （expand-only 加列——它仍是 runtime generation，不做 Attempt 改名，
  *    R5.9），并调 Nexus `POST /v2/runtime/start` + `GET runs/{pid}` 回读
@@ -23,13 +23,36 @@
 
 import type { DbDriver } from '../../db/driver.js'
 import type { ZoneBindingConfig } from '../binding/config.js'
-import { NexusZoneClient } from '../../nexus/nexusZoneClient.js'
+import { NexusZoneApiError, NexusZoneClient } from '../../nexus/nexusZoneClient.js'
 
 export interface HomeZoneResolution {
   homeZoneId: string | null
   /** payload 提示被忽略时记录原因（审计/测试断言用）。 */
   payloadZoneAccepted: boolean
   payloadZoneIgnoredReason?: string
+}
+
+export interface RunnerZoneContext {
+  NEXUS_ZONE_ID: string
+  NEXUS_V2_BASE_URL: string
+  NEXUS_DELEGATION_REF: string
+}
+
+/** Build the child environment without leaking Moss/Nexus control-plane keys. */
+export function applyRunnerZoneContext(
+  baseEnv: Record<string, string>,
+  context: RunnerZoneContext | null,
+): Record<string, string> {
+  const env = { ...baseEnv }
+  delete env.MOSS_NEXUS_V2_SERVICE_TOKEN
+  delete env.NEXUS_API_KEY
+  delete env.NEXUS_ADMIN_BOOTSTRAP_TOKEN
+  if (context) {
+    env.NEXUS_ZONE_ID = context.NEXUS_ZONE_ID
+    env.NEXUS_V2_BASE_URL = context.NEXUS_V2_BASE_URL
+    env.NEXUS_DELEGATION_REF = context.NEXUS_DELEGATION_REF
+  }
+  return env
 }
 
 /** 本地 policy：org 的 active default binding 决定 home Zone。 */
@@ -87,11 +110,22 @@ interface NexusSessionView {
 export async function establishNexusSession(
   client: NexusZoneClient,
   input: { sessionId: string; homeZoneId: string },
-): Promise<{ observedAt: string } | null> {
+): Promise<{ observedAt: string; observedRevision: string } | null> {
   try {
     const response = await client.createSession(input.sessionId, input.homeZoneId)
-    return { observedAt: response.updated_at }
-  } catch {
+    return { observedAt: new Date().toISOString(), observedRevision: response.updated_at }
+  } catch (error) {
+    if (error instanceof NexusZoneApiError && error.status === 409) {
+      try {
+        const existing = await client.getSession(input.sessionId)
+        if (existing.home_zone_id === input.homeZoneId) {
+          return { observedAt: new Date().toISOString(), observedRevision: existing.updated_at }
+        }
+      } catch {
+        // Fall through to pending: an existing session that cannot be read
+        // back authoritatively is not considered reconciled.
+      }
+    }
     return null
   }
 }
@@ -103,7 +137,7 @@ export async function reconcilePendingNexusSessions(
 ): Promise<number> {
   const rows = await driver.all(
     `SELECT session_id, home_zone_id FROM sessions
-     WHERE home_zone_id IS NOT NULL AND home_zone_observed_at IS NULL`,
+     WHERE home_zone_id IS NOT NULL AND home_zone_observed_revision IS NULL`,
   )
   let written = 0
   for (const row of rows) {
@@ -113,8 +147,10 @@ export async function reconcilePendingNexusSessions(
     })
     if (established) {
       await driver.run(
-        `UPDATE sessions SET home_zone_observed_at = ? WHERE session_id = ?`,
-        [established.observedAt, String(row.session_id)],
+        `UPDATE sessions
+         SET home_zone_observed_at = ?, home_zone_observed_revision = ?
+         WHERE session_id = ?`,
+        [established.observedAt, established.observedRevision, String(row.session_id)],
       )
       written += 1
     }
@@ -129,14 +165,32 @@ export async function reconcilePendingNexusSessions(
  */
 export async function reconcileRunnerGeneration(
   client: NexusZoneClient,
-  input: { attemptId: string; sessionId: string; homeZoneId: string },
+  input: {
+    attemptId: string
+    sessionId: string
+    homeZoneId: string
+    delegationRef: string
+    executionZoneId?: string
+    decisionReason?: string
+    policyVersion?: string
+  },
 ): Promise<{ executionZoneId: string; pid: string } | null> {
   const pid = runnerPid(input.attemptId)
+  const executionZoneId = input.executionZoneId ?? input.homeZoneId
+  if (
+    executionZoneId !== input.homeZoneId
+    && (!input.decisionReason || !input.policyVersion)
+  ) {
+    throw new Error('cross-Zone execution requires decision reason and policy version')
+  }
   try {
     const run = await client.startRuntimeRun({
       pid,
       sessionId: input.sessionId,
-      executionZoneHint: input.homeZoneId,
+      executionZoneHint: executionZoneId,
+      delegationRef: input.delegationRef,
+      decisionReason: input.decisionReason,
+      policyVersion: input.policyVersion,
     })
     const readBack = await client.getRuntimeRun(pid)
     return {
@@ -161,8 +215,8 @@ export function runnerPid(attemptId: string): string {
 export async function runnerZoneContext(
   driver: DbDriver,
   client: NexusZoneClient,
-  input: { sessionId: string },
-): Promise<{ NEXUS_ZONE_ID: string; NEXUS_V2_BASE_URL?: string; NEXUS_DELEGATION_REF: string } | null> {
+  input: { sessionId: string; config?: ZoneBindingConfig },
+): Promise<RunnerZoneContext | null> {
   const row = await driver.get(
     `SELECT home_zone_id FROM sessions WHERE session_id = ? LIMIT 1`,
     [input.sessionId],
@@ -178,17 +232,24 @@ export async function runnerZoneContext(
   // delegation ref（短期、最小 scope），拿不到 service credential。
   const { ZoneDelegationService } = await import('../binding/delegationService.js')
   const { resolveZoneBindingConfig } = await import('../binding/config.js')
+  const config = input.config ?? resolveZoneBindingConfig()
   const delegation = new ZoneDelegationService({
     driver,
     client,
-    config: resolveZoneBindingConfig(),
+    config,
   })
   const issued = await delegation.issueForOrgUser({
     orgId: String(userRow.org_id),
     userId: String(userRow.user_id),
   })
+  if (issued.zoneId !== homeZoneId) {
+    throw new Error(
+      `session home Zone ${homeZoneId} no longer matches active binding ${issued.zoneId}`,
+    )
+  }
   return {
     NEXUS_ZONE_ID: homeZoneId,
+    NEXUS_V2_BASE_URL: config.nexusV2BaseUrl,
     NEXUS_DELEGATION_REF: issued.delegationId,
   }
 }

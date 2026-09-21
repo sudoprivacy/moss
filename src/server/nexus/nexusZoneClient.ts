@@ -78,6 +78,9 @@ export interface ZoneDelegationResult {
   user_id: string
   org_id: string
   zone_id: string
+  grant_id: string
+  grant_revision: string
+  authorization_epoch: number
   audience: string
   expires_at: string
   status: string
@@ -106,7 +109,7 @@ export class NexusZoneClient {
   private async request(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
-    input: { body?: unknown; idempotencyKey?: string } = {},
+    input: { body?: unknown; idempotencyKey?: string; delegationRef?: string } = {},
   ): Promise<unknown> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -117,6 +120,7 @@ export class NexusZoneClient {
         headers: {
           ...(input.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
           ...(input.idempotencyKey ? { 'Idempotency-Key': input.idempotencyKey } : {}),
+          ...(input.delegationRef ? { 'X-Nexus-Zone-Delegation': input.delegationRef } : {}),
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         },
         body: input.body !== undefined ? JSON.stringify(input.body) : undefined,
@@ -270,16 +274,22 @@ export class NexusZoneClient {
     }
     const d = payload as Record<string, unknown>
     // §6.4 端点的最小结构校验（该对象不属于 Zone/ZoneGrant owner 家族）
-    for (const key of ['delegation_id', 'user_id', 'org_id', 'zone_id', 'expires_at'] as const) {
+    for (const key of ['delegation_id', 'user_id', 'org_id', 'zone_id', 'grant_id', 'grant_revision', 'expires_at'] as const) {
       if (typeof d[key] !== 'string' || d[key] === '') {
         throw new NexusZoneApiError(`delegation payload missing ${key}`, 'CONTRACT', false, 0)
       }
+    }
+    if (!Number.isSafeInteger(d.authorization_epoch) || Number(d.authorization_epoch) < 0) {
+      throw new NexusZoneApiError('delegation payload has invalid authorization_epoch', 'CONTRACT', false, 0)
     }
     return {
       delegation_id: String(d.delegation_id),
       user_id: String(d.user_id),
       org_id: String(d.org_id),
       zone_id: String(d.zone_id),
+      grant_id: String(d.grant_id),
+      grant_revision: String(d.grant_revision),
+      authorization_epoch: Number(d.authorization_epoch),
       audience: String(d.audience ?? ''),
       expires_at: String(d.expires_at),
       status: String(d.status ?? 'active'),
@@ -383,13 +393,25 @@ export class NexusZoneClient {
     sessionId: string
     executionZoneHint?: string
     delegationRef?: string
-  }): Promise<{ pid: string; execution_zone_id: string; state: string }> {
+    decisionReason?: string
+    policyVersion?: string
+  }): Promise<{
+    pid: string
+    execution_zone_id: string
+    state: string
+    delegation_ref: string | null
+    grant_ref: string | null
+    authorization_epoch: number | null
+  }> {
     const payload = await this.request('POST', '/v2/runtime/start', {
+      delegationRef: input.delegationRef,
       body: {
         pid: input.pid,
         session_id: input.sessionId,
         ...(input.executionZoneHint !== undefined ? { execution_zone_id: input.executionZoneHint } : {}),
         ...(input.delegationRef !== undefined ? { delegation_ref: input.delegationRef } : {}),
+        ...(input.decisionReason !== undefined ? { decision_reason: input.decisionReason } : {}),
+        ...(input.policyVersion !== undefined ? { policy_version: input.policyVersion } : {}),
       },
     })
     const r = payload as Record<string, unknown>
@@ -397,17 +419,30 @@ export class NexusZoneClient {
       pid: String(r.pid),
       execution_zone_id: String(r.execution_zone_id),
       state: String(r.state),
+      delegation_ref: r.delegation_ref == null ? null : String(r.delegation_ref),
+      grant_ref: r.grant_ref == null ? null : String(r.grant_ref),
+      authorization_epoch: r.authorization_epoch == null ? null : Number(r.authorization_epoch),
     }
   }
 
   /** GET /v2/runtime/runs/{pid} —— 对账回读。 */
-  async getRuntimeRun(pid: string): Promise<{ pid: string; execution_zone_id: string; state: string }> {
+  async getRuntimeRun(pid: string): Promise<{
+    pid: string
+    execution_zone_id: string
+    state: string
+    delegation_ref: string | null
+    grant_ref: string | null
+    authorization_epoch: number | null
+  }> {
     const payload = await this.request('GET', `/v2/runtime/runs/${encodeURIComponent(pid)}`)
     const r = payload as Record<string, unknown>
     return {
       pid: String(r.pid),
       execution_zone_id: String(r.execution_zone_id),
       state: String(r.state),
+      delegation_ref: r.delegation_ref == null ? null : String(r.delegation_ref),
+      grant_ref: r.grant_ref == null ? null : String(r.grant_ref),
+      authorization_epoch: r.authorization_epoch == null ? null : Number(r.authorization_epoch),
     }
   }
 

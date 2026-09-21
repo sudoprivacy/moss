@@ -329,7 +329,7 @@ export class DirectConnectStore {
 
     // P1a expand-only (SW-20260915-002 §8.10)：home Zone 投影列。home_zone_id
     // 由 Org binding policy 解析（永不取 org_id 字符串，R5.8）；
-    // home_zone_observed_at 为 null 表示 Nexus 权威写入未确认（后台补写）。
+    // observed_revision 为 Nexus 权威 Session 的版本标记；null 表示尚未确认。
     if (!sessionsColumns.some(col => col.name === 'home_zone_id')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_id TEXT`)
       console.log('[DB] Added home_zone_id column to sessions')
@@ -337,6 +337,10 @@ export class DirectConnectStore {
     if (!sessionsColumns.some(col => col.name === 'home_zone_observed_at')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_observed_at TEXT`)
       console.log('[DB] Added home_zone_observed_at column to sessions')
+    }
+    if (!sessionsColumns.some(col => col.name === 'home_zone_observed_revision')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_observed_revision TEXT`)
+      console.log('[DB] Added home_zone_observed_revision column to sessions')
     }
 
     // P1a：老库的 session_attempts 补 execution_zone_id（表内注释见 DDL）。
