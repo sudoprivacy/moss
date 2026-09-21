@@ -20,7 +20,7 @@ import { mkdirSync } from 'node:fs'
 import { SqliteDriver } from '../../../db/driver.js'
 import { AuthCenterDb } from '../../../authCenter/db.js'
 import {
-  establishNexusSession, parkRunsForZone, reconcileRunnerGeneration,
+  applyRunnerZoneContext, establishNexusSession, parkRunsForZone, reconcilePendingNexusSessions, reconcileRunnerGeneration,
   resolveHomeZoneWithHint, runnerPid, runnerZoneContext,
 } from '../../runtime/sessionZoneBridge.js'
 import { NexusZoneClient } from '../../../nexus/nexusZoneClient.js'
@@ -36,10 +36,17 @@ let raw: DatabaseSync
 let authDb: AuthCenterDb
 // deployment id 与 AuthCenterDb 的 env-resolved 默认一致（测试进程未设
 // MOSS_NEXUS_DEPLOYMENT_ID → 'local'），binding 行与解析必须同源。
-const config: ZoneBindingConfig = { ...resolveZoneBindingConfig(), zoneBindingEnabled: true, nexusDeploymentId: 'local' }
+let config: ZoneBindingConfig
 
 before(async () => {
   nexus = await startNexus(join(tmp, 'nexus'))
+  config = {
+    ...resolveZoneBindingConfig(),
+    zoneBindingEnabled: true,
+    nexusDeploymentId: 'local',
+    nexusV2BaseUrl: nexus.baseUrl,
+    nexusV2ServiceToken: nexus.apiKey,
+  }
   client = new NexusZoneClient({ nexusV2BaseUrl: nexus.baseUrl, nexusV2ServiceToken: nexus.apiKey, nexusV2TimeoutMs: 15_000 })
   // moss 主库 + auth 库（同目录结构；直接建全新实例——桥只依赖表结构）
   raw = new DatabaseSync(join(tmp, 'moss', 'direct-connect.db'))
@@ -68,7 +75,8 @@ before(async () => {
       ended_at INTEGER,
       deleted_at INTEGER,
       home_zone_id TEXT,
-      home_zone_observed_at TEXT
+      home_zone_observed_at TEXT,
+      home_zone_observed_revision TEXT
     );
     CREATE TABLE IF NOT EXISTS session_attempts (
       attempt_id TEXT PRIMARY KEY,
@@ -158,6 +166,19 @@ describe('P1a session zone bridge (real nexus)', () => {
     assert.ok(observed, 'nexus authoritative write must succeed while nexus is up')
     const authoritative = await client.getSession(sessionId)
     assert.equal(authoritative.home_zone_id, homeZone)
+
+    await driver.run(
+      `INSERT INTO sessions (session_id, transcript_session_id, org_id, user_id, role, scopes_json, cwd, runtime_type, status, desired_state, transcript_path, created_at, last_active_at, home_zone_id)
+       VALUES (?, ?, ?, 'p1a-projection-user', 'user', '[]', '/tmp', 'host', 'active', 'active', ?, ?, ?, ?)`,
+      [sessionId, sessionId, orgId, `/t/${sessionId}.jsonl`, Date.now(), Date.now(), homeZone],
+    )
+    assert.equal(await reconcilePendingNexusSessions(driver, client), 1)
+    const projection = await driver.get(
+      `SELECT home_zone_observed_at, home_zone_observed_revision FROM sessions WHERE session_id = ?`,
+      [sessionId],
+    )
+    assert.ok(String(projection?.home_zone_observed_at ?? ''))
+    assert.equal(String(projection?.home_zone_observed_revision), authoritative.updated_at)
   })
 
   it('R5.3: a payload zone hint disagreeing with policy is ignored', async () => {
@@ -177,13 +198,50 @@ describe('P1a session zone bridge (real nexus)', () => {
 
   it('R5.2: runner generation reconciles with the nexus PID descriptor', async () => {
     const sessionId = 'p1a-sess-0002'
+    const userId = 'p1a-user-0002'
+    const now = Date.now()
+    await driver.run(
+      `INSERT INTO users (id, org_id, email, name, role, status, local_auth, created_at)
+       VALUES (?, ?, ?, 'P1a User 2', 'user', 'active', 1, ?)`,
+      [userId, orgId, 'p1a-user-0002@example.test', now],
+    )
+    await driver.run(
+      `INSERT INTO sessions (session_id, transcript_session_id, org_id, user_id, role, scopes_json, cwd, runtime_type, status, desired_state, transcript_path, created_at, last_active_at, home_zone_id)
+       VALUES (?, ?, ?, ?, 'user', '[]', '/tmp', 'host', 'active', 'active', ?, ?, ?, ?)`,
+      [sessionId, sessionId, orgId, userId, `/t/${sessionId}.jsonl`, now, now, homeZone],
+    )
     await establishNexusSession(client, { sessionId, homeZoneId: homeZone })
+    const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, { sessionId, config })
+    assert.ok(context)
+    assert.equal(context.NEXUS_ZONE_ID, homeZone)
+    assert.equal(context.NEXUS_V2_BASE_URL, nexus.baseUrl)
+    assert.ok(!('MOSS_NEXUS_V2_SERVICE_TOKEN' in context))
+    assert.ok(!('NEXUS_API_KEY' in context))
     const attemptId = 'p1a-attempt-0002'
-    const reconciled = await reconcileRunnerGeneration(client, { attemptId, sessionId, homeZoneId: homeZone })
+    const reconciled = await reconcileRunnerGeneration(client, {
+      attemptId,
+      sessionId,
+      homeZoneId: homeZone,
+      delegationRef: context.NEXUS_DELEGATION_REF,
+    })
     assert.ok(reconciled)
     assert.equal(reconciled.executionZoneId, homeZone)
     const readBack = await client.getRuntimeRun(runnerPid(attemptId))
     assert.equal(readBack.execution_zone_id, homeZone)
+    assert.equal(readBack.delegation_ref, context.NEXUS_DELEGATION_REF)
+    assert.ok(readBack.grant_ref)
+    assert.ok(Number.isSafeInteger(readBack.authorization_epoch))
+
+    await assert.rejects(
+      reconcileRunnerGeneration(client, {
+        attemptId: 'p1a-cross-zone-without-decision',
+        sessionId,
+        homeZoneId: homeZone,
+        executionZoneId: 'different-zone',
+        delegationRef: context.NEXUS_DELEGATION_REF,
+      }),
+      /cross-Zone execution requires decision reason and policy version/,
+    )
   })
 
   it('R5.4: runner zone context carries a short-lived USER delegation, never the service credential', async () => {
@@ -200,19 +258,36 @@ describe('P1a session zone bridge (real nexus)', () => {
        VALUES (?, ?, ?, ?, 'user', '[]', '/tmp', 'host', 'active', 'active', ?, ?, ?, ?)`,
       [sessionId, sessionId, orgId, 'p1a-user-0003', `/t/${sessionId}.jsonl`, now, now, homeZone],
     )
-    const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, { sessionId })
+    const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, {
+      sessionId,
+      config,
+    })
     assert.ok(context, 'zone context must resolve for a homed session')
     assert.equal(context.NEXUS_ZONE_ID, homeZone)
     assert.ok(context.NEXUS_DELEGATION_REF.startsWith('dlg_'), 'runner carries a user delegation ref')
     // delegation ref 是用户 delegation（nexus 侧核对 org 绑定），绝不是 service key
     assert.notEqual(context.NEXUS_DELEGATION_REF, nexus.apiKey)
     assert.notEqual(context.NEXUS_DELEGATION_REF, nexus.adminApiKey)
+    const runnerEnv = applyRunnerZoneContext({
+      MOSS_NEXUS_V2_SERVICE_TOKEN: nexus.apiKey,
+      NEXUS_API_KEY: nexus.adminApiKey,
+      SAFE_VALUE: 'kept',
+    }, context)
+    assert.equal(runnerEnv.SAFE_VALUE, 'kept')
+    assert.equal(runnerEnv.NEXUS_DELEGATION_REF, context.NEXUS_DELEGATION_REF)
+    assert.equal(runnerEnv.MOSS_NEXUS_V2_SERVICE_TOKEN, undefined)
+    assert.equal(runnerEnv.NEXUS_API_KEY, undefined)
   })
 
   it('R5.7: detaching parks the zone’s active runs in revocation_pending', async () => {
     const sessionId = 'p1a-sess-0004'
     const attemptId = 'p1a-attempt-0004'
     const now = Date.now()
+    await driver.run(
+      `INSERT INTO users (id, org_id, email, name, role, status, local_auth, created_at)
+       VALUES ('u4', ?, 'p1a-u4@example.test', 'P1a User 4', 'user', 'active', 1, ?)`,
+      [orgId, now],
+    )
     await driver.run(
       `INSERT INTO sessions (session_id, transcript_session_id, org_id, user_id, role, scopes_json, cwd, runtime_type, status, desired_state, transcript_path, created_at, last_active_at, home_zone_id)
        VALUES (?, ?, ?, 'u4', 'user', '[]', '/tmp', 'host', 'active', 'active', ?, ?, ?, ?)`,
@@ -224,7 +299,17 @@ describe('P1a session zone bridge (real nexus)', () => {
       [attemptId, sessionId, sessionId, homeZone, now, now],
     )
     await establishNexusSession(client, { sessionId, homeZoneId: homeZone })
-    await reconcileRunnerGeneration(client, { attemptId, sessionId, homeZoneId: homeZone })
+    const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, {
+      sessionId,
+      config,
+    })
+    assert.ok(context)
+    await reconcileRunnerGeneration(client, {
+      attemptId,
+      sessionId,
+      homeZoneId: homeZone,
+      delegationRef: context.NEXUS_DELEGATION_REF,
+    })
 
     const parked = await parkRunsForZone(authDb.driver as SqliteDriver, client, homeZone)
     assert.ok(parked >= 1, `expected at least one parked run, got ${parked}`)
