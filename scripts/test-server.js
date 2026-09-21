@@ -41,6 +41,7 @@ const BUN = [
   'applicationHelloReplay.test.ts',
   'contractsActivation.test.ts',
   'nexusZoneId.test.ts',
+  'releaseE2eSmoke.test.ts',
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
   'secretsMetadata.test.ts',
@@ -113,8 +114,6 @@ const NODE = [
  * which is a defect in its own right. Listing them keeps that visible.
  */
 const EXCLUDED = {
-  // Asserts on the contents of the packaged E2E script; fails on dev checkouts.
-  'releaseE2eSmoke.test.ts': 'asserts packaged release artifacts absent from a dev tree',
   // Declared "runnable under Bun only" by its own header, but bun cannot load
   // runtimeService.ts (transitive node:sqlite), and under node its mock.timers
   // / #scheduleFencingWait private-access shape plus real-clock heartbeat
