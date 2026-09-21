@@ -1,3 +1,4 @@
+import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { spawn } from 'child_process'
 import { writeFileSync } from 'fs'
 import { mkdir, readFile } from 'fs/promises'
@@ -143,6 +144,7 @@ export class ScodeBackend implements SessionBackend {
       workspaceSkillLinks = await syncWorkspaceSkills(options.cwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[ScodeBackend] Workspace skills synced to ${options.cwd}/.nexus/sudocode/skills/ with ${enabledSkills.length} skills: ${enabledSkills.join(', ') || 'none'}\n`)
     } catch (err) {
+      if (getOrganizationResourceScope()) throw err
       process.stderr.write(`[ScodeBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)

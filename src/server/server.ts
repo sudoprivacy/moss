@@ -1,3 +1,5 @@
+import { cp } from 'node:fs/promises'
+import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
 import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
@@ -127,7 +129,6 @@ import {
   fetchAgentHubSkillDetailsByIds,
   getInstalledAssistants,
   resolveAssistantDisplayName,
-  getHubInstalledAssistants,
   installHubAssistant,
   type AgentHubAssistant,
   uninstallAssistant,
@@ -136,7 +137,6 @@ import {
   type AssistantStoreMeta,
   uploadCustomAssistant,
   packageAssistantZip,
-  packageAssistantZipByDir,
   readAssistantMeta,
   findAssistantDir,
   writeAssistantMeta,
@@ -147,7 +147,6 @@ import {
   fetchSkillHubSkillDetail,
   fetchSkillHubSkills,
   getInstalledSkills,
-  getHubInstalledSkills,
   importLocalSkillArchive,
   importLocalSkillDirectory,
   importTenantSkillArchive,
@@ -164,7 +163,6 @@ import {
   findInstalledSkillPath,
   readSkillMeta,
   readSkillVersion,
-  writeSkillMeta,
 } from './skillStore.js'
 import { createAdaptersApi } from './api/adapters.js'
 import {
@@ -219,7 +217,6 @@ import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
-import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
   getUserModelPreference,
@@ -689,91 +686,6 @@ function parseTenantBoolean(value: unknown, fieldName: string): boolean | undefi
 function formatTenantAssistantAvatarUrl(avatar: unknown, publicBaseUrl: string): unknown {
   if (typeof avatar !== 'string' || !publicBaseUrl) return avatar
   return getTenantAssistantAvatarFilename(avatar) ? `${publicBaseUrl}${avatar}` : avatar
-}
-
-async function copySkillToTenantDir(skillName: string, sourcePathOverride?: string): Promise<void> {
-  // Prefer the record's stored file_path (a pending skill is staged in the
-  // tenant-pending dir); fall back to the custom dir by name for legacy
-  // publish-from-custom records.
-  const sourceDir = sourcePathOverride && existsSync(sourcePathOverride)
-    ? sourcePathOverride
-    : join(MOSS_SKILLS_CUSTOM_DIR, skillName)
-  const targetDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
-
-  if (!existsSync(sourceDir)) {
-    throw new HttpError(404, `Skill directory not found: ${skillName}`)
-  }
-
-  // Ensure tenant directory exists
-  await mkdir(MOSS_SKILLS_TENANT_DIR, { recursive: true })
-
-  // Copy the skill directory
-  cpSync(sourceDir, targetDir, { recursive: true })
-
-  // Update metadata to set source_type to 'tenant'
-  const meta = await readSkillMeta(targetDir)
-  if (meta) {
-    meta.source_type = 'tenant'
-    await writeSkillMeta(targetDir, meta)
-  }
-}
-
-async function copyAssistantToTenantDir(assistantName: string): Promise<void> {
-  const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-  const MOSS_ASSISTANTS_DIR = join(MOSS_HOME, 'assistants')
-  const ASSISTANT_CUSTOM_DIR = join(MOSS_ASSISTANTS_DIR, 'custom')
-  const ASSISTANT_TENANT_DIR = join(MOSS_ASSISTANTS_DIR, 'tenant')
-
-  const sourceDir = join(ASSISTANT_CUSTOM_DIR, assistantName)
-  const targetDir = join(ASSISTANT_TENANT_DIR, assistantName)
-
-  if (!existsSync(sourceDir)) {
-    throw new HttpError(404, `Assistant directory not found: ${assistantName}`)
-  }
-
-  // Ensure tenant directory exists
-  await mkdir(ASSISTANT_TENANT_DIR, { recursive: true })
-
-  // Copy the agent directory
-  cpSync(sourceDir, targetDir, { recursive: true })
-
-  // Update metadata to set source_type to 'tenant'
-  const meta = await readAssistantMeta(targetDir)
-  if (meta) {
-    meta.source_type = 'tenant'
-    await writeAssistantMeta(targetDir, meta)
-  }
-}
-
-/**
- * Copy agent to tenant directory by source path
- * Used when file_path is stored in tenant_assistants table
- */
-async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> {
-  const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-  const MOSS_ASSISTANTS_DIR = join(MOSS_HOME, 'assistants')
-  const ASSISTANT_TENANT_DIR = join(MOSS_ASSISTANTS_DIR, 'tenant')
-
-  // Use directory name from source path
-  const dirName = basename(sourceDir)
-  const targetDir = join(ASSISTANT_TENANT_DIR, dirName)
-
-  if (!existsSync(sourceDir)) {
-    throw new HttpError(404, `Assistant directory not found: ${sourceDir}`)
-  }
-
-  // Ensure tenant directory exists
-  await mkdir(ASSISTANT_TENANT_DIR, { recursive: true })
-
-  // Copy the agent directory
-  cpSync(sourceDir, targetDir, { recursive: true })
-
-  // Update metadata to set source_type to 'tenant'
-  const meta = await readAssistantMeta(targetDir)
-  if (meta) {
-    meta.source_type = 'tenant'
-    await writeAssistantMeta(targetDir, meta)
-  }
 }
 
 /**
@@ -2488,7 +2400,7 @@ export function startServer(
         jti: '',
         exp: 0,
       })
-      const installed = await getInstalledAssistants()
+      const installed = await withOrganizationResources({ orgId: ownerOrgId, userId: ownerUserId, driver: runtime.store.driver, visibility: filter }, getInstalledAssistants)
       return installed
         .filter((a) => {
           if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
@@ -3587,6 +3499,9 @@ export function startServer(
         throw new HttpError(401, 'Unauthorized')
       }
 
+      const resourceAuth = auth
+      return await withOrganizationResources({ orgId: auth.orgId, userId: auth.userId, driver: runtime.store.driver, visibility: await authService.buildVisibilityFilter(auth) }, async () => {
+      const auth = resourceAuth
       const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || undefined
 
       // Internal (HA): token-revoke forward target. Terminate is a REST op
@@ -8774,7 +8689,7 @@ export function startServer(
             throw new HttpError(404, `Assistant not found: ${assistantId}`)
           }
           // Use agent name for packaging (directory lookup)
-          const zipBuffer = await packageAssistantZip(assistant.name)
+          const zipBuffer = await packageAssistantZip(assistant.id)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(assistantId)
           res.setHeader('Content-Type', 'application/zip')
@@ -8801,6 +8716,9 @@ export function startServer(
         const avatarFile = request.avatar
         for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
+        }
+        for (const fieldName of ['skills', 'enabled_skills', 'enabledSkills']) {
+          if (Array.isArray(body[fieldName])) body[fieldName] = await resolveOrganizationSkillIds(body[fieldName] as string[])
         }
         for (const fieldName of ['visible_to', 'workflow']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantObject(body[fieldName], fieldName)
@@ -8838,12 +8756,8 @@ export function startServer(
         const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
-        // Admin → tenant dir (live now). Non-admin → tenant-pending staging dir
-        // (invisible to the scan; moved to tenant on approval).
-        const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-        const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
-        const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
-        const assistantDir = join(storeAdmin ? ASSISTANT_TENANT_DIR : ASSISTANT_TENANT_PENDING_DIR, name)
+        // Stable object identity; approval and visibility are database state.
+        const assistantDir = newPrivateResourcePath('agent', assistantId)
 
         if (avatarFile) validateTenantAssistantAvatar(avatarFile)
         await mkdir(assistantDir, { recursive: true })
@@ -8940,7 +8854,7 @@ export function startServer(
           throw error
         }
 
-        const result = await runtime.store.getTenantAssistant(assistantId)
+        const result = await runtime.store.getTenantAssistant(assistantId, auth.orgId)
         writeJson(res, 200, {
           success: true,
           data: result
@@ -8967,7 +8881,7 @@ export function startServer(
         // `can_edit` so the client can render read-only instead of guessing.
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(tenantAgentRulesMatch[1] || '')
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
@@ -8998,13 +8912,14 @@ export function startServer(
         const filePath = typeof tenantAssistant.file_path === 'string' ? tenantAssistant.file_path : ''
         const assistantDir = filePath && existsSync(filePath)
           ? filePath
-          : join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant', tenantAssistant.name as string)
+          : ''
         if (!existsSync(assistantDir)) {
           throw new HttpError(404, `Tenant assistant rules not found: ${tenantAssistantId}`)
         }
         const meta = await readAssistantMeta(assistantDir)
         const rulePath = await resolveTenantAssistantRulePath(assistantDir, meta?.ruleFile || 'system.md', false)
-        const rules = await readFile(rulePath, 'utf8').catch(() => '')
+        const overlay = JSON.parse(String(tenantAssistant.config_json || '{}')) as Record<string, unknown>
+        const rules = typeof overlay.rules === 'string' ? overlay.rules : await readFile(rulePath, 'utf8').catch(() => '')
         writeJson(res, 200, { rules, can_edit: canEditRules })
         return
       }
@@ -9038,9 +8953,12 @@ export function startServer(
         // Stamp the publisher's default visibility (dept_admin → own department,
         // user → self) so it survives approval instead of defaulting to global.
         const publishVisibility = await authService.defaultTenantVisibility(auth)
-        // Create tenant agent record with UUID as id
+        const publishedId = randomUUID()
+        const publishedPath = newPrivateResourcePath('agent', publishedId)
+        await cp(assistantResult.dir, publishedPath, { recursive: true })
+        // Create a separate publication, preserving the custom original.
         await runtime.store.createTenantAssistant({
-          id: assistantId, // Use UUID as id
+          id: publishedId,
           name: actualAssistantName,
           display_name: meta?.display_name || actualAssistantName,
           description: meta?.description || undefined,
@@ -9054,10 +8972,11 @@ export function startServer(
           author_name: authorName,
           status: 'pending',
           visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
-          file_path: assistantResult.dir, // Store source directory path for approval
+          file_path: publishedPath,
           org_id: auth.orgId,
         })
-        writeJson(res, 200, { id: assistantId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
+        await updateOrganizationPrivateMetadata('agent', publishedId, meta || {})
+        writeJson(res, 200, { id: publishedId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
       }
 
@@ -9070,10 +8989,12 @@ export function startServer(
         const approved = body.approved === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
+
+        if (approved && (typeof tenantAssistant.file_path !== 'string' || !existsSync(tenantAssistant.file_path))) throw new HttpError(404, 'Resource package not found')
 
         if (approved) {
           // Update status to approved
@@ -9088,34 +9009,10 @@ export function startServer(
           } else if (tenantAssistant.visible_to == null) {
             await runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
           }
-          // Copy agent to tenant directory using stored file_path
-          const sourcePath = tenantAssistant.file_path as string | undefined
-          if (sourcePath && existsSync(sourcePath)) {
-            await copyAssistantToTenantDirByPath(sourcePath)
-            // Update file_path to the copied location (tenant/<dir name>).
-            const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-            const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
-            const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', basename(sourcePath))
-            await runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
-            // MOVE semantics for non-admin-created pending items: remove the
-            // staged source so it lives only in the tenant dir. Items published
-            // from a real custom/ item keep their custom original (copy).
-            if (isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath)) {
-              rmSync(sourcePath, { recursive: true, force: true })
-            }
-          } else {
-            throw new HttpError(404, `Source assistant directory not found: ${sourcePath}`)
-          }
         } else {
           await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
           await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
-          // Clean up staged files for a rejected non-admin submission.
-          const sourcePath = tenantAssistant.file_path as string | undefined
-          const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-          const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
-          if (sourcePath && isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
-          }
+
         }
 
         writeJson(res, 200, { id: tenantAssistantId, status: approved ? 'approved' : 'rejected' })
@@ -9127,7 +9024,7 @@ export function startServer(
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
-        const existingAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const existingAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!existingAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
@@ -9148,6 +9045,9 @@ export function startServer(
         for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps', 'enabledSkills', 'enabledWikis', 'enabledCorpApps']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
         }
+        for (const fieldName of ['skills', 'enabled_skills', 'enabledSkills']) {
+          if (Array.isArray(body[fieldName])) body[fieldName] = await resolveOrganizationSkillIds(body[fieldName] as string[])
+        }
         const enabled = parseTenantBoolean(body.enabled, 'enabled')
         if (enabled !== undefined) body.enabled = enabled
         const removeAvatar = parseTenantBoolean(body.remove_avatar, 'remove_avatar')
@@ -9155,6 +9055,9 @@ export function startServer(
         const hasAvatarField = Object.prototype.hasOwnProperty.call(body, 'avatar') || avatarFile !== null
         if (removeAvatar === true && hasAvatarField) {
           throw new HttpError(400, 'remove_avatar cannot be combined with avatar')
+        }
+        for (const fieldName of ['skills', 'enabled_skills', 'enabledSkills']) {
+          if (Array.isArray(body[fieldName])) body[fieldName] = await resolveOrganizationSkillIds(body[fieldName] as string[])
         }
         for (const fieldName of ['visible_to', 'workflow']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantObject(body[fieldName], fieldName)
@@ -9230,7 +9133,7 @@ export function startServer(
           updates.workflow = body.workflow ? JSON.stringify(body.workflow) : null
         }
 
-        const tenantAssistantBeforeUpdate = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistantBeforeUpdate = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         const assistantDirBeforeUpdate = tenantAssistantBeforeUpdate?.file_path as string | undefined
         const metaBeforeUpdate = assistantDirBeforeUpdate && existsSync(assistantDirBeforeUpdate)
           ? await readAssistantMeta(assistantDirBeforeUpdate)
@@ -9249,8 +9152,8 @@ export function startServer(
           throw error
         }
 
-        // Sync the metadata in the record's current approved or pending directory.
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        // Store effective metadata in this organization's database overlay.
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (tenantAssistant) {
           const assistantDir = tenantAssistant.file_path as string | undefined
           if (assistantDir && existsSync(assistantDir)) {
@@ -9277,10 +9180,10 @@ export function startServer(
               if (body.skills !== undefined) meta.skills = body.skills as string[]
               if (body.workflow !== undefined) meta.workflow = body.workflow as AssistantStoreMeta['workflow']
               if (typeof body.rules === 'string' && rulePath) {
-                await writeFile(rulePath, body.rules, 'utf8')
+                Object.assign(meta, { rules: body.rules })
                 meta.ruleFile = metaBeforeUpdate?.ruleFile || 'system.md'
               }
-              await writeAssistantMeta(assistantDir, meta)
+              await updateOrganizationPrivateMetadata('agent', tenantAssistantId, meta)
             }
           }
         }
@@ -9294,7 +9197,8 @@ export function startServer(
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
+        if (!tenantAssistant) throw new HttpError(404, 'Resource not found')
         // Non-admins may only delete tenant assistants authored by someone
         // currently in their scope, within their own org.
         if (tenantAssistant && !isStoreAdmin(auth)) {
@@ -9307,14 +9211,7 @@ export function startServer(
         }
         if (tenantAssistant) {
           await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
-          const assistantName = tenantAssistant.name as string
-          // Delete from tenant directory if exists
-          const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-          const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
-          const assistantDir = join(ASSISTANT_TENANT_DIR, assistantName)
-          if (existsSync(assistantDir)) {
-            rmSync(assistantDir, { recursive: true, force: true })
-          }
+
         }
         await runtime.store.deleteTenantAssistant(tenantAssistantId)
         writeJson(res, 200, { ok: true })
@@ -9325,7 +9222,8 @@ export function startServer(
       const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantAgentDownloadMatch) {
         const tenantAssistantId = decodeURIComponent(tenantAgentDownloadMatch[1] || '')
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        await requireOrganizationResource('agent', tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant || tenantAssistant.status !== 'approved') {
           throw new HttpError(404, `Tenant assistant not found or not approved: ${tenantAssistantId}`)
         }
@@ -9342,7 +9240,7 @@ export function startServer(
 
         try {
           // Package from the tenant directory
-          const zipBuffer = await packageAssistantZipByDir(tenantPath)
+          const zipBuffer = await packageAssistantZip(tenantAssistantId)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(tenantAssistantId)
           res.setHeader('Content-Type', 'application/zip')
@@ -9652,7 +9550,7 @@ export function startServer(
             throw new HttpError(404, `Skill not found: ${skillId}`)
           }
           // Use skill name for packaging (directory lookup)
-          const zipBuffer = await packageSkillZip(skill.name)
+          const zipBuffer = await packageSkillZip(skill.id)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(skillId)
           res.setHeader('Content-Type', 'application/zip')
@@ -9791,7 +9689,9 @@ export function startServer(
         // self) at publish time so it survives approval instead of defaulting to
         // global. Admins get null (global), unchanged.
         const publishVisibility = await authService.defaultTenantVisibility(auth)
-        const id = `tenant-skill-${Date.now()}`
+        const id = randomUUID()
+        const publishedPath = newPrivateResourcePath('skill', id)
+        await cp(skillPath, publishedPath, { recursive: true })
         await runtime.store.createTenantSkill({
           id,
           name: actualSkillName,
@@ -9804,7 +9704,9 @@ export function startServer(
           status: 'pending',
           visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
           org_id: auth.orgId,
+          file_path: publishedPath,
         })
+        await updateOrganizationPrivateMetadata('skill', id, meta || {})
         writeJson(res, 200, { id, skillId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
       }
@@ -9818,10 +9720,12 @@ export function startServer(
         const approved = body.approved === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!tenantSkill) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
+
+        if (approved && (typeof tenantSkill.file_path !== 'string' || !existsSync(tenantSkill.file_path))) throw new HttpError(404, 'Resource package not found')
 
         if (approved) {
           // Update status to approved
@@ -9837,31 +9741,9 @@ export function startServer(
           } else if (tenantSkill.visible_to == null) {
             await runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
           }
-          // Copy skill to tenant directory using the record's staged file_path
-          // (tenant-pending for non-admin submissions), falling back to the
-          // custom dir by name for legacy publish-from-custom records.
-          const skillName = tenantSkill.name as string
-          const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
-          await copySkillToTenantDir(skillName, sourcePath)
-          // Point file_path at the tenant copy, and MOVE (remove the staged
-          // source) for tenant-pending items so the skill lives only in tenant.
-          const tenantSkillPath = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          await runtime.store.updateTenantSkillFilePath(
-            tenantSkillId,
-            tenantSkillPath,
-            typeof tenantSkill.source_url === 'string' ? tenantSkill.source_url : '',
-            typeof tenantSkill.checksum === 'string' ? tenantSkill.checksum : '',
-          )
-          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
-          }
         } else {
           await runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
-          // Clean up staged files for a rejected non-admin submission.
-          const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
-          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
-          }
+
         }
 
         writeJson(res, 200, { id: tenantSkillId, status: approved ? 'approved' : 'rejected' })
@@ -9873,7 +9755,7 @@ export function startServer(
       if (req.method === 'PATCH' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
-        const existing = await runtime.store.getTenantSkill(tenantSkillId)
+        const existing = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!existing) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
@@ -9908,27 +9790,6 @@ export function startServer(
 
         await runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
 
-        // Sync enabled/visible_to to file metadata
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
-        if (tenantSkill && tenantSkill.status === 'approved') {
-          const skillName = tenantSkill.name as string
-          const skillDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          if (existsSync(skillDir)) {
-            const meta = await readSkillMeta(skillDir)
-            if (meta) {
-              if (updates.enabled !== undefined) {
-                meta.enabled = updates.enabled === 1
-              }
-              if (updates.visible_to !== undefined) {
-                // Use the clamped value written to the DB, not the raw request,
-                // so a non-admin can't push a wider visibility to the file meta.
-                meta.visible_to = updates.visible_to ? JSON.parse(updates.visible_to) : null
-              }
-              await writeSkillMeta(skillDir, meta)
-            }
-          }
-        }
-
         writeJson(res, 200, { ok: true })
         return
       }
@@ -9937,7 +9798,8 @@ export function startServer(
       if (req.method === 'DELETE' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
+        if (!tenantSkill) throw new HttpError(404, 'Resource not found')
         // Non-admins may only delete tenant skills authored by someone currently
         // in their scope, within their own org.
         if (tenantSkill && !isStoreAdmin(auth)) {
@@ -9948,14 +9810,7 @@ export function startServer(
             throw new HttpError(403, 'You cannot manage this tenant skill')
           }
         }
-        if (tenantSkill) {
-          const skillName = tenantSkill.name as string
-          // Delete from tenant directory if exists
-          const skillDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          if (existsSync(skillDir)) {
-            rmSync(skillDir, { recursive: true, force: true })
-          }
-        }
+        await assertOrganizationSkillUnused(tenantSkillId, String(tenantSkill.name))
         await runtime.store.deleteTenantSkill(tenantSkillId)
         writeJson(res, 200, { ok: true })
         return
@@ -9965,18 +9820,19 @@ export function startServer(
       const tenantSkillDownloadMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantSkillDownloadMatch) {
         const tenantSkillId = decodeURIComponent(tenantSkillDownloadMatch[1] || '')
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
+        await requireOrganizationResource('skill', tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!tenantSkill || tenantSkill.status !== 'approved') {
           throw new HttpError(404, `Tenant skill not found or not approved: ${tenantSkillId}`)
         }
         // name is the actual skill name (e.g., "my-skill"), use it to find the directory
         const skillName = tenantSkill.name as string
-        const skillPath = await findInstalledSkillPath(skillName)
+        const skillPath = await findInstalledSkillPath(tenantSkillId)
         if (!skillPath) {
           throw new HttpError(404, `Skill not found: ${skillName}`)
         }
         try {
-          const zipBuffer = await packageSkillZip(skillName)
+          const zipBuffer = await packageSkillZip(tenantSkillId)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(tenantSkillId)
           res.setHeader('Content-Type', 'application/zip')
@@ -10469,7 +10325,7 @@ export function startServer(
           role: auth.role,
           scopes: auth.scopes,
           runtime: runtimeOptions,
-          assistantName: assistantDisplayName,
+          assistantName: rawAssistantName,
           // 新增: 从请求体获取 enabled_skills
           enabledSkills: Array.isArray(body.enabled_skills)
             ? body.enabled_skills.filter((s: unknown) => typeof s === 'string')
@@ -10500,6 +10356,7 @@ export function startServer(
       }
 
       throw new HttpError(404, 'Not found')
+      })
     } catch (error) {
       writeError(logger, res, error)
     }

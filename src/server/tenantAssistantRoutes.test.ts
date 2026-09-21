@@ -25,24 +25,26 @@ async function createPendingTenantAssistant(
   ruleFile: string,
   rules = 'initial rules',
 ): Promise<{ id: string; assistantDir: string }> {
-  const assistantDir = join(fixture.rootDir, 'moss-home', 'assistants', 'custom', name)
-  await mkdir(assistantDir, { recursive: true })
-  await writeFile(join(assistantDir, '_moss_meta.json'), JSON.stringify({
-    id: name,
-    name,
-    display_name: name,
-    ruleFile,
-    source_type: 'tenant',
-  }), 'utf8')
-  await writeFile(join(assistantDir, 'system.md'), rules, 'utf8')
-
+  const create = await fetch(`${fixture.baseUrl}/api/v1/agents/create`, {
+    method: 'POST', headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, displayName: name, rules }),
+  })
+  expect(create.status).toBe(200)
+  const installed = await (await fetch(`${fixture.baseUrl}/api/v1/agents/installed`, { headers: authHeaders(fixture) })).json() as Array<{ id: string; name: string; source: string }>
+  const custom = installed.find(agent => agent.name === name)!
+  const metaPath = join(custom.source, '_moss_meta.json')
+  const meta = JSON.parse(await readFile(metaPath, 'utf8'))
+  await writeFile(metaPath, JSON.stringify({ ...meta, ruleFile }), 'utf8')
+  await writeFile(join(custom.source, 'system.md'), rules, 'utf8')
   const response = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/publish`, {
     method: 'POST',
     headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ assistantId: name }),
+    body: JSON.stringify({ assistantId: custom.id }),
   })
   expect(response.status).toBe(200)
   const result = await response.json() as { id: string }
+  const rows = await (await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, { headers: authHeaders(fixture) })).json() as Array<{ id: string; file_path: string }>
+  const assistantDir = rows.find(row => row.id === result.id)!.file_path
   return { id: result.id, assistantDir }
 }
 
@@ -192,6 +194,15 @@ describe('tenant assistant routes fixture', () => {
 
   it('accepts legacy JSON create and patch requests', async () => {
     const fixture = await startFixture()
+    const skillIds: string[] = []
+    for (const name of ['skill-a', 'skill-b']) {
+      const uploaded = await fetch(`${fixture.baseUrl}/api/v1/skills/tenant/upload`, {
+        method: 'POST', headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entries: [{ path: 'SKILL.md', contentBase64: Buffer.from(`---\nname: ${name}\ndescription: fixture\n---\nSkill`).toString('base64') }] }),
+      })
+      expect(uploaded.status).toBe(200)
+      skillIds.push((await uploaded.json() as { id: string }).id)
+    }
     const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
       method: 'POST',
       headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
@@ -199,7 +210,7 @@ describe('tenant assistant routes fixture', () => {
         name: 'json-agent',
         display_name: 'JSON Agent',
         avatar: 'https://example.test/avatar.png',
-        skills: ['skill-a'],
+        skills: [skillIds[0]],
         visible_to: null,
         workflow: null,
         promptsI18n: { 'zh-CN': ['示例'] },
@@ -217,7 +228,7 @@ describe('tenant assistant routes fixture', () => {
         display_name: 'Updated JSON Agent',
         avatar: 'https://example.test/updated.png',
         enabled: false,
-        skills: ['skill-b'],
+        skills: [skillIds[1]],
         visible_to: null,
         workflow: null,
       }),
@@ -340,7 +351,7 @@ describe('tenant assistant routes fixture', () => {
     expect(response.status).toBe(400)
   })
 
-  it('preserves a new avatar file when metadata persistence fails', async () => {
+  it('updates database configuration when the shared package is read-only', async () => {
     const fixture = await startFixture()
     const { id, assistantDir } = await createPendingTenantAssistant(fixture, 'metadata-failure-agent', 'system.md')
     const metaPath = join(assistantDir, '_moss_meta.json')
@@ -355,7 +366,7 @@ describe('tenant assistant routes fixture', () => {
       headers: authHeaders(fixture),
       body: form,
     })
-    expect(response.status).toBe(500)
+    expect(response.status).toBe(200)
 
     await chmod(metaPath, 0o644)
     const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, {
@@ -398,6 +409,8 @@ describe('tenant assistant routes fixture', () => {
       })(),
     })
     expect(patchResponse.status, fixture.stderrOutput.join('')).toBe(200)
-    expect(await readFile(join(assistantDir, 'system.md'), 'utf8')).toBe('updated rules')
+    expect(await readFile(join(assistantDir, 'system.md'), 'utf8')).toBe('initial rules')
+    const updated = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}/rules`, { headers: authHeaders(fixture) })
+    expect((await updated.json() as { rules: string }).rules).toBe('updated rules')
   })
 })

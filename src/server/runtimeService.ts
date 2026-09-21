@@ -1,3 +1,5 @@
+import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
+import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
 import { mkdir, readFile, writeFile, open } from 'fs/promises'
@@ -615,7 +617,25 @@ export class RuntimeService {
     }
   }
 
+  private async resourceScope(session: { orgId: string; userId: string; role: string; scopes: string[] }) {
+    return { orgId: session.orgId, userId: session.userId, driver: this.store.driver,
+      visibility: await this.authService.buildVisibilityFilter({ ...session, rawToken: '', keyId: '', jti: '', exp: 0 }) }
+  }
+
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
+    if (this.draining) throw new ServerDrainingError()
+    return withOrganizationResources(await this.resourceScope(input), async () => {
+      if (input.assistantName) {
+        const resource = await requireOrganizationResource('agent', input.assistantName)
+        if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
+        input = { ...input, assistantName: resource.id }
+      }
+      if (input.enabledSkills) input = { ...input, enabledSkills: await resolveOrganizationSkillIds(input.enabledSkills) }
+      return this.createSessionInResourceScope(input)
+    })
+  }
+
+  private async createSessionInResourceScope(input: SessionCreateInput): Promise<SessionRecord> {
     // Graceful drain: reject before writing any session row (avoids a stranded
     // status='failed' half-created record that spawnAttempt-level rejection
     // would leave behind).
@@ -1637,6 +1657,30 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
+    if (this.draining) throw new ServerDrainingError()
+    const scope = await this.resourceScope(session)
+    return withOrganizationResources(scope, async () => {
+      await this.assertWithinTokenQuota(session.userId, session.orgId)
+      const pinned = await pinSessionResourceSnapshot(
+        join(this.options.config.runtimeDir, 'sessions', session.sessionId),
+        await snapshotOrganizationResources(), options.enabledSkills,
+      )
+      return withOrganizationResources({ ...scope, snapshot: pinned.snapshot }, () => this.spawnAttemptInResourceScope(
+        session, { ...options, enabledSkills: options.enabledSkills ?? pinned.enabledSkills },
+      ))
+    })
+  }
+
+  private async spawnAttemptInResourceScope(
+    session: SessionRecord,
+    options: {
+      dangerouslySkipPermissions?: boolean
+      resumeTranscriptSessionId?: string
+      assistantName?: string
+      assistantDisplayName?: string
+      enabledSkills?: string[]
+    } = {},
+  ): Promise<AttemptRecord> {
     // Graceful drain: this is the single choke point every "spin up a new
     // runner / new attempt" path funnels through (createSession, resume cold
     // start, GET respawn, WS cold upgrade, background services). Reconnects to
@@ -1658,6 +1702,10 @@ export class RuntimeService {
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
     const effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+    if (effectiveAssistantName) {
+      const resource = await requireOrganizationResource('agent', effectiveAssistantName)
+      if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
+    }
     let assistantDisplayName = options.assistantDisplayName
     if (!assistantDisplayName && effectiveAssistantName) {
       try {
@@ -1668,6 +1716,8 @@ export class RuntimeService {
       }
     }
 
+    if (options.enabledSkills) await resolveOrganizationSkillIds(options.enabledSkills)
+    const resourceSnapshot = await snapshotOrganizationResources()
     const generation = await this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)
     const attachPath = getAttachPath(this.options.config, session.sessionId, generation)
@@ -2035,6 +2085,7 @@ export class RuntimeService {
         availableCorpApps,
         sharedMemory,
         enabledSkills: options.enabledSkills,
+        resources: resourceSnapshot,
         visibilityFilter: visibilityFilter ? {
           isAdmin: visibilityFilter.isAdmin,
           userId: visibilityFilter.userId,

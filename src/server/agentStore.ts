@@ -1,4 +1,5 @@
-import { createHash } from 'crypto'
+import { getOrganizationResourceScope, listOrganizationResources, findOrganizationResource, scopedResourceMetadata, saveOrganizationInstallation, registerOrganizationCustom, updateOrganizationResource, removeOrganizationResource, stageOrganizationArtifact, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
+import { createHash, randomUUID } from 'crypto'
 import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import os from 'os'
@@ -232,7 +233,7 @@ function buildInstalledSkillLookup(
   const lookup = new Map<string, InstalledSkillInfo>()
 
   for (const skill of installedSkills) {
-    const keys = [skill.id, skill.name, path.basename(skill.source)]
+    const keys = (getOrganizationResourceScope() ? [skill.id] : [skill.id, skill.name, path.basename(skill.source)])
       .map(value => String(value || '').trim())
       .filter(Boolean)
 
@@ -438,6 +439,8 @@ async function fileExists(filePath: string): Promise<boolean> {
 export async function readAssistantMeta(
   assistantDir: string,
 ): Promise<AssistantStoreMeta | null> {
+  const scoped = await scopedResourceMetadata('agent', assistantDir)
+  if (scoped) return scoped as AssistantStoreMeta
   try {
     const metaContent = await readFile(
       path.join(assistantDir, ASSISTANT_META_FILE),
@@ -529,6 +532,10 @@ async function scanAssistantDirs(baseDir: string): Promise<string[]> {
 export async function findAssistantDir(
   assistantName: string,
 ): Promise<AssistantSearchResult | null> {
+  if (getOrganizationResourceScope()) {
+    const resource = await findOrganizationResource('agent', assistantName)
+    return resource ? { dir: resource.path, category: resource.sourceType === 'hub' ? 'hub' : resource.sourceType === 'custom' ? 'custom' : 'tenant' } : null
+  }
   const normalizedAssistantName = String(assistantName || '').trim()
   if (!normalizedAssistantName) {
     return null
@@ -718,6 +725,11 @@ export async function fetchAgentHubAssistantDetail(
 }
 
 export async function getInstalledAssistants(): Promise<InstalledAssistantInfo[]> {
+  const scoped = await listOrganizationResources('agent')
+  if (scoped) return scoped.map(resource => toInstalledAssistantInfo({
+    assistantDir: resource.path, dirName: resource.name, meta: resource.meta as AssistantStoreMeta,
+    category: resource.sourceType === 'hub' ? 'hub' : resource.sourceType === 'custom' ? 'custom' : 'tenant',
+  }))
   const results: InstalledAssistantInfo[] = []
 
   for (const baseDir of [ASSISTANT_SYSTEM_DIR, ASSISTANT_HUB_DIR, ASSISTANT_CUSTOM_DIR, ASSISTANT_TENANT_DIR]) {
@@ -782,6 +794,7 @@ export async function resolveAssistantDisplayName(
  * Used by /api/v1/agents/installed endpoint for client sync.
  */
 export async function getHubInstalledAssistants(): Promise<InstalledAssistantInfo[]> {
+  if (getOrganizationResourceScope()) return (await getInstalledAssistants()).filter(agent => agent.isHubInstalled)
   const results: InstalledAssistantInfo[] = []
 
   const assistantDirs = await scanAssistantDirs(ASSISTANT_HUB_DIR)
@@ -906,19 +919,23 @@ export async function installHubAssistant(params: {
   if (params.checksum?.trim()) {
     const isValid = await verifyChecksum(zipBuffer, params.checksum.trim())
     if (!isValid) {
+      if (getOrganizationResourceScope()) throw new Error('Resource package checksum mismatch')
       console.warn(
         `[AgentHub] Checksum mismatch for ${assistantName}, continuing with install`,
       )
     }
   }
 
-  await mkdir(ASSISTANT_HUB_DIR, { recursive: true })
-  // Remove any existing hub install of the same catalog id, even under a
-  // different dir name (e.g. an earlier install with a different name spelling),
-  // so a re-install upserts instead of leaving a stale orphan dir behind.
-  await removeHubAssistantDirsById(assistantId, assistantName)
-  const assistantDir = path.join(ASSISTANT_HUB_DIR, assistantName)
-  await rm(assistantDir, { recursive: true, force: true })
+  const artifact = getOrganizationResourceScope()
+    ? await stageOrganizationArtifact('agent', zipBuffer, `${getHubApiBaseUrl()}:${assistantId}:${params.version ?? ''}`)
+    : null
+  if (!artifact) {
+    await mkdir(ASSISTANT_HUB_DIR, { recursive: true })
+    await removeHubAssistantDirsById(assistantId, assistantName)
+  }
+  const assistantDir = artifact?.dir ?? path.join(ASSISTANT_HUB_DIR, assistantName)
+  if (!artifact) await rm(assistantDir, { recursive: true, force: true })
+  try {
   await mkdir(assistantDir, { recursive: true })
   await extractAssistantZip(zipBuffer, assistantDir)
 
@@ -958,9 +975,9 @@ export async function installHubAssistant(params: {
     }
 
     const existingSkill =
-      installedSkillLookup.get(skillId) || installedSkillLookup.get(detail.name)
+      installedSkillLookup.get(skillId) || (!getOrganizationResourceScope() ? installedSkillLookup.get(detail.name) : undefined)
     if (existingSkill) {
-      enabledSkillNames.add(existingSkill.name || detail.name)
+      enabledSkillNames.add(getOrganizationResourceScope() ? existingSkill.id : (existingSkill.name || detail.name))
       continue
     }
 
@@ -985,7 +1002,7 @@ export async function installHubAssistant(params: {
         skillMeta: detail,
       })
       installedSkillNames.push(detail.name)
-      enabledSkillNames.add(detail.name)
+      enabledSkillNames.add(getOrganizationResourceScope() ? detail.id : detail.name)
       installedSkillLookup.set(skillId, {
         id: detail.id,
         name: detail.name,
@@ -1059,6 +1076,7 @@ export async function installHubAssistant(params: {
         : null,
   }
   await writeAssistantMeta(assistantDir, meta)
+  if (artifact) await saveOrganizationInstallation('agent', await artifact.publish(), meta, getHubApiBaseUrl())
 
   // Note: 在新方案中，智能体信息通过首次消息注入，不再需要 bridge 同步
 
@@ -1067,6 +1085,9 @@ export async function installHubAssistant(params: {
     version: installedVersion,
     installedSkills: installedSkillNames,
     failedSkills: failedSkillIds,
+  }
+  } finally {
+    if (artifact) await rm(artifact.dir, { recursive: true, force: true })
   }
 }
 
@@ -1095,7 +1116,8 @@ export async function createCustomAssistant(params: {
 
   // 2. Prepare directory
   await mkdir(ASSISTANT_CUSTOM_DIR, { recursive: true })
-  const assistantDir = path.join(ASSISTANT_CUSTOM_DIR, assistantName)
+  const resourceId = getOrganizationResourceScope() ? randomUUID() : assistantName
+  const assistantDir = getOrganizationResourceScope() ? newPrivateResourcePath('agent', resourceId) : path.join(ASSISTANT_CUSTOM_DIR, assistantName)
   await mkdir(assistantDir, { recursive: true })
 
   // 3. Write instructions file
@@ -1104,7 +1126,7 @@ export async function createCustomAssistant(params: {
 
   // 4. Write metadata
   const meta: AssistantStoreMeta = {
-    id: assistantName,
+    id: resourceId,
     name: assistantName,
     display_name: params.displayName,
     description: params.description || '',
@@ -1124,10 +1146,15 @@ export async function createCustomAssistant(params: {
     enableCorpAuth: params.enableCorpAuth ?? false,
     agent_type: params.agent_type,
     memory_mode: params.memory_mode,
-    visible_to: params.visible_to,
+    visible_to: getOrganizationResourceScope() ? { user_ids: [getOrganizationResourceScope()!.userId], department_ids: null } : params.visible_to,
     workflow: params.workflow,
   }
+  if (getOrganizationResourceScope()) {
+    meta.skills = await resolveOrganizationSkillIds(meta.skills ?? [])
+    meta.enabledSkills = await resolveOrganizationSkillIds(meta.enabledSkills ?? [])
+  }
   await writeAssistantMeta(assistantDir, meta)
+  if (getOrganizationResourceScope()) await registerOrganizationCustom('agent', assistantDir, meta)
 
   // Note: 在新方案中，智能体信息通过首次消息注入，不再需要 bridge 同步
 
@@ -1138,6 +1165,7 @@ export async function uninstallAssistant(params: {
   assistantName: string
   sourcePath?: string
 }): Promise<void> {
+  if (getOrganizationResourceScope()) return removeOrganizationResource('agent', params.assistantName)
   const sourcePath =
     params.sourcePath || (await findAssistantDir(params.assistantName))?.dir
   if (!sourcePath) {
@@ -1163,6 +1191,7 @@ export async function updateInstalledAssistantMeta(params: {
     >
   > & { rules?: string }
 }): Promise<void> {
+  if (getOrganizationResourceScope()) return updateOrganizationResource('agent', params.assistantName, params.updates)
   const result = await findAssistantDir(params.assistantName)
   if (!result) {
     throw new Error('Assistant not found')
@@ -1257,6 +1286,11 @@ export async function getAssistantContextSummary(
 export async function getAssistantSystemPrompt(
   assistantName: string,
 ): Promise<string | null> {
+  if (getOrganizationResourceScope()) {
+    const resource = await findOrganizationResource('agent', assistantName)
+    if (!resource) return null
+    if (typeof resource.meta.rules === 'string') return resource.meta.rules
+  }
   const result = await findAssistantDir(assistantName)
   if (!result) {
     return null
@@ -1376,7 +1410,7 @@ export async function uploadCustomAssistant(params: {
   userId: string
 }): Promise<{ id: string; name: string; version: string }> {
   // Use provided id (UUID) as directory name, fallback to sanitized name
-  const assistantId = params.id || params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
+  const assistantId = (getOrganizationResourceScope() ? randomUUID() : params.id) || params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
   if (!assistantId) {
     throw new Error('Invalid assistant id')
   }
@@ -1393,7 +1427,7 @@ export async function uploadCustomAssistant(params: {
     await extractAssistantZip(params.file, tempDir)
 
     // Install to custom directory using UUID as directory name
-    const targetDir = path.join(ASSISTANT_CUSTOM_DIR, assistantId)
+    const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('agent', assistantId) : path.join(ASSISTANT_CUSTOM_DIR, assistantId)
     await mkdir(ASSISTANT_CUSTOM_DIR, { recursive: true })
     await rm(targetDir, { recursive: true, force: true })
 
@@ -1432,7 +1466,12 @@ export async function uploadCustomAssistant(params: {
         department_ids: null,
       },
     }
+    if (getOrganizationResourceScope()) {
+      meta.skills = await resolveOrganizationSkillIds(meta.skills ?? [])
+      meta.enabledSkills = await resolveOrganizationSkillIds(meta.enabledSkills ?? [])
+    }
     await writeAssistantMeta(targetDir, meta)
+    if (getOrganizationResourceScope()) await registerOrganizationCustom('agent', targetDir, meta)
 
     return {
       id: assistantId,
@@ -1458,6 +1497,11 @@ export async function packageAssistantZip(assistantName: string): Promise<Buffer
 
   await addDirectoryToZip(zip, result.dir, '')
 
+  if (getOrganizationResourceScope()) {
+    const meta = await readAssistantMeta(result.dir)
+    zip.file(ASSISTANT_META_FILE, JSON.stringify(meta, null, 2))
+    if (typeof meta?.rules === 'string') zip.file(String(meta.ruleFile || 'system.md'), meta.rules)
+  }
   return zip.generateAsync({ type: 'nodebuffer' })
 }
 

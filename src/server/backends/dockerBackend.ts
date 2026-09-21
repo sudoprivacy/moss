@@ -1,3 +1,4 @@
+import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { spawn } from 'child_process'
 import { existsSync, writeFileSync } from 'fs'
 import { mkdir, readFile, rm } from 'fs/promises'
@@ -115,6 +116,7 @@ export class DockerBackend implements SessionBackend {
       workspaceSkillLinks = await syncWorkspaceSkills(safeCwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[DockerBackend] Workspace skills synced to ${safeCwd}/.nexus/sudocode/skills/ with ${enabledSkills.length} skills\n`)
     } catch (err) {
+      if (getOrganizationResourceScope()) throw err
       process.stderr.write(`[DockerBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)

@@ -121,6 +121,7 @@ export class CatalogRepository {
     providerBinding?: Record<string, unknown> | null
     supportedModes?: CatalogSupportedModes
     availability?: CatalogAvailability
+    sourceType?: 'tenant' | 'custom' | 'catalog'
     sourceProvider?: string
     sourceResourceId?: string
     authorName?: string | null
@@ -139,8 +140,8 @@ export class CatalogRepository {
         categories, avatar, skills, prompt_file, sort_order, version, author_id, author_name, status,
         source_url, checksum, file_path, enabled_skills, enabled, visible_to, org_id,
         provider_type, provider_binding, supported_modes, availability, source_provider, source_resource_id,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, updated_at, source_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       input.id,
       input.name,
@@ -173,6 +174,7 @@ export class CatalogRepository {
       input.sourceResourceId ?? input.id,
       input.createdAt ?? timestamp,
       timestamp,
+      input.sourceType ?? 'tenant',
     ])
     return (await this.getAgent(input.id, input.orgId))!
   }
@@ -201,6 +203,7 @@ export class CatalogRepository {
     visibleTo?: VisibleTo
     supportedModes?: CatalogSupportedModes
     availability?: CatalogAvailability
+    sourceType?: 'tenant' | 'custom' | 'catalog'
     sourceProvider?: string
     sourceResourceId?: string
     authorName?: string | null
@@ -217,8 +220,8 @@ export class CatalogRepository {
         id, name, display_name, description, category, categories, emoji, icon, homepage,
         applicable_scenarios, core_features, sort_order, version, author_id, author_name, status,
         source_url, checksum, file_path, enabled, visible_to, org_id,
-        supported_modes, availability, source_provider, source_resource_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        supported_modes, availability, source_provider, source_resource_id, created_at, updated_at, source_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       input.id,
       input.name,
@@ -248,6 +251,7 @@ export class CatalogRepository {
       input.sourceResourceId ?? input.id,
       input.createdAt ?? timestamp,
       timestamp,
+      input.sourceType ?? 'tenant',
     ])
     return (await this.getSkill(input.id, input.orgId))!
   }
@@ -413,10 +417,10 @@ export class CatalogRepository {
     return paginate(
       await this.driver.all<SqlRow>(`
         SELECT * FROM tenant_assistants resource
-        WHERE resource.org_id = ? OR resource.availability = 'all' OR EXISTS (
+        WHERE resource.org_id = ? OR (resource.source_type = 'catalog' AND (resource.availability = 'all' OR EXISTS (
           SELECT 1 FROM catalog_resource_org_assignments assignment
           WHERE assignment.resource_type = 'agent' AND assignment.resource_id = resource.id AND assignment.org_id = ?
-        )
+        )))
         ORDER BY resource.updated_at DESC, resource.id DESC
       `, [options.orgId, options.orgId]),
       options,
@@ -428,10 +432,10 @@ export class CatalogRepository {
     return paginate(
       await this.driver.all<SqlRow>(`
         SELECT * FROM tenant_skills resource
-        WHERE resource.org_id = ? OR resource.availability = 'all' OR EXISTS (
+        WHERE resource.org_id = ? OR (resource.source_type = 'catalog' AND (resource.availability = 'all' OR EXISTS (
           SELECT 1 FROM catalog_resource_org_assignments assignment
           WHERE assignment.resource_type = 'skill' AND assignment.resource_id = resource.id AND assignment.org_id = ?
-        )
+        )))
         ORDER BY resource.updated_at DESC, resource.id DESC
       `, [options.orgId, options.orgId]),
       options,
@@ -497,10 +501,10 @@ export class CatalogRepository {
     return Boolean(await this.driver.get<SqlRow>(`
       SELECT 1 FROM ${table} resource
       WHERE resource.id = ? AND (
-        resource.org_id = ? OR resource.availability = 'all' OR EXISTS (
+        resource.org_id = ? OR (resource.source_type = 'catalog' AND (resource.availability = 'all' OR EXISTS (
           SELECT 1 FROM catalog_resource_org_assignments assignment
           WHERE assignment.resource_type = ? AND assignment.resource_id = resource.id AND assignment.org_id = ?
-        )
+        )))
       )
     `, [resourceId, orgId, resourceType, orgId]))
   }

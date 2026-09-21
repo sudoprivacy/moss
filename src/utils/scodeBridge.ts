@@ -1,3 +1,5 @@
+import { listOrganizationResources } from '../server/catalog/organizationResources.js'
+import { ResourceAccessError } from '../server/catalog/resourceError.js'
 import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
 import { mkdir, readdir, lstat, readlink, rm, symlink } from 'fs/promises'
 import os from 'os'
@@ -57,8 +59,9 @@ export async function syncWorkspaceSkills(
   const workspaceSkillsDir = resolveWorkspaceSkillsDir(workspace)
   await mkdir(workspaceSkillsDir, { recursive: true })
 
-  // 获取所有技能源目录
-  const skillSourceDirs = [
+  const scopedSkills = await listOrganizationResources('skill')
+  // Scoped sessions never discover capabilities by scanning global directories.
+  const skillSourceDirs = scopedSkills ? [] : [
     MOSS_SKILLS_HUB_DIR,
     MOSS_SKILLS_SYSTEM_DIR,
     MOSS_SKILLS_CUSTOM_DIR,
@@ -68,6 +71,19 @@ export async function syncWorkspaceSkills(
 
   // 收集所有启用的技能
   const skillTargets = new Map<string, string>() // skillName -> sourcePath
+  if (scopedSkills) {
+    for (const skill of scopedSkills) {
+      if (skill.meta.enabled === false) continue
+      if (enabledSkillNames && !enabledSkillNames.includes(skill.id) && !enabledSkillNames.includes(skill.name)) continue
+      if (skill.name !== path.basename(skill.name) || skill.name === '..') throw new ResourceAccessError(400, 'Invalid skill name')
+      if (skillTargets.has(skill.name)) throw new ResourceAccessError(409, 'Ambiguous skill name')
+      skillTargets.set(skill.name, skill.path)
+    }
+    for (const ref of enabledSkillNames ?? []) {
+      if (!scopedSkills.some(skill => skill.meta.enabled !== false && (skill.id === ref || skill.name === ref))) throw new ResourceAccessError(404, 'Skill not available')
+    }
+  }
+
 
   for (const sourceDir of skillSourceDirs) {
     try {

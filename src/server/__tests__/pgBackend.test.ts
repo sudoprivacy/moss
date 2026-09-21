@@ -48,8 +48,37 @@ import { getOrganizationSystemSettings } from "../systemSettings.js";
 import { migrateLegacyModelSettings } from "../configuration/migrateLegacyModelSettings.js";
 import { migrateLegacyEnterpriseCronPolicy } from "../migration/legacyEnterpriseCronPolicy.js";
 import { createEnterpriseApi } from "../api/enterprise.js";
+import { withOrganizationResources, saveOrganizationInstallation, listOrganizationResources, updateOrganizationResource, requireOrganizationResource, removeOrganizationResource } from '../catalog/organizationResources.js';
 
 const PG_URL = process.env.MOSS_PG_TEST_URL ?? "";
+
+describe('organization installations on PG', { skip: !PG_URL }, () => {
+  it('concurrent installs are unique, config merges are serialized and organizations stay independent', async () => {
+    const admin = createAdminPool();
+    const database = await createFreshDatabase(admin);
+    const fix = await openFixture(database);
+    const a = { orgId: 'a', userId: 'u-a', driver: fix.driver };
+    const b = { orgId: 'b', userId: 'u-b', driver: fix.driver };
+    const meta = { id: 'shared', name: 'shared', enabled: true };
+    try {
+      await Promise.all(Array.from({ length: 6 }, () => withOrganizationResources(a, () => saveOrganizationInstallation('skill', '/artifact/v1', meta))));
+      assert.equal((await withOrganizationResources(a, () => listOrganizationResources('skill')))?.length, 1);
+      assert.deepEqual(await withOrganizationResources(b, () => listOrganizationResources('skill')), []);
+      await withOrganizationResources(b, () => saveOrganizationInstallation('skill', '/artifact/v1', meta));
+      await Promise.all([
+        withOrganizationResources(a, () => updateOrganizationResource('skill', 'shared', { description: 'A only' })),
+        withOrganizationResources(a, () => updateOrganizationResource('skill', 'shared', { enabled: false })),
+      ]);
+      const updated = await withOrganizationResources(a, () => requireOrganizationResource('skill', 'shared'));
+      assert.equal(updated.meta.description, 'A only');
+      assert.equal(updated.meta.enabled, false);
+      await withOrganizationResources(a, () => saveOrganizationInstallation('skill', '/artifact/v2', meta));
+      assert.equal((await withOrganizationResources(b, () => requireOrganizationResource('skill', 'shared'))).path, '/artifact/v1');
+      await withOrganizationResources(a, () => removeOrganizationResource('skill', 'shared'));
+      assert.equal((await withOrganizationResources(b, () => listOrganizationResources('skill')))?.length, 1);
+    } finally { await fix.release(); await dropDatabase(admin, database); await admin.end(); }
+  });
+});
 
 function createAdminPool(): Pool {
   // Pool construction is lazy (no connection until first query), so this
@@ -243,7 +272,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -1188,10 +1217,10 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: all seven migrations remain applied exactly once.
+        // Re-run is a no-op: all eight migrations remain applied exactly once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
         // v3 (audit fixes): tenant-store org indexes (C-4) + the E-2
         // channel_sessions snapshot column.
         for (const idx of ["idx_tenant_skills_org", "idx_tenant_assistants_org"]) {

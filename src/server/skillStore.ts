@@ -1,5 +1,6 @@
+import { getOrganizationResourceScope, listOrganizationResources, findOrganizationResource, scopedResourceMetadata, saveOrganizationInstallation, registerOrganizationCustom, updateOrganizationResource, removeOrganizationResource, stageOrganizationArtifact, newPrivateResourcePath } from './catalog/organizationResources.js'
 import {
-  createHash } from 'crypto'
+  createHash, randomUUID } from 'crypto'
 import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -252,6 +253,8 @@ function resolveSafeEntryPath(
 }
 
 export async function readSkillMeta(skillDir: string): Promise<SkillStoreMeta | null> {
+  const scoped = await scopedResourceMetadata('skill', skillDir)
+  if (scoped) return scoped as SkillStoreMeta
   try {
     const raw = await readFile(path.join(skillDir, SKILL_HUB_META_FILE), 'utf8')
     const parsed = JSON.parse(raw)
@@ -645,7 +648,8 @@ async function installImportedSkillFromTemp(
     throw new Error('无法确定技能名称，请在 SKILL.md 中指定 name 或 displayName 字段')
   }
 
-  const targetDir = path.join(USER_SKILLS_DIR, skillName)
+  const resourceId = randomUUID()
+  const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('skill', resourceId) : path.join(USER_SKILLS_DIR, skillName)
   await mkdir(USER_SKILLS_DIR, { recursive: true })
   await rm(targetDir, { recursive: true, force: true })
   await copyDirectoryRecursive(skillDir, targetDir)
@@ -654,7 +658,13 @@ async function installImportedSkillFromTemp(
     source_type: 'upload',
     is_builtin: false,
   })
+  if (getOrganizationResourceScope()) {
+    meta.id = resourceId
+    meta.source_type = 'custom'
+    meta.visible_to = { user_ids: [getOrganizationResourceScope()!.userId], department_ids: null }
+  }
   await writeSkillMeta(targetDir, meta)
+  if (getOrganizationResourceScope()) await registerOrganizationCustom('skill', targetDir, meta)
 
   return {
     skillName,
@@ -665,6 +675,7 @@ async function installImportedSkillFromTemp(
 export async function findInstalledSkillPath(
   skillName: string,
 ): Promise<string | null> {
+  if (getOrganizationResourceScope()) return (await findOrganizationResource('skill', skillName))?.path ?? null
   const trimmedName = skillName.trim()
   for (const baseDir of MANAGED_SKILL_SEARCH_DIRS) {
     // Try trimmed name first (normal case)
@@ -754,6 +765,11 @@ export async function fetchSkillHubSkillDetail(
 }
 
 export async function getInstalledSkills(): Promise<InstalledSkillInfo[]> {
+  const scoped = await listOrganizationResources('skill')
+  if (scoped) return Promise.all(scoped.map(async resource => toInstalledSkillInfo({
+    skillDir: resource.path, skillName: resource.name, meta: resource.meta as SkillStoreMeta,
+    version: String(resource.meta.installed_version ?? ''), frontmatter: null,
+  })))
   const groups = await Promise.all(
     MANAGED_SKILL_SEARCH_DIRS.map(dir => collectInstalledSkillsFromDir(dir)),
   )
@@ -765,6 +781,7 @@ export async function getInstalledSkills(): Promise<InstalledSkillInfo[]> {
  * Used by /api/v1/skills/installed endpoint for client sync.
  */
 export async function getHubInstalledSkills(): Promise<InstalledSkillInfo[]> {
+  if (getOrganizationResourceScope()) return (await getInstalledSkills()).filter(skill => skill.isHubInstalled)
   return collectInstalledSkillsFromDir(MOSS_SKILLS_HUB_DIR)
 }
 
@@ -782,10 +799,12 @@ export async function installHubSkill(params: {
     throw new Error('sourceUrl is required')
   }
 
+  if (getOrganizationResourceScope() && !params.skillMeta?.id) throw new Error('skillMeta.id is required')
   const zipBuffer = await downloadFileBuffer(params.sourceUrl)
   if (params.checksum?.trim()) {
     const isValid = await verifyChecksum(zipBuffer, params.checksum.trim())
     if (!isValid) {
+      if (getOrganizationResourceScope()) throw new Error('Resource package checksum mismatch')
       console.warn(
         `[SkillStore] Checksum mismatch for ${params.skillName}, continuing with install`,
       )
@@ -794,11 +813,16 @@ export async function installHubSkill(params: {
 
   // Trim skill name to avoid leading/trailing spaces in directory name
   const trimmedSkillName = params.skillName.trim()
+  const artifact = getOrganizationResourceScope()
+    ? await stageOrganizationArtifact('skill', zipBuffer, `${getHubApiBaseUrl()}:${params.skillMeta?.id}:${params.version ?? ''}`)
+    : null
   await mkdir(MOSS_SKILLS_HUB_DIR, { recursive: true })
-  const skillDir = path.join(MOSS_SKILLS_HUB_DIR, trimmedSkillName)
-  await rm(skillDir, { recursive: true, force: true })
+  const skillDir = artifact?.dir ?? path.join(MOSS_SKILLS_HUB_DIR, trimmedSkillName)
+  if (!artifact) await rm(skillDir, { recursive: true, force: true })
+  try {
   await mkdir(skillDir, { recursive: true })
   await extractSkillZip(zipBuffer, skillDir)
+  if (artifact) await readFile(path.join(skillDir, 'SKILL.md'))
 
   const meta: SkillStoreMeta = {
     id: params.skillMeta?.id || '',
@@ -845,6 +869,7 @@ export async function installHubSkill(params: {
   }
 
   await writeSkillMeta(skillDir, meta)
+  if (artifact) await saveOrganizationInstallation('skill', await artifact.publish(), meta, getHubApiBaseUrl())
 
   // Note: 在新方案中，技能通过工作空间符号链接和首次消息注入，不再需要 bridge 同步
 
@@ -852,12 +877,16 @@ export async function installHubSkill(params: {
     skillName: params.skillName,
     version: params.version || '',
   }
+  } finally {
+    if (artifact) await rm(artifact.dir, { recursive: true, force: true })
+  }
 }
 
 export async function uninstallSkill(params: {
   skillName: string
   sourcePath?: string
 }): Promise<void> {
+  if (getOrganizationResourceScope()) return removeOrganizationResource('skill', params.skillName)
   const sourcePath = params.sourcePath || (await findInstalledSkillPath(params.skillName))
   if (!sourcePath) {
     throw new Error(`Skill not found: ${params.skillName}`)
@@ -912,6 +941,7 @@ export async function setInstalledSkillEnabled(params: {
   enabled: boolean
   sourcePath?: string
 }): Promise<void> {
+  if (getOrganizationResourceScope()) return updateOrganizationResource('skill', params.skillName, { enabled: params.enabled })
   const sourcePath = params.sourcePath || (await findInstalledSkillPath(params.skillName))
   if (!sourcePath) {
     throw new Error(`Skill not found: ${params.skillName}`)
@@ -1017,6 +1047,7 @@ export async function setInstalledSkillMeta(
     Pick<SkillStoreMeta, 'visible_to'>
   >,
 ): Promise<void> {
+  if (getOrganizationResourceScope()) return updateOrganizationResource('skill', skillName, updates)
   const sourcePath = await findInstalledSkillPath(skillName)
   if (!sourcePath) {
     throw new Error(`Skill not found: ${skillName}`)
@@ -1081,7 +1112,8 @@ export async function uploadCustomSkill(params: {
     }
 
     // Install to custom directory
-    const targetDir = path.join(MOSS_SKILLS_CUSTOM_DIR, skillName)
+    const resourceId = getOrganizationResourceScope() ? randomUUID() : skillName
+    const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('skill', resourceId) : path.join(MOSS_SKILLS_CUSTOM_DIR, skillName)
     await mkdir(MOSS_SKILLS_CUSTOM_DIR, { recursive: true })
     await rm(targetDir, { recursive: true, force: true })
     await copyDirectoryRecursive(skillDir, targetDir)
@@ -1089,7 +1121,7 @@ export async function uploadCustomSkill(params: {
     // Create metadata with visibility set to uploader only
     const version = params.version || frontmatter.version || '1.0.0'
     const meta: SkillStoreMeta = {
-      id: skillName,
+      id: resourceId,
       name: skillName,
       display_name: params.displayName || frontmatter.name || frontmatter.displayName || skillName,
       description: params.description || frontmatter.description || '',
@@ -1108,9 +1140,10 @@ export async function uploadCustomSkill(params: {
       },
     }
     await writeSkillMeta(targetDir, meta)
+    if (getOrganizationResourceScope()) await registerOrganizationCustom('skill', targetDir, meta)
 
     return {
-      id: skillName,
+      id: resourceId,
       name: skillName,
       version,
     }
@@ -1132,6 +1165,8 @@ export async function packageSkillZip(skillName: string): Promise<Buffer> {
   const zip = new JSZip()
 
   await addDirectoryToZip(zip, skillPath, '')
+  const meta = await scopedResourceMetadata('skill', skillPath)
+  if (meta) zip.file('_moss_meta.json', JSON.stringify(meta, null, 2))
 
   return zip.generateAsync({ type: 'nodebuffer' })
 }
@@ -1243,13 +1278,14 @@ async function installTenantSkillFromTemp(
   }
 
   // Check if skill already exists in the chosen target directory
-  const existingTenantPath = path.join(targetBaseDir, skillName)
-  if (existsSync(existingTenantPath)) {
+  const existingTenantPath = getOrganizationResourceScope() ? await findInstalledSkillPath(skillName) : path.join(targetBaseDir, skillName)
+  if (existingTenantPath && existsSync(existingTenantPath)) {
     throw new Error(`专属技能已存在: ${skillName}`)
   }
 
   // Install to the chosen target directory (tenant or tenant-pending)
-  const targetDir = path.join(targetBaseDir, skillName)
+  const resourceId = randomUUID()
+  const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('skill', resourceId) : path.join(targetBaseDir, skillName)
   await mkdir(targetBaseDir, { recursive: true })
   await rm(targetDir, { recursive: true, force: true })
   await copyDirectoryRecursive(skillDir, targetDir)
@@ -1259,11 +1295,12 @@ async function installTenantSkillFromTemp(
     source_type: 'tenant',
     is_builtin: false,
   })
+  meta.id = resourceId
   await writeSkillMeta(targetDir, meta)
 
   return {
     skillName,
-    id: `tenant-skill-${Date.now()}`,
+    id: resourceId,
     status: 'approved',
     version: meta.installed_version || '1.0.0',
     displayName: meta.display_name || skillName,

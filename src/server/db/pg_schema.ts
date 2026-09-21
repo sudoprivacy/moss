@@ -1,3 +1,4 @@
+import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 /**
  * PostgreSQL schema for moss (HA P1-2e).
  *
@@ -2006,6 +2007,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 5, name: 'enterprise-policy-2026-09', sql: MIGRATION_0005_ENTERPRISE_POLICY },
   { version: 6, name: 'sudowork-compatibility-2026-09', sql: MIGRATION_0006_COMPATIBILITY },
   { version: 7, name: 'organization-model-settings-2026-09', sql: ORGANIZATION_MODEL_SETTINGS_SCHEMA },
+  { version: 8, name: 'organization-resource-installations', sql: ORGANIZATION_RESOURCE_PG_SCHEMA },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

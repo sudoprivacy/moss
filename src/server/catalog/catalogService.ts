@@ -97,6 +97,7 @@ export class CatalogService {
         providerBinding: input.providerBinding,
         supportedModes: input.supportedModes,
         availability: input.availability,
+        sourceType: input.availability && input.availability !== 'organization' ? 'catalog' : 'tenant',
         sourceProvider: input.externalIdentity?.providerType ?? 'moss',
         sourceResourceId: input.externalIdentity?.externalId ?? id,
       })
@@ -187,6 +188,7 @@ export class CatalogService {
         status: input.actor.role === 'user' ? 'pending' : 'approved',
         supportedModes: input.supportedModes,
         availability: input.availability,
+        sourceType: input.availability && input.availability !== 'organization' ? 'catalog' : 'tenant',
         sourceProvider: input.externalIdentity?.providerType ?? 'moss',
         sourceResourceId: input.externalIdentity?.externalId ?? id,
       })
@@ -400,11 +402,13 @@ export class CatalogService {
       const resource = kind === 'agent'
         ? await this.repository.createAgent({
             ...(record as Parameters<CatalogRepository['createAgent']>[0]),
+            sourceType: input.availability && input.availability !== 'organization' ? 'catalog' : 'tenant',
             sourceProvider: externalIdentity?.providerType ?? record.sourceProvider ?? 'moss',
             sourceResourceId: externalIdentity?.externalId ?? record.sourceResourceId ?? record.id,
           })
         : await this.repository.createSkill({
             ...(record as Parameters<CatalogRepository['createSkill']>[0]),
+            sourceType: input.availability && input.availability !== 'organization' ? 'catalog' : 'tenant',
             sourceProvider: externalIdentity?.providerType ?? record.sourceProvider ?? 'moss',
             sourceResourceId: externalIdentity?.externalId ?? record.sourceResourceId ?? record.id,
           })

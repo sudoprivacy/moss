@@ -1,3 +1,4 @@
+import { ensureSqliteCompatibilityDomainSchemas, ensureCompatibilityCoreSchema } from './db/compatibilitySchema.js'
 import { randomUUID } from 'crypto'
 import { readServerConfig, ensureServerDirectories } from './config.js'
 import { DirectConnectStore } from './db.js'
@@ -14,6 +15,8 @@ const { config } = await readServerConfig(configPath)
 await ensureServerDirectories(config)
 
 const store = new DirectConnectStore(config.dbPath)
+ensureSqliteCompatibilityDomainSchemas(store.requireSqliteDb())
+ensureCompatibilityCoreSchema(store.requireSqliteDb())
 const { service: authService } = await createAuthService({
   db: store.requireSqliteDb(),
   dbPath: config.dbPath,

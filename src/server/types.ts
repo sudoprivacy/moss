@@ -1004,6 +1004,8 @@ export type RunnerManifest = {
      */
     availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
     sharedMemory?: string | null
+    /** Authorized resource metadata and immutable artifact references for the runner. */
+    resources?: import('./catalog/organizationResources.js').OrganizationResourceSnapshot
     /** Enabled skill names (from client or agent config) */
     enabledSkills?: string[]
     /**
