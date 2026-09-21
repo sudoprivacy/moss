@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS session_attempts (
   container_name TEXT,
   attach_path TEXT,
   resume_transcript_session_id TEXT NOT NULL,
+  -- P1a (§8.10 R5.2)：runner generation 的 execution zone。本表仍是
+  -- runtime generation（R5.9）；真正 Attempt.execution_zone_id 属 P1b。
+  execution_zone_id TEXT,
   started_at BIGINT NOT NULL,
   last_heartbeat_at BIGINT,
   stopped_at BIGINT,
