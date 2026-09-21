@@ -10,6 +10,9 @@ import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
+import { NexusZoneClient } from './nexus/nexusZoneClient.js'
+import { resolveZoneBindingConfig } from './zones/binding/config.js'
+import { ZoneBindingReconciler } from './zones/binding/bindingService.js'
 import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
@@ -538,6 +541,37 @@ async function finishStandaloneServerStartup(
     void runtime.gcOrphanedK8sPods()
   }, Math.max(60_000, config.heartbeatTimeoutMs * 2))
   k8sGcTimer.unref?.()
+
+  // Zone binding outbox reconciler (§8.7): converges default bindings to
+  // Nexus Zone + Org ZoneGrant. Same shared driver as AuthCenterDb, so the
+  // lease/fence writes ride the same pool. Skipped entirely when the /v2
+  // management endpoint is not configured — bindings stay pending, which is
+  // the specified offline behavior.
+  const zoneBindingConfig = resolveZoneBindingConfig()
+  if (zoneBindingConfig.zoneBindingEnabled) {
+    const zoneBindingReconciler = new ZoneBindingReconciler({
+      driver: store.driver,
+      client: new NexusZoneClient(zoneBindingConfig),
+      config: zoneBindingConfig,
+    })
+    const zoneBindingTimer = setInterval(() => {
+      void zoneBindingReconciler.reconcileOnce().then(
+        (result) => {
+          if (result.claimed > 0) {
+            console.log(
+              `[ZoneBinding] reconciled: claimed=${result.claimed} completed=${result.completed} retried=${result.retried} failed=${result.failed}`,
+            )
+          }
+        },
+        (err: unknown) => {
+          process.stderr.write(
+            `[ZoneBinding] reconcile pass failed: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        },
+      )
+    }, 30_000)
+    zoneBindingTimer.unref?.()
+  }
 
   let stopped = false
   const stop = async () => {

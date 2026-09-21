@@ -8,6 +8,9 @@ import type { DirectConnectStore } from '../db.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import type { RechargeOrder, RechargeSyncStatus, RefundRecord } from '../credits/recharge.js'
 import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
+import { resolveZoneBindingConfig, type ZoneBindingConfig } from '../zones/binding/config.js'
+import { insertDefaultBindingIntent } from '../zones/binding/bindingRepository.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -312,6 +315,10 @@ export class AuthCenterDb {
   // immutable value. Populated by loadSecretCache() and kept fresh by setConfig.
   #jwtSecret: string | null = null
   #issuer: string | null = null
+  // Zone binding intent 走 env-resolved 配置（nexus_deployment_id 等）；
+  // 未配置 /v2 endpoint 时 binding 仍写入并保持 pending（§8.7 验收语义），
+  // 由 reconciler 在配置可用后收敛。
+  readonly #zoneBindingConfig: ZoneBindingConfig = resolveZoneBindingConfig()
 
   constructor(dbOrPath: string | DatabaseSync | DirectConnectStore, dbPath?: string) {
     // Shared-store form (the production path): shares the store's driver so
@@ -712,6 +719,9 @@ export class AuthCenterDb {
         ON CONFLICT(key) DO NOTHING
       `)
     }
+
+    // Zone binding 三表（§8.7；SQLite 路径。PG 路径由 pg_schema.ts 提供）
+    this.db.exec(ZONE_BINDING_TABLES_DDL)
   }
 
   private ensureColumn(
@@ -790,15 +800,28 @@ export class AuthCenterDb {
   }
 
   // Organization operations
+  // §8.7 事务规则：insert organization → insert binding intent → insert
+  // outbox → commit，同一本地事务；事务内不调用 Nexus（reconciler 异步收敛）。
+  // 本方法是全部 7 个 Org 创建入口（bootstrap / phone signup / OAuth 首登 /
+  // admin create / phone import / legacy import / backfill 脚本）的汇聚点，
+  // binding 接入只落在这里——外层已有事务时 driver.transaction 为 join 语义。
   async createOrganization(
     id: string,
     name: string,
     createdAt: number,
     extOrgId: string | null = null,
   ): Promise<void> {
-    await this.driver.run(`
-      INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
-    `, [id, name, extOrgId, createdAt])
+    const now = Date.now()
+    await this.driver.transaction(async () => {
+      await this.driver.run(`
+        INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
+      `, [id, name, extOrgId, createdAt])
+      await insertDefaultBindingIntent(this.driver, {
+        orgId: id,
+        nexusDeploymentId: this.#zoneBindingConfig.nexusDeploymentId,
+        now,
+      })
+    })
   }
 
   async getOrganization(id: string): Promise<AuthCenterOrganization | null> {

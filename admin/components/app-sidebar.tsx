@@ -31,6 +31,7 @@ import {
   Activity,
   ClipboardList,
   Database,
+  Boxes,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -87,6 +88,11 @@ const menuItems: NavItem[] = [
     url: '/users',
     icon: Users,
     requiredScope: 'admin:users',
+  },
+  {
+    title: 'Zone 管理',
+    url: '/zones',
+    icon: Boxes,
   },
   {
     title: '会话管理',

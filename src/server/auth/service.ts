@@ -11,6 +11,9 @@ import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
 import { OrganizationIdentityService } from '../identity/organizationIdentityService.js'
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
 import { getSystemSettings } from '../systemSettings.js'
+import { NexusZoneClient } from '../nexus/nexusZoneClient.js'
+import { resolveZoneBindingConfig } from '../zones/binding/config.js'
+import { ZoneDelegationService } from '../zones/binding/delegationService.js'
 import {
   newApplicationNo,
   type CreditApplication,
@@ -297,6 +300,9 @@ export class AuthService {
   private readonly oauth2Bridge: OAuth2Bridge
   private readonly identityRepository: IdentityRepository
   private readonly unifiedIdentity: UnifiedIdentityService
+  // Zone delegation（§5.4/§6.4）：/v2 endpoint 未配置时为 null，全部钩子
+  // 空跳过——不影响无 Zone 部署的现有行为。
+  readonly zoneDelegation: ZoneDelegationService | null
   private sudorouterAccounts?: {
     accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
     initialQuotaUnits: number
@@ -319,6 +325,14 @@ export class AuthService {
       legacyClientCronEnabled: getSystemSettings().clientCronEnabled,
     })
     this.unifiedIdentity = new UnifiedIdentityService(this.db.db, this.db, this.identityRepository)
+    const zoneBindingConfig = resolveZoneBindingConfig()
+    this.zoneDelegation = zoneBindingConfig.zoneBindingEnabled
+      ? new ZoneDelegationService({
+          driver: this.db.driver,
+          client: new NexusZoneClient(zoneBindingConfig),
+          config: zoneBindingConfig,
+        })
+      : null
     void this.ensureCompatibilityRecords().catch((error) => {
       console.warn('[AuthService] Failed to ensure Sudowork compatibility records:', error)
     })
@@ -1590,6 +1604,16 @@ export class AuthService {
       }
       throw err
     }
+    // Org delete 只撤销访问，不自动 deprovision Zone 数据（§8.7 验收）：
+    // binding desired_state → detached（远端 detach 由 05B 管理面处理），
+    // 已发 delegation 主动 revoke（best-effort；nexus membership 复查兜底）。
+    await this.db.driver.run(
+      `UPDATE org_zone_bindings SET desired_state = 'detached', updated_at = ? WHERE org_id = ?`,
+      [Date.now(), org.id],
+    )
+    if (this.zoneDelegation) {
+      void this.zoneDelegation.revokeForOrg(org.id).catch(() => {})
+    }
     return { ok: true }
   }
 
@@ -2041,6 +2065,12 @@ export class AuthService {
     }
 
     await withExtIdConflict(() => this.db.updateUser(user.id, patch))
+    // Membership 变化（role downgrade / suspend 等）→ 旧 delegation 的下一
+    // 次访问必须拒绝。nexus verify 的 membership 复查是安全兜底；这里的
+    // 主动 revoke 只加速收敛，best-effort 不阻塞管理操作。
+    if (this.zoneDelegation && (patch.role !== undefined || patch.status !== undefined)) {
+      void this.zoneDelegation.revokeForUser(nextOrgId, user.id).catch(() => {})
+    }
     return {
       user: sanitizeUser((await this.db.getUserByIdAndOrg(user.id, nextOrgId)) ?? user),
     }

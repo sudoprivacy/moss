@@ -15,6 +15,10 @@ import { createServerLogger, type ServerLogger } from './serverLog.js'
 import { hasScope, hasExactScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
+import { ZoneDelegationError } from './zones/binding/delegationService.js'
+import { ZoneManagementError, ZoneManagementService } from './zones/binding/managementService.js'
+import { resolveZoneBindingConfig } from './zones/binding/config.js'
+import { NexusZoneClient } from './nexus/nexusZoneClient.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
@@ -2097,6 +2101,15 @@ export function startServer(
     } catch { return undefined }
   }) : null
 
+  // Zone 管理面（§8.8）：/v2 未配置时 client 为 null——binding 列表等只读
+  // 本地的操作仍可用，涉及 Nexus 的操作返回 503（显式未配置，不静默）。
+  const zoneBindingConfig = resolveZoneBindingConfig()
+  const zoneManagement = new ZoneManagementService({
+    driver: runtime.store.driver,
+    client: zoneBindingConfig.zoneBindingEnabled ? new NexusZoneClient(zoneBindingConfig) : null,
+    config: zoneBindingConfig,
+  })
+
   // Cron Service - scheduled task execution engine
   const cronService = new CronService(runtime.store.driver, {
     runtimeService: runtime,
@@ -2923,6 +2936,150 @@ export function startServer(
           throw new HttpError(401, 'User account is disabled')
         }
         writeJson(res, 200, await authService.getMe(auth))
+        return
+      }
+
+      // Zone delegation 自助换发（§5.4）：普通用户以自身 active Membership
+      // 获取可被 Nexus 验证的短期 delegation。audience/ttl 可选（默认
+      // 'vfs'/900s）。Zone 未配置（/v2 endpoint 缺失）时 503——不是错误
+      // 配置下的静默降级。
+      if (req.method === 'POST' && pathname === '/api/v1/zones/delegations') {
+        const token = getBearerToken(req)
+        if (!token) {
+          throw new HttpError(401, 'Missing bearer token')
+        }
+        const auth = await authService.verifyAccessToken(token)
+        if (!auth) {
+          throw new HttpError(401, 'Invalid access token')
+        }
+        if (!(await isUserActive(auth.userId, authService))) {
+          throw new HttpError(401, 'User account is disabled')
+        }
+        if (!authService.zoneDelegation) {
+          throw new HttpError(503, 'Zone delegation is not configured')
+        }
+        const body = await readJsonBody(req).catch(() => ({}) as JsonBody)
+        const audience = typeof body.audience === 'string' && body.audience.trim() ? body.audience.trim() : undefined
+        const ttlS = typeof body.ttl_s === 'number' ? body.ttl_s : undefined
+        try {
+          const issued = await authService.zoneDelegation.issueForOrgUser({
+            orgId: auth.orgId,
+            userId: auth.userId,
+            audience,
+            ttlS,
+          })
+          writeJson(res, 201, {
+            delegation_id: issued.delegationId,
+            zone_id: issued.zoneId,
+            audience: issued.audience,
+            expires_at: issued.expiresAt,
+          })
+        } catch (error) {
+          const code = error instanceof ZoneDelegationError ? error.code : 'DELEGATION_FAILED'
+          const message = error instanceof Error ? error.message : 'delegation issuance failed'
+          throw new HttpError(409, JSON.stringify({ code, message }))
+        }
+        return
+      }
+
+      // ── Zone 管理面（§8.8）：binding/生命周期/operation ──────────────────
+      // 权限分层：super admin 全量；Org admin 本 Org binding（管理面 service
+      // 内再校验归属）；普通用户仅可用 Zone 列表，不看 grant 历史。
+      const zoneBindingMatch = pathname.match(/^\/api\/v1\/zones\/bindings$/)
+      if (req.method === 'GET' && zoneBindingMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        writeJson(res, 200, { bindings: await zoneManagement.listBindings({ role: auth.role, orgId: auth.orgId }) })
+        return
+      }
+      if (req.method === 'POST' && zoneBindingMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        await authService.requireSuperAdmin(auth)
+        const body = (await readJsonBody(req).catch(() => ({}) as JsonBody)) as JsonBody
+        const orgId = typeof body.org_id === 'string' ? body.org_id.trim() : ''
+        const zoneId = typeof body.zone_id === 'string' ? body.zone_id.trim() : ''
+        const purpose = typeof body.purpose === 'string' && body.purpose.trim() ? body.purpose.trim() : 'shared'
+        if (!orgId || !zoneId) {
+          throw new HttpError(400, 'Missing org_id or zone_id')
+        }
+        try {
+          writeJson(res, 201, await zoneManagement.addBinding({ orgId, zoneId, purpose }))
+        } catch (error) {
+          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          throw error
+        }
+        return
+      }
+
+      const zoneBindingActionMatch = pathname.match(/^\/api\/v1\/zones\/bindings\/([^/]+)\/(refresh|detach)$/)
+      if (req.method === 'POST' && zoneBindingActionMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        const [, bindingId, action] = zoneBindingActionMatch
+        try {
+          const result =
+            action === 'refresh'
+              ? await zoneManagement.refreshBinding(bindingId, { role: auth.role, orgId: auth.orgId })
+              : await zoneManagement.detachBinding(bindingId, { role: auth.role, orgId: auth.orgId })
+          writeJson(res, 200, result)
+        } catch (error) {
+          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          throw error
+        }
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/zones/available') {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        writeJson(res, 200, { zones: await zoneManagement.listAvailableZones(auth.orgId) })
+        return
+      }
+
+      const zoneOperationMatch = pathname.match(/^\/api\/v1\/zones\/operations\/([^/]+)$/)
+      if (req.method === 'GET' && zoneOperationMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        await authService.requireSuperAdmin(auth)
+        try {
+          writeJson(res, 200, await zoneManagement.getOperation(zoneOperationMatch[1]))
+        } catch (error) {
+          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          throw error
+        }
+        return
+      }
+
+      const zoneLifecycleMatch = pathname.match(/^\/api\/v1\/zones\/([^/:]+):(suspend|resume)$/)
+      if (req.method === 'POST' && zoneLifecycleMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        await authService.requireSuperAdmin(auth)
+        try {
+          writeJson(res, 202, await zoneManagement.zoneLifecycle(zoneLifecycleMatch[1], zoneLifecycleMatch[2] as 'suspend' | 'resume'))
+        } catch (error) {
+          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          throw error
+        }
+        return
+      }
+
+      const zoneDeprovisionMatch = pathname.match(/^\/api\/v1\/zones\/([^/:]+)\/deprovision$/)
+      if (req.method === 'POST' && zoneDeprovisionMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        await authService.requireSuperAdmin(auth)
+        const body = await readJsonBody(req).catch(() => ({}) as JsonBody)
+        const confirmZoneId = typeof body.confirm_zone_id === 'string' ? body.confirm_zone_id.trim() : ''
+        try {
+          // 二次确认：confirm_zone_id 必须与目标一致；返回 operation，
+          // 不在请求内同步等待删除（§8.8）
+          writeJson(res, 202, await zoneManagement.deprovisionZone(zoneDeprovisionMatch[1], confirmZoneId))
+        } catch (error) {
+          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          throw error
+        }
         return
       }
 

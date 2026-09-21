@@ -55,6 +55,23 @@ export function createHostDispatch(options: HostDispatchOptions): RequestListene
       void sudoworkHandler(request, response)
       return
     }
-    void options.mossHandler(request, response)
+    // mossHandler 是巨型 async 路由，任何路由逃逸的异常（例如 404
+    // AuthServiceError——2026-09-21 P0 E2E 实证：PATCH /api/v1/users/:id 对
+    // 不存在用户抛 404）在此前被 void 丢弃 → unhandledRejection → node 24
+    // 默认击穿整个进程（一个 4xx 请求即可打死 server）。此处兜底转 500；
+    // 响应已开始时只能记录并断开连接。
+    void Promise.resolve(options.mossHandler(request, response)).catch((error: unknown) => {
+      if (!response.headersSent) {
+        response.writeHead(500, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({ error: 'internal server error' }))
+      } else {
+        response.destroy()
+      }
+      if (typeof (error as { stack?: string })?.stack === 'string') {
+        process.stderr.write(`[hostDispatch] unhandled route error: ${(error as Error).stack}\n`)
+      } else {
+        process.stderr.write(`[hostDispatch] unhandled route error: ${String(error)}\n`)
+      }
+    })
   }
 }

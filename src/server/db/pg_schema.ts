@@ -32,6 +32,7 @@
  * additionally make a re-run after a crash safe.
  */
 import type { DbDriver } from './driver.js'
+import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 
 /** Initial full schema (all stores, migrated-final shape). */
 const MIGRATION_0001_INITIAL_SCHEMA = `
@@ -1231,11 +1232,16 @@ interface PgMigration {
   sql: string
 }
 
+/** §8.7 zone binding 三表：DDL 与 SQLite 侧同源（zones/binding/schema.ts，
+ *  双方言兼容文本），不在本文件复制第二份。 */
+const MIGRATION_0005_ZONE_BINDING = ZONE_BINDING_TABLES_DDL
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
   { version: 4, name: 'recharge-orders-2026-09', sql: MIGRATION_0004_RECHARGE },
+  { version: 5, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
