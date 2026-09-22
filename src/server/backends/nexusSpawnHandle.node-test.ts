@@ -130,7 +130,10 @@ void test('a deadline on the long poll is not a disconnect', async () => {
   handle.on('close', () => { closes += 1 })
   const seen: string[] = []
   handle.stdout.on('data', (chunk: Buffer) => seen.push(chunk.toString()))
-  await settle(150)
+  // Longer than the first transport backoff: the retry is deliberately not
+  // immediate, so a daemon that is down is not re-dialled tens of times a
+  // second.
+  await settle(450)
 
   assert.equal(closes, 0, 'a transport deadline must not end the session')
   assert.equal(seen.join(''), 'after the deadline\n', 'the follow loop resumes')
@@ -147,4 +150,21 @@ void test('a stream-closed error still ends the session once', async () => {
   await settle(120)
 
   assert.equal(closes, 1)
+})
+
+void test('a stream-closed error is not rescued by a status name in its text', async () => {
+  // The daemon's own error text is the detail field, so it can say anything.
+  // Classifying on "contains a transient status name" let such a payload
+  // masquerade as a transport hiccup, and the session would hang instead of
+  // closing. The status is read from its own position now.
+  const { agent } = fakeAgent({
+    '/proc/sid-8/fd/1': [new Error('stream closed: writer exited (UNAVAILABLE upstream)')],
+  })
+  const handle = new NexusSpawnHandle(agent, 'sid-8', null)
+
+  let closes = 0
+  handle.on('close', () => { closes += 1 })
+  await settle(120)
+
+  assert.equal(closes, 1, 'a stream close must still end the session')
 })

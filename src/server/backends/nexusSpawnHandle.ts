@@ -36,21 +36,39 @@ const IDLE_BACKOFF_MS = 25
  * fixed ~30s after they started, because the client deadline and the poll
  * budget were the same number.
  */
-const TRANSIENT_READ_STATUSES = [
+const TRANSIENT_READ_STATUSES = new Set([
   'DEADLINE_EXCEEDED',
   'UNAVAILABLE',
   'RESOURCE_EXHAUSTED',
   'ABORTED',
-]
+])
 
 /**
- * A stream that is really gone surfaces the daemon's own error payload; a
- * transport hiccup surfaces the gRPC status name the client put in the
- * message. Only the former ends the session.
+ * First pause after a transport failure, doubled on each consecutive one up to
+ * {@link TRANSPORT_RETRY_CEILING_MS}. A daemon that is down fails a read
+ * immediately instead of holding it for the poll budget, so a fixed pause
+ * would re-dial it tens of times a second for as long as it stays down.
+ */
+const TRANSPORT_RETRY_BASE_MS = 200
+const TRANSPORT_RETRY_CEILING_MS = 5_000
+
+/**
+ * The nexus client formats a failed call as
+ * `gRPC <operation> failed: <STATUS>: <detail>`. Reading the status from its
+ * own position matters: `<detail>` is the daemon's text, and a stream-closed
+ * payload that happens to mention a status name would otherwise be read as
+ * that status — the session would then hang instead of closing.
+ */
+const RPC_STATUS_PATTERN = /^gRPC .+? failed: ([A-Z_]+): /
+
+/**
+ * A stream that is really gone surfaces the daemon's own error; a transport
+ * hiccup surfaces a gRPC status. Only the former ends the session.
  */
 function isTransientReadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return TRANSIENT_READ_STATUSES.some(status => message.includes(status))
+  const status = RPC_STATUS_PATTERN.exec(message)?.[1]
+  return status !== undefined && TRANSIENT_READ_STATUSES.has(status)
 }
 
 /**
@@ -105,11 +123,12 @@ export class NexusSpawnHandle implements AcpChildProcessLike {
    *
    * Per the DT_STREAM contract: data → deliver and advance the offset; a
    * long-poll that expires (`timedOut`, and `eof` on older servers) → re-read
-   * at the SAME offset, the blocking read is itself the wait. Only a rejection
-   * means the writer is gone, and that is what ends the session.
+   * at the SAME offset, the blocking read is itself the wait. A rejection ends
+   * the session only when it came from the stream rather than the transport.
    */
   async #pump(streamPath: string, sink: PassThrough): Promise<void> {
     let offset = '0'
+    let transportBackoffMs = TRANSPORT_RETRY_BASE_MS
     while (!this.#readersStopped) {
       let res
       try {
@@ -122,13 +141,16 @@ export class NexusSpawnHandle implements AcpChildProcessLike {
         // rejection — most often the client deadline beating the long poll it
         // just requested — says nothing about the writer, so re-read instead.
         if (isTransientReadError(error) && !this.#readersStopped) {
-          await new Promise(resolve => setTimeout(resolve, IDLE_BACKOFF_MS))
+          await new Promise(resolve => setTimeout(resolve, transportBackoffMs))
+          transportBackoffMs = Math.min(transportBackoffMs * 2, TRANSPORT_RETRY_CEILING_MS)
           continue
         }
         // The stream closed or the writer exited — the disconnect signal.
         this.#emitClose()
         return
       }
+      // The transport answered, so the next failure starts its own backoff.
+      transportBackoffMs = TRANSPORT_RETRY_BASE_MS
       if (res.data.length > 0) {
         // The other fd's pump may have closed the handle while this read was
         // in flight — both sinks end together, so writing now would throw
