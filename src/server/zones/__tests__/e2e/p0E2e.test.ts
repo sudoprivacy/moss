@@ -2,6 +2,11 @@
 // moss server). Serial only (spec `-n 0` semantics; parallel spawns race on
 // reserved port ranges, observed on Windows).
 //
+// ⚠ 必须整套运行（`node scripts/test-server.js` 或无过滤的 `npx tsx --test
+// 本文件`）。场景间存在状态依赖（nexus 在场景 3 启动、moss 在场景 3 重启、
+// orgAAdminToken/userA 在场景 4 设置）——用 `--test-name-pattern` 单跑后续
+// 场景会拿到空 token/未初始化状态，产生误导性 401/404（曾误诊为回归）。
+//
 // SW-20260915-002-MOSS §11.3 real-process P0 E2E — moss 侧场景：
 //   1  创建 Org，产生一个 pending default binding（Nexus 离线时也成立）
 //   3  binding active（Nexus 上线后 reconciler 收敛，exactly-once）
