@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
+import { NexusRpcError } from '@nexus-ai-fs/vfs-client'
+
 import { NexusSpawnHandle } from './nexusSpawnHandle.js'
 import type { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 
@@ -120,7 +122,7 @@ void test('a deadline on the long poll is not a disconnect', async () => {
   // nothing about the writer -- re-read instead of reporting a disconnect.
   const { agent } = fakeAgent({
     '/proc/sid-6/fd/1': [
-      new Error('gRPC stream read failed: DEADLINE_EXCEEDED: Deadline exceeded'),
+      new NexusRpcError(4, 'DEADLINE_EXCEEDED', 'stream read', 'Deadline exceeded'),
       frame('after the deadline\n', '19'),
     ],
   })
@@ -158,6 +160,8 @@ void test('a stream-closed error is not rescued by a status name in its text', a
   // masquerade as a transport hiccup, and the session would hang instead of
   // closing. The status is read from its own position now.
   const { agent } = fakeAgent({
+    // A plain Error, as a closed stream raises: it is not an RPC status, so it
+    // must not be rescued however its text reads.
     '/proc/sid-8/fd/1': [new Error('stream closed: writer exited (UNAVAILABLE upstream)')],
   })
   const handle = new NexusSpawnHandle(agent, 'sid-8', null)

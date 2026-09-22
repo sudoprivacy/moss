@@ -13,6 +13,7 @@
  * and `.on('data')` behave exactly as they do over a pipe.
  */
 
+import { NexusRpcError } from '@nexus-ai-fs/vfs-client'
 import { PassThrough, Writable } from 'stream'
 import type { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 
@@ -53,22 +54,16 @@ const TRANSPORT_RETRY_BASE_MS = 200
 const TRANSPORT_RETRY_CEILING_MS = 5_000
 
 /**
- * The nexus client formats a failed call as
- * `gRPC <operation> failed: <STATUS>: <detail>`. Reading the status from its
- * own position matters: `<detail>` is the daemon's text, and a stream-closed
- * payload that happens to mention a status name would otherwise be read as
- * that status — the session would then hang instead of closing.
- */
-const RPC_STATUS_PATTERN = /^gRPC .+? failed: ([A-Z_]+): /
-
-/**
  * A stream that is really gone surfaces the daemon's own error; a transport
- * hiccup surfaces a gRPC status. Only the former ends the session.
+ * hiccup surfaces a gRPC status, and the client carries that status as data.
+ * Only the former ends the session.
+ *
+ * Reading the status rather than the message matters: the daemon's text is
+ * its own, so a stream-closed payload mentioning a status name would be read
+ * as that status and the session would hang instead of closing.
  */
 function isTransientReadError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  const status = RPC_STATUS_PATTERN.exec(message)?.[1]
-  return status !== undefined && TRANSIENT_READ_STATUSES.has(status)
+  return error instanceof NexusRpcError && TRANSIENT_READ_STATUSES.has(error.status)
 }
 
 /**
