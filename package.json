@@ -47,7 +47,7 @@
     "@opentelemetry/sdk-metrics": "^2.6.1",
     "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
-    "@sudo/contracts": "github:sudoprivacy/sudostack#f0c586477694f054c8a31fe682e7481593c16948",
+    "@sudo/contracts": "github:sudoprivacy/sudostack#a479b8cbfe0a144629764a060ef026fb6d043f7c",
     "@xenova/transformers": "^2.17.2",
     "@xmldom/xmldom": "^0.9.9",
     "ajv": "^8.18.0",
