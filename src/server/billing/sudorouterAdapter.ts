@@ -66,7 +66,9 @@ interface SudorouterAdapterOptions {
 
 export function pointsToQuota(points: number): number {
   if (!Number.isSafeInteger(points)) throw new Error('Points must be a safe integer')
-  return points * 500
+  const quota = points * 500
+  if (!Number.isSafeInteger(quota)) throw new Error('Points exceed the safe quota range')
+  return quota
 }
 
 export function quotaToPoints(quota: number): number {

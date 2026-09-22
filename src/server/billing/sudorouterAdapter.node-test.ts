@@ -63,6 +63,7 @@ void describe('SudorouterAdapter', () => {
 
   void test('保持旧服务 0.002 的积分额度换算', () => {
     assert.equal(pointsToQuota(1_000), 500_000)
+    assert.throws(() => pointsToQuota(Number.MAX_SAFE_INTEGER), /safe quota range/)
     assert.equal(quotaToPoints(500_000), 1_000)
   })
 

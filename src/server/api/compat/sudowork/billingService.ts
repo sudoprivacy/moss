@@ -104,8 +104,8 @@ interface SudoworkBillingServiceOptions {
   recharge: RechargeService
   coordinator: BillingCoordinator
   credit: CreditApplicationService
-  refund: RefundService
-  payment: BillingPaymentPort
+  refund?: RefundService
+  payment?: BillingPaymentPort
   clock?: () => number
 }
 
@@ -126,10 +126,12 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   listPackages(): unknown[] {
+    this.requirePayment()
     return this.options.recharge.listPackages()
   }
 
   async createOrder(input: { actor: IdentityActor; amount: number; paymentMethod: unknown; idempotencyKey?: string }): Promise<unknown> {
+    this.requirePayment()
     const user = await this.requireUser(input.actor.userId)
     const legacyUserId = await this.ensureAlias('user', user.id, user.orgId)
     const phone = (await this.options.identities.findAuthIdentityByUser(user.id, 'phone', 'sudowork'))?.normalizedSubject ?? null
@@ -144,10 +146,11 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async payOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
+    const paymentProvider = this.requirePayment()
     const context = this.context(input.idempotencyKey, 'pay-order')
     const intent = await this.options.recharge.preparePayment(input.orderNo, input.actor.userId, context)
     try {
-      const payment = await this.options.payment.createPayment(intent)
+      const payment = await paymentProvider.createPayment(intent)
       await this.options.recharge.recordPaymentRequestResult({
         attemptId: intent.attemptId, orderId: intent.orderId, success: true,
         providerOrderInfo: payment.orderInfo,
@@ -163,7 +166,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async handlePaymentCallback(payload: Record<string, unknown>): Promise<void> {
-    const event = await this.options.payment.verifyCallback(payload)
+    const event = await this.requirePayment().verifyCallback(payload)
     await this.options.recharge.acceptVerifiedCallbackWithCoordinator(event, this.options.coordinator)
   }
 
@@ -235,7 +238,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async calculateRefund(actor: IdentityActor, orderNo: string): Promise<unknown> {
     await this.requireScopedOrder(actor, orderNo)
-    const quote = await this.options.refund.calculate(orderNo)
+    const quote = await this.requireRefund().calculate(orderNo)
     return {
       order_points: quote.orderPoints, user_balance: quote.userBalance, used_points: quote.usedPoints,
       refund_amount: quote.refundAmountCents, refund_amount_yuan: (quote.refundAmountCents / 100).toFixed(2),
@@ -246,7 +249,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async requestRefund(input: { actor: IdentityActor; orderNo: string; reason: string; idempotencyKey?: string }): Promise<unknown> {
     await this.requireScopedOrder(input.actor, input.orderNo)
-    const result = await this.options.refund.request(
+    const result = await this.requireRefund().request(
       { orderNo: input.orderNo, reason: input.reason }, input.actor,
       this.context(input.idempotencyKey, 'refund'),
     )
@@ -254,7 +257,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async simulatePayment(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
-    if (!this.options.payment.simulationEnabled) throw new SudoworkBillingError(400, '仅在测试模式下可用')
+    if (!this.requirePayment().simulationEnabled) throw new SudoworkBillingError(400, '仅在测试模式下可用')
     const order = await this.requireScopedOrder(input.actor, input.orderNo)
     await this.options.recharge.acceptVerifiedCallbackWithCoordinator({
       providerEventId: `simulation:${order.orderNo}`, orderNo: order.orderNo,
@@ -322,6 +325,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async syncPendingOrders(input: { actor: IdentityActor; idempotencyKey?: string }): Promise<unknown> {
+    this.requirePayment()
     const orders = (await this.options.repository.listOrders({
       orgId: hasGlobalOrganizationAccess(input.actor) ? undefined : input.actor.orgId,
       limit: 1_000, offset: 0,
@@ -339,7 +343,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async syncOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
     const order = await this.requireScopedOrder(input.actor, input.orderNo)
-    const queried = await this.options.payment.queryPayment(order)
+    const queried = await this.requirePayment().queryPayment(order)
     if (queried.event) await this.options.recharge.acceptVerifiedCallbackWithCoordinator(queried.event, this.options.coordinator)
     return { order_no: order.orderNo, status: STATUS_TO_LEGACY[queried.status === 'PENDING' ? order.status : queried.status] }
   }
@@ -350,8 +354,11 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }): Promise<unknown> {
     const user = await this.requireLegacyUser(input.legacyUserId)
     this.assertOrgScope(input.actor, user.orgId)
+    this.validatePoints(input.amount)
+    if (input.operation !== 'add' && input.operation !== 'subtract') {
+      throw new SudoworkBillingError(400, '积分操作必须是 add 或 subtract')
+    }
     const delta = input.operation === 'subtract' ? -input.amount : input.amount
-    if (!Number.isSafeInteger(delta) || delta === 0) throw new SudoworkBillingError(400, '积分数量必须大于 0')
     if (!input.syncSudorouter) {
       const result = await this.options.wallet.post({
         ownerType: 'user', ownerId: user.id, deltaUnits: delta,
@@ -377,6 +384,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     paymentReference?: string; idempotencyKey?: string
   }): Promise<unknown> {
     if (input.actor.role !== 'super_admin') throw new SudoworkBillingError(403, '只有超级管理员可以为用户充值')
+    this.validatePoints(input.points)
     const user = await this.requireLegacyUser(input.legacyUserId)
     this.assertOrgScope(input.actor, user.orgId)
     const external = await this.requireExternal(user.id)
@@ -515,6 +523,22 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     const external = await this.options.repository.getExternalAccount('sudorouter', 'user', userId)
     if (!external) throw new SudoworkBillingError(400, '用户未绑定 sudorouter 账号')
     return external
+  }
+
+  private validatePoints(points: number): void {
+    if (!Number.isSafeInteger(points) || points <= 0 || !Number.isSafeInteger(points * 500)) {
+      throw new SudoworkBillingError(400, '积分必须为有效范围内的正整数')
+    }
+  }
+
+  private requirePayment(): BillingPaymentPort {
+    if (!this.options.payment) throw new SudoworkBillingError(503, '在线支付未配置，后台积分和额度管理仍可使用')
+    return this.options.payment
+  }
+
+  private requireRefund(): RefundService {
+    if (!this.options.refund) throw new SudoworkBillingError(503, '在线退款未配置')
+    return this.options.refund
   }
 
   private async externalQuota(userId: string): Promise<number> {

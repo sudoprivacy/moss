@@ -672,7 +672,7 @@ export class AuthService {
 
   createSudoworkBillingService(input: {
     sudorouter: SudorouterPort
-    payment: BillingPaymentPort & FuiouRefundPort
+    payment?: BillingPaymentPort & FuiouRefundPort
     getCreditPolicy(orgId: string): Promise<CreditApplicationPolicy> | CreditApplicationPolicy
     testPaymentAmountCents?: number
   }): SudoworkBillingService {
@@ -689,9 +689,9 @@ export class AuthService {
       this.db.driver, repository, this.identityRepository, coordinator,
       { getPolicy: input.getCreditPolicy },
     )
-    const refund = new RefundService(
+    const refund = input.payment ? new RefundService(
       this.db.driver, repository, this.identityRepository, wallet, coordinator, input.payment,
-    )
+    ) : undefined
     return new SudoworkBillingService({
       db: this.db.driver, auth: this.db, identities: this.identityRepository,
       repository, wallet, recharge, coordinator, credit, refund, payment: input.payment,
