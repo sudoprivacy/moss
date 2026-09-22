@@ -52,6 +52,18 @@ export class SudorouterAccountService {
     private readonly clock: () => number = Date.now,
   ) {}
 
+  async getAccount(ownerId: string, orgId: string): Promise<SudorouterAccountResult | null> {
+    const account = await this.repository.getExternalAccount('sudorouter', 'user', ownerId)
+    if (!account?.tokenSecretRef) return null
+    return {
+      externalUserId: account.externalAccountId,
+      token: await this.readToken(account.tokenSecretRef, orgId),
+      tokenSecretRef: account.tokenSecretRef,
+      quotaUnits: account.quotaUnits,
+      usedQuotaUnits: account.usedQuotaUnits,
+    }
+  }
+
   ensureAccount(
     input: EnsureSudorouterAccountInput,
     context: CommandContext,
@@ -74,17 +86,8 @@ export class SudorouterAccountService {
     context: CommandContext,
   ): Promise<SudorouterAccountResult> {
     const requestFingerprint = fingerprint(input)
-    const existingAccount = await this.repository.getExternalAccount('sudorouter', 'user', input.ownerId)
-    if (existingAccount?.tokenSecretRef) {
-      const token = await this.readToken(existingAccount.tokenSecretRef, input.orgId)
-      return {
-        externalUserId: existingAccount.externalAccountId,
-        token,
-        tokenSecretRef: existingAccount.tokenSecretRef,
-        quotaUnits: existingAccount.quotaUnits,
-        usedQuotaUnits: existingAccount.usedQuotaUnits,
-      }
-    }
+    const existingAccount = await this.getAccount(input.ownerId, input.orgId)
+    if (existingAccount) return existingAccount
 
     const prepared = await this.driver.transaction(async () => {
       const byKey = await this.repository.getSudorouterProvisioningByKey(context.idempotencyKey)

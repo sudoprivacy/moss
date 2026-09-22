@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -107,6 +107,7 @@ import {
   createDepartment,
   createOrganization,
   createUser,
+  copyUserSudorouterKey,
   deleteDepartment,
   deleteOrganization,
   getApiKeys,
@@ -570,6 +571,20 @@ export default function UsersPage() {
   } | null>(null)
   const [pendingDepartmentActionId, setPendingDepartmentActionId] = useState<string | null>(null)
   const [pendingApiKeyActionId, setPendingApiKeyActionId] = useState<string | null>(null)
+  const [copyingSudorouterUserId, setCopyingSudorouterUserId] = useState<string | null>(null)
+
+  async function handleCopySudorouterKey(userId: string) {
+    setCopyingSudorouterUserId(userId)
+    try {
+      const { key } = await copyUserSudorouterKey(userId)
+      await copyToClipboard(key)
+      toast.success('Sudorouter API Key 已复制')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '复制失败，请重试')
+    } finally {
+      setCopyingSudorouterUserId(null)
+    }
+  }
 
   const userForm = useForm<UserFormData>({
     resolver: zodResolver(userFormSchema),
@@ -836,6 +851,7 @@ export default function UsersPage() {
     }
   }
 
+  const createUserRequest = useRef<{ identity: string; key: string } | null>(null)
   const handleSubmitUser = async (values: UserFormData) => {
     if (userDialog.mode === 'create' && !values.password) {
       userForm.setError('password', {
@@ -848,6 +864,10 @@ export default function UsersPage() {
     try {
       const extUserId = values.extUserId?.trim() || null
       if (userDialog.mode === 'create') {
+        const identity = JSON.stringify([values.orgId, values.name.trim()])
+        if (createUserRequest.current?.identity !== identity) {
+          createUserRequest.current = { identity, key: crypto.randomUUID() }
+        }
         await createUser({
           name: values.name,
           email: values.email || undefined,
@@ -856,7 +876,8 @@ export default function UsersPage() {
           role: values.role,
           password: values.password || '',
           ext_user_id: extUserId,
-        })
+        }, createUserRequest.current.key)
+        createUserRequest.current = null
         toast.success('用户创建成功')
       } else if (userDialog.user) {
         // Organization is immutable (req 3) — never send target_org_id on edit.
@@ -1265,7 +1286,8 @@ export default function UsersPage() {
                         <TableHead>所属部门</TableHead>
                         <TableHead>角色</TableHead>
                         <TableHead className="text-right">积分余额</TableHead>
-                        <TableHead>API Keys</TableHead>
+                        <TableHead>Moss API Keys</TableHead>
+                        <TableHead>Sudorouter API Key</TableHead>
                         <TableHead>状态</TableHead>
                         <TableHead>最后登录</TableHead>
                         <TableHead className="text-right">操作</TableHead>
@@ -1286,6 +1308,9 @@ export default function UsersPage() {
                               >
                                 {userLabel(user)}
                               </button>
+                              {user.displayName && user.displayName !== user.name ? (
+                                <div className="text-xs text-muted-foreground">{user.name}</div>
+                              ) : null}
                               {user.extUserId ? (
                                 <div className="max-w-48 truncate font-mono text-xs text-muted-foreground" title={user.extUserId}>{user.extUserId}</div>
                               ) : null}
@@ -1316,6 +1341,25 @@ export default function UsersPage() {
                                 </div>
                               ) : (
                                 <span className="text-xs text-muted-foreground">暂无</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {user.sudorouterApiKeyMasked ? (
+                                <div className="flex items-center gap-2">
+                                  <code className="whitespace-nowrap text-xs">{user.sudorouterApiKeyMasked}</code>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`复制 ${user.name} 的 Sudorouter API Key`}
+                                    title="复制完整 Sudorouter API Key"
+                                    disabled={copyingSudorouterUserId !== null}
+                                    onClick={() => void handleCopySudorouterKey(user.id)}
+                                  >
+                                    {copyingSudorouterUserId === user.id ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}
+                                  </Button>
+                                </div>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">{user.sudorouterCredentialStatus === 'unavailable' ? '读取失败，请刷新' : '尚未分配'}</span>
                               )}
                             </TableCell>
                             <TableCell>
@@ -1623,6 +1667,9 @@ export default function UsersPage() {
                     <FormControl>
                       <Input {...field} placeholder="请输入用户名" />
                     </FormControl>
+                    {userDialog.mode === 'create' ? (
+                      <FormDescription>Sudorouter 初始密码为账户名，不足 8 位在末尾补 1。</FormDescription>
+                    ) : null}
                     <FormMessage />
                   </FormItem>
                 )}

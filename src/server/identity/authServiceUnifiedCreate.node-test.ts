@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
-import { AuthService } from '../auth/service.js'
-import { AuthCenterDb } from '../authCenter/db.js'
+import { AuthService, AuthServiceError } from '../auth/service.js'
+import { AuthCenterDb, verifyPassword } from '../authCenter/db.js'
 import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
 void test('Moss native user creation uses the unified identity command', async () => {
@@ -61,6 +61,9 @@ void test('Moss native user creation provisions Sudorouter before activating the
     orgId: 'org-a', name: '13800000000', password: 'StrongPass123', role: 'user',
     idempotencyKey: 'native-provisioned-user-1',
   }
+  await assert.rejects(authService.createProvisionedUser({ ...input, name: 'x'.repeat(21) }),
+    (error: unknown) => error instanceof AuthServiceError && error.statusCode === 400)
+  assert.equal((await authDb.listUsersByOrg('org-a')).length, 0, 'Invalid gateway account must not leave a pending local user')
   const created = await authService.createProvisionedUser(input)
   const retried = await authService.createProvisionedUser(input)
 
@@ -74,6 +77,10 @@ void test('Moss native user creation provisions Sudorouter before activating the
     (await repository.findAuthIdentity('phone', 'sudowork', '13800000000'))?.userId,
     created.user.id,
   )
+  assert.equal(verifyPassword(input.password, (await authDb.getUserById(created.user.id))?.passwordHash), true)
+  const short = await authService.createProvisionedUser({ ...input, name: 'test', idempotencyKey: 'short-native-user' })
+  assert.equal((await authDb.getUserById(short.user.id))?.phone, null, 'An ordinary username must not become a phone identity')
+  assert.equal(verifyPassword(input.password, (await authDb.getUserById(short.user.id))?.passwordHash), true)
 
   authService.destroy()
   db.close()

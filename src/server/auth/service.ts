@@ -4,7 +4,7 @@ import type { DirectConnectStore } from '../db.js'
 import { isUniqueViolation } from '../db/driver.js'
 import { hasScope, issueAccessToken, issueWikiSessionToken, resolveUserPinnedOrSuperAdmin, verifyAccessToken, type AuthContext } from './token.js'
 import { OAuth2Bridge, OAuth2BridgeError, type OAuth2Identity } from './oauth2Bridge.js'
-import { PhoneAuthService, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
+import { PhoneAuthService, normalizePhone, type PhoneAuthConfig, type SmsSender } from './phoneAuth.js'
 import { onlineCommandContext } from '../application/commandContext.js'
 import { IdentityRepository, type OrganizationLoginMethod } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
@@ -68,7 +68,9 @@ import { RechargeService } from '../billing/rechargeService.js'
 import { CreditApplicationService, type CreditApplicationPolicy } from '../billing/creditApplicationService.js'
 import { RefundService, type FuiouRefundPort } from '../billing/refundService.js'
 import {
+  pointsToQuota,
   quotaToPoints,
+  validateSudorouterAccountName,
   type SudorouterPort,
   type SudorouterAccountPort,
   type SudorouterUsagePort,
@@ -147,6 +149,9 @@ function loginMethodForTokenKey(keyId: string): LoginPolicyMethod | null {
 type NativeUserProjection = SanitizedAuthCenterUser & {
   legacyId: number | null
   balanceUnits: number
+  sudorouterUserId?: string | null
+  sudorouterApiKeyMasked?: string | null
+  sudorouterCredentialStatus?: 'ready' | 'missing' | 'unavailable'
 }
 
 type NativeOrganizationProjection = AuthCenterOrganization & {
@@ -334,7 +339,7 @@ export class AuthService {
   private readonly clientPolicies: ClientPolicyRepository
   private readonly loginPolicyDefaults: { loginMethod: LoginPolicyMethod } = { loginMethod: 'password' }
   private sudorouterAccounts?: {
-    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
+    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'> & Partial<Pick<SudorouterAccountService, 'getAccount'>>
     initialQuotaUnits: number
   }
 
@@ -526,7 +531,7 @@ export class AuthService {
   }
 
   configureSudorouterAccounts(input: {
-    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'>
+    accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'> & Partial<Pick<SudorouterAccountService, 'getAccount'>>
     initialQuotaUnits: number
   }): void {
     this.sudorouterAccounts = input
@@ -1578,8 +1583,43 @@ export class AuthService {
     users: NativeUserProjection[]
   }> {
     return {
-      users: await Promise.all((await this.listVisibleUsers(orgId, auth)).map(user => this.projectUser(user))),
+      users: await Promise.all((await this.listVisibleUsers(orgId, auth)).map(async user => {
+        const projected = await this.projectUser(user)
+        try {
+          const credential = await this.getUserModelCredential(user.id)
+          return {
+            ...projected,
+            name: user.name,
+            sudorouterUserId: credential?.sudorouterUserId ?? null,
+            sudorouterApiKeyMasked: credential
+              ? credential.sudorouterKey.length > 10
+                ? `${credential.sudorouterKey.slice(0, 6)}…${credential.sudorouterKey.slice(-4)}`
+                : '••••••••'
+              : null,
+            sudorouterCredentialStatus: credential ? 'ready' as const : 'missing' as const,
+          }
+        } catch {
+          return { ...projected, name: user.name, sudorouterCredentialStatus: 'unavailable' as const }
+        }
+      })),
     }
+  }
+
+  async copyUserSudorouterKey(userId: string, auth: AuthContext): Promise<{ key: string }> {
+    this.requireScope(auth, 'admin:users')
+    const user = await this.db.getUserByIdAndOrg(userId, auth.orgId)
+    if (!user) throw new AuthServiceError(404, 'Unknown user_id')
+    await this.assertCanManageExistingUser(user, auth)
+    const credential = await this.getUserModelCredential(userId)
+    if (!credential) throw new AuthServiceError(404, 'Sudorouter API Key is not provisioned')
+    const auditId = randomUUID()
+    await this.identityRepository.insertOperationAudit({
+      id: auditId, orgId: auth.orgId, actorUserId: auth.userId,
+      action: 'SUDOROUTER_KEY_COPY', resource: 'user', resourceId: userId,
+      method: 'POST', path: `/api/v1/users/${userId}/sudorouter-key/copy`,
+      responseStatus: 200, idempotencyKey: auditId,
+    })
+    return { key: credential.sudorouterKey }
   }
 
   async listDepartments(
@@ -1947,10 +1987,42 @@ export class AuthService {
 
   /**
    * The user's own model-gateway token, or null when the shared server key
-   * applies. Returns the secret, so it has exactly one caller: session spawn.
+   * applies. Used only server-side for model discovery and session credentials.
    */
   async getUserModelCredential(userId: string): Promise<UserModelCredential | null> {
+    const provisioner = this.sudorouterAccounts?.accountProvisioner
+    if (provisioner?.getAccount) {
+      const user = await this.db.getUserById(userId)
+      const account = user ? await provisioner.getAccount(user.id, user.orgId) : null
+      if (account) {
+        return {
+          sudorouterUserId: account.externalUserId,
+          sudorouterKey: account.token.startsWith('sk-') ? account.token : `sk-${account.token}`,
+        }
+      }
+    }
     return this.db.getUserModelCredential(userId)
+  }
+
+  /** Provision native registration/login through the configured account service. */
+  async ensureUserSudorouterAccount(userId: string): Promise<boolean> {
+    if (!this.sudorouterAccounts) return false
+    const user = await this.db.getUserById(userId)
+    if (!user) throw new AuthServiceError(404, 'User does not exist')
+    const wallet = await this.identityRepository.getWallet('user', user.id)
+    if (!wallet) throw new AuthServiceError(500, 'User wallet is not initialized')
+    try {
+      await this.sudorouterAccounts.accountProvisioner.ensureAccount({
+        ownerId: user.id,
+        orgId: user.orgId,
+        username: user.name,
+        displayName: resolveDisplayName(user),
+        initialQuotaUnits: pointsToQuota(wallet.balanceUnits),
+      }, onlineCommandContext(`native-sudorouter:${user.id}`))
+    } catch {
+      throw new AuthServiceError(503, 'Sudorouter account provisioning failed; please retry login')
+    }
+    return true
   }
 
   async setUserModelCredential(userId: string, credential: UserModelCredential): Promise<void> {
@@ -2037,6 +2109,12 @@ export class AuthService {
   }> {
     if (!this.sudorouterAccounts) return this.createUser(input, auth)
 
+    try {
+      validateSudorouterAccountName(input.name)
+    } catch (error) {
+      throw new AuthServiceError(400, (error as Error).message)
+    }
+
     const idempotencyKey = input.idempotencyKey ?? `moss-user:${randomUUID()}`
     const previous = await this.identityRepository.getCommandResult<{ userId: string }>(
       'identity.create_user', idempotencyKey,
@@ -2048,7 +2126,7 @@ export class AuthService {
     if (!user) {
       const created = await this.createUser({
         ...input,
-        phone: input.phone?.trim() || input.name.trim(),
+        phone: input.phone?.trim() || normalizePhone(input.name) || undefined,
         status: 'pending',
         initialCreditUnits: quotaToPoints(this.sudorouterAccounts.initialQuotaUnits),
         idempotencyKey,

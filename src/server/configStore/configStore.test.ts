@@ -492,6 +492,7 @@ describe('updateSystemSettings 敏感字段写 Nexus、文件不落盘', () => {
     expect(fake.read(organizationConfigKey('org-a', 'settings.image-api-key'))).toEqual({ value: 'org-a-image-key' })
     expect(fake.read(organizationConfigKey('org-a', 'settings.model-provider-api-keys'))?.value).toContain('org-a-provider-key')
     expect(getModelProviderApiKey('org-a-provider', orgA.apiKey, 'org-a')).toBe('org-a-provider-key')
+    expect(getModelProviderApiKey('org-a-provider', orgA.apiKey, 'org-a', 'user-gateway-key')).toBe('org-a-provider-key')
 
     const orgB = await getOrganizationSystemSettings('org-b', repository, { redactSecrets: true })
     expect(orgB.model).toBe('platform-model')

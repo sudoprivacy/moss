@@ -29,6 +29,8 @@ const nodeTestFiles = [
   'src/server/api/compat/sudowork/transportContract.node-test.ts',
   'src/server/api/compat/sudowork/userProjectionService.node-test.ts',
   'src/server/api/cron.node-test.ts',
+  'src/server/auth/sudorouterCredentials.node-test.ts',
+  'src/server/backends/acpBridge.node-test.ts',
   'src/server/backends/nexusSpawnHandle.node-test.ts',
   'src/server/billing/billingCoordinator.node-test.ts',
   'src/server/billing/billingOutboxWorker.node-test.ts',

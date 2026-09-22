@@ -2122,6 +2122,9 @@ export class RuntimeService {
 
     // Build environment for runner from system settings
     const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
+    const userModelKey = session.userId
+      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
+      : undefined
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
@@ -2141,6 +2144,7 @@ export class RuntimeService {
       ? await getModelsForSelection(requestedModel, {
         settings: systemSettings,
         orgId: session.orgId,
+        userApiKey: userModelKey,
       })
       : null
     const defaultModel = providerCatalog?.selection.modelId || requestedModel
@@ -2168,9 +2172,6 @@ export class RuntimeService {
     // balance untouched. Users without a token (private / on-prem deployments,
     // where no metered gateway exists) keep the shared key. Resolved here in the
     // main process: the runner subprocess has no database.
-    const userModelKey = session.userId
-      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
-      : undefined
     const providerApiKey = providerCatalog
       ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey, session.orgId)
       : undefined

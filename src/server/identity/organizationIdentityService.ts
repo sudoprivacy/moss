@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import type { CommandContext } from '../application/commandContext.js'
 import { AuthCenterDb, hashPassword, type AuthCenterUser } from '../authCenter/db.js'
 import {
@@ -25,6 +25,12 @@ export interface IdentityActor {
 
 export function hasGlobalOrganizationAccess(actor: IdentityActor): boolean {
   return actor.role === 'super_admin' && actor.organizationScoped !== true
+}
+
+const INVITATION_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+export function generateInvitationCode(): string {
+  return Array.from({ length: 6 }, () => INVITATION_CODE_ALPHABET[randomInt(INVITATION_CODE_ALPHABET.length)]!).join('')
 }
 
 export class OrganizationIdentityService {
@@ -142,7 +148,7 @@ export class OrganizationIdentityService {
       for (let index = 0; index < input.count; index += 1) {
         let invitation: InvitationRecord | null = null
         for (let attempt = 0; attempt < 100 && !invitation; attempt += 1) {
-          const code = (codeFactory ?? (() => randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()))()
+          const code = (codeFactory ?? generateInvitationCode)()
           if (await this.repository.getInvitationByCode(code)) continue
           const id = randomUUID()
           await this.repository.createInvitation({

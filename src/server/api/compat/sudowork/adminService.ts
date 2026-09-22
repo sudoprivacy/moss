@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { CommandContext } from '../../../application/commandContext.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
 import { IdentityRepository, type InvitationRecord, type OperationAuditRecord } from '../../../identity/identityRepository.js'
@@ -10,6 +10,7 @@ import type { SudorouterAccountService } from '../../../billing/sudorouterAccoun
 import { pointsToQuota } from '../../../billing/sudorouterAdapter.js'
 import {
   hasGlobalOrganizationAccess,
+  generateInvitationCode,
   IdentityDomainError,
   OrganizationIdentityService,
   type IdentityActor,
@@ -64,15 +65,6 @@ export class SudoworkAdministrationError extends Error {
     super(message)
     this.name = 'SudoworkAdministrationError'
   }
-}
-
-const LEGACY_INVITATION_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-
-function generateLegacyInvitationCode(): string {
-  return Array.from(
-    { length: 6 },
-    () => LEGACY_INVITATION_CODE_ALPHABET[randomInt(LEGACY_INVITATION_CODE_ALPHABET.length)]!,
-  ).join('')
 }
 
 export class SudoworkAdministrationService {
@@ -191,7 +183,7 @@ export class SudoworkAdministrationService {
         ? sudoworkQuotaToCreditUnits(this.options.defaultInitialQuota ?? 100_000)
         : sudoworkUsdToCreditUnits(input.initialQuotaUsd),
       legacyInitialQuotaUsd: input.initialQuotaUsd ?? null,
-    }, codeFactory ?? generateLegacyInvitationCode, input.actor)
+    }, codeFactory ?? generateInvitationCode, input.actor)
     return { codes: invitations.map((item) => item.code), count: invitations.length }
   }
 

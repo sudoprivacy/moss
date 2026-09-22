@@ -1,3 +1,4 @@
+import { sudorouterInitialPassword, validateSudorouterAccountName } from '../billing/sudorouterAdapter.js'
 /**
  * The credit ledger, which lives in SudoRouter rather than in moss.
  *
@@ -211,27 +212,16 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
         }
       }
 
-      // The gateway validates these three at 20 characters and answers with a
-      // field-validation blob, which surfaces as a failed sign-up for a reason
-      // no one can act on. A phone number fits; a display name the user typed
-      // may not, so it is trimmed here rather than rejected — the name is
-      // cosmetic at the gateway, and moss keeps the full one.
+      validateSudorouterAccountName(username)
       const GATEWAY_FIELD_MAX = 20
-      if (username.length > GATEWAY_FIELD_MAX) {
-        throw new SudorouterError(
-          `Username is too long for the gateway (${username.length} > ${GATEWAY_FIELD_MAX})`,
-        )
-      }
       const created = await call('/api/user/', {
         method: 'POST',
         body: JSON.stringify({
           username,
-          // The gateway requires a password it will never be asked for: moss
-          // authenticates these people, and nothing signs in to the gateway
-          // console as them. Derived rather than random so a re-provision after
-          // a lost record produces the same account. Its own minimum is 8.
-          password: username.length >= 8 ? username : username.padEnd(8, '1'),
-          display_name: (input.displayName?.trim() || username).slice(0, GATEWAY_FIELD_MAX),
+          // Initial console password follows the account-name policy. Existing
+          // accounts are reused above without overwriting a changed password.
+          password: sudorouterInitialPassword(username),
+          display_name: [...(input.displayName?.trim() || username)].slice(0, GATEWAY_FIELD_MAX).join(''),
           role: 1,
           utm_source: 'sudowork',
         }),

@@ -14,6 +14,9 @@ export interface AuthUser {
   role: UserRole
   status: 'pending' | 'active' | 'locked' | 'disabled'
   balanceUnits?: number
+  sudorouterUserId?: string | null
+  sudorouterApiKeyMasked?: string | null
+  sudorouterCredentialStatus?: 'ready' | 'missing' | 'unavailable'
   localAuth: boolean
   tokenLimit: number | null
   createdAt: number

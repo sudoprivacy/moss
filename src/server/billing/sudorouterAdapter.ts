@@ -74,6 +74,18 @@ export function quotaToPoints(quota: number): number {
   return Math.round(quota * 0.002)
 }
 
+export function validateSudorouterAccountName(username: string): void {
+  const length = [...username.trim()].length
+  if (length < 1 || length > 20) {
+    throw new Error('Sudorouter 账户名须为 1–20 个字符')
+  }
+}
+
+export function sudorouterInitialPassword(username: string): string {
+  const name = username.trim()
+  return name + '1'.repeat(Math.max(0, 8 - [...name].length))
+}
+
 export class SudorouterAdapter implements SudorouterAccountPort {
   private readonly baseUrl: string
   private readonly fetchImpl: FetchLike
@@ -160,14 +172,14 @@ export class SudorouterAdapter implements SudorouterAccountPort {
     idempotencyKey: string
   }): Promise<SudorouterUserAccount> {
     const username = input.username.trim()
-    if (!username) throw new Error('Sudorouter username is required')
+    validateSudorouterAccountName(username)
     const response = await this.request(`${this.baseUrl}/api/user/`, {
       method: 'POST',
       headers: { 'Idempotency-Key': input.idempotencyKey },
       body: JSON.stringify({
         username,
-        password: username.length >= 8 ? username : username.padEnd(8, '1'),
-        display_name: input.displayName.trim() || username,
+        password: sudorouterInitialPassword(username),
+        display_name: [...(input.displayName.trim() || username)].slice(0, 20).join(''),
         role: 1,
         utm_source: 'sudowork',
       }),
