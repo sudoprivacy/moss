@@ -152,11 +152,11 @@ void describe('Sudowork Catalog 协议投影', () => {
     const { db, repository, compatibility, orgA, orgB } = await setup()
     await repository.createAgent({
       id: 'public-agent', orgId: orgB.organizationId, name: 'Public', authorId: 'owner-b',
-      status: 'approved', supportedModes: 'both', availability: 'all',
+      status: 'approved', supportedModes: 'both', availability: 'all', sourceType: 'catalog',
     })
     await repository.createSkill({
       id: 'assigned-skill', orgId: orgB.organizationId, name: 'Assigned', authorId: 'owner-b',
-      status: 'approved', supportedModes: 'both', availability: 'assigned',
+      status: 'approved', supportedModes: 'both', availability: 'assigned', sourceType: 'catalog',
     })
     await repository.createSkill({
       id: 'private-skill', orgId: orgB.organizationId, name: 'Private', authorId: 'owner-b',

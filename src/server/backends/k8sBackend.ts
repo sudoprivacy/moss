@@ -1,3 +1,4 @@
+import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { execFile, spawn } from 'child_process'
 import { mkdir, readFile } from 'fs/promises'
 import { join, posix as posixPath } from 'path'
@@ -176,6 +177,7 @@ export class K8sBackend implements SessionBackend {
       workspaceSkillLinks = await syncWorkspaceSkills(safeCwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[K8sBackend] Enumerated ${workspaceSkillLinks.length} skills for session ${options.sessionId}\n`)
     } catch (err) {
+      if (getOrganizationResourceScope()) throw err
       process.stderr.write(`[K8sBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)

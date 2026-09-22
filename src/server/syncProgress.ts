@@ -1,3 +1,4 @@
+import { getOrganizationResourceScope } from './catalog/organizationResources.js'
 export type SyncProgress = {
   status: 'idle' | 'running' | 'done' | 'error'
   total: number
@@ -21,29 +22,37 @@ const idleProgress: SyncProgress = {
   startedAt: 0,
 }
 
-let _skillProgress: SyncProgress = { ...idleProgress }
-let _agentProgress: SyncProgress = { ...idleProgress }
+const progressByOrg = new Map<string, { skill: SyncProgress; agent: SyncProgress }>()
+function current() {
+  const orgId = getOrganizationResourceScope()?.orgId ?? '__offline__'
+  let progress = progressByOrg.get(orgId)
+  if (!progress) {
+    progress = { skill: { ...idleProgress }, agent: { ...idleProgress } }
+    progressByOrg.set(orgId, progress)
+  }
+  return progress
+}
 
 export function getSkillSyncProgress(): SyncProgress {
-  return { ..._skillProgress }
+  return { ...current().skill }
 }
 
 export function getAgentSyncProgress(): SyncProgress {
-  return { ..._agentProgress }
+  return { ...current().agent }
 }
 
 export function updateSkillSyncProgress(patch: Partial<SyncProgress>): void {
-  _skillProgress = { ..._skillProgress, ...patch }
+  current().skill = { ...current().skill, ...patch }
 }
 
 export function updateAgentSyncProgress(patch: Partial<SyncProgress>): void {
-  _agentProgress = { ..._agentProgress, ...patch }
+  current().agent = { ...current().agent, ...patch }
 }
 
 export function resetSkillSyncProgress(): void {
-  _skillProgress = { ...idleProgress }
+  current().skill = { ...idleProgress }
 }
 
 export function resetAgentSyncProgress(): void {
-  _agentProgress = { ...idleProgress }
+  current().agent = { ...idleProgress }
 }

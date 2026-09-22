@@ -44,6 +44,8 @@ const nodeTestFiles = [
   'src/server/billing/walletService.node-test.ts',
   'src/server/catalog/catalogArtifactStore.node-test.ts',
   'src/server/catalog/catalogRepository.node-test.ts',
+  'src/server/catalog/organizationResources.node-test.ts',
+  'src/server/catalog/organizationResourceRoutes.node-test.ts',
   'src/server/catalog/catalogSchema.node-test.ts',
   'src/server/catalog/catalogService.node-test.ts',
   'src/server/catalog/catalogUploadService.node-test.ts',

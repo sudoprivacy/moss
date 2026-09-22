@@ -1,3 +1,4 @@
+import { ensureOrganizationResourceSchema } from './organizationResourceSchema.js'
 import type { DatabaseSync } from 'node:sqlite'
 
 type CatalogTable = 'tenant_assistants' | 'tenant_skills'
@@ -20,6 +21,7 @@ function addMissingColumns(
 }
 
 export function ensureCatalogSchema(db: DatabaseSync): void {
+  ensureOrganizationResourceSchema(db)
   addMissingColumns(db, 'tenant_assistants', [
     ['provider_type', "provider_type TEXT NOT NULL DEFAULT 'moss_runtime' CHECK (provider_type IN ('local', 'moss_runtime', 'dify'))"],
     ['provider_binding', 'provider_binding TEXT CHECK (provider_binding IS NULL OR json_valid(provider_binding))'],

@@ -1,3 +1,4 @@
+import { ensureOrganizationResourceSchema } from './catalog/organizationResourceSchema.js'
 import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
@@ -713,6 +714,8 @@ export class DirectConnectStore {
       }
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
     }
+
+    ensureOrganizationResourceSchema(this.db)
 
     // Secrets base table must exist before column migrations below. On a fresh
     // DB, PRAGMA table_info(nonexistent) returns an empty list, and ALTER TABLE
@@ -1472,9 +1475,8 @@ export class DirectConnectStore {
         `UPDATE secret_audit_log SET org_id = ? WHERE org_id IS NULL`,
         [defaultOrgId],
       )
-      // Tenant skills/assistants: stranded global rows go to the default org.
-      await this.driver.run(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
-      await this.driver.run(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
+      // Unowned tenant resources require explicit migration mappings; never
+      // infer ownership from the first organization created during bootstrap.
       // Channels: backfill from the owning user's org where resolvable, else default.
       // C-5: parameterized run, not string-interpolated exec — the exec
       // interface has no parameter slots, which is what forced the template
@@ -2856,22 +2858,22 @@ export class DirectConnectStore {
   // ==================== Tenant Skills ====================
 
   async listTenantSkills(status?: string, orgId?: string): Promise<SqlRow[]> {
-    const conds: string[] = []
+    const conds: string[] = ["source_type = 'tenant'"]
     const params: unknown[] = []
     if (status) { conds.push('status = ?'); params.push(status) }
-    // Org isolation: a NULL org_id row is legacy/global and stays visible.
-    if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
+    // Legacy rows without ownership are not implicitly public.
+    if (orgId) { conds.push('org_id = ?'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
     return this.driver.all<SqlRow>(`SELECT * FROM tenant_skills ${where} ORDER BY created_at DESC`, params as SqlParam[])
   }
 
-  async getTenantSkill(id: string): Promise<SqlRow | null> {
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE id = ?`, [id])) ?? null
+  async getTenantSkill(id: string, orgId?: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])) ?? null
   }
 
   async getTenantSkillByName(name: string, orgId?: string): Promise<SqlRow | null> {
     if (orgId) {
-      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ? AND (org_id = ? OR org_id IS NULL)`, [name, orgId])) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ? AND org_id = ?`, [name, orgId])) ?? null
     }
     return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ?`, [name])) ?? null
   }
@@ -2967,21 +2969,21 @@ export class DirectConnectStore {
   // ==================== Tenant Assistants ====================
 
   async listTenantAssistants(status?: string, orgId?: string): Promise<SqlRow[]> {
-    const conds: string[] = []
+    const conds: string[] = ["source_type = 'tenant'"]
     const params: unknown[] = []
     if (status) { conds.push('status = ?'); params.push(status) }
-    if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
+    if (orgId) { conds.push('org_id = ?'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
     return this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
   }
 
-  async getTenantAssistant(id: string): Promise<SqlRow | null> {
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?`, [id])) ?? null
+  async getTenantAssistant(id: string, orgId?: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])) ?? null
   }
 
   async getTenantAssistantByName(name: string, orgId?: string): Promise<SqlRow | null> {
     if (orgId) {
-      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ? AND (org_id = ? OR org_id IS NULL)`, [name, orgId])) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ? AND org_id = ?`, [name, orgId])) ?? null
     }
     return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ?`, [name])) ?? null
   }

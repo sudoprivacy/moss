@@ -95,11 +95,11 @@ void describe('统一 Agent/Skill Catalog Repository', () => {
     const { db, catalog } = setup()
     await catalog.createSkill({
       id: 'public', orgId: 'catalog-owner', name: 'Public', authorId: 'owner',
-      status: 'approved', supportedModes: 'both', availability: 'all', updatedAt: 30,
+      status: 'approved', supportedModes: 'both', availability: 'all', sourceType: 'catalog', updatedAt: 30,
     })
     await catalog.createSkill({
       id: 'assigned', orgId: 'org-b', name: 'Assigned', authorId: 'owner',
-      status: 'approved', supportedModes: 'both', availability: 'assigned', updatedAt: 20,
+      status: 'approved', supportedModes: 'both', availability: 'assigned', sourceType: 'catalog', updatedAt: 20,
     })
     await catalog.createSkill({
       id: 'private', orgId: 'org-b', name: 'Private', authorId: 'owner',
