@@ -1,8 +1,32 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { SudorouterAdapter, pointsToQuota, quotaToPoints } from './sudorouterAdapter.js'
+import { SudorouterAdapter, pointsToQuota, quotaToPoints, sudorouterInitialPassword } from './sudorouterAdapter.js'
 
 void describe('SudorouterAdapter', () => {
+  void test('pads short account names with 1 only in the initial password', async () => {
+    assert.equal(sudorouterInitialPassword('test'), 'test1111')
+    assert.equal(sudorouterInitialPassword('13800138000'), '13800138000')
+    assert.equal(sudorouterInitialPassword('测试用户'), '测试用户1111')
+    const adapter = new SudorouterAdapter({ baseUrl: 'https://router.example.test', apiToken: 'test', fetch: async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      assert.equal(body.username, 'test')
+      assert.equal(body.password, 'test1111')
+      return new Response(JSON.stringify({ success: true, data: { id: 1, username: body.username } }))
+    } })
+    await adapter.createUser({ username: 'test', displayName: 'Test', idempotencyKey: 'short-account' })
+  })
+  void test('bounds gateway display names without splitting Unicode and uses the account name as the initial password', async () => {
+    const bodies: Array<Record<string,string>>=[]
+    const adapter=new SudorouterAdapter({baseUrl:'https://router.example.test',apiToken:'test',fetch:async (_url,init)=>{
+      const body=JSON.parse(String(init?.body)); bodies.push(body)
+      return new Response(JSON.stringify({success:true,data:{id:10,username:body.username,quota:0,used_quota:0}}))
+    }})
+    for (let i=0;i<2;i++) await adapter.createUser({username:'testaccount',displayName:'测试'.repeat(20),idempotencyKey:`test-${i}`})
+    assert.equal([...bodies[0]!.display_name!].length,20)
+    assert.equal(bodies[0]!.password,'testaccount')
+    assert.equal(bodies[1]!.password,'testaccount')
+  })
+
   void test('按旧协议分页读取用户模型用量', async () => {
     let requestUrl = ''
     const adapter = new SudorouterAdapter({
@@ -39,6 +63,7 @@ void describe('SudorouterAdapter', () => {
 
   void test('保持旧服务 0.002 的积分额度换算', () => {
     assert.equal(pointsToQuota(1_000), 500_000)
+    assert.throws(() => pointsToQuota(Number.MAX_SAFE_INTEGER), /safe quota range/)
     assert.equal(quotaToPoints(500_000), 1_000)
   })
 
@@ -73,7 +98,7 @@ void describe('SudorouterAdapter', () => {
         { id: 8, username: 'user-17-other', quota: 1, used_quota: 0, status: 1 },
         { id: 9, username: 'user-17', quota: 100, used_quota: 2, status: 1 },
       ] } },
-      { success: true, data: { id: 10, username: 'short', quota: 0, used_quota: 0 } },
+      { success: true, data: { id: 10, username: 'testaccount', quota: 0, used_quota: 0 } },
       { success: true, data: { key: 'sk-user-token' } },
     ]
     const adapter = new SudorouterAdapter({
@@ -88,21 +113,23 @@ void describe('SudorouterAdapter', () => {
       externalUserId: '9', username: 'user-17', quotaUnits: 100, usedQuotaUnits: 2,
     })
     assert.deepEqual(await adapter.createUser({
-      username: 'short', displayName: '新用户', idempotencyKey: 'create-user-10',
+      username: 'testaccount', displayName: '新用户', idempotencyKey: 'create-user-10',
     }), {
-      externalUserId: '10', username: 'short', quotaUnits: 0, usedQuotaUnits: 0,
+      externalUserId: '10', username: 'testaccount', quotaUnits: 0, usedQuotaUnits: 0,
     })
     assert.equal(await adapter.createToken({
-      externalUserId: '10', name: 'short-token', idempotencyKey: 'create-token-10',
+      externalUserId: '10', name: 'testaccount-token', idempotencyKey: 'create-token-10',
     }), 'sk-user-token')
 
     assert.equal(requests[0]?.url, 'https://router.example.test/api/user/search?keyword=user-17&page=1&page_size=100')
-    assert.deepEqual(JSON.parse(String(requests[1]?.init?.body)), {
-      username: 'short', password: 'short111', display_name: '新用户', role: 1, utm_source: 'sudowork',
+    const { password, ...createdBody } = JSON.parse(String(requests[1]?.init?.body))
+    assert.equal(password, 'testaccount')
+    assert.deepEqual(createdBody, {
+      username: 'testaccount', display_name: '新用户', role: 1, utm_source: 'sudowork',
     })
     assert.equal(new Headers(requests[1]?.init?.headers).get('Idempotency-Key'), 'create-user-10')
     assert.deepEqual(JSON.parse(String(requests[2]?.init?.body)), {
-      name: 'short-token', expired_time: -1, unlimited_quota: true, user_id: 10,
+      name: 'testaccount-token', expired_time: -1, unlimited_quota: true, user_id: 10,
     })
     assert.equal(new Headers(requests[2]?.init?.headers).get('Idempotency-Key'), 'create-token-10')
     for (const request of requests) {
@@ -126,7 +153,7 @@ void describe('SudorouterAdapter', () => {
     })
     await assert.rejects(failed.findUserByUsername('target'), /provider rejected/)
     await assert.rejects(failed.createUser({
-      username: 'target', displayName: 'Target', idempotencyKey: 'create-target',
+      username: 'target-user', displayName: 'Target', idempotencyKey: 'create-target',
     }), /provider rejected/)
     await assert.rejects(failed.createToken({
       externalUserId: '8', name: 'target-token', idempotencyKey: 'token-target',

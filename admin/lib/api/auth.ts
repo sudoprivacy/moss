@@ -98,8 +98,14 @@ export async function getUsers(): Promise<UsersListResponse> {
   return authClient.get<UsersListResponse>('/api/v1/users')
 }
 
-export async function createUser(data: CreateUserRequest): Promise<CreateUserResponse> {
-  return authClient.post<CreateUserResponse>('/api/v1/users', data)
+export async function copyUserSudorouterKey(userId: string): Promise<{ key: string }> {
+  return authClient.post<{ key: string }>(`/api/v1/users/${encodeURIComponent(userId)}/sudorouter-key/copy`, {})
+}
+
+export async function createUser(data: CreateUserRequest, idempotencyKey?: string): Promise<CreateUserResponse> {
+  return authClient.post<CreateUserResponse>('/api/v1/users', data, {
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+  })
 }
 
 export async function updateUser(

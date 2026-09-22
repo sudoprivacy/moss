@@ -459,6 +459,6 @@ describe('gateway field limits', () => {
     })
     await expect(client.provisionAccount({
       username: 'x'.repeat(21), initialPoints: 0,
-    })).rejects.toThrow(/too long for the gateway/)
+    })).rejects.toThrow(/Sudorouter 账户名须为 1–20 个字符/)
   })
 })

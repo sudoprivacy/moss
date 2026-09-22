@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { AuthCenterDb } from "../authCenter/db.js";
 import { AuthService, AuthServiceError } from "../auth/service.js";
-import { createIdentityTestRepository } from "../testing/compatibilityRepositories.js";
+import { createBillingTestRepository, createIdentityTestRepository } from "../testing/compatibilityRepositories.js";
 import { ensureClientPolicySchema } from "../configuration/clientPolicyRepository.js";
+import { SudorouterAccountService } from "../billing/sudorouterAccountService.js";
 
 let raw: DatabaseSync;
 let db: AuthCenterDb;
@@ -25,6 +26,58 @@ afterEach(() => {
 });
 
 describe("invited phone registration", () => {
+  it("provisions a native registrant once and reads its model key from the encrypted store", async () => {
+    const created = await auth.createOrganization({ name: "Gateway" });
+    const orgId = created.organization.id;
+    const identities = createIdentityTestRepository(raw, {}, db.driver);
+    const profile = await identities.getOrganizationProfile(orgId);
+    assert(profile);
+    await identities.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.createOrganizationIdentityService().createInvitations(
+      { orgId, count: 1, initialCreditUnits: 200 }, () => "GATEWAY",
+    );
+    const billing = createBillingTestRepository(raw, db.driver);
+    const secrets = new Map<string, string>();
+    let usersCreated = 0;
+    let tokensCreated = 0;
+    let quota = 0;
+    const accounts = new SudorouterAccountService(db.driver, billing, {
+      async findUserByUsername() { return null; },
+      async createUser(input) {
+        usersCreated += 1;
+        return { externalUserId: "91", username: input.username, quotaUnits: 0, usedQuotaUnits: 0 };
+      },
+      async getUser() { return { externalUserId: "91", quotaUnits: quota, usedQuotaUnits: 0 }; },
+      async changeQuota(input) { quota += input.deltaUnits; return { success: true }; },
+      async createToken() { tokensCreated += 1; return "private-user-key"; },
+    }, {
+      async putSecret(namespace, key, value) { secrets.set(`${namespace}/${key}`, value); },
+      async getSecret(namespace, key) {
+        const value = secrets.get(`${namespace}/${key}`);
+        return value ? { value, status: "enabled", version: 1 } : null;
+      },
+    });
+    auth.configureSudorouterAccounts({ accountProvisioner: accounts, initialQuotaUnits: 100000 });
+    const registered = await auth.registerWithPhone({ phone: "13800138004", nickname: "Alice", invitationCode: "GATEWAY" });
+    assert.equal(await auth.getUserModelCredential(registered.user.id), null);
+    assert.equal(usersCreated, 0, "reading a missing credential must not provision an account");
+    await auth.ensureUserSudorouterAccount(registered.user.id);
+    await auth.ensureUserSudorouterAccount(registered.user.id);
+    assert.deepEqual(await auth.getUserModelCredential(registered.user.id), {
+      sudorouterUserId: "91", sudorouterKey: "sk-private-user-key",
+    });
+    assert.equal(usersCreated, 1);
+    assert.equal(tokensCreated, 1);
+    assert.equal(quota, 100000);
+    assert.equal(await db.getUserModelCredential(registered.user.id), null, "no plaintext key in users table");
+    secrets.clear();
+    await assert.rejects(auth.getUserModelCredential(registered.user.id), /Token/);
+    await assert.rejects(auth.ensureUserSudorouterAccount(registered.user.id), (error: unknown) =>
+      error instanceof AuthServiceError && error.statusCode === 503,
+    );
+    assert.equal(tokensCreated, 1, "missing stored secrets must not silently mint replacement keys");
+  });
+
   it("joins the invitation organization as a normal user without creating an organization", async () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;

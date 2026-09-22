@@ -86,6 +86,32 @@ void describe('BillingCoordinator Sudorouter Saga', () => {
     db.close()
   })
 
+  void test('本地积分不足时不调用网关扣减，也不留下待执行操作', async () => {
+    const { db, repository, fake, coordinator } = await setup()
+    await assert.rejects(coordinator.adjustPoints({ ...adjustment, pointsDelta: -1 }, onlineCommandContext('overdraw')), /积分不足/)
+    assert.equal(fake.changeCalls, 0)
+    assert.equal(await repository.getQuotaOperationByKey('overdraw'), null)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
+    db.close()
+  })
+
+  void test('网关余额不足时不扣减，查询异常不会遗留 PROCESSING 状态', async () => {
+    const { db, repository, fake, coordinator } = await setup()
+    await repository.updateWallet({ ownerType: 'user', ownerId: 'u1', expectedVersion: 0, balanceUnits: 10, updatedAt: 2 })
+    await assert.rejects(coordinator.adjustPoints({ ...adjustment, pointsDelta: -3 }, onlineCommandContext('router-overdraw')), /额度不足/)
+    assert.equal(fake.changeCalls, 0)
+    assert.equal((await repository.getQuotaOperationByKey('router-overdraw'))?.status, 'FAILED')
+    db.close()
+
+    const other = await setup()
+    other.fake.getUser = async () => { throw new Error('network timeout') }
+    const result = await other.coordinator.adjustPoints(adjustment, onlineCommandContext('query-timeout'))
+    assert.equal(result.status, 'FAILED')
+    assert.equal(other.fake.changeCalls, 0)
+    assert.equal((await other.repository.getQuotaOperationByKey('query-timeout'))?.status, 'FAILED')
+    other.db.close()
+  })
+
   void test('迁移上下文保留钱包和审计但抑制外部调用', async () => {
     const { db, repository, fake, coordinator } = await setup()
     const result = await coordinator.adjustPoints(adjustment, migrationCommandContext('batch-1', 'adjust-migration'))

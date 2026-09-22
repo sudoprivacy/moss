@@ -431,7 +431,7 @@ async function finishStandaloneServerStartup(
     getSecret: key => configStore.get(key),
     readFile: path => readFileSync(path, 'utf8'),
   })
-  const billing = billingRuntime && sudorouter
+  const billing = sudorouter
     ? createBillingCompatibilityService(authService, systemConfiguration, publicBaseUrl, billingRuntime, sudorouter)
     : undefined
   const listOrganizationModels = async (orgId?: string) => {
@@ -625,10 +625,10 @@ function createBillingCompatibilityService(
   authService: Awaited<ReturnType<typeof createAuthService>>['service'],
   systemConfiguration: ReturnType<typeof authService.createSudoworkSystemConfigService>,
   publicBaseUrl: string,
-  runtime: BillingRuntimeConfig,
+  runtime: BillingRuntimeConfig | null,
   sudorouter: SudorouterAdapter,
 ) {
-  const payment = new FuiouAdapter({
+  const payment = runtime ? new FuiouAdapter({
     merchantCode: runtime.merchantCode,
     merchantPrivateKey: runtime.merchantPrivateKey,
     fuiouPublicKey: runtime.fuiouPublicKey,
@@ -637,12 +637,12 @@ function createBillingCompatibilityService(
     refundUrl: runtime.refundUrl,
     timeoutMs: runtime.timeoutMs,
     testMode: runtime.testMode,
-  })
+  }) : undefined
   return authService.createSudoworkBillingService({
     sudorouter,
     payment,
     getCreditPolicy: orgId => systemConfiguration.getCreditApplicationPolicy(orgId),
-    testPaymentAmountCents: runtime.testMode ? 1 : undefined,
+    testPaymentAmountCents: runtime?.testMode ? 1 : undefined,
   })
 }
 

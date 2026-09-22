@@ -22,6 +22,19 @@ function setup() {
 }
 
 void describe('organization identity service', () => {
+  void test('generates six-character invitations and retries collisions without invalidating legacy codes', async () => {
+    const { db, service } = setup()
+    try {
+      const org = await service.createOrganization({ name: 'Invites', code: 'INV' }, onlineCommandContext('org'))
+      const created = await service.createInvitations({ orgId: org.organization.id, count: 100 })
+      assert.equal(new Set(created.map(i => i.code)).size, 100)
+      for (const invitation of created) assert.match(invitation.code, /^[A-HJ-NP-Z2-9]{6}$/)
+      const attempts = [created[0]!.code, 'LEGACY123456']
+      const [legacy] = await service.createInvitations({ orgId: org.organization.id, count: 1 }, () => attempts.shift()!)
+      assert.equal(legacy!.code, 'LEGACY123456')
+      assert.equal((await service.listInvitations({ orgId: org.organization.id })).total, 101)
+    } finally { db.close() }
+  })
   void test('creates and updates a canonical organization with its compatibility profile', async () => {
     const { db, service } = setup()
     const created = await service.createOrganization({

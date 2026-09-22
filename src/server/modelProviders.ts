@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { getConfigStore, organizationConfigKey, type ConfigKey } from './configStore/configStore.js'
 
 export type ModelProviderKind = 'openai-compatible'
@@ -43,6 +44,8 @@ export type ProviderModelInfo = {
   providerName: string
   protocol: ModelProviderProtocol
   ratio: number
+  contextWindow?: number
+  maxOutputTokens?: number
 }
 
 export type ResolvedModelSelection = {
@@ -185,7 +188,8 @@ export async function discoverProviderModels(
   options: { forceRefresh?: boolean; orgId?: string } = {},
 ): Promise<ProviderModelInfo[]> {
   const orgScope = options.orgId?.trim() || 'platform'
-  const cacheKey = `${orgScope}\u0000${provider.id}\u0000${provider.discoveryUrl}\u0000${apiKey ? 'key' : 'no-key'}`
+  const credentialScope = apiKey ? createHash('sha256').update(apiKey).digest('hex') : 'no-key'
+  const cacheKey = `${orgScope}\u0000${provider.id}\u0000${provider.discoveryUrl}\u0000${credentialScope}`
   const cached = catalogCache.get(cacheKey)
   if (!options.forceRefresh && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.models
 
@@ -198,17 +202,23 @@ export async function discoverProviderModels(
 
   const models = payload.data
     .filter(isRecord)
-    .map(item => typeof item.id === 'string' ? item.id.trim() : '')
-    .filter(Boolean)
-    .map(modelId => ({
-      id: `${provider.id}:${modelId}`,
-      modelId,
-      name: modelId,
-      providerId: provider.id,
-      providerName: provider.name,
-      protocol: provider.protocol,
-      ratio: 1,
-    }))
+    .filter(item => typeof item.id === 'string' && item.id.trim())
+    .map(item => {
+      const modelId = (item.id as string).trim()
+      const contextWindow = positiveInteger(item.context_window ?? item.context_length)
+      const maxOutputTokens = positiveInteger(item.max_output_tokens ?? item.max_tokens)
+      return {
+        id: `${provider.id}:${modelId}`,
+        modelId,
+        name: modelId,
+        providerId: provider.id,
+        providerName: provider.name,
+        protocol: provider.protocol,
+        ratio: 1,
+        ...(contextWindow ? { contextWindow } : {}),
+        ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      }
+    })
   catalogCache.set(cacheKey, { models, fetchedAt: Date.now() })
   return models
 }
@@ -251,4 +261,8 @@ function isModelProviderProtocol(value: unknown): value is ModelProviderProtocol
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }

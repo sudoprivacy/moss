@@ -73,9 +73,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
   }
   const reevaluateBusy = (): void => {
-    // Busy = false only when stopReason arrived AND no buffered stdin AND no
-    // pending AskUserQuestion. Anything pending keeps busy=true.
-    if (pendingAskUserQuestions.size > 0) {
+    // A completed or failed prompt releases busy only when no work remains.
+    if (pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0) {
       setBusy(true)
       return
     }
@@ -120,6 +119,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   // Pending RPC requests waiting for response
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
+  const pendingPromptIds = new Set<string>()
 
   // Pending AskUserQuestion requests waiting for user answer
   // Maps tool_call_id -> { requestId, questionData, resolve, reject }
@@ -240,6 +240,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   const sendRpc = (method: string, params: any, customId?: string) => {
     const id = customId || `m-${rpcId++}`
+    if (method === 'session/prompt') pendingPromptIds.add(id)
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
@@ -644,7 +645,23 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           continue
         }
 
-        // ... (rest of the stdout processing logic)
+        if (typeof parsed.id === 'string' && pendingPromptIds.delete(parsed.id) && parsed.error) {
+          const message = typeof parsed.error.message === 'string' ? parsed.error.message : 'Model request failed'
+          const resultEvent = {
+            type: 'result', session_id: sessionId, status: 'error',
+            is_error: true, errors: [message],
+          }
+          emitStdout(JSON.stringify(resultEvent) + '\n')
+          void writeTranscript({ ...resultEvent, uuid: randomUUID(), timestamp: new Date().toISOString() })
+          currentAssistantText = ''
+          currentThoughtText = ''
+          currentTurnAssistantUuid = null
+          currentTurnUsedSendUserMessage = false
+          currentTurnToolCalls.clear()
+          currentTurnToolOutput.clear()
+          reevaluateBusy()
+          continue
+        }
 
         if (parsed.result?.stopReason) {
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)

@@ -52,7 +52,7 @@ export class BillingCoordinator {
     finalizeLocal?: () => Promise<void>,
   ): Promise<AdjustmentResult> {
     assertTrustedCommandContext(context)
-    if (!Number.isSafeInteger(input.pointsDelta) || input.pointsDelta === 0) {
+    if (!Number.isSafeInteger(input.pointsDelta) || input.pointsDelta === 0 || !Number.isSafeInteger(input.pointsDelta * 500)) {
       throw new BillingDomainError('INVALID_AMOUNT', '积分数量必须为非零整数')
     }
     const quotaDelta = pointsToQuota(input.pointsDelta)
@@ -69,6 +69,7 @@ export class BillingCoordinator {
         }
         return { operation: existing, created: false, newBalanceUnits: undefined }
       }
+      await this.assertWalletBalance(input.ownerType, input.ownerId, input.pointsDelta)
       const status = context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'PENDING'
       const id = this.idGenerator()
       const inserted = await this.repository.insertQuotaOperation({
@@ -106,8 +107,17 @@ export class BillingCoordinator {
       }
     }
 
-    const baseline = await this.sudorouter.getUser(input.externalUserId)
+    let baseline: QuotaSnapshot | null
+    try {
+      baseline = await this.sudorouter.getUser(input.externalUserId)
+    } catch {
+      return this.failOperation(prepared.operation.id, '查询 Sudorouter 用户失败，请稍后重试')
+    }
     if (!baseline) return this.failOperation(prepared.operation.id, '获取 sudorouter 用户信息失败')
+    if (quotaDelta < 0 && baseline.quotaUnits + quotaDelta < 0) {
+      await this.failOperation(prepared.operation.id, 'Sudorouter 额度不足')
+      throw new BillingDomainError('INSUFFICIENT_QUOTA', 'Sudorouter 额度不足')
+    }
     await this.driver.transaction(async () => this.repository.updateQuotaOperation({
       id: prepared.operation.id, status: 'PROCESSING', observedQuotaUnits: baseline.quotaUnits,
       observedUsedUnits: baseline.usedQuotaUnits, updatedAt: this.clock(),
@@ -151,6 +161,7 @@ export class BillingCoordinator {
         id: claimed.id, status: 'PROCESSING', observedQuotaUnits: current.quotaUnits,
         observedUsedUnits: current.usedQuotaUnits, updatedAt: this.clock(),
       }))
+      await this.assertRetryBalance(claimed, current)
       const changed = await this.sudorouter.changeQuota({
         externalUserId: claimed.externalUserId, deltaUnits: claimed.deltaUnits,
         comment: claimed.reason ?? '额度恢复', idempotencyKey: claimed.idempotencyKey,
@@ -163,6 +174,7 @@ export class BillingCoordinator {
     if (current.quotaUnits !== claimed.observedQuotaUnits) {
       return { operationId, status: 'UNKNOWN', error: 'sudorouter 额度与基线及预期均不一致' }
     }
+    await this.assertRetryBalance(claimed, current)
     const changed = await this.sudorouter.changeQuota({
       externalUserId: claimed.externalUserId, deltaUnits: claimed.deltaUnits,
       comment: claimed.reason ?? '额度重试', idempotencyKey: claimed.idempotencyKey,
@@ -225,11 +237,33 @@ export class BillingCoordinator {
     }
   }
 
+  private async assertWalletBalance(ownerType: BillingOwnerType, ownerId: string, delta: number): Promise<void> {
+    const wallet = await this.repository.getWallet(ownerType, ownerId)
+    if (!wallet) throw new BillingDomainError('WALLET_NOT_FOUND', '钱包不存在')
+    if (wallet.balanceUnits + delta < 0) throw new BillingDomainError('INSUFFICIENT_BALANCE', '积分不足')
+  }
+
+  private async assertRetryBalance(operation: QuotaOperationRecord, snapshot: QuotaSnapshot): Promise<void> {
+    try {
+      await this.assertWalletBalance(operation.ownerType, operation.ownerId, operation.deltaUnits / 500)
+      if (operation.deltaUnits < 0 && snapshot.quotaUnits + operation.deltaUnits < 0) {
+        throw new BillingDomainError('INSUFFICIENT_QUOTA', 'Sudorouter 额度不足')
+      }
+    } catch (error) {
+      await this.failOperation(operation.id, error instanceof Error ? error.message : '积分校验失败')
+      throw error
+    }
+  }
+
   private walletInput(operation: QuotaOperationRecord) {
     return {
       ownerType: operation.ownerType, ownerId: operation.ownerId,
       deltaUnits: operation.deltaUnits / 500,
-      entryType: operation.deltaUnits < 0 ? 'CONSUME' : 'BONUS',
+      entryType: operation.sourceType === 'admin_adjustment'
+        ? operation.deltaUnits < 0 ? 'DEDUCT' : 'ADJUST'
+        : operation.sourceType === 'admin_recharge' || operation.sourceType === 'payment_order'
+          ? 'RECHARGE'
+          : operation.deltaUnits < 0 ? 'CONSUME' : 'BONUS',
       memo: operation.reason,
       sourceType: 'quota_operation', sourceId: operation.id,
       actorUserId: operation.actorUserId, orgId: operation.orgId,

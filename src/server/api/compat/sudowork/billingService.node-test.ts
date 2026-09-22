@@ -24,7 +24,7 @@ class FakeRouter implements SudorouterPort {
   }
 }
 
-async function setup() {
+async function setup(paymentEnabled = true) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
@@ -77,7 +77,8 @@ async function setup() {
     simulationEnabled: false,
   }
   const service = new SudoworkBillingService({
-    db: auth.driver, auth, identities, repository, wallet, recharge, coordinator, credit, refund, payment,
+    db: auth.driver, auth, identities, repository, wallet, recharge, coordinator, credit,
+    refund: paymentEnabled ? refund : undefined, payment: paymentEnabled ? payment : undefined,
     clock: () => now,
   })
   return { db, auth, identities, repository, router, service, setNow(value: number) { now = value } }
@@ -87,6 +88,45 @@ const userActor = { userId: 'user-1', orgId: 'org-1', role: 'user' }
 const adminActor = { userId: 'admin-1', orgId: 'org-1', role: 'admin' }
 
 void describe('SudoworkBillingService', () => {
+  void test('未配置在线支付仍可充值、调整和同步，支付操作在创建订单前明确失败', async () => {
+    const { db, repository, service, router } = await setup(false)
+    const actor = { userId: 'root-1', orgId: 'org-1', role: 'super_admin' }
+    const input = { actor, legacyUserId: 17, points: 10, idempotencyKey: 'offline-recharge' }
+    await service.rechargeUser(input)
+    await service.rechargeUser(input)
+    assert.equal(router.calls, 1)
+    assert.equal((await repository.listRechargeActivities({ limit: 20, offset: 0 })).total, 1)
+    await service.adjustUserPoints({ actor, legacyUserId: 17, amount: 2, operation: 'subtract', syncSudorouter: true, idempotencyKey: 'offline-adjust' })
+    assert.deepEqual(await service.syncUserQuota({ actor, legacyUserId: 17 }), { quota: 4000, used_quota: 0, balance: 8, total_points: 8 })
+    const ledger = await repository.listLedgerEntries({ userId: 'user-1', excludeEntryType: 'OPENING', limit: 10, offset: 0 })
+    assert.deepEqual(ledger.list.map(entry => [entry.entryType, entry.deltaUnits]).sort(), [['DEDUCT', -2], ['RECHARGE', 10]])
+    await assert.rejects(service.createOrder({ actor: userActor, amount: 5, paymentMethod: 'ALIPAY' }), /在线支付未配置/)
+    await assert.rejects(service.payOrder({ actor: userActor, orderNo: 'absent' }), /在线支付未配置/)
+    await assert.rejects(service.syncPendingOrders({ actor }), /在线支付未配置/)
+    assert.equal((await repository.listOrders({ limit: 10, offset: 0 })).total, 0)
+    db.close()
+  })
+
+  void test('在线支付已配置时仍可正常创建支付请求', async () => {
+    const { db, service } = await setup()
+    const order = await service.createOrder({ actor: userActor, amount: 5, paymentMethod: 'ALIPAY', idempotencyKey: 'online-order' }) as { order_no: string }
+    const result = await service.payOrder({ actor: userActor, orderNo: order.order_no, idempotencyKey: 'online-payment' }) as { qr_code_url: string }
+    assert.equal(result.qr_code_url, 'https://pay.test/qr')
+    db.close()
+  })
+
+  void test('非法积分或操作类型不产生额度和账本变动', async () => {
+    const { db, service, router } = await setup(false)
+    const actor = { userId: 'root-1', orgId: 'org-1', role: 'super_admin' }
+    for (const points of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER]) {
+      await assert.rejects(service.rechargeUser({ actor, legacyUserId: 17, points }), /积分/)
+      await assert.rejects(service.adjustUserPoints({ actor, legacyUserId: 17, amount: points, operation: 'subtract', syncSudorouter: true }), /积分/)
+    }
+    await assert.rejects(service.adjustUserPoints({ actor, legacyUserId: 17, amount: 1, operation: 'invalid', syncSudorouter: true }), /操作/)
+    assert.equal(router.calls, 0)
+    db.close()
+  })
+
   void test('新 Moss 用户可立即创建并通过旧接口查询永久数字 ID 订单', async () => {
     const { db, repository, service } = await setup()
     const created = await service.createOrder({

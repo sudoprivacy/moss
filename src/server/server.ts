@@ -1,4 +1,5 @@
 import { cp } from 'node:fs/promises'
+import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
 import http from 'http'
 import { randomUUID } from 'crypto'
@@ -1483,14 +1484,16 @@ async function readWorkspaceTreeIn(
  * quietly bills everyone's consumption to one account, which is exactly the
  * behaviour the per-user key exists to end.
  *
- * Never throws. A gateway that is down must not stop someone signing in; they
- * simply get another attempt next time.
+ * Configured account-service failures propagate so callers do not report a
+ * successful login without the user's gateway credential. The legacy fallback
+ * retains its existing best-effort behavior.
  */
 async function ensureGatewayAccount(
   authService: AuthService,
   config: ServerConfig,
   input: { userId: string; username: string; displayName?: string },
 ): Promise<void> {
+  if (await authService.ensureUserSudorouterAccount(input.userId)) return
   if (await authService.getUserModelCredential(input.userId)) return
   const client = buildSudorouterClient(config)
   if (!client) return
@@ -6134,6 +6137,13 @@ export function startServer(
         return
       }
 
+      const userSudorouterKeyMatch = pathname.match(/^\/api\/v1\/users\/([^/]+)\/sudorouter-key\/copy$/)
+      if (req.method === 'POST' && userSudorouterKeyMatch) {
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, await authService.copyUserSudorouterKey(userSudorouterKeyMatch[1]!, auth))
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
@@ -6143,7 +6153,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          await authService.createUser({
+          await authService.createProvisionedUser({
             orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6157,6 +6167,9 @@ export function startServer(
                 : undefined,
             role: typeof body.role === 'string' ? body.role : 'user',
             password: typeof body.password === 'string' ? body.password : '',
+            idempotencyKey: typeof req.headers['idempotency-key'] === 'string'
+              ? req.headers['idempotency-key']
+              : undefined,
             extUserId:
               body.ext_user_id === null || typeof body.ext_user_id === 'string'
                 ? body.ext_user_id
@@ -6998,12 +7011,16 @@ export function startServer(
           if (!modelId) {
             throw new HttpError(400, 'modelId is required')
           }
+          if (!(await authService.getUserOrNull(userId, auth.orgId))) {
+            throw new HttpError(404, 'Unknown user_id')
+          }
           let resolvedModelId: string
           try {
             const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
             resolvedModelId = (await getModelsForSelection(modelId, {
               settings: systemSettings,
               orgId: auth.orgId,
+              userApiKey: (await authService.getUserModelCredential(userId))?.sudorouterKey,
             })).selection.selectionId
           } catch (error) {
             throw new HttpError(
@@ -7024,7 +7041,11 @@ export function startServer(
       // Available models endpoint
       if (req.method === 'GET' && pathname === '/api/v1/models/available') {
         const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
-        const models = await getAvailableModels({ settings: systemSettings, orgId: auth.orgId })
+        const models = await getAvailableModels({
+          settings: systemSettings,
+          orgId: auth.orgId,
+          userApiKey: (await authService.getUserModelCredential(auth.userId))?.sudorouterKey,
+        })
         writeJson(res, 200, {
           success: true,
           data: models,
@@ -7048,7 +7069,13 @@ export function startServer(
         authService.requireScope(auth, 'admin:settings')
         const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
         const systemSettings = await authService.getOrganizationSystemSettings(settingsOrgId)
-        const models = await refreshModelCache({ settings: systemSettings, orgId: settingsOrgId })
+        const models = await refreshModelCache({
+          settings: systemSettings,
+          orgId: settingsOrgId,
+          userApiKey: settingsOrgId === auth.orgId
+            ? (await authService.getUserModelCredential(auth.userId))?.sudorouterKey
+            : undefined,
+        })
         writeJson(res, 200, {
           success: true,
           data: models,

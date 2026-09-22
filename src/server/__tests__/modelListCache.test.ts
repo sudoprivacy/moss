@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { buildModelsConfig, refreshModelCache } from '../modelListCache.js'
+import { buildModelsConfig, getAvailableModels, getModelsForSelection, refreshModelCache } from '../modelListCache.js'
+import type { SystemSettingsPayload } from '../systemSettings.js'
 import {
   clearProviderModelCache,
   discoverProviderModels,
@@ -17,6 +18,19 @@ afterEach(() => {
 })
 
 describe('provider model discovery', () => {
+  it('preserves gateway context and output limits in the runtime model configuration', async () => {
+    const [provider] = normalizeModelProviders([], 'https://gateway.example.invalid/v1')
+    globalThis.fetch = (async () => new Response(JSON.stringify({ data: [
+      { id: 'gpt-4o', context_window: 128000, max_output_tokens: 16384 },
+      { id: 'alias-model', context_length: 64000, max_tokens: 8000 },
+      { id: 'invalid-limits', context_window: -1, max_output_tokens: '64000' },
+    ] }))) as typeof fetch
+    const models = await discoverProviderModels(provider, 'user-key')
+    expect(buildModelsConfig(models)['proxy/gpt-4o']).toMatchObject({ contextWindow: 128000, maxOutputTokens: 16384 })
+    expect(buildModelsConfig(models)['proxy/alias-model']).toMatchObject({ contextWindow: 64000, maxOutputTokens: 8000 })
+    expect(models[2]?.contextWindow).toBeUndefined()
+    expect(models[2]?.maxOutputTokens).toBeUndefined()
+  })
   it('normalizes an OpenAI-compatible /models response into provider-scoped selections', async () => {
     const provider: ModelProvider = {
       id: 'local-vllm',
@@ -107,6 +121,91 @@ describe('provider model discovery', () => {
     await b()
     await other()
     expect(calls).toBe(8)
+  })
+
+  it.each(['', 'shared-key'])('uses the user key for discovery, selection and refresh with shared key %j', async (apiKey) => {
+    const options = {
+      orgId: 'org-a',
+      userApiKey: 'user-key',
+      settings: {
+        apiKey,
+        model: 'user-model',
+        defaultModelProviderId: 'legacy-default',
+        modelProviders: normalizeModelProviders([], 'https://gateway.example.invalid/v1'),
+      } as SystemSettingsPayload,
+    }
+    const seenAuth: string[] = []
+    globalThis.fetch = (async (_input, init) => {
+      const authorization = new Headers(init?.headers).get('authorization') || ''
+      seenAuth.push(authorization)
+      return authorization === 'Bearer user-key'
+        ? new Response(JSON.stringify({ data: [{ id: 'user-model' }] }))
+        : new Response('Unauthorized', { status: 401 })
+    }) as typeof fetch
+
+    await expect(getAvailableModels(options)).resolves.toMatchObject([{ id: 'legacy-default:user-model' }])
+    clearProviderModelCache()
+    await expect(getModelsForSelection('legacy-default:user-model', options)).resolves.toMatchObject({
+      selection: { selectionId: 'legacy-default:user-model' },
+    })
+    await expect(refreshModelCache(options)).resolves.toMatchObject([{ id: 'legacy-default:user-model' }])
+    expect(seenAuth).toEqual(Array(3).fill('Bearer user-key'))
+  })
+
+  it('isolates user catalogs and selection validation within the same organization', async () => {
+    const options = {
+      orgId: 'org-a',
+      settings: {
+        apiKey: '',
+        model: 'model-a',
+        defaultModelProviderId: 'legacy-default',
+        modelProviders: normalizeModelProviders([], 'https://gateway.example.invalid/v1'),
+      } as SystemSettingsPayload,
+    }
+    const seenAuth: string[] = []
+    globalThis.fetch = (async (_input, init) => {
+      const authorization = new Headers(init?.headers).get('authorization') || ''
+      seenAuth.push(authorization)
+      const model = authorization === 'Bearer key-a' ? 'model-a' : 'model-b'
+      return new Response(JSON.stringify({ data: [{ id: model }] }))
+    }) as typeof fetch
+    const a = { ...options, userApiKey: 'key-a' }
+    const b = { ...options, userApiKey: 'key-b' }
+
+    await expect(getAvailableModels(a)).resolves.toMatchObject([{ modelId: 'model-a' }])
+    await expect(getAvailableModels(b)).resolves.toMatchObject([{ modelId: 'model-b' }])
+    await expect(getModelsForSelection('model-a', b)).rejects.toThrow('not currently available')
+    await expect(getAvailableModels(a)).resolves.toMatchObject([{ modelId: 'model-a' }])
+    expect(seenAuth).toEqual(['Bearer key-a', 'Bearer key-b'])
+    clearProviderModelCache('legacy-default', 'org-a')
+    await getAvailableModels(a)
+    await getAvailableModels(b)
+    expect(seenAuth).toEqual(['Bearer key-a', 'Bearer key-b', 'Bearer key-a', 'Bearer key-b'])
+  })
+
+  it('does not send the user gateway key to an unauthenticated named provider', async () => {
+    const [legacy] = normalizeModelProviders([], 'https://local.example.invalid/v1')
+    const options = {
+      userApiKey: 'user-gateway-key',
+      settings: {
+        apiKey: 'shared-gateway-key',
+        model: 'local-model',
+        defaultModelProviderId: 'local',
+        modelProviders: [{ ...legacy, id: 'local' }],
+      } as SystemSettingsPayload,
+    }
+    const seenAuth: Array<string | null> = []
+    globalThis.fetch = (async (_input, init) => {
+      seenAuth.push(new Headers(init?.headers).get('authorization'))
+      return new Response(JSON.stringify({ data: [{ id: 'local-model' }] }))
+    }) as typeof fetch
+
+    await expect(getAvailableModels(options)).resolves.toMatchObject([{ id: 'local:local-model' }])
+    clearProviderModelCache()
+    await expect(getModelsForSelection('local:local-model', options)).resolves.toMatchObject({
+      selection: { selectionId: 'local:local-model' },
+    })
+    expect(seenAuth).toEqual([null, null])
   })
 
   it('refreshes the model cache using the supplied organization settings', async () => {
