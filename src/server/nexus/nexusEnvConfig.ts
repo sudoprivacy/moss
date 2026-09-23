@@ -15,11 +15,17 @@
 
 export const NEXUS_DEFAULT_GRPC_PORT = Number(process.env.MOSS_NEXUS_GRPC_PORT) || 2126
 
-/** mTLS material for connecting to an external `nexusd-cluster`. */
+/**
+ * mTLS material for connecting to an external `nexusd-cluster`.
+ *
+ * Spelt the way the client takes it, which accepts bytes or a path. These are
+ * paths — moss's own long-lived identity lives on disk — but a per-session
+ * credential is handed over as bytes, so the two share one shape.
+ */
 export type NexusTlsConfig = {
-  caPath: string
-  certPath: string
-  keyPath: string
+  ca: string
+  cert: string
+  key: string
   /** Server-cert SAN to validate; defaults to the cluster's `nexus-node`. */
   serverName?: string
 }
@@ -78,17 +84,17 @@ export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
     )
   }
 
-  const caPath = env.MOSS_NEXUS_TLS_CA?.trim()
-  const certPath = env.MOSS_NEXUS_TLS_CERT?.trim()
-  const keyPath = env.MOSS_NEXUS_TLS_KEY?.trim()
+  const ca = env.MOSS_NEXUS_TLS_CA?.trim()
+  const cert = env.MOSS_NEXUS_TLS_CERT?.trim()
+  const key = env.MOSS_NEXUS_TLS_KEY?.trim()
   let tls: NexusTlsConfig | null = null
-  if (caPath || certPath || keyPath) {
-    if (!caPath || !certPath || !keyPath) {
+  if (ca || cert || key) {
+    if (!ca || !cert || !key) {
       throw new Error(
         'mTLS to the external nexus requires all of MOSS_NEXUS_TLS_CA, MOSS_NEXUS_TLS_CERT, MOSS_NEXUS_TLS_KEY',
       )
     }
-    tls = { caPath, certPath, keyPath, serverName: env.MOSS_NEXUS_TLS_SERVER_NAME?.trim() || undefined }
+    tls = { ca, cert, key, serverName: env.MOSS_NEXUS_TLS_SERVER_NAME?.trim() || undefined }
   } else if (endpoint.startsWith('https://')) {
     throw new Error(
       'MOSS_NEXUS_ENDPOINT uses https:// but no client certs were provided; set MOSS_NEXUS_TLS_CA/CERT/KEY for mTLS',
