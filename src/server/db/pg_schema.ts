@@ -2008,6 +2008,12 @@ const MIGRATIONS: PgMigration[] = [
   { version: 6, name: 'sudowork-compatibility-2026-09', sql: MIGRATION_0006_COMPATIBILITY },
   { version: 7, name: 'organization-model-settings-2026-09', sql: ORGANIZATION_MODEL_SETTINGS_SCHEMA },
   { version: 8, name: 'organization-resource-installations', sql: ORGANIZATION_RESOURCE_PG_SCHEMA },
+  { version: 9, name: 'user-local-execution-permission', sql: `
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS local_execution_allowed BIGINT;
+    UPDATE users SET local_execution_allowed = local_auth WHERE local_execution_allowed IS NULL;
+    ALTER TABLE users ALTER COLUMN local_execution_allowed SET DEFAULT 1;
+    ALTER TABLE users ALTER COLUMN local_execution_allowed SET NOT NULL;
+  ` },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

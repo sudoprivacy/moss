@@ -40,6 +40,8 @@ export type AuthCenterUser = {
   role: string
   status: AuthCenterUserStatus
   localAuth: boolean
+  /** Desktop execution permission, independent of password authentication. */
+  localExecutionAllowed?: boolean
   tokenLimit: number | null
   createdAt: number
   passwordHash: string | null
@@ -189,6 +191,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     role: String(row.role),
     status: String(row.status) as AuthCenterUserStatus,
     localAuth: Boolean(row.local_auth),
+    localExecutionAllowed: row.local_execution_allowed == null ? Boolean(row.local_auth) : Boolean(row.local_execution_allowed),
     tokenLimit: row.token_limit == null ? null : Number(row.token_limit),
     createdAt: Number(row.created_at),
     passwordHash: row.password_hash == null ? null : String(row.password_hash),
@@ -672,6 +675,13 @@ export class AuthCenterDb {
       'ALTER TABLE users ADD COLUMN sudorouter_key TEXT',
     )
     this.ensureUserStatusCompatibility()
+    // Preserve existing Local grants once; new accounts default to allowed.
+    this.ensureColumn('users', 'local_execution_allowed', `
+      SAVEPOINT local_execution_migration;
+      ALTER TABLE users ADD COLUMN local_execution_allowed INTEGER NOT NULL DEFAULT 1;
+      UPDATE users SET local_execution_allowed = local_auth;
+      RELEASE local_execution_migration;
+    `)
     this.ensureColumn(
       'departments',
       'ext_dept_id',
@@ -970,8 +980,8 @@ export class AuthCenterDb {
     await this.driver.run(`
       INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, local_auth,
                          token_limit, password_hash, password_updated_at, last_login_at, created_at,
-                         ext_user_id, phone)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         ext_user_id, phone, local_execution_allowed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       user.id,
       user.orgId,
@@ -989,6 +999,7 @@ export class AuthCenterDb {
       user.createdAt,
       user.extUserId ?? null,
       user.phone ?? null,
+      user.localExecutionAllowed === false ? 0 : 1,
     ])
   }
 
@@ -1563,6 +1574,12 @@ export class AuthCenterDb {
     await this.driver.run(`
       UPDATE users SET local_auth = ? WHERE id = ?
     `, [localAuth ? 1 : 0, id])
+  }
+
+  async setLocalExecutionAllowed(id: string, orgId: string, isAllowed: boolean): Promise<void> {
+    await this.driver.run(`
+      UPDATE users SET local_execution_allowed = ? WHERE id = ? AND org_id = ?
+    `, [isAllowed ? 1 : 0, id, orgId])
   }
 
   async setDepartmentTokenLimit(id: string, tokenLimit: number | null): Promise<void> {

@@ -1,3 +1,4 @@
+import { createHash as resourceContentHash } from 'node:crypto'
 import { cp } from 'node:fs/promises'
 import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
@@ -77,6 +78,7 @@ import {
 } from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import { buildClientCredentials, sealCredentials } from './credentialsEnvelope.js'
+import { buildClientRuntime } from './clientRuntime.js'
 import type { ConfigKey } from './configStore/configStore.js'
 
 const SUDOROUTER_ADMIN_TOKEN_KEY: ConfigKey = 'server.sudorouter-admin-token'
@@ -1035,23 +1037,18 @@ async function authenticateRequest(
 
 /**
  * Attach sudocode.json fields (sudorouter_key, model_service_url, models)
- * to the login response only when the user has local authorization.
+ * to the login response using the current user's model credential.
  * Format matches sudowork-server for sudowork code reuse.
  */
 async function attachSudocodeFields<T extends Record<string, unknown>>(
   tokenResult: T,
   authService: AuthService,
 ): Promise<T> {
-  const user = tokenResult.user as { localAuth?: boolean; orgId?: string } | undefined
-  if (!user?.localAuth) return tokenResult
-  const settings = user.orgId
-    ? await authService.getOrganizationSystemSettings(user.orgId)
-    : getSystemSettings()
+  const user = tokenResult.user as { id: string; orgId: string } | undefined
+  if (!user?.id || !user.orgId) return tokenResult
   return {
     ...tokenResult,
-    sudorouter_key: settings.apiKey || null,
-    model_service_url: settings.url || 'https://hk.sudorouter.ai/v1',
-    models: [settings.model],
+    ...await buildClientRuntime(authService, user),
   }
 }
 
@@ -2481,6 +2478,7 @@ export function startServer(
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
       const pathname = url.pathname
+      if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
 
       // Sticky-routing cookie (no-op unless MOSS_INSTANCE_ID is configured).
@@ -3505,6 +3503,11 @@ export function startServer(
       const resourceAuth = auth
       return await withOrganizationResources({ orgId: auth.orgId, userId: auth.userId, driver: runtime.store.driver, visibility: await authService.buildVisibilityFilter(auth) }, async () => {
       const auth = resourceAuth
+      if (req.method === 'GET' && pathname === '/api/v1/client/local-runtime') {
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, await buildClientRuntime(authService, { id: auth.userId, orgId: auth.orgId }))
+        return
+      }
       const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || undefined
 
       // Internal (HA): token-revoke forward target. Terminate is a REST op
@@ -8719,6 +8722,7 @@ export function startServer(
           const zipBuffer = await packageAssistantZip(assistant.id)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(assistantId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -9270,6 +9274,7 @@ export function startServer(
           const zipBuffer = await packageAssistantZip(tenantAssistantId)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(tenantAssistantId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -9580,6 +9585,7 @@ export function startServer(
           const zipBuffer = await packageSkillZip(skill.id)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(skillId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -9862,6 +9868,7 @@ export function startServer(
           const zipBuffer = await packageSkillZip(tenantSkillId)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(tenantSkillId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)

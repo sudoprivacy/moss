@@ -272,7 +272,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -1167,6 +1167,10 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
             updated_at BIGINT NOT NULL
           );
           CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, local_auth BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL);
+          INSERT INTO organizations (id, name, created_at) VALUES ('local-org', 'Local migration', 1);
+          INSERT INTO users (id, org_id, email, name, local_auth, created_at) VALUES
+            ('local-allowed', 'local-org', 'allowed@example.test', 'allowed', 1, 1),
+            ('local-denied', 'local-org', 'denied@example.test', 'denied', 0, 1);
           CREATE TABLE wikis (id TEXT PRIMARY KEY, source_mode TEXT, source_node_ids TEXT, source_exclude_node_ids TEXT, auto_rebuild BIGINT DEFAULT 0, needs_rebuild BIGINT DEFAULT 0, created_by TEXT NOT NULL, created_at BIGINT NOT NULL);
           INSERT INTO wikis (id, created_by, created_at) VALUES ('w1', 'u1', 0);
           CREATE TABLE wiki_build_jobs (id TEXT PRIMARY KEY, wiki_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', queued_at BIGINT NOT NULL, triggered_by TEXT NOT NULL);
@@ -1217,10 +1221,17 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: all eight migrations remain applied exactly once.
+        // Re-run is a no-op: all nine migrations remain applied exactly once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
+        assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
+        await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);
+        await applyPgSchema(driver);
+        assert.equal(Number((await driver.get<{ local_execution_allowed: number }>('SELECT local_execution_allowed FROM users WHERE id = ?', ['local-allowed']))?.local_execution_allowed), 0);
+        await driver.run('INSERT INTO users (id, org_id, email, name, created_at) VALUES (?, ?, ?, ?, ?)', ['local-new', 'local-org', 'new@example.test', 'new', 1]);
+        assert.equal(Number((await driver.get<{ local_execution_allowed: number }>('SELECT local_execution_allowed FROM users WHERE id = ?', ['local-new']))?.local_execution_allowed), 1);
         // v3 (audit fixes): tenant-store org indexes (C-4) + the E-2
         // channel_sessions snapshot column.
         for (const idx of ["idx_tenant_skills_org", "idx_tenant_assistants_org"]) {
