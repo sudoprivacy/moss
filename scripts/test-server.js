@@ -44,6 +44,7 @@ const BUN = [
   'releaseE2eSmoke.test.ts',
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
+  'clientRuntime.test.ts',
   'secretsMetadata.test.ts',
   'credits.test.ts',
   'fuiou.test.ts',

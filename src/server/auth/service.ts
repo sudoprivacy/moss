@@ -446,6 +446,11 @@ export class AuthService {
     return this.clientPolicies.getEffective(orgId)
   }
 
+  async isUserLocalExecutionAllowed(userId: string): Promise<boolean> {
+    const user = await this.db.getUserById(userId)
+    return user?.status === 'active' && user.localExecutionAllowed === true
+  }
+
   putOrganizationClientPolicy(orgId: string, patch: Record<string, unknown>, updatedBy: string): Promise<Record<string, unknown>> {
     return this.clientPolicies.putOrganization(orgId, patch, updatedBy)
   }
@@ -2292,12 +2297,18 @@ export class AuthService {
     userId: string
     localAuth: boolean
   }, auth: AuthContext): Promise<{ ok: true; local_auth: boolean }> {
-    const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
+    this.requireScope(auth, 'admin:users')
+    const actor = await this.requireAuthUser(auth)
+    const isRoot = isSuperAdmin(actor.role)
+    if (!isRoot && actor.role !== 'admin') throw new AuthServiceError(403, 'Only organization administrators can manage Local authorization')
+    if (!isRoot && input.orgId !== actor.orgId) throw new AuthServiceError(404, 'Unknown user_id')
+    const user = isRoot
+      ? await this.db.getUserById(input.userId)
+      : await this.db.getUserByIdAndOrg(input.userId, actor.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
-    await this.assertCanManageExistingUser(user, auth)
-    await this.db.setLocalAuth(input.userId, input.localAuth)
+    await this.db.setLocalExecutionAllowed(user.id, user.orgId, input.localAuth)
     return { ok: true, local_auth: input.localAuth }
   }
 

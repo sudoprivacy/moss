@@ -1429,8 +1429,8 @@ export default function UsersPage() {
                                     <Coins className="mr-2 size-4" />
                                     设置 Token 限额
                                   </DropdownMenuItem>
-                                  <DropdownMenuItem onClick={() => setLocalAuthTarget({ userId: user.id, userName: user.name, currentAuth: user.localAuth ?? false })}>
-                                    {user.localAuth ? (
+                                  <DropdownMenuItem onClick={() => setLocalAuthTarget({ userId: user.id, userName: user.name, currentAuth: user.localExecutionAllowed ?? user.localAuth })}>
+                                    {(user.localExecutionAllowed ?? user.localAuth) ? (
                                       <>
                                         <MonitorSmartphone className="mr-2 size-4" />
                                         取消Local授权

@@ -1166,9 +1166,9 @@ export async function packageSkillZip(skillName: string): Promise<Buffer> {
 
   await addDirectoryToZip(zip, skillPath, '')
   const meta = await scopedResourceMetadata('skill', skillPath)
-  if (meta) zip.file('_moss_meta.json', JSON.stringify(meta, null, 2))
+  if (meta) zip.file('_moss_meta.json', JSON.stringify(meta, null, 2), { date: new Date('2000-01-01T00:00:00Z') })
 
-  return zip.generateAsync({ type: 'nodebuffer' })
+  return zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' })
 }
 
 async function addDirectoryToZip(
@@ -1177,7 +1177,7 @@ async function addDirectoryToZip(
   zipPath: string,
 ): Promise<void> {
   const entries = await readdir(dirPath, { withFileTypes: true })
-  for (const entry of entries) {
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const fullPath = path.join(dirPath, entry.name)
     const entryZipPath = zipPath ? `${zipPath}/${entry.name}` : entry.name
 
@@ -1185,7 +1185,7 @@ async function addDirectoryToZip(
       await addDirectoryToZip(zip, fullPath, entryZipPath)
     } else if (entry.isFile()) {
       const content = await readFile(fullPath)
-      zip.file(entryZipPath, content)
+      zip.file(entryZipPath, content, { date: new Date('2000-01-01T00:00:00Z'), unixPermissions: (await stat(fullPath)).mode, createFolders: false })
     }
   }
 }

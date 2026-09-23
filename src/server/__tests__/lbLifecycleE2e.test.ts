@@ -74,12 +74,22 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFi
   const configPath = join(rootDir, 'server.json')
   await writeFile(configPath, JSON.stringify(config), 'utf8')
 
+  // An unrelated developer Nexus instance must not make the no-Nexus fixture ready.
+  const probePort = await new Promise<number>((resolvePort, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address() as { port: number }
+      probe.close(() => resolvePort(address.port))
+    })
+  })
   const fixtureProcess = Bun.spawn(['node', bundleEntry], {
     cwd: resolve(import.meta.dir, '..', '..'),
     env: {
       ...globalThis.process.env,
       MOSS_HOME: join(rootDir, 'moss-home'),
       MOSS_SERVER_CONFIG: configPath,
+      MOSS_NEXUS_GRPC_PORT: String(probePort),
       ...extraEnv,
     },
     stdin: 'pipe',

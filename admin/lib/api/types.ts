@@ -18,6 +18,7 @@ export interface AuthUser {
   sudorouterApiKeyMasked?: string | null
   sudorouterCredentialStatus?: 'ready' | 'missing' | 'unavailable'
   localAuth: boolean
+  localExecutionAllowed?: boolean
   tokenLimit: number | null
   createdAt: number
   passwordUpdatedAt: number | null

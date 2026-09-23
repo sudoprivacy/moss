@@ -61,6 +61,8 @@ describe("invited phone registration", () => {
     const registered = await auth.registerWithPhone({ phone: "13800138004", nickname: "Alice", invitationCode: "GATEWAY" });
     assert.equal(await auth.getUserModelCredential(registered.user.id), null);
     assert.equal(usersCreated, 0, "reading a missing credential must not provision an account");
+    assert.equal(registered.user.localExecutionAllowed, true);
+    assert.equal(registered.user.localAuth, false);
     await auth.ensureUserSudorouterAccount(registered.user.id);
     await auth.ensureUserSudorouterAccount(registered.user.id);
     assert.deepEqual(await auth.getUserModelCredential(registered.user.id), {

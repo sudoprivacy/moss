@@ -1499,10 +1499,10 @@ export async function packageAssistantZip(assistantName: string): Promise<Buffer
 
   if (getOrganizationResourceScope()) {
     const meta = await readAssistantMeta(result.dir)
-    zip.file(ASSISTANT_META_FILE, JSON.stringify(meta, null, 2))
-    if (typeof meta?.rules === 'string') zip.file(String(meta.ruleFile || 'system.md'), meta.rules)
+    zip.file(ASSISTANT_META_FILE, JSON.stringify(meta, null, 2), { date: new Date('2000-01-01T00:00:00Z') })
+    if (typeof meta?.rules === 'string') zip.file(String(meta.ruleFile || 'system.md'), meta.rules, { date: new Date('2000-01-01T00:00:00Z') })
   }
-  return zip.generateAsync({ type: 'nodebuffer' })
+  return zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' })
 }
 
 /**
@@ -1518,7 +1518,7 @@ export async function packageAssistantZipByDir(assistantDir: string): Promise<Bu
 
   await addDirectoryToZip(zip, assistantDir, '')
 
-  return zip.generateAsync({ type: 'nodebuffer' })
+  return zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' })
 }
 
 async function copyDirectoryRecursive(
@@ -1527,7 +1527,7 @@ async function copyDirectoryRecursive(
 ): Promise<void> {
   await mkdir(targetDir, { recursive: true })
   const entries = await readdir(sourceDir, { withFileTypes: true })
-  for (const entry of entries) {
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const sourcePath = path.join(sourceDir, entry.name)
     const targetPath = path.join(targetDir, entry.name)
     if (entry.isDirectory()) {
@@ -1545,7 +1545,7 @@ async function addDirectoryToZip(
   zipPath: string,
 ): Promise<void> {
   const entries = await readdir(dirPath, { withFileTypes: true })
-  for (const entry of entries) {
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const fullPath = path.join(dirPath, entry.name)
     const entryZipPath = zipPath ? `${zipPath}/${entry.name}` : entry.name
 
@@ -1553,7 +1553,7 @@ async function addDirectoryToZip(
       await addDirectoryToZip(zip, fullPath, entryZipPath)
     } else if (entry.isFile()) {
       const content = await readFile(fullPath)
-      zip.file(entryZipPath, content)
+      zip.file(entryZipPath, content, { date: new Date('2000-01-01T00:00:00Z'), unixPermissions: (await stat(fullPath)).mode, createFolders: false })
     }
   }
 }
