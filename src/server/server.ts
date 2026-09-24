@@ -3077,7 +3077,12 @@ export function startServer(
           // 不在请求内同步等待删除（§8.8）
           writeJson(res, 202, await zoneManagement.deprovisionZone(zoneDeprovisionMatch[1], confirmZoneId))
         } catch (error) {
-          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, {
+              error: { code: error.code, message: error.message, retryable: error.retryable },
+            })
+            return
+          }
           throw error
         }
         return

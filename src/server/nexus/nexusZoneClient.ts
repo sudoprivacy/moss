@@ -109,7 +109,7 @@ export class NexusZoneClient {
   private async request(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
-    input: { body?: unknown; idempotencyKey?: string; delegationRef?: string } = {},
+    input: { body?: unknown; idempotencyKey?: string; delegationRef?: string; confirmZone?: string } = {},
   ): Promise<unknown> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -121,6 +121,7 @@ export class NexusZoneClient {
           ...(input.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
           ...(input.idempotencyKey ? { 'Idempotency-Key': input.idempotencyKey } : {}),
           ...(input.delegationRef ? { 'X-Nexus-Zone-Delegation': input.delegationRef } : {}),
+          ...(input.confirmZone ? { 'X-Nexus-Confirm-Zone': input.confirmZone } : {}),
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         },
         body: input.body !== undefined ? JSON.stringify(input.body) : undefined,
@@ -346,6 +347,7 @@ export class NexusZoneClient {
   async deprovisionZone(zoneId: string, idempotencyKey: string): Promise<ZoneOperationRef> {
     const payload = await this.request('DELETE', `/v2/zones/${encodeURIComponent(zoneId)}`, {
       idempotencyKey,
+      confirmZone: zoneId,
     })
     return NexusZoneClient.parseOperation(payload)
   }

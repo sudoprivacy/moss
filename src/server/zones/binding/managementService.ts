@@ -26,6 +26,7 @@ export class ZoneManagementError extends Error {
     message: string,
     public readonly code: string,
     public readonly status: number,
+    public readonly retryable: boolean = false,
   ) {
     super(message)
     this.name = 'ZoneManagementError'
@@ -92,6 +93,18 @@ export class ZoneManagementService {
       throw new ZoneManagementError('Nexus /v2 management endpoint is not configured', 'NOT_CONFIGURED', 503)
     }
     return this.client
+  }
+
+  private mapNexusZoneError(error: unknown): never {
+    if (error instanceof NexusZoneApiError) {
+      throw new ZoneManagementError(
+        error.message,
+        error.code,
+        error.status || 502,
+        error.retryable,
+      )
+    }
+    throw error
   }
 
   /** super admin 看全部；Org admin 看本 Org。 */
@@ -241,7 +254,14 @@ export class ZoneManagementService {
         400,
       )
     }
-    return this.requireClient().deprovisionZone(zoneId, `moss-admin:deprovision:${zoneId}:${randomUUID()}`)
+    try {
+      return await this.requireClient().deprovisionZone(
+        zoneId,
+        `moss-admin:deprovision:${zoneId}:${randomUUID()}`,
+      )
+    } catch (error) {
+      return this.mapNexusZoneError(error)
+    }
   }
 
   /** operation 查询（step/error/retry——UI 故障恢复入口）。 */

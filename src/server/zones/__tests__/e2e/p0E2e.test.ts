@@ -24,9 +24,11 @@ import {
   login, mintNexusUserKey, mossApi, nexusApi, sleep, startMoss, startNexus,
   type MossProcess, type NexusProcess,
 } from './p0Harness.js'
+import { startNexusFaultProxy, type NexusFaultProxy } from './nexusFaultProxy.js'
 
 let moss: MossProcess
 let nexus: NexusProcess | null = null
+let nexusProxy: NexusFaultProxy | null = null
 let adminToken = ''
 const tmp = mkdtempSync(join(tmpdir(), 'moss-p0-e2e-'))
 
@@ -40,6 +42,7 @@ before(async () => {
 
 after(async () => {
   await moss.stop()
+  if (nexusProxy) await nexusProxy.stop()
   if (nexus) await nexus.stop()
 })
 
@@ -78,6 +81,7 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
   let delegationA = ''
   let nexusKeyA = ''
   let orgAAdminToken = ''
+  let zoneBDefault = ''
 
   it('scenario 1: creating an org leaves a pending default binding while nexus is offline', async () => {
     orgA = await createOrg('P0 E2E Org A')
@@ -92,12 +96,13 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
 
   it('scenario 3: binding converges to active after nexus comes online (exactly-once)', async () => {
     nexus = await startNexus(join(tmp, 'nexus'))
+    nexusProxy = await startNexusFaultProxy(nexus.baseUrl)
     // moss 以真实 /v2 地址重启（同一 CLAUDE_CONFIG_DIR 数据库——离线期写入
     // 的 binding 行由新实例的 reconciler 收敛）。硬杀跳过了优雅清理，实例
     // 心跳（默认 30s 窗口）滞留会让新实例的 HA 保护拒绝启动——等窗口过期。
     await moss.stop()
     await sleep(35_000)
-    moss = await startMoss(tmp, { nexusV2BaseUrl: nexus.baseUrl, nexusServiceToken: nexus.apiKey })
+    moss = await startMoss(tmp, { nexusV2BaseUrl: nexusProxy.baseUrl, nexusServiceToken: nexus.apiKey })
     adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
     const row = await waitBindingActive(orgA)
     // grant id 已记录（string 或 null——收敛后应为 string）
@@ -216,7 +221,7 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     // Org B 的 default binding 解绑
     const row = (await bindings()).find((b) => b.org_id === orgB && b.is_default === true)
     assert.ok(row)
-    const zoneBDefault = String(row.zone_id)
+    zoneBDefault = String(row.zone_id)
     const detached = await mossApi(moss, adminToken, 'POST', `/api/v1/zones/bindings/${row.binding_id}/detach`)
     assert.equal(detached.status, 200, `detach failed: ${JSON.stringify(detached.json)}`)
 
@@ -262,5 +267,77 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     // 一个 Org 多 Zone：org A 现在有 ≥2 条 bound binding
     const orgABindings = (await bindings()).filter((b) => b.org_id === orgA && b.desired_state === 'bound')
     assert.ok(orgABindings.length >= 2)
+  })
+
+  it('H-1: deprovision preserves errors and completes a real Nexus deletion', async () => {
+    const mismatch = await mossApi(
+      moss,
+      adminToken,
+      'POST',
+      `/api/v1/zones/${encodeURIComponent(zoneBDefault)}/deprovision`,
+      { confirm_zone_id: 'wrong-zone' },
+    )
+    assert.equal(mismatch.status, 400)
+    assert.deepEqual(mismatch.json, {
+      error: {
+        code: 'CONFIRM_MISMATCH',
+        message: 'confirmation zone id does not match the target zone id',
+        retryable: false,
+      },
+    })
+
+    const blocked = await mossApi(
+      moss,
+      adminToken,
+      'POST',
+      `/api/v1/zones/${encodeURIComponent(zoneA)}/deprovision`,
+      { confirm_zone_id: zoneA },
+    )
+    assert.equal(blocked.status, 409, `Nexus blocker must remain 409: ${JSON.stringify(blocked.json)}`)
+    assert.equal((blocked.json as { error?: { code?: string } }).error?.code, 'ZONE_DELETE_BLOCKED')
+    assert.equal((blocked.json as { error?: { retryable?: boolean } }).error?.retryable, false)
+
+    const unavailableZone = 'h1-structured-503'
+    nexusProxy!.failNextDeprovision(unavailableZone)
+    const unavailable = await mossApi(
+      moss,
+      adminToken,
+      'POST',
+      `/api/v1/zones/${unavailableZone}/deprovision`,
+      { confirm_zone_id: unavailableZone },
+    )
+    assert.equal(unavailable.status, 503, `structured Nexus 503 must remain 503: ${JSON.stringify(unavailable.json)}`)
+    assert.deepEqual(unavailable.json, {
+      error: {
+        code: 'ZONE_RUNTIME_UNAVAILABLE',
+        message: 'injected Nexus runtime outage',
+        retryable: true,
+      },
+    })
+
+    const accepted = await mossApi(
+      moss,
+      adminToken,
+      'POST',
+      `/api/v1/zones/${encodeURIComponent(zoneBDefault)}/deprovision`,
+      { confirm_zone_id: zoneBDefault },
+    )
+    assert.equal(accepted.status, 202, `deprovision failed: ${JSON.stringify(accepted.json)}`)
+    const operationId = (accepted.json as { operation_id?: string }).operation_id
+    assert.ok(operationId)
+    const deadline = Date.now() + 120_000
+    let operation: Record<string, unknown> | null = null
+    while (Date.now() <= deadline) {
+      const current = await nexusApi(nexus!, 'GET', `/v2/zone-operations/${operationId}`)
+      assert.equal(current.status, 200, `operation lookup failed: ${JSON.stringify(current.json)}`)
+      operation = current.json as Record<string, unknown>
+      if (operation.state === 'succeeded') break
+      if (operation.state === 'failed') throw new Error(`deprovision operation failed: ${JSON.stringify(operation)}`)
+      await sleep(1_000)
+    }
+    assert.equal(operation?.state, 'succeeded', `deprovision did not finish: ${JSON.stringify(operation)}`)
+    const deleted = await nexusApi(nexus!, 'GET', `/v2/zones/${encodeURIComponent(zoneBDefault)}`)
+    assert.equal(deleted.status, 200, `deleted zone tombstone missing: ${JSON.stringify(deleted.json)}`)
+    assert.equal((deleted.json as { status?: string }).status, 'deleted')
   })
 })

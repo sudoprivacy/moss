@@ -460,6 +460,28 @@ describe('ZoneManagementService (§8.8 permissions & confirmations)', () => {
       (error: unknown) => error instanceof ZoneManagementError && error.code === 'CONFIRM_MISMATCH',
     )
   })
+
+  it('preserves structured Nexus deprovision errors', async () => {
+    const client = {
+      async deprovisionZone(): Promise<ZoneOperationRef> {
+        throw new NexusZoneApiError(
+          'runtime is temporarily unavailable',
+          'ZONE_RUNTIME_UNAVAILABLE',
+          true,
+          503,
+        )
+      },
+    } as unknown as NexusZoneClient
+    const svc = new ZoneManagementService({ driver: db.driver, client, config: CONFIG })
+
+    await assert.rejects(
+      svc.deprovisionZone('org-somezone', 'org-somezone'),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.status === 503
+        && error.code === 'ZONE_RUNTIME_UNAVAILABLE'
+        && error.retryable,
+    )
+  })
 })
 
 describe('existing Org backfill (§10.4)', () => {
