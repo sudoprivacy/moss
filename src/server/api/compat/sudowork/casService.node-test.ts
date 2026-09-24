@@ -122,7 +122,9 @@ void describe('Sudowork CAS compatibility service', () => {
       refreshTokenFactory: () => 'refresh-cas',
     })
     const accountCalls: Array<{ input: any; key: string }> = []
+    let loginMethod: 'password' | 'cas' = 'cas'
     const service = new SudoworkCasService({
+      getLoginMethod: () => loginMethod,
       authDb, identities, unifiedIdentity: unified, identity, tokenStore: store,
       initialQuotaUnits: 500_000,
       accountProvisioner: {
@@ -157,6 +159,13 @@ void describe('Sudowork CAS compatibility service', () => {
     await assert.rejects(() => service.exchange({
       providerId: 'cas-main', code: 'handoff-code', deviceId: 'desktop-a',
     }))
+    const nativeId = await service.loginNative({ providerId: 'cas-main', ticket: 'native-ticket', service: 'https://api.example.test' })
+    assert.equal(nativeId, accountCalls[0]!.input.ownerId)
+    await service.createHandoff({ providerId: 'cas-main', ticket: 'another-ticket' })
+    assert.equal(await service.exchangeNative({ providerId: 'cas-main', code: 'handoff-code' }), nativeId)
+    await assert.rejects(service.exchangeNative({ providerId: 'cas-main', code: 'handoff-code' }))
+    loginMethod = 'password'
+    await assert.rejects(service.loginNative({ providerId: 'cas-main', ticket: 'disallowed-ticket', service: 'https://api.example.test' }), /未开启三方认证/)
     db.close()
   })
 })

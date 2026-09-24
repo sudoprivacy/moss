@@ -238,7 +238,19 @@ const systemItems: NavItem[] = [
     exact: true,
   },
   {
+    title: '平台配置',
+    url: '/settings/platform-config',
+    icon: ServerCog,
+    requiredRole: 'super_admin',
+  },
+  {
+    title: '账户安全',
+    url: '/account/security',
+    icon: KeyRound,
+  },
+  {
     title: '服务器凭据',
+    requiredRole: 'super_admin',
     url: '/settings/server-credentials',
     icon: ServerCog,
     requiredScope: 'admin:settings',
@@ -342,6 +354,7 @@ export function AppSidebar() {
   // neither are ungated. Shared by the top-level filters and the child-level
   // isItemVisible so children honor scope gating identically to their parents.
   const matchesScope = (item: NavItem): boolean => {
+    if (item.requiredRole && item.requiredRole !== user?.role) return false
     if ('requiredScope' in item && item.requiredScope) {
       return hasScope(scopes, item.requiredScope)
     }

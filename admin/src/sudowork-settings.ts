@@ -7,7 +7,7 @@ export const SUDOWORK_LOGIN_METHODS = [
 ] as const
 
 const POLICY_KEYS = new Set([
-  'login_method', 'third_party_auth', 'log_report', 'version_update',
+  'inherit_login_method', 'login_method', 'third_party_auth', 'log_report', 'version_update',
   'product_improvement', 'scode_auto_model', 'recharge_mode', 'credit_application',
   'client_cron_enabled', 'client_show_tool_calls', 'workspace_upload_limit_bytes',
 ])
@@ -27,5 +27,8 @@ export function buildSudoworkConfigPatch(config: Record<string, unknown>, dirtyK
       patch[key] = value
     }
   }
+  if (patch.inherit_login_method === true) delete patch.login_method
+  // Choosing the same displayed method while leaving inheritance still creates an explicit choice.
+  if (patch.inherit_login_method === false) patch.login_method = config.login_method
   return patch
 }

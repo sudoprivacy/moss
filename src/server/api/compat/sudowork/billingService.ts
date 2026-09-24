@@ -106,6 +106,7 @@ interface SudoworkBillingServiceOptions {
   credit: CreditApplicationService
   refund?: RefundService
   payment?: BillingPaymentPort
+  paymentsEnabled?: boolean
   clock?: () => number
 }
 
@@ -131,6 +132,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async createOrder(input: { actor: IdentityActor; amount: number; paymentMethod: unknown; idempotencyKey?: string }): Promise<unknown> {
+    if (this.options.paymentsEnabled === false) throw new SudoworkBillingError(403, '平台支付服务已停用新支付')
     this.requirePayment()
     const user = await this.requireUser(input.actor.userId)
     const legacyUserId = await this.ensureAlias('user', user.id, user.orgId)
@@ -146,6 +148,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async payOrder(input: { actor: IdentityActor; orderNo: string; idempotencyKey?: string }): Promise<unknown> {
+    if (this.options.paymentsEnabled === false) throw new SudoworkBillingError(403, '平台支付服务已停用新支付')
     const paymentProvider = this.requirePayment()
     const context = this.context(input.idempotencyKey, 'pay-order')
     const intent = await this.options.recharge.preparePayment(input.orderNo, input.actor.userId, context)

@@ -1,3 +1,7 @@
+import { SudoworkCasService, SudoworkCasError } from './api/compat/sudowork/casService.js'
+import { PlatformConfigService } from './configuration/platformConfigService.js'
+import { isPlatformProvider } from './configuration/platformConfigDefinition.js'
+import { PLATFORM_CREDENTIAL_GROUPS } from './configuration/platformConfigRuntime.js'
 import { createHash as resourceContentHash } from 'node:crypto'
 import { cp } from 'node:fs/promises'
 import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
@@ -1521,6 +1525,7 @@ async function ensureGatewayAccount(
  * so a leaked config file cannot move anyone's balance.
  */
 function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
+  if (config.systemConfig.sudorouterEnabled === false) return null
   // Resolved exactly as the public system-config resolves it — explicit
   // override first, otherwise derived from the model service URL the
   // deployment already uses. Requiring a separate setting here would have made
@@ -1535,6 +1540,8 @@ function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
   return createSudorouterClient({
     baseUrl,
     getAdminToken: async () => getConfigStore().get(SUDOROUTER_ADMIN_TOKEN_KEY) ?? '',
+    adminUserId: config.systemConfig.sudorouterAdminUserId,
+    timeoutMs: config.systemConfig.sudorouterTimeoutMs,
   })
 }
 
@@ -2025,6 +2032,8 @@ export function startServer(
   mossOperations?: {
     fetch: HonoFetch
   },
+  platformConfig?: PlatformConfigService,
+  cas?: SudoworkCasService,
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -2542,7 +2551,7 @@ export function startServer(
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/system-config') {
         writeJson(res, 200, {
           success: true,
-          data: buildPublicSystemConfig(config, getSystemSettings().url),
+          data: { ...buildPublicSystemConfig(config, getSystemSettings().url), ...await authService.getClientPublicConfig(url.searchParams.get('organization_code')?.trim()) },
         })
         return
       }
@@ -2584,6 +2593,75 @@ export function startServer(
 
       // Self-service signup, step 1: mint and deliver a verification code.
       // Unauthenticated by necessity — the caller has no account yet.
+      if (pathname.startsWith('/api/v1/auth/third-party/cas/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (!cas) throw new HttpError(503, 'CAS 服务未初始化')
+        try {
+          if (req.method === 'POST' && ['/api/v1/auth/third-party/cas/login', '/api/v1/auth/third-party/cas/exchange'].includes(pathname)) {
+            const body = await readJsonBody(req)
+            const providerId = typeof body.provider === 'string' ? body.provider.trim() : ''
+            const ticket = typeof body.ticket === 'string' ? body.ticket.trim() : ''
+            const service = typeof body.service === 'string' ? body.service.trim() : ''
+            const code = typeof body.code === 'string' ? body.code.trim() : ''
+            const isExchange = pathname.endsWith('/exchange')
+            if (!providerId || (isExchange ? !code : !ticket || !service)) throw new HttpError(400, 'CAS 参数不完整')
+            const userId = isExchange ? await cas.exchangeNative({ providerId, code }) : await cas.loginNative({ providerId, ticket, service })
+            const result = await authService.issueTokenFromVerifiedCasUser(userId)
+            writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
+            return
+          }
+          const callback = pathname.match(/^\/api\/v1\/auth\/third-party\/cas\/(logout\/)?callback\/([^/]+)$/)
+          if (req.method === 'GET' && callback) {
+            const providerId = decodeURIComponent(callback[2]!)
+            if (callback[1]) redirect(res, await cas.logoutCallbackUrl(providerId))
+            else {
+              const ticket = url.searchParams.get('ticket') || ''
+              if (!ticket) throw new HttpError(400, 'CAS ticket 缺失')
+              redirect(res, (await cas.createHandoff({ providerId, ticket })).redirectUrl)
+            }
+            return
+          }
+          throw new HttpError(404, 'CAS 接口不存在')
+        } catch (error) {
+          if (error instanceof SudoworkCasError) throw new HttpError(error.statusCode, error.message)
+          throw error
+        }
+      }
+
+      // The consumer client posts here rather than sending a grant_type to
+      // /auth/token, so the path exists as its own entry to the same refresh.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/refresh') {
+        const body = await readJsonBody(req)
+        const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token.trim() : ''
+        if (!refreshToken) {
+          writeJson(res, 400, { success: false, msg: 'refresh_token is required' })
+          return
+        }
+        try {
+          const data = await attachSudocodeFields(await authService.refreshToken(refreshToken), authService)
+          res.setHeader('Cache-Control', 'no-store')
+          writeJson(res, 200, { success: true, ...data, data })
+        } catch (err) {
+          // A dead refresh token is the normal end of a long absence, not a
+          // server fault; the client needs a 401 to know to show the login
+          // screen rather than an empty page.
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          writeJson(res, status, { success: false, msg: 'refresh_token is invalid or expired' })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/moss/auth/login') {
+        const body = await readJsonBody(req)
+        const result = await authService.issueMossTokenFromPassword({
+          username: typeof body.username === 'string' ? body.username : '',
+          password: typeof body.password === 'string' ? body.password : '',
+        })
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, result)
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/auth/send-code') {
         const body = await readJsonBody(req)
         const phoneAuth = authService.phoneAuth
@@ -6195,30 +6273,6 @@ export function startServer(
         return
       }
 
-      // The consumer client posts here rather than sending a grant_type to
-      // /auth/token, so the path exists as its own entry to the same refresh.
-      if (req.method === 'POST' && pathname === '/api/v1/auth/refresh') {
-        const body = await readJsonBody(req)
-        const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token.trim() : ''
-        if (!refreshToken) {
-          writeJson(res, 400, { success: false, msg: 'refresh_token is required' })
-          return
-        }
-        try {
-          writeJson(res, 200, {
-            success: true,
-            data: await attachSudocodeFields(await authService.refreshToken(refreshToken), authService),
-          })
-        } catch (err) {
-          // A dead refresh token is the normal end of a long absence, not a
-          // server fault; the client needs a 401 to know to show the login
-          // screen rather than an empty page.
-          const status = err instanceof AuthServiceError ? err.statusCode : 401
-          writeJson(res, status, { success: false, msg: 'refresh_token is invalid or expired' })
-        }
-        return
-      }
-
       if (req.method === 'POST' && pathname === '/api/v1/user/update-profile') {
         const body = await readJsonBody(req)
         const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
@@ -6261,33 +6315,13 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/auth/change-password') {
+      if (req.method === 'POST' && (pathname === '/api/v1/auth/change-password' || pathname === '/api/v1/moss/auth/change-password')) {
+        if (pathname.startsWith('/api/v1/moss/') && auth.authApp !== 'moss') throw new HttpError(403, '请使用 Moss 账户密码登录后修改密码')
         const body = await readJsonBody(req)
-        const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword : ''
-        const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
-        if (!newPassword) {
-          writeJson(res, 400, { success: false, msg: 'newPassword is required' })
-          return
-        }
-        const actor = authService.getUserById(auth.userId)
-        if (!actor) {
-          writeJson(res, 404, { success: false, msg: 'Unknown user' })
-          return
-        }
-        // The current password is re-checked here even though the caller is
-        // already authenticated: a token left behind on a shared machine must
-        // not be enough to take the account over.
-        try {
-          await authService.issueTokenFromPassword({
-            username: (await authService.getUserName(auth.userId)) ?? '',
-            password: oldPassword,
-          })
-        } catch {
-          writeJson(res, 403, { success: false, msg: 'Current password is incorrect' })
-          return
-        }
-        await authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
-        writeJson(res, 200, { success: true, msg: 'password updated' })
+        await authService.changeOwnPassword(auth,
+          typeof body.oldPassword === 'string' ? body.oldPassword : '',
+          typeof body.newPassword === 'string' ? body.newPassword : '')
+        writeJson(res, 200, { success: true, msg: '密码已修改' })
         return
       }
 
@@ -6305,7 +6339,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/create') {
-        if (config.systemConfig.rechargeMode !== 'pay') {
+        if (config.systemConfig.rechargeMode !== 'pay' || config.systemConfig.recharge.fuiou.enabled === false || config.systemConfig.sudorouterEnabled === false) {
           writeJson(res, 403, { success: false, msg: '充值功能未开启' })
           return
         }
@@ -6339,7 +6373,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/pay') {
-        if (config.systemConfig.rechargeMode !== 'pay') {
+        if (config.systemConfig.rechargeMode !== 'pay' || config.systemConfig.recharge.fuiou.enabled === false || config.systemConfig.sudorouterEnabled === false) {
           writeJson(res, 403, { success: false, msg: '充值功能未开启' })
           return
         }
@@ -7917,8 +7951,38 @@ export function startServer(
       // GET 脱敏返回；PUT 单字段编辑——同步回写内存 config 快照（就地赋值）并按需
       // 重调 initHubConfig，保存即时生效。前端仅提交实际被修改的字段；服务端忽略
       // 与脱敏占位格式相同的提交值。
+      if (pathname === '/api/v1/platform-config' || pathname.startsWith('/api/v1/platform-config/')) {
+        await authService.requireSuperAdmin(auth)
+        if (!platformConfig) throw new HttpError(503, '平台配置服务未初始化')
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method === 'GET' && pathname === '/api/v1/platform-config') {
+          writeJson(res, 200, await platformConfig.list())
+          return
+        }
+        if (pathname === '/api/v1/platform-config/password-migration' && (req.method === 'GET' || req.method === 'POST')) {
+          const body = req.method === 'POST' ? await readJsonBody(req) : {}
+          const result = await authService.migratePhonePasswords({
+            apply: req.method === 'POST', fingerprint: typeof body.fingerprint === 'string' ? body.fingerprint : undefined, actorId: auth.userId,
+          })
+          writeJson(res, 200, result)
+          return
+        }
+        const segments = pathname.slice('/api/v1/platform-config/'.length).split('/')
+        const id = segments[0] ?? ''
+        if (!isPlatformProvider(id)) throw new HttpError(404, '平台配置分组不存在')
+        if (req.method === 'POST' && segments.length === 2 && segments[1] === 'check') {
+          writeJson(res, 200, await platformConfig.check(id, await readJsonBody(req)))
+          return
+        }
+        if (req.method === 'PUT' && segments.length === 1) {
+          writeJson(res, 200, await platformConfig.save(id, await readJsonBody(req), auth.userId))
+          return
+        }
+        throw new HttpError(405, 'Method not allowed')
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/server-credentials') {
-        authService.requireScope(auth, 'admin:settings')
+        await authService.requireSuperAdmin(auth)
         const store = getConfigStore()
         const items = SERVER_CREDENTIAL_FIELDS.map(field => {
           const value = store.get(field.key)
@@ -7936,12 +8000,14 @@ export function startServer(
       }
 
       if (req.method === 'PUT' && pathname === '/api/v1/server-credentials') {
-        authService.requireScope(auth, 'admin:settings')
+        await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         const key = typeof body?.key === 'string' ? body.key : ''
         if (!SERVER_CREDENTIAL_FIELDS.some(field => field.key === key)) {
           throw new HttpError(400, `Unknown credential key: ${key}`)
         }
+        const provider = PLATFORM_CREDENTIAL_GROUPS[key as ConfigKey]
+        if (provider && platformConfig && await platformConfig.hasSaved(provider)) throw new HttpError(409, '该凭据已由平台配置接管，请在平台配置页修改')
         const value = typeof body?.value === 'string' ? body.value.trim() : ''
         if (value.startsWith('****')) {
           // 脱敏占位值原样提交 = 未实际修改，忽略以防覆盖真实凭据

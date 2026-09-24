@@ -78,7 +78,11 @@ export class SudoworkSystemConfigService {
     }
     smsRuntimeAvailable?: boolean
     smsCredentialsAvailable?: boolean
+    productImprovementAvailable?: boolean
+    platformConfigPage?: boolean
     smsConfigured?: boolean
+    getSmsReadiness?: () => Promise<{ ready: boolean; reason?: string }>
+    resolveInfrastructure?: (legacy: SudoworkInfrastructureConfig) => SudoworkInfrastructureConfig
     secrets: {
       get(key: ConfigKey): string | undefined
       put(key: ConfigKey, value: string): Promise<void>
@@ -101,10 +105,11 @@ export class SudoworkSystemConfigService {
     const productImprovement = object(policy.productImprovement)
     const enabledLogReport = flag(logReport.enabled)
     const enabledVersionUpdate = flag(versionUpdate.enabled)
-    const enabledProductImprovement = flag(productImprovement.enabled)
+    const enabledProductImprovement = this.options.productImprovementAvailable === false ? 0 : flag(productImprovement.enabled)
     const systemSettings = getSystemSettings()
     return {
       login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
+      auth_methods: [({ sms: 'phone', password: 'password', cas: 'sso' } as const)[await this.getLoginMethod(orgId)]],
       log_report: enabledLogReport === 1
         ? { enabled: 1, baseurl: `${string(logReport.protocol, 'https')}://${string(logReport.domain)}` }
         : { enabled: 0 },
@@ -115,8 +120,8 @@ export class SudoworkSystemConfigService {
         ? { enabled: 1, encryption_required: this.options.defaults.productImprovementEncryptionRequired === true }
         : { enabled: 0 },
       sudorouter_baseurl: withoutTrailingSlash(string(
-        policy.sudorouterBaseUrl,
-        infrastructure.billing.sudorouter.baseUrl || this.options.defaults.sudorouterBaseUrl || '',
+        infrastructure.billing.sudorouter.baseUrl,
+        this.options.defaults.sudorouterBaseUrl || '',
       )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
@@ -149,7 +154,7 @@ export class SudoworkSystemConfigService {
   }
 
   async getInfrastructureConfig(): Promise<SudoworkInfrastructureConfig> {
-    return {
+    const result: SudoworkInfrastructureConfig = {
       sms: normalizeSmsInfrastructure(
         await this.infrastructureSettings.get('sudowork.sms'),
         this.options.defaults.sms ?? DEFAULT_SMS_INFRASTRUCTURE,
@@ -159,6 +164,7 @@ export class SudoworkSystemConfigService {
         this.options.defaults.billing ?? DEFAULT_BILLING_INFRASTRUCTURE,
       ),
     }
+    return this.options.resolveInfrastructure?.(result) ?? result
   }
 
   async getAdminConfig(actor: IdentityActor): Promise<Json> {
@@ -173,6 +179,8 @@ export class SudoworkSystemConfigService {
       organization_id: orgId ?? '',
       login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
       sms_configured: await this.isSmsConfigured(),
+      sms_status: await this.options.getSmsReadiness?.(),
+      login_method_inherited: orgId ? (await this.options.policies.getOrganization(orgId)).loginMethod === undefined : false,
       third_party_auth: await this.thirdPartyAuth(true, orgId),
       log_report: {
         enabled: flag(logReport.enabled),
@@ -203,8 +211,7 @@ export class SudoworkSystemConfigService {
     return {
       ...config,
       restart_required: true,
-      sms: adminSmsConfig(infrastructure.sms),
-      billing: adminBillingConfig(infrastructure.billing),
+      ...(this.options.platformConfigPage ? { platform_config_url: '/settings/platform-config' } : { sms: adminSmsConfig(infrastructure.sms), billing: adminBillingConfig(infrastructure.billing) }),
     }
   }
 
@@ -215,7 +222,7 @@ export class SudoworkSystemConfigService {
     const logKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (flag(logReport.enabled) === 1 && logKey) result.log_report = { key: logKey }
     const productImprovement = object(policy.productImprovement)
-    if (flag(productImprovement.enabled) === 1) {
+    if (flag(productImprovement.enabled) === 1 && this.options.productImprovementAvailable !== false) {
       const value: Json = { api_key: this.options.defaults.productImprovementApiKey ?? '' }
       if (this.options.defaults.productImprovementEncryptionRequired) {
         value.public_key = this.options.defaults.productImprovementPublicKey ?? ''
@@ -280,6 +287,12 @@ export class SudoworkSystemConfigService {
     this.assertAdmin(actor)
     const orgId = this.policyOrgId(actor)
     const platformActor = orgId === undefined
+    if (this.options.platformConfigPage && (body.sms !== undefined || body.billing !== undefined)) {
+      throw new SudoworkSystemConfigError(platformActor ? 409 : 403, '公共服务连接已移至平台配置，请在平台配置页面修改')
+    }
+    if (body.inherit_login_method !== undefined && typeof body.inherit_login_method !== 'boolean') {
+      throw new SudoworkSystemConfigError(400, 'inherit_login_method 必须为布尔值')
+    }
     const patch: Json = {}
     let providers: NormalizedProvider[] | undefined
     let smsInfrastructure: SudoworkInfrastructureConfig['sms'] | undefined
@@ -295,12 +308,13 @@ export class SudoworkSystemConfigService {
       patch.thirdPartyAuth = { enabled: normalized.enabled, defaultProvider: normalized.defaultProvider }
     }
 
-    if (body.login_method !== undefined) {
+    if (body.login_method !== undefined && body.inherit_login_method !== true) {
       if (body.login_method !== 0 && body.login_method !== 1 && body.login_method !== 2) {
         throw new SudoworkSystemConfigError(400, '无效的登录方式')
       }
       if (body.login_method === 0 && !(await this.isSmsConfigured())) {
-        throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
+        const readiness = await this.options.getSmsReadiness?.()
+        throw new SudoworkSystemConfigError(400, readiness?.reason || '短信通道未配置,无法切换到手机验证码')
       }
       if (body.login_method === 2 && !(await this.hasEnabledThirdPartyAuth(orgId, patch.thirdPartyAuth, providers))) {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
@@ -339,6 +353,7 @@ export class SudoworkSystemConfigService {
     }
     if (body.product_improvement !== undefined) {
       const enabled = flag(object(body.product_improvement).enabled)
+      if (enabled === 1 && this.options.productImprovementAvailable === false) throw new SudoworkSystemConfigError(400, '平台 QMS 服务未启用或尚未重启生效')
       if (enabled === 1 && !this.options.defaults.productImprovementApiKey) {
         throw new SudoworkSystemConfigError(400, '未配置 QMS_DEFAULT_API_KEY,无法开启产品改进计划')
       }
@@ -386,6 +401,11 @@ export class SudoworkSystemConfigService {
     const scoped = orgId
       ? splitPlatformInheritedValues(patch, await this.platformInheritedValues(orgId))
       : { patch, inheritedKeys: [] }
+    if (body.inherit_login_method === true) {
+      if (!orgId) throw new SudoworkSystemConfigError(400, '只有组织策略可跟随平台默认')
+      delete scoped.patch.loginMethod
+      scoped.inheritedKeys.push('loginMethod')
+    }
     return {
       patch: scoped.patch,
       inheritedKeys: scoped.inheritedKeys,
@@ -399,11 +419,12 @@ export class SudoworkSystemConfigService {
   }
 
   async isSmsConfigured(): Promise<boolean> {
+    if (this.options.getSmsReadiness) return (await this.options.getSmsReadiness()).ready
     if (this.options.smsConfigured !== undefined) return this.options.smsConfigured
     const sms = (await this.getInfrastructureConfig()).sms
     return this.options.smsRuntimeAvailable === true
       && sms.provider === 'tencent'
-      && [sms.sdkAppId, sms.signName, sms.templateId, sms.signId, sms.region].every(Boolean)
+      && [sms.sdkAppId, sms.signName, sms.templateId, sms.region].every(Boolean)
       && (this.options.smsCredentialsAvailable === true || (
         Boolean(this.options.secrets.get('server.sudowork-tencent-secret-id'))
         && Boolean(this.options.secrets.get('server.sudowork-tencent-secret-key'))
@@ -650,7 +671,7 @@ function splitPlatformInheritedValues(patch: Json, platform: Json): { patch: Jso
   const result: Json = {}
   const inheritedKeys: string[] = []
   for (const [key, value] of Object.entries(patch)) {
-    if (jsonEqual(value, platform[key])) inheritedKeys.push(key)
+    if (key !== 'loginMethod' && jsonEqual(value, platform[key])) inheritedKeys.push(key)
     else result[key] = value
   }
   return { patch: result, inheritedKeys }

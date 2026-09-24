@@ -109,6 +109,7 @@ export type SudorouterConfig = {
   getAdminToken: () => Promise<string>
   fetchImpl?: typeof fetch
   timeoutMs?: number
+  adminUserId?: string
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -129,6 +130,7 @@ export function createSudorouterClient(config: SudorouterConfig): SudorouterClie
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
+          ...(config.adminUserId ? { 'New-Api-User': config.adminUserId } : {}),
           ...(init.headers ?? {}),
         },
         signal: AbortSignal.timeout(config.timeoutMs ?? DEFAULT_TIMEOUT_MS),

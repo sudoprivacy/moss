@@ -1,3 +1,4 @@
+import { migratePhonePasswords } from '../identity/phonePasswordMigration.js'
 import { randomUUID } from 'crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { DirectConnectStore } from '../db.js'
@@ -142,7 +143,7 @@ type LoginPolicyMethod = OrganizationLoginMethod
 function loginMethodForTokenKey(keyId: string): LoginPolicyMethod | null {
   if (keyId === 'password-login') return 'password'
   if (keyId === 'phone-login') return 'sms'
-  if (keyId === 'oauth2-login') return 'cas'
+  if (keyId === 'oauth2-login' || keyId === 'cas-login') return 'cas'
   return null
 }
 
@@ -455,12 +456,23 @@ export class AuthService {
     return this.clientPolicies.putOrganization(orgId, patch, updatedBy)
   }
 
-  getOrganizationSystemSettings(orgId: string | undefined, options: { redactSecrets?: boolean } = {}) {
-    return getOrganizationSystemSettings(
+  private platformRouterModelConfig?: { enabled: boolean; modelServiceUrl: string; modelsApiUrl: string }
+
+  configurePlatformRouterModel(config: { enabled: boolean; modelServiceUrl: string; modelsApiUrl: string }): void {
+    this.platformRouterModelConfig = config
+  }
+
+  async getOrganizationSystemSettings(orgId: string | undefined, options: { redactSecrets?: boolean } = {}) {
+    const settings = await getOrganizationSystemSettings(
       orgId,
       new OrganizationModelSettingsRepository(this.db.driver),
       options,
     )
+    const router = this.platformRouterModelConfig
+    if (!router) return settings
+    return { ...settings, modelProviders: settings.modelProviders.map(provider => provider.id === 'legacy-default'
+      ? { ...provider, enabled: provider.enabled && router.enabled, baseUrl: router.modelServiceUrl, discoveryUrl: router.modelsApiUrl }
+      : provider) }
   }
 
   updateOrganizationSystemSettings(
@@ -567,6 +579,7 @@ export class AuthService {
   }
 
   createSudoworkDifyServices(input: {
+    timeoutMs?: number
     baseUrl: string
     systemToken?: string
     provisionSecret?: string
@@ -586,6 +599,7 @@ export class AuthService {
     const catalogService = new CatalogService(catalog)
     const difyRepository = new DifyRepository(this.db.driver)
     const adapter = new DifyHttpAdapter({
+      timeoutMs: input.timeoutMs,
       baseUrl: input.baseUrl,
       systemToken: input.systemToken,
       provisionSecret: input.provisionSecret,
@@ -642,19 +656,32 @@ export class AuthService {
     })
   }
 
+  private systemConfiguration?: SudoworkSystemConfigService
+
+  async getClientPublicConfig(organizationCode?: string) {
+    if (!this.systemConfiguration) return null
+    const org = organizationCode ? await this.identityRepository.getOrganizationProfileByCode(organizationCode) : null
+    if (organizationCode && !org) throw new AuthServiceError(404, '企业码无效')
+    return this.systemConfiguration.getPublicConfig(org?.orgId)
+  }
+
   createSudoworkSystemConfigService(input: {
     secrets: ConfigStore
     loginMethod: 'sms' | 'password' | 'cas'
     skillhubBaseUrl: string
     sudorouterBaseUrl?: string
     smsRuntimeAvailable: boolean
+    productImprovementAvailable?: boolean
+    platformConfigPage?: boolean
+    getSmsReadiness?: () => Promise<{ ready: boolean; reason?: string }>
+    resolveInfrastructure?: (legacy: SudoworkInfrastructureConfig) => SudoworkInfrastructureConfig
     smsCredentialsAvailable: boolean
     sms: SudoworkInfrastructureConfig['sms']
     billing: SudoworkInfrastructureConfig['billing']
     productImprovementEncryptionRequired?: boolean
   }): SudoworkSystemConfigService {
     this.loginPolicyDefaults.loginMethod = input.loginMethod
-    return new SudoworkSystemConfigService({
+    this.systemConfiguration = new SudoworkSystemConfigService({
       db: this.db.driver,
       policies: this.clientPolicies,
       infrastructureSettings: new PlatformIntegrationSettingsRepository(this.db.driver),
@@ -670,14 +697,20 @@ export class AuthService {
         billing: input.billing,
       },
       smsRuntimeAvailable: input.smsRuntimeAvailable,
+      getSmsReadiness: input.getSmsReadiness,
+      platformConfigPage: input.platformConfigPage,
+      productImprovementAvailable: input.productImprovementAvailable,
+      resolveInfrastructure: input.resolveInfrastructure,
       smsCredentialsAvailable: input.smsCredentialsAvailable,
       secrets: input.secrets,
     })
+    return this.systemConfiguration
   }
 
   createSudoworkBillingService(input: {
     sudorouter: SudorouterPort
     payment?: BillingPaymentPort & FuiouRefundPort
+    paymentsEnabled?: boolean
     getCreditPolicy(orgId: string): Promise<CreditApplicationPolicy> | CreditApplicationPolicy
     testPaymentAmountCents?: number
   }): SudoworkBillingService {
@@ -699,7 +732,7 @@ export class AuthService {
     ) : undefined
     return new SudoworkBillingService({
       db: this.db.driver, auth: this.db, identities: this.identityRepository,
-      repository, wallet, recharge, coordinator, credit, refund, payment: input.payment,
+      repository, wallet, recharge, coordinator, credit, refund, payment: input.payment, paymentsEnabled: input.paymentsEnabled,
     })
   }
 
@@ -857,11 +890,28 @@ export class AuthService {
     }
   }
 
-  async issueTokenFromPassword(input: {
+  /** Only called after server-side CAS ticket/handoff validation. */
+  async issueTokenFromVerifiedCasUser(userId: string) {
+    const user = await this.db.getUserById(userId)
+    if (!user || user.status !== 'active') throw new AuthServiceError(401, 'User is invalid')
+    await this.assertOrganizationLoginMethod(user.orgId, 'cas')
+    await this.db.updateUserLastLogin(user.id)
+    return this.issueToken({ user, scopes: defaultScopesForRole(user.role), keyId: 'cas-login' })
+  }
+
+  async issueMossTokenFromPassword(input: { username?: string; email?: string; password: string }) {
+    return this.issuePasswordToken(input, 'moss')
+  }
+
+  async issueTokenFromPassword(input: { username?: string; email?: string; password: string }) {
+    return this.issuePasswordToken(input, 'sudowork')
+  }
+
+  private async issuePasswordToken(input: {
     username?: string
     email?: string
     password: string
-  }): Promise<{
+  }, application: 'moss' | 'sudowork'): Promise<{
     access_token: string
     refresh_token: string
     token_type: 'Bearer'
@@ -887,7 +937,7 @@ export class AuthService {
       throw new AuthServiceError(401, 'Invalid username/email or password')
     }
 
-    await this.assertOrganizationLoginMethod(user.orgId, 'password')
+    if (application === 'sudowork') await this.assertOrganizationLoginMethod(user.orgId, 'password')
     if (isLegacyPasswordHash(user.passwordHash)) {
       await this.db.updateUserPassword(user.id, hashPassword(input.password), Date.now())
     }
@@ -895,8 +945,7 @@ export class AuthService {
     return this.issueToken({
       user,
       scopes: defaultScopesForRole(user.role),
-      keyId: 'password-login',
-      loginMethod: 'password',
+      keyId: application === 'moss' ? 'moss-password-login' : 'password-login',
     })
   }
 
@@ -990,7 +1039,7 @@ export class AuthService {
         username: phone,
         displayName: input.nickname,
         phone,
-        password: input.password,
+        password: input.password ?? phone,
         role: 'user',
         status: 'active',
         invitationCode,
@@ -2339,7 +2388,6 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing password')
     }
     await this.assertCanManageExistingUser(user, auth)
-    await this.assertOrganizationLoginMethod(input.orgId, 'password')
 
     await this.db.updateUserPassword(
       input.userId,
@@ -2347,6 +2395,31 @@ export class AuthService {
       Date.now(),
     )
     return { ok: true }
+  }
+
+  migratePhonePasswords(input: { apply?: boolean; fingerprint?: string; actorId: string }) {
+    return migratePhonePasswords(this.db, input)
+  }
+
+  async changeOwnPassword(auth: AuthContext, oldPassword: string, newPassword: string): Promise<void> {
+    const user = await this.requireAuthUser(auth)
+    if (user.status !== 'active' || !verifyPassword(oldPassword, user.passwordHash)) {
+      throw new AuthServiceError(403, '当前密码不正确')
+    }
+    if (newPassword.length < 8 || newPassword.length > 20 || !/[A-Z]/.test(newPassword)
+      || !/[a-z]/.test(newPassword) || !/\d/.test(newPassword)) {
+      throw new AuthServiceError(400, '新密码须为 8–20 位，包含大写字母、小写字母和数字')
+    }
+    await this.db.driver.transaction(async () => {
+      await this.db.updateUserPassword(user.id, hashPassword(newPassword), Date.now())
+      await this.db.driver.run('UPDATE users SET local_auth = 1 WHERE id = ?', [user.id])
+      if (!(await this.identityRepository.findAuthIdentityByUser(user.id, 'password', 'moss'))) {
+        await this.identityRepository.createAuthIdentity({
+          id: randomUUID(), userId: user.id, orgId: user.orgId,
+          provider: 'password', issuer: 'moss', normalizedSubject: user.name, metadata: {},
+        })
+      }
+    })
   }
 
   async listApiKeys(
@@ -2648,6 +2721,7 @@ export class AuthService {
         role: input.user.role,
         scopes: input.scopes,
         key_id: input.keyId,
+        auth_app: input.keyId === 'moss-password-login' ? 'moss' : loginMethodForTokenKey(input.keyId) ? 'sudowork' : undefined,
       },
       this.db.getJwtSecret(),
       input.accessTtlSec ?? this.tokenTtlSec,
@@ -2662,6 +2736,7 @@ export class AuthService {
         role: input.user.role,
         scopes: input.scopes,
         key_id: input.keyId,
+        auth_app: input.keyId === 'moss-password-login' ? 'moss' : loginMethodForTokenKey(input.keyId) ? 'sudowork' : undefined,
       },
       this.db.getJwtSecret(),
       7 * 24 * 60 * 60, // 7 days

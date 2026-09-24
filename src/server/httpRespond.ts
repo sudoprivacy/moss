@@ -1,4 +1,5 @@
 import { ResourceAccessError } from './catalog/resourceError.js'
+import { PlatformConfigError } from './configuration/platformConfigService.js'
 // Extracted from server.ts for testability: importing the whole server.js
 // pulls in node:sqlite (bun cannot load it) AND bun:bundle (node cannot load
 // it), so its unit tests ran under neither runner. This module may transitively
@@ -68,7 +69,7 @@ export function writeError(
     writeJson(res, 403, { error: error.message })
     return
   }
-  if (error instanceof AuthServiceError || error instanceof HttpError) {
+  if (error instanceof AuthServiceError || error instanceof HttpError || error instanceof PlatformConfigError) {
     writeJson(res, error.statusCode, { error: error.message })
     return
   }

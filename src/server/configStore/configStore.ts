@@ -17,6 +17,7 @@
  */
 
 import { createHash } from 'crypto'
+import { PlatformConfigError } from '../configuration/platformConfigService.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { ServerConfig } from '../types.js'
 
@@ -381,6 +382,7 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
 export class ConfigStore {
   private readonly client: NexusClient | null
   private readonly cache = new Map<ConfigKey, string>()
+  private readonly managed = new Map<ConfigKey, string | undefined>()
   private refreshTimer: NodeJS.Timeout | null = null
   private lastFingerprint: string | null = null
 
@@ -390,8 +392,11 @@ export class ConfigStore {
 
   /** 同步读缓存；未初始化（runner 子进程）或未设置时返回 undefined，不抛错。 */
   get(key: ConfigKey): string | undefined {
-    return this.cache.get(key)
+    return this.managed.has(key) ? this.managed.get(key) : this.cache.get(key)
   }
+
+  setManaged(key: ConfigKey, value: string | undefined): void { this.managed.set(key, value) }
+  isManaged(key: ConfigKey): boolean { return this.managed.has(key) }
 
   /** 当前缓存的 key 集合（测试/诊断用）。 */
   keys(): Set<ConfigKey> {
@@ -448,6 +453,7 @@ export class ConfigStore {
    * 仅用于 server.json 侧 10 个字段时才传 config。
    */
   async put(key: ConfigKey, value: string, config?: ServerConfig): Promise<void> {
+    if (this.isManaged(key)) throw new PlatformConfigError(409, '该凭据已由平台配置接管')
     if (!this.client) {
       throw new Error('[ConfigStore] 未初始化（initConfigStore 未调用），无法写入')
     }
@@ -462,6 +468,7 @@ export class ConfigStore {
    * resolveServerConfig 的取值语义，与现状"从文件删键"运行时等价。
    */
   async remove(key: ConfigKey, config?: ServerConfig): Promise<void> {
+    if (this.isManaged(key)) throw new PlatformConfigError(409, '该凭据已由平台配置接管')
     if (!this.client) {
       throw new Error('[ConfigStore] 未初始化（initConfigStore 未调用），无法删除')
     }
@@ -491,6 +498,7 @@ export class ConfigStore {
    */
   hydrateConfig(config: ServerConfig): void {
     for (const field of SERVER_FIELDS) {
+      if (this.managed.has(field.key)) { field.apply(config, this.managed.get(field.key) || field.fallbackValue); continue }
       // env 优先（hub 除外）：config 已由 resolveServerConfig 置为 env 值，保持不动
       if (!field.ignoreEnvGate && process.env[field.envName]) continue
       // Nexus 有值用 Nexus，否则回落默认/undefined —— 覆盖并丢弃文件值

@@ -225,6 +225,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       publicBaseUrl: z.string().url().optional(),
       loginMethod: z.enum(['sms', 'password', 'cas']).default('password'),
       dify: z.object({
+        timeoutMs: z.number().positive().optional(),
         baseUrl: z.string().url().default('http://localhost:5001'),
       }).default({
         baseUrl: 'http://localhost:5001',
@@ -491,6 +492,9 @@ export const serverFileConfigSchema = lazySchema(() =>
        * derives it from the system settings' model service url.
        */
       sudorouterBaseUrl: z.string().min(1).optional(),
+      sudorouterEnabled: z.boolean().optional(),
+      sudorouterAdminUserId: z.string().optional(),
+      sudorouterTimeoutMs: z.number().positive().optional(),
       skillhubBaseUrl: z.string().min(1).optional(),
       scodeAutoModel: z.string().min(1).optional(),
       /**
@@ -518,6 +522,7 @@ export const serverFileConfigSchema = lazySchema(() =>
         orderExpireMinutes: z.number().int().min(1).default(30),
         usdToCnyRate: z.number().min(0).default(7.3),
         fuiou: z.object({
+          enabled: z.boolean().optional(),
           testMode: z.boolean().default(false),
           merchantCode: z.string().optional(),
           timeoutMs: z.number().int().min(1000).default(10_000),
@@ -717,6 +722,7 @@ export type ServerConfig = {
     legacyJwtSecret?: string
     redisUrl?: string
     dify: {
+      timeoutMs?: number
       baseUrl: string
       systemToken?: string
       provisionSecret?: string

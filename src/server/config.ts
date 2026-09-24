@@ -372,6 +372,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       legacyJwtSecret: process.env.SUDOWORK_LEGACY_JWT_SECRET || undefined,
       redisUrl: process.env.SUDOWORK_REDIS_URL || undefined,
       dify: {
+        timeoutMs: raw.sudoworkCompatibility.dify.timeoutMs,
         baseUrl: (process.env.DIFY_BASE_URL || raw.sudoworkCompatibility.dify.baseUrl).replace(/\/+$/, ''),
         systemToken: process.env.DIFY_SYSTEM_TOKEN || undefined,
         provisionSecret: process.env.DIFY_SYSTEM_SECRET || undefined,

@@ -13,6 +13,8 @@ const UsersPage = lazy(() => import('./pages/users-page'))
 const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page'))
 const ApiKeysPage = lazy(() => import('./pages/api-keys-page'))
 const SystemSettingsPage = lazy(() => import('./pages/system-settings-page'))
+const PlatformConfigPage = lazy(() => import('./pages/platform-config-page'))
+const AccountSecurityPage = lazy(() => import('./pages/account-security-page'))
 const ServerCredentialsPage = lazy(() => import('./pages/server-credentials-page'))
 const ChannelsPage = lazy(() => import('./pages/channels-page'))
 const CorpAppsPage = lazy(() => import('./pages/corp-apps-page'))
@@ -154,6 +156,11 @@ export default function App() {
             </SuspendedRoute>
           }
         />
+        <Route
+          path="/settings/platform-config"
+          element={<SuspendedRoute><PlatformConfigPage /></SuspendedRoute>}
+        />
+        <Route path="/account/security" element={<SuspendedRoute><AccountSecurityPage /></SuspendedRoute>} />
         <Route
           path="/settings/server-credentials"
           element={

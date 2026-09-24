@@ -62,7 +62,7 @@ describe("invited phone registration", () => {
     assert.equal(await auth.getUserModelCredential(registered.user.id), null);
     assert.equal(usersCreated, 0, "reading a missing credential must not provision an account");
     assert.equal(registered.user.localExecutionAllowed, true);
-    assert.equal(registered.user.localAuth, false);
+    assert.equal(registered.user.localAuth, true);
     await auth.ensureUserSudorouterAccount(registered.user.id);
     await auth.ensureUserSudorouterAccount(registered.user.id);
     assert.deepEqual(await auth.getUserModelCredential(registered.user.id), {
@@ -98,6 +98,15 @@ describe("invited phone registration", () => {
 
     assert.equal(result.user.orgId, orgId);
     assert.equal(result.user.role, "user");
+    const mossSession = await auth.issueMossTokenFromPassword({ username: "13800138000", password: "13800138000" });
+    const mossAuth = await auth.verifyAccessToken(mossSession.access_token);
+    assert(mossAuth);
+    assert.equal(mossAuth.authApp, "moss");
+    await auth.changeOwnPassword(mossAuth, "13800138000", "ChangedPass123");
+    await assert.rejects(auth.issueMossTokenFromPassword({ username: "13800138000", password: "13800138000" }));
+    await auth.registerWithPhone({ phone: "13800138000", invitationCode: "JOINME" });
+    assert.equal((await auth.issueMossTokenFromPassword({ username: "13800138000", password: "ChangedPass123" })).user.id, result.user.id);
+
     assert.equal((await auth.listAllOrganizations()).organizations.length, 1);
     assert.equal(
       (await db.getUserByPhone("13800138000"))?.displayName,
