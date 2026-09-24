@@ -53,15 +53,7 @@ export class SudorouterAccountService {
   ) {}
 
   async getAccount(ownerId: string, orgId: string): Promise<SudorouterAccountResult | null> {
-    const account = await this.repository.getExternalAccount('sudorouter', 'user', ownerId)
-    if (!account?.tokenSecretRef) return null
-    return {
-      externalUserId: account.externalAccountId,
-      token: await this.readToken(account.tokenSecretRef, orgId),
-      tokenSecretRef: account.tokenSecretRef,
-      quotaUnits: account.quotaUnits,
-      usedQuotaUnits: account.usedQuotaUnits,
-    }
+    return readSudorouterAccount(this.repository, this.secrets, ownerId, orgId)
   }
 
   ensureAccount(
@@ -125,7 +117,7 @@ export class SudorouterAccountService {
     let operation = prepared.operation
 
     if (operation.status === 'COMPLETED' && operation.tokenSecretRef && operation.externalAccountId) {
-      return this.completed(operation, await this.readToken(operation.tokenSecretRef, input.orgId))
+      return this.completed(operation, await readToken(this.secrets, operation.tokenSecretRef, input.orgId))
     }
     if (!prepared.claimed) throw new SudorouterAccountError('Sudorouter 开户操作正在处理中')
 
@@ -154,7 +146,7 @@ export class SudorouterAccountService {
       const tokenSecretRef = operation.tokenSecretRef ?? secretRef(input.ownerId)
       let token: string
       if (operation.tokenSecretRef) {
-        token = await this.readToken(operation.tokenSecretRef, input.orgId)
+        token = await readToken(this.secrets, operation.tokenSecretRef, input.orgId)
       } else {
         token = await this.provider.createToken({
           externalUserId: operation.externalAccountId!,
@@ -237,14 +229,6 @@ export class SudorouterAccountService {
     return { ...account, quotaUnits: baselineQuotaUnits + deltaUnits }
   }
 
-  private async readToken(reference: string, orgId: string): Promise<string> {
-    const parsed = parseSecretRef(reference)
-    const record = await this.secrets.getSecret(parsed.namespace, parsed.key, `org:${orgId}`)
-    const token = record?.value?.trim()
-    if (!token) throw new SudorouterAccountError('Sudorouter 用户 Token 不存在')
-    return token
-  }
-
   private completed(operation: SudorouterProvisioningRecord, token: string): SudorouterAccountResult {
     return {
       externalUserId: operation.externalAccountId!, token,
@@ -258,6 +242,32 @@ export class SudorouterAccountService {
       throw new SudorouterAccountError('Sudorouter 开户用户信息不完整')
     }
   }
+}
+
+/** Existing user credentials remain readable without enabling the management API. */
+export async function readSudorouterAccount(
+  repository: BillingRepository,
+  secrets: Pick<SudorouterSecretPort, 'getSecret'>,
+  ownerId: string,
+  orgId: string,
+): Promise<SudorouterAccountResult | null> {
+  const account = await repository.getExternalAccount('sudorouter', 'user', ownerId)
+  if (!account?.tokenSecretRef) return null
+  return {
+    externalUserId: account.externalAccountId,
+    token: await readToken(secrets, account.tokenSecretRef, orgId),
+    tokenSecretRef: account.tokenSecretRef,
+    quotaUnits: account.quotaUnits,
+    usedQuotaUnits: account.usedQuotaUnits,
+  }
+}
+
+async function readToken(secrets: Pick<SudorouterSecretPort, 'getSecret'>, reference: string, orgId: string): Promise<string> {
+  const parsed = parseSecretRef(reference)
+  const record = await secrets.getSecret(parsed.namespace, parsed.key, `org:${orgId}`)
+  const token = record?.value?.trim()
+  if (!token) throw new SudorouterAccountError('Sudorouter 用户 Token 不存在')
+  return token
 }
 
 function fingerprint(input: EnsureSudorouterAccountInput): string {

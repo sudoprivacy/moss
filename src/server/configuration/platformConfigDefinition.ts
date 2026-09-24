@@ -24,9 +24,8 @@ export const PLATFORM_DEFINITIONS: Record<PlatformProvider, { label: string; des
       field('secretId', 'Secret ID', 'secret', true), field('secretKey', 'Secret Key', 'secret', true)],
   },
   sudorouter: {
-    label: 'Sudorouter', description: '统一管理接口与模型服务地址，保留用户及组织的独立模型凭据。',
+    label: 'Sudorouter', description: '平台共用的账号与额度管理 API；模型服务地址在各组织的系统设置中配置。',
     fields: [enabled, field('baseUrl', '管理 API 根地址', 'url', true), field('adminUserId', '管理员用户 ID', 'text', true),
-      field('modelServiceUrl', '模型服务地址', 'url'), field('modelsApiUrl', '模型列表地址', 'url'),
       number('timeoutMs', '请求超时（毫秒）'), field('apiToken', '平台管理 Token', 'secret', true)],
   },
   fuiou: {

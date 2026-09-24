@@ -380,12 +380,6 @@ async function finishStandaloneServerStartup(
     },
     productImprovementEncryptionRequired: platformConfig.isManaged('qms') ? config.qms?.encryptionRequired === true : process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
   })
-  if (platformConfig.isManaged('sudorouter')) {
-    const c = platformConfig.getActive('sudorouter').config
-    const root = String(c.baseUrl || '').replace(/\/+$/, '')
-    const modelServiceUrl = String(c.modelServiceUrl || `${root}/v1`)
-    authService.configurePlatformRouterModel({ enabled: c.enabled === true, modelServiceUrl, modelsApiUrl: String(c.modelsApiUrl || `${modelServiceUrl}/models`) })
-  }
   const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
   const infrastructure = await systemConfiguration.getInfrastructureConfig()
   const sudorouterRuntime = platformConfig.isManaged('sudorouter') && !platformConfig.getActive('sudorouter').config.enabled ? null : resolveSudorouterRuntimeConfig({
@@ -399,6 +393,7 @@ async function finishStandaloneServerStartup(
     const migrated = await migrateLegacySudorouterCredentials(store.driver, sudorouter, nexusClient)
     if (migrated.imported > 0) console.info(`[Startup] Adopted ${migrated.imported} existing Sudorouter credentials`)
   }
+  authService.configureSudorouterCredentialReader(nexusClient)
   const accountProvisioner = sudorouter
     ? authService.createSudorouterAccountService({ provider: sudorouter, secrets: nexusClient })
     : undefined
@@ -477,10 +472,7 @@ async function finishStandaloneServerStartup(
     secrets: nexusClient,
     listModels: listOrganizationModels,
     quotaReader: sudorouter,
-    getRuntimeConfig: async orgId => ({
-      modelServiceUrl: (await systemConfiguration.getInfrastructureConfig()).billing.sudorouter.modelServiceUrl,
-      scodeAutoModel: String((await systemConfiguration.getPublicConfig(orgId)).scode_auto_model ?? ''),
-    }),
+    getScodeAutoModel: async orgId => String((await systemConfiguration.getPublicConfig(orgId)).scode_auto_model ?? ''),
   })
   qmsRuntime = await startQmsRuntime({
     config: config.qms,

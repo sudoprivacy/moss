@@ -30,9 +30,15 @@ void describe('Sudowork Billing 运行配置', () => {
     }), {
       baseUrl: 'https://router.policy', apiToken: 'nexus-router-token',
       adminUserId: '13', timeoutMs: 11_000, initialQuota: 50_000_000,
-      modelServiceUrl: 'https://router.policy/v1',
-      modelsApiUrl: 'https://router.policy/api/specific_pricing',
     })
+  })
+
+  void test('管理 API 初始化不依赖模型地址字段或模型环境变量', () => {
+    assert.deepEqual(resolveSudorouterRuntimeConfig({
+      infrastructure: { baseUrl: 'https://admin.test', adminUserId: '76', timeoutMs: 1000, initialQuota: 0 },
+      environment: { SUDOROUTER_MODEL_SERVICE_URL: 'https://model.test/v1', SUDOROUTER_MODELS_API_URL: 'https://model.test/models' },
+      getSecret: () => 'admin-token',
+    }), { baseUrl: 'https://admin.test', adminUserId: '76', apiToken: 'admin-token', timeoutMs: 1000, initialQuota: 0 })
   })
 
   void test('非敏感参数来自统一策略且敏感值来自 Nexus', () => {

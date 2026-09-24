@@ -70,8 +70,6 @@ export async function legacyPlatformSnapshots(config: ServerConfig, store: Confi
     enabled: Boolean(routerToken || oldToken), baseUrl: env.SUDOROUTER_BASE_URL || str(router.baseUrl) || config.systemConfig.sudorouterBaseUrl || '',
     adminUserId: env.SUDOROUTER_ADMIN_USER_ID || str(router.adminUserId) || '13',
     timeoutMs: Number(env.SUDOROUTER_TIMEOUT_MS || router.timeoutMs || 10000),
-    modelServiceUrl: env.SUDOROUTER_MODEL_SERVICE_URL || str(router.modelServiceUrl),
-    modelsApiUrl: env.SUDOROUTER_MODELS_API_URL || str(router.modelsApiUrl) || 'https://hk.sudorouter.ai/api/specific_pricing',
   }, { apiToken: routerToken || oldToken }, 'environment / legacy platform / server.json / Nexus')
   routerSnapshot.conflicts = routerToken && oldToken && routerToken !== oldToken ? ['apiToken'] : []
   result.sudorouter = routerSnapshot
@@ -165,7 +163,9 @@ export function platformInfrastructure(service: PlatformConfigService, legacy: S
   }
   if (service.isManaged('sudorouter')) {
     const c = service.getActive('sudorouter').config
-    Object.assign(result.billing.sudorouter, c, { baseUrl: c.enabled ? c.baseUrl : '', modelServiceUrl: c.enabled ? c.modelServiceUrl : '', modelsApiUrl: c.enabled ? c.modelsApiUrl : '' })
+    Object.assign(result.billing.sudorouter, {
+      baseUrl: c.enabled ? str(c.baseUrl) : '', adminUserId: str(c.adminUserId), timeoutMs: Number(c.timeoutMs),
+    })
   }
   if (service.isManaged('fuiou')) {
     const c = service.getActive('fuiou').config

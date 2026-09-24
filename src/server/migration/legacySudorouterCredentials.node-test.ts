@@ -250,8 +250,7 @@ void test('凭据迁移使用平台管理 API 的 URL、Token 和管理员 ID，
     await platform.initialize()
     await platform.save('sudorouter', {
       expectedVersion: null,
-      config: { enabled: true, baseUrl: 'https://router-admin.platform.test', adminUserId: '76', timeoutMs: 1000,
-        modelServiceUrl: '', modelsApiUrl: '' },
+      config: { enabled: true, baseUrl: 'https://router-admin.platform.test', adminUserId: '76', timeoutMs: 1000 },
       secrets: { apiToken: 'test-platform-admin-token' },
     }, 'root')
     const restarted = createPlatform()
