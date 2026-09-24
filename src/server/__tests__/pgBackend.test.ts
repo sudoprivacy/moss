@@ -11,12 +11,14 @@
 // the AuthCenterDb shared-store (postgres) construction form.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { PgDriver, type PgPoolLike } from "../db/driver.js";
 import { applyPgSchema } from "../db/pg_schema.js";
 import { DirectConnectStore, forPostgresDirectConnectStore } from "../db.js";
 import { CronStore } from "../services/cron/CronStore.js";
 import { AuthCenterDb } from "../authCenter/db.js";
+import { lookupMembership } from "../zones/binding/membershipLookup.js";
 import { isUniqueViolationOn } from "../auth/service.js";
 import { EventTriggerStore } from "../services/eventTrigger/EventTriggerStore.js";
 
@@ -115,7 +117,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -348,6 +350,33 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       await authDb.setConfig("jwt_secret", "test-secret-value");
       assert.equal(await authDb.getConfig("jwt_secret"), "test-secret-value");
     });
+
+    it("increments membership revision atomically only for actual role/status changes", async () => {
+      const authDb = new AuthCenterDb(fix.store);
+      const suffix = Math.random().toString(36).slice(2);
+      const orgId = randomUUID();
+      const userId = randomUUID();
+      await authDb.createOrganization(orgId, "Membership PG", Date.now());
+      await authDb.createUser({
+        id: userId, orgId, email: `${suffix}@membership.test`, name: "member",
+        displayName: null, departmentId: null, role: "user", status: "active",
+        localAuth: true, tokenLimit: null, createdAt: Date.now(), passwordHash: null,
+        passwordUpdatedAt: null, lastLoginAt: null, extUserId: null, phone: null,
+      });
+
+      await authDb.updateUser(userId, { name: "profile-only" });
+      assert.equal((await lookupMembership(fix.driver, userId, orgId))?.revision, 0);
+      await Promise.all([
+        authDb.updateUser(userId, { role: "admin" }),
+        authDb.updateUser(userId, { role: "admin" }),
+      ]);
+      assert.equal((await lookupMembership(fix.driver, userId, orgId))?.revision, 1);
+      await authDb.updateUser(userId, { status: "disabled" });
+      await authDb.updateUser(userId, { status: "disabled" });
+      assert.deepEqual(await lookupMembership(fix.driver, userId, orgId), {
+        status: "disabled", role: "admin", revision: 2,
+      });
+    });
   });
 
   describe("HA fixes: LIKE escaping through prepare() (C-7)", () => {
@@ -507,6 +536,8 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           INSERT INTO _migrations (version, name, applied_at) VALUES (1, 'initial-schema', 0);
           CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, ext_org_id TEXT, created_at BIGINT NOT NULL);
           CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, local_auth BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL);
+          CREATE TABLE sessions (session_id TEXT PRIMARY KEY);
+          CREATE TABLE session_attempts (attempt_id TEXT PRIMARY KEY);
           CREATE TABLE wikis (id TEXT PRIMARY KEY, source_mode TEXT, source_node_ids TEXT, source_exclude_node_ids TEXT, auto_rebuild BIGINT DEFAULT 0, needs_rebuild BIGINT DEFAULT 0, created_by TEXT NOT NULL, created_at BIGINT NOT NULL);
           INSERT INTO wikis (id, created_by, created_at) VALUES ('w1', 'u1', 0);
           CREATE TABLE wiki_build_jobs (id TEXT PRIMARY KEY, wiki_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', queued_at BIGINT NOT NULL, triggered_by TEXT NOT NULL);
@@ -546,10 +577,10 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: still exactly [1, 2, 3, 4].
+        // Re-run is a no-op: all published migrations remain recorded once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
         // v3 (audit fixes): tenant-store org indexes (C-4) + the E-2
         // channel_sessions snapshot column.
         for (const idx of ["idx_tenant_skills_org", "idx_tenant_assistants_org"]) {

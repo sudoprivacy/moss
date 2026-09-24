@@ -43,6 +43,8 @@ export type AuthCenterUser = {
   departmentId: string | null
   role: string
   status: AuthCenterUserStatus
+  /** Monotonic authorization-membership version; changes only with role/status. */
+  membershipRevision: number
   localAuth: boolean
   tokenLimit: number | null
   createdAt: number
@@ -117,7 +119,7 @@ export type AuthCenterStore = {
 
 export type SanitizedAuthCenterUser = Omit<
   AuthCenterUser,
-  'passwordHash' | 'email'
+  'passwordHash' | 'email' | 'membershipRevision'
 > & {
   email: string | null
 }
@@ -192,6 +194,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     departmentId: row.department_id == null ? null : String(row.department_id),
     role: String(row.role),
     status: String(row.status) as AuthCenterUserStatus,
+    membershipRevision: Number(row.membership_revision ?? 0),
     localAuth: Boolean(row.local_auth),
     tokenLimit: row.token_limit == null ? null : Number(row.token_limit),
     createdAt: Number(row.created_at),
@@ -393,6 +396,7 @@ export class AuthCenterDb {
         department_id TEXT REFERENCES departments(id),
         role TEXT NOT NULL DEFAULT 'user',
         status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'locked', 'disabled')),
+        membership_revision INTEGER NOT NULL DEFAULT 0,
         password_hash TEXT,
         password_updated_at INTEGER,
         last_login_at INTEGER,
@@ -677,6 +681,13 @@ export class AuthCenterDb {
       'ALTER TABLE users ADD COLUMN sudorouter_key TEXT',
     )
     this.ensureUserStatusCompatibility()
+    // Independent from the legacy status-table rebuild above: databases that
+    // already support pending/locked still need the monotonic membership column.
+    this.ensureColumn(
+      'users',
+      'membership_revision',
+      'ALTER TABLE users ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 0',
+    )
     this.ensureColumn(
       'departments',
       'ext_dept_id',
@@ -722,6 +733,11 @@ export class AuthCenterDb {
 
     // Zone binding 三表（§8.7；SQLite 路径。PG 路径由 pg_schema.ts 提供）
     this.db.exec(ZONE_BINDING_TABLES_DDL)
+    this.ensureColumn(
+      'zone_binding_outbox',
+      'grant_source_id',
+      'ALTER TABLE zone_binding_outbox ADD COLUMN grant_source_id TEXT',
+    )
   }
 
   private ensureColumn(
@@ -984,7 +1000,9 @@ export class AuthCenterDb {
   }
 
   // User operations
-  async createUser(user: AuthCenterUser): Promise<void> {
+  async createUser(
+    user: Omit<AuthCenterUser, 'membershipRevision'> & { membershipRevision?: number },
+  ): Promise<void> {
     await this.driver.run(`
       INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, local_auth,
                          token_limit, password_hash, password_updated_at, last_login_at, created_at,
@@ -1530,33 +1548,43 @@ export class AuthCenterDb {
       extUserId?: string | null
     },
   ): Promise<void> {
-    const user = await this.getUserById(id)
-    if (!user) {
-      return
+    const assignments: string[] = []
+    const params: SqlParam[] = []
+    const add = (column: string, value: SqlParam): void => {
+      assignments.push(`${column} = ?`)
+      params.push(value)
     }
 
-    await this.driver.run(`
-      UPDATE users
-      SET name = ?,
-          display_name = ?,
-          email = ?,
-          org_id = ?,
-          department_id = ?,
-          role = ?,
-          status = ?,
-          ext_user_id = ?
-      WHERE id = ?
-    `, [
-      patch.name ?? user.name,
-      patch.displayName === undefined ? user.displayName : patch.displayName,
-      patch.email ?? user.email,
-      patch.orgId ?? user.orgId,
-      patch.departmentId === undefined ? user.departmentId : patch.departmentId,
-      patch.role ?? user.role,
-      patch.status ?? user.status,
-      patch.extUserId === undefined ? user.extUserId : patch.extUserId,
-      id,
-    ])
+    if (patch.name !== undefined) add('name', patch.name)
+    if (patch.displayName !== undefined) add('display_name', patch.displayName)
+    if (patch.email !== undefined) add('email', patch.email)
+    if (patch.orgId !== undefined) add('org_id', patch.orgId)
+    if (patch.departmentId !== undefined) add('department_id', patch.departmentId)
+    if (patch.role !== undefined) add('role', patch.role)
+    if (patch.status !== undefined) add('status', patch.status)
+    if (patch.extUserId !== undefined) add('ext_user_id', patch.extUserId)
+
+    const membershipComparisons: string[] = []
+    if (patch.role !== undefined) {
+      membershipComparisons.push('role <> ?')
+      params.push(patch.role)
+    }
+    if (patch.status !== undefined) {
+      membershipComparisons.push('status <> ?')
+      params.push(patch.status)
+    }
+    if (membershipComparisons.length > 0) {
+      assignments.push(
+        `membership_revision = membership_revision + CASE WHEN ${membershipComparisons.join(' OR ')} THEN 1 ELSE 0 END`,
+      )
+    }
+    if (assignments.length === 0) return
+
+    params.push(id)
+    await this.driver.run(
+      `UPDATE users SET ${assignments.join(', ')} WHERE id = ?`,
+      params,
+    )
   }
 
   async updateUserLastLogin(id: string): Promise<void> {
@@ -2156,7 +2184,7 @@ export function sanitizeApiKey(apiKey: AuthCenterApiKey): Omit<
 export function sanitizeUser(
   user: AuthCenterUser,
 ): SanitizedAuthCenterUser {
-  const { passwordHash: _passwordHash, email, ...rest } = user
+  const { passwordHash: _passwordHash, membershipRevision: _membershipRevision, email, ...rest } = user
   return {
     ...rest,
     email: sanitizePublicEmail(email),

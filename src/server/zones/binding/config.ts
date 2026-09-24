@@ -19,6 +19,8 @@
  *   - `MOSS_NEXUS_V2_TIMEOUT_MS`   请求超时，默认 10s；超时/断连一律按
  *                                  `unknown` 处理（先查 operation，不得
  *                                  换 idempotency key 重试）
+ *   - `MOSS_INTERNAL_API_TOKEN`    Nexus membership 回查共享 secret；空值
+ *                                  表示内部 membership 端点关闭
  *
  * 未配置 base URL 时 `zoneBindingEnabled` 为 false：binding 仍会写入本地
  * 表并保持 `pending`（§8.7 验收——Nexus 离线时 Org 创建可完成），reconciler
@@ -30,6 +32,7 @@ export interface ZoneBindingConfig {
   nexusV2ServiceToken: string
   nexusDeploymentId: string
   nexusV2TimeoutMs: number
+  internalApiToken: string
 }
 
 export function resolveZoneBindingConfig(env: NodeJS.ProcessEnv = process.env): ZoneBindingConfig {
@@ -40,5 +43,6 @@ export function resolveZoneBindingConfig(env: NodeJS.ProcessEnv = process.env): 
     nexusV2ServiceToken: env.MOSS_NEXUS_V2_SERVICE_TOKEN?.trim() ?? '',
     nexusDeploymentId: env.MOSS_NEXUS_DEPLOYMENT_ID?.trim() || 'local',
     nexusV2TimeoutMs: Number(env.MOSS_NEXUS_V2_TIMEOUT_MS) || 10_000,
+    internalApiToken: env.MOSS_INTERNAL_API_TOKEN?.trim() ?? '',
   }
 }

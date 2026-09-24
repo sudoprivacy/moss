@@ -20,6 +20,7 @@ import {
 } from '../binding/bindingRepository.js'
 import { ZoneBindingReconciler } from '../binding/bindingService.js'
 import { ZoneDelegationService, ZoneDelegationError } from '../binding/delegationService.js'
+import { lookupMembership } from '../binding/membershipLookup.js'
 import { applyOrgZoneBackfill, planOrgZoneBackfill } from '../binding/backfill.js'
 import { ZoneManagementService, ZoneManagementError } from '../binding/managementService.js'
 import type { ZoneBindingConfig } from '../binding/config.js'
@@ -29,6 +30,7 @@ import {
   NexusZoneUnknownError,
   type ZoneOperationRef,
 } from '../../nexus/nexusZoneClient.js'
+import { reconcilePendingNexusSessions } from '../runtime/sessionZoneBridge.js'
 
 let raw: DatabaseSync
 let db: AuthCenterDb
@@ -50,6 +52,7 @@ const CONFIG: ZoneBindingConfig = {
   // 不设 MOSS_NEXUS_DEPLOYMENT_ID），binding 行因此对得上。
   nexusDeploymentId: 'local',
   nexusV2TimeoutMs: 50,
+  internalApiToken: '',
 }
 
 describe('org creation writes binding intent + outbox in one transaction', () => {
@@ -74,6 +77,7 @@ describe('org creation writes binding intent + outbox in one transaction', () =>
     assert.equal(outbox.action, 'provision')
     assert.equal(outbox.status, 'pending')
     assert.equal(outbox.fence, 0)
+    assert.equal(outbox.grant_source_id, `${String(binding.binding_id)}:1`)
 
     const audit = raw
       .prepare(`SELECT COUNT(*) AS n FROM zone_binding_audit`)
@@ -198,7 +202,7 @@ describe('zone_binding_outbox claim/fence lifecycle', () => {
 /** 记录调用并按脚本回放的 fake /v2 client——不产生任何网络。 */
 class FakeZoneClient {
   readonly zoneCalls: Array<{ zoneId: string; key: string }> = []
-  readonly grantCalls: Array<{ zoneId: string; grantee: string; key: string }> = []
+  readonly grantCalls: Array<{ zoneId: string; grantee: string; sourceId: string; key: string }> = []
   script: Array<'ok' | 'unknown' | 'retryable' | 'fatal'> = ['ok']
 
   async createZone(input: { zoneId: string }, key: string): Promise<ZoneOperationRef> {
@@ -214,8 +218,8 @@ class FakeZoneClient {
     return { operation_id: operationId, action: 'create', zone_id: 'z', grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false }
   }
 
-  async createGrant(input: { zoneId: string; grantee: { subject_id: string } }, key: string): Promise<ZoneOperationRef> {
-    this.grantCalls.push({ zoneId: input.zoneId, grantee: input.grantee.subject_id, key })
+  async createGrant(input: { zoneId: string; grantee: { subject_id: string }; source: { source_id: string } }, key: string): Promise<ZoneOperationRef> {
+    this.grantCalls.push({ zoneId: input.zoneId, grantee: input.grantee.subject_id, sourceId: input.source.source_id, key })
     return { operation_id: 'grant-op-1', action: 'grant', zone_id: input.zoneId, grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false }
   }
 
@@ -247,6 +251,7 @@ describe('reconciler', () => {
     assert.equal(fake.grantCalls.length, 1)
     // grantee 是 organization principal（Org grant，非用户直发）
     assert.equal(fake.grantCalls[0].grantee, orgId)
+    assert.match(fake.grantCalls[0].sourceId, /:1$/)
     const binding = (raw
       .prepare(`SELECT * FROM org_zone_bindings WHERE org_id = ?`)
       .get(orgId)) as Record<string, unknown>
@@ -330,7 +335,7 @@ describe('ZoneDelegationService', () => {
     return { orgId, userId: 'uuuuuuuu-0000-4000-8000-000000000001' }
   }
 
-  it('issues for an active member and passes status:role as membership version', async () => {
+  it('issues for an active member and passes the monotonic membership revision', async () => {
     const { orgId, userId } = await seedActiveOrgWithUser()
     const fake = new FakeDelegationClient()
     const service = new ZoneDelegationService({
@@ -340,7 +345,7 @@ describe('ZoneDelegationService', () => {
     })
     const issued = await service.issueForOrgUser({ orgId, userId })
     assert.equal(issued.delegationId, 'del-1')
-    assert.equal(fake.issued[0].membershipVersion, 'active:admin')
+    assert.equal(fake.issued[0].membershipVersion, 'r0')
     assert.equal(validateZoneId(issued.zoneId), null)
   })
 
@@ -381,6 +386,112 @@ describe('ZoneDelegationService', () => {
       service.issueForOrgUser({ orgId, userId }),
       (error: unknown) => error instanceof ZoneDelegationError && error.code === 'BINDING_PENDING',
     )
+  })
+})
+
+describe('membership revision and lookup', () => {
+  async function seedMembership(): Promise<string> {
+    const orgId = 'eeeeeeee-0000-4000-8000-000000000001'
+    await db.createOrganization(orgId, 'Membership Org', Date.now())
+    await db.createUser({
+      id: 'eeeeeeee-0000-4000-8000-000000000002',
+      orgId,
+      email: 'member@example.test',
+      name: 'member',
+      displayName: null,
+      departmentId: null,
+      role: 'user',
+      status: 'active',
+      localAuth: true,
+      tokenLimit: null,
+      createdAt: Date.now(),
+      passwordHash: null,
+      passwordUpdatedAt: null,
+      lastLoginAt: null,
+      extUserId: null,
+      phone: null,
+    })
+    return orgId
+  }
+
+  it('increments exactly once for actual role/status changes and never for profile writes or retries', async () => {
+    const orgId = await seedMembership()
+    const userId = 'eeeeeeee-0000-4000-8000-000000000002'
+    await db.updateUser(userId, { name: 'renamed', email: 'renamed@example.test' })
+    assert.equal((await lookupMembership(db.driver, userId, orgId))?.revision, 0)
+
+    await Promise.all([
+      db.updateUser(userId, { role: 'admin' }),
+      db.updateUser(userId, { role: 'admin' }),
+    ])
+    assert.deepEqual(await lookupMembership(db.driver, userId, orgId), {
+      status: 'active', role: 'admin', revision: 1,
+    })
+
+    await db.updateUser(userId, { status: 'disabled' })
+    await db.updateUser(userId, { status: 'disabled' })
+    assert.deepEqual(await lookupMembership(db.driver, userId, orgId), {
+      status: 'disabled', role: 'admin', revision: 2,
+    })
+    assert.equal(await lookupMembership(db.driver, userId, 'wrong-org'), null)
+  })
+
+  it('adds membership_revision to an existing SQLite users table without losing data', async () => {
+    const legacy = new DatabaseSync(':memory:')
+    try {
+      legacy.exec(`
+        CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE users (
+          id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), email TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL, display_name TEXT, department_id TEXT, role TEXT NOT NULL DEFAULT 'user',
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending','active','locked','disabled')),
+          local_auth INTEGER NOT NULL DEFAULT 0, token_limit INTEGER, password_hash TEXT,
+          password_updated_at INTEGER, last_login_at INTEGER, created_at INTEGER NOT NULL,
+          ext_user_id TEXT, phone TEXT, sudorouter_user_id TEXT, sudorouter_key TEXT
+        );
+        INSERT INTO organizations VALUES ('legacy-org', 'Legacy', 1);
+        INSERT INTO users (id, org_id, email, name, role, status, created_at)
+          VALUES ('legacy-user', 'legacy-org', 'legacy@example.test', 'legacy', 'user', 'active', 1);
+      `)
+      const upgraded = new AuthCenterDb(legacy, ':memory:')
+      const membership = await lookupMembership(upgraded.driver, 'legacy-user', 'legacy-org')
+      assert.deepEqual(membership, { status: 'active', role: 'user', revision: 0 })
+    } finally {
+      legacy.close()
+    }
+  })
+})
+
+describe('session home-zone conflict quarantine', () => {
+  it('records a 409 mismatch and excludes it from further automatic retries', async () => {
+    raw.exec(`
+      CREATE TABLE sessions (
+        session_id TEXT PRIMARY KEY,
+        home_zone_id TEXT,
+        home_zone_observed_revision TEXT,
+        home_zone_observed_at TEXT,
+        home_zone_sync_error TEXT
+      );
+      INSERT INTO sessions (session_id, home_zone_id) VALUES ('session-conflict', 'wanted-zone');
+    `)
+    let creates = 0
+    const client = {
+      async createSession() {
+        creates++
+        throw new NexusZoneApiError('conflict', 'SESSION_ALREADY_EXISTS', false, 409)
+      },
+      async getSession() {
+        return { session_id: 'session-conflict', home_zone_id: 'other-zone', updated_at: 'v1' }
+      },
+    } as unknown as NexusZoneClient
+
+    assert.equal(await reconcilePendingNexusSessions(db.driver, client), 0)
+    const row = raw.prepare(
+      `SELECT home_zone_sync_error FROM sessions WHERE session_id = 'session-conflict'`,
+    ).get() as { home_zone_sync_error: string }
+    assert.equal(row.home_zone_sync_error, 'HOME_ZONE_CONFLICT:other-zone')
+    assert.equal(await reconcilePendingNexusSessions(db.driver, client), 0)
+    assert.equal(creates, 1, 'quarantined conflicts require an explicit error clear before retry')
   })
 })
 

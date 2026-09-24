@@ -759,12 +759,14 @@ export class RuntimeService {
           : null
         await this.store.driver.run(
           `UPDATE sessions
-           SET home_zone_id = ?, home_zone_observed_at = ?, home_zone_observed_revision = ?
+           SET home_zone_id = ?, home_zone_observed_at = ?, home_zone_observed_revision = ?,
+               home_zone_sync_error = ?
            WHERE session_id = ?`,
           [
             resolution.homeZoneId,
-            observed ? observed.observedAt : null,
-            observed ? observed.observedRevision : null,
+            observed?.observedAt ?? null,
+            observed?.observedRevision ?? null,
+            observed?.syncError ?? null,
             created.sessionId,
           ],
         )
@@ -1749,7 +1751,8 @@ export class RuntimeService {
 
     // P1a (§8.10 R5.2)：runner generation 记录 execution_zone_id 并与 Nexus
     // PID/runtime descriptor 对账。execution zone 默认 = session home zone；
-    // Nexus 不可达时本地仍记录（对账由后台补写），不阻塞 spawn。
+    // Nexus 不可达、delegation 无法换发或 descriptor 对账失败时，下面会
+    // markAttemptLost 并令 spawn 失败；zoned runner 始终 fail closed。
     try {
       const sessionRow = await this.store.driver.get(
         `SELECT home_zone_id FROM sessions WHERE session_id = ? LIMIT 1`,

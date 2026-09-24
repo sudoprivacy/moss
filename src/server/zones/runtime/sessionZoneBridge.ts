@@ -47,6 +47,7 @@ export function applyRunnerZoneContext(
   delete env.MOSS_NEXUS_V2_SERVICE_TOKEN
   delete env.NEXUS_API_KEY
   delete env.NEXUS_ADMIN_BOOTSTRAP_TOKEN
+  delete env.MOSS_INTERNAL_API_TOKEN
   if (context) {
     env.NEXUS_ZONE_ID = context.NEXUS_ZONE_ID
     env.NEXUS_V2_BASE_URL = context.NEXUS_V2_BASE_URL
@@ -110,16 +111,33 @@ interface NexusSessionView {
 export async function establishNexusSession(
   client: NexusZoneClient,
   input: { sessionId: string; homeZoneId: string },
-): Promise<{ observedAt: string; observedRevision: string } | null> {
+): Promise<{
+  observedAt: string | null
+  observedRevision: string | null
+  syncError: string | null
+} | null> {
   try {
     const response = await client.createSession(input.sessionId, input.homeZoneId)
-    return { observedAt: new Date().toISOString(), observedRevision: response.updated_at }
+    return {
+      observedAt: new Date().toISOString(),
+      observedRevision: response.updated_at,
+      syncError: null,
+    }
   } catch (error) {
     if (error instanceof NexusZoneApiError && error.status === 409) {
       try {
         const existing = await client.getSession(input.sessionId)
         if (existing.home_zone_id === input.homeZoneId) {
-          return { observedAt: new Date().toISOString(), observedRevision: existing.updated_at }
+          return {
+            observedAt: new Date().toISOString(),
+            observedRevision: existing.updated_at,
+            syncError: null,
+          }
+        }
+        return {
+          observedAt: null,
+          observedRevision: null,
+          syncError: `HOME_ZONE_CONFLICT:${existing.home_zone_id}`,
         }
       } catch {
         // Fall through to pending: an existing session that cannot be read
@@ -137,7 +155,9 @@ export async function reconcilePendingNexusSessions(
 ): Promise<number> {
   const rows = await driver.all(
     `SELECT session_id, home_zone_id FROM sessions
-     WHERE home_zone_id IS NOT NULL AND home_zone_observed_revision IS NULL`,
+     WHERE home_zone_id IS NOT NULL
+       AND home_zone_observed_revision IS NULL
+       AND home_zone_sync_error IS NULL`,
   )
   let written = 0
   for (const row of rows) {
@@ -145,10 +165,15 @@ export async function reconcilePendingNexusSessions(
       sessionId: String(row.session_id),
       homeZoneId: String(row.home_zone_id),
     })
-    if (established) {
+    if (established?.syncError) {
+      await driver.run(
+        `UPDATE sessions SET home_zone_sync_error = ? WHERE session_id = ?`,
+        [established.syncError, String(row.session_id)],
+      )
+    } else if (established?.observedRevision) {
       await driver.run(
         `UPDATE sessions
-         SET home_zone_observed_at = ?, home_zone_observed_revision = ?
+         SET home_zone_observed_at = ?, home_zone_observed_revision = ?, home_zone_sync_error = NULL
          WHERE session_id = ?`,
         [established.observedAt, established.observedRevision, String(row.session_id)],
       )

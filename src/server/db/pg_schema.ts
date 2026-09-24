@@ -64,7 +64,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at BIGINT NOT NULL,
   last_active_at BIGINT NOT NULL,
   ended_at BIGINT,
-  deleted_at BIGINT
+  deleted_at BIGINT,
+  home_zone_id TEXT,
+  home_zone_observed_at TEXT,
+  home_zone_observed_revision TEXT,
+  home_zone_sync_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_attempts (
@@ -653,6 +657,7 @@ CREATE TABLE IF NOT EXISTS users (
   department_id TEXT REFERENCES departments(id),
   role TEXT NOT NULL DEFAULT 'user',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  membership_revision BIGINT NOT NULL DEFAULT 0,
   password_hash TEXT,
   password_updated_at BIGINT,
   last_login_at BIGINT,
@@ -1247,6 +1252,13 @@ const MIGRATION_0007_SESSION_ZONE_REVISION = `
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_revision TEXT;
 `
 
+/** H-2 + branch audit expand-only columns (membership, outbox idempotency, session sync). */
+const MIGRATION_0008_ZONE_MEMBERSHIP = `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE zone_binding_outbox ADD COLUMN IF NOT EXISTS grant_source_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_sync_error TEXT;
+`
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
@@ -1255,6 +1267,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 5, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
   { version: 6, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
   { version: 7, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
+  { version: 8, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

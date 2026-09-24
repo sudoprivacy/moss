@@ -74,6 +74,7 @@ void describe('SQLite UnitOfWork', () => {
         departmentId: null,
         role: 'user',
         status: 'active',
+        membershipRevision: 0,
         localAuth: true,
         tokenLimit: null,
         createdAt: 1,

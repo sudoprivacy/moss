@@ -47,6 +47,7 @@ export interface ZoneBindingOutboxRow {
   attempts: number
   next_retry_at: number | null
   operation_id: string | null
+  grant_source_id: string | null
   last_error_code: string | null
   created_at: number
   updated_at: number
@@ -93,6 +94,7 @@ function mapOutbox(row: SqlRow): ZoneBindingOutboxRow {
     attempts: Number(row.attempts),
     next_retry_at: row.next_retry_at == null ? null : Number(row.next_retry_at),
     operation_id: row.operation_id == null ? null : String(row.operation_id),
+    grant_source_id: row.grant_source_id == null ? null : String(row.grant_source_id),
     last_error_code: row.last_error_code == null ? null : String(row.last_error_code),
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
@@ -136,9 +138,9 @@ export async function insertDefaultBindingIntent(
 
   await driver.run(
     `INSERT INTO zone_binding_outbox (
-       id, binding_id, generation, action, status, fence, attempts, created_at, updated_at
-     ) VALUES (?, ?, 1, 'provision', 'pending', 0, 0, ?, ?)`,
-    [outboxId, bindingId, input.now, input.now],
+       id, binding_id, generation, action, status, fence, attempts, grant_source_id, created_at, updated_at
+     ) VALUES (?, ?, 1, 'provision', 'pending', 0, 0, ?, ?, ?)`,
+    [outboxId, bindingId, `${bindingId}:1`, input.now, input.now],
   )
 
   await driver.run(
@@ -380,9 +382,9 @@ export async function insertManagedBindingIntent(
   )
   await driver.run(
     `INSERT INTO zone_binding_outbox (
-       id, binding_id, generation, action, status, fence, attempts, created_at, updated_at
-     ) VALUES (?, ?, 1, 'provision', 'pending', 0, 0, ?, ?)`,
-    [outboxId, bindingId, input.now, input.now],
+       id, binding_id, generation, action, status, fence, attempts, grant_source_id, created_at, updated_at
+     ) VALUES (?, ?, 1, 'provision', 'pending', 0, 0, ?, ?, ?)`,
+    [outboxId, bindingId, `${bindingId}:1`, input.now, input.now],
   )
   await driver.run(
     `INSERT INTO zone_binding_audit (id, binding_id, action, actor, detail, created_at)

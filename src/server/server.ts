@@ -1,5 +1,5 @@
 import http from 'http'
-import { randomUUID } from 'crypto'
+import { randomUUID, timingSafeEqual } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
 import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
@@ -18,6 +18,7 @@ import { AuthService, AuthServiceError } from './auth/service.js'
 import { ZoneDelegationError } from './zones/binding/delegationService.js'
 import { ZoneManagementError, ZoneManagementService } from './zones/binding/managementService.js'
 import { resolveZoneBindingConfig } from './zones/binding/config.js'
+import { lookupMembership } from './zones/binding/membershipLookup.js'
 import { NexusZoneClient } from './nexus/nexusZoneClient.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
@@ -2110,6 +2111,13 @@ export function startServer(
     config: zoneBindingConfig,
   })
 
+  const hasInternalApiToken = (candidate: string | null): boolean => {
+    if (!zoneBindingConfig.internalApiToken || candidate == null) return false
+    const actual = Buffer.from(candidate, 'utf8')
+    const expected = Buffer.from(zoneBindingConfig.internalApiToken, 'utf8')
+    return actual.length === expected.length && timingSafeEqual(actual, expected)
+  }
+
   // Cron Service - scheduled task execution engine
   const cronService = new CronService(runtime.store.driver, {
     runtimeService: runtime,
@@ -2936,6 +2944,26 @@ export function startServer(
           throw new HttpError(401, 'User account is disabled')
         }
         writeJson(res, 200, await authService.getMe(auth))
+        return
+      }
+
+      // External service-to-service membership lookup for Nexus delegation
+      // revalidation. This deliberately uses its own shared secret instead of
+      // the short-lived HA internal-channel token family.
+      if (req.method === 'GET' && pathname === '/api/v1/internal/zone-membership') {
+        if (!hasInternalApiToken(getBearerToken(req))) {
+          throw new HttpError(403, 'Forbidden')
+        }
+        const userId = url.searchParams.get('user_id')?.trim() ?? ''
+        const orgId = url.searchParams.get('org_id')?.trim() ?? ''
+        if (!userId || !orgId) {
+          throw new HttpError(400, 'Missing user_id or org_id')
+        }
+        const membership = await lookupMembership(runtime.store.driver, userId, orgId)
+        if (!membership) {
+          throw new HttpError(404, 'Membership not found')
+        }
+        writeJson(res, 200, membership)
         return
       }
 

@@ -16,7 +16,9 @@
  *    临时 server.json；串行运行（规格 `-n 0` 语义，避免并行端口竞争）。
  */
 import { spawn, spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { Agent, setGlobalDispatcher } from 'undici'
@@ -56,6 +58,37 @@ export interface MossProcess {
   alive: () => boolean
 }
 
+interface MembershipStub {
+  url: string
+  stop: () => Promise<void>
+}
+
+async function startMembershipStub(token: string): Promise<MembershipStub> {
+  const port = await freePort()
+  const server = createHttpServer((req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+    if (
+      req.method !== 'GET'
+      || url.pathname !== '/api/v1/internal/zone-membership'
+      || req.headers.authorization !== `Bearer ${token}`
+    ) {
+      res.writeHead(req.headers.authorization === `Bearer ${token}` ? 404 : 403).end()
+      return
+    }
+    const body = JSON.stringify({ status: 'active', role: 'user', revision: 0 })
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
+    res.end(body)
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(port, '127.0.0.1', resolve)
+  })
+  return {
+    url: `http://127.0.0.1:${port}/api/v1/internal/zone-membership`,
+    stop: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
+  }
+}
+
 /**
  * 从低段（25000-45000）选取可用端口——避开 ephemeral 范围（49152+）。
  *
@@ -66,7 +99,7 @@ export interface MossProcess {
  * ECONNREFUSED，进程存活、无崩溃日志）——nexus（Python）与 moss（node）
  * 均复现，与被测系统无关。低段端口不受动态保留影响，实测稳定。
  */
-function freePort(): Promise<number> {
+export function freePort(): Promise<number> {
   const pick = (): Promise<number> =>
     new Promise((resolve, reject) => {
       const candidate = 25000 + Math.floor(Math.random() * 20000)
@@ -104,11 +137,16 @@ function mintServiceKey(env: NodeJS.ProcessEnv, tmp: string): string {
 }
 
 /** 启动真实 nexus（Python full profile）。 */
-export async function startNexus(tmp: string): Promise<NexusProcess> {
+export async function startNexus(
+  tmp: string,
+  input: { membershipUrl?: string; internalApiToken?: string } = {},
+): Promise<NexusProcess> {
   mkdirSync(join(tmp, 'metastore'), { recursive: true })
   mkdirSync(join(tmp, 'kernel-identity'), { recursive: true })
   mkdirSync(join(tmp, 'home'), { recursive: true })
 
+  const internalApiToken = input.internalApiToken ?? randomUUID()
+  const membershipStub = input.membershipUrl ? null : await startMembershipStub(internalApiToken)
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NEXUS_API_KEY_SECRET: 'test-e2e-kernel-secret-12345',
@@ -117,6 +155,10 @@ export async function startNexus(tmp: string): Promise<NexusProcess> {
     NEXUS_JWT_SECRET: 'p0-e2e-jwt-secret',
     NEXUS_DATABASE_URL: `sqlite:///${join(tmp, 'nexus.db').replaceAll('\\', '/')}`,
     NEXUS_ZONE_DELEGATION_ISSUERS: 'moss-e2e',
+    NEXUS_ZONE_MEMBERSHIP_URL: input.membershipUrl
+      ? `${input.membershipUrl}/api/v1/internal/zone-membership`
+      : membershipStub!.url,
+    NEXUS_ZONE_MEMBERSHIP_TOKEN: internalApiToken,
     NEXUS_RECORD_STORE_PATH: join(tmp, 'record_store.db'),
     NEXUS_UPLOAD_MIN_CHUNK_SIZE: '1',
     NEXUS_RATE_LIMIT_ENABLED: 'false',
@@ -176,7 +218,10 @@ export async function startNexus(tmp: string): Promise<NexusProcess> {
     baseUrl,
     apiKey: serviceKey,
     adminApiKey: apiKey,
-    stop: () => stopChild(child),
+    stop: async () => {
+      await stopChild(child)
+      if (membershipStub) await membershipStub.stop()
+    },
   }
 }
 
@@ -198,11 +243,16 @@ function stopChild(child: { kill: (signal?: NodeJS.Signals) => boolean; pid?: nu
 /** 启动真实 moss server（tsx 源码直跑）。 */
 export async function startMoss(
   tmp: string,
-  input: { nexusV2BaseUrl: string; nexusServiceToken: string },
+  input: {
+    nexusV2BaseUrl: string
+    nexusServiceToken: string
+    port?: number
+    internalApiToken?: string
+  },
 ): Promise<MossProcess> {
   const adminUsername = 'p0admin'
   const adminPassword = 'p0-e2e-password-123'
-  const port = await freePort()
+  const port = input.port ?? await freePort()
   const configPath = join(tmp, 'server.json')
   writeFileSync(configPath, JSON.stringify({
     server: { host: '127.0.0.1', port },
@@ -222,6 +272,7 @@ export async function startMoss(
     MOSS_NEXUS_V2_BASE_URL: input.nexusV2BaseUrl,
     MOSS_NEXUS_V2_SERVICE_TOKEN: input.nexusServiceToken,
     MOSS_NEXUS_DEPLOYMENT_ID: 'p0-e2e',
+    MOSS_INTERNAL_API_TOKEN: input.internalApiToken ?? '',
     // embedded nexus（secrets 数据面）gRPC 端口随机：moss#1 停止后端口可能
     // 处于 TIME_WAIT，复用 2126 会让 moss#2 的 embedded nexusd bind 失败
     MOSS_NEXUS_GRPC_PORT: String(await freePort()),

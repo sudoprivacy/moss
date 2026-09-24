@@ -35,6 +35,7 @@ async function setup() {
   const user: AuthCenterUser = {
     id: 'user-a', orgId: 'org-a', email: 'user-a@example.test', name: 'user-a', displayName: null,
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
+    membershipRevision: 0,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   }
   await auth.createUser(user)

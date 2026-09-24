@@ -23,6 +23,7 @@ function user(id: string, orgId: string, status: AuthCenterUser['status']): Auth
     departmentId: null,
     role: 'user',
     status,
+    membershipRevision: 0,
     localAuth: true,
     tokenLimit: null,
     createdAt: 1,

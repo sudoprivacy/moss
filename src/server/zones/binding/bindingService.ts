@@ -172,7 +172,13 @@ export class ZoneBindingReconciler {
           zoneId: binding.zone_id,
           grantee: { subject_type: 'organization', subject_id: binding.org_id },
           capabilities: JSON.parse(binding.desired_capabilities) as string[],
-          source: { source_type: 'moss_org_binding', source_id: binding.binding_id },
+          source: {
+            source_type: 'moss_org_binding',
+            // Persisted on the outbox row so retries across an upgrade reuse
+            // the exact request body. Legacy rows intentionally keep the old
+            // binding-only source id.
+            source_id: row.grant_source_id ?? binding.binding_id,
+          },
           reason: 'moss default org zone binding',
           policyVersion: this.policyVersion,
         },

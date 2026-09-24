@@ -72,7 +72,7 @@ export class ZoneDelegationService {
     const ttlS = input.ttlS ?? DEFAULT_TTL_S
 
     const user = await this.driver.get(
-      `SELECT id, org_id, role, status FROM users WHERE id = ? AND org_id = ? LIMIT 1`,
+      `SELECT id, org_id, role, status, membership_revision FROM users WHERE id = ? AND org_id = ? LIMIT 1`,
       [input.userId, input.orgId],
     )
     if (!user) {
@@ -106,8 +106,7 @@ export class ZoneDelegationService {
       return cached
     }
 
-    // membership version：`${status}:${role}` —— role/status 变更即版本变更
-    const membershipVersion = `${String(user.status)}:${String(user.role)}`
+    const membershipVersion = `r${Number(user.membership_revision)}`
 
     const result: ZoneDelegationResult = await this.client.issueDelegation(
       {
