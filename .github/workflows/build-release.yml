@@ -72,6 +72,17 @@ jobs:
       - name: Run server tests
         run: bun run test
 
+      # `scripts/e2e/session-owner-live.ts` needs a live auth-on daemon and an
+      # operator's node certificate, so CI cannot run it. Keeping it compiling
+      # is what stops it rotting into something nobody can run — and it lives
+      # here rather than beside the `node --check` lines because, unlike those,
+      # it needs node_modules.
+      - name: Keep the live session-owner e2e compiling
+        run: |
+          node node_modules/typescript/bin/tsc --noEmit --module nodenext \
+            --moduleResolution nodenext --target es2022 --skipLibCheck \
+            scripts/e2e/session-owner-live.ts
+
       # Nothing in this repo has ever type-checked: bun executes TypeScript
       # without checking it, and the release artifact is produced by `bun build`,
       # a bundler. A wrong-arity call therefore reaches dev under a fully green
