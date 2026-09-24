@@ -172,13 +172,12 @@ export class SudoworkIdentityService {
     const created = existingUser ? { userId: existingUser.id } : await this.unifiedIdentity.createUser({
       orgId: invitation!.orgId,
       username: phone,
+      phone,
+      password: phone,
       displayName: input.nickname,
       role: 'user',
       status: this.options.accountProvisioner ? 'pending' : 'active',
       invitationCode: input.invitationCode,
-      authIdentity: {
-        provider: 'phone', issuer: 'sudowork', subject: phone, metadata: {},
-      },
     }, onlineCommandContext(createKey))
     await this.provisionAccount(created.userId, phone, input.nickname, createKey)
     await this.options.tokenStore.del(registerKey)

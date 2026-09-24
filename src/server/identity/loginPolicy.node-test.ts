@@ -13,6 +13,7 @@ mock.method(os, 'homedir', () => temporaryHome)
 const { AuthService, AuthServiceError } = await import('../auth/service.js')
 const { AuthCenterDb, hashPassword } = await import('../authCenter/db.js')
 const { ClientPolicyRepository, ensureClientPolicySchema } = await import('../configuration/clientPolicyRepository.js')
+const { ensureOrganizationModelSettingsSchema } = await import('../configuration/organizationModelSettingsRepository.js')
 const { ensurePlatformIntegrationSettingsSchema } = await import('../configuration/platformIntegrationSettingsRepository.js')
 const { resolveEffectiveLoginMethod } = await import('../configuration/loginPolicy.js')
 const { IdentityRepository, ensureIdentitySchema } = await import('./identityRepository.js')
@@ -35,6 +36,7 @@ async function setup(t: TestContext, defaultLoginMethod: OrganizationLoginMethod
   const authDb = new AuthCenterDb(db)
   ensureIdentitySchema(db)
   ensureClientPolicySchema(db)
+  ensureOrganizationModelSettingsSchema(db)
   ensurePlatformIntegrationSettingsSchema(db)
   ensureCompatibilityCounterTable(db)
   await authDb.setConfig('issuer', 'moss-login-policy-test')
@@ -167,7 +169,7 @@ void test('configured platform policy overrides legacy profiles and organization
   await service.issueTokenFromPassword(passwordInput)
   await assert.rejects(service.issueTokenFromPhone(phone), forbidden)
   await config.update(scopedRoot, { login_method: 0 })
-  assert.equal((await policies.getOrganization('org-a')).loginMethod, undefined)
+  assert.equal((await policies.getOrganization('org-a')).loginMethod, 0)
   assert.equal((await config.getLoginMethod('org-a')), 'sms')
 })
 
@@ -185,7 +187,7 @@ void test('clearing an organization override restores its legacy profile when pl
   await identities.putOrganizationProfile({ ...(await identities.getOrganizationProfile('org-b'))!, loginMethod: 'cas' })
   await config.update({ ...scopedRoot, orgId: 'org-b' }, { login_method: 1 })
   assert.equal((await policies.getOrganization('org-b')).loginMethod, 1)
-  await config.update({ ...scopedRoot, orgId: 'org-b' }, { login_method: 2 })
+  await config.update({ ...scopedRoot, orgId: 'org-b' }, { inherit_login_method: true })
   assert.equal((await policies.getOrganization('org-b')).loginMethod, undefined)
   assert.equal((await config.getLoginMethod('org-b')), 'cas')
   t.mock.method(OAuth2Bridge.prototype, 'resolve', async () => providerIdentity({ extOrgId: 'external-b' }))
@@ -327,4 +329,67 @@ void test('new organizations on an upgraded DEFAULT 0 schema still obey the curr
   await identities.setOrganizationClientCronEnabled(orgId, false)
   await identities.putOrganizationProfile({ ...(await identities.getOrganizationProfile(orgId))!, loginMethod: 'cas' })
   assert.equal((await service.isOrganizationClientCronEnabled(orgId)), false)
+})
+
+
+void test('Moss password login, refresh, organization switching and self-service password changes ignore Sudowork policy', async t => {
+  const { service, config, policies } = await setup(t)
+  await config.update(scopedRoot, { login_method: 0 })
+  const session = await service.issueMossTokenFromPassword(passwordInput)
+  const auth = (await service.verifyAccessToken(session.access_token))!
+  assert.equal(auth.authApp, 'moss')
+  const switched = await service.switchOrg(auth, 'org-b')
+  await policies.putOrganization('org-a', { loginMethod: 'cas' }, 'root')
+  const refreshed = await service.refreshToken(switched.refresh_token)
+  assert.equal((await service.verifyAccessToken(refreshed.access_token))?.authApp, 'moss')
+  await assert.rejects(service.issueTokenFromPassword(passwordInput), forbidden)
+  await assert.rejects(service.changeOwnPassword(auth, 'wrong', 'NewStrong123'), forbidden)
+  await service.changeOwnPassword(auth, passwordInput.password, 'NewStrong123')
+  await assert.rejects(service.issueMossTokenFromPassword(passwordInput))
+  assert.equal((await service.issueMossTokenFromPassword({ ...passwordInput, password: 'NewStrong123' })).user.id, 'root')
+})
+
+void test('an explicitly saved organization choice stays independent when the platform changes', async t => {
+  const { config, policies } = await setup(t)
+  await config.update(root, { login_method: 0 })
+  await config.update(scopedRoot, { login_method: 0 })
+  assert.equal((await policies.getOrganization('org-a')).loginMethod, 0)
+  await config.update(root, { login_method: 1 })
+  assert.equal(await config.getLoginMethod('org-a'), 'sms')
+  assert.equal(await config.getLoginMethod('org-b'), 'password')
+  await config.update(scopedRoot, { inherit_login_method: true })
+  assert.equal(await config.getLoginMethod('org-a'), 'password')
+})
+
+void test('public organization discovery is scoped and invalid codes do not return platform defaults', async t => {
+  const { service, config, identities } = await setup(t)
+  await config.update({ ...scopedRoot, orgId: 'org-a' }, { login_method: 0 })
+  await config.update({ ...scopedRoot, orgId: 'org-b' }, { login_method: 1 })
+  const orgA = await identities.getOrganizationProfile('org-a')
+  const orgB = await identities.getOrganizationProfile('org-b')
+  assert.deepEqual((await service.getClientPublicConfig(orgA!.code))!.auth_methods, ['phone'])
+  assert.deepEqual((await service.getClientPublicConfig(orgB!.code))!.auth_methods, ['password'])
+  await assert.rejects(service.getClientPublicConfig('does-not-exist'), /企业码无效/)
+})
+
+void test('ordinary organization administrators cannot access platform administration even with wildcard scope', async t => {
+  const { service, authDb } = await setup(t)
+  await authDb.driver.run("UPDATE users SET role = 'admin' WHERE id = ?", ['root'])
+  const session = await service.issueMossTokenFromPassword(passwordInput)
+  const auth = (await service.verifyAccessToken(session.access_token))!
+  assert(auth.scopes.includes('*'))
+  await assert.rejects(service.requireSuperAdmin(auth), forbidden)
+})
+
+void test('managed Router discovery uses global endpoints with per-organization business providers intact', async t => {
+  const { service } = await setup(t)
+  service.configurePlatformRouterModel({ enabled: true, modelServiceUrl: 'https://platform.test/v1', modelsApiUrl: 'https://platform.test/models' })
+  for (const orgId of ['org-a', 'org-b']) {
+    const settings = await service.getOrganizationSystemSettings(orgId)
+    const router = settings.modelProviders.find(provider => provider.id === 'legacy-default')!
+    assert.equal(router.baseUrl, 'https://platform.test/v1')
+    assert.equal(router.discoveryUrl, 'https://platform.test/models')
+  }
+  service.configurePlatformRouterModel({ enabled: false, modelServiceUrl: '', modelsApiUrl: '' })
+  assert.equal((await service.getOrganizationSystemSettings('org-a')).modelProviders.find(provider => provider.id === 'legacy-default')!.enabled, false)
 })

@@ -154,6 +154,11 @@ export class SudoworkCasService {
     })
   }
 
+  async loginNative(input: { providerId: string; ticket: string; service: string }): Promise<string> {
+    const resolved = await this.resolveUser(input.providerId, input.ticket, input.service)
+    return resolved.user.id
+  }
+
   async createHandoff(input: { providerId: string; ticket: string }): Promise<{ redirectUrl: string }> {
     const provider = await this.getProvider(input.providerId)
     if (provider.callbackMode !== 'server_callback') {
@@ -176,6 +181,15 @@ export class SudoworkCasService {
   }
 
   async exchange(input: { providerId: string; code: string; deviceId?: string }): Promise<SudoworkLegacySession> {
+    const payload = await this.consumeHandoff(input)
+    return this.options.identity.startSessionForCanonicalUser({ userId: payload.userId, account: payload.account, deviceId: input.deviceId })
+  }
+
+  async exchangeNative(input: { providerId: string; code: string }): Promise<string> {
+    return (await this.consumeHandoff(input)).userId
+  }
+
+  private async consumeHandoff(input: { providerId: string; code: string }): Promise<{ userId: string; account: string }> {
     const provider = await this.getProvider(input.providerId)
     const key = `cas_handoff:${hash(input.code)}`
     const raw = await this.options.tokenStore.get(key)
@@ -187,11 +201,7 @@ export class SudoworkCasService {
       ? await this.options.tokenStore.rotate(key, `cas_handoff_used:${hash(input.code)}`, 1, 'used')
       : await consumeHandoffToken(this.options.tokenStore, key, `cas_handoff_used:${hash(input.code)}`)
     if (!consumed) throw new SudoworkCasError(401, '登录凭证已失效，请重新登录')
-    return this.options.identity.startSessionForCanonicalUser({
-      userId: payload.userId,
-      account: payload.account,
-      deviceId: input.deviceId,
-    })
+    return payload
   }
 
   async logoutCallbackUrl(providerId: string): Promise<string> {
@@ -214,6 +224,7 @@ export class SudoworkCasService {
     user: AuthCenterUser
   }> {
     const provider = await this.getProvider(providerId)
+    await this.assertCasLoginEnabled(provider.orgId)
     const profile = await this.validator.validate(provider, service, ticket)
     if (!profile.active) throw new SudoworkCasError(403, 'CAS 用户已被禁用')
     const existingIdentity = await this.options.identities.findAuthIdentity('cas', provider.id, profile.subject)

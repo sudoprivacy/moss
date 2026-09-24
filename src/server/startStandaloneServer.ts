@@ -1,3 +1,6 @@
+import { PlatformConfigService } from './configuration/platformConfigService.js'
+import { PlatformIntegrationSettingsRepository } from './configuration/platformIntegrationSettingsRepository.js'
+import { legacyPlatformSnapshots, applyPlatformRuntime, platformInfrastructure, platformEnvironment, smsReadiness, resolveNativeSmsCredentials } from './configuration/platformConfigRuntime.js'
 import type { ServerConfig } from './types.js'
 import { startServer } from './server.js'
 import { printBanner } from './serverBanner.js'
@@ -148,6 +151,17 @@ async function finishStandaloneServerStartup(
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
   const store = await openStoreAsync(config)
+  await store.driver.exec(`CREATE TABLE IF NOT EXISTS platform_integration_settings (
+    setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_by TEXT NOT NULL,
+    created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+  )`)
+  const platformConfig = new PlatformConfigService({
+    driver: store.driver, vault: nexusClient, instanceId: config.instanceId || `standalone-${process.pid}`,
+    legacy: providers => legacyPlatformSnapshots(config, configStore, nexusClient, new PlatformIntegrationSettingsRepository(store.driver), process.env, providers),
+  })
+  await platformConfig.initialize()
+  applyPlatformRuntime(platformConfig, config, configStore)
+
   const sqliteDb = store.db
   if (sqliteDb) {
     ensureSqliteCompatibilityDomainSchemas(sqliteDb, { legacyClientCronEnabled: getSystemSettings().clientCronEnabled })
@@ -331,7 +345,11 @@ async function finishStandaloneServerStartup(
   })
   const systemConfiguration = authService.createSudoworkSystemConfigService({
     secrets: configStore,
-    loginMethod: config.sudoworkCompatibility.loginMethod,
+    loginMethod: config.systemConfig.loginMethod === 0 ? 'sms' : config.systemConfig.loginMethod === 2 ? 'cas' : 'password',
+    platformConfigPage: true,
+    productImprovementAvailable: platformConfig.isManaged('qms') ? config.qms?.enabled === true : undefined,
+    getSmsReadiness: () => smsReadiness(platformConfig, config, configStore, nexusClient),
+    resolveInfrastructure: legacy => platformInfrastructure(platformConfig, legacy),
     skillhubBaseUrl: publicBaseUrl,
     sudorouterBaseUrl: process.env.SUDOROUTER_BASE_URL,
     smsRuntimeAvailable: config.sudoworkCompatibility.enabled,
@@ -359,13 +377,19 @@ async function finishStandaloneServerStartup(
         modelsApiUrl: process.env.SUDOROUTER_MODELS_API_URL || 'https://hk.sudorouter.ai/api/specific_pricing',
       },
     },
-    productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
+    productImprovementEncryptionRequired: platformConfig.isManaged('qms') ? config.qms?.encryptionRequired === true : process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
   })
+  if (platformConfig.isManaged('sudorouter')) {
+    const c = platformConfig.getActive('sudorouter').config
+    const root = String(c.baseUrl || '').replace(/\/+$/, '')
+    const modelServiceUrl = String(c.modelServiceUrl || `${root}/v1`)
+    authService.configurePlatformRouterModel({ enabled: c.enabled === true, modelServiceUrl, modelsApiUrl: String(c.modelsApiUrl || `${modelServiceUrl}/models`) })
+  }
   const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
   const infrastructure = await systemConfiguration.getInfrastructureConfig()
-  const sudorouterRuntime = resolveSudorouterRuntimeConfig({
+  const sudorouterRuntime = platformConfig.isManaged('sudorouter') && !platformConfig.getActive('sudorouter').config.enabled ? null : resolveSudorouterRuntimeConfig({
     infrastructure: infrastructure.billing.sudorouter,
-    environment: process.env,
+    environment: platformEnvironment(platformConfig),
     getSecret: key => configStore.get(key),
   })
   const sudorouter = sudorouterRuntime ? new SudorouterAdapter(sudorouterRuntime) : undefined
@@ -388,16 +412,15 @@ async function finishStandaloneServerStartup(
     accountProvisioner,
     defaultInitialQuota: sudorouterRuntime?.initialQuota,
   })
-  const cas = config.sudoworkCompatibility.enabled
-    ? authService.createSudoworkCasService({
+  const cas = authService.createSudoworkCasService({
         identity,
         tokenStore: legacyTokenStore,
         accountProvisioner,
         initialQuotaUnits: sudorouterRuntime?.initialQuota,
         getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
       })
-    : undefined
-  const dify = authService.createSudoworkDifyServices({
+  const dify = platformConfig.isManaged('dify') && !platformConfig.getActive('dify').config.enabled ? undefined : authService.createSudoworkDifyServices({
+    timeoutMs: config.sudoworkCompatibility.dify.timeoutMs,
     baseUrl: config.sudoworkCompatibility.dify.baseUrl,
     systemToken: config.sudoworkCompatibility.dify.systemToken,
     provisionSecret: config.sudoworkCompatibility.dify.provisionSecret,
@@ -410,7 +433,7 @@ async function finishStandaloneServerStartup(
   const sms = await systemConfiguration.isSmsConfigured() && redisLegacyTokenStore
     ? new SmsVerificationService({
         store: redisLegacyTokenStore,
-        sender: createTencentSmsSender({
+        sender: smsSender ? { send: input => smsSender(input.phone, input.code) } : createTencentSmsSender({
           secretId: config.sudoworkCompatibility.sms.secretId ?? '',
           secretKey: config.sudoworkCompatibility.sms.secretKey ?? '',
           sdkAppId: smsConfig.sdkAppId,
@@ -420,19 +443,19 @@ async function finishStandaloneServerStartup(
           region: smsConfig.region,
         }),
         codeLength: smsConfig.codeLength,
-        expireMinutes: smsConfig.expireMinutes,
-        sendIntervalSeconds: smsConfig.sendIntervalSeconds,
+        expireMinutes: smsSender ? Math.max(1, Math.round(config.phoneAuth.codeTtlSec / 60)) : smsConfig.expireMinutes,
+        sendIntervalSeconds: smsSender ? config.phoneAuth.resendCooldownSec : smsConfig.sendIntervalSeconds,
         maxPerDay: smsConfig.maxPerDay,
       })
     : undefined
-  const billingRuntime = resolveBillingRuntimeConfig({
-    infrastructure: infrastructure.billing,
-    environment: process.env,
+  const billingRuntime = !sudorouter ? null : resolveBillingRuntimeConfig({
+    infrastructure: platformConfig.isManaged('fuiou') && platformConfig.getActive('fuiou').secrets.merchantPrivateKey ? { ...infrastructure.billing, enabled: true } : infrastructure.billing,
+    environment: platformEnvironment(platformConfig),
     getSecret: key => configStore.get(key),
     readFile: path => readFileSync(path, 'utf8'),
   })
   const billing = sudorouter
-    ? createBillingCompatibilityService(authService, systemConfiguration, publicBaseUrl, billingRuntime, sudorouter)
+    ? createBillingCompatibilityService(authService, systemConfiguration, config.systemConfig.recharge.fuiou.callbackBaseUrl || publicBaseUrl, billingRuntime, sudorouter, infrastructure.billing.enabled)
     : undefined
   const listOrganizationModels = async (orgId?: string) => {
     const settings = orgId
@@ -480,12 +503,12 @@ async function finishStandaloneServerStartup(
     legacyUsage,
     getUserProjection: user => userProjection.project(user),
     rateLimit: config.sudoworkCompatibility.enabled ? redisLegacyTokenStore : undefined,
-    difyRuntime: dify.runtime,
-    difyEnhancement: dify.enhancement,
-    difyDataset: dify.dataset,
-    difyAdministration: dify.administration,
-    resolveEnterpriseAlias: dify.resolveEnterpriseAlias,
-    buildVisibility: dify.buildVisibility,
+    difyRuntime: dify?.runtime,
+    difyEnhancement: dify?.enhancement,
+    difyDataset: dify?.dataset,
+    difyAdministration: dify?.administration,
+    resolveEnterpriseAlias: dify?.resolveEnterpriseAlias,
+    buildVisibility: dify?.buildVisibility,
     difyUpstreamBaseUrl: config.sudoworkCompatibility.dify.baseUrl,
     cas,
     loginMethod: config.sudoworkCompatibility.loginMethod,
@@ -521,7 +544,11 @@ async function finishStandaloneServerStartup(
     nexusClient,
     sudoworkCompatibility,
     { fetch: mossOperationsApp.fetch },
+    platformConfig,
+    cas,
   )
+  const platformVersionTimer = setInterval(() => { void platformConfig.reportVersions().catch(() => {}) }, 30_000)
+  platformVersionTimer.unref()
   const actualPort = (await server.ready) ?? config.port
   const connectHost =
     config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host
@@ -591,6 +618,7 @@ async function finishStandaloneServerStartup(
       }
     }
     await server.stop()
+    clearInterval(platformVersionTimer)
     await qmsRuntime?.stop()
     await closeSudoworkRedis?.()
     await authProxy.stop()
@@ -627,6 +655,7 @@ function createBillingCompatibilityService(
   publicBaseUrl: string,
   runtime: BillingRuntimeConfig | null,
   sudorouter: SudorouterAdapter,
+  paymentsEnabled = true,
 ) {
   const payment = runtime ? new FuiouAdapter({
     merchantCode: runtime.merchantCode,
@@ -641,6 +670,7 @@ function createBillingCompatibilityService(
   return authService.createSudoworkBillingService({
     sudorouter,
     payment,
+    paymentsEnabled,
     getCreditPolicy: orgId => systemConfiguration.getCreditApplicationPolicy(orgId),
     testPaymentAmountCents: runtime?.testMode ? 1 : undefined,
   })
@@ -664,25 +694,7 @@ function buildSmsSender(
   }
 
   return async (phone: string, code: string) => {
-    // Credentials page first, vault second.
-    //
-    // The vault pair works but nothing can write it: no API or admin screen
-    // puts a value at an arbitrary vault namespace, so these credentials were
-    // placed there out of band and could never be rotated through the product.
-    // The credentials page is the supported path; the vault stays as the
-    // fallback so deployments already holding a pair there keep sending without
-    // a migration step.
-    const store = getConfigStore()
-    let secretId = store.get('server.sms-secret-id')
-    let secretKey = store.get('server.sms-secret-key')
-    if (!secretId || !secretKey) {
-      const [id, key] = await Promise.all([
-        nexus.getSecret(tencent.vaultNamespace, tencent.secretIdKey),
-        nexus.getSecret(tencent.vaultNamespace, tencent.secretKeyKey),
-      ])
-      secretId = secretId || id?.value || ''
-      secretKey = secretKey || key?.value || ''
-    }
+    const { secretId, secretKey } = await resolveNativeSmsCredentials(config, getConfigStore(), nexus)
     if (!secretId || !secretKey) {
       throw new Error(
         'SMS credentials are not configured. Set them on the server credentials '

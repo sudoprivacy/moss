@@ -70,3 +70,8 @@ test('organization policies cannot submit infrastructure, log secrets, or respon
   assert.deepEqual(buildSudoworkConfigPatch(config, new Set(['scode_auto_model'])), { scode_auto_model: 'org-model' })
   assert.equal(config.log_report.key, 'platform-key')
 })
+
+test('explicitly choosing the inherited login method persists it; follow-default removes the choice', () => {
+  assert.deepEqual(buildSudoworkConfigPatch({ login_method: 1, inherit_login_method: false }, new Set(['inherit_login_method']), 'organization'), { login_method: 1, inherit_login_method: false })
+  assert.deepEqual(buildSudoworkConfigPatch({ login_method: 1, inherit_login_method: true }, new Set(['login_method', 'inherit_login_method']), 'organization'), { inherit_login_method: true })
+})

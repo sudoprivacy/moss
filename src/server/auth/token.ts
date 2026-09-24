@@ -7,6 +7,7 @@ export type AccessTokenClaims = {
   role: string
   scopes: string[]
   key_id: string
+  auth_app?: 'moss' | 'sudowork'
   jti: string
   type: 'access' | 'refresh'
   iat: number
@@ -20,6 +21,7 @@ export type AuthContext = {
   role: string
   scopes: string[]
   keyId: string
+  authApp?: 'moss' | 'sudowork'
   jti: string
   exp: number
   /** Document Center: set when the token was issued for an in-container scode session. */
@@ -192,12 +194,18 @@ export function verifyAccessToken(
     return null
   }
 
+  if (payload.key_id === 'password-login' && payload.auth_app !== 'sudowork') return null
+  if (payload.auth_app !== undefined && payload.auth_app !== 'moss' && payload.auth_app !== 'sudowork') return null
+  if (payload.auth_app === 'moss' && payload.key_id !== 'moss-password-login') return null
+  if (payload.key_id === 'moss-password-login' && payload.auth_app !== 'moss') return null
+
   if (expectedIssuer && payload.iss !== expectedIssuer) {
     return null
   }
 
   return {
     rawToken: token,
+    authApp: payload.auth_app,
     userId: payload.sub,
     orgId: payload.org_id,
     role: payload.role,

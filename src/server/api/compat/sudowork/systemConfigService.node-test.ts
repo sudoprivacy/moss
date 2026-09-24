@@ -369,7 +369,7 @@ void describe('Sudowork 系统配置统一服务', () => {
         userId: 'root-b', orgId: orgB.organizationId, role: 'super_admin', organizationScoped: true,
       }
       const roundTripped = (await service.getAdminConfig(scopedRoot)) as Record<string, unknown>
-      await service.update(scopedRoot, { ...roundTripped, scode_auto_model: 'org-b-model' })
+      await service.update(scopedRoot, { ...roundTripped, inherit_login_method: true, scode_auto_model: 'org-b-model' })
 
       assert.deepEqual((await policies.getOrganization(orgB.organizationId)), { scodeAutoModel: 'org-b-model' })
     } finally {
@@ -443,7 +443,7 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  void test('平台未配置登录方式时恢复组织 profile 的 CAS 会清除 override', async () => {
+  void test('主动跟随默认时恢复组织 profile 的 CAS，显式选择仍保留 override', async () => {
     const { db, identities, org, service, policies } = await setup()
     try {
       const profile = (await identities.getOrganizationProfile(org.organizationId))
@@ -466,7 +466,7 @@ void describe('Sudowork 系统配置统一服务', () => {
       await service.update(actor, { login_method: 1 })
       assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, 1)
       assert.equal((await service.getLoginMethod(org.organizationId)), 'password')
-      await service.update(actor, { login_method: 2 })
+      await service.update(actor, { inherit_login_method: true })
       assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, undefined)
       assert.equal((await service.getLoginMethod(org.organizationId)), 'cas')
       assert.deepEqual((await policies.getPlatform()), {})
@@ -476,7 +476,7 @@ void describe('Sudowork 系统配置统一服务', () => {
       await service.update(actor, { login_method: 2 })
       assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, 2)
       assert.equal((await service.getLoginMethod(org.organizationId)), 'cas')
-      await service.update(actor, { login_method: 1 })
+      await service.update(actor, { inherit_login_method: true })
       assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, undefined)
     } finally {
       db.close()

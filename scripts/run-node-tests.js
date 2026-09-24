@@ -70,6 +70,8 @@ const nodeTestFiles = [
   'src/server/identity/identityRepository.node-test.ts',
   'src/server/identity/legacyToken.node-test.ts',
   'src/server/identity/loginPolicy.node-test.ts',
+  'src/server/identity/phonePasswordMigration.node-test.ts',
+  'src/server/configuration/platformConfigService.node-test.ts',
   'src/server/identity/organizationAutomationPolicy.node-test.ts',
   'src/server/identity/organizationIdentityService.node-test.ts',
   'src/server/identity/passwordCompatibility.node-test.ts',

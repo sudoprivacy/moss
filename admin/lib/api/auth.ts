@@ -38,7 +38,7 @@ export async function login(
     username,
     password,
   }
-  const response = await authClient.post<LoginResponse>('/api/v1/auth/token', body)
+  const response = await authClient.post<LoginResponse>('/api/v1/moss/auth/login', body)
   storeLoginResponse(response)
   return response
 }
@@ -218,4 +218,8 @@ export async function setDepartmentTokenLimit(
 
 export function isAuthenticated(): boolean {
   return !!getToken()
+}
+
+export function changeOwnPassword(oldPassword: string, newPassword: string): Promise<{ success: boolean }> {
+  return authClient.post('/api/v1/moss/auth/change-password', { oldPassword, newPassword })
 }

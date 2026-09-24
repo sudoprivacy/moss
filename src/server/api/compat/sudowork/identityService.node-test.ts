@@ -1,3 +1,4 @@
+import { verifyPassword } from '../../../authCenter/db.js'
 import assert from 'node:assert/strict'
 import { hashSync } from 'bcryptjs'
 import { DatabaseSync } from 'node:sqlite'
@@ -403,7 +404,8 @@ void describe('Sudowork unified identity service', () => {
     })
     const identity = await identities.findAuthIdentity('phone', 'sudowork', '13900000000')
     assert(identity)
-    assert.equal((await authDb.getUserById(identity.userId))?.localAuth, false)
+    assert.equal((await authDb.getUserById(identity.userId))?.localAuth, true)
+    assert(verifyPassword('13900000000', (await authDb.getUserById(identity.userId))!.passwordHash))
     assert.equal(registered.needRegistration, false)
     assert.equal(registered.session.user.phone, '13900000000')
     assert.equal(tokens.values.has('register_token:register-one'), false)

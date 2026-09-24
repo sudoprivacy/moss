@@ -22,6 +22,7 @@ import {
 } from '@/lib/api/server-credentials'
 import { KeyRound, Loader2, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
+import { Link } from 'react-router-dom'
 
 /** 字段路径 → 中文标签（仅展示用，不影响提交的 key）。 */
 const FIELD_LABELS: Record<string, string> = {
@@ -265,6 +266,7 @@ export default function ServerCredentialsPage() {
   const grouped = useMemo(() => {
     const map = new Map<ServerCredentialGroup, ServerCredentialItem[]>()
     for (const item of items ?? []) {
+      if (item.group === 'billing' || item.group === 'qms' || (item.group === 'sudowork' && !['server.sudowork-legacy-jwt-secret', 'server.sudowork-redis-url'].includes(item.key))) continue
       const list = map.get(item.group) ?? []
       list.push(item)
       map.set(item.group, list)
@@ -275,9 +277,10 @@ export default function ServerCredentialsPage() {
   return (
     <DashboardLayout
       title="服务器凭据"
-      description="管理 server.json 侧的敏感凭据（存储于 Nexus，不再明文落盘）。保存后即时生效。"
+      description="管理 server.json 侧的敏感凭据（存储于 Nexus，不再明文落盘）。生效方式以各字段提示为准。"
     >
       <div className="space-y-6">
+        <Alert><AlertTitle>公共平台配置已集中管理</AlertTitle><AlertDescription>短信、Sudorouter、富友支付、Dify 和 QMS 的参数及密钥请前往 <Link to="/settings/platform-config" className="underline">平台配置</Link>。</AlertDescription></Alert>
         <div className="flex justify-end">
           <Button
             variant="outline"
