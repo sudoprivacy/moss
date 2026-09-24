@@ -300,7 +300,6 @@ export class DirectConnectStore {
     if (!this.db) throw new Error('SQLite database handle is unavailable')
     this.db.exec(`
       ${SESSION_SCHEMA}
-
       CREATE TABLE IF NOT EXISTS enterprises (
         id TEXT PRIMARY KEY DEFAULT 'default',
         logo TEXT,
@@ -407,6 +406,10 @@ export class DirectConnectStore {
     if (!sessionsColumns.some(col => col.name === 'home_zone_observed_revision')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_observed_revision TEXT`)
       console.log('[DB] Added home_zone_observed_revision column to sessions')
+    }
+    if (!sessionsColumns.some(col => col.name === 'home_zone_sync_error')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_sync_error TEXT`)
+      console.log('[DB] Added home_zone_sync_error column to sessions')
     }
 
     // P1a：老库的 session_attempts 补 execution_zone_id（表内注释见 DDL）。

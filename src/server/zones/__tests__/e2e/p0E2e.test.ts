@@ -17,11 +17,13 @@
 //   12 detach 只撤销访问，不删除数据（Zone 在 Nexus 侧仍存在）
 import { before, after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import {
-  login, mintNexusUserKey, mossApi, nexusApi, sleep, startMoss, startNexus,
+  freePort, login, mintNexusUserKey, mossApi, nexusApi, sleep, startMoss, startNexus,
   type MossProcess, type NexusProcess,
 } from './p0Harness.js'
 import { startNexusFaultProxy, type NexusFaultProxy } from './nexusFaultProxy.js'
@@ -31,12 +33,16 @@ let nexus: NexusProcess | null = null
 let nexusProxy: NexusFaultProxy | null = null
 let adminToken = ''
 const tmp = mkdtempSync(join(tmpdir(), 'moss-p0-e2e-'))
+const internalApiToken = randomUUID()
+let mossPort = 0
 
 before(async () => {
   // 阶段一：moss 单独起，/v2 未配置（Nexus 离线语义——binding 写入并保持
   // pending，无网络尝试）。阶段二（场景 3）以真实 nexus 地址重启 moss：
   // V2 endpoint 是进程 env，运行期不可变，重启是唯一正确的编排。
-  moss = await startMoss(tmp, { nexusV2BaseUrl: '', nexusServiceToken: '' })
+  moss = await startMoss(tmp, {
+    nexusV2BaseUrl: '', nexusServiceToken: '', internalApiToken,
+  })
   adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
 })
 
@@ -95,14 +101,23 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
   })
 
   it('scenario 3: binding converges to active after nexus comes online (exactly-once)', async () => {
-    nexus = await startNexus(join(tmp, 'nexus'))
-    nexusProxy = await startNexusFaultProxy(nexus.baseUrl)
     // moss 以真实 /v2 地址重启（同一 CLAUDE_CONFIG_DIR 数据库——离线期写入
     // 的 binding 行由新实例的 reconciler 收敛）。硬杀跳过了优雅清理，实例
     // 心跳（默认 30s 窗口）滞留会让新实例的 HA 保护拒绝启动——等窗口过期。
     await moss.stop()
     await sleep(35_000)
-    moss = await startMoss(tmp, { nexusV2BaseUrl: nexusProxy.baseUrl, nexusServiceToken: nexus.apiKey })
+    mossPort = await freePort()
+    nexus = await startNexus(join(tmp, 'nexus'), {
+      membershipUrl: `http://127.0.0.1:${mossPort}`,
+      internalApiToken,
+    })
+    nexusProxy = await startNexusFaultProxy(nexus.baseUrl)
+    moss = await startMoss(tmp, {
+      nexusV2BaseUrl: nexusProxy.baseUrl,
+      nexusServiceToken: nexus.apiKey,
+      port: mossPort,
+      internalApiToken,
+    })
     adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
     const row = await waitBindingActive(orgA)
     // grant id 已记录（string 或 null——收敛后应为 string）
@@ -172,39 +187,74 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     assert.ok([403, 404].includes(foreign.status), `org B member must be denied on org A zone, got ${foreign.status}`)
   })
 
-  it('scenario 8: suspended membership invalidates the old delegation on next access', async () => {
-    // suspend 须用 orgA 上下文的 admin token（updateUser 按 auth.orgId 查
-    // 用户——用 default-org token 会 404；该 404 在 hostDispatch 修复前
-    // 曾以 unhandledRejection 击穿整个 server，即此前的"监听消失"）。
-    // 1) suspend → 进程内 revoke 钩子主动 revoke → 旧 delegation 双要素
-    //    访问被拒；
-    // 2) membership 失效后（重）换发被拒（moss 同步校验）。
-    const patched = await mossApi(moss, orgAAdminToken, 'PATCH', `/api/v1/users/${userA.id}`, {
-      status: 'disabled',
-    })
-    assert.equal(patched.status, 200, `suspend failed: ${JSON.stringify(patched.json)}`)
-    await sleep(2_000) // revoke 为 best-effort 异步
+  it('scenario 8: membership lookup is fail-closed across outage and monotonic changes', async () => {
+    const nexusDbPath = join(tmp, 'nexus', 'nexus.db')
+    const mossDbPath = join(tmp, 'mosshome', 'server', 'moss.db')
+    const delegationStatus = (): string => {
+      const sqlite = new DatabaseSync(nexusDbPath, { readOnly: true })
+      try {
+        const row = sqlite.prepare(
+          `SELECT status FROM zone_delegations WHERE delegation_id = ?`,
+        ).get(delegationA) as { status: string }
+        return row.status
+      } finally {
+        sqlite.close()
+      }
+    }
 
-    const denied = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+    // No membership mutation and no revoke hook: stopping Moss alone must
+    // deny through MEMBERSHIP_UNAVAILABLE while the delegation row stays active.
+    await moss.stop()
+    const unavailable = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
       headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
     })
-    assert.ok([401, 403, 404].includes(denied.status), `suspended member delegation must be denied, got ${denied.status}`)
+    assert.equal(unavailable.status, 503, await unavailable.text())
+    assert.equal(delegationStatus(), 'active')
 
-    // suspend 后用户连登录都被拒（401）——membership 失效的最直接证明，
-    // 重换发自然无从发生（换发前置的 active 校验在 zones 单测覆盖）。
-    const loginRefused = await fetch(`${moss.baseUrl}/api/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: userA.name, password: userA.password }),
+    await sleep(35_000)
+    moss = await startMoss(tmp, {
+      nexusV2BaseUrl: nexusProxy!.baseUrl,
+      nexusServiceToken: nexus!.apiKey,
+      port: mossPort,
+      internalApiToken,
     })
-    assert.equal(loginRefused.status, 401, `suspended member must not log in: ${await loginRefused.text()}`)
+    adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
+    const switched = await mossApi(moss, adminToken, 'POST', '/api/v1/auth/switch-org', { org_id: orgA })
+    assert.equal(switched.status, 200)
+    orgAAdminToken = (switched.json as { access_token: string }).access_token
 
-    // 恢复用户；恢复后可正常换发（对称验证）
-    await mossApi(moss, orgAAdminToken, 'PATCH', `/api/v1/users/${userA.id}`, { status: 'active' })
+    // Mutate the authoritative row directly so the in-process best-effort
+    // revoke hook cannot race the assertion.
+    const mossDb = new DatabaseSync(mossDbPath)
+    mossDb.prepare(
+      `UPDATE users SET status = 'disabled', membership_revision = membership_revision + 1 WHERE id = ?`,
+    ).run(userA.id)
+    mossDb.close()
+    const inactive = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+      headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
+    })
+    assert.equal(inactive.status, 403, await inactive.text())
+    assert.equal(delegationStatus(), 'active')
+
+    const restoreDb = new DatabaseSync(mossDbPath)
+    restoreDb.prepare(
+      `UPDATE users SET status = 'active', membership_revision = membership_revision + 1 WHERE id = ?`,
+    ).run(userA.id)
+    restoreDb.close()
+    const stale = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+      headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
+    })
+    assert.equal(stale.status, 403, await stale.text())
+    assert.equal(delegationStatus(), 'active')
+
     const tokenA3 = await login(moss, userA.name, userA.password)
     const reissued = await mossApi(moss, tokenA3, 'POST', '/api/v1/zones/delegations', {})
     assert.equal(reissued.status, 201, `active member must re-issue after restore: ${JSON.stringify(reissued.json)}`)
     delegationA = (reissued.json as { delegation_id: string }).delegation_id
+    const restored = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+      headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
+    })
+    assert.equal(restored.status, 200, await restored.text())
   })
 
   it('scenario 11: renaming the org does not change the zone id', async () => {
@@ -286,6 +336,26 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
       },
     })
 
+    const blockerSession = await nexusApi(
+      nexus!, 'POST', '/v2/sessions', { session_id: 'moss-active-run-blocker', home_zone_id: zoneA },
+    )
+    assert.equal(blockerSession.status, 201, JSON.stringify(blockerSession.json))
+    const blockerRun = await nexusApi(
+      nexus!,
+      'POST',
+      '/v2/runtime/start',
+      {
+        pid: 'moss-active-run-blocker-pid',
+        session_id: 'moss-active-run-blocker',
+        delegation_ref: delegationA,
+      },
+      {
+        Authorization: `Bearer ${nexusKeyA}`,
+        'X-Nexus-Zone-Delegation': delegationA,
+      },
+    )
+    assert.equal(blockerRun.status, 201, JSON.stringify(blockerRun.json))
+
     const blocked = await mossApi(
       moss,
       adminToken,
@@ -296,6 +366,7 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     assert.equal(blocked.status, 409, `Nexus blocker must remain 409: ${JSON.stringify(blocked.json)}`)
     assert.equal((blocked.json as { error?: { code?: string } }).error?.code, 'ZONE_DELETE_BLOCKED')
     assert.equal((blocked.json as { error?: { retryable?: boolean } }).error?.retryable, false)
+    assert.match(String((blocked.json as { error?: { message?: string } }).error?.message), /active runtime/)
 
     const unavailableZone = 'h1-structured-503'
     nexusProxy!.failNextDeprovision(unavailableZone)

@@ -1566,6 +1566,7 @@ export class AuthService {
         departmentId: null,
         role: 'user',
         status: 'active',
+        membershipRevision: 0,
         localAuth: false,
         tokenLimit: null,
         createdAt,

@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at BIGINT NOT NULL,
   last_active_at BIGINT NOT NULL,
   ended_at BIGINT,
-  deleted_at BIGINT
+  deleted_at BIGINT,
+  -- P1a/H2：session 的 home zone 归属与 observed 对账持久化列。
+  home_zone_id TEXT,
+  home_zone_observed_at TEXT,
+  home_zone_observed_revision TEXT,
+  home_zone_sync_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_attempts (

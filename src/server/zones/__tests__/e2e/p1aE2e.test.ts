@@ -76,7 +76,8 @@ before(async () => {
       deleted_at INTEGER,
       home_zone_id TEXT,
       home_zone_observed_at TEXT,
-      home_zone_observed_revision TEXT
+      home_zone_observed_revision TEXT,
+      home_zone_sync_error TEXT
     );
     CREATE TABLE IF NOT EXISTS session_attempts (
       attempt_id TEXT PRIMARY KEY,
@@ -217,6 +218,8 @@ describe('P1a session zone bridge (real nexus)', () => {
     assert.equal(context.NEXUS_V2_BASE_URL, nexus.baseUrl)
     assert.ok(!('MOSS_NEXUS_V2_SERVICE_TOKEN' in context))
     assert.ok(!('NEXUS_API_KEY' in context))
+    const sanitized = applyRunnerZoneContext({ MOSS_INTERNAL_API_TOKEN: 'must-not-leak' }, context)
+    assert.ok(!('MOSS_INTERNAL_API_TOKEN' in sanitized))
     const attemptId = 'p1a-attempt-0002'
     const reconciled = await reconcileRunnerGeneration(client, {
       attemptId,

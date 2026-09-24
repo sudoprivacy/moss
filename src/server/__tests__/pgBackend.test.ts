@@ -11,6 +11,7 @@
 // the AuthCenterDb shared-store (postgres) construction form.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
 import { PgDriver, type PgPoolLike } from "../db/driver.js";
@@ -18,6 +19,7 @@ import { applyPgSchema } from "../db/pg_schema.js";
 import { DirectConnectStore, forPostgresDirectConnectStore } from "../db.js";
 import { CronStore } from "../services/cron/CronStore.js";
 import { AuthCenterDb } from "../authCenter/db.js";
+import { lookupMembership } from "../zones/binding/membershipLookup.js";
 import { createAuthService, isUniqueViolationOn } from "../auth/service.js";
 import { EventTriggerStore } from "../services/eventTrigger/EventTriggerStore.js";
 import { IdentityRepository } from "../identity/identityRepository.js";
@@ -294,7 +296,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -1026,6 +1028,33 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       await authDb.setConfig("jwt_secret", "test-secret-value");
       assert.equal(await authDb.getConfig("jwt_secret"), "test-secret-value");
     });
+
+    it("increments membership revision atomically only for actual role/status changes", async () => {
+      const authDb = new AuthCenterDb(fix.store);
+      const suffix = Math.random().toString(36).slice(2);
+      const orgId = randomUUID();
+      const userId = randomUUID();
+      await authDb.createOrganization(orgId, "Membership PG", Date.now());
+      await authDb.createUser({
+        id: userId, orgId, email: `${suffix}@membership.test`, name: "member",
+        displayName: null, departmentId: null, role: "user", status: "active",
+        localAuth: true, tokenLimit: null, createdAt: Date.now(), passwordHash: null,
+        passwordUpdatedAt: null, lastLoginAt: null, extUserId: null, phone: null,
+      });
+
+      await authDb.updateUser(userId, { name: "profile-only" });
+      assert.equal((await lookupMembership(fix.driver, userId, orgId))?.revision, 0);
+      await Promise.all([
+        authDb.updateUser(userId, { role: "admin" }),
+        authDb.updateUser(userId, { role: "admin" }),
+      ]);
+      assert.equal((await lookupMembership(fix.driver, userId, orgId))?.revision, 1);
+      await authDb.updateUser(userId, { status: "disabled" });
+      await authDb.updateUser(userId, { status: "disabled" });
+      assert.deepEqual(await lookupMembership(fix.driver, userId, orgId), {
+        status: "disabled", role: "admin", revision: 2,
+      });
+    });
   });
 
   describe("HA fixes: LIKE escaping through prepare() (C-7)", () => {
@@ -1202,6 +1231,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
             updated_at BIGINT NOT NULL
           );
           CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, local_auth BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL);
+          CREATE TABLE session_attempts (attempt_id TEXT PRIMARY KEY);
           INSERT INTO organizations (id, name, created_at) VALUES ('local-org', 'Local migration', 1);
           INSERT INTO users (id, org_id, email, name, local_auth, created_at) VALUES
             ('local-allowed', 'local-org', 'allowed@example.test', 'allowed', 1, 1),
@@ -1265,7 +1295,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         // Re-run is a no-op: every migration remains applied exactly once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
         assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
         await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);

@@ -50,6 +50,7 @@ export const ZONE_BINDING_TABLES_DDL = `
     attempts INTEGER NOT NULL DEFAULT 0,
     next_retry_at BIGINT,
     operation_id TEXT,
+    grant_source_id TEXT,
     last_error_code TEXT,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
