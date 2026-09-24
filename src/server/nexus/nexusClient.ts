@@ -36,9 +36,9 @@ interface SecretMetadata extends SecretListMetadata {
 
 /** mTLS material for connecting to an auth-on external `nexusd-cluster`. */
 export type NexusClientTlsConfig = {
-  caPath: string
-  certPath: string
-  keyPath: string
+  ca: string
+  cert: string
+  key: string
   /** Server-cert SAN to validate; defaults to the cluster's `nexus-node`. */
   serverName?: string
 }
@@ -60,12 +60,7 @@ export class NexusClient {
     if (!this.client) {
       // mTLS to an auth-on cluster vs. plaintext trusted-loopback serve-local.
       this.client = this.tls
-        ? NexusVfsClient.withMtls(this.endpoint, {
-            caPath: this.tls.caPath,
-            certPath: this.tls.certPath,
-            keyPath: this.tls.keyPath,
-            serverName: this.tls.serverName,
-          })
+        ? NexusVfsClient.withMtls(this.endpoint, this.tls)
         : new NexusVfsClient(this.endpoint)
     }
     return this.client

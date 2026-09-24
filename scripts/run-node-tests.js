@@ -117,6 +117,7 @@ const nodeTestFiles = [
   'src/server/migration/sudoworkP5QmsSourceReader.node-test.ts',
   'src/server/migration/sudoworkSourceSnapshot.node-test.ts',
   'src/server/migration/targetIdentitySnapshot.node-test.ts',
+  'src/server/nexus/sessionIdentity.node-test.ts',
   'src/server/qms/alertService.node-test.ts',
   'src/server/qms/config.node-test.ts',
   'src/server/qms/crashService.node-test.ts',

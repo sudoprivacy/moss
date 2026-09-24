@@ -427,7 +427,7 @@ describe('NexusManager', () => {
       mode: 'external',
       endpoint: 'https://100.64.0.1:8443',
       authToken: 'tok',
-      tls: { caPath: '/certs/ca.pem', certPath: '/certs/moss.pem', keyPath: '/certs/moss-key.pem', serverName: undefined },
+      tls: { ca: '/certs/ca.pem', cert: '/certs/moss.pem', key: '/certs/moss-key.pem', serverName: undefined },
     })
   })
 

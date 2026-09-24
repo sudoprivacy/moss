@@ -20,6 +20,7 @@ import {
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
+import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
 import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
@@ -508,25 +509,48 @@ async function maybeStartViaNexus(input: {
     return null
   }
 
-  const client = config.tls
-    ? NexusVfsClient.withMtls(config.endpoint, config.tls)
-    : new NexusVfsClient(config.endpoint)
-  const agent = new ManagedAgentClient(client, config.authToken)
+  const asMoss = () =>
+    config.tls
+      ? NexusVfsClient.withMtls(config.endpoint, config.tls)
+      : new NexusVfsClient(config.endpoint)
 
-  const { sessionId, osPid } = await agent.startSession({
-    agentId: input.agentId,
-    model: input.model,
-    ownerId: input.ownerId,
-    spawnSpec: {
-      cmd: 'kubectl',
-      args: input.execArgs,
-      env: toStringEnv(input.env),
-      cwd: input.cwd,
-    },
-  })
+  // Prove who the session is for instead of stating it. The call that plants
+  // the session is made as a credential minted for this user and carries no
+  // `owner_id`, so nexus reads the owner off the certificate. `null` means
+  // there was nothing to mint with, and then the body still stands — which is
+  // what lets this take effect per credential instead of as a flag day.
+  const identity = await mintSessionIdentity(config.endpoint, config.tls, input.ownerId)
+  const starter = identity ? NexusVfsClient.withMtls(config.endpoint, identity.tls) : asMoss()
+
+  let sessionId: string
+  let osPid: number | null
+  try {
+    ;({ sessionId, osPid } = await new ManagedAgentClient(starter, config.authToken).startSession({
+      agentId: input.agentId,
+      model: input.model,
+      ...ownerField(identity, input.ownerId),
+      spawnSpec: {
+        cmd: 'kubectl',
+        args: input.execArgs,
+        env: toStringEnv(input.env),
+        cwd: input.cwd,
+      },
+    }))
+  } catch (error) {
+    starter.close()
+    throw error
+  }
+  // The credential's job ended with that call; the owner is in the session's
+  // process record now. The byte tunnel goes back to moss's own identity,
+  // which is what it has always used, so the credential can stay short-lived
+  // instead of having to outlive the longest session anyone might run.
+  if (identity) starter.close()
+
   process.stderr.write(
-    `[K8sBackend] nexus start_session ok (session=${sessionId}, os_pid=${osPid ?? 'n/a'})\n`,
+    `[K8sBackend] nexus start_session ok (session=${sessionId}, os_pid=${osPid ?? 'n/a'}` +
+      `${identity ? `, owner proven by ${identity.subjectId}` : ''})\n`,
   )
+  const agent = new ManagedAgentClient(identity ? asMoss() : starter, config.authToken)
   return new NexusSpawnHandle(agent, sessionId, osPid)
 }
 
