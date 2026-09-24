@@ -41,6 +41,7 @@ import { getAvailableModels } from './modelListCache.js'
 import { getSystemSettings } from './systemSettings.js'
 import { migrateLegacyModelSettings } from './configuration/migrateLegacyModelSettings.js'
 import { migrateLegacyEnterpriseCronPolicy } from './migration/legacyEnterpriseCronPolicy.js'
+import { migrateLegacySudorouterCredentials } from './migration/legacySudorouterCredentials.js'
 import type { LegacyKeyValueStore } from './identity/legacyToken.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
 import { assertSafeInstanceIdentity } from './startupGuards.js'
@@ -393,6 +394,11 @@ async function finishStandaloneServerStartup(
     getSecret: key => configStore.get(key),
   })
   const sudorouter = sudorouterRuntime ? new SudorouterAdapter(sudorouterRuntime) : undefined
+  if (sudorouter) {
+    // Use the resolved platform adapter; a disabled integration skips adoption too.
+    const migrated = await migrateLegacySudorouterCredentials(store.driver, sudorouter, nexusClient)
+    if (migrated.imported > 0) console.info(`[Startup] Adopted ${migrated.imported} existing Sudorouter credentials`)
+  }
   const accountProvisioner = sudorouter
     ? authService.createSudorouterAccountService({ provider: sudorouter, secrets: nexusClient })
     : undefined

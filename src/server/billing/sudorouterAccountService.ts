@@ -88,6 +88,10 @@ export class SudorouterAccountService {
     const requestFingerprint = fingerprint(input)
     const existingAccount = await this.getAccount(input.ownerId, input.orgId)
     if (existingAccount) return existingAccount
+    // An existing account can be in debt. Only a new provision needs a grant.
+    if (!Number.isSafeInteger(input.initialQuotaUnits) || input.initialQuotaUnits < 0) {
+      throw new SudorouterAccountError('Sudorouter 初始额度无效')
+    }
 
     const prepared = await this.driver.transaction(async () => {
       const byKey = await this.repository.getSudorouterProvisioningByKey(context.idempotencyKey)
@@ -252,9 +256,6 @@ export class SudorouterAccountService {
   private validate(input: EnsureSudorouterAccountInput): void {
     if (!input.ownerId.trim() || !input.orgId.trim() || !input.username.trim()) {
       throw new SudorouterAccountError('Sudorouter 开户用户信息不完整')
-    }
-    if (!Number.isSafeInteger(input.initialQuotaUnits) || input.initialQuotaUnits < 0) {
-      throw new SudorouterAccountError('Sudorouter 初始额度无效')
     }
   }
 }
