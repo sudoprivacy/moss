@@ -36,6 +36,7 @@ export interface RunnerZoneContext {
   NEXUS_ZONE_ID: string
   NEXUS_V2_BASE_URL: string
   NEXUS_DELEGATION_REF: string
+  NEXUS_RESOURCE_SCOPE: string
 }
 
 /** Build the child environment without leaking Moss/Nexus control-plane keys. */
@@ -48,10 +49,12 @@ export function applyRunnerZoneContext(
   delete env.NEXUS_API_KEY
   delete env.NEXUS_ADMIN_BOOTSTRAP_TOKEN
   delete env.MOSS_INTERNAL_API_TOKEN
+  delete env.NEXUS_RESOURCE_SCOPE
   if (context) {
     env.NEXUS_ZONE_ID = context.NEXUS_ZONE_ID
     env.NEXUS_V2_BASE_URL = context.NEXUS_V2_BASE_URL
     env.NEXUS_DELEGATION_REF = context.NEXUS_DELEGATION_REF
+    env.NEXUS_RESOURCE_SCOPE = context.NEXUS_RESOURCE_SCOPE
   }
   return env
 }
@@ -240,7 +243,7 @@ export function runnerPid(attemptId: string): string {
 export async function runnerZoneContext(
   driver: DbDriver,
   client: NexusZoneClient,
-  input: { sessionId: string; config?: ZoneBindingConfig },
+  input: { sessionId: string; runtimePid?: string; config?: ZoneBindingConfig },
 ): Promise<RunnerZoneContext | null> {
   const row = await driver.get(
     `SELECT home_zone_id FROM sessions WHERE session_id = ? LIMIT 1`,
@@ -263,9 +266,15 @@ export async function runnerZoneContext(
     client,
     config,
   })
+  const runtimePidValue = input.runtimePid ?? runnerPid(input.sessionId)
   const issued = await delegation.issueForOrgUser({
     orgId: String(userRow.org_id),
     userId: String(userRow.user_id),
+    purpose: 'runtime',
+    scopeRules: [{
+      capability: 'zone.runtime.execute',
+      resourcePrefixes: [`/sessions/${input.sessionId}`],
+    }],
   })
   if (issued.zoneId !== homeZoneId) {
     throw new Error(
@@ -276,6 +285,14 @@ export async function runnerZoneContext(
     NEXUS_ZONE_ID: homeZoneId,
     NEXUS_V2_BASE_URL: config.nexusV2BaseUrl,
     NEXUS_DELEGATION_REF: issued.delegationId,
+    NEXUS_RESOURCE_SCOPE: JSON.stringify({
+      schema_version: 1,
+      zone_id: homeZoneId,
+      rules: [
+        { capability: 'zone.data.read', resource_prefixes: [`/proc/${runtimePidValue}/workspace`] },
+        { capability: 'zone.data.write', resource_prefixes: [`/proc/${runtimePidValue}/workspace`] },
+      ],
+    }),
   }
 }
 

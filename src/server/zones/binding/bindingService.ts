@@ -172,6 +172,7 @@ export class ZoneBindingReconciler {
           zoneId: binding.zone_id,
           grantee: { subject_type: 'organization', subject_id: binding.org_id },
           capabilities: JSON.parse(binding.desired_capabilities) as string[],
+          resourcePrefixes: ['/'],
           source: {
             source_type: 'moss_org_binding',
             // Persisted on the outbox row so retries across an upgrade reuse

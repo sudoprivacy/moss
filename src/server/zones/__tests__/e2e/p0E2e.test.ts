@@ -164,11 +164,18 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     // nexus 侧核对 delegation 绑定（user/org/zone/audience 五要素）
     const detail = await nexusApi(nexus!, 'GET', `/v2/auth/zone-delegations/${delegationA}`)
     assert.equal(detail.status, 200, `delegation detail failed: ${JSON.stringify(detail.json)}`)
-    const dv = detail.json as Record<string, string>
+    const dv = detail.json as Record<string, unknown>
     assert.equal(dv.user_id, userA.id, `delegation user binding: ${JSON.stringify({ got: dv.user_id, want: userA.id })}`)
     assert.equal(dv.org_id, orgA, `delegation org binding: ${JSON.stringify({ got: dv.org_id, want: orgA, zone: dv.zone_id, wantZone: zoneA, aud: dv.audience })}`)
     assert.equal(dv.zone_id, zoneA, `delegation zone binding: ${JSON.stringify({ got: dv.zone_id })}`)
     assert.equal(dv.audience, 'nexus-api', `delegation audience: ${JSON.stringify({ got: dv.audience })}`)
+    const bindingA = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
+    assert.equal(dv.grant_id, bindingA?.nexus_grant_id)
+    assert.equal(dv.purpose, 'data-access')
+    assert.deepEqual(dv.scope_rules, [
+      { capability: 'zone.data.read', resource_prefixes: ['/'] },
+      { capability: 'zone.data.write', resource_prefixes: ['/'] },
+    ])
 
     // 用户自身认证 + delegation 头（zone_security 双要素）访问本 Org Zone → 200
     const own = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
@@ -340,6 +347,33 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
       nexus!, 'POST', '/v2/sessions', { session_id: 'moss-active-run-blocker', home_zone_id: zoneA },
     )
     assert.equal(blockerSession.status, 201, JSON.stringify(blockerSession.json))
+    const bindingA = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
+    assert.ok(bindingA?.nexus_grant_id)
+    const runtimeDelegationResponse = await nexusApi(
+      nexus!,
+      'POST',
+      '/v2/auth/zone-delegations',
+      {
+        user_id: userA.id,
+        org_id: orgA,
+        membership_version: 'r2',
+        zone_id: zoneA,
+        audience: 'nexus-api',
+        ttl_s: 300,
+        grant_id: bindingA.nexus_grant_id,
+        purpose: 'runtime',
+        scope_rules: [{
+          capability: 'zone.runtime.execute',
+          resource_prefixes: ['/sessions/moss-active-run-blocker'],
+        }],
+      },
+      {
+        Authorization: `Bearer ${nexus!.apiKey}`,
+        'Idempotency-Key': 'moss-active-run-blocker-delegation',
+      },
+    )
+    assert.equal(runtimeDelegationResponse.status, 201, JSON.stringify(runtimeDelegationResponse.json))
+    const runtimeDelegation = (runtimeDelegationResponse.json as { delegation_id: string }).delegation_id
     const blockerRun = await nexusApi(
       nexus!,
       'POST',
@@ -347,11 +381,11 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
       {
         pid: 'moss-active-run-blocker-pid',
         session_id: 'moss-active-run-blocker',
-        delegation_ref: delegationA,
+        delegation_ref: runtimeDelegation,
       },
       {
         Authorization: `Bearer ${nexusKeyA}`,
-        'X-Nexus-Zone-Delegation': delegationA,
+        'X-Nexus-Zone-Delegation': runtimeDelegation,
       },
     )
     assert.equal(blockerRun.status, 201, JSON.stringify(blockerRun.json))
