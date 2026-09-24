@@ -198,7 +198,9 @@ function validValue(type: string, v: unknown): boolean {
 }
 export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformSnapshot): string[] {
   const issues: string[] = []
+  const mockSms = id === 'sms' && snapshot.config.mockDelivery === true
   for (const f of PLATFORM_DEFINITIONS[id].fields) {
+    if (mockSms && (f.required || f.key === 'templateParams')) continue
     const value = f.type === 'secret' ? snapshot.secrets[f.key] : snapshot.config[f.key]
     if (snapshot.config.enabled && f.required && (value === undefined || value === '')) issues.push(`缺少${f.label}`)
     if (value === undefined || value === '') continue
@@ -209,7 +211,7 @@ export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformS
     }
   }
   if (id === 'sudorouter' && snapshot.config.enabled && !/^\d+$/.test(String(snapshot.config.adminUserId))) issues.push('管理员用户 ID 须为数字')
-  if (id === 'sms' && snapshot.config.enabled && (!Array.isArray(snapshot.config.templateParams) || !snapshot.config.templateParams.some(x => x.includes('{code}')))) issues.push('模板参数必须包含 {code}')
+  if (id === 'sms' && !mockSms && snapshot.config.enabled && (!Array.isArray(snapshot.config.templateParams) || !snapshot.config.templateParams.some(x => x.includes('{code}')))) issues.push('模板参数必须包含 {code}')
   if (snapshot.config.enabled && (id === 'fuiou' || id === 'qms')) {
     const privateName = id === 'fuiou' ? 'merchantPrivateKey' : 'privateKeyPem'
     const publicName = id === 'fuiou' ? 'publicKey' : 'publicKeyPem'

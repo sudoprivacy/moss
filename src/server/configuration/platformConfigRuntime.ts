@@ -38,6 +38,7 @@ export async function legacyPlatformSnapshots(config: ServerConfig, store: Confi
     ? readFileSync(env[`${envKey}_FILE`]!, 'utf8')
     : env[`${envKey}_BASE64`] ? Buffer.from(env[`${envKey}_BASE64`]!, 'base64').toString('utf8') : secret(key, envKey)
   if (providers.includes('sms')) {
+  const mockDelivery = config.phoneAuth.enabled && config.phoneAuth.delivery === 'log'
   const nativeSms = config.phoneAuth.enabled && config.phoneAuth.delivery === 'tencent' && config.phoneAuth.tencent
   const tencent = nativeSms || config.phoneAuth.tencent
   const nativeSecrets = await resolveNativeSmsCredentials(config, store, vault, env).catch(() => ({ secretId: '', secretKey: '' }))
@@ -46,12 +47,13 @@ export async function legacyPlatformSnapshots(config: ServerConfig, store: Confi
     : { secretId: store.get('server.sudowork-tencent-secret-id') || '', secretKey: store.get('server.sudowork-tencent-secret-key') || '' }
   const compatSms = { ...config.sudoworkCompatibility.sms, ...smsDb }
   const sms = snapshot({
-    enabled: Boolean(nativeSms || (config.sudoworkCompatibility.enabled && compatSms.provider === 'tencent')),
+    mockDelivery,
+    enabled: Boolean(mockDelivery || nativeSms || (config.sudoworkCompatibility.enabled && compatSms.provider === 'tencent')),
     sdkAppId: str(nativeSms ? tencent?.sdkAppId : compatSms.sdkAppId), signName: str(nativeSms ? tencent?.signName : compatSms.signName),
     templateId: str(nativeSms ? tencent?.templateId : compatSms.templateId), region: str(nativeSms ? tencent?.region : compatSms.region) || 'ap-beijing',
     templateParams: nativeSms ? tencent?.templateParams ?? ['{code}', '{ttlMinutes}'] : ['{code}', '{ttlMinutes}'],
-    codeTtlSec: nativeSms ? config.phoneAuth.codeTtlSec : Number(compatSms.expireMinutes) * 60,
-    resendCooldownSec: nativeSms ? config.phoneAuth.resendCooldownSec : Number(compatSms.sendIntervalSeconds),
+    codeTtlSec: nativeSms || mockDelivery ? config.phoneAuth.codeTtlSec : Number(compatSms.expireMinutes) * 60,
+    resendCooldownSec: nativeSms || mockDelivery ? config.phoneAuth.resendCooldownSec : Number(compatSms.sendIntervalSeconds),
     maxSendsPerHour: config.phoneAuth.maxSendsPerHour, maxVerifyAttempts: config.phoneAuth.maxVerifyAttempts,
   }, nativeSms ? nativeSecrets : compatibilitySecrets, nativeSms ? 'phoneAuth / Nexus / environment' : 'sudoworkCompatibility / Nexus / environment')
   sms.conflicts = (['secretId', 'secretKey'] as const).filter(key => nativeSecrets[key] && compatibilitySecrets[key] && nativeSecrets[key] !== compatibilitySecrets[key])
@@ -117,13 +119,13 @@ export function applyPlatformRuntime(service: PlatformConfigService, config: Ser
   store.hydrateConfig(config)
   if (service.isManaged('sms') || (!config.phoneAuth.enabled && config.sudoworkCompatibility.enabled && service.getActive('sms').config.enabled)) {
     const c = service.getActive('sms').config
-    Object.assign(config.phoneAuth, { enabled: c.enabled, delivery: 'tencent', codeTtlSec: c.codeTtlSec,
+    Object.assign(config.phoneAuth, { enabled: c.enabled, delivery: c.mockDelivery === true ? 'log' : 'tencent', codeTtlSec: c.codeTtlSec,
       resendCooldownSec: c.resendCooldownSec, maxSendsPerHour: c.maxSendsPerHour, maxVerifyAttempts: c.maxVerifyAttempts,
       tencent: { sdkAppId: c.sdkAppId, signName: c.signName, templateId: c.templateId, region: c.region,
         templateParams: c.templateParams, vaultNamespace: service.isManaged('sms') ? '' : 'moss:config',
         secretIdKey: service.isManaged('sms') ? '' : 'server.sudowork-tencent-secret-id',
         secretKeyKey: service.isManaged('sms') ? '' : 'server.sudowork-tencent-secret-key' } })
-    Object.assign(config.sudoworkCompatibility.sms, { provider: c.enabled ? 'tencent' : 'disabled', sdkAppId: c.sdkAppId,
+    Object.assign(config.sudoworkCompatibility.sms, { provider: c.enabled && c.mockDelivery !== true ? 'tencent' : 'disabled', sdkAppId: c.sdkAppId,
       signName: c.signName, templateId: c.templateId, region: c.region, expireMinutes: Number(c.codeTtlSec) / 60,
       sendIntervalSeconds: c.resendCooldownSec })
   }
@@ -159,7 +161,7 @@ export function platformInfrastructure(service: PlatformConfigService, legacy: S
   const result = structuredClone(legacy)
   if (service.isManaged('sms')) {
     const c = service.getActive('sms').config
-    Object.assign(result.sms, { ...c, provider: c.enabled ? 'tencent' : 'disabled', expireMinutes: Number(c.codeTtlSec) / 60, sendIntervalSeconds: c.resendCooldownSec })
+    Object.assign(result.sms, { ...c, provider: c.enabled && c.mockDelivery !== true ? 'tencent' : 'disabled', expireMinutes: Number(c.codeTtlSec) / 60, sendIntervalSeconds: c.resendCooldownSec })
   }
   if (service.isManaged('sudorouter')) {
     const c = service.getActive('sudorouter').config
@@ -185,7 +187,11 @@ export async function smsReadiness(service: PlatformConfigService, config: Serve
   if (service.isManaged('sms')) {
     const active = service.getActive('sms')
     const issues = validatePlatformConfig('sms', active)
-    return { ready: active.config.enabled === true && issues.length === 0, reason: active.config.enabled ? issues.join('；') : '平台短信服务未启用或尚未重启生效' }
+    return { ready: active.config.enabled === true && issues.length === 0, reason: !active.config.enabled ? '平台短信服务未启用或尚未重启生效'
+      : issues.length ? issues.join('；') : active.config.mockDelivery === true ? '模拟发送模式：验证码仅输出到服务端日志，不发送真实短信' : '' }
+  }
+  if (config.phoneAuth.enabled && config.phoneAuth.delivery === 'log') {
+    return { ready: true, reason: '模拟发送模式：验证码仅输出到服务端日志，不发送真实短信' }
   }
   if (!config.phoneAuth.enabled || config.phoneAuth.delivery !== 'tencent' || !config.phoneAuth.tencent) {
     const legacy = service.getActive('sms')

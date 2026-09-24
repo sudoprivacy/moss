@@ -148,7 +148,7 @@ function ScopedSudoworkSettings({ scope, organizationId, allowPlatform, onScopeC
           <Field label="CAS 配置（JSON）" wide><Textarea rows={10} value={JSON.stringify(thirdParty, null, 2)} onChange={event => { try { patch({ third_party_auth: JSON.parse(event.target.value) as JsonObject }) } catch { /* keep last valid value */ } }} /></Field>
         </CardContent></Card>
 
-        <Alert><AlertTitle>公共平台服务</AlertTitle><AlertDescription><p>{config.sms_configured ? '短信服务已就绪。' : String(smsStatus.reason || '短信服务尚未就绪，请联系平台管理员配置。')} Moss 管理平台始终使用账户密码登录。</p>{allowPlatform ? <Link className="underline underline-offset-4" to="/settings/platform-config">管理短信、Sudorouter、富友支付、Dify 和 QMS</Link> : null}</AlertDescription></Alert>
+        <Alert><AlertTitle>公共平台服务</AlertTitle><AlertDescription><p>{String(smsStatus.reason || (config.sms_configured ? '短信服务已就绪。' : '短信服务尚未就绪，请联系平台管理员配置。'))} Moss 管理平台始终使用账户密码登录。</p>{allowPlatform ? <Link className="underline underline-offset-4" to="/settings/platform-config">管理短信、Sudorouter、富友支付、Dify 和 QMS</Link> : null}</AlertDescription></Alert>
 
         <Card><CardHeader><CardTitle className="text-base">客户端上报与更新</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">
           <Toggle label="日志上报" checked={Number(logReport.enabled) === 1} onChange={checked => nested('log_report', { enabled: checked ? 1 : 0 })} />
