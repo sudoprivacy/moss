@@ -381,15 +381,44 @@ void test('ordinary organization administrators cannot access platform administr
   await assert.rejects(service.requireSuperAdmin(auth), forbidden)
 })
 
-void test('managed Router discovery uses global endpoints with per-organization business providers intact', async t => {
-  const { service } = await setup(t)
-  service.configurePlatformRouterModel({ enabled: true, modelServiceUrl: 'https://platform.test/v1', modelsApiUrl: 'https://platform.test/models' })
-  for (const orgId of ['org-a', 'org-b']) {
-    const settings = await service.getOrganizationSystemSettings(orgId)
-    const router = settings.modelProviders.find(provider => provider.id === 'legacy-default')!
-    assert.equal(router.baseUrl, 'https://platform.test/v1')
-    assert.equal(router.discoveryUrl, 'https://platform.test/models')
+void test('platform Router management changes preserve each organization model URL and enablement', async t => {
+  const { service, authDb } = await setup(t)
+  const { PlatformConfigService } = await import('../configuration/platformConfigService.js')
+  const { applyPlatformRuntime } = await import('../configuration/platformConfigRuntime.js')
+  const { ConfigStore } = await import('../configStore/configStore.js')
+  const { serverFileConfigSchema } = await import('../types.js')
+  const { resolveQmsConfig } = await import('../qms/config.js')
+  const { OrganizationModelSettingsRepository } = await import('../configuration/organizationModelSettingsRepository.js')
+  const settings = new OrganizationModelSettingsRepository(authDb.driver)
+  for (const orgId of ['org-a', 'org-b']) await settings.put(orgId, {
+    modelProviders: [{ id: 'legacy-default', name: 'Default', baseUrl: `https://${orgId}.test/v1`,
+      discoveryUrl: `https://${orgId}.test/catalog`, enabled: orgId === 'org-a' },
+    { id: 'private', name: 'Private', baseUrl: `https://${orgId}-private.test/v1`, enabled: true }],
+  }, 'root')
+  const before = await Promise.all(['org-a', 'org-b'].map(id => service.getOrganizationSystemSettings(id)))
+  const values = new Map<string, string>()
+  const create = () => new PlatformConfigService({ driver: authDb.driver, instanceId: 'test',
+    legacy: async ids => Object.fromEntries(ids.map(id => [id, { config: { enabled: false }, secrets: {}, sources: {} }])),
+    vault: {
+      getSecret: async (namespace, key) => ({ value: values.get(`${namespace}/${key}`) ?? null }),
+      putSecret: async (namespace, key, value) => { values.set(`${namespace}/${key}`, value) },
+      deleteSecret: async (namespace, key) => { values.delete(`${namespace}/${key}`) },
+    },
+  })
+  let platform = create()
+  await platform.initialize()
+  let version: string | null = null
+  for (const enabled of [true, false]) {
+    version = (await platform.save('sudorouter', { expectedVersion: version,
+      config: { enabled, baseUrl: 'https://management.test', adminUserId: '76', timeoutMs: 1000 },
+      secrets: { apiToken: 'test-management-token' },
+    }, 'root')).version
+    platform = create()
+    await platform.initialize()
+    const config = serverFileConfigSchema().parse({}) as unknown as import('../types.js').ServerConfig
+    config.qms = resolveQmsConfig({}, {})
+    applyPlatformRuntime(platform, config, new ConfigStore(null))
+    assert.equal(config.systemConfig.sudorouterEnabled, enabled)
+    assert.deepEqual(await Promise.all(['org-a', 'org-b'].map(id => service.getOrganizationSystemSettings(id))), before)
   }
-  service.configurePlatformRouterModel({ enabled: false, modelServiceUrl: '', modelsApiUrl: '' })
-  assert.equal((await service.getOrganizationSystemSettings('org-a')).modelProviders.find(provider => provider.id === 'legacy-default')!.enabled, false)
 })

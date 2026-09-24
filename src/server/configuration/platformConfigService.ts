@@ -4,6 +4,7 @@ import { PlatformIntegrationSettingsRepository } from './platformIntegrationSett
 import { PLATFORM_DEFINITIONS, PLATFORM_PROVIDERS, type PlatformProvider, type PlatformValues } from './platformConfigDefinition.js'
 
 export const PLATFORM_SECRET_NAMESPACE = 'moss:platform-config'
+const LEGACY_ROUTER_MODEL_FIELDS = new Set(['modelServiceUrl', 'modelsApiUrl'])
 export interface PlatformVault {
   getSecret(namespace: string, key: string): Promise<{ value: string | null } | null>
   putSecret(namespace: string, key: string, value: string): Promise<unknown>
@@ -42,7 +43,7 @@ export class PlatformConfigService {
       const saved = savedProviders.get(id)
       const snapshot = saved ? await this.readSnapshot(id, saved) : legacy[id]
       if (!snapshot) throw new PlatformConfigError(500, `平台配置未加载: ${id}`)
-      this.active.set(id, { version: saved?.version ?? null, snapshot })
+      this.active.set(id, { version: saved?.version ?? null, snapshot: withoutLegacyRouterModelFields(id, snapshot) })
     }
     await this.reportVersions()
   }
@@ -125,6 +126,8 @@ export class PlatformConfigService {
     const snapshot = structuredClone(previous)
     const fields = PLATFORM_DEFINITIONS[id].fields
     for (const [key, value] of Object.entries(input.config)) {
+      // Accept stale admin-page payloads without restoring global model overrides.
+      if (id === 'sudorouter' && LEGACY_ROUTER_MODEL_FIELDS.has(key) && typeof value === 'string') continue
       const field = fields.find(f => f.key === key && f.type !== 'secret')
       if (!field || !validValue(field.type, value)) throw new PlatformConfigError(400, `无效配置字段: ${key}`)
       snapshot.config[key] = typeof value === 'string' ? value.trim() : value as PlatformValues[string]
@@ -175,7 +178,15 @@ export class PlatformConfigService {
       if (!record?.value) throw new PlatformConfigError(503, '平台凭据暂不可读取，请检查凭据服务')
       secrets[key] = record.value
     }
-    return { config: saved.config, secrets, sources: Object.fromEntries(PLATFORM_DEFINITIONS[id].fields.map(f => [f.key, 'platform'])) }
+    return withoutLegacyRouterModelFields(id, { config: saved.config, secrets, sources: Object.fromEntries(PLATFORM_DEFINITIONS[id].fields.map(f => [f.key, 'platform'])) })
+  }
+}
+function withoutLegacyRouterModelFields(id: PlatformProvider, snapshot: PlatformSnapshot): PlatformSnapshot {
+  if (id !== 'sudorouter') return snapshot
+  return {
+    ...snapshot,
+    config: Object.fromEntries(Object.entries(snapshot.config).filter(([key]) => !LEGACY_ROUTER_MODEL_FIELDS.has(key))),
+    sources: Object.fromEntries(Object.entries(snapshot.sources).filter(([key]) => !LEGACY_ROUTER_MODEL_FIELDS.has(key))),
   }
 }
 function isRecord(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v) }

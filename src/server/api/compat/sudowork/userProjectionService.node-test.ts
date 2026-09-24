@@ -2,6 +2,9 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
+import { AuthService } from '../../../auth/service.js'
+import { OrganizationModelSettingsRepository } from '../../../configuration/organizationModelSettingsRepository.js'
+import { buildClientRuntime } from '../../../clientRuntime.js'
 import type { SudorouterPort } from '../../../billing/sudorouterAdapter.js'
 import { createBillingTestRepository, createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import {
@@ -66,7 +69,7 @@ async function setup(
     }),
     quotaReader,
   })
-  return { db, service, billing, modelOrgIds }
+  return { db, auth, identities, service, billing, modelOrgIds }
 }
 
 const user = {
@@ -117,4 +120,55 @@ void describe('SudoworkUserProjectionService', () => {
     assert.equal((await billing.getExternalAccount('sudorouter', 'user', 'user-1'))?.quotaUnits, 4_000)
     db.close()
   })
+})
+
+void test('native and compatibility login use organization models and Nexus keys without a management API', async () => {
+  const c = await setup()
+  const auth = new AuthService(c.auth, 3600)
+  try {
+    await c.auth.createOrganization('org-2', '企业二', 2)
+    const other = await auth.createUser({ orgId: 'org-2', name: 'other', password: 'Test-password', role: 'user' })
+    await auth.initializeCompatibilityRecords()
+    const settings = new OrganizationModelSettingsRepository(c.auth.driver)
+    const keys = new Map<string, string>()
+    for (const member of [{ id: 'user-1', orgId: 'org-1' }, { id: other.user.id, orgId: 'org-2' }]) {
+      const token = `sk-${member.orgId}-key`
+      keys.set(member.id, token)
+      await settings.put(member.orgId, { model: 'model-a', modelProviders: [
+        { id: 'legacy-default', name: 'Router', baseUrl: `https://${member.orgId}.test/v1`, enabled: true },
+        { id: 'private', name: 'Private', baseUrl: 'https://unrelated.test/v1', enabled: true },
+      ] }, 'admin')
+      await c.billing.upsertExternalAccount({ provider: 'sudorouter', ownerType: 'user', ownerId: member.id,
+        externalAccountId: member.id, quotaUnits: 0, usedQuotaUnits: 0,
+        tokenSecretRef: `nexus://moss:sudorouter-users/${member.id}`, updatedAt: 1 })
+      const secrets = { getSecret: async (_namespace: string, key: string, subject?: string) => {
+          assert.equal(subject, `org:${member.orgId}`)
+          return { value: keys.get(key) ?? null, status: 'enabled', version: 1 }
+      } }
+      auth.configureSudorouterCredentialReader(secrets)
+      assert.equal(await c.auth.getUserModelCredential(member.id), null)
+      assert.equal(await auth.ensureUserSudorouterAccount(member.id), false)
+      const projection = auth.createSudoworkUserProjectionService({
+        secrets,
+        listModels: orgId => { assert.equal(orgId, member.orgId); return [{ id: 'model-a' }] },
+        getScodeAutoModel: orgId => { assert.equal(orgId, member.orgId); return 'model-a' },
+      })
+      const legacy = await projection.project({ ...user,
+        id: (await c.identities.getNumericAlias('user', member.id))!,
+        enterpriseId: (await c.identities.getNumericAlias('enterprise', member.orgId))!,
+      })
+      assert.equal(legacy.modelServiceUrl, `https://${member.orgId}.test/v1`)
+      assert.equal(legacy.sudorouterKey, token)
+      const native = await buildClientRuntime(auth, member, async options => {
+        assert.equal(options?.orgId, member.orgId)
+        assert.equal(options?.userApiKey, token)
+        assert.equal(options?.settings?.modelProviders.length, 1)
+        assert.equal(options?.settings?.modelProviders[0]?.baseUrl, legacy.modelServiceUrl)
+        return [{ id: 'legacy-default:model-a', modelId: 'model-a', name: 'A', providerId: 'legacy-default', providerName: 'Router', protocol: 'openai-completions', ratio: 1 }]
+      })
+      assert.equal(native.localRuntime.status, 'ready')
+      assert.equal('model_service_url' in native && native.model_service_url, legacy.modelServiceUrl)
+      assert.equal('sudorouter_key' in native && native.sudorouter_key, legacy.sudorouterKey)
+    }
+  } finally { auth.destroy(); c.db.close() }
 })

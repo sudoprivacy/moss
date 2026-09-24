@@ -24,12 +24,10 @@ export interface SudorouterRuntimeConfig {
   adminUserId: string
   timeoutMs: number
   initialQuota: number
-  modelServiceUrl: string
-  modelsApiUrl: string
 }
 
 export function resolveSudorouterRuntimeConfig(input: {
-  infrastructure: SudoworkInfrastructureConfig['billing']['sudorouter']
+  infrastructure: Pick<SudoworkInfrastructureConfig['billing']['sudorouter'], 'baseUrl' | 'adminUserId' | 'timeoutMs' | 'initialQuota'>
   environment: Environment
   getSecret(key: ConfigKey): string | undefined
 }): SudorouterRuntimeConfig | null {
@@ -49,12 +47,6 @@ export function resolveSudorouterRuntimeConfig(input: {
       input.environment.USER_INITIAL_QUOTA,
       input.infrastructure.initialQuota,
     ),
-    modelServiceUrl: (
-      input.environment.SUDOROUTER_MODEL_SERVICE_URL || input.infrastructure.modelServiceUrl
-    ).replace(/\/+$/, ''),
-    modelsApiUrl: (
-      input.environment.SUDOROUTER_MODELS_API_URL || input.infrastructure.modelsApiUrl
-    ).replace(/\/+$/, ''),
   }
 }
 

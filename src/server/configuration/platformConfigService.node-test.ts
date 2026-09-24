@@ -8,7 +8,11 @@ import { serverFileConfigSchema, type ServerConfig } from '../types.js'
 import { PLATFORM_PROVIDERS, type PlatformProvider } from './platformConfigDefinition.js'
 import { ensurePlatformIntegrationSettingsSchema, PlatformIntegrationSettingsRepository } from './platformIntegrationSettingsRepository.js'
 import { PlatformConfigService, PlatformConfigError, type PlatformVault, type PlatformSnapshot } from './platformConfigService.js'
-import { applyPlatformRuntime, legacyPlatformSnapshots, platformEnvironment, resolveNativeSmsCredentials, smsReadiness } from './platformConfigRuntime.js'
+import { applyPlatformRuntime, legacyPlatformSnapshots, platformEnvironment, platformInfrastructure, resolveNativeSmsCredentials, smsReadiness } from './platformConfigRuntime.js'
+import { resolveSudorouterRuntimeConfig } from '../billing/billingRuntimeConfig.js'
+import { SudoworkSystemConfigService } from '../api/compat/sudowork/systemConfigService.js'
+import { ClientPolicyRepository } from './clientPolicyRepository.js'
+import { IdentityRepository } from '../identity/identityRepository.js'
 
 class Vault implements PlatformVault {
   values = new Map<string, string>()
@@ -128,4 +132,65 @@ void test('conflicting legacy accounts require explicit credentials; protected h
   await service.save('sms', { expectedVersion: null, config: smsConfig, secrets: smsSecrets }, 'root')
   const saved = await service.save('qms', { expectedVersion: null, config: { enabled: false } }, 'root')
   await assert.rejects(service.save('qms', { expectedVersion: saved.version, config: { enabled: false }, secrets: { privateKeyPem: null } }, 'root'), status(409))
+})
+
+void test('old saved Router model fields are ignored and stale admin payloads cannot restore them', async t => {
+  const { auth, create } = setup(t)
+  const platform = create()
+  await platform.initialize()
+  const saved = await platform.save('sudorouter', {
+    expectedVersion: null,
+    config: { enabled: true, baseUrl: 'https://admin.test', adminUserId: '76', timeoutMs: 1000 },
+    secrets: { apiToken: 'test-admin-token' },
+  }, 'root')
+  const repository = new PlatformIntegrationSettingsRepository(auth.driver)
+  const old = (await repository.get('platform.v1.sudorouter'))!
+  old.config = { ...(old.config as Record<string, unknown>), modelServiceUrl: 'https://old-global.test/v1', modelsApiUrl: 'https://old-global.test/models' }
+  await repository.put('platform.v1.sudorouter', old, 'legacy')
+  const restarted = create('restart')
+  await restarted.initialize()
+  const item = (await restarted.list()).items.find(value => value.id === 'sudorouter')!
+  assert.equal(item.fields.some(field => field.key === 'modelServiceUrl' || field.key === 'modelsApiUrl'), false)
+  assert.equal('modelServiceUrl' in item.config, false)
+  assert.equal('modelsApiUrl' in restarted.getActive('sudorouter').config, false)
+  assert.deepEqual(await repository.get('platform.v1.sudorouter'), old, 'Reads leave the historical record intact')
+  const store = new ConfigStore(null)
+  const config = serverFileConfigSchema().parse({}) as unknown as ServerConfig
+  config.qms = resolveQmsConfig({}, {})
+  applyPlatformRuntime(restarted, config, store)
+  const system = new SudoworkSystemConfigService({
+    db: auth.driver, policies: new ClientPolicyRepository(auth.driver), identities: new IdentityRepository(auth.driver),
+    defaults: { loginMethod: 'password', skillhubBaseUrl: '' }, secrets: store,
+    resolveInfrastructure: legacy => platformInfrastructure(restarted, legacy),
+  })
+  const infrastructure = await system.getInfrastructureConfig()
+  assert.equal(infrastructure.billing.sudorouter.modelServiceUrl, '')
+  assert.deepEqual(resolveSudorouterRuntimeConfig({
+    infrastructure: infrastructure.billing.sudorouter,
+    environment: platformEnvironment(restarted, { SUDOROUTER_API_TOKEN: 'obsolete', SUDOROUTER_BASE_URL: 'https://obsolete.test' }),
+    getSecret: key => store.get(key),
+  }), { baseUrl: 'https://admin.test', adminUserId: '76', timeoutMs: 1000, initialQuota: infrastructure.billing.sudorouter.initialQuota, apiToken: 'test-admin-token' })
+  await restarted.save('sudorouter', {
+    expectedVersion: saved.version,
+    config: { baseUrl: 'https://new-admin.test', modelServiceUrl: 'https://stale-page.test/v1', modelsApiUrl: '' },
+  }, 'root')
+  const updated = (await repository.get('platform.v1.sudorouter'))!.config as Record<string, unknown>
+  assert.equal(updated.baseUrl, 'https://new-admin.test')
+  assert.equal('modelServiceUrl' in updated, false)
+  assert.equal('modelsApiUrl' in updated, false)
+  const secondRestart = create('second-restart')
+  await secondRestart.initialize()
+  assert.equal(secondRestart.getActive('sudorouter').config.baseUrl, 'https://new-admin.test')
+  assert.equal(secondRestart.getActive('sudorouter').secrets.apiToken, 'test-admin-token')
+})
+
+void test('legacy Router import contains only management connection fields', async t => {
+  const { auth, vault } = setup(t)
+  const config = serverFileConfigSchema().parse({}) as unknown as ServerConfig
+  const snapshots = await legacyPlatformSnapshots(config, new ConfigStore(null), vault,
+    new PlatformIntegrationSettingsRepository(auth.driver), {
+      SUDOROUTER_BASE_URL: 'https://admin.test', SUDOROUTER_API_TOKEN: 'admin-token', SUDOROUTER_ADMIN_USER_ID: '76',
+      SUDOROUTER_MODEL_SERVICE_URL: 'https://model.test/v1', SUDOROUTER_MODELS_API_URL: 'https://model.test/models',
+    }, ['sudorouter'])
+  assert.deepEqual(snapshots.sudorouter!.config, { enabled: true, baseUrl: 'https://admin.test', adminUserId: '76', timeoutMs: 10000 })
 })

@@ -85,6 +85,7 @@ const nodeTestFiles = [
   'src/server/migration/governanceMigrationService.node-test.ts',
   'src/server/migration/identityMergePlanner.node-test.ts',
   'src/server/migration/identityMigrationService.node-test.ts',
+  'src/server/migration/legacySudorouterCredentials.node-test.ts',
   'src/server/migration/migrationReportFactory.node-test.ts',
   'src/server/migration/migrationReportWriter.node-test.ts',
   'src/server/migration/migrationRunStore.node-test.ts',

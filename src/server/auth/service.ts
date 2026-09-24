@@ -76,7 +76,7 @@ import {
   type SudorouterAccountPort,
   type SudorouterUsagePort,
 } from '../billing/sudorouterAdapter.js'
-import { SudorouterAccountService } from '../billing/sudorouterAccountService.js'
+import { readSudorouterAccount, SudorouterAccountService } from '../billing/sudorouterAccountService.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import { SudoworkBillingService, type BillingPaymentPort } from '../api/compat/sudowork/billingService.js'
 import { SudoworkLegacyUsageService } from '../api/compat/sudowork/legacyUsageService.js'
@@ -339,6 +339,7 @@ export class AuthService {
   private readonly unifiedIdentity: UnifiedIdentityService
   private readonly clientPolicies: ClientPolicyRepository
   private readonly loginPolicyDefaults: { loginMethod: LoginPolicyMethod } = { loginMethod: 'password' }
+  private sudorouterAccountReader?: Pick<SudorouterAccountService, 'getAccount'>
   private sudorouterAccounts?: {
     accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'> & Partial<Pick<SudorouterAccountService, 'getAccount'>>
     initialQuotaUnits: number
@@ -456,23 +457,12 @@ export class AuthService {
     return this.clientPolicies.putOrganization(orgId, patch, updatedBy)
   }
 
-  private platformRouterModelConfig?: { enabled: boolean; modelServiceUrl: string; modelsApiUrl: string }
-
-  configurePlatformRouterModel(config: { enabled: boolean; modelServiceUrl: string; modelsApiUrl: string }): void {
-    this.platformRouterModelConfig = config
-  }
-
   async getOrganizationSystemSettings(orgId: string | undefined, options: { redactSecrets?: boolean } = {}) {
-    const settings = await getOrganizationSystemSettings(
+    return getOrganizationSystemSettings(
       orgId,
       new OrganizationModelSettingsRepository(this.db.driver),
       options,
     )
-    const router = this.platformRouterModelConfig
-    if (!router) return settings
-    return { ...settings, modelProviders: settings.modelProviders.map(provider => provider.id === 'legacy-default'
-      ? { ...provider, enabled: provider.enabled && router.enabled, baseUrl: router.modelServiceUrl, discoveryUrl: router.modelsApiUrl }
-      : provider) }
   }
 
   updateOrganizationSystemSettings(
@@ -534,16 +524,30 @@ export class AuthService {
     )
   }
 
+  configureSudorouterCredentialReader(secrets: Pick<NexusClient, 'getSecret'>): void {
+    const repository = new BillingRepository(this.db.driver)
+    this.sudorouterAccountReader = {
+      getAccount: (ownerId, orgId) => readSudorouterAccount(repository, secrets, ownerId, orgId),
+    }
+  }
+
   createSudoworkUserProjectionService(input: {
     secrets: Pick<NexusClient, 'getSecret'>
     listModels: (orgId?: string) => Promise<Array<{ id: string }>> | Array<{ id: string }>
-    getRuntimeConfig: (orgId?: string) => Promise<{ modelServiceUrl: string; scodeAutoModel: string }> | { modelServiceUrl: string; scodeAutoModel: string }
+    getScodeAutoModel: (orgId?: string) => Promise<string> | string
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }): SudoworkUserProjectionService {
     return new SudoworkUserProjectionService({
       identities: this.identityRepository,
       billing: new BillingRepository(this.db.driver),
       ...input,
+      getRuntimeConfig: async orgId => {
+        const settings = await this.getOrganizationSystemSettings(orgId)
+        // This response carries a Router user token, so only its organization
+        // provider may supply the endpoint, just as in buildClientRuntime.
+        const provider = settings.modelProviders.find(item => item.id === 'legacy-default' && item.enabled)
+        return { modelServiceUrl: provider?.baseUrl ?? '', scodeAutoModel: await input.getScodeAutoModel(orgId) }
+      },
     })
   }
 
@@ -2044,10 +2048,10 @@ export class AuthService {
    * applies. Used only server-side for model discovery and session credentials.
    */
   async getUserModelCredential(userId: string): Promise<UserModelCredential | null> {
-    const provisioner = this.sudorouterAccounts?.accountProvisioner
-    if (provisioner?.getAccount) {
+    const reader = this.sudorouterAccountReader ?? this.sudorouterAccounts?.accountProvisioner
+    if (reader?.getAccount) {
       const user = await this.db.getUserById(userId)
-      const account = user ? await provisioner.getAccount(user.id, user.orgId) : null
+      const account = user ? await reader.getAccount(user.id, user.orgId) : null
       if (account) {
         return {
           sudorouterUserId: account.externalUserId,
