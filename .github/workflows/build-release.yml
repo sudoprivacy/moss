@@ -72,6 +72,17 @@ jobs:
       - name: Run server tests
         run: bun run test
 
+      # `scripts/e2e/session-owner-live.ts` needs a live auth-on daemon and an
+      # operator's node certificate, so CI cannot run it. Keeping it compiling
+      # is what stops it rotting into something nobody can run — and it lives
+      # here rather than beside the `node --check` lines because, unlike those,
+      # it needs node_modules.
+      - name: Keep the live session-owner e2e compiling
+        run: |
+          node node_modules/typescript/bin/tsc --noEmit --module nodenext \
+            --moduleResolution nodenext --target es2022 --skipLibCheck \
+            scripts/e2e/session-owner-live.ts
+
       # Nothing in this repo has ever type-checked: bun executes TypeScript
       # without checking it, and the release artifact is produced by `bun build`,
       # a bundler. A wrong-arity call therefore reaches dev under a fully green
@@ -155,11 +166,6 @@ jobs:
           node --check scripts/e2e/server-release-smoke.mjs
           node --check scripts/e2e/server-admin-browser-smoke.mjs
           node --check scripts/e2e/packaged-pg-ha-smoke.mjs
-          # This one is TypeScript because it drives moss's own modules; it needs a
-          # live auth-on daemon so CI cannot run it, only keep it compiling.
-          node node_modules/typescript/bin/tsc --noEmit --module nodenext \
-            --moduleResolution nodenext --target es2022 --skipLibCheck \
-            scripts/e2e/session-owner-live.ts
           chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh \
             scripts/e2e/mock-openai-server.mjs scripts/e2e/server-release-smoke.mjs \
             scripts/e2e/server-admin-browser-smoke.mjs \
