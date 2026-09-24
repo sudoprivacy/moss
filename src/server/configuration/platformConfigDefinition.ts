@@ -15,8 +15,8 @@ const number = (key: string, label: string, min = 1, max = 86400000): PlatformFi
 const enabled = field('enabled', '启用服务', 'boolean')
 export const PLATFORM_DEFINITIONS: Record<PlatformProvider, { label: string; description: string; fields: PlatformField[] }> = {
   sms: {
-    label: '腾讯短信', description: '所有组织共用的短信通道；登录方式在组织策略中选择。',
-    fields: [enabled, field('sdkAppId', 'SDK App ID', 'text', true), field('signName', '短信签名', 'text', true),
+    label: '短信', description: '所有组织共用的短信通道，支持腾讯短信和本地模拟发送；登录方式在组织策略中选择。',
+    fields: [enabled, field('mockDelivery', '模拟发送（仅测试，不发送真实短信）', 'boolean'), field('sdkAppId', 'SDK App ID', 'text', true), field('signName', '短信签名', 'text', true),
       field('templateId', '模板 ID', 'text', true), field('region', '地域', 'text', true),
       field('templateParams', '模板参数（每行一个）', 'lines'), number('codeTtlSec', '验证码有效期（秒）', 60, 3600),
       number('resendCooldownSec', '重发间隔（秒）', 1, 3600), number('maxSendsPerHour', '每小时最多发送次数', 1, 100),

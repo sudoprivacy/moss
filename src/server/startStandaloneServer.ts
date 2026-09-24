@@ -26,6 +26,7 @@ import { readFileSync } from 'node:fs'
 import { createSudoworkCompatibilityApp } from './api/compat/sudowork/app.js'
 import { createRedisLegacyTokenStore, type RedisLegacyTokenStore } from './api/compat/sudowork/redisLegacyStore.js'
 import { SmsVerificationService } from './identity/smsVerification.js'
+import { logPhoneVerificationCode } from './auth/phoneAuth.js'
 import { createTencentSmsSender } from './identity/tencentSmsSender.js'
 import { ManagedImageStore } from './configuration/managedImageStore.js'
 import { SudorouterAdapter } from './billing/sudorouterAdapter.js'
@@ -434,7 +435,9 @@ async function finishStandaloneServerStartup(
   const sms = await systemConfiguration.isSmsConfigured() && redisLegacyTokenStore
     ? new SmsVerificationService({
         store: redisLegacyTokenStore,
-        sender: smsSender ? { send: input => smsSender(input.phone, input.code) } : createTencentSmsSender({
+        sender: config.phoneAuth.enabled && config.phoneAuth.delivery === 'log'
+          ? { send: async input => logPhoneVerificationCode(input.phone, input.code) }
+          : smsSender ? { send: input => smsSender(input.phone, input.code) } : createTencentSmsSender({
           secretId: config.sudoworkCompatibility.sms.secretId ?? '',
           secretKey: config.sudoworkCompatibility.sms.secretKey ?? '',
           sdkAppId: smsConfig.sdkAppId,

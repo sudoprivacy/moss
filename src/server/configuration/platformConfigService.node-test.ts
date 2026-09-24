@@ -11,7 +11,10 @@ import { PlatformConfigService, PlatformConfigError, type PlatformVault, type Pl
 import { applyPlatformRuntime, legacyPlatformSnapshots, platformEnvironment, platformInfrastructure, resolveNativeSmsCredentials, smsReadiness } from './platformConfigRuntime.js'
 import { resolveSudorouterRuntimeConfig } from '../billing/billingRuntimeConfig.js'
 import { SudoworkSystemConfigService } from '../api/compat/sudowork/systemConfigService.js'
-import { ClientPolicyRepository } from './clientPolicyRepository.js'
+import { AuthService } from '../auth/service.js'
+import { PhoneAuthService, logPhoneVerificationCode } from '../auth/phoneAuth.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
+import { ClientPolicyRepository, ensureClientPolicySchema } from './clientPolicyRepository.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
 
 class Vault implements PlatformVault {
@@ -193,4 +196,142 @@ void test('legacy Router import contains only management connection fields', asy
       SUDOROUTER_MODEL_SERVICE_URL: 'https://model.test/v1', SUDOROUTER_MODELS_API_URL: 'https://model.test/models',
     }, ['sudorouter'])
   assert.deepEqual(snapshots.sudorouter!.config, { enabled: true, baseUrl: 'https://admin.test', adminUserId: '76', timeoutMs: 10000 })
+})
+
+
+void test('mock SMS can be saved without Tencent credentials, activates on restart and cannot silently switch to real delivery', async t => {
+  const { create, legacy, vault } = setup(t)
+  legacy.sms = { config: { ...smsConfig, enabled: false, sdkAppId: '', signName: '', templateId: '' }, secrets: {}, sources: {} }
+  const platform = create()
+  await platform.initialize()
+  const input = { expectedVersion: null, config: { enabled: true, mockDelivery: true } }
+  assert.equal((await platform.check('sms', input)).ready, true)
+  const saved = await platform.save('sms', input, 'root')
+  assert.equal(platform.getActive('sms').config.enabled, false)
+  assert.equal((await platform.list()).items[0]!.restartRequired, true)
+  assert.equal(vault.values.size, 0)
+  const restarted = create('restarted')
+  await restarted.initialize()
+  const config = serverFileConfigSchema().parse({}) as unknown as ServerConfig
+  config.qms = resolveQmsConfig({}, {})
+  const store = new ConfigStore(null)
+  applyPlatformRuntime(restarted, config, store)
+  assert.equal(config.phoneAuth.enabled, true)
+  assert.equal(config.phoneAuth.delivery, 'log')
+  assert.equal(config.sudoworkCompatibility.sms.provider, 'disabled')
+  const ready = await smsReadiness(restarted, config, store, vault)
+  assert.equal(ready.ready, true)
+  assert.match(ready.reason!, /模拟发送/)
+  await assert.rejects(restarted.save('sms', {
+    expectedVersion: saved.version, config: { mockDelivery: false },
+  }, 'root'), status(400))
+  await assert.rejects(restarted.save('sms', {
+    expectedVersion: saved.version, config: { maxVerifyAttempts: 0 },
+  }, 'root'), status(400))
+  assert.equal(restarted.getActive('sms').config.mockDelivery, true)
+})
+
+void test('existing managed SMS without a mock flag stays on Tencent and saved credentials survive mock mode', async t => {
+  const { create, vault } = setup(t)
+  const platform = create()
+  await platform.initialize()
+  const first = await platform.save('sms', { expectedVersion: null, config: smsConfig }, 'root')
+  const real = create('real')
+  await real.initialize()
+  const config = serverFileConfigSchema().parse({ phoneAuth: { enabled: true, delivery: 'log' } }) as unknown as ServerConfig
+  config.qms = resolveQmsConfig({}, {})
+  applyPlatformRuntime(real, config, new ConfigStore(null))
+  assert.equal(config.phoneAuth.delivery, 'tencent')
+  const second = await real.save('sms', { expectedVersion: first.version, config: { mockDelivery: true } }, 'root')
+  assert.equal(real.getActive('sms').config.mockDelivery, undefined)
+  const simulated = create('simulated')
+  await simulated.initialize()
+  applyPlatformRuntime(simulated, config, new ConfigStore(null))
+  assert.equal(config.phoneAuth.delivery, 'log')
+  assert.deepEqual(simulated.getActive('sms').secrets, smsSecrets)
+  await simulated.save('sms', { expectedVersion: second.version, config: { mockDelivery: false } }, 'root')
+  const restored = create('restored')
+  await restored.initialize()
+  applyPlatformRuntime(restored, config, new ConfigStore(null))
+  assert.equal(config.phoneAuth.delivery, 'tencent')
+  assert.equal((await smsReadiness(restored, config, new ConfigStore(null), vault)).ready, true)
+})
+
+void test('legacy explicit log delivery imports as mock SMS and satisfies login-policy readiness', async t => {
+  const { auth, vault, create } = setup(t)
+  const config = serverFileConfigSchema().parse({ phoneAuth: { enabled: true, delivery: 'log', resendCooldownSec: 5 } }) as unknown as ServerConfig
+  config.qms = resolveQmsConfig({}, {})
+  const store = new ConfigStore(null)
+  const snapshots = await legacyPlatformSnapshots(config, store, vault, new PlatformIntegrationSettingsRepository(auth.driver), {}, ['sms'])
+  assert.equal(snapshots.sms!.config.enabled, true)
+  assert.equal(snapshots.sms!.config.mockDelivery, true)
+  assert.equal(snapshots.sms!.config.resendCooldownSec, 5)
+  const platform = create()
+  await platform.initialize()
+  assert.equal((await smsReadiness(platform, config, store, vault)).ready, true)
+})
+
+void test('mock SMS exercises registration, one-time code login and organization policy without calling a provider', async t => {
+  const { db, auth: authDb, create, vault, legacy } = setup(t)
+  legacy.sms.secrets = {}
+  const platform = create()
+  await platform.initialize()
+  await platform.save('sms', { expectedVersion: null, config: { ...smsConfig, mockDelivery: true } }, 'root')
+  const restarted = create('restarted')
+  await restarted.initialize()
+  const config = serverFileConfigSchema().parse({}) as unknown as ServerConfig
+  config.qms = resolveQmsConfig({}, {})
+  const store = new ConfigStore(null)
+  applyPlatformRuntime(restarted, config, store)
+  createIdentityTestRepository(db, {}, authDb.driver)
+  ensureClientPolicySchema(db)
+  await authDb.setConfig('issuer', 'mock-sms-test')
+  await authDb.setConfig('jwt_secret', 'mock-sms-test-secret')
+  const forbiddenSender = t.mock.fn(async () => { throw new Error('Real SMS must never be called') })
+  const auth = new AuthService(authDb, 3600, config.phoneAuth, forbiddenSender)
+  // Registered after setup's close hook; destroy does not access the database.
+  t.after(() => auth.destroy())
+  const org = (await auth.createOrganization({ name: 'SMS Test' })).organization
+  const other = (await auth.createOrganization({ name: 'Password Test' })).organization
+  const system = auth.createSudoworkSystemConfigService({
+    loginMethod: 'password', skillhubBaseUrl: '', secrets: store,
+    getSmsReadiness: () => smsReadiness(restarted, config, store, vault),
+  })
+  const actor = { userId: 'root', orgId: org.id, role: 'super_admin', organizationScoped: true }
+  await system.update(actor, { login_method: 0 })
+  assert.equal(await system.getLoginMethod(org.id), 'sms')
+  assert.equal(await system.getLoginMethod(other.id), 'password')
+  await auth.createOrganizationIdentityService().createInvitations({ orgId: org.id, count: 1 }, () => 'MOCK-INVITE')
+  const phone = '13800138009'
+  let output = ''
+  t.mock.method(console, 'warn', (...args: unknown[]) => { output = args.map(String).join(' ') })
+  const send = await auth.phoneAuth.sendCode(phone)
+  assert.equal(send.delivery, 'log')
+  assert.equal(forbiddenSender.mock.callCount(), 0)
+  const code = output.match(/is (\d{6})\./)?.[1]
+  assert(code)
+  assert.equal(output.includes(phone), false)
+  assert.equal(await auth.phoneAuth.verifyCode(phone, code), true)
+  assert.equal(await auth.phoneAuth.verifyCode(phone, code), false)
+  await assert.rejects(auth.registerWithPhone({ phone, nickname: 'Test', invitationCode: 'BAD' }), /Invitation/)
+  const registered = await auth.registerWithPhone({ phone, nickname: 'Test', invitationCode: 'MOCK-INVITE' })
+  assert.equal(registered.user.orgId, org.id)
+  assert.equal(registered.user.role, 'user')
+  await auth.phoneAuth.sendCode(phone)
+  const loginCode = output.match(/is (\d{6})\./)?.[1]
+  assert(loginCode)
+  assert.equal(await auth.phoneAuth.verifyCode(phone, loginCode), true)
+  assert.equal((await auth.issueTokenFromPhone(phone)).user.id, registered.user.id)
+  await assert.rejects(auth.issueTokenFromPassword({ username: phone, password: phone }), /does not allow password/)
+  assert.equal((await auth.issueMossTokenFromPassword({ username: phone, password: phone })).user.id, registered.user.id)
+  await system.update(actor, { login_method: 1 })
+  await assert.rejects(auth.issueTokenFromPhone(phone), /does not allow phone/)
+  assert.equal((await auth.issueTokenFromPassword({ username: phone, password: phone })).user.id, registered.user.id)
+  assert.equal(forbiddenSender.mock.callCount(), 0)
+  logPhoneVerificationCode(phone, '123456')
+  assert.match(output, /is 123456\./)
+  // The log transport must ignore a wired sender even when a credential is present.
+  const verification = new PhoneAuthService(authDb, config.phoneAuth, 'test-secret', forbiddenSender)
+  await verification.sendCode('13800138008')
+  assert.equal(forbiddenSender.mock.callCount(), 0)
 })

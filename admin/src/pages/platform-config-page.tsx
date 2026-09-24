@@ -28,6 +28,7 @@ export default function PlatformConfigPage() {
   const [preview, setPreview] = useState<PasswordMigrationPreview | null>(null)
   const inFlight = useRef(false)
   const item = data?.items.find(value => value.id === selected)
+  const mockSms = item?.id === 'sms' && draft.mockDelivery === true
   const dirty = Boolean(item && (JSON.stringify(draft) !== JSON.stringify(item.config) || Object.keys(secrets).length))
   const discard = useCallback(() => { setDraft(item?.config ?? {}); setSecrets({}) }, [item])
   const confirmDiscard = useSettingsNavigationGuard(dirty, saving, discard)
@@ -84,13 +85,15 @@ export default function PlatformConfigPage() {
           <div className="border-t px-3 pt-3 pb-2 text-xs leading-relaxed text-muted-foreground">管理其他服务器凭据<br /><Link className="underline underline-offset-4" to="/settings/server-credentials">打开服务器凭据</Link></div>
         </nav>
         <Card>
-          <CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="flex items-center gap-2"><ServerCog className="size-5" />{item.label}</CardTitle><Badge variant={item.restartRequired ? 'secondary' : 'outline'}>{item.restartRequired ? '已保存 · 待重启' : item.managed ? '平台配置已生效' : '使用现有部署配置'}</Badge></div><CardDescription>{item.description}</CardDescription></CardHeader>
+          <CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="flex items-center gap-2"><ServerCog className="size-5" />{item.label}</CardTitle><Badge variant={item.restartRequired ? 'secondary' : 'outline'}>{item.restartRequired ? '已保存 · 待重启' : item.managed ? item.id === 'sms' && item.config.enabled === true && item.config.mockDelivery === true ? '模拟发送已生效' : '平台配置已生效' : '使用现有部署配置'}</Badge></div><CardDescription>{item.description}</CardDescription></CardHeader>
           <CardContent className="space-y-6 pt-6">
             {!item.managed ? <Alert><AlertTitle>接管现有配置</AlertTitle><AlertDescription>参数已从现有配置导入。首次保存后，该服务由平台页面管理，旧环境变量不再覆盖它。未修改的凭据会在服务端保留。</AlertDescription></Alert> : null}
             {item.conflicts.length ? <Alert variant="destructive"><AlertTitle>历史配置存在冲突</AlertTitle><AlertDescription>请重新填写这些字段，明确选择要使用的值：{item.conflicts.join('、')}</AlertDescription></Alert> : null}
             {item.issues.length ? <p className="text-sm text-amber-700 dark:text-amber-400">当前检查：{item.issues.join('；')}</p> : null}
+            {mockSms ? <Alert><AlertTitle>模拟发送（仅测试）</AlertTitle><AlertDescription>保存并重启 Moss 后，验证码仅写入启动服务的终端日志，不会调用腾讯短信。无需填写腾讯参数和凭据；已有凭据会保留。登录和注册仍校验验证码及组织策略，注册仍需有效邀请码。关闭模拟发送后，需配置有效的腾讯短信参数和凭据。</AlertDescription></Alert> : null}
             <fieldset disabled={saving} className="grid gap-x-5 gap-y-6 lg:grid-cols-2"><legend className="sr-only">{item.label}配置</legend>
               {item.fields.map(field => {
+                if (mockSms && (field.required || field.key === 'templateParams')) return null
                 const id = `${item.id}-${field.key}`
                 const value = draft[field.key]
                 if (field.type === 'boolean') return <div key={id} className="flex items-center justify-between gap-4 rounded-lg border p-3"><Label htmlFor={id}>{field.label}</Label><Switch id={id} checked={value === true} onCheckedChange={checked => setDraft(current => ({ ...current, [field.key]: checked }))} /></div>
