@@ -295,6 +295,17 @@ void test('mock SMS exercises registration, one-time code login and organization
   const other = (await auth.createOrganization({ name: 'Password Test' })).organization
   const system = auth.createSudoworkSystemConfigService({
     loginMethod: 'password', skillhubBaseUrl: '', secrets: store,
+    smsRuntimeAvailable: config.sudoworkCompatibility.enabled,
+    smsCredentialsAvailable: false,
+    sms: config.sudoworkCompatibility.sms,
+    billing: {
+      enabled: false,
+      fuiou: { testMode: true, merchantCode: '', timeoutMs: 1000 },
+      sudorouter: {
+        baseUrl: '', adminUserId: '', timeoutMs: 1000, initialQuota: 0,
+        modelServiceUrl: '', modelsApiUrl: '',
+      },
+    },
     getSmsReadiness: () => smsReadiness(restarted, config, store, vault),
   })
   const actor = { userId: 'root', orgId: org.id, role: 'super_admin', organizationScoped: true }
