@@ -202,7 +202,7 @@ describe('zone_binding_outbox claim/fence lifecycle', () => {
 /** 记录调用并按脚本回放的 fake /v2 client——不产生任何网络。 */
 class FakeZoneClient {
   readonly zoneCalls: Array<{ zoneId: string; key: string }> = []
-  readonly grantCalls: Array<{ zoneId: string; grantee: string; sourceId: string; key: string }> = []
+  readonly grantCalls: Array<{ zoneId: string; grantee: string; sourceId: string; resourcePrefixes?: string[]; key: string }> = []
   script: Array<'ok' | 'unknown' | 'retryable' | 'fatal'> = ['ok']
 
   async createZone(input: { zoneId: string }, key: string): Promise<ZoneOperationRef> {
@@ -218,8 +218,8 @@ class FakeZoneClient {
     return { operation_id: operationId, action: 'create', zone_id: 'z', grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false }
   }
 
-  async createGrant(input: { zoneId: string; grantee: { subject_id: string }; source: { source_id: string } }, key: string): Promise<ZoneOperationRef> {
-    this.grantCalls.push({ zoneId: input.zoneId, grantee: input.grantee.subject_id, sourceId: input.source.source_id, key })
+  async createGrant(input: { zoneId: string; grantee: { subject_id: string }; source: { source_id: string }; resourcePrefixes?: string[] }, key: string): Promise<ZoneOperationRef> {
+    this.grantCalls.push({ zoneId: input.zoneId, grantee: input.grantee.subject_id, sourceId: input.source.source_id, resourcePrefixes: input.resourcePrefixes, key })
     return { operation_id: 'grant-op-1', action: 'grant', zone_id: input.zoneId, grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false }
   }
 
@@ -252,6 +252,7 @@ describe('reconciler', () => {
     // grantee 是 organization principal（Org grant，非用户直发）
     assert.equal(fake.grantCalls[0].grantee, orgId)
     assert.match(fake.grantCalls[0].sourceId, /:1$/)
+    assert.deepEqual(fake.grantCalls[0].resourcePrefixes, ['/'])
     const binding = (raw
       .prepare(`SELECT * FROM org_zone_bindings WHERE org_id = ?`)
       .get(orgId)) as Record<string, unknown>
@@ -302,10 +303,26 @@ describe('reconciler', () => {
 
 describe('ZoneDelegationService', () => {
   class FakeDelegationClient {
-    issued: Array<{ userId: string; orgId: string; membershipVersion: string; zoneId: string }> = []
+    issued: Array<{
+      userId: string
+      orgId: string
+      membershipVersion: string
+      zoneId: string
+      grantId?: string
+      purpose?: 'data-access' | 'runtime'
+      scopeRules?: Array<{ capability: string; resourcePrefixes: string[] }>
+    }> = []
     revoked: string[] = []
     async issueDelegation(
-      input: { userId: string; orgId: string; membershipVersion: string; zoneId: string },
+      input: {
+        userId: string
+        orgId: string
+        membershipVersion: string
+        zoneId: string
+        grantId?: string
+        purpose?: 'data-access' | 'runtime'
+        scopeRules?: Array<{ capability: string; resourcePrefixes: string[] }>
+      },
       _key: string,
     ) {
       this.issued.push(input)
@@ -314,7 +331,13 @@ describe('ZoneDelegationService', () => {
         user_id: input.userId,
         org_id: input.orgId,
         zone_id: input.zoneId,
+        grant_id: input.grantId ?? 'grant-test',
+        grant_revision: 'rev-test',
+        authorization_epoch: 1,
         audience: 'vfs',
+        purpose: input.purpose ?? 'data-access',
+        scope_rules: (input.scopeRules ?? [{ capability: 'zone.data.read', resourcePrefixes: ['/'] }])
+          .map(rule => ({ capability: rule.capability, resource_prefixes: rule.resourcePrefixes })),
         expires_at: new Date(Date.now() + 900_000).toISOString(),
         status: 'active',
       }
@@ -331,7 +354,7 @@ describe('ZoneDelegationService', () => {
       `INSERT INTO users (id, org_id, email, name, role, status, local_auth, created_at) VALUES (?, ?, ?, ?, 'admin', 'active', 1, ?)`,
     ).run('uuuuuuuu-0000-4000-8000-000000000001', orgId, 'k@x', 'kappa', Date.now())
     // binding → active（绕过 reconciler，直接模拟收敛后的状态）
-    raw.prepare(`UPDATE org_zone_bindings SET sync_status = 'active'`).run()
+    raw.prepare(`UPDATE org_zone_bindings SET sync_status = 'active', nexus_grant_id = 'grant-test'`).run()
     return { orgId, userId: 'uuuuuuuu-0000-4000-8000-000000000001' }
   }
 
@@ -346,7 +369,31 @@ describe('ZoneDelegationService', () => {
     const issued = await service.issueForOrgUser({ orgId, userId })
     assert.equal(issued.delegationId, 'del-1')
     assert.equal(fake.issued[0].membershipVersion, 'r0')
+    assert.equal(fake.issued[0].grantId, 'grant-test')
     assert.equal(validateZoneId(issued.zoneId), null)
+  })
+
+  it('binds runtime issuance to the persisted grant and exact session rule', async () => {
+    const { orgId, userId } = await seedActiveOrgWithUser()
+    const fake = new FakeDelegationClient()
+    const service = new ZoneDelegationService({
+      driver: db.driver,
+      client: fake as unknown as NexusZoneClient,
+      config: CONFIG,
+    })
+    const rules = [{
+      capability: 'zone.runtime.execute',
+      resourcePrefixes: ['/sessions/session-1'],
+    }]
+    const issued = await service.issueForOrgUser({
+      orgId, userId, purpose: 'runtime', scopeRules: rules,
+    })
+    assert.equal(fake.issued[0].grantId, 'grant-test')
+    assert.equal(fake.issued[0].purpose, 'runtime')
+    assert.deepEqual(fake.issued[0].scopeRules, rules)
+    assert.equal(issued.grantId, 'grant-test')
+    assert.equal(issued.purpose, 'runtime')
+    assert.deepEqual(issued.scopeRules, rules)
   })
 
   it('reuses the cached delegation within TTL and revokes on membership invalidation', async () => {

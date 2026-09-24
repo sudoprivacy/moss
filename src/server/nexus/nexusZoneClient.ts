@@ -18,7 +18,13 @@
  *    成对 owner object 的重定义；
  *  - Authorization credential 不出现在任何日志/错误消息里。
  */
-import { validateZone, validateZoneGrant, validateZoneOperation } from '@sudo/contracts/auth/v1'
+import {
+  validateZone,
+  validateZoneDelegation,
+  validateZoneGrant,
+  validateZoneOperation,
+  type ZoneDelegation as ContractZoneDelegation,
+} from '@sudo/contracts/auth/v1'
 import { validatePrincipalRef } from '@sudo/contracts/common/v1'
 import type { ZoneBindingConfig } from '../zones/binding/config.js'
 
@@ -71,20 +77,12 @@ export interface ZoneDelegationInput {
   zoneId: string
   audience: string
   ttlS: number
+  grantId?: string
+  purpose?: 'data-access' | 'runtime'
+  scopeRules?: Array<{ capability: string; resourcePrefixes: string[] }>
 }
 
-export interface ZoneDelegationResult {
-  delegation_id: string
-  user_id: string
-  org_id: string
-  zone_id: string
-  grant_id: string
-  grant_revision: string
-  authorization_epoch: number
-  audience: string
-  expires_at: string
-  status: string
-}
+export type ZoneDelegationResult = ContractZoneDelegation
 
 const OPERATION_STATES: readonly ZoneOperationRef['state'][] = [
   'queued',
@@ -268,33 +266,23 @@ export class NexusZoneClient {
         zone_id: input.zoneId,
         audience: input.audience,
         ttl_s: input.ttlS,
+        grant_id: input.grantId,
+        purpose: input.purpose,
+        scope_rules: input.scopeRules?.map(rule => ({
+          capability: rule.capability,
+          resource_prefixes: rule.resourcePrefixes,
+        })),
       },
     })
-    if (typeof payload !== 'object' || payload === null) {
-      throw new NexusZoneApiError('malformed delegation payload', 'CONTRACT', false, 0)
+    if (!validateZoneDelegation(payload)) {
+      throw new NexusZoneApiError(
+        'delegation payload failed @sudo/contracts ZoneDelegation validation',
+        'CONTRACT',
+        false,
+        0,
+      )
     }
-    const d = payload as Record<string, unknown>
-    // §6.4 端点的最小结构校验（该对象不属于 Zone/ZoneGrant owner 家族）
-    for (const key of ['delegation_id', 'user_id', 'org_id', 'zone_id', 'grant_id', 'grant_revision', 'expires_at'] as const) {
-      if (typeof d[key] !== 'string' || d[key] === '') {
-        throw new NexusZoneApiError(`delegation payload missing ${key}`, 'CONTRACT', false, 0)
-      }
-    }
-    if (!Number.isSafeInteger(d.authorization_epoch) || Number(d.authorization_epoch) < 0) {
-      throw new NexusZoneApiError('delegation payload has invalid authorization_epoch', 'CONTRACT', false, 0)
-    }
-    return {
-      delegation_id: String(d.delegation_id),
-      user_id: String(d.user_id),
-      org_id: String(d.org_id),
-      zone_id: String(d.zone_id),
-      grant_id: String(d.grant_id),
-      grant_revision: String(d.grant_revision),
-      authorization_epoch: Number(d.authorization_epoch),
-      audience: String(d.audience ?? ''),
-      expires_at: String(d.expires_at),
-      status: String(d.status ?? 'active'),
-    }
+    return payload
   }
 
   /** DELETE /v2/auth/zone-delegations/{delegation_id} —— membership 失效钩子。 */

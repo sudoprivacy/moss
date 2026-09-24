@@ -133,19 +133,26 @@ describe('P1a session zone bridge (real nexus)', () => {
       zoneId,
       grantee: { subject_type: 'organization', subject_id: orgId },
       capabilities: ['zone.data.read', 'zone.data.write', 'zone.runtime.execute'],
+      resourcePrefixes: ['/'],
       source: { source_type: 'moss_org_binding', source_id: 'p1a-binding' },
       reason: 'p1a e2e',
       policyVersion: 'p1a-e2e',
     }, `p1a-e2e-grant-${zoneId}`)
+    let grantId = ''
     for (let i = 0; i < 60; i++) {
       const op = await client.getOperation(grant.operation_id)
-      if (op.state === 'succeeded' || op.state === 'failed') break
+      if (op.state === 'succeeded') {
+        grantId = op.grant_id ?? ''
+        break
+      }
+      if (op.state === 'failed') break
       await sleep(1_000)
     }
+    assert.ok(grantId)
     // binding active（本地 policy 源）
     await driver.run(
-      `UPDATE org_zone_bindings SET sync_status = 'active' WHERE binding_id = ?`,
-      [bindingRow.binding_id],
+      `UPDATE org_zone_bindings SET sync_status = 'active', nexus_grant_id = ? WHERE binding_id = ?`,
+      [grantId, bindingRow.binding_id],
     )
 
     // 桥：binding policy 解析
@@ -261,8 +268,10 @@ describe('P1a session zone bridge (real nexus)', () => {
        VALUES (?, ?, ?, ?, 'user', '[]', '/tmp', 'host', 'active', 'active', ?, ?, ?, ?)`,
       [sessionId, sessionId, orgId, 'p1a-user-0003', `/t/${sessionId}.jsonl`, now, now, homeZone],
     )
+    const runtimePidValue = 'moss-p1a-context'
     const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, {
       sessionId,
+      runtimePid: runtimePidValue,
       config,
     })
     assert.ok(context, 'zone context must resolve for a homed session')
@@ -271,6 +280,14 @@ describe('P1a session zone bridge (real nexus)', () => {
     // delegation ref 是用户 delegation（nexus 侧核对 org 绑定），绝不是 service key
     assert.notEqual(context.NEXUS_DELEGATION_REF, nexus.apiKey)
     assert.notEqual(context.NEXUS_DELEGATION_REF, nexus.adminApiKey)
+    assert.deepEqual(JSON.parse(context.NEXUS_RESOURCE_SCOPE), {
+      schema_version: 1,
+      zone_id: homeZone,
+      rules: [
+        { capability: 'zone.data.read', resource_prefixes: [`/proc/${runtimePidValue}/workspace`] },
+        { capability: 'zone.data.write', resource_prefixes: [`/proc/${runtimePidValue}/workspace`] },
+      ],
+    })
     const runnerEnv = applyRunnerZoneContext({
       MOSS_NEXUS_V2_SERVICE_TOKEN: nexus.apiKey,
       NEXUS_API_KEY: nexus.adminApiKey,
@@ -278,6 +295,7 @@ describe('P1a session zone bridge (real nexus)', () => {
     }, context)
     assert.equal(runnerEnv.SAFE_VALUE, 'kept')
     assert.equal(runnerEnv.NEXUS_DELEGATION_REF, context.NEXUS_DELEGATION_REF)
+    assert.equal(runnerEnv.NEXUS_RESOURCE_SCOPE, context.NEXUS_RESOURCE_SCOPE)
     assert.equal(runnerEnv.MOSS_NEXUS_V2_SERVICE_TOKEN, undefined)
     assert.equal(runnerEnv.NEXUS_API_KEY, undefined)
   })

@@ -7,8 +7,8 @@
  *    `POST /v2/auth/zone-delegations`（service credential）；换发出的
  *    delegation 属于**用户自身**，普通用户访问数据面时以自身 delegation
  *    出示，绝不携带 provisioning/global admin credential；
- *  - delegation 绑定 user、effective org、membership version（`${status}:${role}`
- *    ——role/status 一变版本即变）、目标 zone（经由该 Org 的 active default
+ *  - delegation 绑定 user、effective org、单调 membership revision（`rN`，
+ *    role/status 实际变化时递增）、目标 zone（经由该 Org 的 active default
  *    binding）与 audience；nexus 侧 verify 每次都会复查 membership（回调）
  *    与 grant/epoch，因此旧 delegation 在 membership 变化后的下一次访问
  *    必然被拒（fail-closed，不依赖本进程的主动 revoke）；
@@ -37,6 +37,9 @@ export interface IssuedDelegation {
   zoneId: string
   audience: string
   expiresAt: string
+  grantId: string
+  purpose: 'data-access' | 'runtime'
+  scopeRules: Array<{ capability: string; resourcePrefixes: string[] }>
 }
 
 const DEFAULT_TTL_S = 900
@@ -67,6 +70,8 @@ export class ZoneDelegationService {
     userId: string
     audience?: string
     ttlS?: number
+    purpose?: 'data-access' | 'runtime'
+    scopeRules?: Array<{ capability: string; resourcePrefixes: string[] }>
   }): Promise<IssuedDelegation> {
     const audience = input.audience ?? DEFAULT_AUDIENCE
     const ttlS = input.ttlS ?? DEFAULT_TTL_S
@@ -85,7 +90,7 @@ export class ZoneDelegationService {
     }
 
     const binding = await this.driver.get(
-      `SELECT zone_id, sync_status FROM org_zone_bindings
+      `SELECT zone_id, sync_status, nexus_grant_id FROM org_zone_bindings
        WHERE org_id = ? AND nexus_deployment_id = ? AND is_default = 1 AND desired_state = 'bound'
        ORDER BY created_at LIMIT 1`,
       [input.orgId, this.config.nexusDeploymentId],
@@ -99,8 +104,17 @@ export class ZoneDelegationService {
         'BINDING_PENDING',
       )
     }
+    if (binding.nexus_grant_id == null) {
+      throw new ZoneDelegationError('default zone binding has no active grant', 'BINDING_PENDING')
+    }
 
-    const cacheKey = `${input.orgId}:${input.userId}:${audience}`
+    const purpose = input.purpose ?? 'data-access'
+    const scopeRules = input.scopeRules ?? []
+    const cacheKey = `${input.orgId}:${input.userId}:${audience}:${JSON.stringify([
+      String(binding.nexus_grant_id),
+      purpose,
+      scopeRules,
+    ])}`
     const cached = this.registry.get(cacheKey)
     if (cached && Date.parse(cached.expiresAt) > Date.now() + 5_000) {
       return cached
@@ -116,6 +130,9 @@ export class ZoneDelegationService {
         zoneId: String(binding.zone_id),
         audience,
         ttlS,
+        grantId: String(binding.nexus_grant_id),
+        purpose,
+        scopeRules: input.scopeRules,
       },
       randomUUID(),
     )
@@ -124,6 +141,12 @@ export class ZoneDelegationService {
       zoneId: result.zone_id,
       audience: result.audience || audience,
       expiresAt: result.expires_at,
+      grantId: result.grant_id,
+      purpose: result.purpose ?? purpose,
+      scopeRules: (result.scope_rules ?? []).map(rule => ({
+        capability: rule.capability,
+        resourcePrefixes: rule.resource_prefixes,
+      })),
     }
     this.registry.set(cacheKey, issued)
     return issued

@@ -1747,6 +1747,7 @@ export class RuntimeService {
       NEXUS_ZONE_ID: string
       NEXUS_V2_BASE_URL: string
       NEXUS_DELEGATION_REF: string
+      NEXUS_RESOURCE_SCOPE: string
     } | null = null
 
     // P1a (§8.10 R5.2)：runner generation 记录 execution_zone_id 并与 Nexus
@@ -1772,7 +1773,11 @@ export class RuntimeService {
           p1aRunnerZoneContext = await runnerZoneContext(
             this.store.driver,
             client,
-            { sessionId: session.sessionId, config: zoneConfig },
+            {
+              sessionId: session.sessionId,
+              runtimePid: `moss-${attempt.attemptId}`,
+              config: zoneConfig,
+            },
           )
           if (!p1aRunnerZoneContext) {
             throw new Error('zoned session has no usable runner delegation')

@@ -38,7 +38,7 @@
         "@opentelemetry/sdk-metrics": "^2.6.1",
         "@opentelemetry/sdk-trace-base": "^2.6.1",
         "@opentelemetry/semantic-conventions": "^1.40.0",
-        "@sudo/contracts": "github:sudoprivacy/sudostack#a479b8cbfe0a144629764a060ef026fb6d043f7c",
+        "@sudo/contracts": "github:sudoprivacy/sudostack#8323b0f6ac50270594dd76120919c20cc57318dd",
         "@xenova/transformers": "^2.17.2",
         "@xmldom/xmldom": "^0.9.9",
         "ajv": "^8.18.0",
@@ -513,7 +513,7 @@
 
     "@stablelib/base64": ["@stablelib/base64@1.0.1", "", {}, "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ=="],
 
-    "@sudo/contracts": ["@sudo/contracts@github:sudoprivacy/sudostack#a479b8c", {}, "sudoprivacy-sudostack-a479b8c", "sha512-q7uVTTe83WRdAYfcQ48KpBgPY7vAf6wRxzjLl5nRlarDyk/8A3dX2Amt3b0gYzSUSsnqgPDIctLw/K0S76Gwuw=="],
+    "@sudo/contracts": ["@sudo/contracts@github:sudoprivacy/sudostack#8323b0f", {}, "sudoprivacy-sudostack-8323b0f", "sha512-rQJHYw8MJ5HfX+g3L3zxVNmutTLt3Dc8pP6UrNkn/rz9gl7+9LE8b+WwI6cD3iwzDlldP5o7B85B76Cp364FvQ=="],
 
     "@types/esrecurse": ["@types/esrecurse@4.3.1", "", {}, "sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw=="],
 
