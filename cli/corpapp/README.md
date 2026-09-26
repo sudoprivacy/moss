@@ -377,6 +377,34 @@ corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
 **前两步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
 释放，那个群就白白锁死一天。
 
+### 合并发送：一条 `mark-sent` 绑多个 entry
+
+每个外部客户群一天只能发一条。若同一天同一个群有多个待发意图（例如日常追货的
+事项二/三/四同天撞在一起），可以把它们合并成**一条**企微消息发出，再用**一次**
+`mark-sent` 把这几个 entry 全绑到同一个 `--msgid` 上 —— `--entry-id` 传逗号分隔的多个：
+
+```bash
+# claim 抢下当天名额（claim 其中任一 entry 即锁住整个群）
+corpapp group-msg-queue --app $APP --action claim --chat-id wr_xxx --entry-id q_2
+# 组装合并正文（各段用一行 ===== 前后空行隔开）+ 附件，一次发出
+corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "<合并正文>" --file ./x.xlsx
+# 把参与合并的所有 entry 一起标 sent，绑同一个 msgid
+corpapp group-msg-queue --app $APP --action mark-sent --chat-id wr_xxx   --entry-id q_2,q_3,q_4 --msgid msg_... --sender linqinhui
+```
+
+为什么要多 entry 一起 `mark-sent`：这几个意图确实通过这条消息送达了客户，所以都该
+记为 `sent`、绑同一个 `msgid`，让对账（reconcile）把它们**全部**算作已送达 —— 而不是
+一个 delivered、其余被 `cancel`（那样对账会误以为其余没发）。
+
+约定：
+- 一组 entry 里，被 `claim` 的那个是名额持有者（`claimed`），其余是被合并进来的
+  （仍 `pending`）—— `mark-sent` 两种状态都接受，因为「并入这条送出」正是花掉它们意图的方式。
+- **全有或全无**：任一 entry 缺失或已是 sent/cancelled 等不可并入状态，则整批不写、返回原因，
+  不会留下「一半标了、一半没标」。
+- 合并这条消息的 `--expires-at`（保留时长）取参与各 entry 里**最短**的那个。
+- 每个 entry 的**取消条件各自独立判断**：发送前逐个复核，只把仍满足发送条件的并进正文；
+  不满足的单独 `cancel`，不连累其它。
+
 ### `reconcile`：只用于排查，标准循环不需要它
 
 `reap` 和 `next` 都会自己先结算，所以正常流程里**不必**单独调用 `reconcile`。

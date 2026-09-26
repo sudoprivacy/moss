@@ -114,11 +114,11 @@ func TestQueueClaimReportsSlotTaken(t *testing.T) {
 
 func TestQueueMarkSentRequiresMsgidAndSender(t *testing.T) {
 	c := New("http://unused", "t")
-	if _, err := c.QueueMarkSent("app1", "wr_a", "q_1", "", "linqinhui"); err == nil {
+	if _, err := c.QueueMarkSent("app1", "wr_a", []string{"q_1"}, "", "linqinhui"); err == nil {
 		t.Error("want error for empty msgid")
 	}
 	// sender is required because send results are scoped per sender at reconcile
-	if _, err := c.QueueMarkSent("app1", "wr_a", "q_1", "msg_1", ""); err == nil {
+	if _, err := c.QueueMarkSent("app1", "wr_a", []string{"q_1"}, "msg_1", ""); err == nil {
 		t.Error("want error for empty sender")
 	}
 }
@@ -128,11 +128,33 @@ func TestQueueMarkSentForwardsSender(t *testing.T) {
 	c, srv := newTestClient(queueStub(t, `{"ok":true}`, &got))
 	defer srv.Close()
 
-	if _, err := c.QueueMarkSent("app1", "wr_a", "q_1", "msg_1", "linqinhui"); err != nil {
+	if _, err := c.QueueMarkSent("app1", "wr_a", []string{"q_1"}, "msg_1", "linqinhui"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got["sender"] != "linqinhui" || got["msgid"] != "msg_1" {
 		t.Errorf("body wrong: %+v", got)
+	}
+}
+
+func TestQueueMarkSentRequiresAtLeastOneEntry(t *testing.T) {
+	c := New("http://unused", "t")
+	if _, err := c.QueueMarkSent("app1", "wr_a", nil, "msg_1", "linqinhui"); err == nil {
+		t.Error("want error for no entry ids")
+	}
+}
+
+func TestQueueMarkSentForwardsManyEntries(t *testing.T) {
+	var got map[string]any
+	c, srv := newTestClient(queueStub(t, `{"ok":true,"entryIds":["q_1","q_2","q_3"]}`, &got))
+	defer srv.Close()
+
+	// A merged send: several intents bound to one msgid.
+	if _, err := c.QueueMarkSent("app1", "wr_a", []string{"q_1", "q_2", "q_3"}, "msg_1", "linqinhui"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ids, ok := got["entryIds"].([]any)
+	if !ok || len(ids) != 3 || ids[0] != "q_1" || ids[2] != "q_3" {
+		t.Errorf("entryIds not forwarded as array: %+v", got["entryIds"])
 	}
 }
 

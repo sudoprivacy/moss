@@ -423,8 +423,24 @@ export async function release(
 }
 
 /**
- * Bind the WeCom msgid so reconcile can follow this entry, and record which
- * sender it was assigned to (send-result lookups are per-sender).
+ * Bind the WeCom msgid so reconcile can follow these entries, and record which
+ * sender the task was assigned to (send-result lookups are per-sender).
+ *
+ * Accepts one OR MANY entry ids, all bound to the SAME msgid — this is how a
+ * merged send is recorded: several queued intents (e.g. 事项二/三/四 that fell
+ * on the same day for one group) go out as a single WeCom message, and every
+ * one of them must be marked `sent` against that one msgid so reconcile counts
+ * them all as delivered (rather than one delivered + the rest cancelled).
+ *
+ * Because a group has only one daily slot, at most one of the ids is `claimed`
+ * (the slot holder); the others are still `pending` when merged. So a `pending`
+ * entry is accepted here too — being merged into the claimed entry's single
+ * send is exactly what spends its intent. Requiring every id to be `claimed`
+ * would make merging impossible.
+ *
+ * All-or-nothing: if any id is missing or in a non-mergeable state (already
+ * sent/cancelled/settled), nothing is written and a reason is returned, so a
+ * partial bind never leaves some intents unrecorded.
  *
  * Note this does NOT set `lastSentDate`: the task exists but nothing has been
  * delivered yet. Only reconcile, seeing status 1, can say the quota was spent.
@@ -432,19 +448,37 @@ export async function release(
 export async function markSent(
   corpAppId: string,
   chatId: string,
-  entryId: string,
+  entryId: string | string[],
   msgid: string,
   sender: string,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; entryIds?: string[] }> {
+  const ids = (Array.isArray(entryId) ? entryId : [entryId])
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0)
+  const uniqueIds = [...new Set(ids)]
+  if (uniqueIds.length === 0) return { ok: false, reason: 'no_entry_id' }
   return mutate(corpAppId, chatId, (q) => {
-    const entry = q.entries.find((e) => e.entryId === entryId)
-    if (!entry) return { ok: false, reason: 'not_found' }
-    if (entry.state !== 'claimed') return { ok: false, reason: `state_is_${entry.state}` }
-    entry.state = 'sent'
-    entry.msgid = msgid
-    entry.sender = sender
-    entry.sentAt = new Date().toISOString()
-    return { ok: true }
+    // Validate every id up front — all-or-nothing, so a bad id in the middle
+    // never leaves the group half-marked.
+    const targets: QueueEntry[] = []
+    for (const id of uniqueIds) {
+      const entry = q.entries.find((e) => e.entryId === id)
+      if (!entry) return { ok: false, reason: `not_found:${id}` }
+      // A merged entry is still `pending`; the slot holder is `claimed`. Both
+      // are mergeable. Anything already sent/cancelled/settled is not.
+      if (entry.state !== 'claimed' && entry.state !== 'pending') {
+        return { ok: false, reason: `state_is_${entry.state}:${id}` }
+      }
+      targets.push(entry)
+    }
+    const now = new Date().toISOString()
+    for (const entry of targets) {
+      entry.state = 'sent'
+      entry.msgid = msgid
+      entry.sender = sender
+      entry.sentAt = now
+    }
+    return { ok: true, entryIds: uniqueIds }
   })
 }
 

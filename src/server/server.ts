@@ -5659,11 +5659,18 @@ export function startServer(
             case 'mark-sent': {
               const msgid = typeof body.msgid === 'string' ? body.msgid : ''
               const sender = typeof body.sender === 'string' ? body.sender : ''
-              if (!chatId || !entryId || !msgid || !sender) {
-                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId, entryId, msgid and sender are required' } })
+              // Accept a single entryId (string) or many (entryIds: string[]) —
+              // many is how a merged send binds several intents to one msgid.
+              const entryIds = Array.isArray(body.entryIds)
+                ? body.entryIds.filter((x: unknown): x is string => typeof x === 'string')
+                : entryId
+                  ? [entryId]
+                  : []
+              if (!chatId || entryIds.length === 0 || !msgid || !sender) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId, entryId(s), msgid and sender are required' } })
                 return
               }
-              writeJson(res, 200, await q.markSent(corpAppId, chatId, entryId, msgid, sender))
+              writeJson(res, 200, await q.markSent(corpAppId, chatId, entryIds, msgid, sender))
               return
             }
             case 'cancel': {

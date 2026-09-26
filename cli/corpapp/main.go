@@ -197,6 +197,10 @@ The message queue (group-msg-queue):
                              as "reconciled"
     5. per entry: claim -> compose -> send-group -> mark-sent
                   (on failure: release, so the slot is not burned)
+                  merged send: if one group has several intents due the same
+                  day, compose ONE message and mark-sent them together —
+                  --entry-id takes a comma-separated list, all bound to the one
+                  --msgid, so reconcile counts every intent as delivered
     6. list --state failed   caller decides whether to re-queue
 
   next reconciles first because an entry stays "sent" until someone asks the

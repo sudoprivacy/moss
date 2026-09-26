@@ -856,7 +856,7 @@ func runGroupMsgQueue(args []string, c *Client, opts RunOptions) error {
 	app := fs.String("app", "", "corp app name")
 	action := fs.String("action", "", "enqueue|next|claim|release|mark-sent|cancel|reap|list; reconcile is diagnostic-only")
 	chatID := fs.String("chat-id", "", "customer group chat id")
-	entryID := fs.String("entry-id", "", "queue entry id")
+	entryID := fs.String("entry-id", "", "queue entry id; comma-separated for mark-sent to bind several entries (a merged send) to one msgid")
 	meta := fs.String("meta", "", "message metadata as JSON (enqueue); put `type` in here")
 	idemKey := fs.String("idempotency-key", "", "dedupe key; a re-run with the same key will not queue twice")
 	expiresAt := fs.String("expires-at", "", "RFC3339 instant after which a still-pending entry is reaped (default: enqueue time + 72h)")
@@ -916,7 +916,13 @@ func runGroupMsgQueue(args []string, c *Client, opts RunOptions) error {
 		r, err := c.QueueRelease(resolved.ID, *chatID, *entryID, *reason)
 		return queueActionOut(opts, asJSON, r, err)
 	case "mark-sent":
-		r, err := c.QueueMarkSent(resolved.ID, *chatID, *entryID, *msgid, *sender)
+		var ids []string
+		for _, part := range strings.Split(*entryID, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				ids = append(ids, p)
+			}
+		}
+		r, err := c.QueueMarkSent(resolved.ID, *chatID, ids, *msgid, *sender)
 		return queueActionOut(opts, asJSON, r, err)
 	case "cancel":
 		r, err := c.QueueCancel(resolved.ID, *chatID, *entryID, *reason, *cancelWecom)
