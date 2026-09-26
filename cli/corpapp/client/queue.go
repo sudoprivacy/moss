@@ -150,11 +150,32 @@ func (c *Client) QueueRelease(id, chatID, entryID, reason string) (*QueueActionR
 
 // QueueMarkSent binds the msgid and records the sender the task was assigned
 // to; reconcile needs it because send results are scoped per sender.
-func (c *Client) QueueMarkSent(id, chatID, entryID, msgid, sender string) (*QueueActionResp, error) {
+//
+// entryIDs may be one or many. Many binds every listed entry to the SAME
+// msgid — how a merged send is recorded: several queued intents that went out
+// as one WeCom message are all marked sent against that one msgid, so reconcile
+// counts them all as delivered.
+func (c *Client) QueueMarkSent(id, chatID string, entryIDs []string, msgid, sender string) (*QueueActionResp, error) {
 	if msgid == "" || sender == "" {
 		return nil, errors.New("msgid and sender are required")
 	}
-	return c.queueSimple(id, "mark-sent", chatID, entryID, map[string]any{"msgid": msgid, "sender": sender})
+	if len(entryIDs) == 0 {
+		return nil, errors.New("at least one entry-id is required")
+	}
+	// Send entryIds (array) always; the server also still accepts a lone
+	// entryId for older callers.
+	body := map[string]any{
+		"action":   "mark-sent",
+		"chatId":   chatID,
+		"entryIds": entryIDs,
+		"msgid":    msgid,
+		"sender":   sender,
+	}
+	var resp QueueActionResp
+	if err := c.queuePost(id, body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // QueueCancel cancels an entry for a BUSINESS reason. Expiry-based removal is
