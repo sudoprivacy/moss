@@ -175,11 +175,50 @@ export function resolveModelSelection(
   if (selection && separator > 0) {
     const provider = enabled.find(item => item.id === selection.slice(0, separator))
     const modelId = selection.slice(separator + 1)
-    if (provider && modelId) return { provider, modelId, selectionId: `${provider.id}:${modelId}` }
+    // A stored preference outlives the catalog it was chosen from. Hiding these
+    // from the picker stops new ones being made; it does nothing for a choice
+    // already saved, and that choice is what actually reaches the session.
+    if (provider && modelId && !isChatCapable(modelId)) {
+      process.stderr.write(
+        `[modelProviders] stored selection '${selection}' is not a chat model — falling back to '${defaultModel}'\n`,
+      )
+    } else if (provider && modelId) {
+      return { provider, modelId, selectionId: `${provider.id}:${modelId}` }
+    }
   }
 
-  const modelId = selection || defaultModel
+  const modelId = selection && isChatCapable(selection) ? selection : defaultModel
   return { provider: fallbackProvider, modelId, selectionId: `${fallbackProvider.id}:${modelId}` }
+}
+
+/**
+ * Model families that cannot hold a conversation, matched on the id.
+ *
+ * An OpenAI-compatible `/models` response says nothing about what a model can
+ * do, so there is no metadata to filter on — only the naming convention every
+ * provider follows for these families. That makes this a heuristic, and a
+ * heuristic that hides things silently is how a legitimate model goes missing
+ * with nobody able to say why. So it is deliberately narrow (no `image`: a
+ * vision model still chats) and every exclusion is logged.
+ *
+ * Without it the picker offered embeddings and speech models as if they were
+ * chat engines. Someone picked one, and their sessions ran a transcription
+ * model as the conversation engine — it fails at the far end of the system,
+ * where the cause is invisible.
+ */
+const NON_CHAT_MODEL_PATTERNS = [
+  /embedding/i,
+  /(^|[-_])embed([-_]|$)/i,
+  /transcribe/i,
+  /(^|[-_])whisper/i,
+  /(^|[-_])tts([-_]|$)/i,
+  /(^|[-_])dall-?e/i,
+  /moderation/i,
+  /rerank/i,
+]
+
+function isChatCapable(modelId: string): boolean {
+  return !NON_CHAT_MODEL_PATTERNS.some(pattern => pattern.test(modelId))
 }
 
 export async function discoverProviderModels(
@@ -200,9 +239,20 @@ export async function discoverProviderModels(
   const payload = await response.json() as { data?: unknown }
   if (!Array.isArray(payload.data)) throw new Error(`Model provider ${provider.name} returned an invalid /models response`)
 
-  const models = payload.data
+  const named = payload.data
     .filter(isRecord)
     .filter(item => typeof item.id === 'string' && item.id.trim())
+  const excluded = named
+    .map(item => (item.id as string).trim())
+    .filter(modelId => !isChatCapable(modelId))
+  if (excluded.length > 0) {
+    process.stderr.write(
+      `[modelProviders] ${provider.name}: hiding ${excluded.length} non-chat model(s) from selection: ${excluded.join(', ')}\n`,
+    )
+  }
+
+  const models = named
+    .filter(item => isChatCapable((item.id as string).trim()))
     .map(item => {
       const modelId = (item.id as string).trim()
       const contextWindow = positiveInteger(item.context_window ?? item.context_length)
