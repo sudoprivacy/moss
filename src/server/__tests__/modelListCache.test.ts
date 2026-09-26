@@ -300,3 +300,44 @@ describe('provider model discovery', () => {
     })
   })
 })
+
+describe('non-chat models', () => {
+  // The picker was fed a provider's whole /models catalog. That catalog carries
+  // embeddings and speech models, an OpenAI-compatible response says nothing
+  // about what a model can do, and the failure surfaces far away: a session
+  // running a transcription model as its conversation engine.
+  it('are hidden from discovery, and chat models that merely sound similar are not', async () => {
+    const [provider] = normalizeModelProviders([], 'https://gateway.example.invalid/v1')
+    globalThis.fetch = (async () => new Response(JSON.stringify({ data: [
+      { id: 'gpt-5.5' },
+      { id: 'text-embedding-ada-002' },
+      { id: 'gpt-4o-transcribe-diarize' },
+      { id: 'whisper-1' },
+      { id: 'tts-1-hd' },
+      { id: 'dall-e-3' },
+      { id: 'omni-moderation-latest' },
+      { id: 'bge-reranker-v2' },
+      // Vision and audio-capable chat models keep chatting; excluding on
+      // "image" or "audio" would have taken these with them.
+      { id: 'gpt-4o-audio-preview' },
+      { id: 'claude-opus-4-6' },
+    ] }), { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+
+    const models = await discoverProviderModels(provider, 'key')
+    const ids = models.map(model => model.modelId)
+
+    expect(ids).toEqual(['gpt-5.5', 'gpt-4o-audio-preview', 'claude-opus-4-6'])
+  })
+
+  // Hiding one from the picker does nothing about a preference already saved,
+  // and that saved value is what reaches the session.
+  it('are refused when they arrive as an already-stored selection', () => {
+    const providers = normalizeModelProviders([], 'https://gateway.example.invalid/v1')
+
+    const stale = resolveModelSelection(providers, 'legacy-default', 'gpt-5.5', 'legacy-default:gpt-4o-transcribe-diarize')
+    expect(stale.modelId).toBe('gpt-5.5')
+
+    const good = resolveModelSelection(providers, 'legacy-default', 'gpt-5.5', 'legacy-default:claude-opus-4-6')
+    expect(good.modelId).toBe('claude-opus-4-6')
+  })
+})
