@@ -42,7 +42,8 @@ const AGENT = `moss-e2e-${process.pid}`
 
 let failures = 0
 const expect = (label: string, ok: boolean, detail?: unknown) => {
-  console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}${detail === undefined ? '' : ` — ${String(detail)}`}`)
+  // Detail only on failure: printing it on a pass made `alice != alice` read like one.
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}${ok || detail === undefined ? '' : ` — ${String(detail)}`}`)
   if (!ok) failures += 1
 }
 
