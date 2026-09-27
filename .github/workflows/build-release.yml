@@ -77,11 +77,11 @@ jobs:
       # is what stops it rotting into something nobody can run — and it lives
       # here rather than beside the `node --check` lines because, unlike those,
       # it needs node_modules.
-      - name: Keep the live session-owner e2e compiling
+      - name: Keep the live e2e scripts compiling
         run: |
           node node_modules/typescript/bin/tsc --noEmit --module nodenext \
             --moduleResolution nodenext --target es2022 --skipLibCheck \
-            scripts/e2e/session-owner-live.ts
+            scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts
 
       # Nothing in this repo has ever type-checked: bun executes TypeScript
       # without checking it, and the release artifact is produced by `bun build`,

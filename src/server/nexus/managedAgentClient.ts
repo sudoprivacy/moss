@@ -61,7 +61,14 @@ export class ManagedAgentClient {
    */
   async startSession(input: {
     agentId: string
-    spawnSpec: NexusSpawnSpec
+    /**
+     * Omitted when the daemon supplies the runtime itself.
+     *
+     * `nexusd-cohost` turns a spawn into a thread inside its own process, so
+     * there is no command to hand it — and nexus already treats the field as
+     * optional. Requiring it here was moss assuming the only host it had seen.
+     */
+    spawnSpec?: NexusSpawnSpec
     model?: string
     ownerId?: string
     zoneId?: string
@@ -73,12 +80,16 @@ export class ManagedAgentClient {
         ...(input.model ? { model: input.model } : {}),
         ...(input.ownerId ? { owner_id: input.ownerId } : {}),
         ...(input.zoneId ? { zone_id: input.zoneId } : {}),
-        spawn_spec: {
-          cmd: input.spawnSpec.cmd,
-          args: input.spawnSpec.args,
-          env: input.spawnSpec.env,
-          cwd: input.spawnSpec.cwd,
-        },
+        ...(input.spawnSpec
+          ? {
+              spawn_spec: {
+                cmd: input.spawnSpec.cmd,
+                args: input.spawnSpec.args,
+                env: input.spawnSpec.env,
+                cwd: input.spawnSpec.cwd,
+              },
+            }
+          : {}),
       },
     )
     return { sessionId: res.session_id, osPid: res.os_pid ?? null }
