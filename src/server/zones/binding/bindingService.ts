@@ -157,7 +157,7 @@ export class ZoneBindingReconciler {
         )
       } catch (error) {
         if (error instanceof NexusZoneApiError && error.code === 'ZONE_ALREADY_EXISTS') {
-          zoneOp = { operation_id: '', action: 'create', zone_id: binding.zone_id, grant_id: null, state: 'succeeded', step: 'already-exists', retryable: false }
+          zoneOp = { operation_id: '', action: 'create', zone_id: binding.zone_id, grant_id: null, state: 'succeeded', step: 'already-exists', retryable: false, error: null }
         } else {
           throw error
         }
@@ -247,7 +247,7 @@ export class ZoneBindingReconciler {
           op = await this.client.revokeGrant(binding.zone_id, binding.nexus_grant_id, revokeKey)
         } catch (error) {
           if (error instanceof NexusZoneApiError && error.code === 'GRANT_NOT_FOUND') {
-            op = { operation_id: '', action: 'revoke', zone_id: binding.zone_id, grant_id: null, state: 'succeeded', step: 'already-revoked', retryable: false }
+            op = { operation_id: '', action: 'revoke', zone_id: binding.zone_id, grant_id: null, state: 'succeeded', step: 'already-revoked', retryable: false, error: null }
           } else {
             throw error
           }

@@ -8,7 +8,15 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { validateZoneId } from '@sudo/contracts/zone-id'
+import { safeParse } from '../generated/org-zone-binding.gen.js'
+import { rowToOrgZoneBinding } from '../binding/bindingWire.js'
 import { AuthCenterDb } from '../../authCenter/db.js'
 import {
   claimDueOutbox,
@@ -211,22 +219,22 @@ class FakeZoneClient {
     if (step === 'unknown') throw new NexusZoneUnknownError('simulated timeout')
     if (step === 'retryable') throw new NexusZoneApiError('busy', 'ZONE_QUORUM_UNAVAILABLE', true, 503)
     if (step === 'fatal') throw new NexusZoneApiError('bad id', 'INVALID_ZONE_ID', false, 400)
-    return { operation_id: 'zone-op-1', action: 'create', zone_id: input.zoneId, grant_id: null, state: 'succeeded', step: 'done', retryable: false }
+    return { operation_id: 'zone-op-1', action: 'create', zone_id: input.zoneId, grant_id: null, state: 'succeeded', step: 'done', retryable: false, error: null }
   }
 
   async getOperation(operationId: string): Promise<ZoneOperationRef> {
-    return { operation_id: operationId, action: 'create', zone_id: 'z', grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false }
+    return { operation_id: operationId, action: 'create', zone_id: 'z', grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false, error: null }
   }
 
   async createGrant(input: { zoneId: string; grantee: { subject_id: string }; source: { source_id: string }; resourcePrefixes?: string[] }, key: string): Promise<ZoneOperationRef> {
     this.grantCalls.push({ zoneId: input.zoneId, grantee: input.grantee.subject_id, sourceId: input.source.source_id, resourcePrefixes: input.resourcePrefixes, key })
-    return { operation_id: 'grant-op-1', action: 'grant', zone_id: input.zoneId, grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false }
+    return { operation_id: 'grant-op-1', action: 'grant', zone_id: input.zoneId, grant_id: 'grant-1', state: 'succeeded', step: 'done', retryable: false, error: null }
   }
 
   revokedGrants: string[] = []
   async revokeGrant(_zoneId: string, grantId: string, _key: string): Promise<ZoneOperationRef> {
     this.revokedGrants.push(grantId)
-    return { operation_id: 'revoke-op-1', action: 'revoke', zone_id: _zoneId, grant_id: grantId, state: 'succeeded', step: 'done', retryable: false }
+    return { operation_id: 'revoke-op-1', action: 'revoke', zone_id: _zoneId, grant_id: grantId, state: 'succeeded', step: 'done', retryable: false, error: null }
   }
 }
 
@@ -584,6 +592,19 @@ describe('detach flow (§8.8: unbind ≠ delete data)', () => {
 })
 
 describe('ZoneManagementService (§8.8 permissions & confirmations)', () => {
+  it('rejects user and dept_admin on every binding management entry', async () => {
+    const orgId = 'dddddddd-0000-4000-8000-000000000003'
+    await db.createOrganization(orgId, 'Role test', Date.now())
+    const svc = new ZoneManagementService({ driver: db.driver, client: new FakeZoneClient() as unknown as NexusZoneClient, config: CONFIG })
+    const id = (await svc.listBindings({ role: 'admin', orgId }))[0].binding_id
+    for (const role of ['user', 'dept_admin']) {
+      const viewer = { role, orgId }
+      const forbidden = (error: unknown) => error instanceof ZoneManagementError && error.status === 403 && error.code === 'FORBIDDEN'
+      await assert.rejects(svc.listBindings(viewer), forbidden)
+      await assert.rejects(svc.refreshBinding(id, viewer), forbidden)
+      await assert.rejects(svc.detachBinding(id, viewer), forbidden)
+    }
+  })
   it('scopes binding visibility by role and enforces deprovision double confirmation', async () => {
     const orgId = 'dddddddd-0000-4000-8000-000000000001'
     await db.createOrganization(orgId, 'Mu', Date.now())
@@ -643,6 +664,23 @@ describe('ZoneManagementService (§8.8 permissions & confirmations)', () => {
 })
 
 describe('existing Org backfill (§10.4)', () => {
+  it('requires a default binding, still reserves shared zones, and reports invalid org IDs', async () => {
+    const sharedOnly = 'bbbbbbbb-0000-4000-8000-000000000003'
+    const collision = 'bbbbbbbb-0000-4000-8000-000000000004'
+    const invalid = 'bad_org-id_x'
+    for (const id of [sharedOnly, collision, invalid]) {
+      raw.prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)').run(id, id, Date.now())
+    }
+    const candidate = 'org-bbbbbbbb000040008000000000000004'
+    raw.prepare(`INSERT INTO org_zone_bindings (binding_id, org_id, nexus_deployment_id, zone_id, purpose, is_default, desired_capabilities, created_at, updated_at) VALUES (?, ?, 'local', ?, 'shared', 0, '[]', ?, ?)`).run('shared-only', sharedOnly, candidate, Date.now(), Date.now())
+    const plan = await planOrgZoneBackfill(db.driver, { nexusDeploymentId: 'local' })
+    assert.equal(plan.items.find((item) => item.orgId === sharedOnly)?.status, 'would-create')
+    assert.equal(plan.items.find((item) => item.orgId === collision)?.status, 'collision')
+    assert.equal(plan.items.find((item) => item.orgId === invalid)?.status, 'invalid')
+    assert.equal(plan.invalid, 1)
+    const applied = await applyOrgZoneBackfill(db.driver, { nexusDeploymentId: 'local' })
+    assert.deepEqual(applied.created, [sharedOnly])
+  })
   it('plans would-create for unbound orgs and is re-entrant on apply', async () => {
     // 存量 org 模拟：绕过在线入口（createOrganization 现在自带 binding），
     // 直接插 organizations 行——backfill 的服务对象正是入口改造前创建的 org
@@ -673,5 +711,174 @@ describe('existing Org backfill (§10.4)', () => {
     // 写入的行与在线入口同构：pending + provision outbox
     const plan2 = await planOrgZoneBackfill(db.driver, { nexusDeploymentId: 'local' })
     assert.equal(plan2.alreadyBound, 2)
+  })
+})
+
+describe('generated binding wire and layered zone-id fixtures', () => {
+  it('roundtrips row arrays, null optionals, booleans and timestamps through the generated contract', async () => {
+    const orgId = 'bbbbbbbb-0000-4000-8000-000000000005'
+    await db.createOrganization(orgId, 'Wire', Date.now())
+    raw.prepare('UPDATE org_zone_bindings SET resource_prefixes = ? WHERE org_id = ?').run('["/a","/b"]', orgId)
+    const row = raw.prepare('SELECT * FROM org_zone_bindings WHERE org_id = ?').get(orgId) as Record<string, unknown>
+    const wire = rowToOrgZoneBinding(row)
+    assert.deepEqual(wire.resource_prefixes, ['/a', '/b'])
+    assert.deepEqual(wire.desired_capabilities, ['zone.data.read', 'zone.data.write', 'zone.runtime.execute'])
+    assert.equal(wire.is_default, true)
+    assert.equal(Date.parse(wire.created_at), row.created_at)
+    assert.equal(wire.nexus_grant_id, undefined)
+    const svc = new ZoneManagementService({ driver: db.driver, client: null, config: CONFIG })
+    const view = (await svc.listBindings({ role: 'admin', orgId }))[0]
+    assert.equal(view.created_at, row.created_at)
+    assert.equal(view.nexus_grant_id, null)
+    raw.prepare('UPDATE org_zone_bindings SET resource_prefixes = NULL WHERE org_id = ?').run(orgId)
+    assert.equal(rowToOrgZoneBinding(raw.prepare('SELECT * FROM org_zone_bindings WHERE org_id = ?').get(orgId) as Record<string, unknown>).resource_prefixes, undefined)
+  })
+
+  it('fails fast with binding ID and contract errors for malformed rows', async () => {
+    const orgId = 'bbbbbbbb-0000-4000-8000-000000000006'
+    await db.createOrganization(orgId, 'Bad wire', Date.now())
+    const id = (raw.prepare('SELECT binding_id FROM org_zone_bindings WHERE org_id = ?').get(orgId) as { binding_id: string }).binding_id
+    const svc = new ZoneManagementService({ driver: db.driver, client: null, config: CONFIG })
+    for (const sql of ['generation = -1', "last_error_code = ''"]) {
+      raw.prepare(`UPDATE org_zone_bindings SET ${sql} WHERE binding_id = ?`).run(id)
+      await assert.rejects(svc.listBindings({ role: 'admin', orgId }), (error: unknown) => String(error).includes(id))
+      raw.prepare('UPDATE org_zone_bindings SET generation = 1, last_error_code = NULL WHERE binding_id = ?').run(id)
+    }
+  })
+
+  it('accepts runtime-rejected zone IDs at binding schema layer and rejects with owner validator', () => {
+    const rawCases = JSON.parse(readFileSync(join(process.cwd(), 'contracts/iam/v1/fixtures/invalid/cases.json'), 'utf8')) as { cases: Array<{ name: string; rejected_by?: string; payload: { zone_id: string } }> }
+    for (const name of ['bad-zone-id', 'path-traversal']) {
+      const fixture = rawCases.cases.find((item) => item.name === name)
+      assert.ok(fixture)
+      assert.equal(fixture.rejected_by, 'zone-id-runtime')
+      assert.equal(safeParse(fixture.payload).ok, true)
+      assert.notEqual(validateZoneId(fixture.payload.zone_id), null)
+    }
+  })
+})
+
+describe('NexusZoneClient HTTP projection', () => {
+  it('parses complete, absent and malformed operation errors and real grant source', async () => {
+    let payload: unknown = null
+    const server = createServer((_req, response) => {
+      response.setHeader('Content-Type', 'application/json')
+      response.end(JSON.stringify(payload))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = (server.address() as AddressInfo).port
+      const client = new NexusZoneClient({ nexusV2BaseUrl: `http://127.0.0.1:${port}`, nexusV2ServiceToken: '', nexusV2TimeoutMs: 5000 })
+      const base = { operation_id: 'op-1', action: 'create', zone_id: 'org-abc', grant_id: null, state: 'failed', step: 'grant', retryable: true }
+      payload = { ...base, error: { code: 'GRANT_FAILED', message: 'denied', retryable: true } }
+      assert.deepEqual((await client.getOperation('op-1')).error, { code: 'GRANT_FAILED', message: 'denied', retryable: true })
+      payload = base
+      assert.equal((await client.getOperation('op-1')).error, null)
+      payload = { ...base, error: { code: 42 } }
+      assert.deepEqual((await client.getOperation('op-1')).error, { code: 'UNKNOWN', message: '', retryable: false })
+      const grant = {
+        api_version: 'auth.sudo.dev/v1', kind: 'ZoneGrant', grant_id: 'grant-1', zone_id: 'org-abc',
+        grantee: { subject_type: 'organization', subject_id: 'org-a' }, issued_by: { subject_type: 'service', subject_id: 'moss' },
+        capabilities: ['zone.data.read'], source: { source_type: 'moss_org_binding', source_id: 'binding-1' },
+        reason: 'test', policy_version: 'v1', revision: 'rev-1', status: 'active', created_at: '2026-09-18T08:00:00Z',
+      }
+      payload = {
+        ...grant,
+        grantee: { ...grant.grantee, trust_domain: null },
+        issued_by: { ...grant.issued_by, is_admin: true },
+        created_at: '2026-09-18T08:00:00',
+        resource_prefixes: null, not_before: null, expires_at: null, revoked_at: null, revoked_by: null, revoke_reason: null,
+      }
+      assert.equal((await client.getGrant('org-abc', 'grant-1')).sourceType, 'moss_org_binding')
+      payload = { ...grant, source: null, expires_at: null }
+      assert.equal((await client.getGrant('org-abc', 'grant-1')).sourceType, null)
+      payload = {
+        api_version: 'auth.sudo.dev/v1', kind: 'Zone', zone_id: 'org-abc', display_name: 'Org ABC',
+        description: null, status: 'active', deployment: { location: 'cloud', trust_domain: 'local' }, labels: null,
+        revision: 'rev-1', created_by: { subject_type: 'service', subject_id: 'moss', trust_domain: null },
+        created_at: '2026-09-18T08:00:00', updated_at: '2026-09-18T08:00:00', deleted_at: null,
+      }
+      assert.equal((await client.getZone('org-abc')).status, 'active')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+})
+
+describe('zone-backfill CLI real SQLite processes', () => {
+  it('dry-runs under Bun and Node, applies all batches, remains re-runnable and stops on conflicts', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'moss-zone-backfill-'))
+    const path = join(tmp, 'moss.db')
+    const sqlite = new DatabaseSync(path)
+    try {
+      new AuthCenterDb(sqlite, path)
+      for (let i = 1; i <= 5; i += 1) {
+        sqlite.prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)').run(`cccccccc-0000-4000-8000-00000000000${i}`, `Legacy ${i}`, Date.now() + i)
+      }
+      const invoke = (runtime: 'bun' | 'node', args: string[], env = process.env) => {
+        const command = runtime === 'bun' ? ['scripts/zone-backfill.ts'] : [join('node_modules', 'tsx', 'dist', 'cli.mjs'), 'scripts/zone-backfill.ts']
+        return spawnSync(runtime === 'bun' ? 'bun' : process.execPath, [...command, '--db', path, ...args], { cwd: process.cwd(), encoding: 'utf8', env, timeout: 60000 })
+      }
+      const dryBun = invoke('bun', ['--deployment', 'local', '--json'])
+      assert.equal(dryBun.status, 0, dryBun.stderr)
+      assert.equal((JSON.parse(dryBun.stdout) as { plan: { wouldCreate: number }; deployment: string }).plan.wouldCreate, 5)
+      const dryNode = invoke('node', ['--deployment', 'local', '--json'])
+      assert.equal(dryNode.status, 0, dryNode.stderr)
+      assert.equal((JSON.parse(dryNode.stdout) as { plan: { wouldCreate: number } }).plan.wouldCreate, 5)
+      const apply = invoke('bun', ['--deployment', 'local', '--batch-size', '2', '--apply', '--json'])
+      assert.equal(apply.status, 0, apply.stderr)
+      assert.equal((JSON.parse(apply.stdout) as { created: string[] }).created.length, 5)
+      const rerun = invoke('node', ['--deployment', 'local', '--apply', '--json'])
+      assert.equal(rerun.status, 0, rerun.stderr)
+      assert.equal((JSON.parse(rerun.stdout) as { created: string[] }).created.length, 0)
+      const mismatch = invoke('bun', ['--deployment', 'other', '--apply'])
+      assert.equal(mismatch.status, 2)
+      assert.match(mismatch.stderr, /deployment mismatch/)
+      const noDeployment = { ...process.env }
+      delete noDeployment.MOSS_NEXUS_DEPLOYMENT_ID
+      assert.equal(invoke('bun', [], noDeployment).status, 2)
+      sqlite.prepare("UPDATE org_zone_bindings SET desired_state = 'detached' WHERE org_id = ?").run('cccccccc-0000-4000-8000-000000000001')
+      const stalled = invoke('bun', ['--deployment', 'local', '--batch-size', '2', '--apply', '--json'])
+      assert.equal(stalled.status, 1, stalled.stderr)
+      assert.equal((JSON.parse(stalled.stdout) as { unfinished: unknown[] }).unfinished.length, 1)
+    } finally {
+      sqlite.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an uninitialized database before planning', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'moss-zone-backfill-empty-'))
+    try {
+      const run = spawnSync('bun', ['scripts/zone-backfill.ts', '--db', join(tmp, 'empty.db'), '--deployment', 'local'], { cwd: process.cwd(), encoding: 'utf8', timeout: 60000 })
+      assert.equal(run.status, 2)
+      assert.match(run.stderr, /org_zone_bindings is unavailable/)
+    } finally { rmSync(tmp, { recursive: true, force: true }) }
+  })
+
+  it('reports collision and invalid as exit 3, and a non-unique write failure as exit 1', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'moss-zone-backfill-status-'))
+    const path = join(tmp, 'moss.db')
+    const sqlite = new DatabaseSync(path)
+    try {
+      new AuthCenterDb(sqlite, path)
+      const owner = 'eeeeeeee-0000-4000-8000-000000000001'
+      const blocked = 'eeeeeeee-0000-4000-8000-000000000002'
+      for (const id of [owner, blocked, 'bad_org-id_x']) sqlite.prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)').run(id, id, Date.now())
+      sqlite.prepare(`INSERT INTO org_zone_bindings (binding_id, org_id, nexus_deployment_id, zone_id, purpose, is_default, desired_capabilities, created_at, updated_at) VALUES (?, ?, 'local', ?, 'shared', 0, '[]', ?, ?)`).run('shared-collision', owner, 'org-eeeeeeee000040008000000000000002', Date.now(), Date.now())
+      const invoke = () => spawnSync('bun', ['scripts/zone-backfill.ts', '--db', path, '--deployment', 'local', '--apply', '--json'], { cwd: process.cwd(), encoding: 'utf8', timeout: 60000 })
+      const partial = invoke()
+      assert.equal(partial.status, 3, partial.stderr)
+      const report = JSON.parse(partial.stdout) as { plan: { collisions: number; invalid: number }; unfinished: unknown[] }
+      assert.equal(report.plan.collisions, 1)
+      assert.equal(report.plan.invalid, 1)
+      assert.equal(report.unfinished.length, 2)
+      const failing = 'eeeeeeee-0000-4000-8000-000000000003'
+      sqlite.prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)').run(failing, failing, Date.now())
+      sqlite.exec(`CREATE TRIGGER backfill_force_failure BEFORE INSERT ON org_zone_bindings BEGIN SELECT RAISE(FAIL, 'forced insert failure'); END`)
+      const failed = invoke()
+      assert.equal(failed.status, 1, failed.stderr)
+      assert.equal((JSON.parse(failed.stdout) as { failed: Array<{ orgId: string }> }).failed[0]?.orgId, failing)
+    } finally { sqlite.close(); rmSync(tmp, { recursive: true, force: true }) }
   })
 })

@@ -14,6 +14,8 @@ import { getSystemSettings } from '../systemSettings.js'
 import { NexusZoneClient } from '../nexus/nexusZoneClient.js'
 import { resolveZoneBindingConfig } from '../zones/binding/config.js'
 import { ZoneDelegationService } from '../zones/binding/delegationService.js'
+import { ADMIN_ROLES, type AuthRole } from './roles.js'
+export type { AuthRole } from './roles.js'
 import {
   newApplicationNo,
   type CreditApplication,
@@ -85,8 +87,6 @@ import { DifyAdministrationService, type DifyAdministrationSecretPort } from '..
 import { DifyRepository } from '../dify/difyRepository.js'
 import type { QmsOrganizationDirectory } from '../qms/qmsAuthorization.js'
 
-export type AuthRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
-
 /**
  * The human-facing name for a user: the optional `displayName` when set,
  * otherwise the login `name` (username). Used for the outgoing login-response
@@ -104,8 +104,6 @@ function resolveDisplayName(user: { name: string; displayName?: string | null })
  * mint/edit other `super_admin` accounts. Everything that previously checked
  * `role === 'admin'` for *capability* should check membership here instead.
  */
-const ADMIN_ROLES = new Set<string>(['admin', 'super_admin'])
-
 function isSuperAdmin(role: string): boolean {
   return role === 'super_admin'
 }

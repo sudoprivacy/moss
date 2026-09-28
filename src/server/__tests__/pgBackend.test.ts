@@ -12,6 +12,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { Pool } from "pg";
 import { PgDriver, type PgPoolLike } from "../db/driver.js";
 import { applyPgSchema } from "../db/pg_schema.js";
@@ -114,6 +116,24 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
   });
 
   describe("pg_schema + type normalisation", () => {
+    it("runs the zone backfill CLI against real PG with deployment and batch checks", async () => {
+      const orgId = randomUUID();
+      await fix.driver.run("INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)", [orgId, "PG backfill legacy", Date.now()]);
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`);
+      const invoke = (args: string[]) => spawnSync(process.execPath, [join("node_modules", "tsx", "dist", "cli.mjs"), "scripts/zone-backfill.ts", "--database-url", url, ...args], { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
+      const dry = invoke(["--deployment", "local", "--json"]);
+      assert.equal(dry.status, 0, dry.stderr);
+      assert.equal((JSON.parse(dry.stdout) as { plan: { items: Array<{ orgId: string; status: string }> } }).plan.items.find(item => item.orgId === orgId)?.status, "would-create");
+      const applied = invoke(["--deployment", "local", "--batch-size", "1", "--apply", "--json"]);
+      assert.equal(applied.status, 0, applied.stderr);
+      assert.ok((JSON.parse(applied.stdout) as { created: string[] }).created.includes(orgId));
+      const rerun = invoke(["--deployment", "local", "--apply", "--json"]);
+      assert.equal(rerun.status, 0, rerun.stderr);
+      assert.equal((JSON.parse(rerun.stdout) as { created: string[] }).created.length, 0);
+      const mismatch = invoke(["--deployment", "different", "--apply"]);
+      assert.equal(mismatch.status, 2);
+      assert.match(mismatch.stderr, /deployment mismatch/);
+    });
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");

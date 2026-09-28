@@ -11,6 +11,7 @@
     "postinstall": "bun run scripts/copy-vendor.js",
     "test": "node scripts/test-server.js",
     "typecheck": "node scripts/typecheck-ratchet.js",
+    "contracts:check": "node contracts/generate/gen-adapter.mjs --check",
     "lint": "eslint src/server src/channels"
   },
   "dependencies": {

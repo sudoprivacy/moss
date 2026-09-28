@@ -3017,7 +3017,12 @@ export function startServer(
       if (req.method === 'GET' && zoneBindingMatch) {
         const auth = await authenticateRequest(req, authService)
         if (!auth) throw new HttpError(401, 'Unauthorized')
-        writeJson(res, 200, { bindings: await zoneManagement.listBindings({ role: auth.role, orgId: auth.orgId }) })
+        try {
+          writeJson(res, 200, { bindings: await zoneManagement.listBindings({ role: auth.role, orgId: auth.orgId }) })
+        } catch (error) {
+          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          throw error
+        }
         return
       }
       if (req.method === 'POST' && zoneBindingMatch) {
