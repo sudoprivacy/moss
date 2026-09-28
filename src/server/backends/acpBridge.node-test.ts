@@ -40,6 +40,7 @@ void test('a failed ACP prompt emits an error result, releases busy, and allows 
     assert.equal(handle.isBusy?.(), true)
     const first = requests.find(r => r.method === 'session/prompt')!
     respond({ id: first.id, error: { code: -32603, message: 'context_window_exceeded' } })
+    await waitFor(() => output.some(e => e.type === 'result'))
     assert.deepEqual(output.find(e => e.type === 'result'), {
       type: 'result', session_id: 'session-test', status: 'error',
       is_error: true, errors: ['context_window_exceeded'],

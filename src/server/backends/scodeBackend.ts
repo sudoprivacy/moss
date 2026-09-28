@@ -1,8 +1,9 @@
 import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { spawn } from 'child_process'
 import { writeFileSync } from 'fs'
-import { mkdir, readFile } from 'fs/promises'
-import { join } from 'path'
+import { mkdir, readFile, copyFile } from 'fs/promises'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'node:url'
 import {
   buildSessionEnv,
   resolveScodeCliPath,
@@ -166,6 +167,10 @@ export class ScodeBackend implements SessionBackend {
     process.stderr.write(`  Base URL: ${env.ANTHROPIC_BASE_URL}\n`)
     process.stderr.write(`  Auth: ${env.ANTHROPIC_API_KEY ? 'Present' : 'MISSING'}\n\n`)
 
+    const artifactToolPath = join(options.cwd, '.moss', 'artifact-mcp.mjs')
+    await mkdir(dirname(artifactToolPath), { recursive: true })
+    await copyFile(join(dirname(fileURLToPath(import.meta.url)), 'artifact-mcp.mjs'), artifactToolPath)
+
     const child = spawn(scodePath, args, {
       cwd: options.cwd,
       env: {
@@ -185,6 +190,7 @@ export class ScodeBackend implements SessionBackend {
 
     const handle = createAcpBridgeHandle({
       child,
+      mcpServers: [{ name: 'moss-artifacts', command: process.execPath, args: [artifactToolPath], env: [] }],
       sessionId: options.sessionId,
       cwd: options.cwd,
       model: scodeModel,

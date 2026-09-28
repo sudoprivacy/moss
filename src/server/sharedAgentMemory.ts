@@ -42,7 +42,7 @@ export function getSharedAgentMemoryFilePath(
  * First line of every moss-generated AGENTS.md. Used to tell our own file apart from a
  * workspace's hand-written one so we never overwrite the latter.
  */
-const AGENTS_MD_HEADER = '# Moss Assistant Override'
+const AGENTS_MD_HEADER = '# Moss Application Role'
 
 export function getAssistantOverrideAgentsMdPath(configDir: string): string {
   return path.join(configDir, '.nexus', 'sudocode', 'AGENTS.md')
@@ -224,12 +224,12 @@ export async function writeAssistantOverrideAgentsMd(params: {
   const lines = [
     AGENTS_MD_HEADER,
     '',
-    'These instructions override any default runtime identity or generic assistant framing.',
+    '## Application role',
+    `Within this application, your business role is ${identityName}.`,
+    'Explain this role and its responsibilities when asked about your role.',
+    'Keep the application role distinct from the underlying model and runtime. Answer questions about model identity truthfully; do not invent or deny it.',
     '',
-    '## Identity Override',
-    `When asked "Who are you?" / "你是谁?" you MUST answer: "我是${identityName}，有什么可以帮助你的吗？"`,
-    `Your assistant identity is ${identityName}. Do not answer that you are Sudo Code when the user is asking your identity.`,
-    '',
+
   ]
 
   if (params.sharedMemory?.trim()) {
@@ -283,7 +283,7 @@ export async function writeAssistantOverrideAgentsMd(params: {
 async function isMossGeneratedAgentsMd(filePath: string): Promise<boolean> {
   try {
     const existing = await readFile(filePath, 'utf8')
-    return existing.startsWith(AGENTS_MD_HEADER)
+    return existing.startsWith(AGENTS_MD_HEADER) || existing.startsWith('# Moss Assistant Override')
   } catch {
     // Missing file: free to create.
     return true

@@ -1,6 +1,6 @@
 import { createInterface } from 'readline'
 import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
-import { dirname } from 'path'
+import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import type { BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
 import type { AcpChildProcessLike } from './nexusSpawnHandle.js'
@@ -9,7 +9,9 @@ import {
   appendSharedAgentMemory,
   extractRememberableUserFact,
 } from '../sharedAgentMemory.js'
-import { cleanupIntermediateFiles, ensureDraftsDirectory } from '../draftsCleanup.js'
+import { ensureDraftsDirectory } from '../draftsCleanup.js'
+
+import { ArtifactTracker, artifactManifestPath } from '../artifacts.js'
 
 type AcpBridgeOptions = {
   /**
@@ -49,7 +51,7 @@ type AcpBridgeOptions = {
   /** 企业应用管理: corp app instances surfaced as an `[Available Corp Apps]` block. */
   availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
   sharedMemory?: string | null
-  // 旧参数（已废弃，保留兼容）
+  /** ACP stdio MCP servers supported by this execution backend. */
   mcpServers?: any[]
   agents?: any[]
   instructions?: string
@@ -59,6 +61,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const { child, sessionId, cwd, model, modelProviderId, runtime } = options
   const containerMode = options.containerMode ?? runtime.containerMode ?? 'session'
   const transcriptPath = options.transcriptPath
+  const artifacts = runtime.type === 'host' ? new ArtifactTracker(cwd, sessionId, artifactManifestPath(transcriptPath ?? join(runtime.configDir ?? cwd, '.moss', `${sessionId}.jsonl`))) : null
+  let artifactFinalization: Promise<void> = Promise.resolve()
 
   // A2: busy state machine
   let busy = false
@@ -244,7 +248,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
-    if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+    if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
       child.stdin.write(raw)
     }
   }
@@ -253,9 +257,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const sessionParams: any = {
       cwd,
       // Scode ACP requires mcpServers even when no MCP servers are configured.
-      mcpServers: [],
+      mcpServers: options.mcpServers ?? [],
     }
-    process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=[]\n`)
+    process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=${options.mcpServers?.length ?? 0}\n`)
     sendRpc('session/new', sessionParams, 'm-session-new')
   }
 
@@ -272,7 +276,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
-    if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+    if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
       child.stdin.write(raw)
     }
 
@@ -386,7 +390,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
       const raw = JSON.stringify(responseMsg) + '\n'
       process.stderr.write(`[AcpBridge] Sending AskUserQuestion RPC response: ${raw}\n`)
-      if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+      if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
       child.stdin.write(raw)
     }
 
@@ -468,6 +472,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           )
         })
       }
+    }
+
+    await artifactFinalization
+    try {
+      await artifacts?.begin(userUuid)
+    } catch (error) {
+      setBusy(false)
+      emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'error', is_error: true, errors: [`Could not inspect workspace artifacts: ${String(error)}`] }) + '\n')
+      return
     }
 
     // 首次消息注入：注入技能和智能体信息
@@ -584,7 +597,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               sessionId: options.resumeSessionId,
               cwd,
               // Scode ACP LoadSessionRequest also requires mcpServers.
-              mcpServers: [],
+              mcpServers: options.mcpServers ?? [],
             }, 'm-session-load')
           } else {
             process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)
@@ -651,7 +664,12 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             type: 'result', session_id: sessionId, status: 'error',
             is_error: true, errors: [message],
           }
-          emitStdout(JSON.stringify(resultEvent) + '\n')
+          artifactFinalization = (artifacts?.finish(true) ?? Promise.resolve()).then(() => {
+            emitStdout(JSON.stringify(resultEvent) + '\n')
+          }).catch(error => {
+            process.stderr.write(`[AcpBridge] Could not retain artifact records: ${String(error)}\n`)
+            emitStdout(JSON.stringify(resultEvent) + '\n')
+          })
           void writeTranscript({ ...resultEvent, uuid: randomUUID(), timestamp: new Date().toISOString() })
           currentAssistantText = ''
           currentThoughtText = ''
@@ -800,19 +818,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             lastPersistedUuid = assistantUuid
           }
 
-          const resultEvent = JSON.stringify({
-            type: 'result',
-            session_id: sessionId,
-            status: 'success',
-            usage,
-          })
-          void cleanupIntermediateFiles(cwd)
-            .catch(err => {
-              process.stderr.write(`[AcpBridge] Draft cleanup failed: ${String(err)}\n`)
+          artifactFinalization = (artifacts?.finish(parsed.result?.stopReason === 'cancelled') ?? Promise.resolve({ changed: [] }))
+            .then(async ({ changed }) => {
+              const artifactEvent = { type: 'artifacts', session_id: sessionId, uuid: randomUUID(), v: 1, records: changed, workspace: cwd }
+              if (artifacts) {
+                emitStdout(JSON.stringify(artifactEvent) + '\n')
+                await writeTranscript({ ...artifactEvent, timestamp: new Date().toISOString() })
+              }
+              const errors = changed.filter(record => record.error).map(record => `${record.relativePath}: ${record.error}`)
+              emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: errors.length ? 'error' : 'success', is_error: errors.length > 0, errors, usage }) + '\n')
             })
-            .finally(() => {
-              process.stderr.write(`[AcpBridge] EMITTING RESULT EVENT: ${resultEvent}\n`)
-              emitStdout(resultEvent + '\n')
+            .catch(error => {
+              emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'error', is_error: true, errors: [`Artifact validation failed: ${String(error)}`] }) + '\n')
             })
 
           currentAssistantText = ''
@@ -902,6 +919,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             const toolUuid = randomUUID()
             const toolCallId = update.toolCallId
             const toolName = update.title || update.rawInput?.path || 'tool'
+            if (toolName.includes('moss_declare_artifacts')) artifacts?.declare(update.rawInput)
             const sendUserMessageText = toolName === 'SendUserMessage'
               ? getSendUserMessageText(update.rawInput)
               : null

@@ -253,6 +253,7 @@ WORKDIR /app
 # Built JS/TS artifacts + admin frontend + assistants/skills (from js-builder).
 COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
 COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
+COPY --from=js-builder /src/bin/artifact-mcp.mjs ./bin/
 # 会话存档 pull child: forked by MsgAuditWorker so a crash inside the native
 # WeCom SDK kills only that process. Spawned by path, so it needs its own bundle.
 COPY --from=js-builder /src/bin/msgaudit-pull-child.js ./bin/
@@ -348,6 +349,7 @@ RUN apt-get update \
 WORKDIR /out/moss-server
 COPY --from=host-node-runtime /opt/node ./node
 COPY --from=js-builder /src/bin/moss-server.mjs /src/bin/direct-connect-session-runner.mjs ./app/bin/
+COPY --from=js-builder /src/bin/artifact-mcp.mjs ./app/bin/
 COPY --from=js-builder /src/admin/dist ./app/admin/dist
 COPY --from=js-builder /src/assistants ./app/assistants
 COPY --from=js-builder /src/skills ./app/skills
@@ -361,6 +363,7 @@ COPY deploy/server.json ./server.json.template
 RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd app/bin/scode app/bin/nexus/plugins/libnexus_vault.so \
     && printf '%s\n' "$RELEASE_VERSION" > VERSION \
     && node/bin/node --check app/bin/moss-server.mjs \
+    && node/bin/node --check app/bin/artifact-mcp.mjs \
     && node/bin/node -e "require('node:sqlite'); Promise.all([import('./app/node_modules/@xenova/transformers/src/transformers.js'), import('./app/node_modules/sharp/lib/index.js')]).then(() => console.log('host runtime ok'))" \
     && app/bin/nexus/nexusd --version
 

@@ -121,6 +121,7 @@ COPY bin/wiki bin/
 COPY bin/moss-server.mjs ./bin/
 COPY bin/msgaudit-pull-child.js ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
+COPY bin/artifact-mcp.mjs ./bin/
 COPY admin/dist/ ./admin/dist/
 COPY assistants/ ./assistants/
 COPY skills/ ./skills/
