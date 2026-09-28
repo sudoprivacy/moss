@@ -189,6 +189,7 @@ async function finishStandaloneServerStartup(
     nexusClient,
   })
   runtime.authProxy = authProxy
+  authProxy.setSessionTokenResolver(tokenHash => runtime.resolveAuthProxyToken(tokenHash))
   await runtime.reconcileOnStartup()
 
   const logger = createServerLogger()

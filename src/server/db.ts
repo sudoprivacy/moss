@@ -130,6 +130,8 @@ function mapAttempt(row: SqlRow): AttemptRecord {
     exitSignal: typeof row.exit_signal === 'string' ? row.exit_signal : null,
     stopReason: typeof row.stop_reason === 'string' ? row.stop_reason : null,
     errorText: typeof row.error_text === 'string' ? row.error_text : null,
+    authProxyTokenHash:
+      typeof row.auth_proxy_token_hash === 'string' ? row.auth_proxy_token_hash : null,
   }
 }
 
@@ -331,6 +333,22 @@ export class DirectConnectStore {
       this.db.exec(`ALTER TABLE enterprises ADD COLUMN client_cron_enabled INTEGER`)
       console.log('[DB] Added client_cron_enabled column to enterprises')
     }
+
+    // Migration: auth-proxy session token hash on the attempt. The proxy resolves
+    // a runner's bearer token against this row, so the token stays valid for as
+    // long as the attempt is the session's live attempt — across server restarts
+    // and with no fixed TTL (a long-lived channel session must not lose its
+    // credentials after 24h). Only the sha256 is stored; the raw token lives in
+    // the runner's env alone.
+    const attemptsColumns = this.db.prepare(`PRAGMA table_info(session_attempts)`).all() as { name: string }[]
+    if (!attemptsColumns.some(col => col.name === 'auth_proxy_token_hash')) {
+      this.db.exec(`ALTER TABLE session_attempts ADD COLUMN auth_proxy_token_hash TEXT`)
+      console.log('[DB] Added auth_proxy_token_hash column to session_attempts')
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS attempts_auth_proxy_token_idx
+        ON session_attempts (auth_proxy_token_hash)
+    `)
 
     // Migration: backfill org_id on department_secret_policies rows written by
     // replaceConfigItemDepartments (the admin "authorized departments" flow),
@@ -1721,6 +1739,24 @@ export class DirectConnectStore {
       input.errorText ?? null,
       attemptId,
     )
+  }
+
+  setAttemptAuthProxyTokenHash(attemptId: string, tokenHash: string): void {
+    this.db.prepare(`
+      UPDATE session_attempts
+      SET auth_proxy_token_hash = ?
+      WHERE attempt_id = ?
+    `).run(tokenHash, attemptId)
+  }
+
+  getAttemptByAuthProxyTokenHash(tokenHash: string): AttemptRecord | null {
+    const row = this.db.prepare(`
+      SELECT *
+      FROM session_attempts
+      WHERE auth_proxy_token_hash = ?
+      LIMIT 1
+    `).get(tokenHash) as SqlRow | undefined
+    return row ? mapAttempt(row) : null
   }
 
   markAttemptLost(attemptId: string, errorText: string): void {

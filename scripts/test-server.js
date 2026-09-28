@@ -57,6 +57,7 @@ const BUN = [
  * Node runtime path on purpose — jsonlParse exercises parseJSONL's non-Bun
  * fallback, the branch the production (node) bundle actually executes. */
 const NODE = [
+  'authProxySessionToken.test.ts',
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
   'jsonlParse.test.ts',

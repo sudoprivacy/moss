@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { request as httpsRequest } from 'https'
 import { request as httpRequest } from 'http'
 import { URL } from 'url'
+import { createHash } from 'crypto'
 import { validateRemoteUrl } from './ssrfGuard.js'
 import { injectAuth, injectMintedToken, injectMultiAuth, validateTokenParamName, type InjectAuthResult } from './authInjectors.js'
 import { handleSecretsRequest } from './secretsApi.js'
@@ -212,6 +213,21 @@ interface TokenEntry {
   registeredAt: number
 }
 
+/** Identity a session token resolves to (see {@link SessionTokenResolver}). */
+export type SessionTokenIdentity = Pick<TokenEntry, 'userId' | 'orgId' | 'departmentId' | 'isAdmin'>
+
+/**
+ * Resolves a runner's bearer token (by its sha256) to the session identity it
+ * acts for, or null when the token is unknown or its attempt is no longer the
+ * session's live attempt. Backed by the DB so validity follows the runner's
+ * lifetime — not a fixed TTL, and not this process's memory.
+ */
+export type SessionTokenResolver = (tokenHash: string) => SessionTokenIdentity | null
+
+export function hashAuthProxyToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
 interface DepartmentPolicyProvider {
   getAuthorizedConfigItemIds(departmentId: string): number[]
 }
@@ -333,8 +349,14 @@ function resolveAuthProxyPort(): number {
 }
 
 const AUTH_PROXY_PORT = resolveAuthProxyPort()
-// Token TTL: tokens older than this are considered expired and will be cleaned up
+// TTL for explicitly registered tokens (registerToken — admin test tokens).
+// Session runner tokens are not subject to it: they resolve via the DB-backed
+// SessionTokenResolver and live exactly as long as their attempt.
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+// How long a DB-resolved session token is trusted before it is re-resolved.
+// Bounds how stale a cached identity (department/role) or a missed revocation
+// on another code path can be; terminateSession evicts immediately.
+const SESSION_TOKEN_RECHECK_MS = 30 * 1000
 const TOKEN_CLEANUP_INTERVAL_MS = 60 * 60 * 1000 // 1 hour
 // Bind host for the proxy listener. Defaults to loopback (the safe local-runner
 // case). In the Docker runtime, moss-server and the session containers are peers
@@ -348,6 +370,9 @@ export class AuthProxyServer {
   /** Port actually bound; differs from the configured one when it is 0. */
   private boundPort: number = AUTH_PROXY_PORT
   private readonly tokenRegistry = new Map<string, TokenEntry>()
+  // Cache of DB-resolved session tokens, keyed by token hash.
+  private readonly sessionTokenCache = new Map<string, { identity: SessionTokenIdentity; checkedAt: number }>()
+  private sessionTokenResolver: SessionTokenResolver | null = null
   private rules = new Map<number, AuthProxyRule>()
   private nexusClient: NexusClient | null = null
   private policyProvider: DepartmentPolicyProvider | null = null
@@ -366,6 +391,10 @@ export class AuthProxyServer {
 
   setTokenMinter(minter: TokenMinter): void {
     this.tokenMinter = minter
+  }
+
+  setSessionTokenResolver(resolver: SessionTokenResolver): void {
+    this.sessionTokenResolver = resolver
   }
 
   setPolicyProvider(provider: DepartmentPolicyProvider): void {
@@ -389,17 +418,55 @@ export class AuthProxyServer {
 
   revokeToken(token: string): void {
     this.tokenRegistry.delete(token)
+    this.sessionTokenCache.delete(hashAuthProxyToken(token))
+  }
+
+  /**
+   * Drop a cached session token by hash so the next request re-resolves it
+   * (and is rejected once its attempt is terminated). Usable after a restart,
+   * when only the hash — not the raw token — is known.
+   */
+  evictSessionTokenHash(tokenHash: string): void {
+    this.sessionTokenCache.delete(tokenHash)
   }
 
   isValidToken(token: string): boolean {
+    return this.resolveToken(token) !== null
+  }
+
+  /**
+   * Resolve a bearer token to the identity it acts for. Explicitly registered
+   * tokens (registerToken) are checked first under their fixed TTL; otherwise
+   * the token is resolved as a session runner token through the DB-backed
+   * resolver, cached for SESSION_TOKEN_RECHECK_MS.
+   */
+  private resolveToken(token: string): SessionTokenIdentity | null {
     const entry = this.tokenRegistry.get(token)
-    if (!entry) return false
-    // Check if token has expired
-    if (Date.now() - entry.registeredAt > TOKEN_TTL_MS) {
+    if (entry) {
+      if (Date.now() - entry.registeredAt <= TOKEN_TTL_MS) return entry
       this.tokenRegistry.delete(token)
-      return false
     }
-    return true
+    if (!this.sessionTokenResolver) return null
+
+    const tokenHash = hashAuthProxyToken(token)
+    const now = Date.now()
+    const cached = this.sessionTokenCache.get(tokenHash)
+    if (cached && now - cached.checkedAt < SESSION_TOKEN_RECHECK_MS) {
+      return cached.identity
+    }
+    let identity: SessionTokenIdentity | null
+    try {
+      identity = this.sessionTokenResolver(tokenHash)
+    } catch (err) {
+      console.error('[AuthProxy] Session token resolve failed:', err)
+      identity = null
+    }
+    if (!identity) {
+      this.sessionTokenCache.delete(tokenHash)
+      return null
+    }
+    this.sessionTokenCache.set(tokenHash, { identity, checkedAt: now })
+    return identity
   }
 
   private cleanupExpiredTokens(): void {
@@ -409,6 +476,11 @@ export class AuthProxyServer {
       if (now - entry.registeredAt > TOKEN_TTL_MS) {
         this.tokenRegistry.delete(token)
         cleaned++
+      }
+    }
+    for (const [tokenHash, cached] of this.sessionTokenCache) {
+      if (now - cached.checkedAt >= SESSION_TOKEN_RECHECK_MS) {
+        this.sessionTokenCache.delete(tokenHash)
       }
     }
     if (cleaned > 0) {
@@ -487,12 +559,12 @@ export class AuthProxyServer {
     if (parsedUrl.pathname === '/secrets' || parsedUrl.pathname.startsWith('/secrets/')) {
       const authHeader = req.headers['authorization']
       const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-      if (!token || !this.isValidToken(token)) {
+      const tokenEntry = token ? this.resolveToken(token) : null
+      if (!tokenEntry) {
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'invalid_token' }))
         return
       }
-      const tokenEntry = this.tokenRegistry.get(token)!
       await handleSecretsRequest(req, res, parsedUrl.pathname, parsedUrl, {
         userId: tokenEntry.userId,
         orgId: tokenEntry.orgId,
@@ -519,13 +591,12 @@ export class AuthProxyServer {
     // 1. Auth check
     const authHeader = req.headers['authorization']
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-    if (!token || !this.isValidToken(token)) {
+    const tokenEntry = token ? this.resolveToken(token) : null
+    if (!tokenEntry) {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'invalid_token' }))
       return
     }
-
-    const tokenEntry = this.tokenRegistry.get(token)!
 
     // 2. Validate remote URL
     const remoteUrl = req.headers['x-remote-url'] as string
