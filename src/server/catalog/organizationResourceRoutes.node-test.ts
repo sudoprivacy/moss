@@ -19,6 +19,19 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
     } else if (req.url === '/api/skills/skill-one') {
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ data: { skill: { id: 'skill-one', name: 'shared-skill', display_name: 'Shared skill' }, versions: [{ version: '1', source_url: `${hubUrl}/skill.zip` }] } }))
+    } else if (req.url === '/api/skills/client-skill') {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ data: { skill: { id: 'client-skill', name: 'client-skill', display_name: 'Client skill' }, versions: [{ version: '2', source_url: `${hubUrl}/skill.zip` }] } }))
+    } else if (req.url === '/api/skills/restricted-skill' || req.url === '/api/skills/pending-skill') {
+      const isPending = req.url.includes('pending')
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ data: { skill: { id: isPending ? 'pending-skill' : 'restricted-skill', name: 'restricted', ...(isPending ? { status: 0 } : { tenant_id: 'other-org' }) }, versions: [{ version: '1', source_url: `${hubUrl}/skill.zip` }] } }))
+    } else if (req.url === '/api/assistants/client-agent') {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ data: { assistant: { id: 'client-agent', name: 'client-agent', skills: ['client-skill'], version: '3', sourceUrl: `${hubUrl}/agent.zip` } } }))
+    } else if (req.url?.startsWith('/api/skills/cursor')) {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ data: { skills: [{ id: 'client-skill', name: 'client-skill' }], next_cursor: null, has_more: false } }))
     } else { res.writeHead(404); res.end() }
   })
   hub.listen(0, '127.0.0.1'); await once(hub, 'listening')
@@ -117,15 +130,53 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       assert.equal((await ok('GET', '/api/v1/agents/installed', b.admin)).length, 1)
       assert.ok(Buffer.isBuffer(await ok('GET', '/api/v1/skills/installed/skill-one/download', b.user)))
     })
+    await t.test('catalog browsing and installation are available to ordinary users and isolated per user', async () => {
+      await ok('POST', '/api/v1/users', a.super, { name: 'a-peer', role: 'user', password: 'test-local-password' })
+      const peer = await login('a-peer')
+      const catalog = await ok('GET', '/api/v1/skill-hub/skills/cursor?limit=40', a.user)
+      assert.equal(catalog.skills[0].id, 'client-skill')
+      assert.equal((await ok('GET', '/api/v1/skills/installed', a.user)).some((item: any) => item.id === 'client-skill'), false)
+      const install = (token: string, kind: string, id: string) => ok('POST', '/api/v1/client/catalog/install', token, { kind, id, source: 'hub', sourceUrl: 'https://untrusted.invalid/ignored.zip', orgId: b.orgId })
+      await install(a.user, 'agents', 'client-agent')
+      for (const [kind, id] of [['skills', 'client-skill'], ['agents', 'client-agent']]) {
+        const own = (await ok('GET', `/api/v1/${kind}/installed`, a.user)).find((item: any) => item.id === id)
+        assert.ok(own, `${kind} must be installed for the caller`)
+        const zip = await JSZip.loadAsync(await ok('GET', `/api/v1/${kind}/installed/${id}/download`, a.user))
+        assert.ok(zip.file('_moss_meta.json'))
+        for (const other of [peer, b.user]) {
+          assert.equal((await ok('GET', `/api/v1/${kind}/installed`, other)).some((item: any) => item.id === id), false)
+          assert.equal((await request('GET', `/api/v1/${kind}/installed/${id}/download`, other)).status, 404)
+        }
+      }
+      await install(peer, 'skills', 'client-skill')
+      const first = (await ok('GET', '/api/v1/skills/installed', a.user)).find((item: any) => item.id === 'client-skill')
+      const second = (await ok('GET', '/api/v1/skills/installed', peer)).find((item: any) => item.id === 'client-skill')
+      assert.notEqual(first.meta.installation_id, second.meta.installation_id)
+      await install(a.user, 'skills', 'client-skill')
+      assert.equal((await ok('GET', '/api/v1/skills/installed', a.user)).filter((item: any) => item.id === 'client-skill').length, 1)
+      assert.equal((await request('POST', '/api/v1/client/catalog/install', peer, { kind: 'skills', id: 'client-skill', source: 'tenant' })).status, 404)
+      assert.equal((await request('POST', '/api/v1/client/catalog/install', undefined, { kind: 'skills', id: 'client-skill', source: 'hub' })).status, 401)
+      assert.equal((await request('POST', '/api/v1/skills/install', peer, { skillName: 'arbitrary' })).status, 403)
+      for (const id of ['restricted-skill', 'pending-skill']) {
+        assert.equal((await request('POST', '/api/v1/client/catalog/install', peer, { kind: 'skills', id, source: 'hub' })).status, 404)
+      }
+    })
     await t.test('private/custom resources cannot be read or managed from another organization', async () => {
       const agent = await ok('POST', '/api/v1/agents/tenant/create', a.admin, { name: 'private-agent', display_name: 'Private A', rules: 'A private prompt', visible_to: null })
       const skill = await ok('POST', '/api/v1/skills/tenant/upload', a.admin, { entries: [{ path: 'SKILL.md', contentBase64: Buffer.from('---\nname: private-skill\ndescription: private\n---\nprivate').toString('base64') }], visible_to: null })
       const custom = await ok('POST', '/api/v1/skills/custom', a.user, { file: skillZip.toString('base64'), name: 'custom-skill', displayName: 'Custom A' })
+      for (const [type, id] of [['agents', agent.data.id], ['skills', skill.id]]) {
+        const own = await ok('GET', `/api/v1/${type}/tenant?status=approved`, a.user)
+        assert.ok(own.some((row: any) => row.id === id), 'The tenant catalog includes accessible resources before a desktop download')
+        const other = await ok('GET', `/api/v1/${type}/tenant?status=approved`, b.user)
+        assert.equal(other.some((row: any) => row.id === id), false)
+      }
       for (const token of [b.user, b.admin, b.super]) {
         for (const [type, id] of [['agents', agent.data.id], ['skills', skill.id]]) {
           assert.equal((await request('GET', `/api/v1/${type}/tenant/${id}/download`, token)).status, 404)
           assert.equal((await request('PATCH', `/api/v1/${type}/tenant/${id}`, token, { enabled: false })).status, 404)
           assert.equal((await request('DELETE', `/api/v1/${type}/tenant/${id}`, token)).status, 404)
+          assert.equal((await request('POST', '/api/v1/client/catalog/install', token, { kind: type, id, source: 'tenant' })).status, 404)
           assert.equal((await ok('GET', `/api/v1/${type}/installed`, token)).some((row: any) => row.id === id), false)
         }
         assert.equal((await request('GET', `/api/v1/skills/installed/${custom.id}/download`, token)).status, 404)
@@ -134,6 +185,9 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       assert.equal((await request('POST', `/api/v1/admin/agents/tenant/${agent.data.id}/approve`, b.admin, { approved: false })).status, 404)
       assert.equal((await request('PATCH', '/api/v1/agents/meta', b.admin, { assistantName: 'agent-one', updates: { enabledSkills: [skill.id] } })).status, 404)
       assert.ok(Buffer.isBuffer(await ok('GET', `/api/v1/skills/installed/${custom.id}/download`, a.user)))
+      const beforeTenantInstall = (await ok('GET', '/api/v1/skills/installed', a.user)).length
+      await ok('POST', '/api/v1/client/catalog/install', a.user, { kind: 'skills', id: skill.id, source: 'tenant' })
+      assert.equal((await ok('GET', '/api/v1/skills/installed', a.user)).length, beforeTenantInstall)
       // Publishing preserves custom originals and does not duplicate their DB ID.
       const publication = await ok('POST', '/api/v1/skills/tenant/publish', a.user, { skillId: custom.id })
       await ok('POST', `/api/v1/admin/skills/tenant/${publication.id}/approve`, a.admin, { approved: true })
