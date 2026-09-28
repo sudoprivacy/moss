@@ -602,7 +602,8 @@ export class DirectConnectStore {
         default_scopes     TEXT,
         token_request_json TEXT,
         mint_script        TEXT,
-        body_auth_check    TEXT
+        body_auth_check    TEXT,
+        token_param        TEXT
       );
     `)
 
@@ -632,6 +633,10 @@ export class DirectConnectStore {
         // (HTTP 200 + {"code":401,...}) so the auth proxy can re-mint on it, not
         // just on an HTTP 401. Null keeps today's HTTP-status-only behavior.
         ['body_auth_check', 'body_auth_check TEXT'],
+        // Login-type items: header / query-param name the minted token is
+        // injected under when scheme is 'header' / 'query' (e.g. 'Token').
+        // Null keeps the default `Authorization: Bearer <token>`.
+        ['token_param', 'token_param TEXT'],
       ] as const
       for (const [colName, colDef] of columnsToAdd) {
         if (!configItemsColumns.some(col => col.name === colName)) {
@@ -903,7 +908,8 @@ export class DirectConnectStore {
         default_scopes     TEXT,
         token_request_json TEXT,
         mint_script        TEXT,
-        body_auth_check    TEXT
+        body_auth_check    TEXT,
+        token_param        TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_config_items_scope_status
@@ -1216,7 +1222,8 @@ export class DirectConnectStore {
             updated_at    INTEGER NOT NULL,
             auth_type TEXT, auth_url TEXT, token_url TEXT, client_id TEXT,
             client_secret_key TEXT, refresh_token_key TEXT, default_scopes TEXT,
-            token_request_json TEXT, mint_script TEXT, body_auth_check TEXT
+            token_request_json TEXT, mint_script TEXT, body_auth_check TEXT,
+            token_param TEXT
           );
         `)
         // Copy the intersection of old columns and the new table's columns.
@@ -1225,7 +1232,7 @@ export class DirectConnectStore {
           'scheme', 'bearer_prefix', 'status', 'org_id', 'created_at', 'updated_at',
           'auth_type', 'auth_url', 'token_url', 'client_id', 'client_secret_key',
           'refresh_token_key', 'default_scopes', 'token_request_json', 'mint_script',
-          'body_auth_check',
+          'body_auth_check', 'token_param',
         ])
         const shared = cols.filter(c => newCols.has(c)).join(', ')
         this.db.exec(`INSERT INTO config_items_new (${shared}) SELECT ${shared} FROM config_items;`)
@@ -3749,6 +3756,7 @@ export class DirectConnectStore {
     token_request_json?: string
     mint_script?: string
     body_auth_check?: string
+    token_param?: string
   }): number {
     const ts = now()
     // User-scope definitions stay global regardless of any org passed in.
@@ -3757,10 +3765,10 @@ export class DirectConnectStore {
       INSERT INTO config_items (
         name, description, icon, pinyin, scope, url_pattern, scheme, bearer_prefix, status, org_id,
         auth_type, auth_url, token_url, client_id, client_secret_key, refresh_token_key, default_scopes,
-        token_request_json, mint_script, body_auth_check,
+        token_request_json, mint_script, body_auth_check, token_param,
         created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.name,
       row.description ?? null,
@@ -3782,6 +3790,7 @@ export class DirectConnectStore {
       row.token_request_json ?? null,
       row.mint_script ?? null,
       row.body_auth_check ?? null,
+      row.token_param ?? null,
       ts, ts,
     )
     return Number(result.lastInsertRowid)
@@ -3807,6 +3816,7 @@ export class DirectConnectStore {
     token_request_json?: string | null
     mint_script?: string | null
     body_auth_check?: string | null
+    token_param?: string | null
   }, orgId?: string): void {
     // Org guard: a non-user-scope item can only be updated within its own org.
     const existing = this.getConfigItem(id, orgId)
@@ -3819,7 +3829,7 @@ export class DirectConnectStore {
           auth_type = ?, auth_url = ?, token_url = ?, client_id = ?,
           client_secret_key = ?, refresh_token_key = ?, default_scopes = ?,
           token_request_json = ?, mint_script = ?, body_auth_check = ?,
-          updated_at = ?
+          token_param = ?, updated_at = ?
       WHERE id = ?
     `).run(
       updates.name ?? (existing.name as string),
@@ -3841,6 +3851,7 @@ export class DirectConnectStore {
       updates.token_request_json !== undefined ? updates.token_request_json : (existing.token_request_json as string | null),
       updates.mint_script !== undefined ? updates.mint_script : (existing.mint_script as string | null),
       updates.body_auth_check !== undefined ? updates.body_auth_check : (existing.body_auth_check as string | null),
+      updates.token_param !== undefined ? updates.token_param : (existing.token_param as string | null),
       ts, id,
     )
   }

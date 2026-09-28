@@ -77,6 +77,8 @@ interface EntryForm {
 type AuthMode = 'static' | 'login'
 // login 子类型映射到后端 auth_type
 type LoginAuthType = 'oauth2_password' | 'script'
+// login 类换取到的令牌如何注入外部请求（映射到后端 scheme + token_param）
+type TokenInject = 'bearer' | 'header' | 'query'
 
 interface ConfigItemForm {
   name: string
@@ -92,6 +94,9 @@ interface ConfigItemForm {
   loginAuthType: LoginAuthType
   token_url: string
   token_request_json: string
+  tokenInject: TokenInject
+  // Header / Query 参数名（tokenInject 为 header/query 时必填）
+  token_param: string
   // Opt-in body-level 401 detection recipe (JSON). Empty = HTTP-status-only.
   body_auth_check: string
   entries: EntryForm[]
@@ -103,6 +108,7 @@ const emptyForm: ConfigItemForm = {
   name: '', pinyin: '', description: '', icon: '', scope: 'system',
   url_pattern: '', authMode: 'static', scheme: '', bearer_prefix: '',
   loginAuthType: 'oauth2_password', token_url: '', token_request_json: '',
+  tokenInject: 'bearer', token_param: '',
   body_auth_check: '',
   entries: [{ ...emptyEntry }],
 }
@@ -197,11 +203,14 @@ export default function ConfigItemsPage() {
       scope: item.scope,
       url_pattern: item.url_pattern || '',
       authMode: isLogin ? 'login' : 'static',
-      scheme: item.scheme || '',
+      // login 类的 scheme 表示令牌注入方式，不回填到静态方案选择器
+      scheme: isLogin ? '' : (item.scheme || ''),
       bearer_prefix: item.bearer_prefix || '',
       loginAuthType,
       token_url: item.token_url || '',
       token_request_json: item.token_request_json || '',
+      tokenInject: isLogin && (item.scheme === 'header' || item.scheme === 'query') ? item.scheme : 'bearer',
+      token_param: item.token_param || '',
       body_auth_check: item.body_auth_check || '',
       entries: item.entries.length > 0
         ? item.entries.map(e => ({ config_key: e.config_key, name: e.name, config_desc: e.config_desc || '', required: !!e.required }))
@@ -241,6 +250,13 @@ export default function ConfigItemsPage() {
         toast.error('请填写令牌端点 URL (token_url)')
         return
       }
+      if (form.tokenInject !== 'bearer') {
+        const name = form.token_param.trim()
+        const label = form.tokenInject === 'header' ? 'Header 名称' : 'Query 参数名'
+        if (!name) { toast.error(`请填写令牌注入的${label}`); return }
+        const re = form.tokenInject === 'header' ? /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/ : /^[A-Za-z0-9_.~-]+$/
+        if (!re.test(name)) { toast.error(`${label}格式不正确`); return }
+      }
       if (form.token_request_json.trim()) {
         try { JSON.parse(form.token_request_json) } catch { toast.error('请求配方 (token_request_json) 不是合法 JSON'); return }
       }
@@ -261,8 +277,10 @@ export default function ConfigItemsPage() {
           token_request_json: form.token_request_json.trim() || undefined,
           // Empty string clears the recipe server-side; a value opts in.
           body_auth_check: form.body_auth_check.trim() || '',
-          scheme: undefined,
-          bearer_prefix: undefined,
+          // 令牌注入方式：Bearer（可自定义前缀）/ 自定义 Header / Query 参数
+          scheme: form.tokenInject,
+          bearer_prefix: form.tokenInject === 'bearer' ? form.bearer_prefix.trim() : '',
+          token_param: form.tokenInject === 'bearer' ? '' : form.token_param.trim(),
         }
       : {
           auth_type: 'static',
@@ -271,6 +289,7 @@ export default function ConfigItemsPage() {
           body_auth_check: '',
           scheme: form.scheme || undefined,
           bearer_prefix: form.bearer_prefix.trim() || undefined,
+          token_param: '',
         }
     setIsSaving(true)
     try {
@@ -639,6 +658,44 @@ export default function ConfigItemsPage() {
                     </p>
                   </div>
                 )}
+
+                <div className="space-y-2">
+                  <Label>令牌注入方式</Label>
+                  <Select
+                    value={form.tokenInject}
+                    onValueChange={v => setForm(f => ({ ...f, tokenInject: v as TokenInject }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="bearer">Authorization 头（Bearer）</SelectItem>
+                      <SelectItem value="header">自定义 Header（如 Token: xxx）</SelectItem>
+                      <SelectItem value="query">Query 参数</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {form.tokenInject === 'bearer' ? (
+                    <div className="space-y-1">
+                      <Label className="text-xs">前缀（可选，默认 Bearer）</Label>
+                      <Input value={form.bearer_prefix} onChange={e => setForm(f => ({ ...f, bearer_prefix: e.target.value }))} placeholder="Bearer" className="h-8 text-sm" />
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <Label className="text-xs">{form.tokenInject === 'header' ? 'Header 名称' : 'Query 参数名'} <span className="text-destructive">*</span></Label>
+                      <Input
+                        value={form.token_param}
+                        onChange={e => setForm(f => ({ ...f, token_param: e.target.value }))}
+                        placeholder={form.tokenInject === 'header' ? 'Token' : 'access_token'}
+                        className="h-8 text-sm font-mono"
+                      />
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    {form.tokenInject === 'bearer'
+                      ? <>换取到的令牌以 <code>{`Authorization: ${form.bearer_prefix.trim() || 'Bearer'} <token>`}</code> 注入外部请求。</>
+                      : form.tokenInject === 'header'
+                        ? <>换取到的令牌以 <code>{`${form.token_param.trim() || '<Header>'}: <token>`}</code> 注入外部请求（不带前缀）。</>
+                        : <>换取到的令牌以 <code>{`?${form.token_param.trim() || '<param>'}=<token>`}</code> 追加到外部请求 URL。</>}
+                  </p>
+                </div>
 
                 <div className="space-y-2">
                   <Label>响应体 401 检测（body_auth_check，可选）</Label>

@@ -115,6 +115,7 @@ function createMcpAuthSecretsApi(
         pinyin: row.pinyin as string,
         scheme: row.scheme as ConfigItemLike['scheme'],
         bearer_prefix: row.bearer_prefix as string | null,
+        auth_type: (row.auth_type as string | null) ?? null,
         entries,
       }
     },

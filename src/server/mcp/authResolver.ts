@@ -53,6 +53,8 @@ export interface ConfigItemLike {
   scheme: 'bearer' | 'basic' | 'header' | 'query' | null
   bearer_prefix: string | null
   entries: Array<{ config_key: string }>
+  /** 登录换取令牌类（非 static）时，entries 存的是登录凭据而非令牌，不可直接注入。 */
+  auth_type?: string | null
 }
 
 /**
@@ -167,6 +169,9 @@ export async function resolveSecretRefHeaders(
   const pinyin = secretRef.includes(':') ? secretRef.split(':').slice(-1)[0] : secretRef
   const configItem = getConfigItemByPinyin(pinyin)
   if (!configItem) return {}
+  // 登录换取令牌类的 scheme 描述的是「令牌」注入位置，已存字段是用户名/密码等
+  // 登录凭据；MCP 路径不会换取令牌，绝不能把原始凭据当 header 注入。
+  if (configItem.auth_type && configItem.auth_type !== 'static') return {}
 
   // Org-scope the enterprise namespace + subject so a session only reads its
   // own org's secret (system creds are org-bound in multi-org mode).

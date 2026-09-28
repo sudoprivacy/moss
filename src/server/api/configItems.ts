@@ -4,6 +4,7 @@ import { textToPinyin } from '../utils/pinyin.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 import { hasScope } from '../auth/token.js'
 import { parseBodyAuthCheck } from '../authProxy/bodyAuthCheck.js'
+import { MINTED_TOKEN_SCHEMES } from '../authProxy/authInjectors.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -53,6 +54,38 @@ function normalizeBodyAuthCheck(raw: string | null | undefined): string | undefi
   if (raw == null || !raw.trim()) return undefined
   const recipe = parseBodyAuthCheck(raw)
   return recipe ? JSON.stringify(recipe) : undefined
+}
+
+function isLoginAuthType(authType: unknown): boolean {
+  return typeof authType === 'string' && authType !== '' && authType !== 'static'
+}
+
+// RFC 9110 header field-name (token) characters.
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+const QUERY_PARAM_RE = /^[A-Za-z0-9_.~-]+$/
+// Headers the proxy itself controls; a minted token must not be placed there.
+const RESERVED_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding'])
+
+/**
+ * Validate where a login-type item injects its minted token. `scheme` empty /
+ * 'bearer' → `Authorization: <prefix> <token>`; 'header' / 'query' need a
+ * `token_param` name. Returns an error message, or null when valid.
+ */
+function validateTokenPlacement(scheme: string | null | undefined, tokenParam: string | null | undefined): string | null {
+  if (scheme && !(MINTED_TOKEN_SCHEMES as readonly string[]).includes(scheme)) {
+    return '登录换取令牌仅支持 Bearer / 自定义 Header / Query 参数三种注入方式'
+  }
+  const name = tokenParam?.trim() ?? ''
+  if (scheme === 'header') {
+    if (!name) return '请填写令牌注入的 Header 名称'
+    if (!HEADER_NAME_RE.test(name) || name.length > 128) return 'Header 名称格式不正确'
+    if (RESERVED_HEADERS.has(name.toLowerCase())) return `不能使用 ${name} 作为令牌 Header`
+  }
+  if (scheme === 'query') {
+    if (!name) return '请填写令牌注入的 Query 参数名'
+    if (!QUERY_PARAM_RE.test(name) || name.length > 128) return 'Query 参数名格式不正确'
+  }
+  return null
 }
 
 // URL pattern validation (ported from sudowork-server)
@@ -114,6 +147,7 @@ function mapConfigItem(row: SqlRow) {
     token_request_json: (row.token_request_json as string | null) ?? null,
     mint_script: (row.mint_script as string | null) ?? null,
     body_auth_check: (row.body_auth_check as string | null) ?? null,
+    token_param: (row.token_param as string | null) ?? null,
     status: row.status as number,
     created_at: row.created_at as number,
     updated_at: row.updated_at as number,
@@ -137,7 +171,7 @@ export function createConfigItemsApi(db: {
   listConfigItems: (opts: { name?: string; scope?: string; status?: string; page?: number; pageSize?: number; orgId?: string }) => { items: SqlRow[]; total: number }
   getConfigItem: (id: number, orgId?: string) => SqlRow | null
   getConfigItemByPinyin: (pinyin: string, orgId?: string) => SqlRow | null
-  createConfigItem: (row: { name: string; description?: string; icon?: string; pinyin: string; scope: string; url_pattern?: string; scheme?: string; bearer_prefix?: string; status?: number; org_id?: string | null; auth_type?: string; token_url?: string; token_request_json?: string; mint_script?: string; body_auth_check?: string }) => number
+  createConfigItem: (row: { name: string; description?: string; icon?: string; pinyin: string; scope: string; url_pattern?: string; scheme?: string; bearer_prefix?: string; status?: number; org_id?: string | null; auth_type?: string; token_url?: string; token_request_json?: string; mint_script?: string; body_auth_check?: string; token_param?: string }) => number
   updateConfigItem: (id: number, updates: Record<string, unknown>, orgId?: string) => void
   deleteConfigItem: (id: number, orgId?: string) => void
   getConfigEntries: (configItemId: number) => SqlRow[]
@@ -194,6 +228,7 @@ export function createConfigItemsApi(db: {
       token_url?: string
       token_request_json?: string
       body_auth_check?: string
+      token_param?: string
       entries: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
       if (!body.name?.trim()) {
@@ -206,7 +241,13 @@ export function createConfigItemsApi(db: {
       // A URL-matched 凭据 needs an auth method: either a static injection
       // scheme (bearer/basic/header/query) OR a login-type auth_type that mints
       // a token (oauth2_* / script).
-      const isLoginType = typeof body.auth_type === 'string' && body.auth_type !== '' && body.auth_type !== 'static'
+      const isLoginType = isLoginAuthType(body.auth_type)
+      if (isLoginType) {
+        const placementErr = validateTokenPlacement(body.scheme, body.token_param)
+        if (placementErr) {
+          return { success: false, error: { code: 'validation_error', message: placementErr } }
+        }
+      }
       if (body.url_pattern?.trim() && !body.scheme && !isLoginType) {
         return { success: false, error: { code: 'validation_error', message: 'URL 模式已填写，请选择认证方案' } }
       }
@@ -216,7 +257,7 @@ export function createConfigItemsApi(db: {
       if (body.scheme && body.scheme !== 'bearer' && body.bearer_prefix?.trim()) {
         return { success: false, error: { code: 'validation_error', message: '仅 Bearer 方案可以设置前缀' } }
       }
-      if (['bearer', 'basic'].includes(body.scheme ?? '') && body.entries?.length > 1) {
+      if (!isLoginType && ['bearer', 'basic'].includes(body.scheme ?? '') && body.entries?.length > 1) {
         return { success: false, error: { code: 'validation_error', message: 'Bearer/Basic 方案只允许 1 个字段' } }
       }
       if (body.entries?.some((e: { config_key?: string; name?: string }) => !e.config_key?.trim() || !e.name?.trim())) {
@@ -256,6 +297,10 @@ export function createConfigItemsApi(db: {
           token_url: body.token_url,
           token_request_json: body.token_request_json,
           body_auth_check: normalizeBodyAuthCheck(body.body_auth_check),
+          // Only meaningful for a login-type item placed via header/query.
+          token_param: isLoginType && (body.scheme === 'header' || body.scheme === 'query')
+            ? body.token_param?.trim()
+            : undefined,
         })
 
         if (body.entries?.length > 0) {
@@ -285,6 +330,7 @@ export function createConfigItemsApi(db: {
       token_url?: string
       token_request_json?: string
       body_auth_check?: string | null
+      token_param?: string | null
       entries?: { config_key: string; name: string; config_desc?: string; required?: boolean }[]
     }) {
       const existing = db.getConfigItem(id, orgId)
@@ -297,6 +343,19 @@ export function createConfigItemsApi(db: {
         const bodyAuthErr = validateBodyAuthCheck(body.body_auth_check)
         if (bodyAuthErr) {
           return { success: false, error: { code: 'validation_error', message: bodyAuthErr } }
+        }
+      }
+
+      // Validate the token placement against the merged (post-update) state so a
+      // partial update can't leave a login-type item with e.g. 'header' but no name.
+      const nextAuthType = body.auth_type !== undefined ? body.auth_type : existing.auth_type
+      const nextScheme = body.scheme !== undefined ? body.scheme : (existing.scheme as string | null)
+      const nextTokenParam = body.token_param !== undefined ? body.token_param : (existing.token_param as string | null)
+      const nextIsLogin = isLoginAuthType(nextAuthType)
+      if (nextIsLogin) {
+        const placementErr = validateTokenPlacement(nextScheme, nextTokenParam)
+        if (placementErr) {
+          return { success: false, error: { code: 'validation_error', message: placementErr } }
         }
       }
 
@@ -326,6 +385,11 @@ export function createConfigItemsApi(db: {
       if (body.auth_type !== undefined) updates.auth_type = body.auth_type
       if (body.token_url !== undefined) updates.token_url = body.token_url
       if (body.token_request_json !== undefined) updates.token_request_json = body.token_request_json
+      // token_param only applies to a login-type item placed via header/query;
+      // otherwise clear it so a stale name can't resurface later.
+      updates.token_param = nextIsLogin && (nextScheme === 'header' || nextScheme === 'query')
+        ? (nextTokenParam?.trim() || null)
+        : null
       // Empty string clears the recipe (null); a non-empty value is normalized.
       if (body.body_auth_check !== undefined) {
         updates.body_auth_check = normalizeBodyAuthCheck(body.body_auth_check)
