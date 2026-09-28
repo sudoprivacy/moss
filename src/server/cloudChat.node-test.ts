@@ -14,7 +14,7 @@ void test('application role separates model identity and preserves user AGENTS.m
   try {
     await writeAssistantOverrideAgentsMd({ workspace, assistantName: 'quote', assistantDisplayName: '物料报价助手', assistantRules: 'Calculate a 7.5% service fee.' })
     const role = await readFile(join(workspace, 'AGENTS.md'), 'utf8')
-    assert.match(role, /business role is 物料报价助手/)
+    assert.match(role, /If those rules do not specify an identity, use 物料报价助手 as your assistant name/)
     assert.match(role, /model identity truthfully/)
     assert.doesNotMatch(role, /override any default|Do not answer that you are|MUST answer/)
     await writeFile(join(workspace, 'AGENTS.md'), '# User rules\nKeep this file.')
@@ -22,7 +22,7 @@ void test('application role separates model identity and preserves user AGENTS.m
     assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), '# User rules\nKeep this file.')
     await writeFile(join(workspace, 'AGENTS.md'), '# Moss Assistant Override\nold generated rules')
     await writeAssistantOverrideAgentsMd({ workspace, assistantName: 'updated' })
-    assert.match(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), /business role is updated/)
+    assert.match(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), /If those rules do not specify an identity, use updated as your assistant name/)
   } finally { await rm(workspace, { recursive: true, force: true }) }
 })
 

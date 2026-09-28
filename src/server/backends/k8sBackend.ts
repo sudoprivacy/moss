@@ -24,6 +24,7 @@ import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
 import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
+import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -94,6 +95,26 @@ async function readScodeSessionId(filePath: string): Promise<string | undefined>
     return value || undefined
   } catch {
     return undefined
+  }
+}
+
+/** Deliver the workspace instructions across the control-plane/pod filesystem boundary. */
+export async function buildWorkspaceInstructionsSecret(workspace: string, isRequired = false): Promise<{
+  data: Record<string, string>
+  mounts: Array<{ key: string; mountPath: string }>
+}> {
+  const filePath = getWorkspaceAgentsMdPath(workspace)
+  try {
+    const body = await readFile(filePath, 'utf8')
+    return {
+      data: { 'AGENTS.md': body },
+      mounts: [{ key: 'AGENTS.md', mountPath: posixPath.join(workspace, 'AGENTS.md') }],
+    }
+  } catch (error) {
+    if (!isRequired && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { data: {}, mounts: [] }
+    }
+    throw new Error(`Unable to deliver assistant instructions from ${filePath}`, { cause: error })
   }
 }
 
@@ -197,8 +218,11 @@ export class K8sBackend implements SessionBackend {
     // Keys map 1:1 to files mounted read-only at the paths scode reads. This is
     // the ONLY channel that carries the sudorouter proxy auth token to the
     // (remote) pod — hence a Secret, not a ConfigMap or hostPath.
-    const secretData: Record<string, string> = {}
-    const secretMounts: Array<{ key: string; mountPath: string }> = []
+    // RuntimeService writes AGENTS.md on the control plane. The pod's emptyDir
+    // does not contain that file until we explicitly deliver it, just like skills.
+    const instructions = await buildWorkspaceInstructionsSecret(safeCwd, Boolean(options.assistantName))
+    const secretData: Record<string, string> = { ...instructions.data }
+    const secretMounts = [...instructions.mounts]
 
     // sudocode.json — preloaded auth + models, exactly like docker backend.
     try {

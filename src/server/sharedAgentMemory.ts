@@ -225,11 +225,11 @@ export async function writeAssistantOverrideAgentsMd(params: {
     AGENTS_MD_HEADER,
     '',
     '## Application role',
-    `Within this application, your business role is ${identityName}.`,
+    'Follow the role, identity, and response instructions defined in Assistant Rules below.',
+    `If those rules do not specify an identity, use ${identityName} as your assistant name.`,
     'Explain this role and its responsibilities when asked about your role.',
     'Keep the application role distinct from the underlying model and runtime. Answer questions about model identity truthfully; do not invent or deny it.',
     '',
-
   ]
 
   if (params.sharedMemory?.trim()) {

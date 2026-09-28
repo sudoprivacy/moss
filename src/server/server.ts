@@ -8,6 +8,7 @@ import { createHash as resourceContentHash } from 'node:crypto'
 import { cp } from 'node:fs/promises'
 import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
+import { installClientCatalogResource } from './catalog/clientCatalogInstall.js'
 import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
@@ -8348,6 +8349,16 @@ export function startServer(
 
         const url = await saveUploadedIcon(config.runtimeDir, buffer, req.headers['content-type'], 'mcp-icons')
         writeJson(res, 200, { success: true, data: { url } })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/client/catalog/install') {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const body = await readJsonBody(req)
+        if ((body.kind !== 'skills' && body.kind !== 'agents') || typeof body.id !== 'string' || !body.id.trim() || (body.source !== 'hub' && body.source !== 'tenant')) {
+          throw new HttpError(400, 'Invalid catalog installation request')
+        }
+        writeJson(res, 200, await installClientCatalogResource({ kind: body.kind, id: body.id, source: body.source }))
         return
       }
 

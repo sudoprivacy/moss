@@ -720,7 +720,7 @@ export async function fetchAgentHubAssistantDetail(
       ? unwrapped.assistant
       : unwrapped
 
-  const normalized = normalizeAgentHubAssistant(rawDetail)
+  const normalized = normalizeAgentHubAssistant(isRecord(rawDetail.assistant) ? { ...rawDetail, ...rawDetail.assistant } : rawDetail)
   return normalized ? (normalized as AgentHubDetail) : null
 }
 

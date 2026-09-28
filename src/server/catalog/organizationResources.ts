@@ -25,6 +25,7 @@ export type OrganizationResourceScope = {
   driver?: DbDriver
   visibility?: VisibilityFilter
   snapshot?: OrganizationResourceSnapshot
+  isPersonalInstall?: boolean
 }
 
 // An explicit request/session boundary creates the scope. No process-global
@@ -79,10 +80,13 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
       scope.driver.all(`SELECT * FROM org_resource_installations WHERE org_id = ? AND resource_type = ?`, [scope.orgId, kind]),
       scope.driver.all(`SELECT * FROM ${tableFor(kind)} WHERE org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom')`, [scope.orgId]),
     ])
-    resources = installed.map(row => {
+    resources = installed.filter(row => !String(row.source_provider).startsWith('user:') || row.installed_by === scope.userId).map(row => {
       const meta = { ...json(row.manifest_json), ...json(row.config_json), id: String(row.source_resource_id), name: String(row.name), source_type: 'hub', installation_id: String(row.id) }
       return { kind, id: String(row.source_resource_id), name: String(row.name), path: String(row.artifact_ref), sourceType: 'hub', installationId: String(row.id), meta }
     })
+    // A personal installation takes precedence over the shared version for its owner.
+    resources.sort((left, right) => Number(right.meta.isPersonalInstallation === true) - Number(left.meta.isPersonalInstallation === true))
+    resources = resources.filter((resource, index, all) => all.findIndex(candidate => candidate.id === resource.id) === index)
     resources.push(...(await Promise.all(owned.map(row => privateResource(kind, row)))).filter((r): r is OrganizationResource => r !== null))
   }
   return resources.filter(r => !scope.visibility || isVisibleTo(r.meta.visible_to as VisibleTo, scope.visibility))
@@ -110,13 +114,17 @@ export async function scopedResourceMetadata(kind: ResourceKind, path: string): 
 export async function saveOrganizationInstallation(kind: ResourceKind, path: string, meta: ResourceMetadata, provider = 'hub'): Promise<void> {
   const scope = writableScope()
   if (typeof meta.id !== 'string' || !meta.id.trim()) throw new HttpError(400, 'A stable Hub resource ID is required')
+  if (scope.isPersonalInstall) {
+    provider = `user:${scope.userId}:${provider}`
+    meta = { ...meta, isPersonalInstallation: true, visible_to: { user_ids: [scope.userId] } }
+  }
   const now = Date.now()
   await scope.driver.run(`INSERT INTO org_resource_installations
     (id, org_id, resource_type, source_provider, source_resource_id, name, artifact_ref, manifest_json, installed_by, installed_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (org_id, resource_type, source_provider, source_resource_id) DO UPDATE SET
       name = excluded.name, artifact_ref = excluded.artifact_ref, manifest_json = excluded.manifest_json, updated_at = excluded.updated_at`,
-  [randomUUID(), scope.orgId, kind, provider, meta.id, String(meta.name), path, JSON.stringify(meta), scope.userId, now, now])
+  [randomUUID(), scope.orgId, kind, provider, String(meta.id), String(meta.name), path, JSON.stringify(meta), scope.userId, now, now])
 }
 
 export async function registerOrganizationCustom(kind: ResourceKind, path: string, meta: ResourceMetadata): Promise<void> {
