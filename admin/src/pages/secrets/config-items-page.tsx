@@ -695,6 +695,10 @@ export default function ConfigItemsPage() {
                         ? <>换取到的令牌以 <code>{`${form.token_param.trim() || '<Header>'}: <token>`}</code> 注入外部请求（不带前缀）。</>
                         : <>换取到的令牌以 <code>{`?${form.token_param.trim() || '<param>'}=<token>`}</code> 追加到外部请求 URL。</>}
                   </p>
+                  <p className="text-xs text-muted-foreground">
+                    此处为默认方式。一个凭据覆盖多个系统时，技能可按请求覆盖：
+                    <code>fetchurl --token-header Token &lt;url&gt;</code> 或 <code>--token-query access_token</code>。
+                  </p>
                 </div>
 
                 <div className="space-y-2">
