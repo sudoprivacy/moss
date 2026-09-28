@@ -31,7 +31,7 @@ function digest(value: string): Buffer {
 
 export class QmsAuthorizationService {
   constructor(private readonly options: {
-    apiKey?: string
+    apiKey?: string | (() => string | undefined)
     organizations: QmsOrganizationDirectory
   }) {}
 
@@ -39,7 +39,7 @@ export class QmsAuthorizationService {
     if (!received) {
       throw new QmsAuthorizationError(401, 'MISSING_API_KEY', 'Missing API key header')
     }
-    const expected = this.options.apiKey
+    const expected = typeof this.options.apiKey === 'function' ? this.options.apiKey() : this.options.apiKey
     if (!expected) {
       throw new QmsAuthorizationError(500, 'API_KEY_NOT_CONFIGURED', 'QMS API key not configured on server')
     }

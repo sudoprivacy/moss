@@ -146,7 +146,11 @@ export class CrashService {
       if (existing[0]) {
         issueId = Number(existing[0].id)
         await db.execute(
-          'UPDATE crash_issues SET count = count + 1, last_seen = $1, last_release = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4',
+          `UPDATE crash_issues SET count = count + 1,
+           first_release = CASE WHEN $1 < first_seen THEN $2 ELSE first_release END,
+           last_release = CASE WHEN $1 >= last_seen THEN $2 ELSE last_release END,
+           first_seen = LEAST(first_seen, $1), last_seen = GREATEST(last_seen, $1),
+           updated_at = NOW() WHERE id = $3 AND tenant_id = $4`,
           [new Date(event.timestamp), event.release ?? event.version, issueId, tenantId],
         )
       } else {
@@ -166,6 +170,10 @@ export class CrashService {
       }
 
       await this.insertEvent(db, event, ingestId, tenantId, fingerprint, issueId, symbolicatedStack)
+      await db.execute(`UPDATE crash_issues SET user_count = (
+        SELECT COUNT(DISTINCT COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')))
+        FROM crash_events WHERE issue_id = $1 AND tenant_id = $2
+      ) WHERE id = $1 AND tenant_id = $2`, [issueId, tenantId])
       return { issueId, duplicate: false }
     })
   }
@@ -347,8 +355,15 @@ export class CrashService {
     const parameters: unknown[] = [start]
     const tenant = tenantId ? ` AND tenant_id = $${parameters.push(tenantId)}` : ''
     const rows = await this.options.db.execute(
-      `SELECT bucket AS date, type, SUM(count)::INTEGER AS count FROM crash_daily_stats
-       WHERE bucket >= $1${tenant} GROUP BY bucket, type ORDER BY bucket ASC`,
+      `WITH raw_days AS (
+         SELECT DATE_TRUNC('day', timestamp) AS bucket, tenant_id, type, COUNT(*) AS count
+         FROM crash_events WHERE timestamp >= $1${tenant} GROUP BY bucket, tenant_id, type
+       ), samples AS (
+         SELECT * FROM raw_days UNION ALL
+         SELECT bucket, tenant_id, type, count FROM crash_daily_stats d WHERE bucket >= $1${tenant}
+         AND NOT EXISTS (SELECT 1 FROM raw_days r WHERE r.bucket = d.bucket AND r.type = d.type
+           AND r.tenant_id IS NOT DISTINCT FROM d.tenant_id)
+       ) SELECT bucket AS date, type, SUM(count)::INTEGER AS count FROM samples GROUP BY bucket, type ORDER BY bucket ASC`,
       parameters,
     )
     return rows.map(row => ({

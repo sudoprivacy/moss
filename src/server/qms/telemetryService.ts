@@ -1,4 +1,5 @@
-import type { TelemetryKind, TelemetryQueueMessage } from './reliableTelemetryQueue.js'
+import type { TelemetryKind, TelemetryQueueMessage } from './telemetryTypes.js'
+import { validateTelemetryPayload } from './telemetryPostgresWriter.js'
 
 export interface TelemetryBatchQueue {
   enqueueMany(items: readonly {
@@ -92,6 +93,7 @@ export class TelemetryService {
       throw new TelemetryServiceError(413, 'BATCH_TOO_LARGE', 'Telemetry batch is too large')
     }
     await this.validateTenants(items)
+    for (const item of items) this.validate(item)
     await this.options.queue.enqueueMany(items.map(({ ref: _ref, ...item }) => item))
     const received = { perf: 0, conversations: 0, turns: 0, steps: 0, installs: 0 }
     for (const item of items) {
@@ -114,6 +116,7 @@ export class TelemetryService {
     const payload = this.withTenant(input, authenticatedTenant)
     const item: NormalizedTelemetryInput = { kind, payload, ingestId: text(input.event_id), ref: kind }
     await this.validateTenants([item])
+    this.validate(item)
     const { ref: _ref, ...queued } = item
     await this.options.queue.enqueueMany([queued])
     return { timestamp: this.now(), queued: true }
@@ -136,6 +139,11 @@ export class TelemetryService {
       }
     }
     return items
+  }
+
+  private validate(item: NormalizedTelemetryInput): void {
+    try { validateTelemetryPayload(item.kind, item.payload) }
+    catch (error) { throw new TelemetryServiceError(400, 'INVALID_PAYLOAD', (error as Error).message, [item.ref]) }
   }
 
   private fromEventEnvelope(input: Record<string, unknown>, authenticatedTenant?: string) {
@@ -167,12 +175,16 @@ export class TelemetryService {
 
   private async validateTenants(items: readonly Pick<NormalizedTelemetryInput, 'payload' | 'ref'>[]): Promise<void> {
     const missing: string[] = []
+    const knownTenants = new Set<string>()
     for (const item of items) {
       const tenantId = text(item.payload.tenant_id)
       if (!tenantId) {
         missing.push(item.ref)
-      } else if (!(await this.options.tenants.hasCode(tenantId))) {
-        throw new TelemetryServiceError(400, 'TENANT_NOT_FOUND', `Unknown QMS tenant: ${tenantId}`, [item.ref])
+      } else if (!knownTenants.has(tenantId)) {
+        if (!(await this.options.tenants.hasCode(tenantId))) {
+          throw new TelemetryServiceError(400, 'TENANT_NOT_FOUND', `Unknown QMS tenant: ${tenantId}`, [item.ref])
+        }
+        knownTenants.add(tenantId)
       }
     }
     if (missing.length > 0) {

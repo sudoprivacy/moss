@@ -42,12 +42,13 @@ export const PLATFORM_DEFINITIONS: Record<PlatformProvider, { label: string; des
       field('provisionSecret', '开户 Secret', 'secret'), field('ssoSecret', 'SSO Secret', 'secret')],
   },
   qms: {
-    label: 'QMS', description: '遥测数据库、队列和通知配置；企业数据访问权限保持隔离。',
-    fields: [enabled, field('apiKeyHeader', 'API Key 请求头', 'text', true), field('encryptionRequired', '要求遥测加密', 'boolean'),
-      number('queueFlushIntervalMs', '队列刷新间隔（毫秒）'), number('queueBatchSize', '批量大小', 1, 10000),
+    label: 'QMS', description: '复用 Moss PostgreSQL，使用进程内存队列；企业数据访问权限保持隔离。',
+    fields: [enabled, field('apiKeyHeader', 'API Key 请求头', 'text', true),
+      number('queueFlushIntervalMs', '队列刷新间隔（毫秒）', 250), number('queueBatchSize', '批量大小', 1, 10000),
+      number('queueMaxItems', '内存队列最大事件数'), number('queueMaxBytes', '内存队列最大字节数', 1, 1073741824),
+      number('queueRetryIntervalMs', '队列重试间隔（毫秒）'), number('queueDrainTimeoutMs', '停机排空超时（毫秒）'),
       number('perfRetentionDays', '性能数据保留天数', 1, 3650), number('conversationRetentionDays', '对话数据保留天数', 1, 3650),
-      field('postgresUrl', 'PostgreSQL 连接地址', 'secret', true), field('redisUrl', 'Redis 连接地址', 'secret', true),
-      field('apiKey', 'API Key', 'secret', true), field('privateKeyPem', '遥测私钥', 'secret'), field('publicKeyPem', '遥测公钥', 'secret'),
+      field('apiKey', 'API Key', 'secret', true),
       field('larkWebhookUrl', '飞书 Webhook', 'secret'), field('smtpUrl', 'SMTP 连接地址', 'secret')],
   },
 }

@@ -92,7 +92,8 @@ export class QmsAlertService {
     userId: string
     input: QmsAlertConfigUpdate
   }) {
-    const entries = Object.entries(input.input).filter(([, value]) => value !== undefined)
+    const allowed = new Set(['name', 'threshold', 'comparison', 'level', 'channels', 'enabled', 'cooldown_minutes', 'description'])
+    const entries = Object.entries(input.input).filter(([key, value]) => allowed.has(key) && value !== undefined)
     if (entries.length === 0) throw new Error('No fields to update')
     if (input.input.threshold !== undefined && !Number.isFinite(input.input.threshold)) {
       throw new Error('Invalid alert threshold')

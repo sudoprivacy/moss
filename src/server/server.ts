@@ -123,11 +123,7 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.sudorouter-api-token', group: 'billing', path: 'billing.sudorouter.apiToken' },
   { key: 'server.fuiou-merchant-private-key', group: 'billing', path: 'systemConfig.recharge.fuiou.merchantPrivateKey' },
   { key: 'server.fuiou-public-key', group: 'billing', path: 'systemConfig.recharge.fuiou.publicKey' },
-  { key: 'server.qms-postgres-url', group: 'qms', path: 'qms.postgresUrl', restartRequired: true },
-  { key: 'server.qms-redis-url', group: 'qms', path: 'qms.redisUrl', restartRequired: true },
   { key: 'server.qms-api-key', group: 'qms', path: 'qms.apiKey', restartRequired: true },
-  { key: 'server.qms-telemetry-private-key', group: 'qms', path: 'qms.privateKeyPem', restartRequired: true },
-  { key: 'server.qms-telemetry-public-key', group: 'qms', path: 'qms.publicKeyPem', restartRequired: true },
   { key: 'server.qms-lark-webhook-url', group: 'qms', path: 'qms.larkWebhookUrl' },
   { key: 'server.qms-smtp-url', group: 'qms', path: 'qms.smtpUrl' },
 ]
@@ -2034,6 +2030,10 @@ export function startServer(
   },
   mossOperations?: {
     fetch: HonoFetch
+    clientReporting?: {
+      getClientReportingConfig(orgId?: string): Promise<Record<string, unknown>>
+      getCredentialData(orgId?: string): Promise<Record<string, unknown>>
+    }
   },
   platformConfig?: PlatformConfigService,
   cas?: SudoworkCasService,
@@ -2552,9 +2552,17 @@ export function startServer(
       // it while logged out, to learn which login method this deployment uses.
       // Public payload only — see publicSystemConfig.ts for what may go in it.
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/system-config') {
+        const token = getBearerToken(req)
+        const actor = token ? await authService.verifyAccessToken(token) : null
+        const organizationCode = url.searchParams.get('organization_code')?.trim()
+        const discovery = await authService.getClientPublicConfig(organizationCode)
+        // Discovery follows the requested organization; authenticated reporting follows the actual actor.
+        const reporting = actor || !organizationCode
+          ? await mossOperations?.clientReporting?.getClientReportingConfig(actor?.orgId)
+          : undefined
         writeJson(res, 200, {
           success: true,
-          data: { ...buildPublicSystemConfig(config, getSystemSettings().url), ...await authService.getClientPublicConfig(url.searchParams.get('organization_code')?.trim()) },
+          data: { ...buildPublicSystemConfig(config, getSystemSettings().url), ...discovery, ...reporting },
         })
         return
       }
@@ -6270,7 +6278,10 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           ...sealCredentials(
-            buildClientCredentials(getConfigStore().get('server.hub-authorization')),
+            {
+              ...buildClientCredentials(getConfigStore().get('server.hub-authorization')),
+              ...await mossOperations?.clientReporting?.getCredentialData(auth.orgId),
+            },
           ),
         })
         return

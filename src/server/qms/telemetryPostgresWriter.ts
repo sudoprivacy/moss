@@ -1,5 +1,5 @@
 import type { QmsSqlPort } from './qmsSchema.js'
-import type { TelemetryKind, TelemetryQueueMessage } from './reliableTelemetryQueue.js'
+import type { TelemetryKind, TelemetryQueueMessage } from './telemetryTypes.js'
 
 export interface QmsTransactionalSqlPort extends QmsSqlPort {
   transaction<T>(operation: (client: QmsSqlPort) => Promise<T>): Promise<T>
@@ -50,17 +50,26 @@ function valueFor(column: string, message: TelemetryQueueMessage): unknown {
   return message.payload[column] ?? null
 }
 
-function validate(message: TelemetryQueueMessage): void {
-  if (!message.ingestId.trim()) throw new Error('QMS telemetry ingest id is required')
-  for (const field of REQUIRED_FIELDS[message.kind]) {
-    const value = message.payload[field]
+export function validateTelemetryPayload(kind: TelemetryKind, payload: Record<string, unknown>): void {
+  for (const field of REQUIRED_FIELDS[kind]) {
+    const value = payload[field]
     if (value === undefined || value === null || value === '') {
-      throw new Error(`QMS ${message.kind} event requires ${field}`)
+      throw new Error(`QMS ${kind} event requires ${field}`)
     }
-    if (field === 'timestamp' && !Number.isFinite(Number(value))) {
-      throw new Error(`QMS ${message.kind} event requires a valid timestamp`)
+    if (field === 'timestamp' && !Number.isFinite(new Date(Number(value)).getTime())) {
+      throw new Error(`QMS ${kind} event requires a valid timestamp`)
     }
   }
+  for (const field of [...COMMON_COLUMNS, ...KIND_COLUMNS[kind]]) {
+    const value = payload[field]
+    if (value != null && !['string', 'number'].includes(typeof value)) throw new Error(`Invalid QMS ${field}`)
+    if (value != null && /(?:_ms|_tokens|tokens_used)$/.test(field) && !Number.isSafeInteger(Number(value))) throw new Error(`Invalid QMS ${field}`)
+  }
+}
+
+function validate(message: TelemetryQueueMessage): void {
+  if (!message.ingestId.trim()) throw new Error('QMS telemetry ingest id is required')
+  validateTelemetryPayload(message.kind, message.payload)
 }
 
 export class TelemetryPostgresWriter {

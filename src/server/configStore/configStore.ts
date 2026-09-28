@@ -49,17 +49,11 @@ export const CONFIG_KEYS = [
   'server.sudowork-redis-url',
   'client.log-report-key',
   'client.product-improvement-api-key',
-  'client.product-improvement-public-key',
   'dify.sso-secret',
   'dify.system-secret',
   'dify.system-token',
   'qms.default-api-key',
-  'server.qms-postgres-url',
-  'server.qms-redis-url',
   'server.qms-api-key',
-  'qms.telemetry-private-key',
-  'server.qms-telemetry-private-key',
-  'server.qms-telemetry-public-key',
   'server.qms-lark-webhook-url',
   'server.qms-smtp-url',
 ] as const
@@ -297,24 +291,6 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
     },
   },
   {
-    key: 'server.qms-postgres-url',
-    envName: 'QMS_POSTGRES_URL',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.postgresUrl = value || undefined
-    },
-  },
-  {
-    key: 'server.qms-redis-url',
-    envName: 'QMS_REDIS_URL',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.redisUrl = value || undefined
-    },
-  },
-  {
     key: 'server.qms-api-key',
     envName: 'QMS_API_KEY',
     ignoreEnvGate: false,
@@ -330,33 +306,6 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
     apply: (config, value) => {
       if (!config.qms) return
       if (!config.qms.secrets.apiKey) config.qms.secrets.apiKey = value || undefined
-    },
-  },
-  {
-    key: 'server.qms-telemetry-private-key',
-    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.privateKeyPem = value || undefined
-    },
-  },
-  {
-    key: 'qms.telemetry-private-key',
-    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      if (!config.qms.secrets.privateKeyPem) config.qms.secrets.privateKeyPem = value || undefined
-    },
-  },
-  {
-    key: 'server.qms-telemetry-public-key',
-    envName: 'QMS_TELEMETRY_PUBLIC_KEY',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.publicKeyPem = value || undefined
     },
   },
   {
@@ -499,6 +448,11 @@ export class ConfigStore {
   hydrateConfig(config: ServerConfig): void {
     for (const field of SERVER_FIELDS) {
       if (this.managed.has(field.key)) { field.apply(config, this.managed.get(field.key) || field.fallbackValue); continue }
+      // Keep the legacy QMS alias only for unmanaged deployments; managed values remain authoritative.
+      if (field.key === 'server.qms-api-key' && !process.env.QMS_API_KEY?.trim() && process.env.QMS_DEFAULT_API_KEY?.trim()) {
+        field.apply(config, process.env.QMS_DEFAULT_API_KEY.trim())
+        continue
+      }
       // env 优先（hub 除外）：config 已由 resolveServerConfig 置为 env 值，保持不动
       if (!field.ignoreEnvGate && process.env[field.envName]) continue
       // Nexus 有值用 Nexus，否则回落默认/undefined —— 覆盖并丢弃文件值

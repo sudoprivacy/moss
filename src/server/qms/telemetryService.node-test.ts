@@ -86,3 +86,19 @@ void describe('TelemetryService', () => {
     assert.equal(queue.calls.length, 0)
   })
 })
+
+void it('rejects malformed events before they can poison the persistent queue', async () => {
+  const queue = new RecordingQueue()
+  const service = new TelemetryService({ queue, tenants })
+  await assert.rejects(() => service.ingestBatch({ tenant_id: 'tenant-a', perf: [{ timestamp: 'bad', version: '1', platform: 'darwin', metric: 'startup', value_ms: 10 }] }), /valid timestamp/)
+  assert.equal(queue.calls.length, 0)
+})
+
+void it('checks each tenant only once per batch to avoid repeated reads of the shared Moss database', async () => {
+  const queue = new RecordingQueue()
+  let lookups = 0
+  const service = new TelemetryService({ queue, tenants: { hasCode: async () => { lookups++; return true } } })
+  await service.ingestBatch({ tenant_id: 'tenant-a', perf: Array.from({ length: 50 }, () => ({ timestamp: 1, version: '1', platform: 'darwin', metric: 'startup', value_ms: 1 })) })
+  assert.equal(lookups, 1)
+  assert.equal(queue.calls[0]?.length, 50)
+})

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import { onlineCommandContext } from '../application/commandContext.js'
-import type { QmsSqlPort } from './qmsSchema.js'
+import { qmsAggregateConflict, type QmsSqlPort } from './qmsSchema.js'
 import type { QmsScheduledTask } from './qmsScheduler.js'
 import type { QmsTransactionalSqlPort } from './telemetryPostgresWriter.js'
 
@@ -34,7 +35,20 @@ export class QmsMaintenanceService {
     const newest = utcDay(now, startDays).end
     if (this.options.continuousAggregates) {
       for (const view of CONTINUOUS_AGGREGATES) {
-        await this.options.db.execute(`CALL refresh_continuous_aggregate('${view}', $1, $2)`, [oldest, newest])
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await this.options.db.execute(`CALL refresh_continuous_aggregate('${view}', $1, $2)`, [oldest, newest])
+            break
+          } catch (error) {
+            // Timescale's own refresh policy may briefly own the same view.
+            if ((error as { code?: string }).code !== '55P03' || attempt >= 4) throw error
+            await delay(100 * (attempt + 1))
+          }
+        }
+      }
+      for (let days = startDays; days <= endDays; days += 1) {
+        const { bucket, end } = utcDay(now, days)
+        await this.options.db.transaction(db => this.aggregateUsers(db, bucket, end))
       }
       return
     }
@@ -53,11 +67,13 @@ export class QmsMaintenanceService {
         await db.execute('DELETE FROM telemetry_turns WHERE timestamp < $1', [this.cutoff(now, policy.conversationDays)])
         await db.execute('DELETE FROM telemetry_steps WHERE timestamp < $1', [this.cutoff(now, policy.conversationDays)])
         await db.execute('DELETE FROM crash_events WHERE timestamp < $1', [this.cutoff(now, policy.crashDays)])
-        for (const table of [...CONTINUOUS_AGGREGATES, 'crash_daily_stats',
-          'telemetry_user_conversations_daily', 'telemetry_user_turns_daily', 'telemetry_user_steps_daily']) {
+        for (const table of CONTINUOUS_AGGREGATES) {
           await db.execute(`DELETE FROM ${table} WHERE bucket < $1`, [this.cutoff(now, policy.aggregateDays)])
         }
       })
+    }
+    for (const table of ['crash_daily_stats', 'telemetry_user_conversations_daily', 'telemetry_user_turns_daily', 'telemetry_user_steps_daily']) {
+      await this.options.db.execute(`DELETE FROM ${table} WHERE bucket < $1`, [this.cutoff(now, policy.aggregateDays)])
     }
     const receiptDays = Math.max(policy.perfDays, policy.conversationDays, policy.crashDays)
     await this.options.db.execute('DELETE FROM qms_ingest_receipts WHERE received_at < $1', [this.cutoff(now, receiptDays)])
@@ -103,7 +119,7 @@ export class QmsMaintenanceService {
         MIN(value_ms), MAX(value_ms), AVG(value_ms), COUNT(*)::INTEGER, NOW()
        FROM telemetry_perf_raw WHERE timestamp >= $1 AND timestamp < $2
        GROUP BY version, platform, arch, tenant_id, metric
-       ON CONFLICT (bucket, version, platform, arch, tenant_id, metric) DO UPDATE SET
+       ON CONFLICT (${qmsAggregateConflict('bucket, version, platform, arch, tenant_id, metric')}) DO UPDATE SET
         p50=EXCLUDED.p50,p90=EXCLUDED.p90,p95=EXCLUDED.p95,p99=EXCLUDED.p99,
         min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value,
         count=EXCLUDED.count,created_at=NOW()`, [bucket, end],
@@ -120,7 +136,7 @@ export class QmsMaintenanceService {
         ROUND(COUNT(*) FILTER (WHERE status='error')::DECIMAL/NULLIF(COUNT(*),0)*100), NOW()
        FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2
        GROUP BY version, platform, arch, tenant_id
-       ON CONFLICT (bucket, version, platform, arch, tenant_id) DO UPDATE SET
+       ON CONFLICT (${qmsAggregateConflict('bucket, version, platform, arch, tenant_id')}) DO UPDATE SET
         success_count=EXCLUDED.success_count,error_count=EXCLUDED.error_count,
         user_cancel_count=EXCLUDED.user_cancel_count,total_count=EXCLUDED.total_count,
         avg_duration_ms=EXCLUDED.avg_duration_ms,avg_tokens=EXCLUDED.avg_tokens,
@@ -131,7 +147,7 @@ export class QmsMaintenanceService {
        SELECT $1,version,platform,arch,tenant_id,error_code,COUNT(*)::INTEGER,NOW()
        FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2
         AND status='error' AND error_code IS NOT NULL GROUP BY version,platform,arch,tenant_id,error_code
-       ON CONFLICT (bucket,version,platform,arch,tenant_id,error_code) DO UPDATE SET count=EXCLUDED.count,created_at=NOW()`,
+       ON CONFLICT (${qmsAggregateConflict('bucket,version,platform,arch,tenant_id,error_code')}) DO UPDATE SET count=EXCLUDED.count,created_at=NOW()`,
       [bucket, end],
     )
     await db.execute(
@@ -141,11 +157,39 @@ export class QmsMaintenanceService {
         COUNT(*) FILTER (WHERE status='success'),COUNT(*) FILTER (WHERE status='failed'),COUNT(*),AVG(duration_ms),
         ROUND(COUNT(*) FILTER (WHERE status='success')::DECIMAL/NULLIF(COUNT(*),0)*100),NOW()
        FROM telemetry_install WHERE timestamp >= $1 AND timestamp < $2 GROUP BY version,platform,arch,tenant_id,install_type
-       ON CONFLICT (bucket,version,platform,arch,tenant_id,install_type) DO UPDATE SET
+       ON CONFLICT (${qmsAggregateConflict('bucket,version,platform,arch,tenant_id,install_type')}) DO UPDATE SET
         success_count=EXCLUDED.success_count,failed_count=EXCLUDED.failed_count,total_count=EXCLUDED.total_count,
         avg_duration_ms=EXCLUDED.avg_duration_ms,success_rate=EXCLUDED.success_rate,created_at=NOW()`, [bucket, end],
     )
     await this.aggregateUsers(db, bucket, end)
+    await db.execute(
+      `INSERT INTO telemetry_turns_daily (
+        bucket,version,platform,arch,tenant_id,model_id,model_provider,success_count,error_count,total_count,
+        total_tokens,total_input_tokens,total_output_tokens,avg_duration_ms,success_rate,created_at
+       ) SELECT $1,version,platform,arch,tenant_id,model_id,model_provider,
+        COUNT(*) FILTER (WHERE status='success'),COUNT(*) FILTER (WHERE status='error'),COUNT(*),
+        COALESCE(SUM(total_tokens),0),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),AVG(duration_ms),
+        ROUND(COUNT(*) FILTER (WHERE status='success')::DECIMAL/NULLIF(COUNT(*),0)*100),NOW()
+       FROM telemetry_turns WHERE timestamp >= $1 AND timestamp < $2
+       GROUP BY version,platform,arch,tenant_id,model_id,model_provider
+       ON CONFLICT (${qmsAggregateConflict('bucket,version,platform,arch,tenant_id,model_id,model_provider')}) DO UPDATE SET
+        success_count=EXCLUDED.success_count,error_count=EXCLUDED.error_count,total_count=EXCLUDED.total_count,
+        total_tokens=EXCLUDED.total_tokens,total_input_tokens=EXCLUDED.total_input_tokens,
+        total_output_tokens=EXCLUDED.total_output_tokens,avg_duration_ms=EXCLUDED.avg_duration_ms,
+        success_rate=EXCLUDED.success_rate,created_at=NOW()`, [bucket, end],
+    )
+    await db.execute(
+      `INSERT INTO telemetry_steps_daily (
+        bucket,version,platform,arch,tenant_id,step_type,success_count,error_count,total_count,
+        avg_duration_ms,success_rate,created_at
+       ) SELECT $1,version,platform,arch,tenant_id,step_type,
+        COUNT(*) FILTER (WHERE status='success'),COUNT(*) FILTER (WHERE status='error'),COUNT(*),AVG(COALESCE(duration_ms,0)),
+        ROUND(COUNT(*) FILTER (WHERE status='success')::DECIMAL/NULLIF(COUNT(*),0)*100),NOW()
+       FROM telemetry_steps WHERE timestamp >= $1 AND timestamp < $2 GROUP BY version,platform,arch,tenant_id,step_type
+       ON CONFLICT (${qmsAggregateConflict('bucket,version,platform,arch,tenant_id,step_type')}) DO UPDATE SET
+        success_count=EXCLUDED.success_count,error_count=EXCLUDED.error_count,total_count=EXCLUDED.total_count,
+        avg_duration_ms=EXCLUDED.avg_duration_ms,success_rate=EXCLUDED.success_rate,created_at=NOW()`, [bucket, end],
+    )
   }
 
   private async aggregateUsers(db: QmsSqlPort, bucket: Date, end: Date): Promise<void> {
@@ -160,7 +204,7 @@ export class QmsMaintenanceService {
         COUNT(*) FILTER (WHERE status='user_cancel'),AVG(duration_ms),NOW()
        FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2 AND ${identity} IS NOT NULL
        GROUP BY ${identity},org_id,tenant_id,login_mode
-       ON CONFLICT (bucket,user_id,org_id,tenant_id,login_mode) DO UPDATE SET
+       ON CONFLICT (${qmsAggregateConflict('bucket,user_id,org_id,tenant_id,login_mode')}) DO UPDATE SET
         user_nickname=EXCLUDED.user_nickname,user_phone=EXCLUDED.user_phone,
         conversation_count=EXCLUDED.conversation_count,total_tokens=EXCLUDED.total_tokens,
         input_tokens=EXCLUDED.input_tokens,output_tokens=EXCLUDED.output_tokens,
@@ -176,7 +220,7 @@ export class QmsMaintenanceService {
         COUNT(*) FILTER (WHERE status='success'),COUNT(*) FILTER (WHERE status='error'),AVG(duration_ms),NOW()
        FROM telemetry_turns WHERE timestamp >= $1 AND timestamp < $2 AND ${identity} IS NOT NULL
        GROUP BY ${identity},org_id,tenant_id,login_mode
-       ON CONFLICT (bucket,user_id,org_id,tenant_id,login_mode) DO UPDATE SET
+       ON CONFLICT (${qmsAggregateConflict('bucket,user_id,org_id,tenant_id,login_mode')}) DO UPDATE SET
         user_nickname=EXCLUDED.user_nickname,user_phone=EXCLUDED.user_phone,turn_count=EXCLUDED.turn_count,
         total_tokens=EXCLUDED.total_tokens,total_input_tokens=EXCLUDED.total_input_tokens,
         total_output_tokens=EXCLUDED.total_output_tokens,success_count=EXCLUDED.success_count,
@@ -190,7 +234,7 @@ export class QmsMaintenanceService {
         COUNT(*),COUNT(*) FILTER (WHERE status='success'),COUNT(*) FILTER (WHERE status='error'),AVG(COALESCE(duration_ms,0)),NOW()
        FROM telemetry_steps WHERE timestamp >= $1 AND timestamp < $2 AND ${identity} IS NOT NULL
        GROUP BY ${identity},org_id,tenant_id,login_mode,step_type
-       ON CONFLICT (bucket,user_id,org_id,tenant_id,login_mode,step_type) DO UPDATE SET
+       ON CONFLICT (${qmsAggregateConflict('bucket,user_id,org_id,tenant_id,login_mode,step_type')}) DO UPDATE SET
         user_nickname=EXCLUDED.user_nickname,user_phone=EXCLUDED.user_phone,step_count=EXCLUDED.step_count,
         success_count=EXCLUDED.success_count,error_count=EXCLUDED.error_count,
         avg_duration_ms=EXCLUDED.avg_duration_ms,created_at=NOW()`, [bucket, end],
@@ -199,7 +243,7 @@ export class QmsMaintenanceService {
 }
 
 export function createQmsScheduledTasks(options: {
-  queue: { recoverExpired(): Promise<number>; processBatch(limit: number): Promise<number> }
+  queue: { recoverExpired?(): Promise<number>; processBatch(limit: number): Promise<number> }
   maintenance: Pick<QmsMaintenanceService, 'aggregateRange' | 'cleanup' | 'aggregateCrash' | 'cleanupCrash'>
   alerts: { evaluateType(input: { type: string; context: ReturnType<typeof onlineCommandContext> }): Promise<unknown> }
   batchSize: number
@@ -208,8 +252,8 @@ export function createQmsScheduledTasks(options: {
 }): QmsScheduledTask[] {
   return [
     {
-      name: 'queue-process', intervalMs: options.flushIntervalMs, leaseMs: Math.max(options.flushIntervalMs * 10, 60_000),
-      run: async () => { await options.queue.recoverExpired(); await options.queue.processBatch(options.batchSize) },
+      name: 'queue-process', scope: 'instance', intervalMs: options.flushIntervalMs, leaseMs: 0,
+      run: async () => { await options.queue.recoverExpired?.(); await options.queue.processBatch(options.batchSize) },
     },
     { name: 'aggregation', intervalMs: 3_600_000, leaseMs: 30 * 60_000, run: () => options.maintenance.aggregateRange(1, 1) },
     { name: 'cleanup', intervalMs: 3_600_000, leaseMs: 30 * 60_000, run: () => options.maintenance.cleanup(options.retention) },

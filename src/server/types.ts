@@ -272,21 +272,26 @@ export const serverFileConfigSchema = lazySchema(() =>
       },
     }),
     qms: z.object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().optional(),
       apiKeyHeader: z.string().min(1).default('X-API-Key'),
       queueFlushIntervalMs: z.number().int().min(250).default(3_000),
       queueBatchSize: z.number().int().min(1).max(10_000).default(50),
+      queueMaxItems: z.number().int().min(1).default(10_000),
+      queueMaxBytes: z.number().int().min(1).default(16 * 1024 * 1024),
+      queueRetryIntervalMs: z.number().int().min(1).default(1_000),
+      queueDrainTimeoutMs: z.number().int().min(1).default(15_000),
       perfRetentionDays: z.number().int().min(1).default(90),
       conversationRetentionDays: z.number().int().min(1).default(180),
-      encryptionRequired: z.boolean().default(false),
     }).default({
-      enabled: false,
       apiKeyHeader: 'X-API-Key',
       queueFlushIntervalMs: 3_000,
       queueBatchSize: 50,
+      queueMaxItems: 10_000,
+      queueMaxBytes: 16 * 1024 * 1024,
+      queueRetryIntervalMs: 1_000,
+      queueDrainTimeoutMs: 15_000,
       perfRetentionDays: 90,
       conversationRetentionDays: 180,
-      encryptionRequired: false,
     }),
     wikiIndex: z.object({
       enabled: z.boolean().default(true),
@@ -563,7 +568,6 @@ export const serverFileConfigSchema = lazySchema(() =>
       }).optional(),
       productImprovement: z.object({
         enabled: z.boolean().default(false),
-        encryptionRequired: z.boolean().optional(),
       }).optional(),
     }).default({
       loginMethod: 1,

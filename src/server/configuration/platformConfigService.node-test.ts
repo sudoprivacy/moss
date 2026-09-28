@@ -128,13 +128,13 @@ void test('production-shaped phoneAuth works with compatibility off and no signI
 void test('conflicting legacy accounts require explicit credentials; protected historical keys cannot be changed', async t => {
   const { legacy, create } = setup(t)
   legacy.sms.conflicts = ['secretId', 'secretKey']
-  legacy.qms = { config: { enabled: false }, secrets: { privateKeyPem: 'existing-key' }, sources: {} }
+  legacy.fuiou = { config: { enabled: false }, secrets: { merchantPrivateKey: 'existing-key' }, sources: {} }
   const service = create()
   await service.initialize()
   await assert.rejects(service.save('sms', { expectedVersion: null, config: smsConfig }, 'root'), status(409))
   await service.save('sms', { expectedVersion: null, config: smsConfig, secrets: smsSecrets }, 'root')
-  const saved = await service.save('qms', { expectedVersion: null, config: { enabled: false } }, 'root')
-  await assert.rejects(service.save('qms', { expectedVersion: saved.version, config: { enabled: false }, secrets: { privateKeyPem: null } }, 'root'), status(409))
+  const saved = await service.save('fuiou', { expectedVersion: null, config: { enabled: false } }, 'root')
+  await assert.rejects(service.save('fuiou', { expectedVersion: saved.version, config: { enabled: false }, secrets: { merchantPrivateKey: null } }, 'root'), status(409))
 })
 
 void test('old saved Router model fields are ignored and stale admin payloads cannot restore them', async t => {
@@ -345,4 +345,72 @@ void test('mock SMS exercises registration, one-time code login and organization
   const verification = new PhoneAuthService(authDb, config.phoneAuth, 'test-secret', forbiddenSender)
   await verification.sendCode('13800138008')
   assert.equal(forbiddenSender.mock.callCount(), 0)
+})
+
+
+void test('platform QMS adopts generated keys without restoring retired middleware or encryption settings', async t => {
+  const { legacy, create } = setup(t)
+  legacy.qms = {
+    config: { enabled: true, apiKeyHeader: 'X-API-Key', encryptionRequired: true },
+    secrets: { postgresUrl: 'postgresql://retired/db', redisUrl: 'redis://retired', privateKeyPem: 'unused', publicKeyPem: 'unused' },
+    sources: {},
+  }
+  const service = create()
+  await service.initialize()
+  assert.equal(service.getActive('qms').secrets.apiKey, undefined)
+  legacy.qms.secrets.apiKey = 'automatically-generated-key'
+  await service.refreshUnmanaged('qms')
+  const qms = (await service.list()).items.find(item => item.id === 'qms')!
+  assert.equal(qms.secrets.apiKey, true)
+  assert.equal(qms.fields.some(field => ['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'encryptionRequired'].includes(field.key)), false)
+  assert.equal(qms.config.encryptionRequired, undefined)
+  assert.deepEqual(qms.issues, [])
+  await service.save('qms', { expectedVersion: null, config: { enabled: true, encryptionRequired: true }, secrets: { redisUrl: 'redis://stale', privateKeyPem: 'stale' } }, 'root')
+  const restarted = create('qms-restart')
+  await restarted.initialize()
+  legacy.qms.secrets.apiKey = 'stale-environment-key'
+  await restarted.refreshUnmanaged('qms')
+  assert.deepEqual(restarted.getActive('qms').secrets, { apiKey: 'automatically-generated-key' })
+  const config = serverFileConfigSchema().parse({}) as unknown as ServerConfig
+  config.dbBackend = 'postgres'
+  config.databaseUrl = 'postgresql://existing-moss/database'
+  config.qms = resolveQmsConfig({}, {}, { validateSecrets: false, dbBackend: 'postgres' })
+  const store = new ConfigStore(null)
+  applyPlatformRuntime(restarted, config, store)
+  assert.equal(config.qms.enabled, true)
+  assert.equal(config.qms.secrets.apiKey, 'automatically-generated-key')
+  assert.equal(config.qms.queue.maxItems, 10000)
+  assert.equal(config.databaseUrl, 'postgresql://existing-moss/database')
+  assert.equal('redisUrl' in config.qms.secrets, false)
+  const old = { api: process.env.QMS_API_KEY, alias: process.env.QMS_DEFAULT_API_KEY }
+  try {
+    process.env.QMS_API_KEY = 'obsolete-env-key'
+    process.env.QMS_DEFAULT_API_KEY = 'obsolete-env-alias'
+    store.hydrateConfig(config)
+    assert.equal(config.qms.secrets.apiKey, 'automatically-generated-key')
+  } finally {
+    if (old.api === undefined) delete process.env.QMS_API_KEY
+    else process.env.QMS_API_KEY = old.api
+    if (old.alias === undefined) delete process.env.QMS_DEFAULT_API_KEY
+    else process.env.QMS_DEFAULT_API_KEY = old.alias
+  }
+})
+
+void test('old managed QMS snapshots do not load retired secrets or break platform startup', async t => {
+  const { auth, create } = setup(t)
+  const platform = create()
+  await platform.initialize()
+  const saved = await platform.save('qms', { expectedVersion: null, config: { enabled: false } }, 'root')
+  const repository = new PlatformIntegrationSettingsRepository(auth.driver)
+  const record = (await repository.get('platform.v1.qms'))!
+  await repository.put('platform.v1.qms', { ...record, config: { ...record.config as object, encryptionRequired: true }, secretRefs: {
+    postgresUrl: `qms.${saved.version}.postgresUrl`, redisUrl: `qms.${saved.version}.redisUrl`,
+    privateKeyPem: `qms.${saved.version}.privateKeyPem`, publicKeyPem: `qms.${saved.version}.publicKeyPem`,
+  } }, 'legacy')
+  const restarted = create('old-qms')
+  await restarted.initialize()
+  assert.deepEqual(restarted.getActive('qms').secrets, {})
+  assert.equal(restarted.getActive('qms').config.encryptionRequired, undefined)
+  const check = await restarted.check('qms', { expectedVersion: saved.version, config: { enabled: true, apiKeyHeader: 'bad header' }, secrets: { apiKey: 'valid' } })
+  assert.equal(check.ready, false)
 })

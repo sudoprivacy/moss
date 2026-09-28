@@ -26,7 +26,7 @@ import type { VisibilityFilter } from '../../../visibilityFilter.js'
 import { registerSudoworkDifyRuntimeRoutes } from './difyRoutes.js'
 import { registerSudoworkDifyDatasetRoutes } from './difyDatasetRoutes.js'
 import { registerSudoworkDifyAdministrationRoutes } from './difyAdministrationRoutes.js'
-import { createSudoworkQmsRoutes } from './qmsRoutes.js'
+import { createSudoworkQmsRoutes, QMS_CLIENT_ROUTES } from './qmsRoutes.js'
 import { registerSudoworkLegacyUsageRoutes, type SudoworkLegacyUsagePort } from './legacyUsageRoutes.js'
 import { SudoworkLegacyUsageError } from './legacyUsageService.js'
 import { SudoworkUserProjectionError } from './userProjectionService.js'
@@ -1510,16 +1510,19 @@ export function createSudoworkCompatibilityApp(options: {
   if (options.qms) {
     app.route('/', createSudoworkQmsRoutes({
       ...options.qms,
-      getActor: async authorization => {
+      getActor: async (authorization, requestedScope) => {
         const actor = await options.identity.getActor(authorization ?? '')
-        return actor && options.organizationScopedAdmin
+        return actor && options.organizationScopedAdmin && !(requestedScope === 'platform' && actor.role === 'super_admin')
           ? { ...actor, organizationScoped: true }
           : actor
       },
     }))
   } else {
+    for (const [method, path] of QMS_CLIENT_ROUTES) {
+      app.on(method, path, context => context.json({ success: false, error: { code: 'QMS_NOT_CONFIGURED', message: '质量管理未就绪，请检查 QMS 开关、Moss PostgreSQL 存储和上报凭据，修复后重启服务。' } }, 503))
+    }
     app.all('/api/v1/qms/*', context => (
-      context.json({ success: false, msg: 'QMS 未配置' }, 503)
+      context.json({ success: false, error: { code: 'QMS_NOT_CONFIGURED', message: '质量管理未就绪，请检查 QMS 开关、Moss PostgreSQL 存储和上报凭据，修复后重启服务。' }, msg: 'QMS 未配置' }, 503)
     ))
   }
 

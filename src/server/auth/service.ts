@@ -682,7 +682,7 @@ export class AuthService {
     smsCredentialsAvailable: boolean
     sms: SudoworkInfrastructureConfig['sms']
     billing: SudoworkInfrastructureConfig['billing']
-    productImprovementEncryptionRequired?: boolean
+    productImprovementRuntime?: () => import('../api/compat/sudowork/systemConfigService.js').ProductImprovementRuntime | Promise<import('../api/compat/sudowork/systemConfigService.js').ProductImprovementRuntime>
   }): SudoworkSystemConfigService {
     this.loginPolicyDefaults.loginMethod = input.loginMethod
     this.systemConfiguration = new SudoworkSystemConfigService({
@@ -694,9 +694,7 @@ export class AuthService {
         loginMethod: input.loginMethod,
         skillhubBaseUrl: input.skillhubBaseUrl,
         sudorouterBaseUrl: input.sudorouterBaseUrl,
-        productImprovementEncryptionRequired: input.productImprovementEncryptionRequired,
         productImprovementApiKey: input.secrets.get('client.product-improvement-api-key'),
-        productImprovementPublicKey: input.secrets.get('client.product-improvement-public-key'),
         sms: input.sms,
         billing: input.billing,
       },
@@ -705,6 +703,7 @@ export class AuthService {
       platformConfigPage: input.platformConfigPage,
       productImprovementAvailable: input.productImprovementAvailable,
       resolveInfrastructure: input.resolveInfrastructure,
+      productImprovementRuntime: input.productImprovementRuntime,
       smsCredentialsAvailable: input.smsCredentialsAvailable,
       secrets: input.secrets,
     })

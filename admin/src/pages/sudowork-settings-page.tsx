@@ -158,6 +158,7 @@ function ScopedSudoworkSettings({ scope, organizationId, allowPlatform, onScopeC
           <Toggle label="版本更新" checked={Number(versionUpdate.enabled) === 1} onChange={checked => nested('version_update', { enabled: checked ? 1 : 0 })} />
           <Field label="版本资源域名"><Input value={String(versionUpdate.cos_domain ?? '')} onChange={event => nested('version_update', { cos_domain: event.target.value })} /></Field>
           <Toggle label="产品改进数据" checked={Number(productImprovement.enabled) === 1} onChange={checked => nested('product_improvement', { enabled: checked ? 1 : 0 })} />
+          <Field label="质量上报地址" wide><div className="flex gap-2"><Input type="url" value={String(productImprovement.baseurl ?? '')} onChange={event => nested('product_improvement', { baseurl: event.target.value })} placeholder="https://moss.example.com" /><Button type="button" variant="outline" onClick={() => nested('product_improvement', { baseurl: window.location.origin })}>使用当前 Moss 地址</Button></div><p className="text-sm text-muted-foreground">会话、性能、安装和 Crash 统一上报到此地址。留空沿用客户端服务端地址；客户端更新至支持此配置的版本后，重新登录即可生效。普通日志仍使用上方日志域名。</p></Field>
         </CardContent></Card>
 
         <Card><CardHeader><CardTitle className="text-base">充值与授信</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2">

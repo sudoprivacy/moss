@@ -5,6 +5,8 @@ import { PLATFORM_DEFINITIONS, PLATFORM_PROVIDERS, type PlatformProvider, type P
 
 export const PLATFORM_SECRET_NAMESPACE = 'moss:platform-config'
 const LEGACY_ROUTER_MODEL_FIELDS = new Set(['modelServiceUrl', 'modelsApiUrl'])
+const RETIRED_QMS_CONFIG_FIELDS = new Set(['encryptionRequired'])
+const RETIRED_QMS_SECRET_FIELDS = new Set(['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem'])
 export interface PlatformVault {
   getSecret(namespace: string, key: string): Promise<{ value: string | null } | null>
   putSecret(namespace: string, key: string, value: string): Promise<unknown>
@@ -43,9 +45,15 @@ export class PlatformConfigService {
       const saved = savedProviders.get(id)
       const snapshot = saved ? await this.readSnapshot(id, saved) : legacy[id]
       if (!snapshot) throw new PlatformConfigError(500, `平台配置未加载: ${id}`)
-      this.active.set(id, { version: saved?.version ?? null, snapshot: withoutLegacyRouterModelFields(id, snapshot) })
+      this.active.set(id, { version: saved?.version ?? null, snapshot: withoutRetiredPlatformFields(id, snapshot) })
     }
     await this.reportVersions()
+  }
+
+  async refreshUnmanaged(id: PlatformProvider): Promise<void> {
+    if (this.isManaged(id)) return
+    const snapshot = (await this.options.legacy([id]))[id]
+    if (snapshot && !this.isManaged(id)) this.active.set(id, { version: null, snapshot: withoutRetiredPlatformFields(id, snapshot) })
   }
 
   getActive(id: PlatformProvider): PlatformSnapshot {
@@ -128,6 +136,7 @@ export class PlatformConfigService {
     for (const [key, value] of Object.entries(input.config)) {
       // Accept stale admin-page payloads without restoring global model overrides.
       if (id === 'sudorouter' && LEGACY_ROUTER_MODEL_FIELDS.has(key) && typeof value === 'string') continue
+      if (id === 'qms' && RETIRED_QMS_CONFIG_FIELDS.has(key) && typeof value === 'boolean') continue
       const field = fields.find(f => f.key === key && f.type !== 'secret')
       if (!field || !validValue(field.type, value)) throw new PlatformConfigError(400, `无效配置字段: ${key}`)
       snapshot.config[key] = typeof value === 'string' ? value.trim() : value as PlatformValues[string]
@@ -135,6 +144,7 @@ export class PlatformConfigService {
     const secrets = input.secrets ?? {}
     if (!isRecord(secrets)) throw new PlatformConfigError(400, '凭据必须为对象')
     for (const [key, value] of Object.entries(secrets)) {
+      if (id === 'qms' && RETIRED_QMS_SECRET_FIELDS.has(key) && (value === null || typeof value === 'string')) continue
       if (!fields.some(f => f.key === key && f.type === 'secret') || (value !== null && typeof value !== 'string')) {
         throw new PlatformConfigError(400, `无效凭据字段: ${key}`)
       }
@@ -145,13 +155,12 @@ export class PlatformConfigService {
     if (!saved && previous.conflicts?.some(key => !(key in configInput) && !(key in secrets))) {
       throw new PlatformConfigError(409, '历史配置存在冲突，请明确填写冲突字段后再接管')
     }
-    // Historical payment callbacks and telemetry ciphertext must remain readable.
+    // Historical payment callbacks must remain readable.
     {
-      const protectedFields = id === 'qms' ? ['privateKeyPem', 'publicKeyPem']
-        : id === 'fuiou' ? ['merchantPrivateKey', 'publicKey'] : []
+      const protectedFields = id === 'fuiou' ? ['merchantPrivateKey', 'publicKey'] : []
       for (const key of protectedFields) {
         if (previous.secrets[key] && snapshot.secrets[key] !== previous.secrets[key]) {
-          throw new PlatformConfigError(409, '历史支付或遥测数据依赖此密钥；请先完成专门的密钥轮换迁移，不能在此直接覆盖或清除')
+          throw new PlatformConfigError(409, '历史支付数据依赖此密钥；请先完成专门的密钥轮换迁移，不能在此直接覆盖或清除')
         }
       }
       if (id === 'fuiou' && previous.secrets.merchantPrivateKey && ['merchantCode', 'testMode'].some(key => snapshot.config[key] !== previous.config[key])) {
@@ -171,6 +180,8 @@ export class PlatformConfigService {
   private async readSnapshot(id: PlatformProvider, saved: SavedProvider): Promise<PlatformSnapshot> {
     const secrets: Record<string, string> = {}
     for (const [key, ref] of Object.entries(saved.secretRefs)) {
+      // Retired QMS storage/crypto settings must not require removed services or credentials at startup.
+      if (id === 'qms' && RETIRED_QMS_SECRET_FIELDS.has(key)) continue
       if (!ref.startsWith(`${id}.${saved.version}.`) || !PLATFORM_DEFINITIONS[id].fields.some(f => f.key === key && f.type === 'secret')) {
         throw new PlatformConfigError(500, '平台凭据引用无效')
       }
@@ -178,17 +189,22 @@ export class PlatformConfigService {
       if (!record?.value) throw new PlatformConfigError(503, '平台凭据暂不可读取，请检查凭据服务')
       secrets[key] = record.value
     }
-    return withoutLegacyRouterModelFields(id, { config: saved.config, secrets, sources: Object.fromEntries(PLATFORM_DEFINITIONS[id].fields.map(f => [f.key, 'platform'])) })
+    return withoutRetiredPlatformFields(id, { config: saved.config, secrets, sources: Object.fromEntries(PLATFORM_DEFINITIONS[id].fields.map(f => [f.key, 'platform'])) })
   }
 }
-function withoutLegacyRouterModelFields(id: PlatformProvider, snapshot: PlatformSnapshot): PlatformSnapshot {
-  if (id !== 'sudorouter') return snapshot
+function withoutRetiredPlatformFields(id: PlatformProvider, snapshot: PlatformSnapshot): PlatformSnapshot {
+  if (id !== 'sudorouter' && id !== 'qms') return snapshot
+  const configFields = id === 'qms' ? RETIRED_QMS_CONFIG_FIELDS : LEGACY_ROUTER_MODEL_FIELDS
+  const secretFields = id === 'qms' ? RETIRED_QMS_SECRET_FIELDS : new Set<string>()
   return {
     ...snapshot,
-    config: Object.fromEntries(Object.entries(snapshot.config).filter(([key]) => !LEGACY_ROUTER_MODEL_FIELDS.has(key))),
-    sources: Object.fromEntries(Object.entries(snapshot.sources).filter(([key]) => !LEGACY_ROUTER_MODEL_FIELDS.has(key))),
+    config: Object.fromEntries(Object.entries(snapshot.config).filter(([key]) => !configFields.has(key))),
+    secrets: Object.fromEntries(Object.entries(snapshot.secrets).filter(([key]) => !secretFields.has(key))),
+    sources: Object.fromEntries(Object.entries(snapshot.sources).filter(([key]) => !configFields.has(key) && !secretFields.has(key))),
+    ...(snapshot.conflicts ? { conflicts: snapshot.conflicts.filter(key => !configFields.has(key) && !secretFields.has(key)) } : {}),
   }
 }
+
 function isRecord(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v) }
 function validValue(type: string, v: unknown): boolean {
   if (type === 'boolean') return typeof v === 'boolean'
@@ -212,9 +228,9 @@ export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformS
   }
   if (id === 'sudorouter' && snapshot.config.enabled && !/^\d+$/.test(String(snapshot.config.adminUserId))) issues.push('管理员用户 ID 须为数字')
   if (id === 'sms' && !mockSms && snapshot.config.enabled && (!Array.isArray(snapshot.config.templateParams) || !snapshot.config.templateParams.some(x => x.includes('{code}')))) issues.push('模板参数必须包含 {code}')
-  if (snapshot.config.enabled && (id === 'fuiou' || id === 'qms')) {
-    const privateName = id === 'fuiou' ? 'merchantPrivateKey' : 'privateKeyPem'
-    const publicName = id === 'fuiou' ? 'publicKey' : 'publicKeyPem'
+  if (snapshot.config.enabled && id === 'fuiou') {
+    const privateName = 'merchantPrivateKey'
+    const publicName = 'publicKey'
     for (const [key, privatePart] of [[privateName, true], [publicName, false]] as const) {
       const value = snapshot.secrets[key]
       if (!value) continue
@@ -226,17 +242,8 @@ export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformS
       } catch { issues.push(`${key} 不是有效的 RSA 密钥`) }
     }
   }
-  if (id === 'qms' && snapshot.config.enabled) {
-    if (snapshot.config.encryptionRequired && (!snapshot.secrets.privateKeyPem || !snapshot.secrets.publicKeyPem)) issues.push('加密遥测需要公钥和私钥')
-    for (const [key, protocols] of [['postgresUrl', ['postgres:', 'postgresql:']], ['redisUrl', ['redis:', 'rediss:']]] as const) {
-      try {
-        const url = new URL(snapshot.secrets[key] ?? '')
-        if (!protocols.includes(url.protocol as never)) throw new Error()
-        if (key === 'postgresUrl' && url.username === 'postgres' && url.password === 'postgres') issues.push('QMS 数据库不能使用不安全的默认账号密码')
-      }
-      catch { issues.push(`${key} 协议或格式无效`) }
-    }
-    if (!/^[A-Za-z0-9-]+$/.test(String(snapshot.config.apiKeyHeader))) issues.push('API Key 请求头格式无效')
+  if (id === 'qms' && snapshot.config.apiKeyHeader && !/^[A-Za-z0-9-]+$/.test(String(snapshot.config.apiKeyHeader))) {
+    issues.push('QMS API Key 请求头格式无效')
   }
   return issues
 }

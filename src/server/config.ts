@@ -108,13 +108,15 @@ export function getDefaultServerConfig(): ServerFileConfig {
       },
     },
     qms: {
-      enabled: false,
       apiKeyHeader: 'X-API-Key',
       queueFlushIntervalMs: 3_000,
       queueBatchSize: 50,
+      queueMaxItems: 10_000,
+      queueMaxBytes: 16 * 1024 * 1024,
+      queueRetryIntervalMs: 1_000,
+      queueDrainTimeoutMs: 15_000,
       perfRetentionDays: 90,
       conversationRetentionDays: 180,
-      encryptionRequired: false,
     },
     wikiIndex: {
       enabled: true,
@@ -227,6 +229,11 @@ function assertLbTokenValue(name: string, value: string): void {
 
 function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
   const defaultStorage = getDefaultStoragePaths()
+  const dbBackend = raw.storage.dbBackend
+      || ((process.env.MOSS_DB_BACKEND?.trim() === 'postgres'
+        || (process.env.MOSS_DATABASE_URL?.trim() ? true : false))
+        ? 'postgres'
+        : 'sqlite')
   return {
     host: raw.server.host,
     port: raw.server.port,
@@ -305,11 +312,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     // Shared DB backend: file config wins; else env (MOSS_DB_BACKEND=postgres or
     // presence of MOSS_DATABASE_URL) selects postgres; default sqlite (unchanged
     // single-host path).
-    dbBackend: raw.storage.dbBackend
-      || ((process.env.MOSS_DB_BACKEND?.trim() === 'postgres'
-        || (process.env.MOSS_DATABASE_URL?.trim() ? true : false))
-        ? 'postgres'
-        : 'sqlite'),
+    dbBackend,
     databaseUrl: process.env.MOSS_DATABASE_URL?.trim() || raw.storage.databaseUrl,
     // Auth-proxy URL: env preferred, else file, else null (= not explicitly
     // set). The consumer (runtimeService spawnAttempt) derives the URL from
@@ -384,7 +387,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         secretKey: process.env.SUDOWORK_TENCENT_SECRET_KEY || undefined,
       },
     },
-    qms: resolveQmsConfig(raw.qms, process.env as QmsSecretEnvironment, { validateSecrets: false }),
+    qms: resolveQmsConfig(raw.qms, process.env as QmsSecretEnvironment, { validateSecrets: false, dbBackend }),
     wikiIndex: {
       enabled: raw.wikiIndex.enabled && process.env.MOSS_WIKI_INDEX_DISABLED !== '1',
       modelId: raw.wikiIndex.modelId,

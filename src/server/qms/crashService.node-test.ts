@@ -52,9 +52,10 @@ void describe('CrashService', () => {
 
     assert.deepEqual(result, { issueId: 41, duplicate: false })
     assert.match(db.statements[0]!.sql, /pg_advisory_xact_lock/)
-    assert.match(db.statements.at(-1)!.sql, /INSERT INTO crash_events/)
+    assert.match(db.statements.at(-2)!.sql, /INSERT INTO crash_events/)
+    assert.match(db.statements.at(-1)!.sql, /UPDATE crash_issues SET user_count/)
     assert.ok(db.statements.some(item => item.sql.includes('INSERT INTO qms_ingest_receipts')))
-    assert.equal(db.statements.at(-1)!.parameters[0], 'event-1')
+    assert.equal(db.statements.at(-2)!.parameters[0], 'event-1')
   })
 
   void it('stores a symbolicated stack resolved for the event tenant and release', async () => {

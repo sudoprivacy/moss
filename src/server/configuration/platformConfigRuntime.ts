@@ -13,9 +13,7 @@ export const PLATFORM_CREDENTIAL_GROUPS: Partial<Record<ConfigKey, PlatformProvi
   'server.sudorouter-api-token': 'sudorouter', 'server.sudorouter-admin-token': 'sudorouter',
   'server.fuiou-merchant-private-key': 'fuiou', 'server.fuiou-public-key': 'fuiou',
   'dify.system-token': 'dify', 'dify.system-secret': 'dify', 'dify.sso-secret': 'dify',
-  'server.qms-postgres-url': 'qms', 'server.qms-redis-url': 'qms', 'server.qms-api-key': 'qms',
-  'qms.default-api-key': 'qms', 'qms.telemetry-private-key': 'qms', 'server.qms-telemetry-private-key': 'qms',
-  'server.qms-telemetry-public-key': 'qms', 'server.qms-lark-webhook-url': 'qms', 'server.qms-smtp-url': 'qms',
+  'server.qms-api-key': 'qms', 'qms.default-api-key': 'qms', 'server.qms-lark-webhook-url': 'qms', 'server.qms-smtp-url': 'qms',
 }
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const str = (value: unknown): string => typeof value === 'string' ? value : ''
@@ -93,8 +91,10 @@ export async function legacyPlatformSnapshots(config: ServerConfig, store: Confi
     }, 'environment / server.json / Nexus')
   if (providers.includes('qms')) {
     const qms = config.qms ?? resolveQmsConfig({}, {})
-    result.qms = snapshot({ enabled: qms.enabled, apiKeyHeader: qms.apiKeyHeader, encryptionRequired: qms.encryptionRequired,
+    result.qms = snapshot({ enabled: qms.enabled, apiKeyHeader: qms.apiKeyHeader,
       queueFlushIntervalMs: qms.queue.flushIntervalMs, queueBatchSize: qms.queue.batchSize,
+      queueMaxItems: qms.queue.maxItems, queueMaxBytes: qms.queue.maxBytes,
+      queueRetryIntervalMs: qms.queue.retryIntervalMs, queueDrainTimeoutMs: qms.queue.drainTimeoutMs,
       perfRetentionDays: qms.retention.perfDays, conversationRetentionDays: qms.retention.conversationDays,
     }, Object.fromEntries(Object.entries(qms.secrets).map(([key, value]) => [key, value || ''])), 'environment / server.json / Nexus')
   }
@@ -113,8 +113,7 @@ export function applyPlatformRuntime(service: PlatformConfigService, config: Ser
   manage('sudorouter', { apiToken: ['server.sudorouter-api-token', 'server.sudorouter-admin-token'] })
   manage('fuiou', { merchantPrivateKey: ['server.fuiou-merchant-private-key'], publicKey: ['server.fuiou-public-key'] })
   manage('dify', { systemToken: ['dify.system-token'], provisionSecret: ['dify.system-secret'], ssoSecret: ['dify.sso-secret'] })
-  manage('qms', { postgresUrl: ['server.qms-postgres-url'], redisUrl: ['server.qms-redis-url'], apiKey: ['server.qms-api-key', 'qms.default-api-key', 'client.product-improvement-api-key'],
-    privateKeyPem: ['server.qms-telemetry-private-key', 'qms.telemetry-private-key'], publicKeyPem: ['server.qms-telemetry-public-key', 'client.product-improvement-public-key'],
+  manage('qms', { apiKey: ['server.qms-api-key', 'qms.default-api-key', 'client.product-improvement-api-key'],
     larkWebhookUrl: ['server.qms-lark-webhook-url'], smtpUrl: ['server.qms-smtp-url'] })
   store.hydrateConfig(config)
   if (service.isManaged('sms') || (!config.phoneAuth.enabled && config.sudoworkCompatibility.enabled && service.getActive('sms').config.enabled)) {
@@ -150,10 +149,9 @@ export function applyPlatformRuntime(service: PlatformConfigService, config: Ser
   if (service.isManaged('qms')) {
     const { config: c, secrets } = service.getActive('qms')
     config.qms = resolveQmsConfig(c, {
-      QMS_POSTGRES_URL: secrets.postgresUrl, QMS_REDIS_URL: secrets.redisUrl, QMS_API_KEY: secrets.apiKey,
-      QMS_TELEMETRY_PRIVATE_KEY: secrets.privateKeyPem, QMS_TELEMETRY_PUBLIC_KEY: secrets.publicKeyPem,
+      QMS_API_KEY: secrets.apiKey,
       QMS_LARK_WEBHOOK_URL: secrets.larkWebhookUrl, QMS_SMTP_URL: secrets.smtpUrl,
-    })
+    }, { validateSecrets: false, dbBackend: config.dbBackend })
   }
 }
 

@@ -37,6 +37,7 @@ import {
   type BillingRuntimeConfig,
 } from './billing/billingRuntimeConfig.js'
 import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
+import { ensureQmsApiKey, initializeQmsWithDeadline, createDeferredQmsRoutes } from './qms/qmsBootstrap.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
 import { getSystemSettings } from './systemSettings.js'
@@ -313,6 +314,8 @@ async function finishStandaloneServerStartup(
   const logger = createServerLogger()
   let closeSudoworkRedis: (() => Promise<void>) | undefined
   let qmsRuntime: StartedQmsRuntime | undefined
+  let qmsStartup: Promise<void> | undefined
+  const qmsStartupController = new AbortController()
 
   const disabledTokenStore: LegacyKeyValueStore = {
     async setex(): Promise<void> { throw new Error('Sudowork legacy sessions are disabled') },
@@ -379,7 +382,11 @@ async function finishStandaloneServerStartup(
         modelsApiUrl: process.env.SUDOROUTER_MODELS_API_URL || 'https://hk.sudorouter.ai/api/specific_pricing',
       },
     },
-    productImprovementEncryptionRequired: platformConfig.isManaged('qms') ? config.qms?.encryptionRequired === true : process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
+    productImprovementRuntime: config.qms.enabled ? async () => {
+      // Only reporting credentials wait for QMS; login and other HTTP endpoints remain available.
+      await qmsStartup
+      return { apiKey: config.qms.secrets.apiKey }
+    } : undefined,
   })
   const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
   const infrastructure = await systemConfiguration.getInfrastructureConfig()
@@ -477,21 +484,6 @@ async function finishStandaloneServerStartup(
     quotaReader: sudorouter,
     getScodeAutoModel: async orgId => String((await systemConfiguration.getPublicConfig(orgId)).scode_auto_model ?? ''),
   })
-  qmsRuntime = await startQmsRuntime({
-    config: config.qms,
-    ownerId: instance.instanceId,
-    organizations: authService.createQmsOrganizationDirectory(),
-    secrets: new QmsNexusSecretAdapter(config.qms, {
-      get: key => configStore.get(key),
-      put: (key, value) => configStore.put(key, value, config),
-    }),
-    environment: {
-      NODE_ENV: process.env.NODE_ENV ?? 'production',
-      PORT: config.port,
-      HOST: config.host,
-      LOG_LEVEL: config.logLevel,
-    },
-  })
   const compatibilityAppOptions: Parameters<typeof createSudoworkCompatibilityApp>[0] = {
     identity,
     administration,
@@ -515,12 +507,7 @@ async function finishStandaloneServerStartup(
     loginMethod: config.sudoworkCompatibility.loginMethod,
     sms,
     systemConfig: { skillhubBaseUrl: publicBaseUrl },
-    qms: qmsRuntime ? {
-      apiKeyHeader: qmsRuntime.apiKeyHeader,
-      authorization: qmsRuntime.authorization,
-      encryption: qmsRuntime.encryption,
-      operations: qmsRuntime.operations,
-    } : undefined,
+    qms: createDeferredQmsRoutes(() => qmsRuntime, config.qms.apiKeyHeader),
   }
   const mossOperationsApp = createSudoworkCompatibilityApp({
     ...compatibilityAppOptions,
@@ -544,13 +531,55 @@ async function finishStandaloneServerStartup(
     logger,
     nexusClient,
     sudoworkCompatibility,
-    { fetch: mossOperationsApp.fetch },
+    { fetch: mossOperationsApp.fetch, clientReporting: systemConfiguration },
     platformConfig,
     cas,
   )
   const platformVersionTimer = setInterval(() => { void platformConfig.reportVersions().catch(() => {}) }, 30_000)
   platformVersionTimer.unref()
   const actualPort = (await server.ready) ?? config.port
+  // QMS is optional: listen first, then initialize it without awaiting it on the startup path.
+  qmsStartup = initializeQmsWithDeadline({
+    enabled: config.qms.enabled,
+    signal: qmsStartupController.signal,
+    initialize: async signal => {
+      await ensureQmsApiKey({
+        config: config.qms,
+        driver: store.driver,
+        signal,
+        secrets: {
+          get: key => configStore.get(key),
+          refreshKey: key => configStore.refreshKey(key),
+          put: (key, value) => configStore.put(key, value, config),
+        },
+      })
+      await platformConfig.refreshUnmanaged('qms')
+      return startQmsRuntime({
+        config: config.qms,
+        driver: store.driver,
+        signal,
+        warn: message => logger.warn(message),
+        ownerId: instance.instanceId,
+        organizations: authService.createQmsOrganizationDirectory(),
+        secrets: new QmsNexusSecretAdapter(config.qms, {
+          get: key => configStore.get(key),
+          put: (key, value) => configStore.put(key, value, config),
+        }),
+        environment: {
+          NODE_ENV: process.env.NODE_ENV ?? 'production',
+          PORT: config.port,
+          HOST: config.host,
+          LOG_LEVEL: config.logLevel,
+        },
+      })
+    },
+    onError: error => {
+      logger.error(`[QMS] Initialization failed (${error instanceof Error ? error.name : 'unknown error'}). Quality APIs are unavailable; check QMS credentials and storage, then restart.`)
+    },
+  }).then(ready => {
+    qmsRuntime = ready
+    if (ready) logger.info('[QMS] Background initialization completed')
+  })
   const connectHost =
     config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host
   const httpUrl = `http://${connectHost}:${actualPort}`
@@ -592,6 +621,8 @@ async function finishStandaloneServerStartup(
   const stop = async () => {
     if (stopped) return
     stopped = true
+    qmsStartupController.abort()
+    await qmsStartup
     // Graceful drain (multi-instance LB): flip /readyz to 503 so the LB stops
     // routing new traffic, then keep serving existing WS/SSE — and keep
     // heartbeating (we still own our attempts) — until connections drain or
