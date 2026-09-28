@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'https'
 import { request as httpRequest } from 'http'
 import { URL } from 'url'
 import { validateRemoteUrl } from './ssrfGuard.js'
-import { injectAuth, injectMintedToken, injectMultiAuth, type InjectAuthResult } from './authInjectors.js'
+import { injectAuth, injectMintedToken, injectMultiAuth, validateTokenParamName, type InjectAuthResult } from './authInjectors.js'
 import { handleSecretsRequest } from './secretsApi.js'
 import { secretSubject, orgScopedNamespace, deptSecretNamespace } from '../secrets/secretSubject.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
@@ -248,7 +248,29 @@ export function isDepartmentCredentialAllowed(
 const CONTROL_HEADERS = new Set([
   'authorization', 'x-secret-namespace', 'x-secret-key', 'x-secret-scheme',
   'x-auth-scheme', 'x-remote-url', 'x-remote-method', 'host', 'connection',
+  'x-token-header', 'x-token-query',
 ])
+
+/**
+ * Read a caller's per-request placement override for a minted token:
+ * `X-Token-Header: <name>` → `<name>: <token>`, `X-Token-Query: <name>` →
+ * `?<name>=<token>`. Null when neither is sent; `{error}` when invalid.
+ */
+function parseTokenPlacementOverride(
+  req: IncomingMessage,
+): { scheme: 'header' | 'query'; tokenParam: string } | { error: string } | null {
+  const header = req.headers['x-token-header']
+  const query = req.headers['x-token-query']
+  if (header === undefined && query === undefined) return null
+  if (header !== undefined && query !== undefined) {
+    return { error: 'X-Token-Header 与 X-Token-Query 只能指定一个' }
+  }
+  const scheme = header !== undefined ? 'header' : 'query'
+  const raw = header ?? query
+  const name = (Array.isArray(raw) ? raw.join(',') : raw ?? '').trim()
+  const err = validateTokenParamName(scheme, name)
+  return err ? { error: err } : { scheme, tokenParam: name }
+}
 
 /**
  * Merge injected auth headers into the upstream headers, first dropping any
@@ -520,6 +542,23 @@ export class AuthProxyServer {
       return
     }
 
+    // 2b. Optional per-request placement for a minted token (fetchurl
+    // --token-header / --token-query), so one login-type 凭据 whose URL pattern
+    // spans several systems can serve each with the header it expects.
+    const placementOverride = parseTokenPlacementOverride(req)
+    if (placementOverride && 'error' in placementOverride) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid_token_placement', message: placementOverride.error }))
+      return
+    }
+    const rejectPlacementOverride = (): void => {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        error: 'token_placement_unsupported',
+        message: 'X-Token-Header / X-Token-Query only apply to login-type (登录换取令牌) credentials',
+      }))
+    }
+
     // 3. Resolve credentials and inject
     let injectResult: InjectAuthResult = { headers: {} }
     let matchedConfigItemId: number | null = null
@@ -551,6 +590,7 @@ export class AuthProxyServer {
     const explicitScheme = req.headers['x-secret-scheme'] as string || req.headers['x-auth-scheme'] as string
 
     if (explicitNs && explicitKey && this.nexusClient) {
+      if (placementOverride) return rejectPlacementOverride()
       // 显式头路径不允许消费企业凭据和部门凭据：缺少策略门，避免越权
       if (explicitNs.startsWith('system:') || explicitNs.startsWith('role:')) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -601,6 +641,12 @@ export class AuthProxyServer {
 
       matchedConfigItemId = match.configItemId
 
+      const isLoginType =
+        typeof match.authType === 'string' && match.authType !== '' && match.authType !== 'static'
+      // A static secret's placement is fixed by the 凭据; only a minted token
+      // may be re-placed per request.
+      if (placementOverride && !isLoginType) return rejectPlacementOverride()
+
       // 5. Resolve secrets from Nexus.
       const resolvedNamespace = match.secretNamespace.replaceAll('{userId}', tokenEntry.userId)
       // For a department-scoped credential, prefer a value specific to the
@@ -649,13 +695,11 @@ export class AuthProxyServer {
         return
       }
 
-      const isLoginType =
-        typeof match.authType === 'string' && match.authType !== '' && match.authType !== 'static'
       if (isLoginType) {
         // The stored "secrets" are login credentials: mint (or reuse a cached)
         // access_token from them and inject it per the item's placement (Bearer
-        // by default, or a custom header / query param). The raw credential
-        // never reaches the upstream request or the skill.
+        // by default, or a custom header / query param; a per-request override
+        // wins). The raw credential never reaches the upstream request or the skill.
         if (!this.tokenMinter) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'mint_unavailable', message: 'Token minting is not configured' }))
@@ -677,7 +721,9 @@ export class AuthProxyServer {
           res.end(JSON.stringify({ error: 'mint_failed', message: 'Could not obtain an access token; the user may need to set or refresh their credential' }))
           return
         }
-        const placement = { scheme: match.scheme, prefix: match.bearerPrefix, tokenParam: match.tokenParam ?? null }
+        const placement = placementOverride
+          ? { scheme: placementOverride.scheme, prefix: '', tokenParam: placementOverride.tokenParam }
+          : { scheme: match.scheme, prefix: match.bearerPrefix, tokenParam: match.tokenParam ?? null }
         injectResult = injectMintedToken(placement, minted.token)
         // Enable the on-401 re-mint-and-retry path for this request. The body
         // check is opt-in per config item; null keeps HTTP-status-only behavior.

@@ -4,7 +4,7 @@ import { textToPinyin } from '../utils/pinyin.js'
 import { resolveIconUrl } from '../utils/iconUrl.js'
 import { hasScope } from '../auth/token.js'
 import { parseBodyAuthCheck } from '../authProxy/bodyAuthCheck.js'
-import { MINTED_TOKEN_SCHEMES } from '../authProxy/authInjectors.js'
+import { MINTED_TOKEN_SCHEMES, validateTokenParamName } from '../authProxy/authInjectors.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -60,12 +60,6 @@ function isLoginAuthType(authType: unknown): boolean {
   return typeof authType === 'string' && authType !== '' && authType !== 'static'
 }
 
-// RFC 9110 header field-name (token) characters.
-const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
-const QUERY_PARAM_RE = /^[A-Za-z0-9_.~-]+$/
-// Headers the proxy itself controls; a minted token must not be placed there.
-const RESERVED_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding'])
-
 /**
  * Validate where a login-type item injects its minted token. `scheme` empty /
  * 'bearer' → `Authorization: <prefix> <token>`; 'header' / 'query' need a
@@ -75,16 +69,7 @@ function validateTokenPlacement(scheme: string | null | undefined, tokenParam: s
   if (scheme && !(MINTED_TOKEN_SCHEMES as readonly string[]).includes(scheme)) {
     return '登录换取令牌仅支持 Bearer / 自定义 Header / Query 参数三种注入方式'
   }
-  const name = tokenParam?.trim() ?? ''
-  if (scheme === 'header') {
-    if (!name) return '请填写令牌注入的 Header 名称'
-    if (!HEADER_NAME_RE.test(name) || name.length > 128) return 'Header 名称格式不正确'
-    if (RESERVED_HEADERS.has(name.toLowerCase())) return `不能使用 ${name} 作为令牌 Header`
-  }
-  if (scheme === 'query') {
-    if (!name) return '请填写令牌注入的 Query 参数名'
-    if (!QUERY_PARAM_RE.test(name) || name.length > 128) return 'Query 参数名格式不正确'
-  }
+  if (scheme === 'header' || scheme === 'query') return validateTokenParamName(scheme, tokenParam)
   return null
 }
 
