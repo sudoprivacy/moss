@@ -241,6 +241,7 @@ jobs:
           set -euo pipefail
           tar -tzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" > dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/moss-server.mjs' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/artifact-mcp.mjs' dist/server-contents.txt
           grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/nexus/nexusd' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/nexus/plugins/libnexus_vault.so' dist/server-contents.txt

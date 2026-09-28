@@ -27,6 +27,7 @@ docker buildx build \
 test -x "$STAGE_DIR/moss-server/node/bin/node"
 test -f "$STAGE_DIR/moss-server/app/bin/moss-server.mjs"
 test -f "$STAGE_DIR/moss-server/app/bin/direct-connect-session-runner.mjs"
+test -f "$STAGE_DIR/moss-server/app/bin/artifact-mcp.mjs"
 test -x "$STAGE_DIR/moss-server/app/bin/nexus/nexusd"
 test -f "$STAGE_DIR/moss-server/app/bin/nexus/plugins/libnexus_vault.so"
 test -f "$STAGE_DIR/moss-server/app/bin/nexus/plugins/libnexus_vault.so.sig"
