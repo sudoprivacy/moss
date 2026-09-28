@@ -43,6 +43,10 @@ export interface ConfigItem {
   // (HTTP 200 + {"code":401,...}) so the auth proxy re-mints on it, not just on
   // an HTTP 401. Null = HTTP-status-only. E.g. {"field":"code","unauthorizedValues":[401]}.
   body_auth_check: string | null
+  // Login-type only: header / query-param name the minted token is injected
+  // under when scheme is 'header' / 'query' (e.g. 'Token'). With scheme null or
+  // 'bearer' the token goes out as `Authorization: <bearer_prefix|Bearer> <token>`.
+  token_param: string | null
   status: number
   entries: ConfigEntry[]
   created_at: number
@@ -177,6 +181,7 @@ export async function createConfigItem(data: {
   token_url?: string
   token_request_json?: string
   body_auth_check?: string
+  token_param?: string
   entries?: { config_key: string; name: string; config_desc?: string; required?: number }[]
 }): Promise<ConfigItem> {
   const res = await dcClient.post<{ success: boolean; data?: ConfigItem; error?: { code: string; message: string } }>('/api/v1/config-items', data)
@@ -197,6 +202,7 @@ export async function updateConfigItem(id: number, data: {
   token_url?: string
   token_request_json?: string
   body_auth_check?: string
+  token_param?: string
   entries?: { config_key: string; name: string; config_desc?: string; required?: number }[]
 }): Promise<ConfigItem> {
   const res = await dcClient.put<{ success: boolean; data?: ConfigItem; error?: { code: string; message: string } }>(`/api/v1/config-items/${id}`, data)

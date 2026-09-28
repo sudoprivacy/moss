@@ -32,7 +32,8 @@ The proxy matches the target URL against a configured **凭据** (credential) an
   secret directly; or
 - **login-type service**: mints a short-lived access_token from the user's
   stored login credential (declaratively, or via a per-service script) and
-  injects it as a Bearer token, caching it per user+service.
+  injects it — as `Authorization: Bearer`, or a custom header / query param
+  (e.g. `Token: xxx`) as configured on the 凭据 — caching it per user+service.
 
 Either way the raw credential stays server-side. For an unattended **cron**
 task this "just works" — the token is re-minted from the stored credential each

@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'https'
 import { request as httpRequest } from 'http'
 import { URL } from 'url'
 import { validateRemoteUrl } from './ssrfGuard.js'
-import { injectAuth, injectMultiAuth, type InjectAuthResult } from './authInjectors.js'
+import { injectAuth, injectMintedToken, injectMultiAuth, type InjectAuthResult } from './authInjectors.js'
 import { handleSecretsRequest } from './secretsApi.js'
 import { secretSubject, orgScopedNamespace, deptSecretNamespace } from '../secrets/secretSubject.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
@@ -43,6 +43,9 @@ export interface AuthProxyRule {
   // Opt-in recipe (JSON) for detecting a body-level "unauthorized" reply
   // (HTTP 200 + {"code":401,...}) so re-mint fires on it too. See bodyAuthCheck.
   bodyAuthCheck?: string | null
+  // Login-type only: header/query-param name the minted token goes under when
+  // `scheme` is 'header' or 'query' (e.g. 'Token'). Bearer otherwise.
+  tokenParam?: string | null
 }
 
 /**
@@ -85,6 +88,7 @@ export function configItemToRule(
     tokenRequestJson: (item.token_request_json as string | null) ?? null,
     pinyin: (item.pinyin as string | null) ?? null,
     bodyAuthCheck: (item.body_auth_check as string | null) ?? null,
+    tokenParam: (item.token_param as string | null) ?? null,
   }
 }
 
@@ -245,6 +249,29 @@ const CONTROL_HEADERS = new Set([
   'authorization', 'x-secret-namespace', 'x-secret-key', 'x-secret-scheme',
   'x-auth-scheme', 'x-remote-url', 'x-remote-method', 'host', 'connection',
 ])
+
+/**
+ * Merge injected auth headers into the upstream headers, first dropping any
+ * caller-sent header with the same name in a different case — HTTP names are
+ * case-insensitive, so `token` from the skill must not ride alongside the
+ * injected `Token`.
+ */
+function applyInjectedHeaders(headers: Record<string, string>, inject: InjectAuthResult): void {
+  for (const name of Object.keys(inject.headers)) {
+    const lower = name.toLowerCase()
+    for (const existing of Object.keys(headers)) {
+      if (existing.toLowerCase() === lower) delete headers[existing]
+    }
+    headers[name] = inject.headers[name]
+  }
+}
+
+/** Append an injected query fragment (`name=value`) to the remote URL. */
+function withInjectedQuery(remoteUrl: string, inject: InjectAuthResult): string {
+  if (!inject.url) return remoteUrl
+  const separator = new URL(remoteUrl).search ? '&' : '?'
+  return `${remoteUrl}${separator}${inject.url}`
+}
 
 /** Collect a request's body into a single Buffer (empty when there is none). */
 function readRequestBody(req: IncomingMessage): Promise<Buffer> {
@@ -514,6 +541,8 @@ export class AuthProxyServer {
       userId: string
       // Parsed per-item body-level 401 recipe (null = HTTP-status-only).
       bodyAuthCheck: BodyAuthCheckRecipe | null
+      // How the re-minted token is placed (same as the first attempt).
+      placement: { scheme: string; prefix: string; tokenParam: string | null }
     } | null = null
 
     // Priority 1: Explicit headers
@@ -624,8 +653,9 @@ export class AuthProxyServer {
         typeof match.authType === 'string' && match.authType !== '' && match.authType !== 'static'
       if (isLoginType) {
         // The stored "secrets" are login credentials: mint (or reuse a cached)
-        // access_token from them and inject it as a Bearer token. The raw
-        // credential never reaches the upstream request or the skill.
+        // access_token from them and inject it per the item's placement (Bearer
+        // by default, or a custom header / query param). The raw credential
+        // never reaches the upstream request or the skill.
         if (!this.tokenMinter) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'mint_unavailable', message: 'Token minting is not configured' }))
@@ -647,7 +677,8 @@ export class AuthProxyServer {
           res.end(JSON.stringify({ error: 'mint_failed', message: 'Could not obtain an access token; the user may need to set or refresh their credential' }))
           return
         }
-        injectResult = injectAuth({ scheme: 'bearer', secret: minted.token })
+        const placement = { scheme: match.scheme, prefix: match.bearerPrefix, tokenParam: match.tokenParam ?? null }
+        injectResult = injectMintedToken(placement, minted.token)
         // Enable the on-401 re-mint-and-retry path for this request. The body
         // check is opt-in per config item; null keeps HTTP-status-only behavior.
         mintRetry = {
@@ -655,6 +686,7 @@ export class AuthProxyServer {
           creds,
           userId: tokenEntry.userId,
           bodyAuthCheck: parseBodyAuthCheck(match.bodyAuthCheck),
+          placement,
         }
       } else if (['bearer', 'basic'].includes(match.scheme)) {
         injectResult = injectAuth({
@@ -675,18 +707,13 @@ export class AuthProxyServer {
         upstreamHeaders[key] = value
       }
     }
-    Object.assign(upstreamHeaders, injectResult.headers)
+    applyInjectedHeaders(upstreamHeaders, injectResult)
     upstreamHeaders['host'] = targetUrl.host
 
     // Handle query injection
-    let finalUrl = remoteUrl
-    if (injectResult.url) {
-      const separator = targetUrl.search ? '&' : '?'
-      finalUrl = `${remoteUrl}${separator}${injectResult.url}`
-    }
+    const targetFinal = new URL(withInjectedQuery(remoteUrl, injectResult))
 
     // 7. Forward request
-    const targetFinal = new URL(finalUrl)
     const method = (req.headers['x-remote-method'] as string | undefined)?.toUpperCase() || req.method
     const baseRequestOptions = {
       hostname: targetFinal.hostname,
@@ -729,13 +756,13 @@ export class AuthProxyServer {
     // Retry path (login-type credential): buffer the request body so it can be
     // replayed, and buffer the upstream response so its status can be inspected
     // before we commit to the client. On a 401 (stale/invalidated minted token)
-    // we force a fresh mint, swap the Bearer header, and forward once more.
+    // we force a fresh mint, swap the injected token, and forward once more.
     const reqBody = await readRequestBody(req)
 
     type UpstreamResult = { status: number; headers: IncomingMessage['headers']; body: Buffer }
-    const sendUpstream = (headers: Record<string, string>): Promise<UpstreamResult> =>
+    const sendUpstream = (headers: Record<string, string>, path = baseRequestOptions.path): Promise<UpstreamResult> =>
       new Promise<UpstreamResult>((resolve, reject) => {
-        const upstreamReq = doRequest({ ...baseRequestOptions, headers })
+        const upstreamReq = doRequest({ ...baseRequestOptions, path, headers })
         upstreamReq.on('response', (upstreamRes) => {
           const chunks: Buffer[] = []
           upstreamRes.on('data', (c: Buffer) => chunks.push(c))
@@ -773,9 +800,13 @@ export class AuthProxyServer {
             `[AuthProxy] Upstream ${reason} for config item #${mintRetry.cfg.configItemId}; ` +
               're-minted token and retrying once.',
           )
-          const retryInject = injectAuth({ scheme: 'bearer', secret: reminted.token })
-          const retryHeaders = { ...upstreamHeaders, ...retryInject.headers }
-          result = await sendUpstream(retryHeaders)
+          const retryInject = injectMintedToken(mintRetry.placement, reminted.token)
+          const retryHeaders = { ...upstreamHeaders }
+          applyInjectedHeaders(retryHeaders, retryInject)
+          // Rebuild from the original URL so a query-placed token is replaced,
+          // not appended next to the stale one.
+          const retryUrl = new URL(withInjectedQuery(remoteUrl, retryInject))
+          result = await sendUpstream(retryHeaders, retryUrl.pathname + retryUrl.search)
         }
       }
 

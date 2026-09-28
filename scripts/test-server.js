@@ -37,6 +37,8 @@ const BUN = [
   'applicationHelloReplay.test.ts',
   'nexusZoneId.test.ts',
   'authProxyPort.test.ts',
+  'authProxyMintedTokenInject.test.ts',
+  'configItemsTokenPlacement.test.ts',
   'credentialsEnvelope.test.ts',
   'credits.test.ts',
   'fuiou.test.ts',
