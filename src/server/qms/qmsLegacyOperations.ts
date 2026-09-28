@@ -50,6 +50,7 @@ function query(input: Input) {
     stepType: input.query.step_type,
     order: input.query.order,
     limit: input.query.limit ? number(input.query.limit, 50) : undefined,
+    offset: input.query.offset ? number(input.query.offset, 0) : undefined,
   }
 }
 

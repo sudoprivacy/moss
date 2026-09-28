@@ -16,6 +16,10 @@ type LoginMethod = 'sms' | 'password' | 'cas'
 type RechargeMode = 'pay' | 'approve' | 'disabled'
 type Json = Record<string, unknown>
 
+export interface ProductImprovementRuntime {
+  apiKey?: string
+}
+
 export interface SudoworkInfrastructureConfig {
   sms: {
     provider: 'disabled' | 'tencent'
@@ -70,9 +74,7 @@ export class SudoworkSystemConfigService {
       loginMethod: LoginMethod
       skillhubBaseUrl: string
       sudorouterBaseUrl?: string
-      productImprovementEncryptionRequired?: boolean
       productImprovementApiKey?: string
-      productImprovementPublicKey?: string
       sms?: SudoworkInfrastructureConfig['sms']
       billing?: SudoworkInfrastructureConfig['billing']
     }
@@ -83,6 +85,7 @@ export class SudoworkSystemConfigService {
     smsConfigured?: boolean
     getSmsReadiness?: () => Promise<{ ready: boolean; reason?: string }>
     resolveInfrastructure?: (legacy: SudoworkInfrastructureConfig) => SudoworkInfrastructureConfig
+    productImprovementRuntime?: () => ProductImprovementRuntime | Promise<ProductImprovementRuntime>
     secrets: {
       get(key: ConfigKey): string | undefined
       put(key: ConfigKey, value: string): Promise<void>
@@ -117,7 +120,8 @@ export class SudoworkSystemConfigService {
         ? { enabled: 1, cos_domain: string(versionUpdate.cosDomain) }
         : { enabled: 0 },
       product_improvement: enabledProductImprovement === 1
-        ? { enabled: 1, encryption_required: this.options.defaults.productImprovementEncryptionRequired === true }
+        ? { enabled: 1, encryption_required: false,
+            ...(string(productImprovement.baseurl) ? { baseurl: string(productImprovement.baseurl) } : {}) }
         : { enabled: 0 },
       sudorouter_baseurl: withoutTrailingSlash(string(
         infrastructure.billing.sudorouter.baseUrl,
@@ -151,6 +155,30 @@ export class SudoworkSystemConfigService {
       maxPoints: Number(credit.max_points),
       allowDuplicatePending: credit.allow_duplicate_pending === true,
     }
+  }
+
+  /** Only persisted reporting policies override native Moss bootstrap defaults. */
+  async getClientReportingConfig(orgId?: string): Promise<Json> {
+    const policy = await this.policy(orgId)
+    const result: Json = {}
+    if (policy.logReport !== undefined) {
+      const value = object(policy.logReport)
+      result.log_report = flag(value.enabled) ? { enabled: 1, baseurl: `${string(value.protocol, 'https')}://${string(value.domain)}` } : { enabled: 0 }
+    }
+    if (policy.versionUpdate !== undefined) {
+      const value = object(policy.versionUpdate)
+      result.version_update = flag(value.enabled) ? { enabled: 1, cos_domain: string(value.cosDomain) } : { enabled: 0 }
+    }
+    if (policy.productImprovement !== undefined) {
+      const value = object(policy.productImprovement)
+      result.product_improvement = flag(value.enabled) && this.options.productImprovementAvailable !== false ? { enabled: 1, encryption_required: false,
+        ...(string(value.baseurl) ? { baseurl: string(value.baseurl) } : {}) } : { enabled: 0 }
+    }
+    if (orgId && result.product_improvement) {
+      const profile = await this.options.identities.getOrganizationProfile(orgId)
+      if (profile?.code) result.product_improvement = { ...object(result.product_improvement), tenant_id: profile.code }
+    }
+    return result
   }
 
   async getInfrastructureConfig(): Promise<SudoworkInfrastructureConfig> {
@@ -193,7 +221,7 @@ export class SudoworkSystemConfigService {
         enabled: flag(versionUpdate.enabled),
         cos_domain: string(versionUpdate.cosDomain),
       },
-      product_improvement: { enabled: flag(productImprovement.enabled) },
+      product_improvement: { enabled: flag(productImprovement.enabled), baseurl: string(productImprovement.baseurl) },
       scode_auto_model: string(policy.scodeAutoModel),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
@@ -223,13 +251,17 @@ export class SudoworkSystemConfigService {
     if (flag(logReport.enabled) === 1 && logKey) result.log_report = { key: logKey }
     const productImprovement = object(policy.productImprovement)
     if (flag(productImprovement.enabled) === 1 && this.options.productImprovementAvailable !== false) {
-      const value: Json = { api_key: this.options.defaults.productImprovementApiKey ?? '' }
-      if (this.options.defaults.productImprovementEncryptionRequired) {
-        value.public_key = this.options.defaults.productImprovementPublicKey ?? ''
-      }
+      const runtime = await this.productImprovementRuntime()
+      const value: Json = { api_key: runtime.apiKey ?? '' }
       result.product_improvement = value
     }
     return result
+  }
+
+  private async productImprovementRuntime(): Promise<ProductImprovementRuntime> {
+    return this.options.productImprovementRuntime?.() ?? {
+      apiKey: this.options.secrets.get('client.product-improvement-api-key') ?? this.options.defaults.productImprovementApiKey,
+    }
   }
 
   async update(actor: IdentityActor, body: Json): Promise<void> {
@@ -352,16 +384,22 @@ export class SudoworkSystemConfigService {
       patch.versionUpdate = { enabled, cosDomain }
     }
     if (body.product_improvement !== undefined) {
-      const enabled = flag(object(body.product_improvement).enabled)
+      const value = object(body.product_improvement)
+      const enabled = flag(value.enabled)
       if (enabled === 1 && this.options.productImprovementAvailable === false) throw new SudoworkSystemConfigError(400, '平台 QMS 服务未启用或尚未重启生效')
-      if (enabled === 1 && !this.options.defaults.productImprovementApiKey) {
+      const runtime = await this.productImprovementRuntime()
+      if (enabled === 1 && !runtime.apiKey) {
         throw new SudoworkSystemConfigError(400, '未配置 QMS_DEFAULT_API_KEY,无法开启产品改进计划')
       }
-      if (enabled === 1 && this.options.defaults.productImprovementEncryptionRequired
-        && (!this.options.defaults.productImprovementPublicKey)) {
-        throw new SudoworkSystemConfigError(400, '已开启遥测加密,但未配置 QMS_TELEMETRY_PUBLIC_KEY')
+      const baseurl = value.baseurl === undefined ? undefined : string(value.baseurl).trim().replace(/\/+$/, '')
+      if (baseurl) {
+        let url: URL
+        try { url = new URL(baseurl) } catch { throw new SudoworkSystemConfigError(400, '质量上报地址必须是完整的 HTTP 或 HTTPS 地址') }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+          throw new SudoworkSystemConfigError(400, '质量上报地址仅填写协议和域名（可包含端口），不要包含接口路径、账号或查询参数')
+        }
       }
-      patch.productImprovement = { enabled }
+      patch.productImprovement = { enabled, ...(baseurl === undefined ? {} : { baseurl }) }
     }
     if (body.scode_auto_model !== undefined) {
       if (typeof body.scode_auto_model !== 'string') {
@@ -443,7 +481,7 @@ export class SudoworkSystemConfigService {
       loginMethod: loginMethodToNumber(await resolveEffectiveLoginMethod(this.options, orgId, { ignoreOrganizationPolicy: true })),
       logReport: platform.logReport ?? { enabled: 0, protocol: '', domain: '', keySet: Boolean(this.options.secrets.get(LOG_REPORT_SECRET_KEY)) },
       versionUpdate: platform.versionUpdate ?? { enabled: 0, cosDomain: '' },
-      productImprovement: platform.productImprovement ?? { enabled: 0 },
+      productImprovement: { ...object(platform.productImprovement ?? { enabled: 0 }), baseurl: string(object(platform.productImprovement).baseurl) },
       thirdPartyAuth: platform.thirdPartyAuth ?? { enabled: 0, defaultProvider: '' },
       scodeAutoModel: string(platform.scodeAutoModel),
       rechargeMode: rechargeMode(platform.rechargeMode),

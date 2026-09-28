@@ -365,7 +365,9 @@ void describe('Sudowork compatibility Hono app', () => {
     const app = createSudoworkCompatibilityApp({ identity: createIdentity() })
     const response = await app.request('/api/v1/qms/system/health')
     assert.equal(response.status, 503)
-    assert.deepEqual(await response.json(), { success: false, msg: 'QMS 未配置' })
+    const body = await response.json() as any
+    assert.equal(body.success, false)
+    assert.equal(body.error.code, 'QMS_NOT_CONFIGURED')
   })
 
   void test('maps legacy administration domain errors to the old JSON error envelope', async () => {
@@ -1203,7 +1205,6 @@ void describe('Sudowork compatibility Hono app', () => {
           apiKey: 'qms-secret',
           organizations: { async getCode() { return 'ENT-A' }, async hasCode(code) { return code === 'ENT-A' } },
         }),
-        encryption: { encryptionRequired: false },
         operations: {
           async execute(input) {
             calls.push(`${input.key}:${input.scope?.userId ?? 'api-key'}`)

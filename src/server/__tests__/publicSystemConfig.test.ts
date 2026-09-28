@@ -83,7 +83,7 @@ describe('buildPublicSystemConfig defaults', () => {
     // self-hosted deployment that configured nothing is asking for.
     expect(payload.log_report).toEqual({ enabled: 0 })
     expect(payload.version_update).toEqual({ enabled: 0 })
-    expect(payload.product_improvement).toEqual({ enabled: 0 })
+    expect(payload.product_improvement).toEqual({ enabled: 0, encryption_required: false })
   })
 
   it('carries no secret-bearing field', () => {

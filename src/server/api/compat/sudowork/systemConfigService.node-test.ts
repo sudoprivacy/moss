@@ -25,7 +25,7 @@ after(() => {
   fs.rmSync(testHome, { recursive: true, force: true })
 })
 
-async function setup(secretFailure: false | 'before-write' | 'after-write' = false) {
+async function setup(secretFailure: false | 'before-write' | 'after-write' = false, productImprovementRuntime?: () => Promise<{ apiKey?: string }>) {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   const identities = createIdentityTestRepository(db, {}, authDb.driver)
@@ -44,9 +44,7 @@ async function setup(secretFailure: false | 'before-write' | 'after-write' = fal
       loginMethod: 'password',
       skillhubBaseUrl: 'https://moss.example.test',
       sudorouterBaseUrl: 'https://router.example.test',
-      productImprovementEncryptionRequired: true,
       productImprovementApiKey: 'qms-api-key',
-      productImprovementPublicKey: 'qms-public-key',
       sms: {
         provider: 'disabled', sdkAppId: '', signName: '', templateId: '', signId: '',
         region: 'ap-beijing', codeLength: 6, expireMinutes: 5,
@@ -59,6 +57,7 @@ async function setup(secretFailure: false | 'before-write' | 'after-write' = fal
       },
     },
     smsRuntimeAvailable: true,
+    productImprovementRuntime,
     secrets: {
       get(key: string) { return secrets.get(key) },
       async put(key: string, value: string) {
@@ -120,7 +119,7 @@ void describe('Sudowork 系统配置统一服务', () => {
       })
       assert.deepEqual(await service.getCredentialData(), {
         log_report: { key: 'log-secret' },
-        product_improvement: { api_key: 'qms-api-key', public_key: 'qms-public-key' },
+        product_improvement: { api_key: 'qms-api-key' },
       })
     } finally {
       db.close()
@@ -307,7 +306,7 @@ void describe('Sudowork 系统配置统一服务', () => {
       assert.equal((await service.getCreditApplicationPolicy(org.organizationId)).rechargeMode, 'payment')
       assert.deepEqual((await service.getCredentialData(orgB.organizationId)), {
         log_report: { key: 'platform-log-key' },
-        product_improvement: { api_key: 'qms-api-key', public_key: 'qms-public-key' },
+        product_improvement: { api_key: 'qms-api-key' },
       })
 
       await service.update(scopedRoot, {
@@ -873,4 +872,43 @@ void describe('Sudowork 系统配置统一服务', () => {
       db.close()
     }
   })
+})
+
+void test('quality reporting policy reaches native bootstrap with tenant code and current credentials', async () => {
+  const { db, org, service, secrets, policies } = await setup()
+  try {
+    const root = { userId: 'root', orgId: org.organizationId, role: 'super_admin', organizationScoped: true }
+    assert.deepEqual(await service.getClientReportingConfig(org.organizationId), {})
+    await service.update(root, { product_improvement: { enabled: 1, baseurl: 'https://moss.example.test/' } })
+    assert.deepEqual(await service.getClientReportingConfig(org.organizationId), {
+      product_improvement: { enabled: 1, encryption_required: false, baseurl: 'https://moss.example.test', tenant_id: 'ENT-A' },
+    })
+    assert.deepEqual(await service.getClientReportingConfig(), {})
+    secrets.set('client.product-improvement-api-key', 'rotated-key')
+    const credentials = await service.getCredentialData(org.organizationId)
+    assert.equal((credentials.product_improvement as any).api_key, 'rotated-key')
+    assert.equal(JSON.stringify(await service.getClientReportingConfig(org.organizationId)).includes('rotated-key'), false)
+    const policy = await policies.getOrganization(org.organizationId)
+    await assert.rejects(() => service.update(root, { product_improvement: { enabled: 1, baseurl: 'https://moss.example.test/api/v1' } }), /质量上报地址/)
+    assert.deepEqual(await policies.getOrganization(org.organizationId), policy)
+    await service.update(root, { product_improvement: { enabled: 0 } })
+    assert.equal((await service.getCredentialData(org.organizationId)).product_improvement, undefined)
+  } finally { db.close() }
+})
+
+void test('only enabled reporting credentials wait for background QMS initialization', async () => {
+  let ready!: (value: { apiKey: string }) => void
+  const pendingRuntime = new Promise<{ apiKey: string }>(resolve => { ready = resolve })
+  const { db, org, service, policies } = await setup(false, () => pendingRuntime)
+  try {
+    await policies.putOrganization(org.organizationId, { productImprovement: { enabled: 1 } }, 'test-admin')
+    let resolved = false
+    const credentials = service.getCredentialData(org.organizationId).then(value => { resolved = true; return value })
+    await setImmediate()
+    assert.equal(resolved, false)
+    assert.equal((await service.getClientReportingConfig(org.organizationId)).product_improvement !== undefined, true)
+    assert.deepEqual(await service.getCredentialData(), {})
+    ready({ apiKey: 'ready-key' })
+    assert.deepEqual((await credentials).product_improvement, { api_key: 'ready-key' })
+  } finally { db.close() }
 })

@@ -49,11 +49,7 @@ const FIELD_LABELS: Record<string, string> = {
   'billing.sudorouter.apiToken': 'Sudorouter 兼容账务 Token',
   'systemConfig.recharge.fuiou.merchantPrivateKey': '富友商户私钥',
   'systemConfig.recharge.fuiou.publicKey': '富友平台公钥',
-  'qms.postgresUrl': 'QMS PostgreSQL URL',
-  'qms.redisUrl': 'QMS Redis URL',
   'qms.apiKey': 'QMS API Key',
-  'qms.privateKeyPem': '遥测 RSA 私钥',
-  'qms.publicKeyPem': '遥测 RSA 公钥',
   'qms.larkWebhookUrl': 'QMS 飞书 Webhook',
   'qms.smtpUrl': 'QMS SMTP URL',
 }
@@ -108,11 +104,7 @@ const PAYMENT_SECRET_PATHS = new Set([
 ])
 
 const QMS_SECRET_PATHS = new Set([
-  'qms.postgresUrl',
-  'qms.redisUrl',
   'qms.apiKey',
-  'qms.privateKeyPem',
-  'qms.publicKeyPem',
 ])
 
 function CredentialRow({

@@ -1,7 +1,6 @@
 import { Hono } from 'hono'
 
 import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
-import { decodeQmsPayload, QmsEncryptionError } from '../../../qms/hybridDecryption.js'
 import { CrashServiceError } from '../../../qms/crashService.js'
 import {
   QmsAuthorizationError,
@@ -27,6 +26,12 @@ const TELEMETRY: Array<[HttpMethod, string]> = [
   ['POST', '/api/v1/telemetry/perf'], ['POST', '/api/v1/telemetry/conversation'],
   ['POST', '/api/v1/telemetry/install'],
 ]
+/** Client ingestion is host-independent; management APIs remain in operations. */
+export const QMS_CLIENT_ROUTES = [
+  ...TELEMETRY.filter(([method]) => method === 'POST'),
+  ['POST', '/api/v1/crash/events'], ['POST', '/api/v1/crash/events/batch'],
+  ['POST', '/api/v1/qms/crash/events'], ['POST', '/api/v1/qms/crash/events/batch'],
+] as const
 const CRASH_SUFFIXES: Array<[HttpMethod, string]> = [
   ['POST', '/events/batch'], ['POST', '/events'], ['GET', '/issues'], ['GET', '/issues/:id'],
   ['PUT', '/issues/:id'], ['POST', '/issues/:id/resolve'], ['POST', '/issues/:id/ignore'],
@@ -68,11 +73,6 @@ const API_KEY_ROUTES = new Set([
   'POST /api/v1/crash/events', 'POST /api/v1/crash/events/batch',
   'POST /api/v1/qms/crash/events', 'POST /api/v1/qms/crash/events/batch',
 ])
-const ENCRYPTED_ROUTES = new Set([
-  'POST /api/v1/telemetry/batch',
-  'POST /api/v1/crash/events/batch',
-  'POST /api/v1/qms/crash/events/batch',
-])
 
 function requiresAdmin(key: string): boolean {
   return key.includes('/qms/alerts/')
@@ -93,9 +93,8 @@ async function requestBody(context: { req: { text(): Promise<string> } }): Promi
 
 export function createSudoworkQmsRoutes(options: {
   apiKeyHeader: string
-  authorization: QmsAuthorizationService
-  getActor(authorization: string | undefined): Promise<IdentityActor | null> | IdentityActor | null
-  encryption: { encryptionRequired: boolean; privateKeyPem?: string }
+  authorization: Pick<QmsAuthorizationService, 'requireApiKey' | 'adminScope'>
+  getActor(authorization: string | undefined, requestedScope?: string): Promise<IdentityActor | null> | IdentityActor | null
   operations: QmsLegacyOperationPort
 }): Hono {
   const app = new Hono()
@@ -108,14 +107,19 @@ export function createSudoworkQmsRoutes(options: {
         if (API_KEY_ROUTES.has(key)) {
           options.authorization.requireApiKey(context.req.header(options.apiKeyHeader))
         } else {
-          const actor = await options.getActor(bearer(context.req.header('Authorization')) ?? undefined)
+          const actor = await options.getActor(bearer(context.req.header('Authorization')) ?? undefined, context.req.query('scope'))
           scope = await options.authorization.adminScope(actor, context.req.query('tenant_id'))
           if (requiresAdmin(key) && scope.qmsRole !== 'admin') {
             throw new QmsAuthorizationError(403, 'FORBIDDEN', 'Insufficient permissions')
           }
         }
-        let body = method === 'GET' ? undefined : await requestBody(context)
-        if (ENCRYPTED_ROUTES.has(key)) body = decodeQmsPayload(body, options.encryption)
+        const body = method === 'GET' ? undefined : await requestBody(context)
+        if (method === 'POST' && API_KEY_ROUTES.has(key) && (
+          context.req.header('X-Encryption')
+          || (body && typeof body === 'object' && ('encrypted_key' in body || 'encrypted_data' in body))
+        )) {
+          return context.json({ success: false, error: { code: 'INVALID_PAYLOAD', message: 'QMS accepts JSON payloads without application-layer encryption' } }, 400)
+        }
         operationStarted = true
         const result = await options.operations.execute({
           key,
@@ -126,16 +130,18 @@ export function createSudoworkQmsRoutes(options: {
         })
         return context.json(result.body as never, result.status as 200, result.headers)
       } catch (error) {
+        if (error instanceof SyntaxError && !operationStarted) {
+          return context.json({ success: false, error: { code: 'INVALID_PAYLOAD', message: 'Invalid JSON payload' } }, 400)
+        }
         if (error instanceof QmsAuthorizationError) {
+          if (error.status === 503) context.header('Retry-After', '3')
           const message = error.code === 'MISSING_API_KEY'
             ? `Missing ${options.apiKeyHeader} header`
             : error.message
           return context.json({ success: false, error: { code: error.code, message } }, error.status as 400)
         }
-        if (error instanceof QmsEncryptionError) {
-          return context.json({ code: error.code, message: error.message }, 400)
-        }
         if (error instanceof TelemetryServiceError) {
+          if (error.status === 503) context.header('Retry-After', '3')
           return context.json({
             success: false,
             error: {

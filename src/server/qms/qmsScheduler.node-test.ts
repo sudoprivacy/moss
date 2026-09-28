@@ -89,3 +89,26 @@ void describe('QmsScheduler', () => {
     assert.deepEqual(leases.completions, ['aggregation:one'])
   })
 })
+
+void it('reports failed manual work and lease errors without leaking rejections', async () => {
+  const leases = new MemoryLeases()
+  const scheduler = new QmsScheduler({ ownerId: 'test', leases, tasks: [{ name: 'aggregation', intervalMs: 100, leaseMs: 500, run: async () => { throw new Error('database unavailable') } }] })
+  assert.equal(await scheduler.runTask('aggregation'), false)
+  assert.equal(scheduler.status()[0]?.lastError, 'database unavailable')
+  leases.tryAcquire = async () => { throw new Error('lease database unavailable') }
+  assert.equal(await scheduler.runTask('aggregation'), false)
+  assert.equal(scheduler.status()[0]?.running, false)
+})
+
+void it('flushes every instance memory queue even when another instance owns the cluster lease', async () => {
+  const calls: string[] = []
+  let leases = 0
+  const shared = { tryAcquire: async () => { leases++; return false }, complete: async () => {}, fail: async () => {} }
+  const make = (ownerId: string) => new QmsScheduler({ ownerId, leases: shared, tasks: [{
+    name: 'queue-process', scope: 'instance', intervalMs: 100, leaseMs: 0,
+    run: async () => { calls.push(ownerId) },
+  }] })
+  await Promise.all([make('one').runDue(), make('two').runDue()])
+  assert.deepEqual(calls.sort(), ['one', 'two'])
+  assert.equal(leases, 0)
+})

@@ -76,7 +76,7 @@ export type PublicSystemConfig = {
   }
   log_report?: { enabled: number; baseurl?: string }
   version_update?: { enabled: number; cos_domain?: string }
-  product_improvement?: { enabled: number; encryption_required?: boolean }
+  product_improvement?: { enabled: number; encryption_required?: false; baseurl?: string }
 }
 
 /**
@@ -181,9 +181,8 @@ export function buildPublicSystemConfig(
   }
   payload.product_improvement = {
     enabled: switchValue(sc.productImprovement?.enabled ?? false),
-    ...(sc.productImprovement?.encryptionRequired !== undefined
-      ? { encryption_required: sc.productImprovement.encryptionRequired }
-      : {}),
+    // Older clients default to hybrid encryption unless explicitly disabled.
+    encryption_required: false,
   }
 
   return payload

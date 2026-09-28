@@ -10,6 +10,8 @@ export interface QmsUserStatsQuery {
   stepType?: string
   order?: string
   limit?: number
+  offset?: number
+  leaderboardMetric?: 'tokens' | 'steps'
 }
 
 function numeric(value: unknown): number {
@@ -31,8 +33,9 @@ export class QmsUserStatsService {
         SELECT user_id, org_id, tenant_id, login_mode, user_nickname, user_phone,
           conversation_count, total_tokens, input_tokens, output_tokens, success_count, error_count,
           avg_duration_ms * conversation_count AS duration_total
-        FROM telemetry_user_conversations_daily
+        FROM telemetry_user_conversations_daily d
         WHERE bucket >= $1 AND bucket < $2${scope.dailyFilters}
+          ${this.excludeRawDays('telemetry_conversations')}
         UNION ALL
         SELECT COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')) AS user_id,
           org_id, tenant_id, login_mode, MAX(user_nickname), MAX(user_phone),
@@ -41,7 +44,7 @@ export class QmsUserStatsService {
           COUNT(*) FILTER (WHERE status = 'success')::INTEGER,
           COUNT(*) FILTER (WHERE status = 'error')::INTEGER, COALESCE(SUM(duration_ms), 0)::BIGINT
         FROM telemetry_conversations
-        WHERE timestamp >= GREATEST($1, $2) AND timestamp < $3${scope.rawFilters}
+        WHERE timestamp >= $1 AND timestamp < $3${scope.rawFilters}
           AND COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')) IS NOT NULL
         GROUP BY COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')), org_id, tenant_id, login_mode
       )
@@ -54,8 +57,8 @@ export class QmsUserStatsService {
         COALESCE(ROUND(SUM(success_count)::DECIMAL /
           NULLIF(SUM(success_count) + SUM(error_count), 0) * 100), 100)::INTEGER AS success_rate
       FROM combined GROUP BY user_id, org_id, tenant_id, login_mode
-      ORDER BY conversation_count ${scope.order} LIMIT $${scope.parameters.length + 1}`,
-      [...scope.parameters, scope.limit],
+      ORDER BY conversation_count ${scope.order} LIMIT $${scope.parameters.length + 1} OFFSET $${scope.parameters.length + 2}`,
+      [...scope.parameters, scope.limit, scope.offset],
     )
     return rows.map(row => ({
       user_id: String(row.user_id), org_id: optional(row.org_id), tenant_id: optional(row.tenant_id),
@@ -73,14 +76,15 @@ export class QmsUserStatsService {
       `WITH combined AS (
         SELECT user_id, org_id, tenant_id, login_mode, user_nickname, user_phone,
           turn_count, total_tokens, success_count, error_count
-        FROM telemetry_user_turns_daily WHERE bucket >= $1 AND bucket < $2${scope.dailyFilters}
+        FROM telemetry_user_turns_daily d WHERE bucket >= $1 AND bucket < $2${scope.dailyFilters}
+          ${this.excludeRawDays('telemetry_turns')}
         UNION ALL
         SELECT COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')), org_id, tenant_id, login_mode,
           MAX(user_nickname), MAX(user_phone), COUNT(*)::INTEGER,
           COALESCE(SUM(total_tokens), 0)::BIGINT,
           COUNT(*) FILTER (WHERE status = 'success')::INTEGER,
           COUNT(*) FILTER (WHERE status = 'error')::INTEGER
-        FROM telemetry_turns WHERE timestamp >= GREATEST($1, $2) AND timestamp < $3${scope.rawFilters}
+        FROM telemetry_turns WHERE timestamp >= $1 AND timestamp < $3${scope.rawFilters}
           AND COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')) IS NOT NULL
         GROUP BY COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')), org_id, tenant_id, login_mode
       )
@@ -91,8 +95,8 @@ export class QmsUserStatsService {
         COALESCE(ROUND(SUM(success_count)::DECIMAL /
           NULLIF(SUM(success_count) + SUM(error_count), 0) * 100), 100)::INTEGER AS success_rate
       FROM combined GROUP BY user_id, org_id, tenant_id, login_mode
-      ORDER BY turn_count ${scope.order} LIMIT $${scope.parameters.length + 1}`,
-      [...scope.parameters, scope.limit],
+      ORDER BY ${query.leaderboardMetric === 'tokens' ? 'total_tokens' : 'turn_count'} ${scope.order} LIMIT $${scope.parameters.length + 1} OFFSET $${scope.parameters.length + 2}`,
+      [...scope.parameters, scope.limit, scope.offset],
     )
     return rows.map(row => ({
       user_id: String(row.user_id), org_id: optional(row.org_id), tenant_id: optional(row.tenant_id),
@@ -108,24 +112,25 @@ export class QmsUserStatsService {
       `WITH combined AS (
         SELECT user_id, org_id, tenant_id, login_mode, user_nickname, user_phone, step_type,
           step_count, success_count, error_count, avg_duration_ms * step_count AS duration_total
-        FROM telemetry_user_steps_daily WHERE bucket >= $1 AND bucket < $2${scope.dailyFilters}
+        FROM telemetry_user_steps_daily d WHERE bucket >= $1 AND bucket < $2${scope.dailyFilters}
+          ${this.excludeRawDays('telemetry_steps')}
         UNION ALL
         SELECT COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')), org_id, tenant_id, login_mode,
           MAX(user_nickname), MAX(user_phone), step_type, COUNT(*)::INTEGER,
           COUNT(*) FILTER (WHERE status = 'success')::INTEGER,
           COUNT(*) FILTER (WHERE status = 'error')::INTEGER, COALESCE(SUM(duration_ms), 0)::BIGINT
-        FROM telemetry_steps WHERE timestamp >= GREATEST($1, $2) AND timestamp < $3${scope.rawFilters}
+        FROM telemetry_steps WHERE timestamp >= $1 AND timestamp < $3${scope.rawFilters}
           AND COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')) IS NOT NULL
         GROUP BY COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')), org_id, tenant_id, login_mode, step_type
       )
       SELECT user_id, org_id, tenant_id, login_mode, MAX(user_nickname) AS user_nickname,
-        MAX(user_phone) AS user_phone, step_type, SUM(step_count)::INTEGER AS step_count,
+        MAX(user_phone) AS user_phone, ${query.leaderboardMetric === 'steps' ? 'NULL AS step_type' : 'step_type'}, SUM(step_count)::INTEGER AS step_count,
         SUM(success_count)::INTEGER AS success_count, SUM(error_count)::INTEGER AS error_count,
         ROUND(SUM(success_count)::DECIMAL / NULLIF(SUM(step_count), 0) * 100)::INTEGER AS success_rate,
         ROUND(SUM(duration_total)::DECIMAL / NULLIF(SUM(step_count), 0))::INTEGER AS avg_duration_ms
-      FROM combined GROUP BY user_id, org_id, tenant_id, login_mode, step_type
-      ORDER BY step_count ${scope.order} LIMIT $${scope.parameters.length + 1}`,
-      [...scope.parameters, scope.limit],
+      FROM combined GROUP BY user_id, org_id, tenant_id, login_mode${query.leaderboardMetric === 'steps' ? '' : ', step_type'}
+      ORDER BY step_count ${scope.order} LIMIT $${scope.parameters.length + 1} OFFSET $${scope.parameters.length + 2}`,
+      [...scope.parameters, scope.limit, scope.offset],
     )
     return rows.map(row => ({
       user_id: String(row.user_id), org_id: optional(row.org_id), tenant_id: optional(row.tenant_id),
@@ -140,10 +145,10 @@ export class QmsUserStatsService {
       throw new Error('Invalid leaderboard type. Must be conversations, turns, steps, or tokens')
     }
     const rows = type === 'conversations'
-      ? await this.conversations(query)
+      ? await this.conversations({ ...query, offset: 0 })
       : type === 'steps'
-        ? await this.steps(query)
-        : await this.turns(query)
+        ? await this.steps({ ...query, offset: 0, leaderboardMetric: 'steps' })
+        : await this.turns({ ...query, offset: 0, ...(type === 'tokens' ? { leaderboardMetric: 'tokens' as const } : {}) })
     const value = type === 'conversations' ? 'conversation_count'
       : type === 'steps' ? 'step_count'
         : type === 'tokens' ? 'total_tokens' : 'turn_count'
@@ -170,7 +175,8 @@ export class QmsUserStatsService {
     const range = this.rawScope(query, 30 * 86_400_000, userId)
     const [identity, conversations, turns, steps, models] = await Promise.all([
       this.db.execute(`SELECT MAX(user_nickname) AS user_nickname, MAX(user_phone) AS user_phone
-        FROM telemetry_conversations WHERE COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')) = $3${range.tenantSql}`,
+        FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2
+        AND COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')) = $3${range.tenantSql}`,
       range.parameters),
       this.db.execute(`SELECT COUNT(*)::INTEGER AS conversation_count,
         COALESCE(SUM(tokens_used), 0)::BIGINT AS total_tokens, AVG(duration_ms)::INTEGER AS avg_duration_ms,
@@ -227,8 +233,7 @@ export class QmsUserStatsService {
     const endMs = query.endTime ?? this.now().getTime()
     const startMs = query.startTime ?? endMs - 7 * 86_400_000
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) throw new Error('Invalid user stats time range')
-    const now = this.now()
-    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+    const today = new Date(endMs)
     const parameters: unknown[] = [new Date(startMs), today, new Date(endMs)]
     let dailyFilters = ''
     let rawFilters = ''
@@ -247,7 +252,16 @@ export class QmsUserStatsService {
     return {
       parameters, dailyFilters, rawFilters,
       order: query.order === 'asc' ? 'ASC' : 'DESC', limit: Math.min(Math.max(query.limit ?? 50, 1), 100),
+      offset: Math.max(0, Math.floor(query.offset ?? 0)),
     }
+  }
+
+  private excludeRawDays(table: string): string {
+    return `AND NOT EXISTS (SELECT 1 FROM ${table} r
+      WHERE r.timestamp >= GREATEST($1, d.bucket) AND r.timestamp < LEAST($3, d.bucket + INTERVAL '1 day')
+        AND COALESCE(NULLIF(r.user_id, ''), NULLIF(r.user_phone, '')) = d.user_id
+        AND r.tenant_id IS NOT DISTINCT FROM d.tenant_id
+        AND r.org_id IS NOT DISTINCT FROM d.org_id AND r.login_mode IS NOT DISTINCT FROM d.login_mode)`
   }
 
   private rawScope(query: QmsUserStatsQuery, duration = 7 * 86_400_000, userId?: string) {

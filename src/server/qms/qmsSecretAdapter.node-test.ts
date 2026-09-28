@@ -8,9 +8,8 @@ function config(): QmsRuntimeConfig {
   return {
     enabled: true,
     apiKeyHeader: 'X-API-Key',
-    queue: { flushIntervalMs: 3_000, batchSize: 50, visibilityTimeoutMs: 60_000 },
+    queue: { flushIntervalMs: 3_000, batchSize: 50, maxItems: 10000, maxBytes: 16777216, retryIntervalMs: 1000, drainTimeoutMs: 15000 },
     retention: { perfDays: 90, conversationDays: 180, crashDays: 90, aggregateDays: 365 },
-    encryptionRequired: false,
     secrets: {
       larkWebhookUrl: 'https://open.feishu.cn/old',
       smtpUrl: 'smtps://old-user:old-pass@mail.example:465?from=old%40example.com&to=ops%40example.com',

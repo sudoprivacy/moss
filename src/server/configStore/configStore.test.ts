@@ -543,3 +543,21 @@ function deepMerge(base: Record<string, unknown>, patch: Record<string, unknown>
   }
   return result
 }
+
+it('preserves the legacy QMS environment key during vault hydration', async () => {
+  const previous = { api: process.env.QMS_API_KEY, legacy: process.env.QMS_DEFAULT_API_KEY }
+  try {
+    delete process.env.QMS_API_KEY
+    process.env.QMS_DEFAULT_API_KEY = 'legacy-env-qms-key'
+    const store = new ConfigStore(asClient(new FakeNexus()))
+    await store.loadAll()
+    const config = { wikiIndex: {}, cabin: {}, qms: { secrets: { apiKey: 'legacy-env-qms-key' } } } as ServerConfig
+    store.hydrateConfig(config)
+    expect(config.qms.secrets.apiKey).toBe('legacy-env-qms-key')
+  } finally {
+    if (previous.api === undefined) delete process.env.QMS_API_KEY
+    else process.env.QMS_API_KEY = previous.api
+    if (previous.legacy === undefined) delete process.env.QMS_DEFAULT_API_KEY
+    else process.env.QMS_DEFAULT_API_KEY = previous.legacy
+  }
+})

@@ -53,9 +53,7 @@ async function setup(
     defaults: {
       loginMethod: 'password',
       skillhubBaseUrl: 'https://moss.example.test',
-      productImprovementEncryptionRequired: true,
       productImprovementApiKey: productImprovementCredentials.apiKey,
-      productImprovementPublicKey: productImprovementCredentials.publicKey,
     },
     smsConfigured: true,
     secrets: {

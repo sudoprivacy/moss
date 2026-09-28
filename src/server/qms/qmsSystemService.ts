@@ -75,6 +75,7 @@ export class QmsSystemService {
     uptime?: () => number
     memoryUsage?: () => NodeJS.MemoryUsage
     backfill?: (days: number) => Promise<void>
+    queue?: { status(): Record<string, unknown> }
   }) {}
 
   async health() {
@@ -120,6 +121,7 @@ export class QmsSystemService {
       node_version: process.version, platform: process.platform,
       memory_usage: { rss: memory.rss, heap_total: memory.heapTotal, heap_used: memory.heapUsed, external: memory.external },
       database: { size: 0, tables },
+      ...(this.options.queue ? { queue: this.options.queue.status() } : {}),
     }
   }
 
