@@ -30,6 +30,7 @@ export interface ZoneBinding {
   observed_zone_status?: string | null
   observed_revision?: string | null
   observed_grant_status?: string | null
+  observed_grant_source?: string | null
   grant_expires_at?: string | null
 }
 
@@ -41,6 +42,7 @@ export interface ZoneOperation {
   state: string
   step: string
   retryable: boolean
+  error: { code: string; message: string; retryable: boolean } | null
 }
 
 export interface AvailableZone {

@@ -10,11 +10,14 @@
 // SW-20260915-002-MOSS §11.3 real-process P0 E2E — moss 侧场景：
 //   1  创建 Org，产生一个 pending default binding（Nexus 离线时也成立）
 //   3  binding active（Nexus 上线后 reconciler 收敛，exactly-once）
-//   4  普通用户以自身短期 delegation 访问本 Org Zone；他 Org 用户不能
+//   4  普通用户以自身短期 delegation 写/读本 Org Zone；他 Org 用户不能
 //   5  同一 Org 绑定第二个 Zone（管理面 addBinding）
+//   6  同一 Zone grant 给第二个 Org
 //   8  Membership suspend 后旧 delegation 的下一次访问拒绝
 //   11 Org rename 不改变 Zone ID
 //   12 detach 只撤销访问，不删除数据（Zone 在 Nexus 侧仍存在）
+//   13 suspend 阻止新 mutation/runtime，resume 恢复
+//   18 响应丢失后同幂等键 replay
 import { before, after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
@@ -36,18 +39,31 @@ const tmp = mkdtempSync(join(tmpdir(), 'moss-p0-e2e-'))
 const internalApiToken = randomUUID()
 let mossPort = 0
 
+async function startMossForP0(
+  directory: string,
+  input: Parameters<typeof startMoss>[1],
+): Promise<MossProcess> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try { return await startMoss(directory, input) }
+    catch (error) {
+      if (attempt === 3 || !String(error).includes('nexusd-cluster 0.1.5 not found')) throw error
+    }
+  }
+  throw new Error('unreachable')
+}
+
 before(async () => {
   // 阶段一：moss 单独起，/v2 未配置（Nexus 离线语义——binding 写入并保持
   // pending，无网络尝试）。阶段二（场景 3）以真实 nexus 地址重启 moss：
   // V2 endpoint 是进程 env，运行期不可变，重启是唯一正确的编排。
-  moss = await startMoss(tmp, {
+  moss = await startMossForP0(tmp, {
     nexusV2BaseUrl: '', nexusServiceToken: '', internalApiToken,
   })
   adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
 })
 
 after(async () => {
-  await moss.stop()
+  if (moss) await moss.stop()
   if (nexusProxy) await nexusProxy.stop()
   if (nexus) await nexus.stop()
 })
@@ -112,7 +128,7 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
       internalApiToken,
     })
     nexusProxy = await startNexusFaultProxy(nexus.baseUrl)
-    moss = await startMoss(tmp, {
+    moss = await startMossForP0(tmp, {
       nexusV2BaseUrl: nexusProxy.baseUrl,
       nexusServiceToken: nexus.apiKey,
       port: mossPort,
@@ -129,7 +145,7 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
 
   it('scenario 4: org member uses own delegation for zone access; foreign org member is denied', async () => {
     orgB = await createOrg('P0 E2E Org B')
-    await waitBindingActive(orgB)
+    const orgBBinding = await waitBindingActive(orgB)
 
     // 两个 org 各建一个普通用户并登录。createUser/updateUser 的 org 均锁定
     // 调用者当前 org（server.ts 明示 never trust body.org_id）——super admin
@@ -154,9 +170,12 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     // zone——GET /v2/zones/{id} 的可见性跟随 key 的 zone）
     nexusKeyA = await mintNexusUserKey(nexus!, userA.id, zoneA)
     const nexusKeyB = await mintNexusUserKey(nexus!, userB.id, zoneA)
+    const nexusKeyBOwnZone = await mintNexusUserKey(nexus!, userB.id, String(orgBBinding.zone_id))
 
     // Org A 用户换发自身 delegation（普通用户路径，无 admin credential）
     const tokenA = await login(moss, userA.name, userA.password)
+    const forbiddenBindings = await mossApi(moss, tokenA, 'GET', '/api/v1/zones/bindings')
+    assert.equal(forbiddenBindings.status, 403)
     const issuedA = await mossApi(moss, tokenA, 'POST', '/api/v1/zones/delegations', {})
     assert.equal(issuedA.status, 201, `delegation issue failed: ${JSON.stringify(issuedA.json)}`)
     delegationA = (issuedA.json as { delegation_id: string }).delegation_id
@@ -171,6 +190,13 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     assert.equal(dv.audience, 'nexus-api', `delegation audience: ${JSON.stringify({ got: dv.audience })}`)
     const bindingA = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
     assert.equal(dv.grant_id, bindingA?.nexus_grant_id)
+    const rawZone = await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}`)
+    const rawGrant = await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}/grants/${bindingA?.nexus_grant_id}`)
+    assert.equal(rawGrant.status, 200)
+    assert.equal((rawGrant.json as { source?: { source_type?: string } }).source?.source_type, 'moss_org_binding')
+    const refreshed = await mossApi(moss, adminToken, 'POST', `/api/v1/zones/bindings/${bindingA?.binding_id}/refresh`)
+    assert.equal(refreshed.status, 200, JSON.stringify(refreshed.json))
+    assert.equal((refreshed.json as { observed_grant_source?: string }).observed_grant_source, 'moss_org_binding', JSON.stringify({ refreshed: refreshed.json, rawZone: rawZone.json, rawGrant: rawGrant.json }))
     assert.equal(dv.purpose, 'data-access')
     assert.deepEqual(dv.scope_rules, [
       { capability: 'zone.data.read', resource_prefixes: ['/'] },
@@ -192,6 +218,26 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
       headers: { Authorization: `Bearer ${nexusKeyB}`, 'X-Nexus-Zone-Delegation': delegationB },
     })
     assert.ok([403, 404].includes(foreign.status), `org B member must be denied on org A zone, got ${foreign.status}`)
+
+    const sessionId = `moss-p0-user-record-${randomUUID()}`
+    const session = await nexusApi(nexus!, 'POST', '/v2/sessions', { session_id: sessionId, home_zone_id: zoneA })
+    assert.equal(session.status, 201, JSON.stringify(session.json))
+    const recordBody = { record_kind: 'context', data: '{"moss":"zone-a-write-read"}' }
+    const recordPath = `/v2/sessions/${sessionId}/records`
+    const unauthenticatedWrite = await nexusApi(nexus!, 'POST', recordPath, recordBody, { Authorization: `Bearer ${nexusKeyA}` })
+    assert.equal(unauthenticatedWrite.status, 403)
+    assert.equal((unauthenticatedWrite.json as { detail?: { code?: string } }).detail?.code, 'GRANT_NOT_ACTIVE')
+    const write = await nexusApi(nexus!, 'POST', recordPath, recordBody, { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA })
+    assert.equal(write.status, 201, JSON.stringify(write.json))
+    const vfsPath = (write.json as { vfs_path?: string }).vfs_path
+    assert.ok(vfsPath)
+    const read = await nexusApi(nexus!, 'GET', `/api/v2/files/read?path=${encodeURIComponent(vfsPath)}&zone=${encodeURIComponent(zoneA)}`, undefined, { Authorization: `Bearer ${nexusKeyA}` })
+    assert.equal(read.status, 200, JSON.stringify(read.json))
+    assert.equal((read.json as { content?: string }).content, recordBody.data)
+    const foreignWrite = await nexusApi(nexus!, 'POST', recordPath, recordBody, { Authorization: `Bearer ${nexusKeyB}`, 'X-Nexus-Zone-Delegation': delegationB })
+    assert.ok([403, 404].includes(foreignWrite.status), JSON.stringify(foreignWrite.json))
+    const foreignRead = await nexusApi(nexus!, 'GET', `/api/v2/files/read?path=${encodeURIComponent(vfsPath)}&zone=${encodeURIComponent(zoneA)}`, undefined, { Authorization: `Bearer ${nexusKeyBOwnZone}` })
+    assert.ok([403, 404].includes(foreignRead.status), JSON.stringify(foreignRead.json))
   })
 
   it('scenario 8: membership lookup is fail-closed across outage and monotonic changes', async () => {
@@ -219,7 +265,7 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     assert.equal(delegationStatus(), 'active')
 
     await sleep(35_000)
-    moss = await startMoss(tmp, {
+    moss = await startMossForP0(tmp, {
       nexusV2BaseUrl: nexusProxy!.baseUrl,
       nexusServiceToken: nexus!.apiKey,
       port: mossPort,
@@ -324,6 +370,40 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     // 一个 Org 多 Zone：org A 现在有 ≥2 条 bound binding
     const orgABindings = (await bindings()).filter((b) => b.org_id === orgA && b.desired_state === 'bound')
     assert.ok(orgABindings.length >= 2)
+  })
+
+  it('scenario 6: one zone can grant a second org without disturbing the first', async () => {
+    const added = await mossApi(moss, adminToken, 'POST', '/api/v1/zones/bindings', { org_id: orgB, zone_id: zoneA, purpose: 'shared' })
+    assert.equal(added.status, 201, JSON.stringify(added.json))
+    const bindingId = (added.json as { binding_id: string }).binding_id
+    const deadline = Date.now() + 120_000
+    let shared: Record<string, unknown> | undefined
+    while (Date.now() < deadline) {
+      shared = (await bindings()).find((row) => row.binding_id === bindingId)
+      if (shared?.sync_status === 'active') break
+      await sleep(3_000)
+    }
+    assert.equal(shared?.sync_status, 'active', JSON.stringify(shared))
+    assert.ok(shared.nexus_grant_id)
+    const grant = await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}/grants/${shared.nexus_grant_id}`)
+    assert.equal(grant.status, 200, JSON.stringify(grant.json))
+    assert.equal((grant.json as { grantee: { subject_id: string } }).grantee.subject_id, orgB)
+    assert.equal((await bindings()).find((row) => row.org_id === orgA && row.is_default === true)?.sync_status, 'active')
+    // A new grant advances the authorization epoch; Moss's TTL cache can
+    // return a previously issued delegation. Issue a fresh one through the
+    // public Nexus boundary to verify the original grant still authorizes A.
+    const defaultBinding = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
+    assert.ok(defaultBinding?.nexus_grant_id)
+    const issued = await nexusApi(nexus!, 'POST', '/v2/auth/zone-delegations', {
+      user_id: userA.id, org_id: orgA, membership_version: 'r2', zone_id: zoneA,
+      audience: 'nexus-api', ttl_s: 300, grant_id: defaultBinding.nexus_grant_id,
+      purpose: 'data-access', scope_rules: [{ capability: 'zone.data.read', resource_prefixes: ['/'] }],
+    }, { Authorization: `Bearer ${nexus!.apiKey}`, 'Idempotency-Key': `moss-s6-reissue-${randomUUID()}` })
+    assert.equal(issued.status, 201, JSON.stringify(issued.json))
+    delegationA = (issued.json as { delegation_id: string }).delegation_id
+    const own = await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}`, undefined, { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA })
+    assert.equal(own.status, 200, JSON.stringify(own.json))
+    assert.equal((await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}`)).status, 200)
   })
 
   it('H-1: deprovision preserves errors and completes a real Nexus deletion', async () => {
@@ -444,5 +524,145 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     const deleted = await nexusApi(nexus!, 'GET', `/v2/zones/${encodeURIComponent(zoneBDefault)}`)
     assert.equal(deleted.status, 200, `deleted zone tombstone missing: ${JSON.stringify(deleted.json)}`)
     assert.equal((deleted.json as { status?: string }).status, 'deleted')
+  })
+
+  it('scenario 18: a lost create response replays the same operation under the same key', async () => {
+    const priorAttempts = nexusProxy!.zoneCreateAttempts().length
+    nexusProxy!.dropNextZoneCreate()
+    const orgC = await createOrg('P0 E2E Org C lost response')
+    const binding = (await bindings()).find((row) => row.org_id === orgC && row.is_default === true)
+    assert.ok(binding)
+    const zoneC = String(binding.zone_id)
+    const deadline = Date.now() + 150_000
+    let settled: Record<string, unknown> | undefined
+    while (Date.now() < deadline) {
+      settled = (await bindings()).find((row) => row.org_id === orgC && row.is_default === true)
+      if (settled?.sync_status === 'active' && nexusProxy!.zoneCreateAttempts().length >= priorAttempts + 2) break
+      await sleep(2_000)
+    }
+    assert.equal(settled?.sync_status, 'active', JSON.stringify(settled))
+    const attempts = nexusProxy!.zoneCreateAttempts().slice(priorAttempts).filter((attempt) => attempt.key.includes(String(binding.binding_id)))
+    assert.equal(attempts.length, 2, JSON.stringify(attempts))
+    assert.ok(attempts[0].key)
+    assert.equal(attempts[0].key, attempts[1].key)
+    assert.equal(attempts[0].status, 202)
+    assert.equal(attempts[1].status, 202)
+    assert.ok(attempts[0].operationId)
+    assert.equal(attempts[0].operationId, attempts[1].operationId)
+    const sqlite = new DatabaseSync(join(tmp, 'nexus', 'nexus.db'), { readOnly: true })
+    try {
+      const row = sqlite.prepare("SELECT COUNT(*) AS n FROM zone_operations WHERE zone_id = ? AND action = 'create'").get(zoneC) as { n: number }
+      assert.equal(row.n, 1)
+    } finally { sqlite.close() }
+  })
+
+  it('scenario 13: suspend rejects runtime, writes and grants; resume restores them', async () => {
+    const adminHeaders = { Authorization: `Bearer ${nexus!.apiKey}` }
+    const cancelledBlocker = await nexusApi(nexus!, 'POST', '/v2/runtime/runs/moss-active-run-blocker-pid/cancel', {}, adminHeaders)
+    assert.ok([200, 202, 204].includes(cancelledBlocker.status), JSON.stringify(cancelledBlocker.json))
+
+    const sessionId = `moss-suspend-${randomUUID()}`
+    const session = await nexusApi(nexus!, 'POST', '/v2/sessions', { session_id: sessionId, home_zone_id: zoneA })
+    assert.equal(session.status, 201, JSON.stringify(session.json))
+    const defaultBinding = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
+    assert.ok(defaultBinding?.nexus_grant_id)
+    const runtimeDelegationResponse = await nexusApi(nexus!, 'POST', '/v2/auth/zone-delegations', {
+      user_id: userA.id, org_id: orgA, membership_version: 'r2', zone_id: zoneA,
+      audience: 'nexus-api', ttl_s: 300, grant_id: defaultBinding.nexus_grant_id,
+      purpose: 'runtime', scope_rules: [{ capability: 'zone.runtime.execute', resource_prefixes: [`/sessions/${sessionId}`] }],
+    }, { ...adminHeaders, 'Idempotency-Key': `moss-suspend-runtime-${sessionId}` })
+    assert.equal(runtimeDelegationResponse.status, 201, JSON.stringify(runtimeDelegationResponse.json))
+    const runtimeDelegation = (runtimeDelegationResponse.json as { delegation_id: string }).delegation_id
+    const runtimeHeaders = { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': runtimeDelegation }
+    const runBody = (pid: string) => ({ pid, session_id: sessionId, delegation_ref: runtimeDelegation })
+    const firstPid = `moss-suspend-before-${randomUUID()}`
+    const before = await nexusApi(nexus!, 'POST', '/v2/runtime/start', runBody(firstPid), runtimeHeaders)
+    assert.equal(before.status, 201, JSON.stringify(before.json))
+    const cancelled = await nexusApi(nexus!, 'POST', `/v2/runtime/runs/${firstPid}/cancel`, {}, adminHeaders)
+    assert.ok([200, 202, 204].includes(cancelled.status), JSON.stringify(cancelled.json))
+
+    const tokenA = await login(moss, userA.name, userA.password)
+    const issuedData = await mossApi(moss, tokenA, 'POST', '/api/v1/zones/delegations', {})
+    assert.equal(issuedData.status, 201, JSON.stringify(issuedData.json))
+    const dataDelegation = (issuedData.json as { delegation_id: string }).delegation_id
+
+    const waitOperation = async (operationId: string) => {
+      const deadline = Date.now() + 120_000
+      while (Date.now() < deadline) {
+        const op = await mossApi(moss, adminToken, 'GET', `/api/v1/zones/operations/${operationId}`)
+        assert.equal(op.status, 200, JSON.stringify(op.json))
+        const value = op.json as { state: string; error: unknown }
+        assert.equal(value.error, null)
+        if (value.state === 'succeeded') return
+        if (value.state === 'failed') throw new Error(`operation failed: ${JSON.stringify(op.json)}`)
+        await sleep(1_000)
+      }
+      throw new Error(`operation ${operationId} timed out`)
+    }
+    const suspended = await mossApi(moss, adminToken, 'POST', `/api/v1/zones/${zoneA}:suspend`)
+    assert.equal(suspended.status, 202, JSON.stringify(suspended.json))
+    const suspendOperationId = (suspended.json as { operation_id: string }).operation_id
+    await waitOperation(suspendOperationId)
+    const zoneSuspended = await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}`)
+    assert.equal((zoneSuspended.json as { status?: string }).status, 'suspended')
+    const refreshSuspended = await mossApi(moss, adminToken, 'POST', `/api/v1/zones/bindings/${defaultBinding.binding_id}/refresh`)
+    assert.equal(refreshSuspended.status, 200, JSON.stringify(refreshSuspended.json))
+    assert.equal((refreshSuspended.json as { observed_zone_status?: string }).observed_zone_status, 'suspended')
+
+    const deniedRun = await nexusApi(nexus!, 'POST', '/v2/runtime/start', runBody(`moss-suspend-denied-${randomUUID()}`), runtimeHeaders)
+    assert.equal(deniedRun.status, 409, JSON.stringify(deniedRun.json))
+    assert.equal((deniedRun.json as { detail?: { code?: string } }).detail?.code, 'ZONE_NOT_ACTIVE')
+
+    const recordBody = { record_kind: 'context', data: '{"suspended":true}' }
+    const staleWrite = await nexusApi(nexus!, 'POST', `/v2/sessions/${sessionId}/records`, recordBody, { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': dataDelegation })
+    assert.equal(staleWrite.status, 403, JSON.stringify(staleWrite.json))
+    assert.equal((staleWrite.json as { detail?: { code?: string } }).detail?.code, 'GRANT_REVOKED')
+    const deniedWrite = await nexusApi(nexus!, 'POST', `/v2/sessions/${sessionId}/records`, recordBody, adminHeaders)
+    assert.equal(deniedWrite.status, 409, JSON.stringify(deniedWrite.json))
+    assert.equal((deniedWrite.json as { detail?: { code?: string } }).detail?.code, 'ZONE_NOT_ACTIVE')
+
+    const office = await mossApi(moss, adminToken, 'POST', '/api/v1/zones/bindings', { org_id: orgA, zone_id: zoneA, purpose: 'office' })
+    assert.equal(office.status, 201, JSON.stringify(office.json))
+    const officeId = (office.json as { binding_id: string }).binding_id
+    const officeDeadline = Date.now() + 120_000
+    let officeRow: Record<string, unknown> | undefined
+    while (Date.now() < officeDeadline) {
+      officeRow = (await bindings()).find((row) => row.binding_id === officeId)
+      if (officeRow?.sync_status === 'sync_failed') break
+      await sleep(3_000)
+    }
+    assert.equal(officeRow?.sync_status, 'sync_failed', JSON.stringify(officeRow))
+    assert.ok(officeRow.last_error_code)
+
+    nexusProxy!.failOperationLookup(suspendOperationId)
+    const injected = await mossApi(moss, adminToken, 'GET', `/api/v1/zones/operations/${suspendOperationId}`)
+    assert.equal(injected.status, 200, JSON.stringify(injected.json))
+    assert.deepEqual((injected.json as { error: unknown }).error, {
+      code: 'INJECTED_OPERATION_FAILURE', message: 'injected operation lookup failure', retryable: false,
+    })
+
+    const resumed = await mossApi(moss, adminToken, 'POST', `/api/v1/zones/${zoneA}:resume`)
+    assert.equal(resumed.status, 202, JSON.stringify(resumed.json))
+    await waitOperation((resumed.json as { operation_id: string }).operation_id)
+    const zoneResumed = await nexusApi(nexus!, 'GET', `/v2/zones/${zoneA}`)
+    assert.equal((zoneResumed.json as { status?: string }).status, 'active')
+    const restoredWrite = await nexusApi(nexus!, 'POST', `/v2/sessions/${sessionId}/records`, { record_kind: 'context', data: '{"suspended":false}' }, adminHeaders)
+    assert.equal(restoredWrite.status, 201, JSON.stringify(restoredWrite.json))
+    const restoredRun = await nexusApi(nexus!, 'POST', '/v2/runtime/start', runBody(`moss-suspend-restored-${randomUUID()}`), runtimeHeaders)
+    assert.equal(restoredRun.status, 201, JSON.stringify(restoredRun.json))
+    const refreshedDefault = await mossApi(moss, adminToken, 'POST', `/api/v1/zones/bindings/${defaultBinding.binding_id}/refresh`)
+    assert.equal((refreshedDefault.json as { sync_status?: string }).sync_status, 'active')
+    assert.equal((await bindings()).find((row) => row.binding_id === officeId)?.sync_status, 'sync_failed')
+    const core = await mossApi(moss, adminToken, 'POST', '/api/v1/zones/bindings', { org_id: orgA, zone_id: zoneA, purpose: 'core' })
+    assert.equal(core.status, 201, JSON.stringify(core.json))
+    const coreId = (core.json as { binding_id: string }).binding_id
+    const coreDeadline = Date.now() + 120_000
+    let coreRow: Record<string, unknown> | undefined
+    while (Date.now() < coreDeadline) {
+      coreRow = (await bindings()).find((row) => row.binding_id === coreId)
+      if (coreRow?.sync_status === 'active') break
+      await sleep(3_000)
+    }
+    assert.equal(coreRow?.sync_status, 'active', JSON.stringify(coreRow))
   })
 })

@@ -1,6 +1,28 @@
 {
-  "$comment": "Invalid OrgZoneBinding payloads. Every case must be rejected by the schema and the generated adapter. Clients judge by code, never by message.",
+  "$comment": "Invalid use cases. Cases marked rejected_by=zone-id-runtime are accepted by the binding schema and rejected by the owner Zone ID validator; other cases are rejected by the schema and generated adapter.",
   "cases": [
+    {
+      "name": "bad-zone-id",
+      "rejected_by": "zone-id-runtime",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1", "kind": "OrgZoneBinding",
+        "binding_id": "binding_bad_zone", "org_id": "org_x", "nexus_deployment_id": "d",
+        "zone_id": "Bad_Zone!", "purpose": "default", "is_default": true,
+        "desired_capabilities": [], "desired_state": "bound", "sync_status": "pending",
+        "generation": 0, "created_at": "2026-09-18T08:00:00Z", "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
+    {
+      "name": "path-traversal",
+      "rejected_by": "zone-id-runtime",
+      "payload": {
+        "api_version": "iam.sudo.dev/v1", "kind": "OrgZoneBinding",
+        "binding_id": "binding_path_traversal", "org_id": "org_x", "nexus_deployment_id": "d",
+        "zone_id": "../escape", "purpose": "default", "is_default": true,
+        "desired_capabilities": [], "desired_state": "bound", "sync_status": "pending",
+        "generation": 0, "created_at": "2026-09-18T08:00:00Z", "updated_at": "2026-09-18T08:00:00Z"
+      }
+    },
     {
       "name": "unknown-major",
       "why": "api_version carries an unsupported major; unknown majors are rejected, not ignored.",

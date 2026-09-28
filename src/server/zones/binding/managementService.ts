@@ -3,7 +3,7 @@
  * binding 列表/对账/解绑、Zone 生命周期（suspend/resume/deprovision）转发、
  * operation 查询、普通用户可用 Zone 列表。
  *
- * 权限分层（调用方 server.ts 已按角色收口，这里再以 viewer 语义防御）：
+ * 权限分层由本 service 在 binding 管理入口执行：
  *  - super admin：全部 binding、create/delete/lifecycle；
  *  - Org admin：本 Org 的 binding 管理（detach）与状态查看；
  *  - 普通用户：仅可用 Zone 列表（不看 grant 历史）。
@@ -16,10 +16,12 @@
  *  - refresh 对账 desired（本地 binding）与 observed（Nexus zone/grant 实况）。
  */
 import { randomUUID } from 'crypto'
+import { ADMIN_ROLES } from '../../auth/roles.js'
 import type { DbDriver } from '../../db/driver.js'
 import type { ZoneBindingConfig } from './config.js'
 import { NexusZoneApiError, NexusZoneClient, type ZoneOperationRef } from '../../nexus/nexusZoneClient.js'
 import { insertDetachIntent, insertManagedBindingIntent, listBindingsByOrg } from './bindingRepository.js'
+import { rowToOrgZoneBinding } from './bindingWire.js'
 
 export class ZoneManagementError extends Error {
   constructor(
@@ -55,25 +57,27 @@ export interface BindingView {
   observed_zone_status?: string | null
   observed_revision?: string | null
   observed_grant_status?: string | null
+  observed_grant_source?: string | null
   grant_expires_at?: string | null
 }
 
 function toView(row: Record<string, unknown>): BindingView {
+  const wire = rowToOrgZoneBinding(row)
   return {
-    binding_id: String(row.binding_id),
-    org_id: String(row.org_id),
-    nexus_deployment_id: String(row.nexus_deployment_id),
-    zone_id: String(row.zone_id),
-    purpose: String(row.purpose),
-    is_default: Number(row.is_default) === 1,
-    desired_state: String(row.desired_state),
-    sync_status: String(row.sync_status),
-    generation: Number(row.generation),
-    nexus_grant_id: row.nexus_grant_id == null ? null : String(row.nexus_grant_id),
-    nexus_operation_id: row.nexus_operation_id == null ? null : String(row.nexus_operation_id),
-    last_error_code: row.last_error_code == null ? null : String(row.last_error_code),
-    created_at: Number(row.created_at),
-    updated_at: Number(row.updated_at),
+    binding_id: wire.binding_id,
+    org_id: wire.org_id,
+    nexus_deployment_id: wire.nexus_deployment_id,
+    zone_id: wire.zone_id,
+    purpose: wire.purpose,
+    is_default: wire.is_default,
+    desired_state: wire.desired_state,
+    sync_status: wire.sync_status,
+    generation: wire.generation,
+    nexus_grant_id: wire.nexus_grant_id ?? null,
+    nexus_operation_id: wire.nexus_operation_id ?? null,
+    last_error_code: wire.last_error_code ?? null,
+    created_at: Date.parse(wire.created_at),
+    updated_at: Date.parse(wire.updated_at),
   }
 }
 
@@ -109,6 +113,7 @@ export class ZoneManagementService {
 
   /** super admin 看全部；Org admin 看本 Org。 */
   async listBindings(viewer: { role: string; orgId: string }): Promise<BindingView[]> {
+    if (!ADMIN_ROLES.has(viewer.role)) throw new ZoneManagementError('binding management requires org admin', 'FORBIDDEN', 403)
     if (viewer.role === 'super_admin') {
       const rows = await this.driver.all(
         `SELECT * FROM org_zone_bindings ORDER BY created_at, binding_id`,
@@ -122,6 +127,7 @@ export class ZoneManagementService {
 
   /** desired vs observed 对账：实时查 Nexus zone+grant，更新本地快照。 */
   async refreshBinding(bindingId: string, viewer: { role: string; orgId: string }): Promise<BindingView> {
+    if (!ADMIN_ROLES.has(viewer.role)) throw new ZoneManagementError('binding management requires org admin', 'FORBIDDEN', 403)
     const row = await this.driver.get(
       `SELECT * FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
       [bindingId],
@@ -155,6 +161,7 @@ export class ZoneManagementService {
         observed_zone_status: zone.status,
         observed_revision: zone.revision,
         observed_grant_status: grant?.status ?? null,
+        observed_grant_source: grant?.sourceType ?? null,
         grant_expires_at: grant?.expires_at ?? null,
       }
     } catch (error) {
@@ -176,6 +183,7 @@ export class ZoneManagementService {
     bindingId: string,
     viewer: { role: string; orgId: string },
   ): Promise<{ generation: number }> {
+    if (!ADMIN_ROLES.has(viewer.role)) throw new ZoneManagementError('binding management requires org admin', 'FORBIDDEN', 403)
     const row = await this.driver.get(
       `SELECT org_id, zone_id, desired_state FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
       [bindingId],

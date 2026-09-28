@@ -293,7 +293,7 @@ export async function startMoss(
   // 日志无 banner 意味着响应来自残留进程（上一实例未死透、端口被复用）——
   // 此时后续状态会张冠李戴，必须当场报错而不是让场景莫名失败。
   const [alive, banner] = await Promise.all([
-    waitForHttp(baseUrl, 180_000),
+    waitForHttp(baseUrl, 180_000, () => child.exitCode !== null),
     waitForLine(child, 'Moss server started', 180_000),
   ])
   if (!alive || !banner) {
@@ -333,10 +333,10 @@ function waitForLine(child: { stderr?: NodeJS.ReadableStream | null; stdout?: No
   })
 }
 
-function waitForHttp(baseUrl: string, timeoutMs: number): Promise<boolean> {
+function waitForHttp(baseUrl: string, timeoutMs: number, hasExited: () => boolean): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   const attempt = async (): Promise<boolean> => {
-    if (Date.now() > deadline) return false
+    if (Date.now() > deadline || hasExited()) return false
     try {
       const response = await fetchWithTimeout(`${baseUrl}/api/v1/auth/me`, { method: 'GET' })
       // 401（无 token）即服务已监听

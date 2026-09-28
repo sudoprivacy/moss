@@ -20,8 +20,9 @@ export interface OrgBackfillPlanItem {
   orgId: string
   orgName: string
   candidateZoneId: string
-  status: 'would-create' | 'already-bound' | 'collision'
+  status: 'would-create' | 'already-bound' | 'collision' | 'invalid'
   collisionWith?: string
+  error?: string
 }
 
 export interface OrgBackfillReport {
@@ -29,6 +30,7 @@ export interface OrgBackfillReport {
   wouldCreate: number
   alreadyBound: number
   collisions: number
+  invalid: number
   items: OrgBackfillPlanItem[]
 }
 
@@ -44,13 +46,13 @@ export async function planOrgZoneBackfill(
   const takenZones = new Map<string, string>()
   const boundOrgs = new Set<string>()
   const rows = await driver.all(
-    `SELECT org_id, zone_id FROM org_zone_bindings
+    `SELECT org_id, zone_id, is_default FROM org_zone_bindings
      WHERE nexus_deployment_id = ? AND desired_state = 'bound'`,
     [input.nexusDeploymentId],
   )
   for (const row of rows) {
     takenZones.set(String(row.zone_id), String(row.org_id))
-    boundOrgs.add(String(row.org_id))
+    if (Number(row.is_default) === 1) boundOrgs.add(String(row.org_id))
   }
 
   const items: OrgBackfillPlanItem[] = []
@@ -65,7 +67,19 @@ export async function planOrgZoneBackfill(
       })
       continue
     }
-    const candidate = defaultZoneIdCandidate(orgId)
+    let candidate: string
+    try {
+      candidate = defaultZoneIdCandidate(orgId)
+    } catch (error) {
+      items.push({
+        orgId,
+        orgName: String(org.org_name),
+        candidateZoneId: '',
+        status: 'invalid',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      continue
+    }
     const owner = takenZones.get(candidate)
     if (owner !== undefined) {
       items.push({
@@ -91,6 +105,7 @@ export async function planOrgZoneBackfill(
     wouldCreate: items.filter((i) => i.status === 'would-create').length,
     alreadyBound: items.filter((i) => i.status === 'already-bound').length,
     collisions: items.filter((i) => i.status === 'collision').length,
+    invalid: items.filter((i) => i.status === 'invalid').length,
     items,
   }
 }

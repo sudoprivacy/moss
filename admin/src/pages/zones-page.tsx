@@ -8,7 +8,7 @@
  *     二次输入 Zone ID + 异步 operation）分列为不同入口与确认强度；
  *  2. Zone ID（不可变身份，等宽展示）与显示名（observed display_name）分列；
  *  3. desired（本地业务意图）与 observed（Nexus 对账快照）分列；
- *  4. grant status/expiry/source（source=moss_org_binding）单独展示；
+ *  4. grant status/expiry/source（最近一次对账的真实 source）单独展示；
  *  5. operation 查询面板（step/error/retry）支持故障恢复；
  *  6. runtime health：observed zone status + revision + 最近对账时间；
  *  7. 挂起/恢复（可逆管理动作）与 deprovision（不可逆数据删除）分开。
@@ -224,7 +224,7 @@ export default function ZonesPage() {
                     <TableCell className="text-xs">
                       {b.nexus_grant_id ? (
                         <>
-                          <div>{b.observed_grant_status ?? '—'} · moss_org_binding</div>
+                          <div>{b.observed_grant_status ?? '—'} · {b.observed_grant_source ?? '—'}</div>
                           <div className="text-muted-foreground">{b.grant_expires_at ?? '无到期'}</div>
                         </>
                       ) : '—'}
@@ -286,6 +286,7 @@ export default function ZonesPage() {
                 <div><span className="text-muted-foreground">state：</span><Badge variant={operation.state === 'succeeded' ? 'default' : operation.state === 'failed' ? 'destructive' : 'secondary'}>{operation.state}</Badge></div>
                 <div><span className="text-muted-foreground">step：</span>{operation.step || '—'}</div>
                 <div><span className="text-muted-foreground">retryable：</span>{String(operation.retryable)}</div>
+                {operation.error ? <div className="col-span-2"><span className="text-muted-foreground">error：</span><span className="font-mono">{operation.error.code}</span> · {operation.error.message}</div> : null}
               </div>
             ) : null}
           </section>

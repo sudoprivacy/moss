@@ -58,6 +58,7 @@ export interface ZoneOperationRef {
   state: 'queued' | 'running' | 'waiting_dependency' | 'succeeded' | 'failed'
   step: string
   retryable: boolean
+  error: { code: string; message: string; retryable: boolean } | null
 }
 
 export interface ZoneGrantInput {
@@ -96,6 +97,33 @@ export class NexusZoneClient {
   private readonly baseUrl: string
   private readonly token: string
   private readonly timeoutMs: number
+
+  /** Normalize Nexus's nullable/SQLite representations to the owner wire contract. */
+  private static normalizeOwnerView(
+    payload: unknown,
+    optionalFields: readonly string[],
+    principalFields: readonly string[],
+    timestampFields: readonly string[],
+  ): unknown {
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return payload
+    const view = { ...(payload as Record<string, unknown>) }
+    for (const key of optionalFields) if (view[key] === null) delete view[key]
+    for (const key of principalFields) {
+      const principal = view[key]
+      if (principal && typeof principal === 'object' && !Array.isArray(principal)) {
+        const normalized = { ...(principal as Record<string, unknown>) }
+        if (normalized.trust_domain === null) delete normalized.trust_domain
+        view[key] = normalized
+      }
+    }
+    for (const key of timestampFields) {
+      const timestamp = view[key]
+      if (typeof timestamp === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?$/.test(timestamp)) {
+        view[key] = `${timestamp}Z`
+      }
+    }
+    return view
+  }
 
   constructor(config: Pick<ZoneBindingConfig, 'nexusV2BaseUrl' | 'nexusV2ServiceToken' | 'nexusV2TimeoutMs'>) {
     // 去掉尾斜杠，路径拼接统一在此处
@@ -166,6 +194,14 @@ export class NexusZoneClient {
     if (!OPERATION_STATES.includes(state)) {
       throw new NexusZoneApiError(`unknown operation state: ${String(op.state)}`, 'CONTRACT', false, 0)
     }
+    const rawError = op.error
+    const error = rawError !== null && typeof rawError === 'object' && !Array.isArray(rawError)
+      ? {
+          code: typeof (rawError as Record<string, unknown>).code === 'string' ? (rawError as Record<string, string>).code : 'UNKNOWN',
+          message: typeof (rawError as Record<string, unknown>).message === 'string' ? (rawError as Record<string, string>).message : '',
+          retryable: (rawError as Record<string, unknown>).retryable === true,
+        }
+      : null
     return {
       operation_id: String(op.operation_id),
       action: String(op.action),
@@ -174,6 +210,7 @@ export class NexusZoneClient {
       state,
       step: String(op.step ?? ''),
       retryable: Boolean(op.retryable),
+      error,
     }
   }
 
@@ -225,10 +262,16 @@ export class NexusZoneClient {
     revision: string
   }> {
     const payload = await this.request('GET', `/v2/zones/${encodeURIComponent(zoneId)}`)
-    if (!validateZone(payload)) {
+    const normalized = NexusZoneClient.normalizeOwnerView(
+      payload,
+      ['description', 'labels', 'deleted_at'],
+      ['created_by'],
+      ['created_at', 'updated_at', 'deleted_at'],
+    )
+    if (!validateZone(normalized)) {
       throw new NexusZoneApiError('zone payload failed @sudo/contracts Zone validation', 'CONTRACT', false, 0)
     }
-    const zone = payload as { zone_id: string; display_name: string; status: string; revision: string }
+    const zone = normalized as { zone_id: string; display_name: string; status: string; revision: string }
     return { zone_id: zone.zone_id, display_name: zone.display_name, status: zone.status, revision: zone.revision }
   }
 
@@ -238,20 +281,28 @@ export class NexusZoneClient {
     status: string
     revision: string
     expires_at: string | null
+    sourceType: string | null
   }> {
     const payload = await this.request(
       'GET',
       `/v2/zones/${encodeURIComponent(zoneId)}/grants/${encodeURIComponent(grantId)}`,
     )
-    if (!validateZoneGrant(payload)) {
+    const normalized = NexusZoneClient.normalizeOwnerView(
+      payload,
+      ['resource_prefixes', 'source', 'not_before', 'expires_at', 'revoked_at', 'revoked_by', 'revoke_reason'],
+      ['grantee', 'issued_by', 'revoked_by'],
+      ['created_at', 'not_before', 'expires_at', 'revoked_at'],
+    )
+    if (!validateZoneGrant(normalized)) {
       throw new NexusZoneApiError('grant payload failed @sudo/contracts ZoneGrant validation', 'CONTRACT', false, 0)
     }
-    const grant = payload as { grant_id: string; status: string; revision: string; expires_at: string | null }
+    const grant = normalized as { grant_id: string; status: string; revision: string; expires_at?: string | null; source?: { source_type?: unknown } | null }
     return {
       grant_id: grant.grant_id,
       status: grant.status,
       revision: grant.revision,
       expires_at: grant.expires_at ?? null,
+      sourceType: typeof grant.source?.source_type === 'string' ? grant.source.source_type : null,
     }
   }
 
@@ -315,6 +366,7 @@ export class NexusZoneClient {
       state: 'succeeded',
       step: '',
       retryable: false,
+      error: null,
     }
   }
 

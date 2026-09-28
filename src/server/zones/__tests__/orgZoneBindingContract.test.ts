@@ -9,7 +9,7 @@ import {
 } from '../generated/org-zone-binding.gen.js'
 import type { OrgZoneBinding } from '../generated/org-zone-binding.gen.js'
 
-type Case = { name: string; why?: string; payload: unknown }
+type Case = { name: string; why?: string; rejected_by?: string; payload: unknown }
 
 const FIXTURES_DIR = join(import.meta.dir, '..', '..', '..', '..', 'contracts', 'iam', 'v1', 'fixtures')
 
@@ -38,6 +38,7 @@ describe('iam/v1 org-zone-binding contract', () => {
     const cases = loadCases(join('invalid', 'cases.json'))
     expect(cases.length).toBeGreaterThan(0)
     for (const c of cases) {
+      if (c.rejected_by === 'zone-id-runtime') continue
       const result = safeParse(c.payload)
       expect(result.ok).toBeFalse()
     }
