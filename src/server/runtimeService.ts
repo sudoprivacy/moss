@@ -1,3 +1,4 @@
+import { SessionStartupError } from './sessionStartup.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
@@ -628,10 +629,15 @@ export class RuntimeService {
       if (input.assistantName) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
+        const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
+        await getAssistantRuntimeConfig(resource.id)
         input = { ...input, assistantName: resource.id }
       }
       if (input.enabledSkills) input = { ...input, enabledSkills: await resolveOrganizationSkillIds(input.enabledSkills) }
       return this.createSessionInResourceScope(input)
+    }).catch(error => {
+      if (error instanceof ResourceAccessError) throw new SessionStartupError(error)
+      throw error
     })
   }
 
@@ -1661,6 +1667,11 @@ export class RuntimeService {
     const scope = await this.resourceScope(session)
     return withOrganizationResources(scope, async () => {
       await this.assertWithinTokenQuota(session.userId, session.orgId)
+      const effectiveAssistant = options.assistantName ?? session.assistantName
+      if (effectiveAssistant) {
+        const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
+        await getAssistantRuntimeConfig(effectiveAssistant)
+      }
       const pinned = await pinSessionResourceSnapshot(
         join(this.options.config.runtimeDir, 'sessions', session.sessionId),
         await snapshotOrganizationResources(), options.enabledSkills,
@@ -1668,6 +1679,14 @@ export class RuntimeService {
       return withOrganizationResources({ ...scope, snapshot: pinned.snapshot }, () => this.spawnAttemptInResourceScope(
         session, { ...options, enabledSkills: options.enabledSkills ?? pinned.enabledSkills },
       ))
+    }).catch(async error => {
+      if (error instanceof ServerDrainingError || error instanceof TokenQuotaExceededError || error instanceof AttemptTakeoverPendingError) throw error
+      const current = await this.store.getSession(session.sessionId)
+      const attemptId = current?.currentAttemptId !== session.currentAttemptId ? current?.currentAttemptId : null
+      const failure = new SessionStartupError(error, session.sessionId, attemptId ?? randomUUID())
+      await this.store.addEvent(session.sessionId, attemptId ?? null, 'startup_failed', failure.failure as unknown as Record<string, unknown>)
+      if (attemptId) await this.store.markAttemptStopped(attemptId, { runtimeState: 'failed', stopReason: 'startup_failed', errorText: JSON.stringify(failure.failure) })
+      throw failure
     })
   }
 

@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'src/server/artifacts.node-test.ts',
+  'src/server/cloudChat.node-test.ts',
   'src/server/api/compat/sudowork/adminService.node-test.ts',
   'src/server/api/compat/sudowork/app.node-test.ts',
   'src/server/api/compat/sudowork/billingRoutes.node-test.ts',

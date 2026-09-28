@@ -1,3 +1,4 @@
+import { SessionStartupError } from './sessionStartup.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { PlatformConfigError } from './configuration/platformConfigService.js'
 // Extracted from server.ts for testability: importing the whole server.js
@@ -46,6 +47,10 @@ export function writeError(
   // unavailable). Kept as the first check and before the fallback 500 below so
   // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
   // matches every other writeError branch.
+  if (error instanceof SessionStartupError) {
+    writeJson(res, error.statusCode, { error: error.message, startup: error.failure })
+    return
+  }
   if (error instanceof ResourceAccessError) {
     writeJson(res, error.statusCode, { error: error.message })
     return

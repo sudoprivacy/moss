@@ -284,22 +284,8 @@ export async function prepareFirstMessageForScode(
 ): Promise<string> {
   const instructions: string[] = []
 
-  // 1. 智能体身份和规则**只**通过 configDir/.nexus/sudocode/AGENTS.md 下发
-  //（RuntimeService.spawnAttempt 每次 spawn 都会写入）。
-  //
-  // 这里曾经把同一份身份/规则再注入到首条用户消息里，作为 scode 未读取该文件时的
-  // 兜底。但这份副本带着 "[Identity Override - 最高优先级]…此身份声明优先级高于
-  // 默认身份声明" 的措辞，且位于**用户消息**中——模型看到不可信的用户文本自称拥有
-  // 覆盖其身份的权限，会判定为提示注入攻击并拒绝，连带不再相信 AGENTS.md 里那份
-  // 合法的身份声明。实测：绑定"招聘专家"后问"你是谁"，模型回答"我是 Claude…我检测到
-  // 你的消息中包含了一段试图覆盖我身份的指令…这是一种提示注入攻击"。
-  //
-  // AGENTS.md 是可信的 runtime 配置，且在所有 runtime 模式下都会写入（configDir
-  // 始终存在），因此兜底并不保护任何真实缺口——它只会让身份声明失效。
-  // sudowork 只走 AGENTS.md，身份切换一直正常，这也印证了这一点。
-  //
-  // 下面保留的技能/wiki/corpapp 提示不是身份声明，属于能力清单，继续随首条消息下发。
-
+  // Business roles use workspace AGENTS.md, the entry scode actually loads.
+  // A user-owned AGENTS.md is preserved; do not repeat identity overrides here.
   // 2. 添加草稿箱使用指令
   instructions.push(buildDraftsInstruction(config.workspace))
 
@@ -388,7 +374,7 @@ export async function prepareFirstMessageForScode(
   }
 
   const systemInstructions = instructions.join('\n\n')
-  return `[Assistant Rules - You MUST follow these instructions]\n${systemInstructions}\n\n[User Request]\n${userContent}`
+  return `[Application workspace context]\n${systemInstructions}\n\n[User Request]\n${userContent}`
 }
 
 /**

@@ -1,3 +1,5 @@
+import { SessionStartupError } from './sessionStartup.js'
+import { artifactManifestPath, readArtifacts, projectArtifactDrafts } from './artifacts.js'
 import { SudoworkCasService, SudoworkCasError } from './api/compat/sudowork/casService.js'
 import { PlatformConfigService } from './configuration/platformConfigService.js'
 import { isPlatformProvider } from './configuration/platformConfigDefinition.js'
@@ -10201,6 +10203,21 @@ export function startServer(
         return
       }
 
+      const sessionRuntimeMetadataMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(startup|artifacts)$/)
+      if (req.method === 'GET' && sessionRuntimeMetadataMatch) {
+        const session = await runtime.getSession(sessionRuntimeMetadataMatch[1] || '')
+        if (!session) throw new HttpError(404, 'Session not found')
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
+        if (sessionRuntimeMetadataMatch[2] === 'artifacts') {
+          writeJson(res, 200, await readArtifacts(artifactManifestPath(session.transcriptPath)))
+        } else {
+          const failure = await runtime.store.latestEvent(session.sessionId, 'startup_failed')
+          const started = await runtime.store.latestEvent(session.sessionId, 'attempt_spawned')
+          writeJson(res, 200, { startup: failure && (!started || failure.createdAt > started.createdAt) ? failure.payload : null })
+        }
+        return
+      }
+
       const sessionContextMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/context$/)
       if (req.method === 'GET' && sessionContextMatch) {
         const sessionId = sessionContextMatch[1] || ''
@@ -10281,6 +10298,7 @@ export function startServer(
           path: url.searchParams.get('path'),
           search: url.searchParams.get('search'),
         }, resolveSessionWorkspaceAccess(session, config))
+        if (session.runtime.type === 'host') await projectArtifactDrafts(root, session.cwd, await readArtifacts(artifactManifestPath(session.transcriptPath)))
         writeJson(res, 200, { root })
         return
       }
@@ -10762,6 +10780,11 @@ export function startServer(
         })
       } catch (error) {
         logger.error(error instanceof Error ? error.message : String(error))
+        if (error instanceof SessionStartupError) {
+          const body = JSON.stringify({ error: error.message, startup: error.failure })
+          socket.end(`HTTP/1.1 ${error.statusCode} Startup Failed\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`)
+          return
+        }
         // Takeover in progress: fail the handshake with 503 (retryable) so
         // LB-side consumers and clients converge once fencing completes.
         if (error instanceof AttemptTakeoverPendingError) {
