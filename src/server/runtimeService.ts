@@ -45,7 +45,11 @@ import {
 import { errorMessage } from '../utils/errors.js'
 import { getSystemSettings } from './systemSettings.js'
 import { getUserModelPreference } from './userModelPreference.js'
-import type { AuthProxyServer } from './authProxy/authProxyServer.js'
+import {
+  hashAuthProxyToken,
+  type AuthProxyServer,
+  type SessionTokenIdentity,
+} from './authProxy/authProxyServer.js'
 import {
   appendSharedAgentMemory,
   buildUserProfileMemory,
@@ -1087,19 +1091,49 @@ export class RuntimeService {
     }
   }
 
+  /**
+   * Auth-proxy session token resolver (wired via setSessionTokenResolver).
+   * A token is valid while its attempt is the session's current, not-stopped
+   * attempt and the session and its user are still active. Department and
+   * admin role are read live, so a department move takes effect without a
+   * session restart.
+   */
+  resolveAuthProxyToken(tokenHash: string): SessionTokenIdentity | null {
+    const attempt = this.store.getAttemptByAuthProxyTokenHash(tokenHash)
+    if (!attempt || attempt.stoppedAt !== null) return null
+    const session = this.store.getSession(attempt.sessionId)
+    if (!session || session.currentAttemptId !== attempt.attemptId) return null
+    if (session.desiredState === 'terminated') return null
+    const user = this.authService.getUserById(session.userId)
+    if (!user || user.status !== 'active') return null
+    return {
+      userId: session.userId,
+      orgId: session.orgId,
+      departmentId: user.departmentId ?? null,
+      // Admins/super_admins bypass the department-credential policy gate in
+      // the auth proxy (full privileges within org / across orgs).
+      isAdmin: user.role === 'admin' || user.role === 'super_admin',
+    }
+  }
+
   async terminateSession(sessionId: string): Promise<void> {
     const session = this.store.getSession(sessionId)
     if (!session) return
     const attempt = this.store.getCurrentAttempt(sessionId)
-    // Revoke auth proxy token
+    this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
+    // Revoke auth proxy token. The terminated lifecycle above already makes the
+    // DB resolver reject it; evicting the cache makes that immediate. The hash
+    // path covers attempts spawned before a server restart (raw token unknown).
     if (this.authProxy) {
       const tokenEntry = this.sessionTokens.get(sessionId)
       if (tokenEntry) {
         this.authProxy.revokeToken(tokenEntry.token)
         this.sessionTokens.delete(sessionId)
       }
+      if (attempt?.authProxyTokenHash) {
+        this.authProxy.evictSessionTokenHash(attempt.authProxyTokenHash)
+      }
     }
-    this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
     this.store.addEvent(sessionId, attempt?.attemptId ?? null, 'session_terminate_requested', {})
 
     if (attempt?.runnerPid) {
@@ -1709,7 +1743,11 @@ export class RuntimeService {
       runnerEnv.SUDOWORK_AUTH_PROXY_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_BASE_URL = proxyUrl
       runnerEnv.SUDOWORK_AUTH_PROXY_TOKEN = authToken
-      // Token will be registered after spawn (needs pid)
+      // The proxy resolves this token via its hash on the attempt row (see
+      // resolveAuthProxyToken), so it stays valid for exactly as long as this
+      // attempt is the session's live attempt — including across server
+      // restarts and for channel sessions whose runner lives for days.
+      this.store.setAttemptAuthProxyTokenHash(attempt.attemptId, hashAuthProxyToken(authToken))
       this.sessionTokens.set(session.sessionId, { token: authToken, pid: -1 })
     }
 
@@ -1763,19 +1801,8 @@ export class RuntimeService {
       throw new Error('Failed to spawn session runner')
     }
 
-    // Register auth proxy token with pid
-    if (this.authProxy) {
-      const entry = this.sessionTokens.get(session.sessionId)
-      if (entry) {
-        entry.pid = child.pid
-        const tokenUser = this.authService.getUserById(session.userId)
-        const deptId = tokenUser?.departmentId ?? null
-        // Admins/super_admins bypass the department-credential policy gate in
-        // the auth proxy (full privileges within org / across orgs).
-        const isAdmin = tokenUser?.role === 'admin' || tokenUser?.role === 'super_admin'
-        this.authProxy.registerToken(entry.token, session.userId, session.orgId, deptId, isAdmin, child.pid)
-      }
-    }
+    const tokenEntry = this.sessionTokens.get(session.sessionId)
+    if (tokenEntry) tokenEntry.pid = child.pid
 
     this.store.updateAttemptRunner(attempt.attemptId, child.pid)
 

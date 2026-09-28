@@ -726,6 +726,8 @@ export type AttemptRecord = {
   exitSignal: string | null
   stopReason: string | null
   errorText: string | null
+  /** sha256 of the runner's auth-proxy bearer token (never the raw token). */
+  authProxyTokenHash?: string | null
 }
 
 export type SessionEventRecord = {
