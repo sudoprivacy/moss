@@ -90,6 +90,7 @@ describe('auth proxy minted-token placement', () => {
       const url = new URL(req.url ?? '/', 'http://x')
       const presented = [
         req.headers.token,
+        req.headers['x-rbox-token'] as string | undefined,
         req.headers.authorization?.replace(/^\S+ /, ''),
         url.searchParams.get('access_token'),
       ].find(Boolean) as string | undefined
@@ -168,5 +169,46 @@ describe('auth proxy minted-token placement', () => {
     expect(retried.get('x')).toBe('1')
     expect(retried.getAll('access_token')).toHaveLength(1)
     expect(retried.get('access_token')).not.toBe(stale)
+  })
+
+  // One login-type 凭据 whose URL pattern spans several systems: the caller
+  // (fetchurl --token-header / --token-query) picks the placement per request.
+  it('per-request X-Token-Header overrides the configured placement', async () => {
+    proxy.updateRules([rule({})])
+    expect(await call('/o', { 'X-Token-Header': 'X-Rbox-Token' })).toBe(200)
+    expect(seen[0].headers['x-rbox-token']).toMatch(/^tok\d+$/)
+    expect(seen[0].headers.authorization).toBeUndefined()
+    // Control headers never reach upstream.
+    expect(seen[0].headers['x-token-header']).toBeUndefined()
+  })
+
+  it('per-request override survives the 401 re-mint retry', async () => {
+    proxy.updateRules([rule({ scheme: 'header', tokenParam: 'Token' })])
+    await call('/warm', { 'X-Token-Query': 'access_token' })
+    const stale = new URL(seen[0].url, 'http://x').searchParams.get('access_token')!
+    expect(seen[0].headers.token).toBeUndefined()
+    rejected.add(stale)
+    seen.length = 0
+
+    expect(await call('/r', { 'X-Token-Query': 'access_token' })).toBe(200)
+    expect(seen).toHaveLength(2)
+    const retried = new URL(seen[1].url, 'http://x').searchParams
+    expect(retried.getAll('access_token')).toHaveLength(1)
+    expect(retried.get('access_token')).not.toBe(stale)
+    expect(seen[1].headers['x-token-query']).toBeUndefined()
+  })
+
+  it('rejects an invalid or ambiguous per-request override', async () => {
+    proxy.updateRules([rule({})])
+    expect(await call('/x', { 'X-Token-Header': 'Host' })).toBe(400)
+    expect(await call('/x', { 'X-Token-Header': 'bad name' })).toBe(400)
+    expect(await call('/x', { 'X-Token-Header': 'Token', 'X-Token-Query': 't' })).toBe(400)
+    expect(seen).toHaveLength(0)
+  })
+
+  it('rejects a per-request override on a static credential', async () => {
+    proxy.updateRules([rule({ authType: 'static', scheme: 'bearer' })])
+    expect(await call('/s', { 'X-Token-Header': 'Token' })).toBe(400)
+    expect(seen).toHaveLength(0)
   })
 })

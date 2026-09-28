@@ -8,6 +8,7 @@
 //
 //	fetchurl https://api.acme.com/v1/orders
 //	fetchurl -X POST https://api.acme.com/v1/orders -H 'Content-Type: application/json' -d '{"x":1}'
+//	fetchurl --token-header Token https://rbox.acme.com/api/list   # minted token as `Token: xxx`
 //
 // The request is sent to ${SUDOWORK_AUTH_PROXY_URL}/proxy with the real target
 // in the X-Remote-URL header; the proxy matches a 凭据 by URL, injects auth, and
@@ -35,30 +36,45 @@ const (
 const helpText = `fetchurl — curl-compatible HTTP via the moss auth proxy.
 
 Usage:
-  fetchurl [-X METHOD] [-H 'Header: value']... [-d BODY] <url>
+  fetchurl [-X METHOD] [-H 'Header: value']... [-d BODY] [--token-header NAME | --token-query NAME] <url>
 
 Flags:
-  -X, --request METHOD   HTTP method (default GET, or POST when -d is given)
-  -H, --header  H:V      add a request header (repeatable)
-  -d, --data    BODY     request body ('@file' reads BODY from a file)
-  -i, --include          include upstream response headers in the output
-  -h, --help             show this help
+  -X, --request METHOD       HTTP method (default GET, or POST when -d is given)
+  -H, --header  H:V          add a request header (repeatable)
+  -d, --data    BODY         request body ('@file' reads BODY from a file)
+  -i, --include              include upstream response headers in the output
+      --token-header NAME    login-type 凭据 only: send the minted token as
+                             'NAME: <token>' (no prefix) for this request
+      --token-query NAME     login-type 凭据 only: send the minted token as
+                             '?NAME=<token>' for this request
+  -h, --help                 show this help
 
 The target <url> is the real service URL; auth is injected by the proxy based on
 the 凭据 (credential) configured for that URL. For login-type services the proxy
-mints a short-lived access_token from your stored credential automatically.
+mints a short-lived access_token from your stored credential automatically and
+injects it where the 凭据 says (default 'Authorization: Bearer <token>').
+
+--token-header / --token-query override that placement per request, for one
+login-type 凭据 that covers several systems expecting the token differently:
+  fetchurl --token-header Token https://rbox.example.com/api/orders
+  fetchurl --token-query access_token https://report.example.com/api/export
+They are rejected (HTTP 400) for static credentials, whose placement is fixed.
 
 Environment (set by moss-server):
   SUDOWORK_AUTH_PROXY_URL    base URL of the auth proxy
   SUDOWORK_AUTH_PROXY_TOKEN  per-session bearer token`
 
 type options struct {
-	method   string
-	headers  []string
-	body     string
-	hasBody  bool
-	include  bool
-	url      string
+	method  string
+	headers []string
+	body    string
+	hasBody bool
+	include bool
+	url     string
+	// Per-request placement of a minted token (login-type 凭据 only); at most
+	// one is set. Sent to the proxy as X-Token-Header / X-Token-Query.
+	tokenHeader string
+	tokenQuery  string
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -82,6 +98,20 @@ func parseArgs(args []string) (*options, error) {
 				return nil, fmt.Errorf("%s requires a value", a)
 			}
 			o.headers = append(o.headers, args[i+1])
+			i++
+		case a == "--token-header" || a == "--token-query":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s requires a value", a)
+			}
+			name := strings.TrimSpace(args[i+1])
+			if name == "" {
+				return nil, fmt.Errorf("%s requires a non-empty name", a)
+			}
+			if a == "--token-header" {
+				o.tokenHeader = name
+			} else {
+				o.tokenQuery = name
+			}
 			i++
 		case a == "-d" || a == "--data":
 			if i+1 >= len(args) {
@@ -110,6 +140,9 @@ func parseArgs(args []string) (*options, error) {
 	}
 	if o.url == "" {
 		return nil, fmt.Errorf("no URL given")
+	}
+	if o.tokenHeader != "" && o.tokenQuery != "" {
+		return nil, fmt.Errorf("--token-header and --token-query are mutually exclusive")
 	}
 	if o.method == "" {
 		if o.hasBody {
@@ -171,6 +204,13 @@ func run(args []string) int {
 			return 2
 		}
 		req.Header.Set(strings.TrimSpace(k), strings.TrimSpace(v))
+	}
+	// Set after -H so a user header can't clobber these proxy control headers.
+	if o.tokenHeader != "" {
+		req.Header.Set("X-Token-Header", o.tokenHeader)
+	}
+	if o.tokenQuery != "" {
+		req.Header.Set("X-Token-Query", o.tokenQuery)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

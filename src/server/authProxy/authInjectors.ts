@@ -30,6 +30,31 @@ export function injectAuth(params: InjectAuthParams): InjectAuthResult {
 /** Schemes a minted (login-type) token can be injected with. */
 export const MINTED_TOKEN_SCHEMES = ['bearer', 'header', 'query'] as const
 
+// RFC 9110 header field-name (token) characters.
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+const QUERY_PARAM_RE = /^[A-Za-z0-9_.~-]+$/
+// Headers the proxy itself controls; a minted token must not be placed there.
+const RESERVED_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding'])
+
+/**
+ * Validate the header / query-param name a minted token is placed under.
+ * Shared by the 凭据 API (admin-configured placement) and the auth proxy
+ * (per-request override from `fetchurl --token-header/--token-query`).
+ * Returns an error message, or null when valid.
+ */
+export function validateTokenParamName(kind: 'header' | 'query', raw: string | null | undefined): string | null {
+  const name = raw?.trim() ?? ''
+  if (kind === 'header') {
+    if (!name) return '请填写令牌注入的 Header 名称'
+    if (!HEADER_NAME_RE.test(name) || name.length > 128) return 'Header 名称格式不正确'
+    if (RESERVED_HEADERS.has(name.toLowerCase())) return `不能使用 ${name} 作为令牌 Header`
+    return null
+  }
+  if (!name) return '请填写令牌注入的 Query 参数名'
+  if (!QUERY_PARAM_RE.test(name) || name.length > 128) return 'Query 参数名格式不正确'
+  return null
+}
+
 /**
  * Inject a minted access_token per the login-type config item's placement:
  *   - 'header': `<tokenParam>: <token>` (e.g. `Token: xxx`)
