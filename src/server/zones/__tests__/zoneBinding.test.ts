@@ -663,6 +663,169 @@ describe('ZoneManagementService (§8.8 permissions & confirmations)', () => {
   })
 })
 
+describe('ZoneManagementService addBinding validation & zoneLifecycle outcomes', () => {
+  const ORG = 'eeeeeeee-0000-4000-8000-000000000001'
+
+  beforeEach(async () => {
+    await db.createOrganization(ORG, 'AddTest', Date.now())
+  })
+
+  function svcWith(client: unknown): ZoneManagementService {
+    return new ZoneManagementService({
+      driver: db.driver,
+      client: client as unknown as NexusZoneClient,
+      config: CONFIG,
+    })
+  }
+
+  function insertRow(zoneId: string, desiredState: 'bound' | 'detached'): void {
+    raw.prepare(
+      `INSERT INTO org_zone_bindings (
+         binding_id, org_id, nexus_deployment_id, zone_id, purpose, is_default,
+         desired_capabilities, desired_state, sync_status, generation, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'shared', 0, '[]', ?, 'detached', 1, ?, ?)`,
+    ).run(`binding-${zoneId}`, ORG, CONFIG.nexusDeploymentId, zoneId, desiredState, Date.now(), Date.now())
+  }
+
+  it('rejects addBinding for a nonexistent org', async () => {
+    const svc = svcWith(new FakeZoneClient())
+    await assert.rejects(
+      svc.addBinding({ orgId: 'eeeeeeee-0000-4000-8000-0000000000ff', zoneId: 'org-zonea', purpose: 'shared' }),
+      (error: unknown) => error instanceof ZoneManagementError && error.code === 'ORG_NOT_FOUND' && error.status === 404,
+    )
+  })
+
+  it('rejects addBinding with an invalid zone id', async () => {
+    const svc = svcWith(new FakeZoneClient())
+    for (const zoneId of ['-ab', 'AB', 'x'.repeat(64)]) {
+      await assert.rejects(
+        svc.addBinding({ orgId: ORG, zoneId, purpose: 'shared' }),
+        (error: unknown) => error instanceof ZoneManagementError && error.code === 'INVALID_ZONE_ID' && error.status === 400,
+      )
+    }
+  })
+
+  it('rejects duplicate addBinding with 409 and distinguishes detached history rows', async () => {
+    const svc = svcWith(new FakeZoneClient())
+    await svc.addBinding({ orgId: ORG, zoneId: 'org-zonea', purpose: 'shared' })
+    await assert.rejects(
+      svc.addBinding({ orgId: ORG, zoneId: 'org-zonea', purpose: 'shared' }),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.status === 409 && error.code === 'BINDING_ALREADY_EXISTS'
+        && error.message.includes('无需重复创建'),
+    )
+    insertRow('org-zoneb', 'detached')
+    await assert.rejects(
+      svc.addBinding({ orgId: ORG, zoneId: 'org-zoneb', purpose: 'shared' }),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.status === 409 && error.code === 'BINDING_ALREADY_EXISTS'
+        && error.message.includes('已解绑的历史绑定'),
+    )
+  })
+
+  it('creates a pending binding on the happy path', async () => {
+    const svc = svcWith(new FakeZoneClient())
+    const view = await svc.addBinding({ orgId: ORG, zoneId: 'org-zonec', purpose: 'office' })
+    assert.equal(view.zone_id, 'org-zonec')
+    assert.equal(view.purpose, 'office')
+    assert.equal(view.sync_status, 'pending')
+    assert.equal(view.desired_state, 'bound')
+  })
+
+  it('confirms via getZone when the primary call fails unknown but the operation already applied', async () => {
+    const client = {
+      async zoneLifecycle(): Promise<ZoneOperationRef> {
+        throw new NexusZoneUnknownError('simulated timeout')
+      },
+      async getZone() {
+        return { zone_id: 'org-zonea', display_name: 'z', status: 'suspended', revision: 'r1' }
+      },
+    }
+    const result = await svcWith(client).zoneLifecycle('org-zonea', 'suspend')
+    assert.ok('confirmed' in result)
+    assert.equal(result.confirmed, true)
+    assert.equal(result.zone_status, 'suspended')
+  })
+
+  it('reports NEXUS_OUTCOME_UNKNOWN with the network cause preserved when both calls fail', async () => {
+    const client = {
+      async zoneLifecycle(): Promise<ZoneOperationRef> {
+        throw new NexusZoneUnknownError('simulated timeout')
+      },
+      async getZone() {
+        throw new NexusZoneUnknownError('still unreachable')
+      },
+    }
+    await assert.rejects(
+      svcWith(client).zoneLifecycle('org-zonea', 'suspend'),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.code === 'NEXUS_OUTCOME_UNKNOWN' && error.status === 504
+        && (error as ZoneManagementError & { cause?: unknown }).cause instanceof NexusZoneUnknownError,
+    )
+  })
+
+  it('surfaces a Chinese message for ZONE_NOT_FOUND on the primary call', async () => {
+    const client = {
+      async zoneLifecycle(): Promise<ZoneOperationRef> {
+        throw new NexusZoneApiError('zone org-zonea not found', 'ZONE_NOT_FOUND', false, 404)
+      },
+    }
+    await assert.rejects(
+      svcWith(client).zoneLifecycle('org-zonea', 'suspend'),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.status === 404 && error.message.includes('尚未在 Nexus 创建完成'),
+    )
+  })
+
+  it('reports NOT_APPLIED when getZone answers with an unchanged status', async () => {
+    const client = {
+      async zoneLifecycle(): Promise<ZoneOperationRef> {
+        throw new NexusZoneUnknownError('simulated timeout')
+      },
+      async getZone() {
+        return { zone_id: 'org-zonea', display_name: 'z', status: 'active', revision: 'r1' }
+      },
+    }
+    await assert.rejects(
+      svcWith(client).zoneLifecycle('org-zonea', 'suspend'),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.code === 'NEXUS_LIFECYCLE_NOT_APPLIED' && error.status === 502
+        && error.message.includes('未生效'),
+    )
+  })
+
+  it('maps ZONE_NOT_ACTIVE (double suspend) to a Chinese 409', async () => {
+    const client = {
+      async zoneLifecycle(): Promise<ZoneOperationRef> {
+        throw new NexusZoneApiError("suspend requires ('active',), zone is suspended", 'ZONE_NOT_ACTIVE', false, 409)
+      },
+    }
+    await assert.rejects(
+      svcWith(client).zoneLifecycle('org-zonea', 'suspend'),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.status === 409 && error.code === 'ZONE_NOT_ACTIVE'
+        && error.message.includes('不支持此操作'),
+    )
+  })
+
+  it('reports NOT_APPLIED when the zone vanished during read convergence', async () => {
+    const client = {
+      async zoneLifecycle(): Promise<ZoneOperationRef> {
+        throw new NexusZoneUnknownError('simulated timeout')
+      },
+      async getZone() {
+        throw new NexusZoneApiError('zone org-zonea not found', 'ZONE_NOT_FOUND', false, 404)
+      },
+    }
+    await assert.rejects(
+      svcWith(client).zoneLifecycle('org-zonea', 'suspend'),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.code === 'NEXUS_LIFECYCLE_NOT_APPLIED' && error.status === 502
+        && error.message.includes('已不存在'),
+    )
+  })
+})
+
 describe('existing Org backfill (§10.4)', () => {
   it('requires a default binding, still reserves shared zones, and reports invalid org IDs', async () => {
     const sharedOnly = 'bbbbbbbb-0000-4000-8000-000000000003'

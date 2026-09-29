@@ -17,11 +17,12 @@
  */
 import { randomUUID } from 'crypto'
 import { ADMIN_ROLES } from '../../auth/roles.js'
-import type { DbDriver } from '../../db/driver.js'
+import { isUniqueViolation, type DbDriver } from '../../db/driver.js'
 import type { ZoneBindingConfig } from './config.js'
-import { NexusZoneApiError, NexusZoneClient, type ZoneOperationRef } from '../../nexus/nexusZoneClient.js'
+import { NexusZoneApiError, NexusZoneUnknownError, NexusZoneClient, type ZoneOperationRef } from '../../nexus/nexusZoneClient.js'
 import { insertDetachIntent, insertManagedBindingIntent, listBindingsByOrg } from './bindingRepository.js'
 import { rowToOrgZoneBinding } from './bindingWire.js'
+import { describeRefusal, validateZoneId } from '@sudo/contracts/zone-id'
 
 export class ZoneManagementError extends Error {
   constructor(
@@ -59,6 +60,13 @@ export interface BindingView {
   observed_grant_status?: string | null
   observed_grant_source?: string | null
   grant_expires_at?: string | null
+}
+
+/** zoneLifecycle 的读收敛确认结果：unknown 后经 getZone 判定操作已实际生效（无 operation 可引用）。 */
+export interface ZoneLifecycleConfirmed {
+  zone_id: string
+  zone_status: string
+  confirmed: true
 }
 
 function toView(row: Record<string, unknown>): BindingView {
@@ -220,6 +228,8 @@ export class ZoneManagementService {
   /**
    * 添加 binding（super admin）：一个 Org 多 Zone / 一个 Zone 多 Org（§8.7
    * 验收）。zone_id 由管理员指定（不做自动候选）；同 provision 收敛路径。
+   * 入口校验：org 存在性 + zone_id 契约格式（保留字归 Nexus daemon 拒绝）；
+   * 重复组合按 UNIQUE 约束捕获转 409（竞态安全，非预检）。
    */
   async addBinding(input: {
     orgId: string
@@ -227,14 +237,41 @@ export class ZoneManagementService {
     purpose: string
     isDefault?: boolean
   }): Promise<BindingView> {
-    const { bindingId } = await insertManagedBindingIntent(this.driver, {
-      orgId: input.orgId,
-      nexusDeploymentId: this.config.nexusDeploymentId,
-      zoneId: input.zoneId,
-      purpose: input.purpose,
-      isDefault: input.isDefault ?? false,
-      now: Date.now(),
-    })
+    const org = await this.driver.get(
+      `SELECT id FROM organizations WHERE id = ? LIMIT 1`,
+      [input.orgId],
+    )
+    if (!org) throw new ZoneManagementError(`组织不存在：${input.orgId}`, 'ORG_NOT_FOUND', 404)
+    const refusal = validateZoneId(input.zoneId)
+    if (refusal) throw new ZoneManagementError(`zone_id 不合法：${describeRefusal(refusal)}`, 'INVALID_ZONE_ID', 400)
+    let bindingId: string
+    try {
+      ;({ bindingId } = await insertManagedBindingIntent(this.driver, {
+        orgId: input.orgId,
+        nexusDeploymentId: this.config.nexusDeploymentId,
+        zoneId: input.zoneId,
+        purpose: input.purpose,
+        isDefault: input.isDefault ?? false,
+        now: Date.now(),
+      }))
+    } catch (err) {
+      // 表级 4 列 UNIQUE 是本入口唯一可能冲突源（partial unique 仅约束
+      // is_default=1 的行，而本入口 isDefault 恒为 false）。
+      if (isUniqueViolation(err)) {
+        // 冲突行可能是已解绑（detached）的历史行：UNIQUE 不含 desired_state，
+        // detach 只 UPDATE 不删行——文案必须与事实一致。
+        const existing = await this.driver.get(
+          `SELECT desired_state FROM org_zone_bindings
+           WHERE org_id = ? AND nexus_deployment_id = ? AND zone_id = ? AND purpose = ? LIMIT 1`,
+          [input.orgId, this.config.nexusDeploymentId, input.zoneId, input.purpose],
+        )
+        if (existing && String(existing.desired_state) === 'detached') {
+          throw new ZoneManagementError('该组合存在已解绑的历史绑定行，需先处理该历史行（当前 schema 不支持同组合重绑）', 'BINDING_ALREADY_EXISTS', 409)
+        }
+        throw new ZoneManagementError('该绑定已存在（同组织 + Zone + 用途），无需重复创建', 'BINDING_ALREADY_EXISTS', 409)
+      }
+      throw err
+    }
     const row = await this.driver.get(
       `SELECT * FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
       [bindingId],
@@ -242,12 +279,48 @@ export class ZoneManagementService {
     return toView(row as Record<string, unknown>)
   }
 
-  /** suspend/resume（super admin）：转发 Nexus，返回 operation。 */
+  /** suspend/resume（super admin）：转发 Nexus，返回 operation；unknown 时读收敛判定。 */
   async zoneLifecycle(
     zoneId: string,
     action: 'suspend' | 'resume',
-  ): Promise<ZoneOperationRef> {
-    return this.requireClient().zoneLifecycle(zoneId, action, `moss-admin:${zoneId}:${action}:${Date.now()}:${randomUUID()}`)
+  ): Promise<ZoneOperationRef | ZoneLifecycleConfirmed> {
+    try {
+      return await this.requireClient().zoneLifecycle(zoneId, action, `moss-admin:${zoneId}:${action}:${Date.now()}:${randomUUID()}`)
+    } catch (error) {
+      // zone 不存在（本地环境收敛前的高频路径）→ 明确中文提示
+      if (error instanceof NexusZoneApiError && error.status === 404) {
+        throw new ZoneManagementError('该 Zone 尚未在 Nexus 创建完成（或已被删除），请先在列表刷新对账确认绑定状态', error.code, 404)
+      }
+      // 重复挂起/恢复（最高频误操作）→ 中文特化
+      if (error instanceof NexusZoneApiError && error.code === 'ZONE_NOT_ACTIVE') {
+        throw new ZoneManagementError('该 Zone 当前状态不支持此操作（如重复挂起或恢复已挂起的 Zone），请刷新对账确认状态', error.code, error.status || 409)
+      }
+      if (error instanceof NexusZoneUnknownError) {
+        try {
+          const zone = await this.requireClient().getZone(zoneId)
+          if (zone.status === (action === 'suspend' ? 'suspended' : 'active')) {
+            return { zone_id: zoneId, zone_status: zone.status, confirmed: true }
+          }
+          // getZone 成功且状态未达预期 = 操作确定未生效、Nexus 可达
+          throw new ZoneManagementError(
+            `操作未生效（Nexus 可达，当前 Zone 状态：${zone.status}），可重试 ${action}`,
+            'NEXUS_LIFECYCLE_NOT_APPLIED', 502)
+        } catch (e) {
+          if (e instanceof ZoneManagementError) throw e
+          if (e instanceof NexusZoneApiError && e.status === 404) {
+            // 读收敛时 zone 已不存在（如并发 deprovision）：Nexus 明确应答，操作可判定未生效
+            throw new ZoneManagementError('该 Zone 已不存在（可能已被删除），操作未生效', 'NEXUS_LIFECYCLE_NOT_APPLIED', 502)
+          }
+          // getZone 亦失败（不可达）→ 维持 unknown 语义
+          const err = new ZoneManagementError(
+            'Nexus 未响应（超时或不可达），操作效果未知——可能已生效，请稍后在列表刷新对账确认 Zone 状态',
+            'NEXUS_OUTCOME_UNKNOWN', 504)
+          err.cause = error
+          throw err
+        }
+      }
+      return this.mapNexusZoneError(error)
+    }
   }
 
   /**
