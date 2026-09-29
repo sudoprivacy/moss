@@ -78,7 +78,14 @@ export function getZoneOperation(operationId: string): Promise<ZoneOperation> {
   return dcClient.get(`/api/v1/zones/operations/${operationId}`)
 }
 
-export function zoneLifecycle(zoneId: string, action: 'suspend' | 'resume'): Promise<ZoneOperation> {
+/** zoneLifecycle 的读收敛确认结果：unknown 后后端经 getZone 判定操作已实际生效（无 operation 可引用）。 */
+export interface ZoneLifecycleConfirmed {
+  zone_id: string
+  zone_status: string
+  confirmed: true
+}
+
+export function zoneLifecycle(zoneId: string, action: 'suspend' | 'resume'): Promise<ZoneOperation | ZoneLifecycleConfirmed> {
   return dcClient.post(`/api/v1/zones/${zoneId}:${action}`)
 }
 

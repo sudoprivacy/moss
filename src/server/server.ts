@@ -3092,6 +3092,17 @@ export function startServer(
         try {
           writeJson(res, 202, await zoneManagement.zoneLifecycle(zoneLifecycleMatch[1], zoneLifecycleMatch[2] as 'suspend' | 'resume'))
         } catch (error) {
+          // NEXUS_OUTCOME_UNKNOWN 携带两层 cause（NexusZoneUnknownError → 网络层原因），
+          // 而 HttpError 分支不写日志——在转换前以"有 cause 才记"为条件落日志。
+          const cause = (error as { cause?: unknown }).cause
+          if (cause !== undefined) {
+            const inner = cause instanceof Error ? cause.cause : undefined
+            const causeMsg = cause instanceof Error ? cause.message : String(cause)
+            const rootMsg = inner instanceof Error
+              ? `${inner.name}: ${inner.message}`
+              : inner !== undefined ? String(inner) : 'n/a'
+            logger.error(`zones ${zoneLifecycleMatch[2]} ${zoneLifecycleMatch[1]} outcome unknown | cause=${causeMsg} | rootCause=${rootMsg}`)
+          }
           if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
           throw error
         }

@@ -24,13 +24,18 @@ import {
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
-import { getMe } from '@/lib/api/auth'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { getMe, getOrganizations } from '@/lib/api/auth'
+import type { AuthOrgWithCounts } from '@/lib/api/types'
 import {
   addZoneBinding, deprovisionZone, detachZoneBinding, getZoneOperation,
   listAvailableZones, listZoneBindings, refreshZoneBinding, zoneLifecycle,
-  type ZoneBinding, type ZoneOperation,
+  type ZoneBinding, type ZoneLifecycleConfirmed, type ZoneOperation,
 } from '@/lib/api/zones'
-import { RefreshCw, Unlink, Loader2, ShieldAlert, PauseCircle, PlayCircle, Search, Plus } from 'lucide-react'
+import { RefreshCw, Unlink, Loader2, ShieldAlert, PauseCircle, PlayCircle, Search, Plus, HelpCircle } from 'lucide-react'
 import { toast } from 'sonner'
 
 type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'outline'
@@ -44,6 +49,26 @@ function syncBadge(status: string): BadgeVariant {
   if (status === 'active') return 'default'
   if (status === 'unknown' || status === 'sync_failed') return 'destructive'
   return 'secondary'
+}
+
+/** purpose 已注册值（契约 x-known-values 的开放注册表，前端为封闭下拉——契约注册新值时需同步）。 */
+const PURPOSE_OPTIONS: Array<{ value: string; tip: string }> = [
+  { value: 'default', tip: '组织默认主 Zone：每组织唯一，用户会话默认落地于此' },
+  { value: 'office', tip: '办公数据域 Zone（预留标签）：对应 Zone 部署属性 data_domain=office，当前无特殊行为' },
+  { value: 'core', tip: '核心数据域 Zone（预留标签）：对应 data_domain=core，当前无特殊行为' },
+  { value: 'shared', tip: '多组织共享 Zone：用于一个 Zone 绑定多个组织的场景' },
+]
+
+/** zones 路由的错误经 HttpError(JSON.stringify({code,message})) 通道透传，前端需解包取 message。 */
+function zoneErrMsg(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  if (raw.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw) as { message?: string }
+      if (parsed.message) return parsed.message
+    } catch { /* 回退原文 */ }
+  }
+  return raw
 }
 
 export default function ZonesPage() {
@@ -62,15 +87,18 @@ export default function ZonesPage() {
   const [addOrgId, setAddOrgId] = useState('')
   const [addZoneId, setAddZoneId] = useState('')
   const [addPurpose, setAddPurpose] = useState('shared')
+  const [addZoneNew, setAddZoneNew] = useState(false)
+  const [organizations, setOrganizations] = useState<AuthOrgWithCounts[]>([])
+  const [orgsLoadState, setOrgsLoadState] = useState<'loading' | 'ready' | 'failed'>('loading')
 
   const onAddBinding = async () => {
     try {
       const created = await addZoneBinding({ org_id: addOrgId.trim(), zone_id: addZoneId.trim(), purpose: addPurpose })
       toast.success(`绑定已创建（pending，异步收敛）：${created.zone_id}`)
-      setAddOpen(false); setAddOrgId(''); setAddZoneId(''); setAddPurpose('shared')
+      setAddOpen(false); setAddOrgId(''); setAddZoneId(''); setAddPurpose('shared'); setAddZoneNew(false)
       await reload()
     } catch (error) {
-      toast.error(`创建失败：${error instanceof Error ? error.message : String(error)}`)
+      toast.error(`创建失败：${zoneErrMsg(error)}`)
     }
   }
 
@@ -80,6 +108,18 @@ export default function ZonesPage() {
       const [me, zones] = await Promise.all([getMe(), listAvailableZones().catch(() => ({ zones: [] }))])
       setRole(me.user?.role ?? '')
       setAvailableZones(zones.zones)
+      // 组织列表仅供 super_admin 的添加绑定弹窗使用（接口 requireSuperAdmin）；
+      // 用 getMe() 的局部返回值判断（role state 在本闭包内是旧值）。
+      if (me.user?.role === 'super_admin') {
+        try {
+          const orgs = await getOrganizations()
+          setOrganizations(orgs.organizations)
+          setOrgsLoadState('ready')
+        } catch {
+          setOrgsLoadState('failed')
+          toast.error('组织列表加载失败，org 选择已降级为手输')
+        }
+      }
       // 普通用户无 binding 列表权限（403）——只展示可用 Zone
       try {
         const list = await listZoneBindings()
@@ -101,7 +141,7 @@ export default function ZonesPage() {
       setBindings((prev) => prev.map((b) => (b.binding_id === updated.binding_id ? updated : b)))
       toast.success(`对账完成：${updated.zone_id} → ${updated.sync_status}`)
     } catch (error) {
-      toast.error(`对账失败：${error instanceof Error ? error.message : String(error)}`)
+      toast.error(`对账失败：${zoneErrMsg(error)}`)
     } finally {
       setRefreshing(null)
     }
@@ -115,7 +155,7 @@ export default function ZonesPage() {
       setDetachTarget(null)
       await reload()
     } catch (error) {
-      toast.error(`解绑失败：${error instanceof Error ? error.message : String(error)}`)
+      toast.error(`解绑失败：${zoneErrMsg(error)}`)
     }
   }
 
@@ -128,17 +168,41 @@ export default function ZonesPage() {
       setConfirmInput('')
       setOperation(op)
     } catch (error) {
-      toast.error(`deprovision 失败：${error instanceof Error ? error.message : String(error)}`)
+      toast.error(`deprovision 失败：${zoneErrMsg(error)}`)
     }
+  }
+
+  /** 静默对账：只更新行数据（observed_zone_status 上屏），不弹逐行 toast（避免与"已生效"语义矛盾的噪声）。 */
+  const silentReconcile = async (zoneId: string) => {
+    const rows = bindings.filter(b => b.zone_id === zoneId)
+    let failed = false
+    for (const row of rows) {
+      try {
+        const updated = await refreshZoneBinding(row.binding_id)
+        setBindings((prev) => prev.map((b) => (b.binding_id === updated.binding_id ? updated : b)))
+      } catch { failed = true }
+    }
+    if (failed) toast.error('部分行自动对账失败，可手动点击行首刷新')
   }
 
   const onLifecycle = async (zoneId: string, action: 'suspend' | 'resume') => {
     try {
-      const op = await zoneLifecycle(zoneId, action)
-      toast.success(`${action} 已受理（operation ${op.operation_id}）`)
-      setOperation(op)
+      const result = await zoneLifecycle(zoneId, action)
+      if ('operation_id' in result) {
+        setOperation(result)
+        if (result.state === 'succeeded') {
+          // Nexus lifecycle 同步执行：收到 succeeded 即已生效 → 自动对账该 Zone 的全部绑定行
+          toast.success(`${action} 已生效（operation ${result.operation_id}）`)
+          await silentReconcile(zoneId)
+        } else {
+          toast.success(`${action} 已受理（operation ${result.operation_id}，可用下方操作面板跟踪）`)
+        }
+      } else {  // ZoneLifecycleConfirmed：unknown 后读收敛确认已生效
+        toast.success(`${action} 已生效（zone 状态：${result.zone_status}）`)
+        await silentReconcile(zoneId)
+      }
     } catch (error) {
-      toast.error(`${action} 失败：${error instanceof Error ? error.message : String(error)}`)
+      toast.error(`${action} 失败：${zoneErrMsg(error)}`)
     }
   }
 
@@ -149,11 +213,22 @@ export default function ZonesPage() {
     try {
       setOperation(await getZoneOperation(id))
     } catch (error) {
-      toast.error(`查询失败：${error instanceof Error ? error.message : String(error)}`)
+      toast.error(`查询失败：${zoneErrMsg(error)}`)
     } finally {
       setOperationLoading(false)
     }
   }
+
+  // 添加绑定弹窗的即时预检（只把活动绑定算重复：detach 后的行仍出现在列表，但语义不同）
+  const zoneCandidates = [...new Set(bindings.map(b => b.zone_id))]
+  const trimmedOrg = addOrgId.trim()
+  const trimmedZone = addZoneId.trim()
+  const duplicate = bindings.find(b => b.org_id === trimmedOrg && b.zone_id === trimmedZone
+    && b.purpose === addPurpose && b.desired_state === 'bound')
+  const detachedSameCombo = bindings.find(b => b.org_id === trimmedOrg && b.zone_id === trimmedZone
+    && b.purpose === addPurpose && b.desired_state !== 'bound')
+  const sameOrgZone = bindings.find(b => b.org_id === trimmedOrg && b.zone_id === trimmedZone
+    && b.purpose !== addPurpose && b.desired_state === 'bound')
 
   return (
     <DashboardLayout title="Zone 管理" description="Zone、绑定、授权与操作的管理与故障恢复">
@@ -293,23 +368,98 @@ export default function ZonesPage() {
         </div>
       )}
 
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setAddZoneNew(false) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>添加组织绑定</DialogTitle>
             <DialogDescription>
-              将一个已存在的 Zone 绑定到组织（一个 Org 多 Zone / 一个 Zone 多 Org 均合法）。
-              Zone 需已在 Nexus 侧存在；绑定异步收敛（grant 由 Moss 侧派生）。
+              将 Zone 绑定到组织（一个 Org 多 Zone / 一个 Zone 多 Org 均合法）。
+              选择现有 Zone，或输入新 Zone ID（新 Zone 将由绑定异步创建）；绑定异步收敛（grant 由 Moss 侧派生）。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Input placeholder="org_id" value={addOrgId} onChange={(e) => setAddOrgId(e.target.value)} className="font-mono" />
-            <Input placeholder="zone_id（不可变身份）" value={addZoneId} onChange={(e) => setAddZoneId(e.target.value)} className="font-mono" />
-            <Input placeholder="purpose（shared/office/core/…）" value={addPurpose} onChange={(e) => setAddPurpose(e.target.value)} />
+          <div className="space-y-3">
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">org_id（组织）</div>
+              {orgsLoadState === 'ready' && organizations.length > 0 ? (
+                <Select value={addOrgId} onValueChange={setAddOrgId}>
+                  <SelectTrigger><SelectValue placeholder="选择组织" /></SelectTrigger>
+                  <SelectContent>
+                    {organizations.map(o => <SelectItem key={o.id} value={o.id}>{o.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              ) : orgsLoadState === 'loading' ? (
+                <Select disabled>
+                  <SelectTrigger><SelectValue placeholder="组织加载中…" /></SelectTrigger>
+                  <SelectContent />
+                </Select>
+              ) : (
+                <Input
+                  placeholder="org_id（组织列表加载失败或为空，请手输）"
+                  value={addOrgId} onChange={(e) => setAddOrgId(e.target.value)}
+                  className="font-mono"
+                />
+              )}
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">zone_id（不可变身份）</div>
+              {addZoneNew ? (
+                <div className="flex items-center gap-2">
+                  <Input
+                    placeholder="新 zone_id（3-63 位小写字母数字与连字符）"
+                    value={addZoneId} onChange={(e) => setAddZoneId(e.target.value)}
+                    className="font-mono"
+                  />
+                  <Button variant="outline" size="sm" onClick={() => { setAddZoneNew(false); setAddZoneId('') }}>
+                    从现有选择
+                  </Button>
+                </div>
+              ) : (
+                <Select
+                  value={addZoneId}
+                  onValueChange={(v) => {
+                    if (v === '__new__') { setAddZoneNew(true); setAddZoneId('') } else setAddZoneId(v)
+                  }}
+                >
+                  <SelectTrigger><SelectValue placeholder="选择 Zone" /></SelectTrigger>
+                  <SelectContent>
+                    {zoneCandidates.map(z => <SelectItem key={z} value={z} className="font-mono">{z}</SelectItem>)}
+                    <SelectItem value="__new__">输入新 Zone ID…</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            <div>
+              <div className="mb-1 flex items-center gap-1">
+                <span className="text-xs text-muted-foreground">purpose（用途）</span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <HelpCircle className="size-3.5 cursor-help text-muted-foreground" />
+                  </TooltipTrigger>
+                  <TooltipContent className="w-96">
+                    <div className="space-y-1 text-xs">
+                      {PURPOSE_OPTIONS.map(o => (
+                        <div key={o.value}>
+                          <span className="font-mono font-semibold">{o.value}</span>：{o.tip}
+                        </div>
+                      ))}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+              <Select value={addPurpose} onValueChange={setAddPurpose}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PURPOSE_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.value}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            {duplicate ? <p className="text-xs text-destructive">该绑定已存在（用途：{duplicate.purpose}）</p> : null}
+            {detachedSameCombo ? <p className="text-xs text-yellow-600">该组合存在已解绑的历史绑定（后端将拒绝重复创建）</p> : null}
+            {!duplicate && sameOrgZone ? <p className="text-xs text-yellow-600">该组织已绑定此 Zone（用途：{sameOrgZone.purpose}），将以新用途追加绑定</p> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)}>取消</Button>
-            <Button disabled={!addOrgId.trim() || !addZoneId.trim()} onClick={() => void onAddBinding()}>创建</Button>
+            <Button disabled={!addOrgId.trim() || !addZoneId.trim() || duplicate !== undefined} onClick={() => void onAddBinding()}>创建</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
