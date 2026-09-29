@@ -94,6 +94,8 @@ export interface InstalledAgentInfo {
   visibleTo: VisibleTo | null
   /** Creator of a custom agent; null for hub/system/tenant agents. */
   ownerId?: string | null
+  /** Manage view only: whether the caller may use it (false = see-only). */
+  usable?: boolean
   workflow: InstalledAgentMeta['workflow']
 }
 
@@ -152,8 +154,15 @@ export function getAgentHubDetail(
   )
 }
 
-export function getInstalledAgents(): Promise<InstalledAgentInfo[]> {
-  return authClient.get<InstalledAgentInfo[]>('/api/v1/agents/installed')
+/**
+ * Installed agents. Default: the ones the caller may USE (pickers). `manage`:
+ * everything the caller may see — for an admin that includes other users'
+ * custom agents they can't use unless the creator permits.
+ */
+export function getInstalledAgents(view?: 'manage'): Promise<InstalledAgentInfo[]> {
+  return authClient.get<InstalledAgentInfo[]>(
+    view === 'manage' ? '/api/v1/agents/installed?view=manage' : '/api/v1/agents/installed',
+  )
 }
 
 export function installAgent(

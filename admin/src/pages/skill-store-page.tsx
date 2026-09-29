@@ -451,6 +451,12 @@ function InstalledSkillCard({
               可更新
             </Badge>
           ) : null}
+          {/* Visible here but the creator hasn't opened it to this viewer. */}
+          {skill.usable === false ? (
+            <Badge variant="outline" className="text-[11px]">
+              仅可查看（创建者未开放使用）
+            </Badge>
+          ) : null}
         </div>
         <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
           {skill.description || '暂无描述'}
@@ -827,7 +833,7 @@ export default function SkillStorePage() {
   const fetchInstalledList = useCallback(async () => {
     setInstalledLoading(true)
     try {
-      const response = await getInstalledSkills()
+      const response = await getInstalledSkills('manage')
       setInstalledList(response)
     } catch (error) {
       toast.error(
@@ -911,7 +917,7 @@ export default function SkillStorePage() {
       await Promise.allSettled([
         getStoreConfig(),
         getSkillHubCategories(),
-        getInstalledSkills(),
+        getInstalledSkills('manage'),
         getTenantSkills(),
       ])
 

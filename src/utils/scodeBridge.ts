@@ -18,7 +18,7 @@ import {
   ASSISTANT_META_FILE,
 } from '../server/agentStore.js'
 import type { VisibilityFilterContext } from '../server/sessionManager.js'
-import { customItemOwnerId } from '../server/visibilityFilter.js'
+import { customItemOwnerId, isUsableBy, type VisibleTo } from '../server/visibilityFilter.js'
 import { buildDraftsInstruction } from '../server/draftsCleanup.js'
 
 // ============================================================================
@@ -186,11 +186,8 @@ function isSkillVisibleToSync(skillDir: string, filter: VisibilityFilterContext 
   // 如果没有提供过滤上下文，默认可见（向后兼容）
   if (!filter) return true
 
-  // 管理员始终可见
-  if (filter.isAdmin) return true
-
   const metaPath = path.join(skillDir, SKILL_HUB_META_FILE)
-  let meta: { source_type?: unknown; author_id?: unknown; visible_to?: { department_ids?: string[] | null; user_ids?: string[] | null } | null } | null = null
+  let meta: { source_type?: unknown; author_id?: unknown; visible_to?: VisibleTo } | null = null
   try {
     const content = readFileSync(metaPath, 'utf8')
     meta = JSON.parse(content)
@@ -198,42 +195,11 @@ function isSkillVisibleToSync(skillDir: string, filter: VisibilityFilterContext 
     return true // 无法读取 meta，默认可见
   }
 
-  // 自定义技能的创建者始终可见（不受其设置的可见范围影响）
-  if (customItemOwnerId(meta) === filter.userId) return true
-
-  const visibleTo = meta?.visible_to
-
-  // visible_to 为 null 或 undefined → 所有人可见
-  if (!visibleTo) return true
-
-  // 检查用户白名单
-  const userIds = visibleTo.user_ids
-  if (userIds !== null && userIds !== undefined) {
-    if (userIds.length === 0) {
-      // 空数组表示仅管理员可见
-      return false
-    }
-    if (userIds.includes(filter.userId)) {
-      return true
-    }
-  }
-
-  // 检查部门白名单
-  const departmentIds = visibleTo.department_ids
-  if (departmentIds !== null && departmentIds !== undefined) {
-    if (departmentIds.length === 0) {
-      // 空数组表示仅管理员可见
-      return false
-    }
-    if (!filter.departmentId) {
-      return false
-    }
-    for (const deptId of filter.visibleDepartmentIds ?? new Set()) {
-      if (departmentIds.includes(deptId)) return true
-    }
-  }
-
-  return false
+  // 自定义技能：创建者始终可用；其他人（含管理员）须在创建者设置的可见范围内。
+  // 其余技能沿用可见性规则（管理员始终可见）。
+  const ownerId = customItemOwnerId(meta)
+  if (ownerId === filter.userId) return true
+  return isUsableBy(meta?.visible_to, ownerId, filter)
 }
 
 // ============================================================================

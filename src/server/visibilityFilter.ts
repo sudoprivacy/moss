@@ -11,6 +11,12 @@ export type VisibilityFilter = {
   userId: string
   departmentId: string | null
   visibleDepartmentIds: Set<string> | null
+  /**
+   * Admins only: their own department chain, i.e. how they'd be evaluated as
+   * a regular member. Used where admin rights don't apply — using someone
+   * else's custom skill/agent (see isUsableBy).
+   */
+  member?: { departmentId: string | null; visibleDepartmentIds: Set<string> }
 }
 
 export function isVisibleTo(
@@ -51,6 +57,27 @@ export function isVisibleTo(
   }
 
   return false
+}
+
+/**
+ * Whether the viewer may USE an item — pick it for a chat, load it into a
+ * session, sync or download it — as opposed to seeing it in the admin UI.
+ * Same as isVisibleTo, except for custom items (ownerId set): the scope their
+ * creator chose binds admins too, so an admin can see them in the admin UI but
+ * only use them when the creator's scope includes them.
+ */
+export function isUsableBy(
+  visibleTo: VisibleTo | null | undefined,
+  ownerId: string | null | undefined,
+  filter: VisibilityFilter,
+): boolean {
+  if (!ownerId || !filter.isAdmin) return isVisibleTo(visibleTo, filter)
+  return isVisibleTo(visibleTo, {
+    isAdmin: false,
+    userId: filter.userId,
+    departmentId: filter.member?.departmentId ?? null,
+    visibleDepartmentIds: filter.member?.visibleDepartmentIds ?? new Set(),
+  })
 }
 
 /**
@@ -98,10 +125,6 @@ export function buildVisibilityFilter(
     auth.role === 'admin' ||
     auth.role === 'super_admin' ||
     hasScope(auth.scopes, '*')
-  if (isAdmin) {
-    return { isAdmin: true, userId: auth.userId, departmentId: null, visibleDepartmentIds: null }
-  }
-
   const user = getUserByIdAndOrg(auth.userId, auth.orgId)
   const departmentId = user?.departmentId ?? null
   const visibleDepartmentIds = getUserAncestorIds(
@@ -110,6 +133,15 @@ export function buildVisibilityFilter(
     getUserByIdAndOrg,
     listDepartmentsByOrg,
   )
+  if (isAdmin) {
+    return {
+      isAdmin: true,
+      userId: auth.userId,
+      departmentId: null,
+      visibleDepartmentIds: null,
+      member: { departmentId, visibleDepartmentIds },
+    }
+  }
 
   return { isAdmin: false, userId: auth.userId, departmentId, visibleDepartmentIds }
 }

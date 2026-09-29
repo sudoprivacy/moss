@@ -27,6 +27,7 @@ import type {
   SessionSummary,
 } from './types.js'
 import type { VisibilityFilterContext } from './sessionManager.js'
+import { customItemOwnerId, isUsableBy } from './visibilityFilter.js'
 import {
   getAttachPath,
   getAttemptDir,
@@ -362,6 +363,17 @@ export class ServerDrainingError extends Error {
  * Error they collapsed into one 500, which reads to the caller as "moss is
  * broken" for what is in fact "you are out of budget".
  */
+/**
+ * The session's user may not use the requested custom agent: its creator's
+ * visibility scope doesn't include them (admins included). Mapped to 403.
+ */
+export class AgentNotUsableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'AgentNotUsableError'
+  }
+}
+
 export class TokenQuotaExceededError extends Error {
   constructor(message: string) {
     super(message)
@@ -1254,6 +1266,52 @@ export class RuntimeService {
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
     const effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+
+    // Visibility filter context for agent/skill access checks.
+    let visibilityFilter: VisibilityFilterContext | null = null
+    if (session.userId) {
+      const isAdmin =
+        session.role === 'admin' ||
+        session.role === 'super_admin' ||
+        hasScope(session.scopes, '*')
+      const user = this.authService.getUserOrNull(session.userId, session.orgId)
+      const departmentId = user?.departmentId ?? null
+      if (isAdmin) {
+        // Admins see everything, but using someone else's custom skill/agent
+        // follows its creator's scope — evaluated against the admin's own
+        // department chain (`member`).
+        visibilityFilter = {
+          isAdmin: true,
+          userId: session.userId,
+          departmentId: null,
+          visibleDepartmentIds: null,
+          member: {
+            departmentId,
+            visibleDepartmentIds: new Set(this.authService.getDepartmentAncestorChain(session.orgId, departmentId)),
+          },
+        }
+      } else {
+        const visibleDepartmentIds =
+          this.authService.getUserDepartmentAncestorIds(
+            session.userId,
+            session.orgId,
+          ) ?? new Set()
+        visibilityFilter = { isAdmin: false, userId: session.userId, departmentId, visibleDepartmentIds }
+      }
+    }
+
+    // Using a custom agent follows the scope its creator chose, admins
+    // included. Checked here, the choke point every entry (chat, IM, cron,
+    // triggers, resume) passes through, before its rules reach the workspace.
+    if (effectiveAssistantName && visibilityFilter) {
+      const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
+      const found = await findAssistantDir(effectiveAssistantName)
+      const meta = found ? await readAssistantMeta(found.dir) : null
+      const ownerId = customItemOwnerId(meta)
+      if (ownerId && ownerId !== session.userId && !isUsableBy(meta?.visible_to, ownerId, visibilityFilter)) {
+        throw new AgentNotUsableError('无权使用该自定义智能体（创建者未向你开放）')
+      }
+    }
     let assistantDisplayName = options.assistantDisplayName
     if (!assistantDisplayName && effectiveAssistantName) {
       try {
@@ -1477,27 +1535,6 @@ export class RuntimeService {
       }
     }
 
-    // Build visibility filter context for skill filtering
-    let visibilityFilter: VisibilityFilterContext | null = null
-    if (session.userId) {
-      const isAdmin =
-        session.role === 'admin' ||
-        session.role === 'super_admin' ||
-        hasScope(session.scopes, '*')
-      if (isAdmin) {
-        visibilityFilter = { isAdmin: true, userId: session.userId, departmentId: null, visibleDepartmentIds: null }
-      } else {
-        const user = this.authService.getUserOrNull(session.userId, session.orgId)
-        const departmentId = user?.departmentId ?? null
-        const visibleDepartmentIds =
-          this.authService.getUserDepartmentAncestorIds(
-            session.userId,
-            session.orgId,
-          ) ?? new Set()
-        visibilityFilter = { isAdmin: false, userId: session.userId, departmentId, visibleDepartmentIds }
-      }
-    }
-
     // Resolve the user's visible MCP servers into scode settings.json shape.
     // Done here (main process) because secret resolution needs nexusClient,
     // which the detached runner can't reach; result travels via manifest.
@@ -1630,6 +1667,14 @@ export class RuntimeService {
           userId: visibilityFilter.userId,
           departmentId: visibilityFilter.departmentId,
           visibleDepartmentIds: visibilityFilter.visibleDepartmentIds ? Array.from(visibilityFilter.visibleDepartmentIds) : null,
+          ...(visibilityFilter.member
+            ? {
+                member: {
+                  departmentId: visibilityFilter.member.departmentId,
+                  visibleDepartmentIds: Array.from(visibilityFilter.member.visibleDepartmentIds),
+                },
+              }
+            : {}),
         } : null,
         ...(mcpSettings ? { mcpSettings } : {}),
         runtime: {

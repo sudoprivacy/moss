@@ -859,6 +859,8 @@ export type RunnerManifest = {
       userId: string
       departmentId: string | null
       visibleDepartmentIds: string[] | null // Set 序列化为数组
+      /** 仅管理员：其自身部门链（用于自定义技能/智能体的使用权判断） */
+      member?: { departmentId: string | null; visibleDepartmentIds: string[] }
     } | null
     /**
      * 用户可见 MCP 服务的 scode settings.json 内容（主进程解析后下发）。

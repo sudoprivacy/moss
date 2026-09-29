@@ -81,6 +81,8 @@ export interface InstalledSkillInfo {
   visibleTo: VisibleTo | null
   /** Creator of a custom skill; null for hub/system/tenant/upload skills. */
   ownerId?: string | null
+  /** Manage view only: whether the caller may use it (false = see-only). */
+  usable?: boolean
 }
 
 export interface InstallSkillRequest {
@@ -137,8 +139,15 @@ export function getSkillHubDetail(skillId: string): Promise<SkillHubDetail | nul
   )
 }
 
-export function getInstalledSkills(): Promise<InstalledSkillInfo[]> {
-  return authClient.get<InstalledSkillInfo[]>('/api/v1/skills/installed')
+/**
+ * Installed skills. Default: the ones the caller may USE (pickers). `manage`:
+ * everything the caller may see — for an admin that includes other users'
+ * custom skills they can't use unless the creator permits.
+ */
+export function getInstalledSkills(view?: 'manage'): Promise<InstalledSkillInfo[]> {
+  return authClient.get<InstalledSkillInfo[]>(
+    view === 'manage' ? '/api/v1/skills/installed?view=manage' : '/api/v1/skills/installed',
+  )
 }
 
 export function installSkill(

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
   customItemOwnerId,
+  isUsableBy,
   isVisibleTo,
   withOwnerVisibility,
   type VisibilityFilter,
@@ -71,5 +72,45 @@ describe('withOwnerVisibility', () => {
   it('is a no-op without an owner', () => {
     const scope = { department_ids: ['d1'], user_ids: null }
     expect(withOwnerVisibility(scope, null)).toEqual(scope)
+  })
+})
+
+describe('isUsableBy', () => {
+  const admin = (departmentIds: string[] = []): VisibilityFilter => ({
+    isAdmin: true,
+    userId: 'admin-1',
+    departmentId: null,
+    visibleDepartmentIds: null,
+    member: { departmentId: departmentIds[0] ?? null, visibleDepartmentIds: new Set(departmentIds) },
+  })
+  const selfOnly = withOwnerVisibility({ department_ids: null, user_ids: [OWNER] }, OWNER)
+
+  it('admin can see but not use a custom item scoped to its creator', () => {
+    expect(isVisibleTo(selfOnly, admin())).toBe(true)
+    expect(isUsableBy(selfOnly, OWNER, admin())).toBe(false)
+  })
+
+  it('admin can use a custom item once the creator opens it to everyone', () => {
+    expect(isUsableBy(null, OWNER, admin())).toBe(true)
+  })
+
+  it('admin is evaluated by their own department for a department scope', () => {
+    const scope = withOwnerVisibility({ department_ids: ['d1'], user_ids: null }, OWNER)
+    expect(isUsableBy(scope, OWNER, admin(['d1', 'root']))).toBe(true)
+    expect(isUsableBy(scope, OWNER, admin(['d2']))).toBe(false)
+  })
+
+  it('admin named in a user scope may use it', () => {
+    const scope = withOwnerVisibility({ department_ids: null, user_ids: ['admin-1'] }, OWNER)
+    expect(isUsableBy(scope, OWNER, admin())).toBe(true)
+  })
+
+  it('non-custom items keep the admin bypass', () => {
+    expect(isUsableBy({ department_ids: ['d9'], user_ids: null }, null, admin())).toBe(true)
+  })
+
+  it('non-admins get plain visibility', () => {
+    expect(isUsableBy(selfOnly, OWNER, viewer(OWNER))).toBe(true)
+    expect(isUsableBy(selfOnly, OWNER, viewer('other'))).toBe(false)
   })
 })

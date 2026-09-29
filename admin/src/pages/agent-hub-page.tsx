@@ -376,6 +376,8 @@ function InstalledAgentCard({
     agent.version ? `v${agent.version}` : '',
     agent.skills.length > 0 ? `${agent.skills.length} 个关联技能` : '',
     (agent.agentType || agent.meta?.agent_type) === 'workflow' ? '业务流程' : '对话智能体',
+    // Visible here but the creator hasn't opened it to this viewer.
+    agent.usable === false ? '仅可查看（创建者未开放使用）' : '',
   ].filter(Boolean)
 
   return (
@@ -754,7 +756,8 @@ export default function AgentHubPage() {
 
     try {
       const [agents, skills] = await Promise.all([
-        getInstalledAgents(),
+        getInstalledAgents('manage'),
+        // Skill picker for agents: only skills the admin may actually use.
         getInstalledSkills(),
       ])
       setInstalledAgents(agents)

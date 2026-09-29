@@ -203,7 +203,7 @@ import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
-import { customItemOwnerId, isVisibleTo, type VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, isUsableBy, isVisibleTo, type VisibleTo } from './visibilityFilter.js'
 import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
@@ -2351,7 +2351,7 @@ export function startServer(
         .filter((a) => {
           if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
           if (a.agentType === 'workflow') return false
-          return isVisibleTo(a.visibleTo, filter)
+          return isUsableBy(a.visibleTo, a.ownerId, filter)
         })
         .map((a) => ({
           name: a.name,
@@ -6129,7 +6129,7 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           data: installed
-            .filter(assistant => isVisibleTo(assistant.visibleTo, filter))
+            .filter(assistant => isUsableBy(assistant.visibleTo, assistant.ownerId, filter))
             .map(assistant => ({
               assistant_id: assistant.meta?.id ?? assistant.name,
               tenant_id: auth.orgId,
@@ -8162,15 +8162,22 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/agents/installed') {
         const filter = authService.buildVisibilityFilter(auth)
-        // Return all installed assistants: hub, tenant, and custom
+        // Default (clients syncing what they may use): usable agents only.
+        // `view=manage` (admin UI): everything the caller may see — for an
+        // admin that includes other users' custom agents they can't use.
+        // The manage view flags each item `usable` so the UI can mark what the
+        // caller sees but may not use.
+        const manageView = url.searchParams.get('view') === 'manage'
         const all = await getInstalledAssistants()
         writeJson(
           res,
           200,
-          all.filter(a => {
-            if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
-            return isVisibleTo(a.visibleTo, filter)
-          }),
+          all
+            .filter(a => {
+              if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
+              return manageView ? isVisibleTo(a.visibleTo, filter) : isUsableBy(a.visibleTo, a.ownerId, filter)
+            })
+            .map(a => (manageView ? { ...a, usable: isUsableBy(a.visibleTo, a.ownerId, filter) } : a)),
         )
         return
       }
@@ -8552,7 +8559,8 @@ export function startServer(
           // Find assistant by ID in installed assistants list
           const installedAssistants = await getInstalledAssistants()
           const assistant = installedAssistants.find(a => a.id === assistantId)
-          if (!assistant) {
+          // Downloading = using (clients install it locally): same rule as the list.
+          if (!assistant || !isUsableBy(assistant.visibleTo, assistant.ownerId, authService.buildVisibilityFilter(auth))) {
             throw new HttpError(404, `Assistant not found: ${assistantId}`)
           }
           // Use agent name for packaging (directory lookup)
@@ -9179,9 +9187,18 @@ export function startServer(
         const filter = authService.buildVisibilityFilter(auth)
         // Scan all managed skill dirs (hub/system/custom/tenant), not just hub,
         // so tenant + custom skills are linkable by assistants and appear in the
-        // Skills page's custom/local groups. Visibility is still enforced below.
+        // Skills page's custom/local groups. Visibility is still enforced below:
+        // by default (clients syncing what they may use) usable skills only;
+        // `view=manage` (admin UI) returns everything the caller may see.
+        const manageView = url.searchParams.get('view') === 'manage'
         const all = await getInstalledSkills()
-        writeJson(res, 200, all.filter(s => isVisibleTo(s.visibleTo, filter)))
+        writeJson(
+          res,
+          200,
+          all
+            .filter(s => (manageView ? isVisibleTo(s.visibleTo, filter) : isUsableBy(s.visibleTo, s.ownerId, filter)))
+            .map(s => (manageView ? { ...s, usable: isUsableBy(s.visibleTo, s.ownerId, filter) } : s)),
+        )
         return
       }
 
@@ -9440,7 +9457,8 @@ export function startServer(
           // Find skill by ID in installed skills list
           const installedSkills = await getInstalledSkills()
           const skill = installedSkills.find(s => s.id === skillId)
-          if (!skill) {
+          // Downloading = using (clients install it locally): same rule as the list.
+          if (!skill || !isUsableBy(skill.visibleTo, skill.ownerId, authService.buildVisibilityFilter(auth))) {
             throw new HttpError(404, `Skill not found: ${skillId}`)
           }
           // Use skill name for packaging (directory lookup)

@@ -83,6 +83,8 @@ export type VisibilityFilterContext = {
   userId: string
   departmentId: string | null
   visibleDepartmentIds: Set<string> | null
+  /** Admins only: their own department chain (see VisibilityFilter.member). */
+  member?: { departmentId: string | null; visibleDepartmentIds: Set<string> }
 }
 
 export type SessionCreateOptions = {
