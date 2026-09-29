@@ -114,6 +114,7 @@ import {
   installHubAssistant,
   type AgentHubAssistant,
   uninstallAssistant,
+  resolveCustomAssistantOwner,
   updateInstalledAssistantMeta,
   batchSyncAssistants,
   type AssistantStoreMeta,
@@ -141,6 +142,7 @@ import {
   type SkillHubSkill,
   type SkillStoreMeta,
   uninstallSkill,
+  resolveCustomSkillOwner,
   batchSyncSkills,
   uploadCustomSkill,
   packageSkillZip,
@@ -201,7 +203,7 @@ import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
-import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, isVisibleTo, type VisibleTo } from './visibilityFilter.js'
 import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
@@ -8252,6 +8254,7 @@ export function startServer(
             body.workflow !== undefined
               ? (body.workflow as AssistantStoreMeta['workflow'])
               : undefined,
+          authorId: auth.userId,
         })
 
         writeJson(res, 200, { success: true, data: result })
@@ -8259,14 +8262,19 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/agents/uninstall') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        await uninstallAssistant({
+        const target = {
           assistantName:
             typeof body.assistantName === 'string' ? body.assistantName : '',
           sourcePath:
             typeof body.sourcePath === 'string' ? body.sourcePath : undefined,
-        })
+        }
+        // Store admins may uninstall anything; a custom agent's creator may
+        // uninstall their own.
+        if ((await resolveCustomAssistantOwner(target)) !== auth.userId) {
+          authService.requireScope(auth, 'admin:settings')
+        }
+        await uninstallAssistant(target)
         writeJson(res, 200, { ok: true })
         return
       }
@@ -8274,27 +8282,26 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/agents/meta') {
         const body = await readJsonBody(req)
         // Editing installed hub/system agents stays admin-only. CUSTOM agents
-        // (created from the SudoWork client, visible only to their owner) are
-        // strictly creator-only — editable ONLY by the owner, even for an admin
-        // who did not create it. Owner = a user id in the custom agent's
-        // visible_to.user_ids (custom items are per-user, so seeing one implies
-        // owning it). visible_to itself is still ignored for custom items on
-        // write; this only opens up the other meta fields for the owner.
+        // (created from the SudoWork client) are strictly creator-only —
+        // editable ONLY by the owner, even for an admin who did not create it.
+        // The owner may also change visibility, clamped to their own scope
+        // like tenant items (an admin owner is unrestricted).
+        const updates = isJsonBody(body.updates) ? body.updates : {}
         {
           const targetName = typeof body.assistantName === 'string' ? body.assistantName : ''
           const found = await findAssistantDir(targetName)
           const targetMeta = found ? await readAssistantMeta(found.dir) : null
           if (targetMeta?.source_type === 'custom') {
-            const ownsCustom = Array.isArray(targetMeta?.visible_to?.user_ids)
-              && (targetMeta?.visible_to?.user_ids?.includes(auth.userId) ?? false)
-            if (!ownsCustom) {
+            if (customItemOwnerId(targetMeta) !== auth.userId) {
               throw new HttpError(403, 'Only the creator can edit this custom agent')
+            }
+            if (updates.visible_to !== undefined && !isStoreAdmin(auth)) {
+              updates.visible_to = authService.clampVisibleToScope(auth, (updates.visible_to ?? null) as VisibleTo)
             }
           } else {
             authService.requireScope(auth, 'admin:settings')
           }
         }
-        const updates = isJsonBody(body.updates) ? body.updates : {}
 
         await updateInstalledAssistantMeta({
           assistantName:
@@ -8355,11 +8362,24 @@ export function startServer(
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/agents/visibility') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
+        const assistantName = typeof body.assistantName === 'string' ? body.assistantName : ''
+        let visibleTo = (body.visible_to ?? null) as VisibleTo
+        const found = await findAssistantDir(assistantName)
+        const targetMeta = found ? await readAssistantMeta(found.dir) : null
+        if (targetMeta?.source_type === 'custom') {
+          // Custom agents: only the creator sets visibility (not even an admin
+          // who didn't create it), clamped to their scope unless they're admin.
+          if (customItemOwnerId(targetMeta) !== auth.userId) {
+            throw new HttpError(403, 'Only the creator can change this custom agent\'s visibility')
+          }
+          if (!isStoreAdmin(auth)) visibleTo = authService.clampVisibleToScope(auth, visibleTo)
+        } else {
+          authService.requireScope(auth, 'admin:settings')
+        }
         await updateInstalledAssistantMeta({
-          assistantName: typeof body.assistantName === 'string' ? body.assistantName : '',
-          updates: { visible_to: (body.visible_to ?? null) as AssistantStoreMeta['visible_to'] },
+          assistantName,
+          updates: { visible_to: visibleTo as AssistantStoreMeta['visible_to'] },
         })
         writeJson(res, 200, { ok: true })
         return
@@ -9187,29 +9207,38 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/skills/uninstall') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        await uninstallSkill({
+        const target = {
           skillName: typeof body.skillName === 'string' ? body.skillName : '',
           sourcePath:
             typeof body.sourcePath === 'string' ? body.sourcePath : undefined,
-        })
+        }
+        // Store admins may uninstall anything; a custom skill's creator may
+        // uninstall their own.
+        if ((await resolveCustomSkillOwner(target)) !== auth.userId) {
+          authService.requireScope(auth, 'admin:settings')
+        }
+        await uninstallSkill(target)
         writeJson(res, 200, { ok: true })
         return
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/skills/enabled') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         if (typeof body.enabled !== 'boolean') {
           throw new HttpError(400, 'enabled must be a boolean')
         }
-        await setInstalledSkillEnabled({
+        const target = {
           skillName: typeof body.skillName === 'string' ? body.skillName : '',
-          enabled: body.enabled,
           sourcePath:
             typeof body.sourcePath === 'string' ? body.sourcePath : undefined,
-        })
+        }
+        // Store admins may toggle anything; a custom skill's creator may
+        // toggle their own.
+        if ((await resolveCustomSkillOwner(target)) !== auth.userId) {
+          authService.requireScope(auth, 'admin:settings')
+        }
+        await setInstalledSkillEnabled({ ...target, enabled: body.enabled })
         writeJson(res, 200, { ok: true })
         return
       }
@@ -9258,11 +9287,21 @@ export function startServer(
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/skills/visibility') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const skillName =
           typeof body.skillName === 'string' ? body.skillName : ''
-        const visibleTo = body.visible_to ?? null
+        let visibleTo = (body.visible_to ?? null) as VisibleTo
+        const customOwnerId = await resolveCustomSkillOwner({ skillName })
+        if (customOwnerId) {
+          // Custom skills: only the creator sets visibility (not even an admin
+          // who didn't create it), clamped to their scope unless they're admin.
+          if (customOwnerId !== auth.userId) {
+            throw new HttpError(403, 'Only the creator can change this custom skill\'s visibility')
+          }
+          if (!isStoreAdmin(auth)) visibleTo = authService.clampVisibleToScope(auth, visibleTo)
+        } else {
+          authService.requireScope(auth, 'admin:settings')
+        }
         await setInstalledSkillMeta(skillName, {
           visible_to: visibleTo as SkillStoreMeta['visible_to'],
         })

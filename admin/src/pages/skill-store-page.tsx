@@ -360,10 +360,19 @@ type InstalledSkillCardProps = {
   onToggleEnabled: (skill: InstalledSkillInfo, enabled: boolean) => void
   onRequestUninstall: (skill: InstalledSkillInfo) => void
   onUpdate: (skill: InstalledSkillInfo) => void
-  // Optional: omitted for custom skills, which have no visibility management.
+  // Optional: omitted when the viewer may not change this skill's visibility.
   onEditVisibility?: (skill: InstalledSkillInfo) => void
+  // Whether the viewer may toggle/uninstall; defaults to any non-builtin skill.
+  canManage?: boolean
   departmentNameMap: Map<string, string>
   users: AuthUser[]
+}
+
+// The visibility scope as stored. For custom skills the server's `visibleTo`
+// also includes the owner (who always sees their own skill), so pickers read
+// the raw meta instead.
+function storedVisibleTo(skill: InstalledSkillInfo) {
+  return skill.ownerId ? (skill.meta?.visible_to ?? null) : (skill.visibleTo ?? skill.meta?.visible_to)
 }
 
 function InstalledSkillCard({
@@ -378,10 +387,11 @@ function InstalledSkillCard({
   onRequestUninstall,
   onUpdate,
   onEditVisibility,
+  canManage: canManageProp = true,
   departmentNameMap,
   users,
 }: InstalledSkillCardProps) {
-  const canManage = !skill.isBuiltin
+  const canManage = !skill.isBuiltin && canManageProp
 
   return (
     <div
@@ -559,6 +569,12 @@ export default function SkillStorePage() {
   // A dept_admin/user (store:read + store:tenant:write) sees the store read-only
   // for hub and manages only tenant/custom skills they own or are in scope for.
   const isStoreAdmin = hasScope(scopes, 'admin:settings')
+  // A custom skill (created from SudoWork) is managed by its creator: only the
+  // owner changes its visibility; the owner or a store admin toggles/uninstalls.
+  const isCustomOwner = useCallback(
+    (skill: InstalledSkillInfo) => !!user?.id && skill.ownerId === user.id,
+    [user],
+  )
   const [settings, setSettings] = useState<StoreConfig | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -1394,7 +1410,7 @@ export default function SkillStorePage() {
 
   const handleOpenVisibilityEdit = useCallback((skill: InstalledSkillInfo) => {
     setEditingSkillName(skill.name)
-    const visibleTo = skill.visibleTo ?? skill.meta?.visible_to
+    const visibleTo = storedVisibleTo(skill)
     setEditingSkillVisibleTo(visibleTo ?? null)
     const deptIds = visibleTo?.department_ids
     const userIds = visibleTo?.user_ids
@@ -1603,9 +1619,11 @@ export default function SkillStorePage() {
         !!latestVersion &&
         (!installedVersion || latestVersion.version !== installedVersion)
 
-      // Custom skills are created from the SudoWork client and are creator-only
-      // by design — no visibility management for any role, so omit onEditVisibility.
+      // Custom skills (created from the SudoWork client): only the creator
+      // manages visibility; the creator or a store admin toggles/uninstalls.
+      // Admin 'upload' skills have no visibility management here.
       const isCustom = skill.isUploaded || skill.meta?.source_type === 'custom'
+      const isOwner = isCustomOwner(skill)
 
       return (
         <InstalledSkillCard
@@ -1624,7 +1642,8 @@ export default function SkillStorePage() {
               void handleUpdate(item.meta.id, item)
             }
           }}
-          onEditVisibility={isCustom ? undefined : handleOpenVisibilityEdit}
+          onEditVisibility={isOwner || !isCustom ? handleOpenVisibilityEdit : undefined}
+          canManage={!isCustom || isStoreAdmin || isOwner}
           departmentNameMap={departmentNameMap}
           users={users}
         />
@@ -1635,6 +1654,8 @@ export default function SkillStorePage() {
       handleOpenVisibilityEdit,
       handleToggleEnabled,
       handleUpdate,
+      isCustomOwner,
+      isStoreAdmin,
       latestVersions,
       openInstalledSkillDetail,
       openSkillDetail,
@@ -2226,9 +2247,10 @@ export default function SkillStorePage() {
               {detailResolvedInstalledSkill && !detailResolvedInstalledSkill.isBuiltin ? (
                 <>
                   {/* Hub/system skills: only a store admin manages visibility.
-                      Custom skills are creator-only (client-managed) — never here. */}
-                  {isStoreAdmin
-                    && !(detailResolvedInstalledSkill.isUploaded || detailResolvedInstalledSkill.meta?.source_type === 'custom') ? (
+                      Custom skills: only their creator. */}
+                  {isCustomOwner(detailResolvedInstalledSkill)
+                    || (isStoreAdmin
+                      && !(detailResolvedInstalledSkill.isUploaded || detailResolvedInstalledSkill.meta?.source_type === 'custom')) ? (
                     <Button
                       variant="outline"
                       onClick={() => handleOpenVisibilityEdit(detailResolvedInstalledSkill)}
@@ -2237,12 +2259,17 @@ export default function SkillStorePage() {
                       编辑可见性
                     </Button>
                   ) : null}
-                  <Button
-                    variant="outline"
-                    onClick={() => setPendingUninstallSkill(detailResolvedInstalledSkill)}
-                  >
-                    卸载
-                  </Button>
+                  {/* Custom skills: uninstall is for their creator or a store admin. */}
+                  {isStoreAdmin
+                    || isCustomOwner(detailResolvedInstalledSkill)
+                    || !(detailResolvedInstalledSkill.isUploaded || detailResolvedInstalledSkill.meta?.source_type === 'custom') ? (
+                    <Button
+                      variant="outline"
+                      onClick={() => setPendingUninstallSkill(detailResolvedInstalledSkill)}
+                    >
+                      卸载
+                    </Button>
+                  ) : null}
                 </>
               ) : null}
               {detailHasUpdate && detailSkill ? (

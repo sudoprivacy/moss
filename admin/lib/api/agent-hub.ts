@@ -90,7 +90,10 @@ export interface InstalledAgentInfo {
   meta: InstalledAgentMeta | null
   agentType: 'chat' | 'workflow'
   memoryMode: 'session' | 'user'
+  /** Effective visibility; for custom agents it also includes the owner. */
   visibleTo: VisibleTo | null
+  /** Creator of a custom agent; null for hub/system/tenant agents. */
+  ownerId?: string | null
   workflow: InstalledAgentMeta['workflow']
 }
 

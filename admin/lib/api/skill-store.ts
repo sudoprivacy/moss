@@ -77,7 +77,10 @@ export interface InstalledSkillInfo {
   enabled: boolean
   source: string
   meta: InstalledSkillMeta | null
+  /** Effective visibility; for custom skills it also includes the owner. */
   visibleTo: VisibleTo | null
+  /** Creator of a custom skill; null for hub/system/tenant/upload skills. */
+  ownerId?: string | null
 }
 
 export interface InstallSkillRequest {

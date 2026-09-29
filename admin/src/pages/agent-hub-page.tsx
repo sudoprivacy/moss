@@ -350,9 +350,17 @@ type InstalledAgentCardProps = {
   agent: InstalledAgentInfo
   uninstalling: boolean
   onOpenEdit: (agent: InstalledAgentInfo) => void
-  // Optional: omitted for custom agents, which have no visibility management.
+  // Optional: omitted when the viewer may not change this agent's visibility.
   onOpenVisibility?: (agent: InstalledAgentInfo) => void
   onRequestUninstall: (agent: InstalledAgentInfo) => void
+  canUninstall?: boolean
+}
+
+// The visibility scope as stored. For custom agents the server's `visibleTo`
+// also includes the owner (who always sees their own agent), so pickers read
+// the raw meta instead.
+function storedVisibleTo(agent: InstalledAgentInfo) {
+  return agent.meta?.source_type === 'custom' ? (agent.meta?.visible_to ?? null) : agent.visibleTo
 }
 
 function InstalledAgentCard({
@@ -361,6 +369,7 @@ function InstalledAgentCard({
   onOpenEdit,
   onOpenVisibility,
   onRequestUninstall,
+  canUninstall = true,
 }: InstalledAgentCardProps) {
   const badges = [
     agent.isBuiltin ? '系统内置' : agent.isHubInstalled ? 'Hub' : '本地',
@@ -436,7 +445,7 @@ function InstalledAgentCard({
         >
           编辑
         </Button>
-        {!agent.isBuiltin ? (
+        {!agent.isBuiltin && canUninstall ? (
           <Button
             size="icon"
             variant="destructive"
@@ -497,17 +506,23 @@ export default function AgentHubPage() {
 
   const [editOpen, setEditOpen] = useState(false)
   const [editingAgent, setEditingAgent] = useState<InstalledAgentInfo | null>(null)
-  // Who may edit the agent open in the 编辑智能体 modal. A CUSTOM agent (created
-  // from SudoWork, visible only to its owner) is strictly creator-only — editable
-  // ONLY by its owner, even for an admin who didn't create it. Hub/system agents
-  // are admin-only.
+  // A CUSTOM agent (created from SudoWork) is managed by its creator: only the
+  // owner may edit it or change its visibility, even an admin who didn't create
+  // it may not. Admins may still uninstall it.
+  const isCustomOwner = useCallback(
+    (agent: InstalledAgentInfo) =>
+      agent.meta?.source_type === 'custom' && !!user?.id && agent.ownerId === user.id,
+    [user],
+  )
+  // Normal users have no department picker (clamped server-side to their scope).
+  const isNormalUser = !isStoreAdmin && user?.role !== 'dept_admin'
+  // Who may edit the agent open in the 编辑智能体 modal: the owner of a custom
+  // agent; a store admin for hub/system agents.
   const canEditEditingAgent = useMemo(() => {
     if (!editingAgent) return false
-    if (editingAgent.meta?.source_type === 'custom') {
-      return !!user?.id && (editingAgent.visibleTo?.user_ids?.includes(user.id) ?? false)
-    }
+    if (editingAgent.meta?.source_type === 'custom') return isCustomOwner(editingAgent)
     return isStoreAdmin
-  }, [isStoreAdmin, editingAgent, user])
+  }, [isStoreAdmin, editingAgent, isCustomOwner])
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [editAvatar, setEditAvatar] = useState('')
@@ -1041,12 +1056,13 @@ export default function AgentHubPage() {
     setEditEmoji(agent.emoji || '')
     setEditAgentType(agent.agentType || agent.meta?.agent_type || 'chat')
     setEditMemoryMode(agent.memoryMode || agent.meta?.memory_mode || 'session')
-    setEditVisibleTo(agent.visibleTo?.department_ids ?? agent.meta?.visible_to?.department_ids ?? [])
-    setEditVisibleUserIds(agent.visibleTo?.user_ids ?? agent.meta?.visible_to?.user_ids ?? [])
+    const scope = storedVisibleTo(agent)
+    setEditVisibleTo(scope?.department_ids ?? agent.meta?.visible_to?.department_ids ?? [])
+    setEditVisibleUserIds(scope?.user_ids ?? agent.meta?.visible_to?.user_ids ?? [])
 
     // Determine visibility mode
-    const deptIds = agent.visibleTo?.department_ids ?? agent.meta?.visible_to?.department_ids
-    const userIds = agent.visibleTo?.user_ids ?? agent.meta?.visible_to?.user_ids
+    const deptIds = scope?.department_ids ?? agent.meta?.visible_to?.department_ids
+    const userIds = scope?.user_ids ?? agent.meta?.visible_to?.user_ids
 
     if (deptIds === null && userIds === null) {
       setEditVisibilityMode('all')
@@ -1213,16 +1229,13 @@ export default function AgentHubPage() {
           enabledWikis: editEnabledWikis,
           // 企业应用管理: persist Corp App associations (string[] of corp app IDs)
           enabledCorpApps: editEnabledCorpApps,
-          // Custom agents have no visibility management (server ignores it).
-          visible_to: editingAgent.meta?.source_type === 'custom'
-            ? undefined
-            : editVisibilityMode === 'admin'
-              ? { department_ids: [], user_ids: [] }
-              : editVisibilityMode === 'departments'
-                ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
-                : editVisibilityMode === 'users'
-                  ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
-                  : null,
+          visible_to: editVisibilityMode === 'admin'
+            ? { department_ids: [], user_ids: [] }
+            : editVisibilityMode === 'departments'
+              ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
+              : editVisibilityMode === 'users'
+                ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
+                : null,
           workflow: editAgentType === 'workflow'
             ? {
                 trigger: editWorkflowTrigger,
@@ -1277,8 +1290,8 @@ export default function AgentHubPage() {
 
   const openAgentVisibility = useCallback((agent: InstalledAgentInfo) => {
     setEditingVisibilityAgent(agent)
-    const deptIds = agent.visibleTo?.department_ids
-    const userIds = agent.visibleTo?.user_ids
+    const deptIds = storedVisibleTo(agent)?.department_ids
+    const userIds = storedVisibleTo(agent)?.user_ids
 
     // Determine visibility mode
     if (deptIds === null && userIds === null) {
@@ -2464,16 +2477,17 @@ export default function AgentHubPage() {
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
                     {filteredCustomAgents.map(agent => (
-                      // Custom agents are created from the SudoWork client and are
-                      // creator-only by design — no visibility management here (any
-                      // role). onOpenVisibility is intentionally omitted so the
-                      // Shield button doesn't render.
+                      // Custom agents are created from the SudoWork client: only
+                      // the creator manages visibility; the creator or a store
+                      // admin may uninstall.
                       <InstalledAgentCard
                         key={`${agent.source}:${agent.name}`}
                         agent={agent}
                         uninstalling={pendingUninstallAgent?.source === agent.source}
                         onOpenEdit={item => void openEdit(item)}
+                        onOpenVisibility={isCustomOwner(agent) ? openAgentVisibility : undefined}
                         onRequestUninstall={setPendingUninstallAgent}
+                        canUninstall={isStoreAdmin || isCustomOwner(agent)}
                       />
                     ))}
                   </div>
@@ -2890,9 +2904,6 @@ export default function AgentHubPage() {
               </div>
             ) : null}
 
-            {/* Custom agents are creator-only by design; the server ignores
-                visible_to for them, so don't offer a picker that can't apply. */}
-            {editingAgent?.meta?.source_type !== 'custom' ? (
             <div className="space-y-3">
               <div>
                 <label className="text-sm font-medium">可见范围</label>
@@ -2906,8 +2917,8 @@ export default function AgentHubPage() {
                   <label className="text-sm cursor-pointer">全员可见</label>
                 </div>
                 <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
+                  <RadioGroupItem value="departments" disabled={isNormalUser} />
+                  <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="users" />
@@ -2970,7 +2981,6 @@ export default function AgentHubPage() {
                 )
               ) : null}
             </div>
-            ) : null}
 
             <div className="space-y-3">
               <div>
@@ -3977,8 +3987,8 @@ export default function AgentHubPage() {
                 <label className="text-sm cursor-pointer">全员可见</label>
               </div>
               <div className="flex items-center gap-2">
-                <RadioGroupItem value="departments" />
-                <label className="text-sm cursor-pointer">指定部门可见</label>
+                <RadioGroupItem value="departments" disabled={isNormalUser} />
+                <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="users" />

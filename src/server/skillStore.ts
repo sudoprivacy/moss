@@ -4,7 +4,7 @@ import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import type { VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
 import {
   MANAGED_SKILL_SEARCH_DIRS,
   MOSS_SKILLS_CUSTOM_DIR,
@@ -97,7 +97,10 @@ export type InstalledSkillInfo = {
   enabled: boolean
   source: string
   meta: SkillStoreMeta | null
+  /** Effective visibility (a custom skill's owner is always included). */
   visibleTo: VisibleTo
+  /** Owner user id for custom skills; null for hub/system/tenant/upload skills. */
+  ownerId: string | null
 }
 
 export type FetchSkillHubSkillsParams = {
@@ -387,6 +390,7 @@ function toInstalledSkillInfo(params: {
   const dirDefaults = inferLocalSkillMetaDefaults(skillDir)
   const effectiveSourceType: SkillStoreMeta['source_type'] | undefined =
     meta?.source_type ?? dirDefaults.source_type
+  const customOwnerId = customItemOwnerId(meta ? { ...meta, source_type: effectiveSourceType } : null)
   // Trim skill name to avoid leading/trailing spaces
   const trimmedSkillName = skillName.trim()
   const displayName =
@@ -436,7 +440,8 @@ function toInstalledSkillInfo(params: {
       : effectiveSourceType
         ? ({ source_type: effectiveSourceType } as SkillStoreMeta)
         : meta,
-    visibleTo: meta?.visible_to ?? null,
+    visibleTo: withOwnerVisibility(meta?.visible_to, customOwnerId),
+    ownerId: customOwnerId,
   }
 }
 
@@ -854,6 +859,24 @@ export async function installHubSkill(params: {
   }
 }
 
+/**
+ * Owner of the custom skill a store route targets, or null when the target is
+ * not a custom skill (admin 'upload' skills share the custom dir but carry no
+ * owner). Resolves the dir the same way the store functions do (sourcePath,
+ * else lookup by name); a caller-supplied sourcePath only counts when it is a
+ * direct child of the custom dir.
+ */
+export async function resolveCustomSkillOwner(params: {
+  skillName: string
+  sourcePath?: string
+}): Promise<string | null> {
+  const dir = params.sourcePath || (await findInstalledSkillPath(params.skillName))
+  if (!dir || path.dirname(path.resolve(dir)) !== path.resolve(MOSS_SKILLS_CUSTOM_DIR)) {
+    return null
+  }
+  return customItemOwnerId(await readSkillMeta(dir))
+}
+
 export async function uninstallSkill(params: {
   skillName: string
   sourcePath?: string
@@ -1028,13 +1051,15 @@ export async function setInstalledSkillMeta(
   }
 
   if (updates.visible_to !== undefined) {
-    // Custom skills are created from the SudoWork client and are creator-only by
-    // design (visible_to defaults to the uploader). Never let a visibility update
-    // widen or change that — ignore visible_to for custom items regardless of who
-    // asks, so the creator-only invariant holds even against a crafted request.
-    if (meta.source_type !== 'custom') {
-      meta.visible_to = updates.visible_to
+    // Custom skills: only the owner reaches here (enforced by the route). Pin
+    // the owner before replacing visible_to — legacy items derive ownership
+    // from visible_to, which the new scope may no longer name.
+    const sourceType = meta.source_type ?? inferLocalSkillMetaDefaults(sourcePath).source_type
+    if (sourceType === 'custom' && !meta.author_id) {
+      const ownerId = customItemOwnerId({ ...meta, source_type: sourceType })
+      if (ownerId) meta.author_id = ownerId
     }
+    meta.visible_to = updates.visible_to
   }
 
   await writeSkillMeta(sourcePath, meta)
@@ -1106,6 +1131,7 @@ export async function uploadCustomSkill(params: {
         user_ids: [params.userId],
         department_ids: null,
       },
+      author_id: params.userId,
     }
     await writeSkillMeta(targetDir, meta)
 

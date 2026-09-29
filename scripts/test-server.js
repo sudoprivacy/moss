@@ -40,6 +40,7 @@ const BUN = [
   'authProxyMintedTokenInject.test.ts',
   'configItemsTokenPlacement.test.ts',
   'credentialsEnvelope.test.ts',
+  'customItemOwnership.test.ts',
   'credits.test.ts',
   'fuiou.test.ts',
   'lbHaConfig.test.ts',

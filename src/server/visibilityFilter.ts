@@ -53,6 +53,37 @@ export function isVisibleTo(
   return false
 }
 
+/**
+ * Owner of a custom skill/agent (created from the SudoWork client). New items
+ * record `author_id`; legacy items were always written with
+ * `visible_to = { user_ids: [creator] }`, so a lone user id identifies the owner.
+ * Returns null for any other source type.
+ */
+export function customItemOwnerId(
+  meta: { source_type?: unknown; author_id?: unknown; visible_to?: VisibleTo } | null | undefined,
+): string | null {
+  if (meta?.source_type !== 'custom') return null
+  if (typeof meta.author_id === 'string' && meta.author_id) return meta.author_id
+  const userIds = meta.visible_to?.user_ids
+  return userIds?.length === 1 && userIds[0] !== 'admin' ? userIds[0] : null
+}
+
+/**
+ * Effective visibility of a custom item: the scope its owner chose, plus the
+ * owner themselves, so narrowing the scope can never lock the creator out.
+ */
+export function withOwnerVisibility(
+  visibleTo: VisibleTo | undefined,
+  ownerId: string | null,
+): VisibleTo {
+  if (!visibleTo || !ownerId) return visibleTo ?? null
+  const userIds = visibleTo.user_ids ?? []
+  return {
+    department_ids: visibleTo.department_ids ?? null,
+    user_ids: userIds.includes(ownerId) ? userIds : [...userIds, ownerId],
+  }
+}
+
 export function buildVisibilityFilter(
   auth: AuthContext,
   getUserByIdAndOrg: (

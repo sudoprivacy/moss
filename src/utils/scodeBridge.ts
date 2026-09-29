@@ -18,6 +18,7 @@ import {
   ASSISTANT_META_FILE,
 } from '../server/agentStore.js'
 import type { VisibilityFilterContext } from '../server/sessionManager.js'
+import { customItemOwnerId } from '../server/visibilityFilter.js'
 import { buildDraftsInstruction } from '../server/draftsCleanup.js'
 
 // ============================================================================
@@ -189,13 +190,16 @@ function isSkillVisibleToSync(skillDir: string, filter: VisibilityFilterContext 
   if (filter.isAdmin) return true
 
   const metaPath = path.join(skillDir, SKILL_HUB_META_FILE)
-  let meta: { visible_to?: { department_ids?: string[] | null; user_ids?: string[] | null } | null } | null = null
+  let meta: { source_type?: unknown; author_id?: unknown; visible_to?: { department_ids?: string[] | null; user_ids?: string[] | null } | null } | null = null
   try {
     const content = readFileSync(metaPath, 'utf8')
     meta = JSON.parse(content)
   } catch {
     return true // 无法读取 meta，默认可见
   }
+
+  // 自定义技能的创建者始终可见（不受其设置的可见范围影响）
+  if (customItemOwnerId(meta) === filter.userId) return true
 
   const visibleTo = meta?.visible_to
 
