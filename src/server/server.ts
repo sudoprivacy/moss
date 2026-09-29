@@ -8,12 +8,12 @@ import { createHash as resourceContentHash } from 'node:crypto'
 import { cp } from 'node:fs/promises'
 import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
-import { installClientCatalogResource } from './catalog/clientCatalogInstall.js'
+import { installAndPrepareClientCatalogResource, describeClientCatalogItem } from './catalog/clientCatalogInstall.js'
 import http from 'http'
 import { randomUUID } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
-import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
+import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm, chmod } from 'fs/promises'
 import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
@@ -1798,7 +1798,7 @@ async function readWorkspaceTree(
  */
 async function writeWorkspaceFileTo(
   workspaceRoot: string,
-  params: { path: string | null; contentBase64: string | null },
+  params: { path: string | null; contentBase64: string | null; mode?: number },
   uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
@@ -1842,6 +1842,7 @@ async function writeWorkspaceFileTo(
 
   await mkdir(dirname(candidate), { recursive: true })
   await writeFile(candidate, buffer)
+  if (params.mode !== undefined) await chmod(candidate, params.mode & 0o777)
   return {
     relativePath: toWorkspaceRelativePath(rootRealPath, candidate),
     size: buffer.length,
@@ -1850,7 +1851,7 @@ async function writeWorkspaceFileTo(
 
 async function writeWorkspaceFile(
   session: SessionRecord,
-  params: { path: string | null; contentBase64: string | null },
+  params: { path: string | null; contentBase64: string | null; mode?: number },
   remote: WorkspaceFileAccess | null,
   uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
@@ -1880,7 +1881,7 @@ async function writeWorkspaceFile(
     throw new HttpError(413, `Uploaded file exceeds size limit (${limitMb}MB)`)
   }
 
-  await remote.writeFile(relativePath, buffer)
+  await remote.writeFile(relativePath, buffer, params.mode)
   return { relativePath, size: buffer.length }
 }
 
@@ -8369,7 +8370,26 @@ export function startServer(
         if ((body.kind !== 'skills' && body.kind !== 'agents') || typeof body.id !== 'string' || !body.id.trim() || (body.source !== 'hub' && body.source !== 'tenant')) {
           throw new HttpError(400, 'Invalid catalog installation request')
         }
-        writeJson(res, 200, await installClientCatalogResource({ kind: body.kind, id: body.id, source: body.source }))
+        writeJson(res, 200, await installAndPrepareClientCatalogResource({ kind: body.kind, id: body.id, source: body.source }))
+        return
+      }
+
+      const preparationMatch = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})$/)
+      if (req.method === 'GET' && preparationMatch) {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const { getClientPreparation } = await import('./catalog/clientCatalogPreparation.js')
+        writeJson(res, 200, await getClientPreparation(preparationMatch[1]!))
+        return
+      }
+
+      const preparationDownload = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})\/(agents|skills)\/([^/]+)\/download$/)
+      if (req.method === 'GET' && preparationDownload) {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const { downloadClientPreparation } = await import('./catalog/clientCatalogPreparation.js')
+        const artifact = await downloadClientPreparation(preparationDownload[1]!, preparationDownload[2] as 'agents' | 'skills', decodeURIComponent(preparationDownload[3]!))
+        res.setHeader('Content-Type', 'application/zip')
+        res.setHeader('X-Content-SHA256', artifact.digest)
+        res.end(artifact.bytes)
         return
       }
 
@@ -8395,7 +8415,7 @@ export function startServer(
             limit: Number.isFinite(limit) ? limit : undefined,
             query: url.searchParams.get('query') || undefined,
             category: url.searchParams.get('category') || undefined,
-          }),
+          }).then(result => ({ ...result, assistants: result.assistants.map(item => describeClientCatalogItem(item)) })),
         )
         return
       }
@@ -8406,7 +8426,7 @@ export function startServer(
       if (req.method === 'GET' && agentHubDetailMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const assistantId = decodeURIComponent(agentHubDetailMatch[1] || '')
-        writeJson(res, 200, await fetchAgentHubAssistantDetail(assistantId))
+        writeJson(res, 200, await fetchAgentHubAssistantDetail(assistantId).then(item => item ? describeClientCatalogItem(item) : null))
         return
       }
 
@@ -8779,6 +8799,9 @@ export function startServer(
           }
           return {
             ...row,
+            sourceType: 'tenant',
+            catalogVersion: String(row.updated_at ?? ''),
+            isAvailable: row.status === 'approved' && Number(row.enabled) === 1 && isVisibleTo(typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null, filter),
             avatar: formatTenantAssistantAvatarUrl(row.avatar, config.publicBaseUrl),
             default_init_prompt: typeof row.default_init_prompt === 'string' ? row.default_init_prompt : '',
             prompts_i18n: parseObject(row.prompts_i18n, { 'zh-CN': [] }),
@@ -9000,7 +9023,7 @@ export function startServer(
         // admin:settings protected nothing and only desynced the UI). Editing
         // stays owner/subtree-only — enforced by PATCH, and signalled here via
         // `can_edit` so the client can render read-only instead of guessing.
-        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(tenantAgentRulesMatch[1] || '')
         const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant) {
@@ -9400,7 +9423,7 @@ export function startServer(
             query: url.searchParams.get('query') || undefined,
             category: category || undefined,
             tenantId: url.searchParams.get('tenant_id') || undefined,
-          }),
+          }).then(result => ({ ...result, skills: result.skills.map(item => describeClientCatalogItem(item)) })),
         )
         return
       }
@@ -9409,7 +9432,7 @@ export function startServer(
       if (req.method === 'GET' && skillHubDetailMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const skillId = decodeURIComponent(skillHubDetailMatch[1] || '')
-        writeJson(res, 200, await fetchSkillHubSkillDetail(skillId))
+        writeJson(res, 200, await fetchSkillHubSkillDetail(skillId).then(item => item ? describeClientCatalogItem(item) : null))
         return
       }
 
@@ -9650,6 +9673,9 @@ export function startServer(
           })
           .map((row: Record<string, unknown>) => ({
             ...row,
+            sourceType: 'tenant',
+            catalogVersion: String(row.updated_at ?? ''),
+            isAvailable: row.status === 'approved' && Number(row.enabled) === 1 && isVisibleTo(typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null, filter),
             // Parse visible_to so the approval page receives an object (matches
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
@@ -9657,6 +9683,22 @@ export function startServer(
             can_manage: isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false),
           }))
         writeJson(res, 200, rows)
+        return
+      }
+
+      const tenantSkillContentMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)\/content$/)
+      if (req.method === 'GET' && tenantSkillContentMatch) {
+        const id = decodeURIComponent(tenantSkillContentMatch[1] || '')
+        const skill = await runtime.store.getTenantSkill(id, auth.orgId)
+        if (!skill) throw new HttpError(404, 'Tenant skill not found')
+        const canManage = isStoreAdmin(auth) || await authService.isCreatorInScope(auth.orgId, skill.author_id as string, auth)
+        const visibleTo = typeof skill.visible_to === 'string' ? JSON.parse(skill.visible_to) : null
+        if (!canManage && (skill.status !== 'approved' || !isVisibleTo(visibleTo, await authService.buildVisibilityFilter(auth)))) throw new HttpError(404, 'Tenant skill not found')
+        const directory = typeof skill.file_path === 'string' ? skill.file_path : ''
+        if (!directory) throw new HttpError(404, 'Skill instructions not found')
+        const entry = await resolveWorkspaceEntry(directory, 'SKILL.md')
+        const content = await readFile(entry.fullPath, 'utf8')
+        writeJson(res, 200, { content })
         return
       }
 
@@ -10356,6 +10398,23 @@ export function startServer(
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
         }, resolveSessionWorkspaceAccess(session, config), uploadLimit)
         writeJson(res, 200, result)
+        return
+      }
+
+      const sessionCatalogSkillsMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/catalog-skills$/)
+      if (req.method === 'POST' && sessionCatalogSkillsMatch) {
+        const session = await runtime.getSession(sessionCatalogSkillsMatch[1] || '')
+        if (!session) throw new HttpError(404, 'Session not found')
+        // Preparation references are personal; a session manager cannot substitute another identity's graph.
+        if (session.orgId !== auth.orgId || session.userId !== auth.userId) throw new HttpError(403, 'Forbidden')
+        const body = await readJsonBody(req)
+        if (!Array.isArray(body.skills) || body.skills.length > 100 || !body.skills.every((ref: unknown) => typeof ref === 'string')) throw new HttpError(400, 'Invalid skills')
+        const { materializeClientSkills } = await import('./catalog/clientCatalogPreparation.js')
+        const assistant = session.assistantName?.startsWith('moss-prepared:') ? session.assistantName : undefined
+        const skills = await materializeClientSkills(body.skills as string[], assistant, async (path, bytes, mode) => {
+          await writeWorkspaceFile(session, { path, contentBase64: bytes.toString('base64'), mode }, resolveSessionWorkspaceAccess(session, config), 50 * 1024 * 1024)
+        })
+        writeJson(res, 200, { skills })
         return
       }
 

@@ -170,7 +170,7 @@ export class K8sBackend implements SessionBackend {
     // Read the assistant config (same as the docker/scode backend).
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
     const enabledSkills = options.assistantName
-      ? assistantConfig.enabledSkills
+      ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
       : (options.enabledSkillNames ?? assistantConfig.enabledSkills)
 
     // memory mode: assistant memory_mode wins, else 'session'

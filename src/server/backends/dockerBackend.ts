@@ -79,7 +79,7 @@ export class DockerBackend implements SessionBackend {
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
 
     const enabledSkills = options.assistantName
-      ? assistantConfig.enabledSkills
+      ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
       : (options.enabledSkillNames ?? assistantConfig.enabledSkills)
 
     // 根据 memory_mode 决定 mode

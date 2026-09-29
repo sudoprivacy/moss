@@ -630,10 +630,13 @@ export class RuntimeService {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
-        await getAssistantRuntimeConfig(resource.id)
-        input = { ...input, assistantName: resource.id }
+        await getAssistantRuntimeConfig(input.assistantName)
+        input = { ...input, assistantName: input.assistantName.startsWith('moss-prepared:') ? input.assistantName : resource.id }
       }
-      if (input.enabledSkills) input = { ...input, enabledSkills: await resolveOrganizationSkillIds(input.enabledSkills) }
+      if (input.enabledSkills) {
+        const resolved = await resolveOrganizationSkillIds(input.enabledSkills)
+        input = { ...input, enabledSkills: input.enabledSkills.map((ref, index) => ref.startsWith('moss-prepared:') ? ref : resolved[index]!) }
+      }
       return this.createSessionInResourceScope(input)
     }).catch(error => {
       if (error instanceof ResourceAccessError) throw new SessionStartupError(error)
@@ -1672,6 +1675,7 @@ export class RuntimeService {
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
         await getAssistantRuntimeConfig(effectiveAssistant)
       }
+      if (options.enabledSkills) await resolveOrganizationSkillIds(options.enabledSkills)
       const pinned = await pinSessionResourceSnapshot(
         join(this.options.config.runtimeDir, 'sessions', session.sessionId),
         await snapshotOrganizationResources(), options.enabledSkills,
@@ -1720,9 +1724,10 @@ export class RuntimeService {
     // below still runs. Without this, a reused session signs a token with
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
-    const effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+    let effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
     if (effectiveAssistantName) {
       const resource = await requireOrganizationResource('agent', effectiveAssistantName)
+      effectiveAssistantName = resource.id
       if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     }
     let assistantDisplayName = options.assistantDisplayName
@@ -1735,7 +1740,7 @@ export class RuntimeService {
       }
     }
 
-    if (options.enabledSkills) await resolveOrganizationSkillIds(options.enabledSkills)
+    if (options.enabledSkills) options = { ...options, enabledSkills: await resolveOrganizationSkillIds(options.enabledSkills) }
     const resourceSnapshot = await snapshotOrganizationResources()
     const generation = await this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)

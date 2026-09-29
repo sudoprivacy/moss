@@ -13,6 +13,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
   const root = await mkdtemp(join(tmpdir(), 'moss-org-routes-'))
   const skillZip = await new JSZip().file('SKILL.md', '---\nname: shared-skill\ndescription: fixture\n---\nSkill one').generateAsync({ type: 'nodebuffer' })
   const agentZip = await new JSZip().file('system.md', 'Original shared prompt').generateAsync({ type: 'nodebuffer' })
+  let isClientSkillAvailable = true
   const hub = createServer((req, res) => {
     if (req.url === '/skill.zip' || req.url === '/agent.zip') {
       res.end(req.url === '/skill.zip' ? skillZip : agentZip)
@@ -21,7 +22,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       res.end(JSON.stringify({ data: { skill: { id: 'skill-one', name: 'shared-skill', display_name: 'Shared skill' }, versions: [{ version: '1', source_url: `${hubUrl}/skill.zip` }] } }))
     } else if (req.url === '/api/skills/client-skill') {
       res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify({ data: { skill: { id: 'client-skill', name: 'client-skill', display_name: 'Client skill' }, versions: [{ version: '2', source_url: `${hubUrl}/skill.zip` }] } }))
+      res.end(JSON.stringify({ data: { skill: { id: 'client-skill', name: 'client-skill', display_name: 'Client skill', enabled: isClientSkillAvailable }, versions: [{ version: '2', source_url: `${hubUrl}/skill.zip` }] } }))
     } else if (req.url === '/api/skills/restricted-skill' || req.url === '/api/skills/pending-skill') {
       const isPending = req.url.includes('pending')
       res.setHeader('content-type', 'application/json')
@@ -137,7 +138,25 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       assert.equal(catalog.skills[0].id, 'client-skill')
       assert.equal((await ok('GET', '/api/v1/skills/installed', a.user)).some((item: any) => item.id === 'client-skill'), false)
       const install = (token: string, kind: string, id: string) => ok('POST', '/api/v1/client/catalog/install', token, { kind, id, source: 'hub', sourceUrl: 'https://untrusted.invalid/ignored.zip', orgId: b.orgId })
-      await install(a.user, 'agents', 'client-agent')
+      const prepared = await install(a.user, 'agents', 'client-agent')
+      assert.equal(prepared.protocolVersion, 1)
+      assert.equal(prepared.resources.length, 2)
+      assert.equal((await install(a.user, 'agents', 'client-agent')).preparationId, prepared.preparationId, 'same installed version must reuse the immutable preparation')
+      const manifest = await ok('GET', `/api/v1/client/catalog/preparations/${prepared.preparationId}`, a.user)
+      isClientSkillAvailable = false
+      assert.equal((await request('GET', `/api/v1/client/catalog/preparations/${prepared.preparationId}`, a.user)).status, 404)
+      isClientSkillAvailable = true
+      assert.equal(manifest.preparationId, prepared.preparationId)
+      assert.equal(manifest.snapshot, undefined, 'server paths must not leave the server')
+      for (const resource of prepared.resources) {
+        assert.match(resource.digest, /^[a-f0-9]{64}$/)
+        assert.match(resource.runtimeRef, /^moss-prepared:/)
+        const bytes = await ok('GET', resource.downloadRef, a.user)
+        assert.ok(Buffer.isBuffer(bytes))
+        assert.equal((await request('GET', resource.downloadRef, peer)).status, 404)
+        assert.equal((await request('GET', resource.downloadRef, b.user)).status, 404)
+      }
+
       for (const [kind, id] of [['skills', 'client-skill'], ['agents', 'client-agent']]) {
         const own = (await ok('GET', `/api/v1/${kind}/installed`, a.user)).find((item: any) => item.id === id)
         assert.ok(own, `${kind} must be installed for the caller`)
@@ -165,6 +184,8 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       const agent = await ok('POST', '/api/v1/agents/tenant/create', a.admin, { name: 'private-agent', display_name: 'Private A', rules: 'A private prompt', visible_to: null })
       const skill = await ok('POST', '/api/v1/skills/tenant/upload', a.admin, { entries: [{ path: 'SKILL.md', contentBase64: Buffer.from('---\nname: private-skill\ndescription: private\n---\nprivate').toString('base64') }], visible_to: null })
       const custom = await ok('POST', '/api/v1/skills/custom', a.user, { file: skillZip.toString('base64'), name: 'custom-skill', displayName: 'Custom A' })
+      assert.match((await ok('GET', `/api/v1/skills/tenant/${skill.id}/content`, a.user)).content, /private/)
+      assert.equal((await ok('GET', `/api/v1/agents/tenant/${agent.data.id}/rules`, a.user)).rules, 'A private prompt')
       for (const [type, id] of [['agents', agent.data.id], ['skills', skill.id]]) {
         const own = await ok('GET', `/api/v1/${type}/tenant?status=approved`, a.user)
         assert.ok(own.some((row: any) => row.id === id), 'The tenant catalog includes accessible resources before a desktop download')
@@ -172,6 +193,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
         assert.equal(other.some((row: any) => row.id === id), false)
       }
       for (const token of [b.user, b.admin, b.super]) {
+        assert.equal((await request('GET', `/api/v1/skills/tenant/${skill.id}/content`, token)).status, 404)
         for (const [type, id] of [['agents', agent.data.id], ['skills', skill.id]]) {
           assert.equal((await request('GET', `/api/v1/${type}/tenant/${id}/download`, token)).status, 404)
           assert.equal((await request('PATCH', `/api/v1/${type}/tenant/${id}`, token, { enabled: false })).status, 404)
