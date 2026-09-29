@@ -67,8 +67,8 @@ export async function syncWorkspaceSkills(
     USER_SKILLS_DIR,
   ]
 
-  // 收集所有启用的技能
-  const skillTargets = new Map<string, string>() // skillName -> sourcePath
+  // 收集所有启用的技能，按会话中的加载名去重
+  const rankedTargets = new Map<string, { sourcePath: string; rank: number }>()
 
   for (const sourceDir of skillSourceDirs) {
     try {
@@ -76,8 +76,8 @@ export async function syncWorkspaceSkills(
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
 
-        const skillName = entry.name
-        const skillSourcePath = path.join(sourceDir, skillName)
+        const dirName = entry.name
+        const skillSourcePath = path.join(sourceDir, dirName)
 
         // 检查是否有 SKILL.md
         try {
@@ -86,8 +86,13 @@ export async function syncWorkspaceSkills(
           continue // 没有 SKILL.md，跳过
         }
 
+        // 自定义技能按用户隔离：与他人重名时目录名带用户后缀，但会话中仍以原名
+        // (meta.skill_name) 加载
+        const customMeta = sourceDir === MOSS_SKILLS_CUSTOM_DIR ? readSkillMetaSync(skillSourcePath) : null
+        const loadName = typeof customMeta?.skill_name === 'string' && customMeta.skill_name ? customMeta.skill_name : dirName
+
         // undefined 表示同步所有启用的技能；显式数组（包括空数组）表示严格按列表同步
-        if (Array.isArray(enabledSkillNames) && !enabledSkillNames.includes(skillName)) {
+        if (Array.isArray(enabledSkillNames) && !enabledSkillNames.includes(loadName) && !enabledSkillNames.includes(dirName)) {
           continue
         }
 
@@ -101,9 +106,13 @@ export async function syncWorkspaceSkills(
           continue
         }
 
-        // custom 优先级最高，然后是 hub，最后是 system
-        if (!skillTargets.has(skillName) || sourceDir === MOSS_SKILLS_CUSTOM_DIR) {
-          skillTargets.set(skillName, skillSourcePath)
+        // 同名时：本人的自定义技能 > 他人共享的自定义技能 > hub > system > tenant
+        const rank = sourceDir !== MOSS_SKILLS_CUSTOM_DIR
+          ? 0
+          : visibilityFilter && customItemOwnerId(customMeta) === visibilityFilter.userId ? 2 : 1
+        const current = rankedTargets.get(loadName)
+        if (!current || rank > current.rank) {
+          rankedTargets.set(loadName, { sourcePath: skillSourcePath, rank })
         }
       }
     } catch {
@@ -111,6 +120,7 @@ export async function syncWorkspaceSkills(
     }
   }
 
+  const skillTargets = new Map([...rankedTargets].map(([name, target]) => [name, target.sourcePath]))
   const linkedTargets = new Map<string, string>()
 
   // 清理旧的符号链接
@@ -182,6 +192,14 @@ function isSkillEnabledSync(skillDir: string): boolean {
 /**
  * 检查技能是否对用户可见
  */
+function readSkillMetaSync(skillDir: string): { source_type?: unknown; author_id?: unknown; skill_name?: unknown; visible_to?: VisibleTo } | null {
+  try {
+    return JSON.parse(readFileSync(path.join(skillDir, SKILL_HUB_META_FILE), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 function isSkillVisibleToSync(skillDir: string, filter: VisibilityFilterContext | null): boolean {
   // 如果没有提供过滤上下文，默认可见（向后兼容）
   if (!filter) return true

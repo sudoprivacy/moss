@@ -142,6 +142,7 @@ import {
   type SkillHubSkill,
   type SkillStoreMeta,
   uninstallSkill,
+  SkillNameConflictError,
   resolveCustomSkillOwner,
   batchSyncSkills,
   uploadCustomSkill,
@@ -662,6 +663,22 @@ function parseTenantBoolean(value: unknown, fieldName: string): boolean | undefi
 function formatTenantAssistantAvatarUrl(avatar: unknown, publicBaseUrl: string): unknown {
   if (typeof avatar !== 'string' || !publicBaseUrl) return avatar
   return getTenantAssistantAvatarFilename(avatar) ? `${publicBaseUrl}${avatar}` : avatar
+}
+
+/**
+ * Whether approving `record` into the tenant skill dir would overwrite an
+ * approved tenant skill of the same name owned by someone else. Re-approving
+ * your own name (a new version) stays allowed.
+ */
+function tenantSkillNameTakenByOther(
+  store: { listTenantSkills(status?: string, orgId?: string): Array<Record<string, unknown>> },
+  name: string,
+  authorId: string,
+  selfId?: string,
+): boolean {
+  return store
+    .listTenantSkills('approved')
+    .some(row => row.name === name && row.id !== selfId && row.author_id !== authorId)
 }
 
 /** Parse a stored visible_to column (JSON text, or NULL for everyone). */
@@ -8845,11 +8862,21 @@ export function startServer(
         if (!assistantId) {
           throw new HttpError(400, `assistantId is required`)
         }
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
 
         // Check if agent exists
         const assistantResult = await findAssistantDir(assistantId)
         if (!assistantResult) {
           throw new HttpError(404, `Assistant not found: ${assistantId}`)
+        }
+        // Only your own custom agent can be submitted — otherwise anyone who
+        // knew an id could publish someone else's private agent (or a hub /
+        // system one) as their own 专属 request.
+        if ((await resolveCustomAssistantOwner({ assistantName: assistantId, sourcePath: assistantResult.dir })) !== auth.userId) {
+          throw new HttpError(403, '只能发布自己创建的自定义智能体')
+        }
+        if (existsSync(join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant', basename(assistantResult.dir)))) {
+          throw new HttpError(409, '已存在同名专属智能体')
         }
 
         // Read agent metadata
@@ -9502,6 +9529,9 @@ export function startServer(
           description: typeof body.description === 'string' ? body.description : undefined,
           version: typeof body.version === 'string' ? body.version : undefined,
           userId: auth.userId,
+        }).catch(error => {
+          if (error instanceof SkillNameConflictError) throw new HttpError(409, error.message)
+          throw error
         })
         writeJson(res, 200, result)
         return
@@ -9669,10 +9699,18 @@ export function startServer(
         const skillId = typeof body.skillId === 'string' ? body.skillId : skillName
         const publishNote = typeof body.publishNote === 'string' ? body.publishNote : undefined
 
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         // Check if skill exists in custom directory
         const skillPath = await findInstalledSkillPath(skillId)
         if (!skillPath) {
           throw new HttpError(404, `Skill not found: ${skillId}`)
+        }
+        // Only your own custom skill can be submitted (see agent publish).
+        if ((await resolveCustomSkillOwner({ skillName: skillId, sourcePath: skillPath })) !== auth.userId) {
+          throw new HttpError(403, '只能发布自己创建的自定义技能')
+        }
+        if (tenantSkillNameTakenByOther(runtime.store, basename(skillPath), auth.userId)) {
+          throw new HttpError(409, '已存在同名专属技能')
         }
 
         // Read skill metadata
@@ -9680,8 +9718,9 @@ export function startServer(
         const version = await readSkillVersion(skillPath)
         const dirName = basename(skillPath)
 
-        // Use actual skill name from metadata or directory name
-        const actualSkillName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : dirName
+        // The tenant copy is keyed by directory name (a custom skill's may be
+        // per-user, see uploadCustomSkill); the source path is what approval moves.
+        const actualSkillName = dirName
 
         // Get author name from user info
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
@@ -9703,6 +9742,7 @@ export function startServer(
           author_id: auth.userId,
           author_name: authorName,
           status: 'pending',
+          file_path: skillPath,
           visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
           org_id: auth.orgId,
         })
@@ -9725,6 +9765,11 @@ export function startServer(
         }
 
         if (approved) {
+          // Refuse before changing anything: approving would overwrite another
+          // author's approved tenant skill of the same name.
+          if (tenantSkillNameTakenByOther(runtime.store, tenantSkill.name as string, tenantSkill.author_id as string, tenantSkillId)) {
+            throw new HttpError(409, `已存在他人的同名专属技能: ${tenantSkill.name as string}`)
+          }
           // Update status to approved
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
           // The requested scope, or the admin's adjustment from the approve body.

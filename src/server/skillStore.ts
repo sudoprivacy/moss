@@ -78,6 +78,8 @@ export type SkillStoreMeta = {
   installed_version?: string
   installed_at?: string
   visible_to?: VisibleTo
+  /** Custom skills: the name sessions load it under, when its directory is per-user. */
+  skill_name?: string
   [key: string]: unknown
 }
 
@@ -1070,6 +1072,14 @@ export async function setInstalledSkillMeta(
  * Upload a custom skill from a zip buffer.
  * The skill will be installed to the custom directory with visibility set to the uploader only.
  */
+/** The uploader already has a custom skill of this name (mapped to HTTP 409). */
+export class SkillNameConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SkillNameConflictError'
+  }
+}
+
 export async function uploadCustomSkill(params: {
   file: Buffer
   name: string
@@ -1078,15 +1088,27 @@ export async function uploadCustomSkill(params: {
   version?: string
   userId: string
 }): Promise<{ id: string; name: string; version: string }> {
-  const skillName = params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
-  if (!skillName) {
+  const baseName = params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
+  if (!baseName) {
     throw new Error('Invalid skill name')
   }
 
-  // Check if skill already exists
-  const existingPath = await findInstalledSkillPath(skillName)
+  // Custom skills are per-user: a name only conflicts with the uploader's own
+  // skill. When another user's skill (or a hub/system/tenant one) holds the
+  // plain name, this one gets a per-user directory; it still loads into
+  // sessions under its original name (skill_name, see syncWorkspaceSkills).
+  const ownsSkillAt = async (dir: string) =>
+    customItemOwnerId(await readSkillMeta(dir)) === params.userId
+  let skillName = baseName
+  const existingPath = await findInstalledSkillPath(baseName)
   if (existingPath) {
-    throw new Error(`Skill already exists: ${skillName}`)
+    if (path.dirname(path.resolve(existingPath)) === path.resolve(MOSS_SKILLS_CUSTOM_DIR) && await ownsSkillAt(existingPath)) {
+      throw new SkillNameConflictError(`你已有同名自定义技能: ${baseName}`)
+    }
+    skillName = `${baseName}-${params.userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}`
+    if (await findInstalledSkillPath(skillName)) {
+      throw new SkillNameConflictError(`你已有同名自定义技能: ${baseName}`)
+    }
   }
 
   // Extract to temp directory first
@@ -1117,7 +1139,7 @@ export async function uploadCustomSkill(params: {
     const meta: SkillStoreMeta = {
       id: skillName,
       name: skillName,
-      display_name: params.displayName || frontmatter.name || frontmatter.displayName || skillName,
+      display_name: params.displayName || frontmatter.name || frontmatter.displayName || baseName,
       description: params.description || frontmatter.description || '',
       icon: frontmatter.icon || '',
       emoji: frontmatter.emoji || null,
@@ -1133,6 +1155,9 @@ export async function uploadCustomSkill(params: {
         department_ids: null,
       },
       author_id: params.userId,
+      // The name sessions load it under (differs from the directory only for
+      // a per-user directory, see above).
+      skill_name: baseName,
     }
     await writeSkillMeta(targetDir, meta)
 
