@@ -49,6 +49,12 @@ import { getDepartments, getUsers } from '@/lib/api/auth'
 import { updateSkillVisibility, approveTenantSkill, deleteTenantSkill, updateTenantSkillMeta } from '@/lib/api/skill-store'
 import type { VisibleTo } from '@/lib/api/agent-hub'
 import { useAuth } from '@/lib/hooks/use-auth'
+import {
+  CustomVisibilityPicker,
+  customVisibilityFrom,
+  customVisibleToFrom,
+  type CustomVisibilityValue,
+} from '@/components/custom-visibility-picker'
 import { hasScope } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 import {
@@ -619,6 +625,9 @@ export default function SkillStorePage() {
   const [editVisibilityOpen, setEditVisibilityOpen] = useState(false)
   const [editingSkillName, setEditingSkillName] = useState('')
   const [skillVisibilityMode, setSkillVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
+  // Owner of the skill being edited when it's a custom skill (its own scope choices).
+  const [editingSkillOwnerId, setEditingSkillOwnerId] = useState<string | null>(null)
+  const [skillCustomVisibility, setSkillCustomVisibility] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
   const [editSkillVisibleTo, setEditSkillVisibleTo] = useState<string[]>([])
   const [editSkillVisibleUserIds, setEditSkillVisibleUserIds] = useState<string[]>([])
   const [savingVisibility, setSavingVisibility] = useState(false)
@@ -1416,6 +1425,8 @@ export default function SkillStorePage() {
 
   const handleOpenVisibilityEdit = useCallback((skill: InstalledSkillInfo) => {
     setEditingSkillName(skill.name)
+    setEditingSkillOwnerId(skill.ownerId ?? null)
+    setSkillCustomVisibility(customVisibilityFrom(skill.meta?.visible_to, skill.ownerId))
     const visibleTo = storedVisibleTo(skill)
     setEditingSkillVisibleTo(visibleTo ?? null)
     const deptIds = visibleTo?.department_ids
@@ -1463,7 +1474,9 @@ export default function SkillStorePage() {
     try {
       await updateSkillVisibility(
         editingSkillName,
-        skillVisibilityMode === 'admin'
+        editingSkillOwnerId
+          ? customVisibleToFrom(skillCustomVisibility, editingSkillOwnerId)
+          : skillVisibilityMode === 'admin'
           ? { department_ids: [], user_ids: [] }
           : skillVisibilityMode === 'departments'
             ? { department_ids: editSkillVisibleTo.length > 0 ? editSkillVisibleTo : null, user_ids: null }
@@ -1480,15 +1493,16 @@ export default function SkillStorePage() {
     } finally {
       setSavingVisibility(false)
     }
-  }, [editingSkillName, skillVisibilityMode, editSkillVisibleTo, editSkillVisibleUserIds, fetchInstalledList])
+  }, [editingSkillName, editingSkillOwnerId, skillCustomVisibility, skillVisibilityMode, editSkillVisibleTo, editSkillVisibleUserIds, fetchInstalledList])
 
   const handleSaveVisibility = useCallback(() => {
-    if (skillVisibilityOutOfScope.deptCount > 0 || skillVisibilityOutOfScope.userCount > 0) {
+    // Custom skills pick from the whole-org directory, so nothing is out of scope.
+    if (!editingSkillOwnerId && (skillVisibilityOutOfScope.deptCount > 0 || skillVisibilityOutOfScope.userCount > 0)) {
       setSkillVisibilityWarnOpen(true)
       return
     }
     void doSaveVisibility()
-  }, [skillVisibilityOutOfScope, doSaveVisibility])
+  }, [editingSkillOwnerId, skillVisibilityOutOfScope, doSaveVisibility])
 
   const handleApproveTenantSkill = useCallback(async (approved: boolean) => {
     if (!approvingSkill) return
@@ -2465,7 +2479,14 @@ export default function SkillStorePage() {
               设置哪些用户或部门可以看到此技能。
             </DialogDescription>
           </DialogHeader>
-          {(() => {
+          {editingSkillOwnerId ? (
+          <CustomVisibilityPicker
+            value={skillCustomVisibility}
+            onChange={setSkillCustomVisibility}
+            ownerId={editingSkillOwnerId}
+          />
+          ) : (
+          (() => {
           const isNormalUser = !isStoreAdmin && user?.role !== 'dept_admin'
           return (
           <div className='space-y-3'>
@@ -2561,7 +2582,8 @@ export default function SkillStorePage() {
             ) : null}
           </div>
           )
-          })()}
+          })()
+          )}
           <DialogFooter>
             <Button variant='outline' onClick={() => setEditVisibilityOpen(false)}>
               取消

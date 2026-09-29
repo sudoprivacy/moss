@@ -3400,6 +3400,13 @@ export function startServer(
         return
       }
 
+      // Org directory (departments + active users, names only) for choosing who
+      // a custom skill/agent is shared with. Any member may read it.
+      if (req.method === 'GET' && pathname === '/api/v1/directory') {
+        writeJson(res, 200, authService.getOrgDirectory(auth.orgId))
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/departments') {
         authService.requireScope(auth, 'admin:users')
         writeJson(res, 200, authService.listDepartments(auth.orgId, auth))
@@ -8291,8 +8298,8 @@ export function startServer(
         // Editing installed hub/system agents stays admin-only. CUSTOM agents
         // (created from the SudoWork client) are strictly creator-only —
         // editable ONLY by the owner, even for an admin who did not create it.
-        // The owner may also change visibility, clamped to their own scope
-        // like tenant items (an admin owner is unrestricted).
+        // The owner may also change visibility: everyone / departments /
+        // users / only me, any of the org (see normalizeCustomVisibleTo).
         const updates = isJsonBody(body.updates) ? body.updates : {}
         {
           const targetName = typeof body.assistantName === 'string' ? body.assistantName : ''
@@ -8302,8 +8309,8 @@ export function startServer(
             if (customItemOwnerId(targetMeta) !== auth.userId) {
               throw new HttpError(403, 'Only the creator can edit this custom agent')
             }
-            if (updates.visible_to !== undefined && !isStoreAdmin(auth)) {
-              updates.visible_to = authService.clampVisibleToScope(auth, (updates.visible_to ?? null) as VisibleTo)
+            if (updates.visible_to !== undefined) {
+              updates.visible_to = authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, (updates.visible_to ?? null) as VisibleTo)
             }
           } else {
             authService.requireScope(auth, 'admin:settings')
@@ -8376,11 +8383,11 @@ export function startServer(
         const targetMeta = found ? await readAssistantMeta(found.dir) : null
         if (targetMeta?.source_type === 'custom') {
           // Custom agents: only the creator sets visibility (not even an admin
-          // who didn't create it), clamped to their scope unless they're admin.
+          // who didn't create it).
           if (customItemOwnerId(targetMeta) !== auth.userId) {
             throw new HttpError(403, 'Only the creator can change this custom agent\'s visibility')
           }
-          if (!isStoreAdmin(auth)) visibleTo = authService.clampVisibleToScope(auth, visibleTo)
+          visibleTo = authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, visibleTo)
         } else {
           authService.requireScope(auth, 'admin:settings')
         }
@@ -9311,11 +9318,11 @@ export function startServer(
         const customOwnerId = await resolveCustomSkillOwner({ skillName })
         if (customOwnerId) {
           // Custom skills: only the creator sets visibility (not even an admin
-          // who didn't create it), clamped to their scope unless they're admin.
+          // who didn't create it).
           if (customOwnerId !== auth.userId) {
             throw new HttpError(403, 'Only the creator can change this custom skill\'s visibility')
           }
-          if (!isStoreAdmin(auth)) visibleTo = authService.clampVisibleToScope(auth, visibleTo)
+          visibleTo = authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, visibleTo)
         } else {
           authService.requireScope(auth, 'admin:settings')
         }

@@ -82,6 +82,12 @@ import {
 import type { AuthDepartment, AuthUser } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
 import { useAuth } from '@/lib/hooks/use-auth'
+import {
+  CustomVisibilityPicker,
+  customVisibilityFrom,
+  customVisibleToFrom,
+  type CustomVisibilityValue,
+} from '@/components/custom-visibility-picker'
 import { hasScope } from '@/lib/api/client'
 import { resolveIconUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
@@ -516,8 +522,6 @@ export default function AgentHubPage() {
       agent.meta?.source_type === 'custom' && !!user?.id && agent.ownerId === user.id,
     [user],
   )
-  // Normal users have no department picker (clamped server-side to their scope).
-  const isNormalUser = !isStoreAdmin && user?.role !== 'dept_admin'
   // Who may edit the agent open in the 编辑智能体 modal: the owner of a custom
   // agent; a store admin for hub/system agents.
   const canEditEditingAgent = useMemo(() => {
@@ -557,6 +561,9 @@ export default function AgentHubPage() {
   const [agentVisibilityOpen, setAgentVisibilityOpen] = useState(false)
   const [editingVisibilityAgent, setEditingVisibilityAgent] = useState<InstalledAgentInfo | null>(null)
   const [agentVisibilityMode, setAgentVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
+  // Custom agents use their own scope choices (see CustomVisibilityPicker).
+  const [agentCustomVisibility, setAgentCustomVisibility] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
+  const [editCustomVisibility, setEditCustomVisibility] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
   const [editAgentVisibleTo, setEditAgentVisibleTo] = useState<string[]>([])
   const [editAgentVisibleUserIds, setEditAgentVisibleUserIds] = useState<string[]>([])
   const [savingAgentVisibility, setSavingAgentVisibility] = useState(false)
@@ -1059,6 +1066,7 @@ export default function AgentHubPage() {
     setEditEmoji(agent.emoji || '')
     setEditAgentType(agent.agentType || agent.meta?.agent_type || 'chat')
     setEditMemoryMode(agent.memoryMode || agent.meta?.memory_mode || 'session')
+    setEditCustomVisibility(customVisibilityFrom(agent.meta?.visible_to, agent.ownerId))
     const scope = storedVisibleTo(agent)
     setEditVisibleTo(scope?.department_ids ?? agent.meta?.visible_to?.department_ids ?? [])
     setEditVisibleUserIds(scope?.user_ids ?? agent.meta?.visible_to?.user_ids ?? [])
@@ -1232,13 +1240,15 @@ export default function AgentHubPage() {
           enabledWikis: editEnabledWikis,
           // 企业应用管理: persist Corp App associations (string[] of corp app IDs)
           enabledCorpApps: editEnabledCorpApps,
-          visible_to: editVisibilityMode === 'admin'
-            ? { department_ids: [], user_ids: [] }
-            : editVisibilityMode === 'departments'
-              ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
-              : editVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
-                : null,
+          visible_to: editingAgent.meta?.source_type === 'custom'
+            ? customVisibleToFrom(editCustomVisibility, editingAgent.ownerId ?? user?.id ?? '')
+            : editVisibilityMode === 'admin'
+              ? { department_ids: [], user_ids: [] }
+              : editVisibilityMode === 'departments'
+                ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
+                : editVisibilityMode === 'users'
+                  ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
+                  : null,
           workflow: editAgentType === 'workflow'
             ? {
                 trigger: editWorkflowTrigger,
@@ -1259,7 +1269,7 @@ export default function AgentHubPage() {
     } finally {
       setSavingEdit(false)
     }
-  }, [editAvatar, editDescription, editEmoji, editName, editRules, editAgentType, editMemoryMode, editVisibilityMode, editVisibleTo, editVisibleUserIds, editWorkflowTrigger, editWorkflowCron, editWorkflowWebhookPath, editWorkflowOutputWebhook, editWorkflowTimeout, editWorkflowOutputTargets, editEnabledSkills, editEnabledWikis, editEnabledCorpApps, editSkills, editingAgent, fetchInstalledState])
+  }, [editAvatar, editDescription, editEmoji, editName, editRules, editAgentType, editMemoryMode, editVisibilityMode, editCustomVisibility, user, editVisibleTo, editVisibleUserIds, editWorkflowTrigger, editWorkflowCron, editWorkflowWebhookPath, editWorkflowOutputWebhook, editWorkflowTimeout, editWorkflowOutputTargets, editEnabledSkills, editEnabledWikis, editEnabledCorpApps, editSkills, editingAgent, fetchInstalledState])
 
   const handleConfirmUninstall = useCallback(async () => {
     if (!pendingUninstallAgent) {
@@ -1293,6 +1303,7 @@ export default function AgentHubPage() {
 
   const openAgentVisibility = useCallback((agent: InstalledAgentInfo) => {
     setEditingVisibilityAgent(agent)
+    setAgentCustomVisibility(customVisibilityFrom(agent.meta?.visible_to, agent.ownerId))
     const deptIds = storedVisibleTo(agent)?.department_ids
     const userIds = storedVisibleTo(agent)?.user_ids
 
@@ -1322,13 +1333,15 @@ export default function AgentHubPage() {
       await updateInstalledAgentMeta({
         assistantName: editingVisibilityAgent.name,
         updates: {
-          visible_to: agentVisibilityMode === 'admin'
-            ? { department_ids: [], user_ids: [] }
-            : agentVisibilityMode === 'departments'
-              ? { department_ids: editAgentVisibleTo.length > 0 ? editAgentVisibleTo : null, user_ids: null }
-              : agentVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editAgentVisibleUserIds.length > 0 ? editAgentVisibleUserIds : null }
-                : null,
+          visible_to: editingVisibilityAgent.meta?.source_type === 'custom'
+            ? customVisibleToFrom(agentCustomVisibility, editingVisibilityAgent.ownerId ?? user?.id ?? '')
+            : agentVisibilityMode === 'admin'
+              ? { department_ids: [], user_ids: [] }
+              : agentVisibilityMode === 'departments'
+                ? { department_ids: editAgentVisibleTo.length > 0 ? editAgentVisibleTo : null, user_ids: null }
+                : agentVisibilityMode === 'users'
+                  ? { department_ids: null, user_ids: editAgentVisibleUserIds.length > 0 ? editAgentVisibleUserIds : null }
+                  : null,
         },
       })
       toast.success('可见性已更新')
@@ -1339,7 +1352,7 @@ export default function AgentHubPage() {
     } finally {
       setSavingAgentVisibility(false)
     }
-  }, [editingVisibilityAgent, agentVisibilityMode, editAgentVisibleTo, editAgentVisibleUserIds, fetchInstalledState])
+  }, [editingVisibilityAgent, agentVisibilityMode, agentCustomVisibility, user, editAgentVisibleTo, editAgentVisibleUserIds, fetchInstalledState])
 
   const fetchTenantAssistants = useCallback(async () => {
     setTenantAssistantsLoading(true)
@@ -2907,6 +2920,18 @@ export default function AgentHubPage() {
               </div>
             ) : null}
 
+            {editingAgent?.meta?.source_type === 'custom' ? (
+            <div className="space-y-3">
+              <div>
+                <label className="text-sm font-medium">可见范围</label>
+              </div>
+              <CustomVisibilityPicker
+                value={editCustomVisibility}
+                onChange={setEditCustomVisibility}
+                ownerId={editingAgent.ownerId}
+              />
+            </div>
+            ) : (
             <div className="space-y-3">
               <div>
                 <label className="text-sm font-medium">可见范围</label>
@@ -2920,8 +2945,8 @@ export default function AgentHubPage() {
                   <label className="text-sm cursor-pointer">全员可见</label>
                 </div>
                 <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" disabled={isNormalUser} />
-                  <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}</label>
+                  <RadioGroupItem value="departments" />
+                  <label className="text-sm cursor-pointer">指定部门可见</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="users" />
@@ -2984,6 +3009,7 @@ export default function AgentHubPage() {
                 )
               ) : null}
             </div>
+            )}
 
             <div className="space-y-3">
               <div>
@@ -3980,6 +4006,13 @@ export default function AgentHubPage() {
               {editingVisibilityAgent?.displayName ?? ''}
             </DialogDescription>
           </DialogHeader>
+          {editingVisibilityAgent?.meta?.source_type === 'custom' ? (
+          <CustomVisibilityPicker
+            value={agentCustomVisibility}
+            onChange={setAgentCustomVisibility}
+            ownerId={editingVisibilityAgent.ownerId}
+          />
+          ) : (
           <div className="space-y-3">
             <RadioGroup
               value={agentVisibilityMode}
@@ -3990,8 +4023,8 @@ export default function AgentHubPage() {
                 <label className="text-sm cursor-pointer">全员可见</label>
               </div>
               <div className="flex items-center gap-2">
-                <RadioGroupItem value="departments" disabled={isNormalUser} />
-                <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}</label>
+                <RadioGroupItem value="departments" />
+                <label className="text-sm cursor-pointer">指定部门可见</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="users" />
@@ -4054,6 +4087,7 @@ export default function AgentHubPage() {
               )
             ) : null}
           </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setAgentVisibilityOpen(false)}>
               取消

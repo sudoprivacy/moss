@@ -2192,6 +2192,52 @@ export class AuthService {
     return this.defaultTenantVisibility(auth)
   }
 
+  /**
+   * Org directory for choosing who a custom skill/agent is shared with: every
+   * department and active user of the org, ids and names only. Readable by any
+   * member — a custom item may be shared with anyone in its org.
+   */
+  getOrgDirectory(orgId: string): {
+    departments: Array<{ id: string; name: string; parentId: string | null }>
+    users: Array<{ id: string; name: string; displayName: string | null; departmentId: string | null }>
+  } {
+    return {
+      departments: this.db
+        .listDepartmentsByOrg(orgId)
+        .map(d => ({ id: d.id, name: d.name, parentId: d.parentId })),
+      users: this.db
+        .listUsersByOrg(orgId)
+        .filter(u => u.status === 'active')
+        .map(u => ({ id: u.id, name: u.name, displayName: u.displayName ?? null, departmentId: u.departmentId })),
+    }
+  }
+
+  /**
+   * Normalize the scope a creator chose for their custom skill/agent to one of
+   * everyone (null) / departments / users / only me ({ user_ids: [owner] }).
+   * Any department or user of the org may be picked — "everyone" is already
+   * allowed, so a narrower choice can never widen exposure — but unknown ids
+   * are dropped. An empty choice, and the retired "admins only" value, mean
+   * only me. The owner is always included at read time (withOwnerVisibility).
+   */
+  normalizeCustomVisibleTo(orgId: string, ownerId: string, requested: VisibleTo): VisibleTo {
+    const onlyMe: VisibleTo = { department_ids: null, user_ids: [ownerId] }
+    if (!requested || (requested.department_ids == null && requested.user_ids == null)) {
+      return null
+    }
+    if (requested.department_ids?.length) {
+      const known = new Set(this.db.listDepartmentsByOrg(orgId).map(d => d.id))
+      const picked = [...new Set(requested.department_ids.filter(id => known.has(id)))]
+      return picked.length ? { department_ids: picked, user_ids: null } : onlyMe
+    }
+    if (requested.user_ids?.length) {
+      const known = new Set(this.db.listUsersByOrg(orgId).map(u => u.id))
+      const picked = [...new Set(requested.user_ids.filter(id => known.has(id)))]
+      return picked.length ? { department_ids: null, user_ids: picked } : onlyMe
+    }
+    return onlyMe
+  }
+
   /** True when the actor is a dept_admin (not a full admin, not a plain user). */
   isDeptAdmin(auth: AuthContext): boolean {
     const actor = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
