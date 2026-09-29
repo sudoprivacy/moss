@@ -46,7 +46,7 @@ async function startMossForP0(
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try { return await startMoss(directory, input) }
     catch (error) {
-      if (attempt === 3 || !String(error).includes('nexusd-cluster 0.1.5 not found')) throw error
+      if (attempt === 3 || !String(error).includes('nexusd-cluster 0.1.6 not found')) throw error
     }
   }
   throw new Error('unreachable')

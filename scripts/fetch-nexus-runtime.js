@@ -12,7 +12,16 @@
  * 由 scripts/build.js 在 `--target=node` 且 win32/darwin 且非 CI 时调用；也可
  * `bun scripts/fetch-nexus-runtime.js` 独立运行（便于单独验证与手动重取）。
  *
- * Versions and artifact checksums share src/server/nexus/runtime-versions.json.
+ * 版本来源：src/server/nexus/runtime-versions.json；升级版本时必须同步更新下方 SHA256 表。
+ *
+ * 本地构建约定（zone-v1 mixed-version 收敛，未上线）：当前 pin
+ * nexusd-cluster 0.1.6 / nexus-vault 0.1.4 是从各仓 feat/contract-zone HEAD
+ * 本地构建的产物版本（构建注入 NEXUSD_BUILD_VERSION=0.1.6；vault 为 crate
+ * 版本标记），不经任何外部发布源分发。产物直接放置在 bin/nexus/ 下并由
+ * .nexusd-version / plugins/.vault-version marker 记录版本——marker 与 pin
+ * 一致即跳过下载。下方 SHA256 表保留官方 0.1.5/0.5.44 条目仅作历史记录：
+ * 0.1.6/0.1.4 在 COS/GitHub 上不存在，即使 marker 丢失触发下载也会 404
+ * 回退（non-fatal warn），不会落盘覆盖本地产物。
  */
 import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
@@ -45,22 +54,29 @@ const REPO_ROOT = process.cwd()
 const COS_RUNTIME = 'https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com'
 const COS_LEGACY = 'https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com'
 
-// Native installation and both Docker builds consume the same verified pins.
-const RUNTIME_PINS = JSON.parse(readFileSync(join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json'), 'utf8'))
-const SHA256 = RUNTIME_PINS['artifact-sha256']
+// sha256 真源（实测值）。仅列 build.js 触发平台（win/mac）所需；Linux 由
+// server.Dockerfile.local 内联 sha 各自维护。升级 runtime-versions.json 版本时必须同步此表。
+const SHA256 = {
+  'nexus-vault-macos-arm64.tar.gz': '8ad59f175c9079709ced75dabea5b90fe89ea6d133c8cb37e5153f1ab0a0e67b',
+  'nexus-vault-macos-x86_64.tar.gz': '7bce4cfa6de33f886b8bdc6ca9fd3c6f6f1cd732358d0a361179f54c2bd64111',
+  'nexus-vault-windows-x86_64.zip': '23619d44c877dbd377dca96fdef944efe14553f9e4a4580f668df29eb504c603',
+  'nexusd-cluster-macos-aarch64.tar.gz': 'be41487657e10955f37395c8c671f0c820359c148c2afb86c5d10162822f53ab',
+  'nexusd-cluster-macos-x86_64.tar.gz': 'f8e9aceed8f02192621b27a71040708d30a89b1eccde86c1a5a2190328b38d8b',
+  'nexusd-cluster-windows-x86_64.zip': '65199f632da8e75de0da4e7be6e3389891b71c1a854d096b9f604890436a9156',
+}
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
 
 function loadVersions() {
-  return { vault: RUNTIME_PINS['nexus-vault'], nexusd: RUNTIME_PINS['nexusd-cluster'] }
+  const p = join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json')
+  const j = JSON.parse(readFileSync(p, 'utf8'))
+  return { vault: j['nexus-vault'], nexusd: j['nexusd-cluster'] }
 }
 
 // ── 平台映射 ──────────────────────────────────────────────────────────────────
 // vault：arch token 用 arm64/x86_64（与 nexusd 的 aarch64 不同，勿混用）。仅列 fetch 支持三平台。
 function vaultArtifact(platform, arch) {
   return {
-    'linux-x64': 'nexus-vault-linux-x86_64.tar.gz',
-    'linux-arm64': 'nexus-vault-linux-aarch64.tar.gz',
     'darwin-arm64': 'nexus-vault-macos-arm64.tar.gz',
     'darwin-x64': 'nexus-vault-macos-x86_64.tar.gz',
     'win32-x64': 'nexus-vault-windows-x86_64.zip',
@@ -92,9 +108,9 @@ function vaultUrls(ver, artifact) {
 
 function nexusdUrls(ver, artifact) {
   return [
-    { label: 'COS Runtime', url: `${COS_RUNTIME}/nexus-vfs/release/v${ver}/${artifact}` },
-    { label: 'Legacy COS', url: `${COS_LEGACY}/nexus-vfs/release/v${ver}/${artifact}` },
-    { label: 'GitHub', url: `https://github.com/nexi-lab/nexus-vfs/releases/download/v${ver}/${artifact}` },
+    { label: 'COS Runtime', url: `${COS_RUNTIME}/nexusd-cluster/release/v${ver}/${artifact}` },
+    { label: 'Legacy COS', url: `${COS_LEGACY}/nexusd-cluster/release/v${ver}/${artifact}` },
+    { label: 'GitHub', url: `${GITHUB}/nexusd-cluster-v${ver}/${artifact}` },
   ]
 }
 
@@ -256,8 +272,9 @@ async function ensureNexusd(version) {
     return
   }
   const expectedSha = SHA256[artifact]
-  if (typeof expectedSha !== 'string' || !/^[0-9a-f]{64}$/.test(expectedSha)) {
-    throw new Error(`Invalid or missing cluster checksum for ${artifact} at v${version}`)
+  if (!expectedSha) {
+    console.warn(`[fetch-nexus] nexusd: no known sha256 for ${artifact}; skip (unsupported platform).`)
+    return
   }
   const binDir = join(REPO_ROOT, 'bin', 'nexus')
   const targetName = platform === 'win32' ? 'nexusd.exe' : 'nexusd'
