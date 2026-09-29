@@ -2174,14 +2174,13 @@ export class AuthService {
    * Any department or user of the org may be picked — "everyone" is already
    * allowed, so a narrower choice can never widen exposure (tenant items gate
    * widening through re-approval instead, see isScopeWithin) — but unknown ids
-   * are dropped. An empty choice, and the retired "admins only" value, mean
-   * only me. The owner is always included at read time (withOwnerVisibility).
+   * are dropped. An empty choice, `{ null, null }` and the retired "admins
+   * only" value mean only me. The owner is always included at read time
+   * (withOwnerVisibility).
    */
   normalizeCustomVisibleTo(orgId: string, ownerId: string, requested: VisibleTo): VisibleTo {
     const onlyMe: VisibleTo = { department_ids: null, user_ids: [ownerId] }
-    if (!requested || (requested.department_ids == null && requested.user_ids == null)) {
-      return null
-    }
+    if (!requested) return null
     if (requested.department_ids?.length) {
       const known = new Set(this.db.listDepartmentsByOrg(orgId).map(d => d.id))
       const picked = [...new Set(requested.department_ids.filter(id => known.has(id)))]
@@ -2202,8 +2201,8 @@ export class AuthService {
    * department, or a user in one, is inside it.
    */
   isScopeWithin(orgId: string, next: VisibleTo, current: VisibleTo, ownerId: string): boolean {
-    if (!current || (current.department_ids == null && current.user_ids == null)) return true
-    if (!next || (next.department_ids == null && next.user_ids == null)) return false
+    if (!current) return true
+    if (!next) return false
     const scopeDepts = new Set(current.department_ids ?? [])
     const scopeUsers = new Set([...(current.user_ids ?? []), ownerId])
     const chainHits = (deptId: string | null) =>

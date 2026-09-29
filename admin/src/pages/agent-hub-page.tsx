@@ -85,6 +85,7 @@ import { getDepartments, getUsers } from '@/lib/api/auth'
 import { useAuth } from '@/lib/hooks/use-auth'
 import {
   CustomVisibilityPicker,
+  ScopeBadges,
   TENANT_SCOPE_HINT,
   customVisibilityFrom,
   customVisibleToFrom,
@@ -1683,11 +1684,6 @@ export default function AgentHubPage() {
       tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
       tenantEditWorkflow, fetchTenantAssistants])
 
-  const departmentNameMap = useMemo(
-    () => new Map(departments.map(dept => [dept.id, dept.name])),
-    [departments],
-  )
-
   const handleSaveTenantVisibility = useCallback(async () => {
     if (!editingTenantAssistant) return
     setSavingTenantVisibility(true)
@@ -2289,25 +2285,9 @@ export default function AgentHubPage() {
                               {' · '}
                               {new Date(assistant.created_at).toLocaleDateString()}
                             </div>
-                            {assistant.status === 'approved' && assistant.visible_to ? (
-                              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                {assistant.visible_to.user_ids?.length ? (
-                                  assistant.visible_to.user_ids.map(userId => {
-                                    const user = users.find(u => u.id === userId)
-                                    return user ? (
-                                      <Badge key={userId} variant="outline" className="text-[10px]">{user.name}</Badge>
-                                    ) : null
-                                  })
-                                ) : assistant.visible_to.department_ids?.length ? (
-                                  assistant.visible_to.department_ids.map(deptId => {
-                                    const name = departmentNameMap.get(deptId)
-                                    return name ? (
-                                      <Badge key={deptId} variant="outline" className="text-[10px]">{name}</Badge>
-                                    ) : null
-                                  })
-                                ) : (
-                                  <span className="text-[11px] text-muted-foreground">全员可见</span>
-                                )}
+                            {assistant.status === 'approved' ? (
+                              <div className="mt-2">
+                                <ScopeBadges visibleTo={assistant.visible_to} ownerId={assistant.author_id} />
                               </div>
                             ) : null}
                           </div>
@@ -4054,82 +4034,15 @@ export default function AgentHubPage() {
               {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可见范围（待审批）` : ''}
             </DialogDescription>
           </DialogHeader>
-          {(() => {
-            const v = viewingVisibility?.visible_to
-            const mode: 'all' | 'departments' | 'users' | 'admin' =
-              !v || (!v.department_ids && !v.user_ids)
-                ? 'all'
-                : v.user_ids?.length === 1 && v.user_ids[0] === 'admin'
-                  ? 'admin'
-                  : v.department_ids?.length
-                    ? 'departments'
-                    : v.user_ids?.length
-                      ? 'users'
-                      : 'all'
-            const deptIds = v?.department_ids ?? []
-            const userIds = v?.user_ids ?? []
-            return (
-              <div className="space-y-3">
-                <RadioGroup value={mode} disabled>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="all" disabled />
-                    <label className="text-sm">全员可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="departments" disabled />
-                    <label className="text-sm">指定部门可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="users" disabled />
-                    <label className="text-sm">指定人员可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="admin" disabled />
-                    <label className="text-sm">仅管理员可见</label>
-                  </div>
-                </RadioGroup>
-                {mode === 'departments' ? (() => {
-                  const inScope = deptIds.filter(id => departmentNameMap.has(id))
-                  const outCount = deptIds.length - inScope.length
-                  return (
-                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                      {inScope.map(deptId => (
-                        <label key={deptId} className="flex items-center gap-2 text-sm">
-                          <Checkbox checked disabled />
-                          <span>{departmentNameMap.get(deptId)}</span>
-                        </label>
-                      ))}
-                      {outCount > 0 ? (
-                        <span className="text-xs text-muted-foreground">+ {outCount} 个其他部门（由管理员设置）</span>
-                      ) : null}
-                    </div>
-                  )
-                })() : mode === 'users' ? (() => {
-                  const resolve = (id: string) => {
-                    const u = users.find(x => x.id === id)
-                    if (u) return u.displayName || u.name
-                    if (user?.id === id) return user.displayName || user.name
-                    return null
-                  }
-                  const inScope = userIds.filter(id => resolve(id) !== null)
-                  const outCount = userIds.length - inScope.length
-                  return (
-                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                      {inScope.map(userId => (
-                        <label key={userId} className="flex items-center gap-2 text-sm">
-                          <Checkbox checked disabled />
-                          <span>{resolve(userId)}</span>
-                        </label>
-                      ))}
-                      {outCount > 0 ? (
-                        <span className="text-xs text-muted-foreground">+ {outCount} 个其他用户（由管理员设置）</span>
-                      ) : null}
-                    </div>
-                  )
-                })() : null}
-              </div>
-            )
-          })()}
+          {/* Read-only view of the requested scope (names from the org directory). */}
+          <fieldset disabled className="min-w-0">
+            <CustomVisibilityPicker
+              value={customVisibilityFrom(viewingVisibility?.visible_to, viewingVisibility?.author_id)}
+              onChange={() => {}}
+              ownerId={viewingVisibility?.author_id}
+              hint={TENANT_SCOPE_HINT}
+            />
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setViewingVisibility(null)}>关闭</Button>
           </DialogFooter>

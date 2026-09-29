@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { getOrgDirectory, type OrgDirectory } from '@/lib/api/auth'
@@ -17,9 +18,13 @@ export type CustomVisibilityValue = {
   userIds: string[]
 }
 
-/** Read a stored scope. Empty lists and the retired "admins only" read as only me. */
+/**
+ * Read a stored scope. Empty lists, the retired "admins only" value, and
+ * `{ null, null }` (an old empty pick — shown as 全员 but visible to nobody)
+ * read as only me.
+ */
 export function customVisibilityFrom(visibleTo: VisibleTo | null | undefined, ownerId: string | null | undefined): CustomVisibilityValue {
-  if (!visibleTo || (visibleTo.department_ids == null && visibleTo.user_ids == null)) {
+  if (!visibleTo) {
     return { mode: 'all', departmentIds: [], userIds: [] }
   }
   if (visibleTo.department_ids?.length) {
@@ -49,6 +54,67 @@ export const CUSTOM_SCOPE_HINT = '创建者本人始终可用；管理员可在�
 /** Hint for tenant (专属) items: widening an approved scope needs re-approval. */
 export const TENANT_SCOPE_HINT = '创建者本人与管理员始终可用。已审批的智能体/技能扩大可见范围需管理员重新审批，缩小范围立即生效。'
 
+// One directory fetch per page load, shared by every picker and badge.
+let directoryRequest: Promise<OrgDirectory> | null = null
+
+/**
+ * The org directory (departments + active users, names only), readable by any
+ * member — so every role sees names, not ids, wherever a scope is shown.
+ */
+export function useOrgDirectory() {
+  const [directory, setDirectory] = useState<OrgDirectory | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    directoryRequest ??= getOrgDirectory()
+    directoryRequest
+      .then(result => { if (!cancelled) setDirectory(result) })
+      .catch(() => {
+        directoryRequest = null
+        if (!cancelled) setFailed(true)
+      })
+    return () => { cancelled = true }
+  }, [])
+  const names = useMemo(() => ({
+    departments: new Map((directory?.departments ?? []).map(d => [d.id, d.name])),
+    users: new Map((directory?.users ?? []).map(u => [u.id, u.displayName || u.name])),
+  }), [directory])
+  return { directory, failed, departmentName: (id: string) => names.departments.get(id), userName: (id: string) => names.users.get(id) }
+}
+
+/**
+ * A stored scope as readable badges — names, never ids. Works for any item:
+ * everyone / admins only / only the creator / departments / users.
+ */
+export function ScopeBadges({
+  visibleTo,
+  ownerId,
+  badgeClassName = 'text-[10px]',
+}: {
+  visibleTo: VisibleTo | null | undefined
+  ownerId?: string | null
+  badgeClassName?: string
+}) {
+  const { directory, departmentName, userName } = useOrgDirectory()
+  const note = (text: string) => <span className="text-[11px] text-muted-foreground">{text}</span>
+  if (!visibleTo) return note('全员可用')
+  const departmentIds = visibleTo.department_ids ?? []
+  const userIds = (visibleTo.user_ids ?? []).filter(id => id !== 'admin')
+  if (!departmentIds.length && !userIds.length) return note('仅管理员可用')
+  if (!departmentIds.length && userIds.length === 1 && userIds[0] === ownerId) return note('仅创建者可用')
+  const fallback = directory ? '（已删除）' : '…'
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {departmentIds.map(id => (
+        <Badge key={id} variant="outline" className={badgeClassName}>{departmentName(id) ?? `部门${fallback}`}</Badge>
+      ))}
+      {userIds.map(id => (
+        <Badge key={id} variant="outline" className={badgeClassName}>{userName(id) ?? `用户${fallback}`}</Badge>
+      ))}
+    </div>
+  )
+}
+
 export function CustomVisibilityPicker({
   value,
   onChange,
@@ -60,16 +126,7 @@ export function CustomVisibilityPicker({
   ownerId: string | null | undefined
   hint?: string
 }) {
-  const [directory, setDirectory] = useState<OrgDirectory | null>(null)
-  const [loadFailed, setLoadFailed] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    getOrgDirectory()
-      .then(result => { if (!cancelled) setDirectory(result) })
-      .catch(() => { if (!cancelled) setLoadFailed(true) })
-    return () => { cancelled = true }
-  }, [])
+  const { directory, failed: loadFailed } = useOrgDirectory()
 
   const departmentOptions = useMemo(() => {
     const departments = directory?.departments ?? []
