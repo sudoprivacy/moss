@@ -1213,13 +1213,16 @@ export default function AgentHubPage() {
           enabledWikis: editEnabledWikis,
           // 企业应用管理: persist Corp App associations (string[] of corp app IDs)
           enabledCorpApps: editEnabledCorpApps,
-          visible_to: editVisibilityMode === 'admin'
-            ? { department_ids: [], user_ids: [] }
-            : editVisibilityMode === 'departments'
-              ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
-              : editVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
-                : null,
+          // Custom agents have no visibility management (server ignores it).
+          visible_to: editingAgent.meta?.source_type === 'custom'
+            ? undefined
+            : editVisibilityMode === 'admin'
+              ? { department_ids: [], user_ids: [] }
+              : editVisibilityMode === 'departments'
+                ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
+                : editVisibilityMode === 'users'
+                  ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
+                  : null,
           workflow: editAgentType === 'workflow'
             ? {
                 trigger: editWorkflowTrigger,
@@ -2702,6 +2705,11 @@ export default function AgentHubPage() {
           </DialogHeader>
 
           <ScrollArea className="max-h-[65vh] pr-4">
+          {/* Read-only for anyone who may not save (non-creator on a custom
+              agent, non-admin on a hub/system agent): a disabled fieldset
+              disables every native control inside it, so the form can't look
+              editable when 保存 is off. */}
+          <fieldset disabled={!canEditEditingAgent} className="min-w-0">
           <div className="space-y-5">
             <div className="space-y-2">
               <label className="text-sm font-medium">标识名称</label>
@@ -2882,6 +2890,9 @@ export default function AgentHubPage() {
               </div>
             ) : null}
 
+            {/* Custom agents are creator-only by design; the server ignores
+                visible_to for them, so don't offer a picker that can't apply. */}
+            {editingAgent?.meta?.source_type !== 'custom' ? (
             <div className="space-y-3">
               <div>
                 <label className="text-sm font-medium">可见范围</label>
@@ -2959,6 +2970,7 @@ export default function AgentHubPage() {
                 )
               ) : null}
             </div>
+            ) : null}
 
             <div className="space-y-3">
               <div>
@@ -3285,6 +3297,7 @@ export default function AgentHubPage() {
               </Alert>
             ) : null}
           </div>
+          </fieldset>
           </ScrollArea>
 
           <DialogFooter>
