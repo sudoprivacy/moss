@@ -8927,10 +8927,15 @@ export function startServer(
             // custom, creator-only) scope; the approved one is what applies.
             const approvedRow = runtime.store.getTenantAssistant(tenantAssistantId)
             await syncTenantAssistantFileScope(tenantPath, parseStoredVisibleTo(approvedRow?.visible_to), tenantAssistant.author_id as string)
-            // MOVE semantics for non-admin-created pending items: remove the
-            // staged source so it lives only in the tenant dir. Items published
-            // from a real custom/ item keep their custom original (copy).
-            if (isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath)) {
+            // MOVE semantics: the approved item lives only in the tenant dir.
+            // Remove the staged pending source, and a custom original it was
+            // published from — keeping both left two same-id copies, where
+            // lookups hit the creator-only custom one first.
+            const ASSISTANT_CUSTOM_DIR = join(MOSS_HOME, 'assistants', 'custom')
+            if (
+              isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath) ||
+              dirname(resolve(sourcePath)) === resolve(ASSISTANT_CUSTOM_DIR)
+            ) {
               rmSync(sourcePath, { recursive: true, force: true })
             }
           } else {
@@ -9736,6 +9741,8 @@ export function startServer(
           const skillName = tenantSkill.name as string
           const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
           await copySkillToTenantDir(skillName, sourcePath)
+          // The source actually copied (see copySkillToTenantDir's fallback).
+          const copiedFrom = sourcePath && existsSync(sourcePath) ? sourcePath : join(MOSS_SKILLS_CUSTOM_DIR, skillName)
           // Point file_path at the tenant copy, and MOVE (remove the staged
           // source) for tenant-pending items so the skill lives only in tenant.
           const tenantSkillPath = join(MOSS_SKILLS_TENANT_DIR, skillName)
@@ -9745,8 +9752,14 @@ export function startServer(
             typeof tenantSkill.source_url === 'string' ? tenantSkill.source_url : '',
             typeof tenantSkill.checksum === 'string' ? tenantSkill.checksum : '',
           )
-          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
+          // MOVE semantics: remove the staged pending source, and a custom
+          // original it was published from, so only the tenant copy remains.
+          if (
+            existsSync(copiedFrom) &&
+            (isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, copiedFrom) ||
+              dirname(resolve(copiedFrom)) === resolve(MOSS_SKILLS_CUSTOM_DIR))
+          ) {
+            rmSync(copiedFrom, { recursive: true, force: true })
           }
           // The copied meta still carries the requested (or, published from
           // custom, creator-only) scope; the approved one is what applies.

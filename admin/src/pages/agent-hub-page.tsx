@@ -441,7 +441,7 @@ function InstalledAgentCard({
               event.stopPropagation()
               onOpenVisibility(agent)
             }}
-            title="编辑可见性"
+            title="编辑可用范围"
           >
             <Shield className="size-4" />
           </Button>
@@ -1344,11 +1344,11 @@ export default function AgentHubPage() {
                   : null,
         },
       })
-      toast.success('可见性已更新')
+      toast.success('可用范围已更新')
       setAgentVisibilityOpen(false)
       await fetchInstalledState(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '更新可见性失败')
+      toast.error(error instanceof Error ? error.message : '更新可用范围失败')
     } finally {
       setSavingAgentVisibility(false)
     }
@@ -1660,7 +1660,7 @@ export default function AgentHubPage() {
           : {}),
         agent_type: tenantEditAgentType,
         memory_mode: tenantEditMemoryMode,
-        // Visibility isn't edited here (see the 编辑专属智能体可见性 dialog):
+        // Visibility isn't edited here (see the 编辑专属智能体可用范围 dialog):
         // don't send it, or an unrelated edit could rewrite the scope.
         enabledSkills: tenantEditEnabledSkills,
         enabledWikis: tenantEditEnabledWikis,
@@ -1692,13 +1692,13 @@ export default function AgentHubPage() {
       const result = await updateTenantAssistantMeta({ id: editingTenantAssistant.id, visible_to })
       toast.success(
         result.visibility_pending
-          ? '扩大可见范围需管理员审批，已提交变更申请'
-          : '可见性已更新',
+          ? '扩大可用范围需管理员审批，已提交变更申请'
+          : '可用范围已更新',
       )
       setTenantVisibilityOpen(false)
       await fetchTenantAssistants()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '更新可见性失败')
+      toast.error(error instanceof Error ? error.message : '更新可用范围失败')
     } finally {
       setSavingTenantVisibility(false)
     }
@@ -1718,7 +1718,7 @@ export default function AgentHubPage() {
         approved,
         approved ? customVisibleToFrom(reviewScope, reviewingScopeAssistant.author_id) : undefined,
       )
-      toast.success(approved ? '已通过可见范围变更' : '已拒绝可见范围变更')
+      toast.success(approved ? '已通过可用范围变更' : '已拒绝可用范围变更')
       setReviewingScopeAssistant(null)
       await fetchTenantAssistants()
     } catch (error) {
@@ -2072,8 +2072,8 @@ export default function AgentHubPage() {
                   </button>
                 ))}
                 {/* Visibility filter for installed agents */}
-                <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
-                {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
+                <span className="text-sm text-muted-foreground ml-3 mr-1">可用范围</span>
+                {([['all', '全部'], ['public', '全员可用'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
@@ -2107,8 +2107,8 @@ export default function AgentHubPage() {
                     {label}
                   </button>
                 ))}
-                <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
-                {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
+                <span className="text-sm text-muted-foreground ml-3 mr-1">可用范围</span>
+                {([['all', '全部'], ['public', '全员可用'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
@@ -2274,7 +2274,7 @@ export default function AgentHubPage() {
                                 <Badge variant="outline" className="text-[10px]">已禁用</Badge>
                               ) : null}
                               {assistant.visibility_change_pending ? (
-                                <Badge variant="secondary" className="text-[10px]">可见范围变更待审批</Badge>
+                                <Badge variant="secondary" className="text-[10px]">可用范围变更待审批</Badge>
                               ) : null}
                             </div>
                             <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
@@ -2315,7 +2315,7 @@ export default function AgentHubPage() {
                                   <Button
                                     size="icon"
                                     variant="ghost"
-                                    title="查看可见范围"
+                                    title="查看可用范围"
                                     onClick={() => setViewingVisibility(assistant)}
                                   >
                                     <Shield className="size-4" />
@@ -2861,7 +2861,7 @@ export default function AgentHubPage() {
             {editingAgent?.meta?.source_type === 'custom' ? (
             <div className="space-y-3">
               <div>
-                <label className="text-sm font-medium">可见范围</label>
+                <label className="text-sm font-medium">可用范围</label>
               </div>
               <CustomVisibilityPicker
                 value={editCustomVisibility}
@@ -2872,7 +2872,7 @@ export default function AgentHubPage() {
             ) : (
             <div className="space-y-3">
               <div>
-                <label className="text-sm font-medium">可见范围</label>
+                <label className="text-sm font-medium">可用范围</label>
               </div>
               <RadioGroup
                 value={editVisibilityMode}
@@ -2880,19 +2880,19 @@ export default function AgentHubPage() {
               >
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
+                  <label className="text-sm cursor-pointer">全员可用</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
+                  <label className="text-sm cursor-pointer">指定部门可用</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
+                  <label className="text-sm cursor-pointer">指定人员可用</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
+                  <label className="text-sm cursor-pointer">仅管理员可用</label>
                 </div>
               </RadioGroup>
               {editVisibilityMode === 'departments' ? (
@@ -3365,8 +3365,8 @@ export default function AgentHubPage() {
             <DialogTitle>{isStoreAdmin ? '创建专属智能体' : '提交专属智能体发布申请'}</DialogTitle>
             <DialogDescription>
               {isStoreAdmin
-                ? '创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。'
-                : '提交一个专属智能体发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。'}
+                ? '创建一个组织内共享的专属智能体（自动审批通过，按可用范围对成员可用）。自定义智能体由客户端创建并同步。'
+                : '提交一个专属智能体发布申请。提交后需管理员审批，审批通过后才会对组织成员可用；可用范围默认限定为你所在部门/本人。'}
             </DialogDescription>
           </DialogHeader>
 
@@ -3593,7 +3593,7 @@ export default function AgentHubPage() {
 
             <div className="space-y-3">
               <div>
-                <label className="text-sm font-medium">可见范围</label>
+                <label className="text-sm font-medium">可用范围</label>
                 {!isStoreAdmin ? (
                   <p className="text-xs text-muted-foreground">作为发布申请的一部分提交，管理员审批时可调整。</p>
                 ) : null}
@@ -3865,7 +3865,7 @@ export default function AgentHubPage() {
       <Dialog open={agentVisibilityOpen} onOpenChange={setAgentVisibilityOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>编辑智能体可见性</DialogTitle>
+            <DialogTitle>编辑智能体可用范围</DialogTitle>
             <DialogDescription>
               {editingVisibilityAgent?.displayName ?? ''}
             </DialogDescription>
@@ -3884,19 +3884,19 @@ export default function AgentHubPage() {
             >
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="all" />
-                <label className="text-sm cursor-pointer">全员可见</label>
+                <label className="text-sm cursor-pointer">全员可用</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="departments" />
-                <label className="text-sm cursor-pointer">指定部门可见</label>
+                <label className="text-sm cursor-pointer">指定部门可用</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="users" />
-                <label className="text-sm cursor-pointer">指定人员可见</label>
+                <label className="text-sm cursor-pointer">指定人员可用</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="admin" />
-                <label className="text-sm cursor-pointer">仅管理员可见</label>
+                <label className="text-sm cursor-pointer">仅管理员可用</label>
               </div>
             </RadioGroup>
             {agentVisibilityMode === 'departments' ? (
@@ -3984,8 +3984,8 @@ export default function AgentHubPage() {
               <p className="mt-1 text-muted-foreground">{approvingAssistant?.publish_note || '无发布说明'}</p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">可见范围</label>
-              <p className="text-xs text-muted-foreground">申请人请求的可见范围，通过前可调整。</p>
+              <label className="text-sm font-medium">可用范围</label>
+              <p className="text-xs text-muted-foreground">申请人请求的可用范围，通过前可调整。</p>
               <CustomVisibilityPicker
                 value={tenantScope}
                 onChange={setTenantScope}
@@ -4029,9 +4029,9 @@ export default function AgentHubPage() {
       <Dialog open={viewingVisibility !== null} onOpenChange={open => { if (!open) setViewingVisibility(null) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>可见范围</DialogTitle>
+            <DialogTitle>可用范围</DialogTitle>
             <DialogDescription>
-              {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可见范围（待审批）` : ''}
+              {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可用范围（待审批）` : ''}
             </DialogDescription>
           </DialogHeader>
           {/* Read-only view of the requested scope (names from the org directory). */}
@@ -4052,15 +4052,15 @@ export default function AgentHubPage() {
       <Dialog open={tenantVisibilityOpen} onOpenChange={open => { if (!open) setTenantVisibilityOpen(false) }}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
-            <DialogTitle>编辑专属智能体可见性</DialogTitle>
+            <DialogTitle>编辑专属智能体可用范围</DialogTitle>
             <DialogDescription>
-              {editingTenantAssistant ? `设置 ${editingTenantAssistant.display_name || editingTenantAssistant.name} 的可见范围` : '设置专属智能体的可见范围'}
+              {editingTenantAssistant ? `设置 ${editingTenantAssistant.display_name || editingTenantAssistant.name} 的可用范围` : '设置专属智能体的可用范围'}
             </DialogDescription>
           </DialogHeader>
           <div className='space-y-3'>
             {editingTenantAssistant?.visibility_change_pending ? (
               <p className='rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground'>
-                已有一项扩大可见范围的变更等待管理员审批。再次保存将替换该申请（缩小范围则立即生效并撤回申请）。
+                已有一项扩大可用范围的变更等待管理员审批。再次保存将替换该申请（缩小范围则立即生效并撤回申请）。
               </p>
             ) : null}
             <CustomVisibilityPicker
@@ -4100,14 +4100,14 @@ export default function AgentHubPage() {
       </Dialog>
 
 
-      {/* 专属智能体可见范围变更审批 */}
+      {/* 专属智能体可用范围变更审批 */}
       <Dialog open={reviewingScopeAssistant !== null} onOpenChange={open => { if (!open) setReviewingScopeAssistant(null) }}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>审批可见范围变更</DialogTitle>
+            <DialogTitle>审批可用范围变更</DialogTitle>
             <DialogDescription>
               {reviewingScopeAssistant
-                ? `${reviewingScopeAssistant.display_name || reviewingScopeAssistant.name} 申请扩大可见范围，通过前可调整。`
+                ? `${reviewingScopeAssistant.display_name || reviewingScopeAssistant.name} 申请扩大可用范围，通过前可调整。`
                 : ''}
             </DialogDescription>
           </DialogHeader>
@@ -4426,12 +4426,12 @@ export default function AgentHubPage() {
 
               {/* Visibility is NOT edited here. Pending items set visibility in
                   the 审批 (approve) dialog; approved items use the Shield
-                  "编辑专属智能体可见性" dialog. Kept out of the general edit dialog
+                  "编辑专属智能体可用范围" dialog. Kept out of the general edit dialog
                   to avoid a redundant/conflicting control. */}
               {false ? (
               <div className="space-y-3">
                 <div>
-                  <label className="text-sm font-medium">可见范围</label>
+                  <label className="text-sm font-medium">可用范围</label>
                 </div>
                 <RadioGroup
                   value={tenantEditVisibilityMode}
@@ -4439,19 +4439,19 @@ export default function AgentHubPage() {
                 >
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="all" />
-                    <label className="text-sm cursor-pointer">全员可见</label>
+                    <label className="text-sm cursor-pointer">全员可用</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="departments" />
-                    <label className="text-sm cursor-pointer">指定部门可见</label>
+                    <label className="text-sm cursor-pointer">指定部门可用</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="users" />
-                    <label className="text-sm cursor-pointer">指定人员可见</label>
+                    <label className="text-sm cursor-pointer">指定人员可用</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="admin" />
-                    <label className="text-sm cursor-pointer">仅管理员可见</label>
+                    <label className="text-sm cursor-pointer">仅管理员可用</label>
                   </div>
                 </RadioGroup>
                 {tenantEditVisibilityMode === 'departments' ? (

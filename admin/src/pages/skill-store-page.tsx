@@ -1448,12 +1448,12 @@ export default function SkillStorePage() {
               ? { department_ids: null, user_ids: editSkillVisibleUserIds.length > 0 ? editSkillVisibleUserIds : null }
               : null,
       )
-      toast.success('可见性已更新')
+      toast.success('可用范围已更新')
       setSkillVisibilityWarnOpen(false)
       setEditVisibilityOpen(false)
       await fetchInstalledList()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '更新可见性失败')
+      toast.error(error instanceof Error ? error.message : '更新可用范围失败')
     } finally {
       setSavingVisibility(false)
     }
@@ -1534,8 +1534,8 @@ export default function SkillStorePage() {
       const result = await updateTenantSkillMeta({ id: editingTenantSkill.id, visible_to })
       toast.success(
         result.visibility_pending
-          ? '扩大可见范围需管理员审批，已提交变更申请'
-          : '可见性已更新',
+          ? '扩大可用范围需管理员审批，已提交变更申请'
+          : '可用范围已更新',
       )
       setTenantVisibilityOpen(false)
       setEditingTenantSkill(null)
@@ -1561,7 +1561,7 @@ export default function SkillStorePage() {
         approved,
         approved ? customVisibleToFrom(reviewScope, reviewingScopeSkill.author_id) : undefined,
       )
-      toast.success(approved ? '已通过可见范围变更' : '已拒绝可见范围变更')
+      toast.success(approved ? '已通过可用范围变更' : '已拒绝可用范围变更')
       setReviewingScopeSkill(null)
       await fetchTenantSkills()
     } catch (error) {
@@ -1926,7 +1926,7 @@ export default function SkillStorePage() {
                                 <Badge variant="outline" className="text-[10px]">已禁用</Badge>
                               ) : null}
                               {skill.visibility_change_pending ? (
-                                <Badge variant="secondary" className="text-[10px]">可见范围变更待审批</Badge>
+                                <Badge variant="secondary" className="text-[10px]">可用范围变更待审批</Badge>
                               ) : null}
                             </div>
                             <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
@@ -1967,7 +1967,7 @@ export default function SkillStorePage() {
                                   <Button
                                     size="icon"
                                     variant="ghost"
-                                    title="查看可见范围"
+                                    title="查看可用范围"
                                     onClick={() => setViewingVisibility(skill)}
                                   >
                                     <Shield className="size-4" />
@@ -2223,7 +2223,7 @@ export default function SkillStorePage() {
                       onClick={() => handleOpenVisibilityEdit(detailResolvedInstalledSkill)}
                     >
                       <Shield className="mr-2 size-4" />
-                      编辑可见性
+                      编辑可用范围
                     </Button>
                   ) : null}
                   {/* Custom skills: uninstall is for their creator or a store admin. */}
@@ -2274,15 +2274,15 @@ export default function SkillStorePage() {
             <DialogDescription>
               {activeTab === 'exclusive'
                 ? (isStoreAdmin
-                    ? '上传技能到专属技能，自动审批通过后按可见范围可见。支持 ZIP 压缩包或本地技能目录。'
-                    : '提交一个专属技能发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。支持 ZIP 压缩包或本地技能目录。')
+                    ? '上传技能到专属技能，自动审批通过后按可用范围可用。支持 ZIP 压缩包或本地技能目录。'
+                    : '提交一个专属技能发布申请。提交后需管理员审批，审批通过后才会对组织成员可用；可用范围默认限定为你所在部门/本人。支持 ZIP 压缩包或本地技能目录。')
                 : '支持导入 ZIP 压缩包，或直接上传本地技能目录。'}
             </DialogDescription>
           </DialogHeader>
           {activeTab === 'exclusive' ? (
             <div className="space-y-3 border-b pb-4">
               <div>
-                <label className="text-sm font-medium">可见范围</label>
+                <label className="text-sm font-medium">可用范围</label>
                 {!isStoreAdmin ? (
                   <p className="text-xs text-muted-foreground">作为发布申请的一部分提交，管理员审批时可调整。</p>
                 ) : null}
@@ -2359,7 +2359,7 @@ export default function SkillStorePage() {
       <Dialog open={editVisibilityOpen} onOpenChange={setEditVisibilityOpen}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
-            <DialogTitle>编辑技能可见性</DialogTitle>
+            <DialogTitle>编辑技能可用范围</DialogTitle>
             <DialogDescription>
               设置哪些用户或部门可以看到此技能。
             </DialogDescription>
@@ -2381,21 +2381,21 @@ export default function SkillStorePage() {
             >
               <div className='flex items-center gap-2'>
                 <RadioGroupItem value="all" />
-                <label className='text-sm cursor-pointer'>全员可见</label>
+                <label className='text-sm cursor-pointer'>全员可用</label>
               </div>
               <div className='flex items-center gap-2'>
                 <RadioGroupItem value="departments" disabled={isNormalUser} />
                 <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>
-                  指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}
+                  指定部门可用{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}
                 </label>
               </div>
               <div className='flex items-center gap-2'>
                 <RadioGroupItem value="users" />
-                <label className='text-sm cursor-pointer'>指定人员可见</label>
+                <label className='text-sm cursor-pointer'>指定人员可用</label>
               </div>
               <div className='flex items-center gap-2'>
                 <RadioGroupItem value="admin" />
-                <label className='text-sm cursor-pointer'>仅管理员可见</label>
+                <label className='text-sm cursor-pointer'>仅管理员可用</label>
               </div>
             </RadioGroup>
             {skillVisibilityMode === 'departments' && !isNormalUser ? (
@@ -2490,13 +2490,13 @@ export default function SkillStorePage() {
       <AlertDialog open={skillVisibilityWarnOpen} onOpenChange={open => { if (!open) setSkillVisibilityWarnOpen(false) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认覆盖可见范围</AlertDialogTitle>
+            <AlertDialogTitle>确认覆盖可用范围</AlertDialogTitle>
             <AlertDialogDescription>
               管理员为该技能设置了
               {skillVisibilityOutOfScope.deptCount > 0 ? ` ${skillVisibilityOutOfScope.deptCount} 个部门` : ''}
               {skillVisibilityOutOfScope.deptCount > 0 && skillVisibilityOutOfScope.userCount > 0 ? ' 和' : ''}
               {skillVisibilityOutOfScope.userCount > 0 ? ` ${skillVisibilityOutOfScope.userCount} 个用户` : ''}
-              的可见范围，这些超出你的管理范围。保存将移除这些设置，仅保留你选择的范围。确认继续？
+              的可用范围，这些超出你的管理范围。保存将移除这些设置，仅保留你选择的范围。确认继续？
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -2602,8 +2602,8 @@ export default function SkillStorePage() {
               <p className="mt-1 text-muted-foreground">{approvingSkill?.publish_note || '无发布说明'}</p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">可见范围</label>
-              <p className="text-xs text-muted-foreground">申请人请求的可见范围，通过前可调整。</p>
+              <label className="text-sm font-medium">可用范围</label>
+              <p className="text-xs text-muted-foreground">申请人请求的可用范围，通过前可调整。</p>
               <CustomVisibilityPicker
                 value={tenantScope}
                 onChange={setTenantScope}
@@ -2647,9 +2647,9 @@ export default function SkillStorePage() {
       <Dialog open={viewingVisibility !== null} onOpenChange={open => { if (!open) setViewingVisibility(null) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>可见范围</DialogTitle>
+            <DialogTitle>可用范围</DialogTitle>
             <DialogDescription>
-              {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可见范围（待审批）` : ''}
+              {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可用范围（待审批）` : ''}
             </DialogDescription>
           </DialogHeader>
           {/* Read-only view of the requested scope (names from the org directory). */}
@@ -2670,10 +2670,10 @@ export default function SkillStorePage() {
       <Dialog open={reviewingScopeSkill !== null} onOpenChange={open => { if (!open) setReviewingScopeSkill(null) }}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>审批可见范围变更</DialogTitle>
+            <DialogTitle>审批可用范围变更</DialogTitle>
             <DialogDescription>
               {reviewingScopeSkill
-                ? `${reviewingScopeSkill.display_name || reviewingScopeSkill.name} 申请扩大可见范围，通过前可调整。`
+                ? `${reviewingScopeSkill.display_name || reviewingScopeSkill.name} 申请扩大可用范围，通过前可调整。`
                 : ''}
             </DialogDescription>
           </DialogHeader>
@@ -2698,15 +2698,15 @@ export default function SkillStorePage() {
       <Dialog open={tenantVisibilityOpen} onOpenChange={open => { if (!open) setTenantVisibilityOpen(false) }}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
-            <DialogTitle>编辑专属技能可见性</DialogTitle>
+            <DialogTitle>编辑专属技能可用范围</DialogTitle>
             <DialogDescription>
-              {editingTenantSkill ? `设置 ${editingTenantSkill.display_name || editingTenantSkill.name} 的可见范围` : '设置专属技能的可见范围'}
+              {editingTenantSkill ? `设置 ${editingTenantSkill.display_name || editingTenantSkill.name} 的可用范围` : '设置专属技能的可用范围'}
             </DialogDescription>
           </DialogHeader>
           <div className='space-y-3'>
             {editingTenantSkill?.visibility_change_pending ? (
               <p className='rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground'>
-                已有一项扩大可见范围的变更等待管理员审批。再次保存将替换该申请（缩小范围则立即生效并撤回申请）。
+                已有一项扩大可用范围的变更等待管理员审批。再次保存将替换该申请（缩小范围则立即生效并撤回申请）。
               </p>
             ) : null}
             <CustomVisibilityPicker
@@ -2822,7 +2822,7 @@ export default function SkillStorePage() {
 
               {tenantSkillDetail.status === 'approved' && (
                 <div>
-                  <h4 className="text-sm font-medium text-muted-foreground mb-2">可见范围</h4>
+                  <h4 className="text-sm font-medium text-muted-foreground mb-2">可用范围</h4>
                   <ScopeBadges visibleTo={tenantSkillDetail.visible_to} ownerId={tenantSkillDetail.author_id} badgeClassName="" />
                 </div>
               )}

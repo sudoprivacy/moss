@@ -52,7 +52,7 @@ export function customVisibleToFrom(value: CustomVisibilityValue, ownerId: strin
 /** Hint for custom items: admins get no special use rights. */
 export const CUSTOM_SCOPE_HINT = '创建者本人始终可用；管理员可在后台查看，但同样仅在上述范围内才能使用。'
 /** Hint for tenant (专属) items: widening an approved scope needs re-approval. */
-export const TENANT_SCOPE_HINT = '创建者本人与管理员始终可用。已审批的智能体/技能扩大可见范围需管理员重新审批，缩小范围立即生效。'
+export const TENANT_SCOPE_HINT = '创建者本人与管理员始终可用。已审批的智能体/技能扩大可用范围需管理员重新审批，缩小范围立即生效。'
 
 // One directory fetch per page load, shared by every picker and badge.
 let directoryRequest: Promise<OrgDirectory> | null = null
