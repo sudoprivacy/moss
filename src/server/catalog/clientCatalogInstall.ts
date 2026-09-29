@@ -1,10 +1,10 @@
 import { fetchSkillHubSkillDetail, installHubSkill } from '../skillStore.js'
 import { fetchAgentHubAssistantDetail, installHubAssistant } from '../agentStore.js'
-import { getOrganizationResourceScope, requireOrganizationResource, withOrganizationResources } from './organizationResources.js'
+import { getOrganizationResourceScope, requireOrganizationResource, withOrganizationResources, listOrganizationResources } from './organizationResources.js'
 import { ResourceAccessError } from './resourceError.js'
 import { isVisibleTo, type VisibleTo } from '../visibilityFilter.js'
 
-function isPublishedPublicItem(item: Record<string, unknown>): boolean {
+export function isPublishedPublicItem(item: Record<string, unknown>): boolean {
   if (item.enabled === false || item.enabled === 0) return false
   if (item.status !== undefined && item.status !== 1 && item.status !== 'approved') return false
   return ![item.tenantId, item.tenant_id, item.tenantIds, item.tenant_ids].some(value => Array.isArray(value) ? value.length > 0 : typeof value === 'string' && value.trim().length > 0)
@@ -32,6 +32,8 @@ export async function installClientCatalogResource(input: { kind: 'skills' | 'ag
       if (!detail || detail.id !== input.id || !isPublishedPublicItem(detail) || !isVisibleTo(detail.visible_to as VisibleTo, scope.visibility!)) throw new ResourceAccessError(404, 'Skill not available')
       const version = detail.versions?.[0]
       if (!version?.source_url) throw new ResourceAccessError(400, 'Skill package is unavailable')
+      const existing = (await listOrganizationResources('skill'))?.find(item => item.id === detail.id)
+      if (existing?.meta.enabled !== false && existing && String(existing.meta.installed_version ?? '') === String(version.version ?? '')) return { id: detail.id, name: existing.name, installedSkills: [], failedSkills: [] }
       const result = await installHubSkill({ skillName: detail.name, skillMeta: detail, sourceUrl: version.source_url, version: version.version, checksum: version.checksum })
       return { id: detail.id, name: result.skillName, installedSkills: [], failedSkills: [] }
     }
@@ -42,8 +44,36 @@ export async function installClientCatalogResource(input: { kind: 'skills' | 'ag
     const version = (detail.latestVersion && typeof detail.latestVersion === 'object' ? detail.latestVersion : detail.versions?.[0]) as Record<string, unknown> | undefined
     const sourceUrl = detail.sourceUrl || (typeof version?.source_url === 'string' ? version.source_url : '')
     if (!sourceUrl) throw new ResourceAccessError(400, 'Assistant package is unavailable')
+    const existing = (await listOrganizationResources('agent'))?.find(item => item.id === detail.id)
+    const requestedVersion = typeof detail.version === 'string' ? detail.version : typeof version?.version === 'string' ? version.version : ''
+    if (existing?.meta.enabled !== false && existing && String(existing.meta.installed_version ?? '') === requestedVersion) return { id: detail.id, name: existing.name, installedSkills: [], failedSkills: [] }
     const result = await installHubAssistant({ assistantName: detail.name, assistantMeta: detail, sourceUrl, version: typeof detail.version === 'string' ? detail.version : typeof version?.version === 'string' ? version.version : undefined, checksum: typeof version?.checksum === 'string' ? version.checksum : undefined, selectedSkillIds: detail.skills })
     if (result.failedSkills.length) throw new ResourceAccessError(400, 'Assistant dependencies could not be installed')
     return { id: detail.id, name: result.assistantName, installedSkills: result.installedSkills, failedSkills: result.failedSkills }
   })
+}
+
+const preparations = new Map<string, Promise<unknown>>()
+
+/** Serialize an account's preparation so dependency updates cannot race each other. */
+export async function installAndPrepareClientCatalogResource(input: { kind: 'skills' | 'agents'; id: string; source: 'hub' | 'tenant' }) {
+  const scope = getOrganizationResourceScope()
+  if (!scope?.driver || !scope.visibility) throw new ResourceAccessError(403, 'Missing resource identity')
+  const key = JSON.stringify([scope.orgId, scope.userId])
+  const previous = preparations.get(key)
+  const pending = (async () => {
+    await previous?.catch(() => {})
+    const installed = await installClientCatalogResource(input)
+    const { prepareClientCatalogResource } = await import('./clientCatalogPreparation.js')
+    return { ...installed, ...await prepareClientCatalogResource(input.kind, input.id) }
+  })()
+  preparations.set(key, pending)
+  try { return await pending }
+  finally { if (preparations.get(key) === pending) preparations.delete(key) }
+}
+
+/** Directory visibility and consumption state are shared by both clients. */
+export function describeClientCatalogItem<T extends Record<string, unknown>>(item: T): T & { isAvailable: boolean; sourceType: 'hub' } {
+  const scope = getOrganizationResourceScope()
+  return { ...item, sourceType: 'hub', isAvailable: isPublishedPublicItem(item) && !!scope?.visibility && isVisibleTo(item.visible_to as VisibleTo, scope.visibility) }
 }

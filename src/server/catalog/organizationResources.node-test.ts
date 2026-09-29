@@ -140,3 +140,75 @@ void test('legacy migration requires explicit ownership, dry-runs, freezes bytes
     assert.equal((await migrateOrganizationResources(driver, root, [custom], true)).unchanged, 1)
   } finally { db.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+void test('prepared catalogs freeze agent dependencies, materialize later skills and recheck current access', async t => {
+  t.mock.method(globalThis, 'fetch', async (url: string) => {
+    const id = String(url).split('/').at(-1)!
+    const detail = { id, name: id }
+    return Response.json({ data: String(url).includes('/skills/') ? { skill: detail, versions: [] } : { assistant: detail } })
+  })
+  const { prepareClientCatalogResource, materializeClientSkills, getClientPreparation } = await import('./clientCatalogPreparation.js')
+  const db = new DatabaseSync(':memory:')
+  createCatalogTestRepository(db)
+  const driver = new SqliteDriver(db)
+  const root = await mkdtemp(join(tmpdir(), 'prepared-catalog-'))
+  const previousHome = process.env.MOSS_HOME
+  process.env.MOSS_HOME = root
+  const visibility = { isAdmin: false, userId: 'owner', departmentId: null, visibleDepartmentIds: null }
+  const scope = () => ({ orgId: 'org', userId: 'owner', driver, visibility })
+  try {
+    for (const [kind, id] of [['skill', 's1'], ['skill', 's2'], ['agent', 'a1']] as const) {
+      const directory = join(root, id)
+      await mkdir(directory)
+      const meta = { id, name: kind === 'skill' ? 'same-name' : 'agent', enabled: true, installed_version: '1', ruleFile: 'system.md', enabledSkills: kind === 'agent' ? ['s1'] : [] }
+      await writeFile(join(directory, '_moss_meta.json'), JSON.stringify(meta))
+      await writeFile(join(directory, kind === 'skill' ? 'SKILL.md' : 'system.md'), `${id} original`)
+      if (id === 's2') await writeFile(join(directory, 'run.sh'), '#!/bin/sh\necho ready', { mode: 0o700 })
+      await withOrganizationResources(scope(), () => saveOrganizationInstallation(kind, directory, meta))
+    }
+    const first = await withOrganizationResources(scope(), () => prepareClientCatalogResource('agents', 'a1'))
+    const agent = first.resources.find(item => item.kind === 'agents')!
+    const oldSkill = first.resources.find(item => item.kind === 'skills')!
+    const standalone = await withOrganizationResources(scope(), () => prepareClientCatalogResource('skills', 's1'))
+    await withOrganizationResources(scope(), async () => {
+      await requireOrganizationResource('agent', agent.runtimeRef)
+      await requireOrganizationResource('skill', standalone.resources[0]!.runtimeRef)
+      const snapshot = await snapshotOrganizationResources()
+      await withOrganizationResources({ ...scope(), snapshot }, async () => {
+        assert.equal((await requireOrganizationResource('skill', standalone.resources[0]!.runtimeRef)).id, 's1')
+      })
+    })
+    await writeFile(join(root, 's1', 'SKILL.md'), 's1 changed')
+    const second = await withOrganizationResources(scope(), () => prepareClientCatalogResource('skills', 's1'))
+    assert.notEqual(second.resources[0]!.digest, oldSkill.digest)
+    const extra = await withOrganizationResources(scope(), () => prepareClientCatalogResource('skills', 's2'))
+    await withOrganizationResources(scope(), async () => {
+      await requireOrganizationResource('agent', agent.runtimeRef)
+      const snapshot = await snapshotOrganizationResources()
+      await withOrganizationResources({ ...scope(), snapshot }, async () => {
+        const skill = await requireOrganizationResource('skill', oldSkill.runtimeRef)
+        assert.equal(await readFile(join(skill.path, 'SKILL.md'), 'utf8'), 's1 original')
+        const config = await getAssistantRuntimeConfig('a1')
+        assert.deepEqual(config.enabledSkills, [skill.name])
+        await syncWorkspaceSkills(join(root, 'workspace'), config.enabledSkills)
+      })
+    })
+    const writes = new Map<string, string>()
+    const modes = new Map<string, number>()
+    const writer = async (path: string, bytes: Buffer, mode: number) => { writes.set(path, bytes.toString()); modes.set(path, mode) }
+    const active = await withOrganizationResources(scope(), () => materializeClientSkills([extra.resources[0]!.runtimeRef], agent.runtimeRef, writer))
+    assert.equal(active.length, 2)
+    assert.equal(new Set(active.map(item => item.name)).size, 2, 'same names must use distinct runtime directories')
+    assert.deepEqual([...writes.values()].sort(), ['#!/bin/sh\necho ready', 's1 original', 's2 original'])
+    assert.equal([...modes].find(([path]) => path.endsWith('/run.sh'))?.[1], 0o700)
+    await assert.rejects(withOrganizationResources(scope(), () => materializeClientSkills([second.resources[0]!.runtimeRef], agent.runtimeRef, writer)), /Conflicting resource versions/)
+    await assert.rejects(withOrganizationResources({ ...scope(), userId: 'peer' }, () => getClientPreparation(first.preparationId)), /not found/)
+    await withOrganizationResources(scope(), () => updateOrganizationResource('skill', 's1', { enabled: false }))
+    await assert.rejects(withOrganizationResources(scope(), () => getClientPreparation(first.preparationId)), /revoked/)
+  } finally {
+    if (previousHome === undefined) delete process.env.MOSS_HOME
+    else process.env.MOSS_HOME = previousHome
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})

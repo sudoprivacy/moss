@@ -41,7 +41,7 @@ export class ScodeBackend implements SessionBackend {
     // 2. 如果没有指定智能体，使用客户端传递的 enabledSkillNames
     // 3. 如果都没有，使用所有可用 skills（已在 getAssistantRuntimeConfig 中处理）
     const enabledSkills = options.assistantName
-      ? assistantConfig.enabledSkills
+      ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
       : (options.enabledSkillNames ?? assistantConfig.enabledSkills)
 
     // 根据 memory_mode 决定 mode

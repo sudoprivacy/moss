@@ -26,6 +26,7 @@ export type OrganizationResourceScope = {
   visibility?: VisibilityFilter
   snapshot?: OrganizationResourceSnapshot
   isPersonalInstall?: boolean
+  preparedResources?: Map<string, OrganizationResource>
 }
 
 // An explicit request/session boundary creates the scope. No process-global
@@ -57,7 +58,7 @@ async function privateResource(kind: ResourceKind, row: SqlRow): Promise<Organiz
   const path = String(row.file_path)
   const raw = await readFile(join(path, '_moss_meta.json'), 'utf8').catch(() => '{}')
   const meta: ResourceMetadata = { ...json(raw), ...json(row.config_json), id: String(row.id), name: String(row.name),
-    source_type: row.source_type || 'tenant', enabled: Number(row.enabled) === 1, visible_to: parsed(row.visible_to, null) }
+    catalogVersion: String(row.updated_at ?? ''), source_type: row.source_type || 'tenant', enabled: Number(row.enabled) === 1, visible_to: parsed(row.visible_to, null) }
   for (const key of ['display_name', 'description', 'avatar', 'emoji', 'memory_mode', 'agent_type']) {
     if (row[key] != null) meta[key] = row[key]
   }
@@ -93,10 +94,15 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
 }
 
 export async function findOrganizationResource(kind: ResourceKind, reference: string): Promise<OrganizationResource | null> {
+  const scope = scopes.getStore()
+  if (scope && !scope.snapshot && reference.startsWith('moss-prepared:')) {
+    const { resolveClientPreparedResource } = await import('./clientCatalogPreparation.js')
+    return resolveClientPreparedResource(kind, reference)
+  }
   const resources = await listOrganizationResources(kind)
   if (!resources) return null
   const ref = reference.startsWith('moss:') ? reference.slice(5) : reference
-  const exact = resources.filter(r => r.id === ref || r.installationId === ref)
+  const exact = resources.filter(r => r.id === ref || r.installationId === ref || r.meta.catalogRuntimeRef === ref || (Array.isArray(r.meta.catalogRuntimeRefs) && r.meta.catalogRuntimeRefs.includes(ref)))
   const matches = exact.length ? exact : resources.filter(r => r.name === ref || r.meta.display_name === ref)
   if (matches.length > 1) throw new HttpError(409, 'Ambiguous resource name; use its ID')
   return matches[0] ?? null
@@ -203,7 +209,8 @@ export async function snapshotOrganizationResources(): Promise<OrganizationResou
   const scope = scopes.getStore()
   if (!scope) throw new HttpError(403, 'Missing resource scope')
   const groups = await Promise.all([listOrganizationResources('agent'), listOrganizationResources('skill')])
-  const resources = structuredClone(groups.flatMap(group => group ?? []).filter(r => r.meta.enabled !== false))
+  const current = groups.flatMap(group => group ?? []).filter(r => r.meta.enabled !== false)
+  const resources = structuredClone(current.map(resource => scope.preparedResources?.get(`${resource.kind}:${resource.id}`) ?? resource))
   for (const resource of resources.filter(r => r.kind === 'agent')) {
     if (typeof resource.meta.rules === 'string' || typeof resource.meta.ruleFile !== 'string') continue
     const file = resolve(resource.path, resource.meta.ruleFile)
