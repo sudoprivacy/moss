@@ -1573,6 +1573,16 @@ export class AuthCenterDb {
       membershipComparisons.push('status <> ?')
       params.push(patch.status)
     }
+    // Org moves change membership semantics just like role/status, so they
+    // must bump membership_revision too (§5.4). Defense in depth: even
+    // without the bump, a moved user's old delegation is refused because
+    // delegationService's membership query filters by org_id and Nexus
+    // re-checks membership (user+org must match) — the bump makes the
+    // revocation immediate instead of relying on that lookup path.
+    if (patch.orgId !== undefined) {
+      membershipComparisons.push('org_id <> ?')
+      params.push(patch.orgId)
+    }
     if (membershipComparisons.length > 0) {
       assignments.push(
         `membership_revision = membership_revision + CASE WHEN ${membershipComparisons.join(' OR ')} THEN 1 ELSE 0 END`,

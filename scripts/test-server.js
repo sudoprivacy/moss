@@ -70,6 +70,7 @@ const BUN = [
  * node:sqlite or the driver seam — verified green under `npx tsx --test` on
  * that branch. */
 const NODE = [
+  'authCenterMembershipRevision.test.ts',
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
   'jsonlParse.test.ts',
