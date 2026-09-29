@@ -252,6 +252,9 @@ export interface TenantSkillInfo {
   reviewed_at?: number
   enabled: number
   visible_to?: VisibleTo | null
+  /** A non-admin's request to widen the approved scope, awaiting admin review. */
+  visibility_change_pending?: boolean
+  pending_visible_to?: VisibleTo | null
   /** Server-computed: whether the current viewer may edit/delete this tenant
    *  skill (admin, or the author is in the viewer's scope). Drives button
    *  visibility so the client doesn't re-derive subtree membership. */
@@ -263,6 +266,18 @@ export interface TenantSkillInfo {
 export function getTenantSkills(status?: string): Promise<TenantSkillInfo[]> {
   const queryString = status ? `?status=${encodeURIComponent(status)}` : ''
   return authClient.get<TenantSkillInfo[]>(`/api/v1/skills/tenant${queryString}`)
+}
+
+/** Admin: approve (optionally adjusted) or reject a pending visibility widening. */
+export function reviewTenantSkillVisibility(
+  id: string,
+  approved: boolean,
+  visible_to?: VisibleTo | null,
+): Promise<{ id: string; approved: boolean }> {
+  return authClient.post<{ id: string; approved: boolean }>(
+    `/api/v1/admin/skills/tenant/${encodeURIComponent(id)}/visibility-review`,
+    visible_to !== undefined ? { approved, visible_to } : { approved },
+  )
 }
 
 export function approveTenantSkill(
@@ -283,8 +298,8 @@ export function updateTenantSkillMeta(params: {
   id: string
   enabled?: boolean
   visible_to?: VisibleTo | null
-}): Promise<{ ok: boolean }> {
-  return authClient.patch<{ ok: boolean }>(
+}): Promise<{ ok: boolean; visibility_pending?: boolean }> {
+  return authClient.patch<{ ok: boolean; visibility_pending?: boolean }>(
     `/api/v1/skills/tenant/${encodeURIComponent(params.id)}`,
     params,
   )

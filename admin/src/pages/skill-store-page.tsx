@@ -46,11 +46,12 @@ import {
 import type { AuthUser } from '@/lib/api/types'
 import type { AuthDepartment } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
-import { updateSkillVisibility, approveTenantSkill, deleteTenantSkill, updateTenantSkillMeta } from '@/lib/api/skill-store'
+import { updateSkillVisibility, approveTenantSkill, reviewTenantSkillVisibility, deleteTenantSkill, updateTenantSkillMeta } from '@/lib/api/skill-store'
 import type { VisibleTo } from '@/lib/api/agent-hub'
 import { useAuth } from '@/lib/hooks/use-auth'
 import {
   CustomVisibilityPicker,
+  TENANT_SCOPE_HINT,
   customVisibilityFrom,
   customVisibleToFrom,
   type CustomVisibilityValue,
@@ -645,9 +646,12 @@ export default function SkillStorePage() {
   const [deletingTenantSkillId, setDeletingTenantSkillId] = useState<string | null>(null)
   const [tenantVisibilityOpen, setTenantVisibilityOpen] = useState(false)
   const [editingTenantSkill, setEditingTenantSkill] = useState<TenantSkillInfo | null>(null)
-  const [tenantVisibilityMode, setTenantVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
-  const [editTenantVisibleTo, setEditTenantVisibleTo] = useState<string[]>([])
-  const [editTenantVisibleUserIds, setEditTenantVisibleUserIds] = useState<string[]>([])
+  // 专属 scopes (visibility / approve / change review) use the same four
+  // choices as custom items (see CustomVisibilityPicker).
+  const [tenantScope, setTenantScope] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
+  const [reviewingScopeSkill, setReviewingScopeSkill] = useState<TenantSkillInfo | null>(null)
+  const [reviewScope, setReviewScope] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
+  const [reviewingScope, setReviewingScope] = useState(false)
   const [savingTenantVisibility, setSavingTenantVisibility] = useState(false)
   const [tenantSkillDetail, setTenantSkillDetail] = useState<TenantSkillInfo | null>(null)
   // Read-only visibility viewer for a non-admin's own PENDING submission (they
@@ -656,26 +660,22 @@ export default function SkillStorePage() {
 
   // Visibility chosen in the upload/publish modal (captured before the file is
   // picked, since the upload fires on file selection).
-  const [uploadVisibilityMode, setUploadVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
-  const [uploadVisibleDeptIds, setUploadVisibleDeptIds] = useState<string[]>([])
-  const [uploadVisibleUserIds, setUploadVisibleUserIds] = useState<string[]>([])
+  const [uploadScope, setUploadScope] = useState<CustomVisibilityValue>(() => ({
+    mode: isStoreAdmin ? 'all' : 'self',
+    departmentIds: [],
+    userIds: [],
+  }))
 
   // Default the publish modal to the submitter's scope (dept_admin → own dept,
-  // user → self); admins keep 全员可见. Only a REQUEST — admin approval is the gate.
+  // user → only me); admins keep 全员可用. Only a REQUEST — admin approval is the gate.
   const applyDefaultUploadVisibility = () => {
-    if (isStoreAdmin) {
-      setUploadVisibilityMode('all')
-      setUploadVisibleDeptIds([])
-      setUploadVisibleUserIds([])
-    } else if (user?.role === 'dept_admin' && user.departmentId) {
-      setUploadVisibilityMode('departments')
-      setUploadVisibleDeptIds([user.departmentId])
-      setUploadVisibleUserIds([])
-    } else if (user?.id) {
-      setUploadVisibilityMode('users')
-      setUploadVisibleDeptIds([])
-      setUploadVisibleUserIds([user.id])
-    }
+    setUploadScope(
+      isStoreAdmin
+        ? { mode: 'all', departmentIds: [], userIds: [] }
+        : user?.role === 'dept_admin' && user.departmentId
+          ? { mode: 'departments', departmentIds: [user.departmentId], userIds: [] }
+          : { mode: 'self', departmentIds: [], userIds: [] },
+    )
   }
 
   // The upload handlers run from the hidden file input's onChange and are
@@ -683,35 +683,14 @@ export default function SkillStorePage() {
   // closure over the state would be STALE (the picked value would be dropped).
   // Mirror the current selection into a ref so buildUploadVisibleTo() always
   // reads the live value at submit time.
-  const uploadVisibilityRef = useRef({
-    mode: uploadVisibilityMode,
-    deptIds: uploadVisibleDeptIds,
-    userIds: uploadVisibleUserIds,
-  })
+  const uploadScopeRef = useRef(uploadScope)
   useEffect(() => {
-    uploadVisibilityRef.current = {
-      mode: uploadVisibilityMode,
-      deptIds: uploadVisibleDeptIds,
-      userIds: uploadVisibleUserIds,
-    }
-  }, [uploadVisibilityMode, uploadVisibleDeptIds, uploadVisibleUserIds])
+    uploadScopeRef.current = uploadScope
+  }, [uploadScope])
 
-  // Build the visible_to payload from the live modal selection. A normal user
-  // has no picker (roster is admin-only): always self-only. dept_admin/admin use
-  // their selection (dept_admin defaults to own dept; admin to 全员/null).
-  const buildUploadVisibleTo = (): VisibleTo | null => {
-    if (!isStoreAdmin && user?.role !== 'dept_admin') {
-      return user?.id ? { department_ids: null, user_ids: [user.id] } : null
-    }
-    const { mode, deptIds, userIds } = uploadVisibilityRef.current
-    return mode === 'admin'
-      ? { department_ids: null, user_ids: [] }
-      : mode === 'departments'
-        ? { department_ids: deptIds.length > 0 ? deptIds : null, user_ids: null }
-        : mode === 'users'
-          ? { department_ids: null, user_ids: userIds.length > 0 ? userIds : null }
-          : null
-  }
+  // Any role picks one of the four scopes; a non-admin's choice is part of the
+  // request the admin approves (and may adjust).
+  const buildUploadVisibleTo = (): VisibleTo | null => customVisibleToFrom(uploadScopeRef.current, user?.id ?? '')
 
   const latestVersionsRef = useRef(latestVersions)
   const requestIdRef = useRef(0)
@@ -1511,13 +1490,7 @@ export default function SkillStorePage() {
       // On approval, send the (possibly admin-adjusted) visibility from the
       // approve dialog's picker; on reject, don't touch visibility.
       const visible_to = approved
-        ? (tenantVisibilityMode === 'admin'
-            ? { department_ids: null, user_ids: [] }
-            : tenantVisibilityMode === 'departments'
-              ? { department_ids: editTenantVisibleTo.length > 0 ? editTenantVisibleTo : null, user_ids: null }
-              : tenantVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editTenantVisibleUserIds.length > 0 ? editTenantVisibleUserIds : null }
-                : null)
+        ? customVisibleToFrom(tenantScope, approvingSkill.author_id)
         : undefined
       await approveTenantSkill(approvingSkill.id, approved, approvalNote || undefined, visible_to)
       toast.success(approved ? '已通过审批' : '已拒绝审批')
@@ -1530,7 +1503,7 @@ export default function SkillStorePage() {
     } finally {
       setApproving(false)
     }
-  }, [approvingSkill, approvalNote, tenantVisibilityMode, editTenantVisibleTo, editTenantVisibleUserIds, fetchTenantSkills])
+  }, [approvingSkill, approvalNote, tenantScope, fetchTenantSkills])
 
   const handleDeleteTenantSkill = useCallback(async (skill: TenantSkillInfo) => {
     try {
@@ -1558,33 +1531,13 @@ export default function SkillStorePage() {
   // Seed the visibility picker from a record's visible_to. Shared by the
   // standalone visibility-edit dialog and the approve dialog (which carries the
   // picker so an admin can adjust visibility before approving).
-  const prefillTenantVisibility = useCallback((visibleTo: TenantSkillInfo['visible_to']) => {
-    if (!visibleTo || (!visibleTo.department_ids && !visibleTo.user_ids)) {
-      setTenantVisibilityMode('all')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds([])
-    } else if (visibleTo.user_ids?.length === 1 && visibleTo.user_ids[0] === 'admin') {
-      setTenantVisibilityMode('admin')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds([])
-    } else if (visibleTo.department_ids?.length) {
-      setTenantVisibilityMode('departments')
-      setEditTenantVisibleTo(visibleTo.department_ids)
-      setEditTenantVisibleUserIds([])
-    } else if (visibleTo.user_ids?.length) {
-      setTenantVisibilityMode('users')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds(visibleTo.user_ids)
-    } else {
-      setTenantVisibilityMode('all')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds([])
-    }
+  const prefillTenantVisibility = useCallback((visibleTo: TenantSkillInfo['visible_to'], ownerId: string) => {
+    setTenantScope(customVisibilityFrom(visibleTo, ownerId))
   }, [])
 
   const handleOpenTenantVisibilityEdit = useCallback((skill: TenantSkillInfo) => {
     setEditingTenantSkill(skill)
-    prefillTenantVisibility(skill.visible_to)
+    prefillTenantVisibility(skill.visible_to, skill.author_id)
     setTenantVisibilityOpen(true)
   }, [prefillTenantVisibility])
 
@@ -1592,16 +1545,13 @@ export default function SkillStorePage() {
     if (!editingTenantSkill) return
     setSavingTenantVisibility(true)
     try {
-      let visible_to: { department_ids: string[] | null; user_ids: string[] | null } | null = null
-      if (tenantVisibilityMode === 'admin') {
-        visible_to = { department_ids: null, user_ids: ['admin'] }
-      } else if (tenantVisibilityMode === 'departments') {
-        visible_to = { department_ids: editTenantVisibleTo.length > 0 ? editTenantVisibleTo : null, user_ids: null }
-      } else if (tenantVisibilityMode === 'users') {
-        visible_to = { department_ids: null, user_ids: editTenantVisibleUserIds.length > 0 ? editTenantVisibleUserIds : null }
-      }
-      await updateTenantSkillMeta({ id: editingTenantSkill.id, visible_to })
-      toast.success('可见性已更新')
+      const visible_to = customVisibleToFrom(tenantScope, editingTenantSkill.author_id)
+      const result = await updateTenantSkillMeta({ id: editingTenantSkill.id, visible_to })
+      toast.success(
+        result.visibility_pending
+          ? '扩大可见范围需管理员审批，已提交变更申请'
+          : '可见性已更新',
+      )
       setTenantVisibilityOpen(false)
       setEditingTenantSkill(null)
       await fetchTenantSkills()
@@ -1610,7 +1560,31 @@ export default function SkillStorePage() {
     } finally {
       setSavingTenantVisibility(false)
     }
-  }, [editingTenantSkill, tenantVisibilityMode, editTenantVisibleTo, editTenantVisibleUserIds, fetchTenantSkills])
+  }, [editingTenantSkill, tenantScope, fetchTenantSkills])
+
+  const openScopeReview = useCallback((skill: TenantSkillInfo) => {
+    setReviewingScopeSkill(skill)
+    setReviewScope(customVisibilityFrom(skill.pending_visible_to ?? null, skill.author_id))
+  }, [])
+
+  const handleReviewScope = useCallback(async (approved: boolean) => {
+    if (!reviewingScopeSkill) return
+    setReviewingScope(true)
+    try {
+      await reviewTenantSkillVisibility(
+        reviewingScopeSkill.id,
+        approved,
+        approved ? customVisibleToFrom(reviewScope, reviewingScopeSkill.author_id) : undefined,
+      )
+      toast.success(approved ? '已通过可见范围变更' : '已拒绝可见范围变更')
+      setReviewingScopeSkill(null)
+      await fetchTenantSkills()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '审批失败')
+    } finally {
+      setReviewingScope(false)
+    }
+  }, [reviewingScopeSkill, reviewScope, fetchTenantSkills])
 
   const handleConfirmDeleteTenantSkill = useCallback(async () => {
     if (!editingTenantSkill) return
@@ -1970,6 +1944,9 @@ export default function SkillStorePage() {
                               ) : skill.status === 'approved' ? (
                                 <Badge variant="outline" className="text-[10px]">已禁用</Badge>
                               ) : null}
+                              {skill.visibility_change_pending ? (
+                                <Badge variant="secondary" className="text-[10px]">可见范围变更待审批</Badge>
+                              ) : null}
                             </div>
                             <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
                               {skill.description || '暂无描述'}
@@ -2013,7 +1990,7 @@ export default function SkillStorePage() {
                                     variant="outline"
                                     onClick={() => {
                                       setApprovingSkill(skill)
-                                      prefillTenantVisibility(skill.visible_to)
+                                      prefillTenantVisibility(skill.visible_to, skill.author_id)
                                       setApprovalDialogOpen(true)
                                     }}
                                   >
@@ -2049,6 +2026,11 @@ export default function SkillStorePage() {
                             ) : skill.status === 'approved' ? (
                               skill.can_manage !== false ? (
                                 <>
+                                  {isStoreAdmin && skill.visibility_change_pending ? (
+                                    <Button size="sm" variant="outline" onClick={() => openScopeReview(skill)}>
+                                      审批范围变更
+                                    </Button>
+                                  ) : null}
                                   <Button
                                     size="icon"
                                     variant="ghost"
@@ -2332,82 +2314,20 @@ export default function SkillStorePage() {
                 : '支持导入 ZIP 压缩包，或直接上传本地技能目录。'}
             </DialogDescription>
           </DialogHeader>
-          {activeTab === 'exclusive' && (isStoreAdmin || user?.role === 'dept_admin') ? (
+          {activeTab === 'exclusive' ? (
             <div className="space-y-3 border-b pb-4">
-              <label className="text-sm font-medium">可见范围</label>
-              <RadioGroup
-                value={uploadVisibilityMode}
-                onValueChange={value => setUploadVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-              >
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
-                </div>
-              </RadioGroup>
-              {uploadVisibilityMode === 'departments' ? (
-                departmentOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无部门数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {departmentOptions.map(dept => (
-                      <label key={dept.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={uploadVisibleDeptIds.includes(dept.id)}
-                          onCheckedChange={checked =>
-                            setUploadVisibleDeptIds(
-                              checked === true
-                                ? [...uploadVisibleDeptIds, dept.id]
-                                : uploadVisibleDeptIds.filter(id => id !== dept.id),
-                            )
-                          }
-                        />
-                        <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : uploadVisibilityMode === 'users' ? (
-                users.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无用户数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {users.map(u => (
-                      <label key={u.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={uploadVisibleUserIds.includes(u.id)}
-                          onCheckedChange={checked =>
-                            setUploadVisibleUserIds(
-                              checked === true
-                                ? [...uploadVisibleUserIds, u.id]
-                                : uploadVisibleUserIds.filter(id => id !== u.id),
-                            )
-                          }
-                        />
-                        <span>{u.displayName || u.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : null}
-            </div>
-          ) : activeTab === 'exclusive' ? (
-            <div className="space-y-2 border-b pb-4">
-              <label className="text-sm font-medium">可见范围</label>
-              <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-                该专属技能将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
-              </p>
+              <div>
+                <label className="text-sm font-medium">可见范围</label>
+                {!isStoreAdmin ? (
+                  <p className="text-xs text-muted-foreground">作为发布申请的一部分提交，管理员审批时可调整。</p>
+                ) : null}
+              </div>
+              <CustomVisibilityPicker
+                value={uploadScope}
+                onChange={setUploadScope}
+                ownerId={user?.id}
+                hint={TENANT_SCOPE_HINT}
+              />
             </div>
           ) : null}
           <div className="grid gap-3">
@@ -2719,72 +2639,12 @@ export default function SkillStorePage() {
             <div className="space-y-2">
               <label className="text-sm font-medium">可见范围</label>
               <p className="text-xs text-muted-foreground">申请人请求的可见范围，通过前可调整。</p>
-              <RadioGroup
-                value={tenantVisibilityMode}
-                onValueChange={value => setTenantVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-              >
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
-                </div>
-              </RadioGroup>
-              {tenantVisibilityMode === 'departments' ? (
-                departmentOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无部门数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {departmentOptions.map(dept => (
-                      <label key={dept.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={editTenantVisibleTo.includes(dept.id)}
-                          onCheckedChange={checked =>
-                            setEditTenantVisibleTo(
-                              checked === true
-                                ? [...editTenantVisibleTo, dept.id]
-                                : editTenantVisibleTo.filter(id => id !== dept.id),
-                            )
-                          }
-                        />
-                        <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : tenantVisibilityMode === 'users' ? (
-                users.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无用户数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {users.map(u => (
-                      <label key={u.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={editTenantVisibleUserIds.includes(u.id)}
-                          onCheckedChange={checked =>
-                            setEditTenantVisibleUserIds(
-                              checked === true
-                                ? [...editTenantVisibleUserIds, u.id]
-                                : editTenantVisibleUserIds.filter(id => id !== u.id),
-                            )
-                          }
-                        />
-                        <span>{u.displayName || u.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : null}
+              <CustomVisibilityPicker
+                value={tenantScope}
+                onChange={setTenantScope}
+                ownerId={approvingSkill?.author_id}
+                hint={TENANT_SCOPE_HINT}
+              />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">审批备注</label>
@@ -2909,6 +2769,34 @@ export default function SkillStorePage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={reviewingScopeSkill !== null} onOpenChange={open => { if (!open) setReviewingScopeSkill(null) }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>审批可见范围变更</DialogTitle>
+            <DialogDescription>
+              {reviewingScopeSkill
+                ? `${reviewingScopeSkill.display_name || reviewingScopeSkill.name} 申请扩大可见范围，通过前可调整。`
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <CustomVisibilityPicker
+            value={reviewScope}
+            onChange={setReviewScope}
+            ownerId={reviewingScopeSkill?.author_id}
+            hint={TENANT_SCOPE_HINT}
+          />
+          <DialogFooter>
+            <Button variant="outline" disabled={reviewingScope} onClick={() => void handleReviewScope(false)}>
+              拒绝
+            </Button>
+            <Button disabled={reviewingScope} onClick={() => void handleReviewScope(true)}>
+              {reviewingScope ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+              通过
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={tenantVisibilityOpen} onOpenChange={open => { if (!open) setTenantVisibilityOpen(false) }}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
@@ -2918,79 +2806,17 @@ export default function SkillStorePage() {
             </DialogDescription>
           </DialogHeader>
           <div className='space-y-3'>
-            <RadioGroup
-              value={tenantVisibilityMode}
-              onValueChange={value => setTenantVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-            >
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="all" />
-                <label className='text-sm cursor-pointer'>全员可见</label>
-              </div>
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="departments" />
-                <label className='text-sm cursor-pointer'>指定部门可见</label>
-              </div>
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="users" />
-                <label className='text-sm cursor-pointer'>指定人员可见</label>
-              </div>
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="admin" />
-                <label className='text-sm cursor-pointer'>仅管理员可见</label>
-              </div>
-            </RadioGroup>
-            {tenantVisibilityMode === 'departments' ? (
-              departmentOptions.length === 0 ? (
-                <p className='text-sm text-muted-foreground'>暂无部门数据</p>
-              ) : (
-                <div className='grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-64 overflow-y-auto'>
-                  {departmentOptions.map(dept => (
-                    <label
-                      key={dept.id}
-                      className='flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1'
-                    >
-                      <Checkbox
-                        checked={editTenantVisibleTo.includes(dept.id)}
-                        onCheckedChange={checked => {
-                          setEditTenantVisibleTo(
-                            checked === true
-                              ? [...editTenantVisibleTo, dept.id]
-                              : editTenantVisibleTo.filter(id => id !== dept.id),
-                          )
-                        }}
-                      />
-                      <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                    </label>
-                  ))}
-                </div>
-              )
+            {editingTenantSkill?.visibility_change_pending ? (
+              <p className='rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground'>
+                已有一项扩大可见范围的变更等待管理员审批。再次保存将替换该申请（缩小范围则立即生效并撤回申请）。
+              </p>
             ) : null}
-            {tenantVisibilityMode === 'users' ? (
-              users.length === 0 ? (
-                <p className='text-sm text-muted-foreground'>暂无用户数据</p>
-              ) : (
-                <div className='grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-64 overflow-y-auto'>
-                  {users.map(user => (
-                    <label
-                      key={user.id}
-                      className='flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1'
-                    >
-                      <Checkbox
-                        checked={editTenantVisibleUserIds.includes(user.id)}
-                        onCheckedChange={checked => {
-                          setEditTenantVisibleUserIds(
-                            checked === true
-                              ? [...editTenantVisibleUserIds, user.id]
-                              : editTenantVisibleUserIds.filter(id => id !== user.id),
-                          )
-                        }}
-                      />
-                      <span>{user.name}</span>
-                    </label>
-                  ))}
-                </div>
-              )
-            ) : null}
+            <CustomVisibilityPicker
+              value={tenantScope}
+              onChange={setTenantScope}
+              ownerId={editingTenantSkill?.author_id}
+              hint={TENANT_SCOPE_HINT}
+            />
           </div>
           <DialogFooter>
             <Button variant='outline' onClick={() => setTenantVisibilityOpen(false)}>

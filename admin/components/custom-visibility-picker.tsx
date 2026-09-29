@@ -5,9 +5,9 @@ import { getOrgDirectory, type OrgDirectory } from '@/lib/api/auth'
 import type { VisibleTo } from '@/lib/api/agent-hub'
 
 /**
- * Who may use a custom skill/agent (created from the SudoWork client). Its
- * creator picks one of these; the creator is always included. Any department
- * or user of the org may be chosen (the server re-validates the ids).
+ * Who may use a custom or tenant (专属) skill/agent. One of these four scopes;
+ * the creator is always included. Any department or user of the org may be
+ * chosen (the server re-validates the ids).
  */
 export type CustomVisibilityMode = 'all' | 'departments' | 'users' | 'self'
 
@@ -44,14 +44,21 @@ export function customVisibleToFrom(value: CustomVisibilityValue, ownerId: strin
   return { department_ids: null, user_ids: [ownerId] }
 }
 
+/** Hint for custom items: admins get no special use rights. */
+export const CUSTOM_SCOPE_HINT = '创建者本人始终可用；管理员可在后台查看，但同样仅在上述范围内才能使用。'
+/** Hint for tenant (专属) items: widening an approved scope needs re-approval. */
+export const TENANT_SCOPE_HINT = '创建者本人与管理员始终可用。已审批的智能体/技能扩大可见范围需管理员重新审批，缩小范围立即生效。'
+
 export function CustomVisibilityPicker({
   value,
   onChange,
   ownerId,
+  hint = CUSTOM_SCOPE_HINT,
 }: {
   value: CustomVisibilityValue
   onChange: (value: CustomVisibilityValue) => void
   ownerId: string | null | undefined
+  hint?: string
 }) {
   const [directory, setDirectory] = useState<OrgDirectory | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
@@ -105,9 +112,7 @@ export function CustomVisibilityPicker({
           <label className="text-sm cursor-pointer">仅自己可用</label>
         </div>
       </RadioGroup>
-      <p className="text-xs text-muted-foreground">
-        创建者本人始终可用；管理员可在后台查看，但同样仅在上述范围内才能使用。
-      </p>
+      <p className="text-xs text-muted-foreground">{hint}</p>
       {value.mode === 'departments' ? (
         emptyHint || departmentOptions.length === 0 ? (
           <p className="text-xs text-muted-foreground">{emptyHint ?? '暂无部门数据'}</p>

@@ -18,7 +18,7 @@ import {
   ASSISTANT_META_FILE,
 } from '../server/agentStore.js'
 import type { VisibilityFilterContext } from '../server/sessionManager.js'
-import { customItemOwnerId, isUsableBy, type VisibleTo } from '../server/visibilityFilter.js'
+import { customItemOwnerId, isUsableBy, itemCreatorId, type VisibleTo } from '../server/visibilityFilter.js'
 import { buildDraftsInstruction } from '../server/draftsCleanup.js'
 
 // ============================================================================
@@ -195,11 +195,10 @@ function isSkillVisibleToSync(skillDir: string, filter: VisibilityFilterContext 
     return true // 无法读取 meta，默认可见
   }
 
-  // 自定义技能：创建者始终可用；其他人（含管理员）须在创建者设置的可见范围内。
-  // 其余技能沿用可见性规则（管理员始终可见）。
-  const ownerId = customItemOwnerId(meta)
-  if (ownerId === filter.userId) return true
-  return isUsableBy(meta?.visible_to, ownerId, filter)
+  // 自定义/专属技能：创建者始终可用。自定义技能的其他人（含管理员）须在创建者
+  // 设置的可见范围内；其余技能沿用可见性规则（管理员始终可见）。
+  if (itemCreatorId(meta) === filter.userId) return true
+  return isUsableBy(meta?.visible_to, customItemOwnerId(meta), filter)
 }
 
 // ============================================================================

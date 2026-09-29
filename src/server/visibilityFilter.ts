@@ -96,7 +96,21 @@ export function customItemOwnerId(
 }
 
 /**
- * Effective visibility of a custom item: the scope its owner chose, plus the
+ * Creator who always keeps access to their item: a custom item's owner, or a
+ * tenant (专属) item's author (stamped as author_id in its meta file).
+ */
+export function itemCreatorId(
+  meta: { source_type?: unknown; author_id?: unknown; visible_to?: VisibleTo } | null | undefined,
+): string | null {
+  const ownerId = customItemOwnerId(meta)
+  if (ownerId) return ownerId
+  return meta?.source_type === 'tenant' && typeof meta.author_id === 'string' && meta.author_id
+    ? meta.author_id
+    : null
+}
+
+/**
+ * Effective visibility of a custom or tenant item: the scope its owner chose, plus the
  * owner themselves, so narrowing the scope can never lock the creator out.
  */
 export function withOwnerVisibility(

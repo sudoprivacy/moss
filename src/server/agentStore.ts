@@ -10,7 +10,7 @@ import {
   type InstalledSkillInfo,
 } from './skillStore.js'
 import { getHubApiBaseUrl, getHubAuthorization, getCosBaseUrl } from './hubConfig.js'
-import { customItemOwnerId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, itemCreatorId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
 
 // Support MOSS_HOME environment variable for Docker/container environments
 const MOSS_HOME = process.env.MOSS_HOME || path.join(os.homedir(), '.moss')
@@ -112,7 +112,7 @@ export type AssistantStoreMeta = {
   agent_type?: 'chat' | 'workflow'
   memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo
-  /** Custom agents: the creating user (owner). See customItemOwnerId. */
+  /** Custom/tenant agents: the creating user. See customItemOwnerId / itemCreatorId. */
   author_id?: string
   workflow?: {
     trigger: 'cron' | 'webhook' | 'manual'
@@ -147,7 +147,7 @@ export type InstalledAssistantInfo = {
   meta: AssistantStoreMeta | null
   agentType: 'chat' | 'workflow'
   memoryMode: 'session' | 'user'
-  /** Effective visibility (a custom agent's owner is always included). */
+  /** Effective visibility (a custom/tenant agent's creator is always included). */
   visibleTo: VisibleTo
   /** Owner user id for custom agents; null for hub/system/tenant agents. */
   ownerId: string | null
@@ -653,7 +653,7 @@ function toInstalledAssistantInfo(params: {
     meta,
     agentType: meta?.agent_type ?? 'chat',
     memoryMode: meta?.memory_mode ?? 'session',
-    visibleTo: withOwnerVisibility(meta?.visible_to, customItemOwnerId(meta)),
+    visibleTo: withOwnerVisibility(meta?.visible_to, itemCreatorId(meta)),
     ownerId: customItemOwnerId(meta),
     workflow: meta?.workflow ?? null,
   }

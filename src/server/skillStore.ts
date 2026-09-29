@@ -4,7 +4,7 @@ import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import { customItemOwnerId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, itemCreatorId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
 import {
   MANAGED_SKILL_SEARCH_DIRS,
   MOSS_SKILLS_CUSTOM_DIR,
@@ -97,7 +97,7 @@ export type InstalledSkillInfo = {
   enabled: boolean
   source: string
   meta: SkillStoreMeta | null
-  /** Effective visibility (a custom skill's owner is always included). */
+  /** Effective visibility (a custom/tenant skill's creator is always included). */
   visibleTo: VisibleTo
   /** Owner user id for custom skills; null for hub/system/tenant/upload skills. */
   ownerId: string | null
@@ -390,7 +390,8 @@ function toInstalledSkillInfo(params: {
   const dirDefaults = inferLocalSkillMetaDefaults(skillDir)
   const effectiveSourceType: SkillStoreMeta['source_type'] | undefined =
     meta?.source_type ?? dirDefaults.source_type
-  const customOwnerId = customItemOwnerId(meta ? { ...meta, source_type: effectiveSourceType } : null)
+  const effectiveMeta = meta ? { ...meta, source_type: effectiveSourceType } : null
+  const customOwnerId = customItemOwnerId(effectiveMeta)
   // Trim skill name to avoid leading/trailing spaces
   const trimmedSkillName = skillName.trim()
   const displayName =
@@ -440,7 +441,7 @@ function toInstalledSkillInfo(params: {
       : effectiveSourceType
         ? ({ source_type: effectiveSourceType } as SkillStoreMeta)
         : meta,
-    visibleTo: withOwnerVisibility(meta?.visible_to, customOwnerId),
+    visibleTo: withOwnerVisibility(meta?.visible_to, itemCreatorId(effectiveMeta)),
     ownerId: customOwnerId,
   }
 }

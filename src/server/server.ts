@@ -664,6 +664,39 @@ function formatTenantAssistantAvatarUrl(avatar: unknown, publicBaseUrl: string):
   return getTenantAssistantAvatarFilename(avatar) ? `${publicBaseUrl}${avatar}` : avatar
 }
 
+/** Parse a stored visible_to column (JSON text, or NULL for everyone). */
+function parseStoredVisibleTo(raw: unknown): VisibleTo {
+  if (typeof raw !== 'string' || !raw) return null
+  try {
+    return JSON.parse(raw) as VisibleTo
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Write a tenant (专属) item's scope and author into its meta file. The
+ * installed list, IM picker and runtime read the file, not the DB row, so
+ * every approved scope change must land here too.
+ */
+async function syncTenantAssistantFileScope(dir: string | undefined, visibleTo: VisibleTo, authorId: string): Promise<void> {
+  if (!dir || !existsSync(dir)) return
+  const meta = await readAssistantMeta(dir)
+  if (!meta) return
+  meta.visible_to = visibleTo
+  meta.author_id = authorId
+  await writeAssistantMeta(dir, meta)
+}
+
+async function syncTenantSkillFileScope(dir: string | undefined, visibleTo: VisibleTo, authorId: string): Promise<void> {
+  if (!dir || !existsSync(dir)) return
+  const meta = await readSkillMeta(dir)
+  if (!meta) return
+  meta.visible_to = visibleTo
+  meta.author_id = authorId
+  await writeSkillMeta(dir, meta)
+}
+
 async function copySkillToTenantDir(skillName: string, sourcePathOverride?: string): Promise<void> {
   // Prefer the record's stored file_path (a pending skill is staged in the
   // tenant-pending dir); fall back to the custom dir by name for legacy
@@ -8550,6 +8583,9 @@ export function startServer(
             enabled_corp_apps: parseArray(row.enabled_corp_apps),
             workflow: parseObject(row.workflow, null),
             visible_to: parseObject(row.visible_to, null),
+            // A widening request awaiting admin review (null here means everyone).
+            visibility_change_pending: row.pending_visible_to != null,
+            pending_visible_to: parseStoredVisibleTo(row.pending_visible_to),
             // Lets the frontend show edit/delete without re-deriving subtree math.
             can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
           }
@@ -8650,19 +8686,12 @@ export function startServer(
             ? body.avatar
             : undefined
 
-        // Visibility policy for the pending request:
-        //  - admin: as submitted (they create live).
-        //  - dept_admin: as submitted (a request the admin approves); when they
-        //    submit nothing, fall back to their default scope (own department).
-        //  - normal user: ALWAYS self-only, enforced server-side regardless of
-        //    what was submitted (they have no picker; the roster is admin-only).
-        const requestedVisibleTo = storeAdmin
-          ? (body.visible_to ?? null)
-          : authService.isDeptAdmin(auth)
-            ? (body.visible_to !== undefined
-                ? body.visible_to
-                : (authService.defaultTenantVisibility(auth) ?? null))
-            : (authService.defaultTenantVisibility(auth) ?? null)
+        // Visibility: the chosen scope (everyone / departments / users / only
+        // me, any of the org), else the role default. A non-admin's choice is
+        // part of the request the admin approves (and may adjust).
+        const requestedVisibleTo: VisibleTo = body.visible_to !== undefined
+          ? authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, (body.visible_to ?? null) as VisibleTo)
+          : storeAdmin ? null : (authService.defaultTenantVisibility(auth) ?? null)
 
         // Create metadata
         const rules = typeof body.rules === 'string' ? body.rules : ''
@@ -8688,6 +8717,7 @@ export function startServer(
           agent_type: body.agent_type || 'chat',
           memory_mode: body.memory_mode || 'session',
           visible_to: requestedVisibleTo,
+          author_id: auth.userId,
           workflow: body.workflow || null,
         }
 
@@ -8875,16 +8905,15 @@ export function startServer(
         if (approved) {
           // Update status to approved
           runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
-          // Preserve the publisher's default visibility (dept/self) through
-          // approval. An admin may override via visible_to in the approve body;
-          // a legacy record without one falls back to global (null).
-          if (body.visible_to !== undefined) {
-            runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
-              visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
-            })
-          } else if (tenantAssistant.visible_to == null) {
-            runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
-          }
+          // The requested scope, or the admin's adjustment from the approve body.
+          const authorId = tenantAssistant.author_id as string
+          const approvedVisibleTo: VisibleTo = body.visible_to !== undefined
+            ? authService.normalizeCustomVisibleTo((tenantAssistant.org_id as string | null) ?? auth.orgId, authorId, (body.visible_to ?? null) as VisibleTo)
+            : parseStoredVisibleTo(tenantAssistant.visible_to)
+          runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
+            visible_to: approvedVisibleTo ? JSON.stringify(approvedVisibleTo) : null,
+          })
+          runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, null)
           // Copy agent to tenant directory using stored file_path
           const sourcePath = tenantAssistant.file_path as string | undefined
           if (sourcePath && existsSync(sourcePath)) {
@@ -8894,6 +8923,10 @@ export function startServer(
             const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
             const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', basename(sourcePath))
             runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
+            // The copied meta still carries the requested (or, published from
+            // custom, creator-only) scope; the approved one is what applies.
+            const approvedRow = runtime.store.getTenantAssistant(tenantAssistantId)
+            await syncTenantAssistantFileScope(tenantPath, parseStoredVisibleTo(approvedRow?.visible_to), tenantAssistant.author_id as string)
             // MOVE semantics for non-admin-created pending items: remove the
             // staged source so it lives only in the tenant dir. Items published
             // from a real custom/ item keep their custom original (copy).
@@ -8916,6 +8949,36 @@ export function startServer(
         }
 
         writeJson(res, 200, { id: tenantAssistantId, status: approved ? 'approved' : 'rejected' })
+        return
+      }
+
+      // POST /api/v1/admin/agents/tenant/:id/visibility-review - Approve (optionally
+      // adjusted) or reject a non-admin's pending request to widen visibility.
+      const agentVisibilityReviewMatch = pathname.match(/^\/api\/v1\/admin\/agents\/tenant\/([^/]+)\/visibility-review$/)
+      if (req.method === 'POST' && agentVisibilityReviewMatch) {
+        authService.requireScope(auth, 'admin:settings')
+        const tenantAssistantId = decodeURIComponent(agentVisibilityReviewMatch[1] || '')
+        const row = runtime.store.getTenantAssistant(tenantAssistantId)
+        if (!row) throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+        if (row.pending_visible_to == null) throw new HttpError(409, 'No pending visibility change')
+        const body = await readJsonBody(req)
+        const approved = body.approved === true
+        if (approved) {
+          const authorId = row.author_id as string
+          const finalVisibleTo = authService.normalizeCustomVisibleTo(
+            (row.org_id as string | null) ?? auth.orgId,
+            authorId,
+            (body.visible_to !== undefined ? body.visible_to : parseStoredVisibleTo(row.pending_visible_to)) as VisibleTo,
+          )
+          runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
+            visible_to: finalVisibleTo ? JSON.stringify(finalVisibleTo) : null,
+          })
+          if (row.status === 'approved') {
+            await syncTenantAssistantFileScope(row.file_path as string | undefined, finalVisibleTo, authorId)
+          }
+        }
+        runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, null)
+        writeJson(res, 200, { id: tenantAssistantId, approved })
         return
       }
 
@@ -8958,12 +9021,27 @@ export function startServer(
         }
         const enableCorpAuth = parseTenantBoolean(body.enableCorpAuth, 'enableCorpAuth')
         if (enableCorpAuth !== undefined) body.enableCorpAuth = enableCorpAuth
-        // A non-admin cannot widen visibility beyond their own scope: keep only
-        // the in-scope department/user ids they requested (out-of-scope ids an
-        // admin set are dropped — the client warns before this happens). This
-        // no longer overwrites a legitimate in-scope choice with their default.
-        if (!agentStoreAdmin && body.visible_to !== undefined) {
-          body.visible_to = authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+        // Visibility: any of the org (everyone / departments / users / only me).
+        // Admins apply it directly; so do non-admins on a not-yet-approved item
+        // (it's still the request) or when narrowing an approved scope. Widening
+        // an approved scope is held as a pending change for admin re-approval.
+        let visibilityPending = false
+        if (body.visible_to !== undefined) {
+          const authorId = existingAssistant.author_id as string
+          const scopeOrgId = (existingAssistant.org_id as string | null) ?? auth.orgId
+          const requested = authService.normalizeCustomVisibleTo(scopeOrgId, authorId, (body.visible_to ?? null) as VisibleTo)
+          if (
+            agentStoreAdmin ||
+            existingAssistant.status !== 'approved' ||
+            authService.isScopeWithin(scopeOrgId, requested, parseStoredVisibleTo(existingAssistant.visible_to), authorId)
+          ) {
+            body.visible_to = requested
+            runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, null)
+          } else {
+            runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, JSON.stringify(requested))
+            delete body.visible_to
+            visibilityPending = true
+          }
         }
 
         const updates: Record<string, unknown> = {}
@@ -9067,6 +9145,7 @@ export function startServer(
               if (updates.memory_mode !== undefined) meta.memory_mode = updates.memory_mode as 'session' | 'user'
               if (updates.enabled !== undefined) meta.enabled = updates.enabled === 1
               if (body.visible_to !== undefined) meta.visible_to = body.visible_to as VisibleTo | null
+              meta.author_id = tenantAssistant.author_id as string
               if (body.enabledSkills !== undefined) meta.enabledSkills = body.enabledSkills as string[]
               if (body.enabledWikis !== undefined) meta.enabledWikis = body.enabledWikis as string[]
               if (body.enabledCorpApps !== undefined) meta.enabledCorpApps = body.enabledCorpApps as string[]
@@ -9083,7 +9162,7 @@ export function startServer(
         }
         if (updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, priorAvatar)
 
-        writeJson(res, 200, { ok: true })
+        writeJson(res, 200, { ok: true, visibility_pending: visibilityPending })
         return
       }
 
@@ -9449,6 +9528,9 @@ export function startServer(
             // Parse visible_to so the approval page receives an object (matches
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
+            // A widening request awaiting admin review (null here means everyone).
+            visibility_change_pending: row.pending_visible_to != null,
+            pending_visible_to: parseStoredVisibleTo(row.pending_visible_to),
             // Lets the frontend show edit/delete without re-deriving subtree math.
             can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
           }))
@@ -9494,17 +9576,12 @@ export function startServer(
         // Get author name from user info
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
-        // Visibility policy (same as agent create): admin as submitted;
-        // dept_admin as submitted (default own dept when unset); normal user
-        // ALWAYS self-only, enforced server-side (no picker; roster is admin-only).
+        // Visibility (same as agent create): the chosen scope, any of the org,
+        // else the role default; a non-admin's choice is part of the request.
         const skillStatus = storeAdmin ? 'approved' : 'pending'
-        const requestedVisibleTo = storeAdmin
-          ? (body.visible_to ?? null)
-          : authService.isDeptAdmin(auth)
-            ? (body.visible_to !== undefined
-                ? body.visible_to
-                : (authService.defaultTenantVisibility(auth) ?? null))
-            : (authService.defaultTenantVisibility(auth) ?? null)
+        const requestedVisibleTo: VisibleTo = body.visible_to !== undefined
+          ? authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, (body.visible_to ?? null) as VisibleTo)
+          : storeAdmin ? null : (authService.defaultTenantVisibility(auth) ?? null)
         const skillResponse = (result: unknown) =>
           storeAdmin
             ? result
@@ -9534,6 +9611,7 @@ export function startServer(
             visible_to: requestedVisibleTo ? JSON.stringify(requestedVisibleTo) : null,
             org_id: auth.orgId,
           })
+          await syncTenantSkillFileScope(result.filePath, requestedVisibleTo, auth.userId)
 
           writeJson(res, 200, skillResponse(result))
           return
@@ -9570,6 +9648,7 @@ export function startServer(
             visible_to: requestedVisibleTo ? JSON.stringify(requestedVisibleTo) : null,
             org_id: auth.orgId,
           })
+          await syncTenantSkillFileScope(result.filePath, requestedVisibleTo, auth.userId)
 
           writeJson(res, 200, skillResponse(result))
           return
@@ -9643,17 +9722,14 @@ export function startServer(
         if (approved) {
           // Update status to approved
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
-          // Preserve the publisher's default visibility (dept/self) through
-          // approval. An admin may still override it by passing visible_to in the
-          // approve body; a record published before this change (no visible_to)
-          // falls back to global (null), the prior behavior.
-          if (body.visible_to !== undefined) {
-            runtime.store.updateTenantSkillMeta(tenantSkillId, {
-              visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
-            })
-          } else if (tenantSkill.visible_to == null) {
-            runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
-          }
+          // The requested scope, or the admin's adjustment from the approve body.
+          const approvedVisibleTo: VisibleTo = body.visible_to !== undefined
+            ? authService.normalizeCustomVisibleTo((tenantSkill.org_id as string | null) ?? auth.orgId, tenantSkill.author_id as string, (body.visible_to ?? null) as VisibleTo)
+            : parseStoredVisibleTo(tenantSkill.visible_to)
+          runtime.store.updateTenantSkillMeta(tenantSkillId, {
+            visible_to: approvedVisibleTo ? JSON.stringify(approvedVisibleTo) : null,
+          })
+          runtime.store.setTenantSkillPendingVisibility(tenantSkillId, null)
           // Copy skill to tenant directory using the record's staged file_path
           // (tenant-pending for non-admin submissions), falling back to the
           // custom dir by name for legacy publish-from-custom records.
@@ -9672,6 +9748,9 @@ export function startServer(
           if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
             rmSync(sourcePath, { recursive: true, force: true })
           }
+          // The copied meta still carries the requested (or, published from
+          // custom, creator-only) scope; the approved one is what applies.
+          await syncTenantSkillFileScope(tenantSkillPath, approvedVisibleTo, tenantSkill.author_id as string)
         } else {
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
           // Clean up staged files for a rejected non-admin submission.
@@ -9682,6 +9761,36 @@ export function startServer(
         }
 
         writeJson(res, 200, { id: tenantSkillId, status: approved ? 'approved' : 'rejected' })
+        return
+      }
+
+      // POST /api/v1/admin/skills/tenant/:id/visibility-review - Approve (optionally
+      // adjusted) or reject a non-admin's pending request to widen visibility.
+      const skillVisibilityReviewMatch = pathname.match(/^\/api\/v1\/admin\/skills\/tenant\/([^/]+)\/visibility-review$/)
+      if (req.method === 'POST' && skillVisibilityReviewMatch) {
+        authService.requireScope(auth, 'admin:settings')
+        const tenantSkillId = decodeURIComponent(skillVisibilityReviewMatch[1] || '')
+        const row = runtime.store.getTenantSkill(tenantSkillId)
+        if (!row) throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
+        if (row.pending_visible_to == null) throw new HttpError(409, 'No pending visibility change')
+        const body = await readJsonBody(req)
+        const approved = body.approved === true
+        if (approved) {
+          const authorId = row.author_id as string
+          const finalVisibleTo = authService.normalizeCustomVisibleTo(
+            (row.org_id as string | null) ?? auth.orgId,
+            authorId,
+            (body.visible_to !== undefined ? body.visible_to : parseStoredVisibleTo(row.pending_visible_to)) as VisibleTo,
+          )
+          runtime.store.updateTenantSkillMeta(tenantSkillId, {
+            visible_to: finalVisibleTo ? JSON.stringify(finalVisibleTo) : null,
+          })
+          if (row.status === 'approved') {
+            await syncTenantSkillFileScope(join(MOSS_SKILLS_TENANT_DIR, row.name as string), finalVisibleTo, authorId)
+          }
+        }
+        runtime.store.setTenantSkillPendingVisibility(tenantSkillId, null)
+        writeJson(res, 200, { id: tenantSkillId, approved })
         return
       }
 
@@ -9712,15 +9821,25 @@ export function startServer(
         if (typeof body.enabled === 'boolean') {
           updates.enabled = body.enabled ? 1 : 0
         }
+        // Visibility: same rules as tenant agents — applied directly for
+        // admins, not-yet-approved items and narrowing; widening an approved
+        // scope is held as a pending change for admin re-approval.
+        let visibilityPending = false
         if (body.visible_to !== undefined) {
-          // A non-admin cannot widen visibility beyond their own scope: keep only
-          // the in-scope ids they requested (out-of-scope admin-set ids are
-          // dropped — the client warns first). Admins set it verbatim. This no
-          // longer overwrites a legitimate in-scope choice with their default.
-          const clamped = skillStoreAdmin
-            ? (body.visible_to as VisibleTo)
-            : authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
-          updates.visible_to = clamped ? JSON.stringify(clamped) : null
+          const authorId = existing.author_id as string
+          const scopeOrgId = (existing.org_id as string | null) ?? auth.orgId
+          const requested = authService.normalizeCustomVisibleTo(scopeOrgId, authorId, (body.visible_to ?? null) as VisibleTo)
+          if (
+            skillStoreAdmin ||
+            existing.status !== 'approved' ||
+            authService.isScopeWithin(scopeOrgId, requested, parseStoredVisibleTo(existing.visible_to), authorId)
+          ) {
+            updates.visible_to = requested ? JSON.stringify(requested) : null
+            runtime.store.setTenantSkillPendingVisibility(tenantSkillId, null)
+          } else {
+            runtime.store.setTenantSkillPendingVisibility(tenantSkillId, JSON.stringify(requested))
+            visibilityPending = true
+          }
         }
 
         runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
@@ -9737,16 +9856,17 @@ export function startServer(
                 meta.enabled = updates.enabled === 1
               }
               if (updates.visible_to !== undefined) {
-                // Use the clamped value written to the DB, not the raw request,
-                // so a non-admin can't push a wider visibility to the file meta.
+                // The value written to the DB (normalized, and never a pending
+                // widening), not the raw request.
                 meta.visible_to = updates.visible_to ? JSON.parse(updates.visible_to) : null
               }
+              meta.author_id = tenantSkill.author_id as string
               await writeSkillMeta(skillDir, meta)
             }
           }
         }
 
-        writeJson(res, 200, { ok: true })
+        writeJson(res, 200, { ok: true, visibility_pending: visibilityPending })
         return
       }
 

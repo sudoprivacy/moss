@@ -590,6 +590,11 @@ export class DirectConnectStore {
         console.log(`[DB] Added org_id column to ${table}`)
       }
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
+      // A non-admin's request to widen an approved item's visibility, held
+      // for admin review; visible_to stays the approved scope meanwhile.
+      if (!tcols.includes('pending_visible_to')) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN pending_visible_to TEXT`)
+      }
     }
 
     // Secrets base table must exist before column migrations below. On a fresh
@@ -2506,6 +2511,12 @@ export class DirectConnectStore {
     `).run(displayName as string, description as string, enabled as number, visibleTo as string | null, ts, id)
   }
 
+  /** Set (JSON) or clear (null) a pending visibility-widening request. */
+  setTenantSkillPendingVisibility(id: string, pendingVisibleTo: string | null): void {
+    this.db.prepare(`UPDATE tenant_skills SET pending_visible_to = ?, updated_at = ? WHERE id = ?`)
+      .run(pendingVisibleTo, now(), id)
+  }
+
   updateTenantSkillFilePath(id: string, filePath: string, sourceUrl: string, checksum: string): void {
     const ts = now()
     this.db.prepare(`
@@ -2683,6 +2694,12 @@ export class DirectConnectStore {
       ts,
       id
     )
+  }
+
+  /** Set (JSON) or clear (null) a pending visibility-widening request. */
+  setTenantAssistantPendingVisibility(id: string, pendingVisibleTo: string | null): void {
+    this.db.prepare(`UPDATE tenant_assistants SET pending_visible_to = ?, updated_at = ? WHERE id = ?`)
+      .run(pendingVisibleTo, now(), id)
   }
 
   updateTenantAssistantFilePath(id: string, filePath: string, sourceUrl: string, checksum: string): void {
