@@ -62,6 +62,7 @@ import {
   getAgentSyncStatus,
   getTenantAssistants,
   approveTenantAssistant,
+  reviewTenantAssistantVisibility,
   deleteTenantAssistant,
   updateTenantAssistantMeta,
   type TenantAssistantInfo,
@@ -82,6 +83,14 @@ import {
 import type { AuthDepartment, AuthUser } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
 import { useAuth } from '@/lib/hooks/use-auth'
+import {
+  CustomVisibilityPicker,
+  ScopeBadges,
+  TENANT_SCOPE_HINT,
+  customVisibilityFrom,
+  customVisibleToFrom,
+  type CustomVisibilityValue,
+} from '@/components/custom-visibility-picker'
 import { hasScope } from '@/lib/api/client'
 import { resolveIconUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
@@ -350,9 +359,17 @@ type InstalledAgentCardProps = {
   agent: InstalledAgentInfo
   uninstalling: boolean
   onOpenEdit: (agent: InstalledAgentInfo) => void
-  // Optional: omitted for custom agents, which have no visibility management.
+  // Optional: omitted when the viewer may not change this agent's visibility.
   onOpenVisibility?: (agent: InstalledAgentInfo) => void
   onRequestUninstall: (agent: InstalledAgentInfo) => void
+  canUninstall?: boolean
+}
+
+// The visibility scope as stored. For custom agents the server's `visibleTo`
+// also includes the owner (who always sees their own agent), so pickers read
+// the raw meta instead.
+function storedVisibleTo(agent: InstalledAgentInfo) {
+  return agent.meta?.source_type === 'custom' ? (agent.meta?.visible_to ?? null) : agent.visibleTo
 }
 
 function InstalledAgentCard({
@@ -361,12 +378,15 @@ function InstalledAgentCard({
   onOpenEdit,
   onOpenVisibility,
   onRequestUninstall,
+  canUninstall = true,
 }: InstalledAgentCardProps) {
   const badges = [
     agent.isBuiltin ? '系统内置' : agent.isHubInstalled ? 'Hub' : '本地',
     agent.version ? `v${agent.version}` : '',
     agent.skills.length > 0 ? `${agent.skills.length} 个关联技能` : '',
     (agent.agentType || agent.meta?.agent_type) === 'workflow' ? '业务流程' : '对话智能体',
+    // Visible here but the creator hasn't opened it to this viewer.
+    agent.usable === false ? '仅可查看（创建者未开放使用）' : '',
   ].filter(Boolean)
 
   return (
@@ -421,7 +441,7 @@ function InstalledAgentCard({
               event.stopPropagation()
               onOpenVisibility(agent)
             }}
-            title="编辑可见性"
+            title="编辑可用范围"
           >
             <Shield className="size-4" />
           </Button>
@@ -436,7 +456,7 @@ function InstalledAgentCard({
         >
           编辑
         </Button>
-        {!agent.isBuiltin ? (
+        {!agent.isBuiltin && canUninstall ? (
           <Button
             size="icon"
             variant="destructive"
@@ -497,17 +517,21 @@ export default function AgentHubPage() {
 
   const [editOpen, setEditOpen] = useState(false)
   const [editingAgent, setEditingAgent] = useState<InstalledAgentInfo | null>(null)
-  // Who may edit the agent open in the 编辑智能体 modal. A CUSTOM agent (created
-  // from SudoWork, visible only to its owner) is strictly creator-only — editable
-  // ONLY by its owner, even for an admin who didn't create it. Hub/system agents
-  // are admin-only.
+  // A CUSTOM agent (created from SudoWork) is managed by its creator: only the
+  // owner may edit it or change its visibility, even an admin who didn't create
+  // it may not. Admins may still uninstall it.
+  const isCustomOwner = useCallback(
+    (agent: InstalledAgentInfo) =>
+      agent.meta?.source_type === 'custom' && !!user?.id && agent.ownerId === user.id,
+    [user],
+  )
+  // Who may edit the agent open in the 编辑智能体 modal: the owner of a custom
+  // agent; a store admin for hub/system agents.
   const canEditEditingAgent = useMemo(() => {
     if (!editingAgent) return false
-    if (editingAgent.meta?.source_type === 'custom') {
-      return !!user?.id && (editingAgent.visibleTo?.user_ids?.includes(user.id) ?? false)
-    }
+    if (editingAgent.meta?.source_type === 'custom') return isCustomOwner(editingAgent)
     return isStoreAdmin
-  }, [isStoreAdmin, editingAgent, user])
+  }, [isStoreAdmin, editingAgent, isCustomOwner])
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [editAvatar, setEditAvatar] = useState('')
@@ -540,6 +564,9 @@ export default function AgentHubPage() {
   const [agentVisibilityOpen, setAgentVisibilityOpen] = useState(false)
   const [editingVisibilityAgent, setEditingVisibilityAgent] = useState<InstalledAgentInfo | null>(null)
   const [agentVisibilityMode, setAgentVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
+  // Custom agents use their own scope choices (see CustomVisibilityPicker).
+  const [agentCustomVisibility, setAgentCustomVisibility] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
+  const [editCustomVisibility, setEditCustomVisibility] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
   const [editAgentVisibleTo, setEditAgentVisibleTo] = useState<string[]>([])
   const [editAgentVisibleUserIds, setEditAgentVisibleUserIds] = useState<string[]>([])
   const [savingAgentVisibility, setSavingAgentVisibility] = useState(false)
@@ -556,28 +583,29 @@ export default function AgentHubPage() {
   const [createRules, setCreateRules] = useState('')
   const [createAgentType, setCreateAgentType] = useState<'chat' | 'workflow'>('chat')
   const [createMemoryMode, setCreateMemoryMode] = useState<'session' | 'user'>('session')
-  const [createVisibilityMode, setCreateVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
-  const [createVisibleTo, setCreateVisibleTo] = useState<string[]>([])
-  const [createVisibleUserIds, setCreateVisibleUserIds] = useState<string[]>([])
+  // 专属 scopes (create / visibility / approve / change review) use the same
+  // four choices as custom items (see CustomVisibilityPicker).
+  const [createScope, setCreateScope] = useState<CustomVisibilityValue>(() => ({
+    mode: isStoreAdmin ? 'all' : 'self',
+    departmentIds: [],
+    userIds: [],
+  }))
+  const [tenantScope, setTenantScope] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
+  const [reviewingScopeAssistant, setReviewingScopeAssistant] = useState<TenantAssistantInfo | null>(null)
+  const [reviewScope, setReviewScope] = useState<CustomVisibilityValue>(customVisibilityFrom(null, null))
+  const [reviewingScope, setReviewingScope] = useState(false)
 
-  // Default visibility a non-admin's publish request opens with: dept_admin →
-  // their own department, normal user → themselves (not global). Admins keep
-  // 全员可见 (all). It's only a REQUEST — the admin approval is the gate and can
-  // still be broadened, so we do not restrict the choices here.
+  // Default scope a publish request opens with: admins 全员可用 (everyone),
+  // dept_admin their own department, normal users only themselves. It's only a
+  // REQUEST — the admin approval is the gate and may adjust it.
   const applyDefaultCreateVisibility = () => {
-    if (isStoreAdmin) {
-      setCreateVisibilityMode('all')
-      setCreateVisibleTo([])
-      setCreateVisibleUserIds([])
-    } else if (user?.role === 'dept_admin' && user.departmentId) {
-      setCreateVisibilityMode('departments')
-      setCreateVisibleTo([user.departmentId])
-      setCreateVisibleUserIds([])
-    } else if (user?.id) {
-      setCreateVisibilityMode('users')
-      setCreateVisibleTo([])
-      setCreateVisibleUserIds([user.id])
-    }
+    setCreateScope(
+      isStoreAdmin
+        ? { mode: 'all', departmentIds: [], userIds: [] }
+        : user?.role === 'dept_admin' && user.departmentId
+          ? { mode: 'departments', departmentIds: [user.departmentId], userIds: [] }
+          : { mode: 'self', departmentIds: [], userIds: [] },
+    )
   }
   const [createWorkflowTrigger, setCreateWorkflowTrigger] = useState<'cron' | 'webhook' | 'manual'>('manual')
   const [createWorkflowCron, setCreateWorkflowCron] = useState('')
@@ -605,14 +633,10 @@ export default function AgentHubPage() {
   const [deletingTenantAssistantId, setDeletingTenantAssistantId] = useState<string | null>(null)
   const [tenantVisibilityOpen, setTenantVisibilityOpen] = useState(false)
   const [editingTenantAssistant, setEditingTenantAssistant] = useState<TenantAssistantInfo | null>(null)
-  const [tenantVisibilityMode, setTenantVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
-  const [editTenantVisibleTo, setEditTenantVisibleTo] = useState<string[]>([])
-  const [editTenantVisibleUserIds, setEditTenantVisibleUserIds] = useState<string[]>([])
   const [savingTenantVisibility, setSavingTenantVisibility] = useState(false)
   // When an admin has granted visibility to departments/users outside the
   // current (dept_admin/normal) editor's scope, those ids aren't in their
   // loaded lists. We surface a "+N" note and warn before a save drops them.
-  const [tenantVisibilityWarnOpen, setTenantVisibilityWarnOpen] = useState(false)
   const [tenantAssistantDetail, setTenantAssistantDetail] = useState<TenantAssistantInfo | null>(null)
   // Read-only visibility viewer for a non-admin's own PENDING submission (they
   // have no 审批 dialog to see the requested visibility in).
@@ -739,7 +763,8 @@ export default function AgentHubPage() {
 
     try {
       const [agents, skills] = await Promise.all([
-        getInstalledAgents(),
+        getInstalledAgents('manage'),
+        // Skill picker for agents: only skills the admin may actually use.
         getInstalledSkills(),
       ])
       setInstalledAgents(agents)
@@ -1041,12 +1066,14 @@ export default function AgentHubPage() {
     setEditEmoji(agent.emoji || '')
     setEditAgentType(agent.agentType || agent.meta?.agent_type || 'chat')
     setEditMemoryMode(agent.memoryMode || agent.meta?.memory_mode || 'session')
-    setEditVisibleTo(agent.visibleTo?.department_ids ?? agent.meta?.visible_to?.department_ids ?? [])
-    setEditVisibleUserIds(agent.visibleTo?.user_ids ?? agent.meta?.visible_to?.user_ids ?? [])
+    setEditCustomVisibility(customVisibilityFrom(agent.meta?.visible_to, agent.ownerId))
+    const scope = storedVisibleTo(agent)
+    setEditVisibleTo(scope?.department_ids ?? agent.meta?.visible_to?.department_ids ?? [])
+    setEditVisibleUserIds(scope?.user_ids ?? agent.meta?.visible_to?.user_ids ?? [])
 
     // Determine visibility mode
-    const deptIds = agent.visibleTo?.department_ids ?? agent.meta?.visible_to?.department_ids
-    const userIds = agent.visibleTo?.user_ids ?? agent.meta?.visible_to?.user_ids
+    const deptIds = scope?.department_ids ?? agent.meta?.visible_to?.department_ids
+    const userIds = scope?.user_ids ?? agent.meta?.visible_to?.user_ids
 
     if (deptIds === null && userIds === null) {
       setEditVisibilityMode('all')
@@ -1213,13 +1240,15 @@ export default function AgentHubPage() {
           enabledWikis: editEnabledWikis,
           // 企业应用管理: persist Corp App associations (string[] of corp app IDs)
           enabledCorpApps: editEnabledCorpApps,
-          visible_to: editVisibilityMode === 'admin'
-            ? { department_ids: [], user_ids: [] }
-            : editVisibilityMode === 'departments'
-              ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
-              : editVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
-                : null,
+          visible_to: editingAgent.meta?.source_type === 'custom'
+            ? customVisibleToFrom(editCustomVisibility, editingAgent.ownerId ?? user?.id ?? '')
+            : editVisibilityMode === 'admin'
+              ? { department_ids: [], user_ids: [] }
+              : editVisibilityMode === 'departments'
+                ? { department_ids: editVisibleTo.length > 0 ? editVisibleTo : null, user_ids: null }
+                : editVisibilityMode === 'users'
+                  ? { department_ids: null, user_ids: editVisibleUserIds.length > 0 ? editVisibleUserIds : null }
+                  : null,
           workflow: editAgentType === 'workflow'
             ? {
                 trigger: editWorkflowTrigger,
@@ -1240,7 +1269,7 @@ export default function AgentHubPage() {
     } finally {
       setSavingEdit(false)
     }
-  }, [editAvatar, editDescription, editEmoji, editName, editRules, editAgentType, editMemoryMode, editVisibilityMode, editVisibleTo, editVisibleUserIds, editWorkflowTrigger, editWorkflowCron, editWorkflowWebhookPath, editWorkflowOutputWebhook, editWorkflowTimeout, editWorkflowOutputTargets, editEnabledSkills, editEnabledWikis, editEnabledCorpApps, editSkills, editingAgent, fetchInstalledState])
+  }, [editAvatar, editDescription, editEmoji, editName, editRules, editAgentType, editMemoryMode, editVisibilityMode, editCustomVisibility, user, editVisibleTo, editVisibleUserIds, editWorkflowTrigger, editWorkflowCron, editWorkflowWebhookPath, editWorkflowOutputWebhook, editWorkflowTimeout, editWorkflowOutputTargets, editEnabledSkills, editEnabledWikis, editEnabledCorpApps, editSkills, editingAgent, fetchInstalledState])
 
   const handleConfirmUninstall = useCallback(async () => {
     if (!pendingUninstallAgent) {
@@ -1248,11 +1277,15 @@ export default function AgentHubPage() {
     }
 
     try {
-      await uninstallAgent({
+      const result = await uninstallAgent({
         assistantName: pendingUninstallAgent.name,
         sourcePath: pendingUninstallAgent.source,
       })
-      toast.success(`已卸载 ${pendingUninstallAgent.displayName}`)
+      toast.success(
+        result.withdrawn_publish_requests
+          ? `已卸载 ${pendingUninstallAgent.displayName}，并撤回了待审批的专属发布申请`
+          : `已卸载 ${pendingUninstallAgent.displayName}`,
+      )
       await fetchInstalledState(false)
       if (detailResolvedInstalledAgent?.name === pendingUninstallAgent.name) {
         setDetailOpen(false)
@@ -1274,8 +1307,9 @@ export default function AgentHubPage() {
 
   const openAgentVisibility = useCallback((agent: InstalledAgentInfo) => {
     setEditingVisibilityAgent(agent)
-    const deptIds = agent.visibleTo?.department_ids
-    const userIds = agent.visibleTo?.user_ids
+    setAgentCustomVisibility(customVisibilityFrom(agent.meta?.visible_to, agent.ownerId))
+    const deptIds = storedVisibleTo(agent)?.department_ids
+    const userIds = storedVisibleTo(agent)?.user_ids
 
     // Determine visibility mode
     if (deptIds === null && userIds === null) {
@@ -1303,24 +1337,26 @@ export default function AgentHubPage() {
       await updateInstalledAgentMeta({
         assistantName: editingVisibilityAgent.name,
         updates: {
-          visible_to: agentVisibilityMode === 'admin'
-            ? { department_ids: [], user_ids: [] }
-            : agentVisibilityMode === 'departments'
-              ? { department_ids: editAgentVisibleTo.length > 0 ? editAgentVisibleTo : null, user_ids: null }
-              : agentVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editAgentVisibleUserIds.length > 0 ? editAgentVisibleUserIds : null }
-                : null,
+          visible_to: editingVisibilityAgent.meta?.source_type === 'custom'
+            ? customVisibleToFrom(agentCustomVisibility, editingVisibilityAgent.ownerId ?? user?.id ?? '')
+            : agentVisibilityMode === 'admin'
+              ? { department_ids: [], user_ids: [] }
+              : agentVisibilityMode === 'departments'
+                ? { department_ids: editAgentVisibleTo.length > 0 ? editAgentVisibleTo : null, user_ids: null }
+                : agentVisibilityMode === 'users'
+                  ? { department_ids: null, user_ids: editAgentVisibleUserIds.length > 0 ? editAgentVisibleUserIds : null }
+                  : null,
         },
       })
-      toast.success('可见性已更新')
+      toast.success('可用范围已更新')
       setAgentVisibilityOpen(false)
       await fetchInstalledState(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '更新可见性失败')
+      toast.error(error instanceof Error ? error.message : '更新可用范围失败')
     } finally {
       setSavingAgentVisibility(false)
     }
-  }, [editingVisibilityAgent, agentVisibilityMode, editAgentVisibleTo, editAgentVisibleUserIds, fetchInstalledState])
+  }, [editingVisibilityAgent, agentVisibilityMode, agentCustomVisibility, user, editAgentVisibleTo, editAgentVisibleUserIds, fetchInstalledState])
 
   const fetchTenantAssistants = useCallback(async () => {
     setTenantAssistantsLoading(true)
@@ -1350,18 +1386,9 @@ export default function AgentHubPage() {
 
     setCreatingAssistant(true)
     try {
-      // A normal user has no visibility picker (the dept/user roster is
-      // admin-only): their request is always self-only. dept_admin/admin use the
-      // picker selection (dept_admin defaults to their own department).
-      const visible_to = (!isStoreAdmin && user?.role !== 'dept_admin')
-        ? (user?.id ? { department_ids: null, user_ids: [user.id] } : null)
-        : createVisibilityMode === 'admin'
-          ? { department_ids: [], user_ids: [] }
-          : createVisibilityMode === 'departments'
-            ? { department_ids: createVisibleTo.length > 0 ? createVisibleTo : null, user_ids: null }
-            : createVisibilityMode === 'users'
-              ? { department_ids: null, user_ids: createVisibleUserIds.length > 0 ? createVisibleUserIds : null }
-              : null
+      // Any role picks one of the four scopes; a non-admin's choice is part of
+      // the request the admin approves (and may adjust).
+      const visible_to = customVisibleToFrom(createScope, user?.id ?? '')
 
       const workflow = createAgentType === 'workflow'
         ? {
@@ -1414,9 +1441,7 @@ export default function AgentHubPage() {
       setCreateRules('')
       setCreateAgentType('chat')
       setCreateMemoryMode('session')
-      setCreateVisibilityMode('all')
-      setCreateVisibleTo([])
-      setCreateVisibleUserIds([])
+      applyDefaultCreateVisibility()
       setCreateWorkflowTrigger('manual')
       setCreateWorkflowCron('')
       setCreateWorkflowWebhookPath('')
@@ -1435,7 +1460,7 @@ export default function AgentHubPage() {
     } finally {
       setCreatingAssistant(false)
     }
-  }, [createAvatar, createCategories, createDefaultInitPrompt, createDescription, createDisplayName, createEmoji, createName, createPromptExamples, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, isStoreAdmin, user, fetchInstalledState, fetchTenantAssistants])
+  }, [createAvatar, createCategories, createDefaultInitPrompt, createDescription, createDisplayName, createEmoji, createName, createPromptExamples, createRules, createAgentType, createMemoryMode, createScope, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, isStoreAdmin, user, fetchInstalledState, fetchTenantAssistants])
 
   const handleApproveTenantAssistant = useCallback(async (approved: boolean) => {
     if (!approvingAssistant) return
@@ -1445,13 +1470,7 @@ export default function AgentHubPage() {
       // approve dialog's picker so it overrides the requested value. On reject,
       // don't touch visibility.
       const visible_to = approved
-        ? (tenantVisibilityMode === 'admin'
-            ? { department_ids: null, user_ids: [] }
-            : tenantVisibilityMode === 'departments'
-              ? { department_ids: editTenantVisibleTo.length > 0 ? editTenantVisibleTo : null, user_ids: null }
-              : tenantVisibilityMode === 'users'
-                ? { department_ids: null, user_ids: editTenantVisibleUserIds.length > 0 ? editTenantVisibleUserIds : null }
-                : null)
+        ? customVisibleToFrom(tenantScope, approvingAssistant.author_id)
         : undefined
       await approveTenantAssistant(approvingAssistant.id, approved, approvalNote || undefined, visible_to)
       toast.success(approved ? '已通过审批' : '已拒绝审批')
@@ -1464,7 +1483,7 @@ export default function AgentHubPage() {
     } finally {
       setApproving(false)
     }
-  }, [approvingAssistant, approvalNote, tenantVisibilityMode, editTenantVisibleTo, editTenantVisibleUserIds, fetchTenantAssistants])
+  }, [approvingAssistant, approvalNote, tenantScope, fetchTenantAssistants])
 
   const handleDeleteTenantAssistant = useCallback(async (assistant: TenantAssistantInfo) => {
     try {
@@ -1492,33 +1511,13 @@ export default function AgentHubPage() {
   // Seed the visibility picker state from a record's visible_to. Shared by the
   // standalone visibility-edit dialog and the approve dialog (which now carries
   // the picker so an admin can adjust visibility before approving).
-  const prefillVisibility = useCallback((visibleTo: TenantAssistantInfo['visible_to']) => {
-    if (!visibleTo || (!visibleTo.department_ids && !visibleTo.user_ids)) {
-      setTenantVisibilityMode('all')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds([])
-    } else if (visibleTo.user_ids?.length === 1 && visibleTo.user_ids[0] === 'admin') {
-      setTenantVisibilityMode('admin')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds([])
-    } else if (visibleTo.department_ids?.length) {
-      setTenantVisibilityMode('departments')
-      setEditTenantVisibleTo(visibleTo.department_ids)
-      setEditTenantVisibleUserIds([])
-    } else if (visibleTo.user_ids?.length) {
-      setTenantVisibilityMode('users')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds(visibleTo.user_ids)
-    } else {
-      setTenantVisibilityMode('all')
-      setEditTenantVisibleTo([])
-      setEditTenantVisibleUserIds([])
-    }
+  const prefillVisibility = useCallback((visibleTo: TenantAssistantInfo['visible_to'], ownerId: string) => {
+    setTenantScope(customVisibilityFrom(visibleTo, ownerId))
   }, [])
 
   const handleOpenTenantVisibilityEdit = useCallback((assistant: TenantAssistantInfo) => {
     setEditingTenantAssistant(assistant)
-    prefillVisibility(assistant.visible_to)
+    prefillVisibility(assistant.visible_to, assistant.author_id)
     setTenantVisibilityOpen(true)
   }, [prefillVisibility])
 
@@ -1650,14 +1649,6 @@ export default function AgentHubPage() {
     setSavingTenantEdit(true)
 
     try {
-      const visible_to = tenantEditVisibilityMode === 'all'
-        ? null
-        : tenantEditVisibilityMode === 'admin'
-          ? { department_ids: [], user_ids: [] }
-          : tenantEditVisibilityMode === 'departments'
-            ? { department_ids: tenantEditVisibleTo, user_ids: null }
-            : { department_ids: null, user_ids: tenantEditVisibleUserIds }
-
       await updateTenantAssistantMeta({
         id: editingTenantAgent.id,
         display_name: tenantEditName,
@@ -1673,7 +1664,8 @@ export default function AgentHubPage() {
           : {}),
         agent_type: tenantEditAgentType,
         memory_mode: tenantEditMemoryMode,
-        visible_to,
+        // Visibility isn't edited here (see the 编辑专属智能体可用范围 dialog):
+        // don't send it, or an unrelated edit could rewrite the scope.
         enabledSkills: tenantEditEnabledSkills,
         enabledWikis: tenantEditEnabledWikis,
         enabledCorpApps: tenantEditEnabledCorpApps,
@@ -1696,59 +1688,49 @@ export default function AgentHubPage() {
       tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
       tenantEditWorkflow, fetchTenantAssistants])
 
-  const departmentNameMap = useMemo(
-    () => new Map(departments.map(dept => [dept.id, dept.name])),
-    [departments],
-  )
-
-  // Departments/users the STORED visible_to references that aren't in the
-  // current editor's loaded lists — i.e. granted by an admin outside this
-  // dept_admin/normal user's scope. A save by them would drop these, so we
-  // count them for the "+N" note and the overwrite warning.
-  const tenantVisibilityOutOfScope = useMemo(() => {
-    const v = editingTenantAssistant?.visible_to
-    if (!v) return { deptCount: 0, userCount: 0 }
-    const deptCount = (v.department_ids ?? []).filter(id => !departmentNameMap.has(id)).length
-    const userCount = (v.user_ids ?? []).filter(id =>
-      id !== 'admin' && !users.some(u => u.id === id) && user?.id !== id,
-    ).length
-    return { deptCount, userCount }
-  }, [editingTenantAssistant, departmentNameMap, users, user])
-
-  const doSaveTenantVisibility = useCallback(async () => {
+  const handleSaveTenantVisibility = useCallback(async () => {
     if (!editingTenantAssistant) return
     setSavingTenantVisibility(true)
     try {
-      let visible_to: { department_ids: string[] | null; user_ids: string[] | null } | null = null
-      if (tenantVisibilityMode === 'admin') {
-        visible_to = { department_ids: null, user_ids: ['admin'] }
-      } else if (tenantVisibilityMode === 'departments') {
-        visible_to = { department_ids: editTenantVisibleTo.length > 0 ? editTenantVisibleTo : null, user_ids: null }
-      } else if (tenantVisibilityMode === 'users') {
-        visible_to = { department_ids: null, user_ids: editTenantVisibleUserIds.length > 0 ? editTenantVisibleUserIds : null }
-      }
-      await updateTenantAssistantMeta({ id: editingTenantAssistant.id, visible_to })
-      toast.success('可见性已更新')
-      setTenantVisibilityWarnOpen(false)
+      const visible_to = customVisibleToFrom(tenantScope, editingTenantAssistant.author_id)
+      const result = await updateTenantAssistantMeta({ id: editingTenantAssistant.id, visible_to })
+      toast.success(
+        result.visibility_pending
+          ? '扩大可用范围需管理员审批，已提交变更申请'
+          : '可用范围已更新',
+      )
       setTenantVisibilityOpen(false)
-      setEditingTenantAssistant(null)
       await fetchTenantAssistants()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存失败')
+      toast.error(error instanceof Error ? error.message : '更新可用范围失败')
     } finally {
       setSavingTenantVisibility(false)
     }
-  }, [editingTenantAssistant, tenantVisibilityMode, editTenantVisibleTo, editTenantVisibleUserIds, fetchTenantAssistants])
+  }, [editingTenantAssistant, tenantScope, fetchTenantAssistants])
 
-  // Gate the save behind a warning when it would drop admin-set out-of-scope
-  // grants; otherwise save directly.
-  const handleSaveTenantVisibility = useCallback(() => {
-    if (tenantVisibilityOutOfScope.deptCount > 0 || tenantVisibilityOutOfScope.userCount > 0) {
-      setTenantVisibilityWarnOpen(true)
-      return
+  const openScopeReview = useCallback((assistant: TenantAssistantInfo) => {
+    setReviewingScopeAssistant(assistant)
+    setReviewScope(customVisibilityFrom(assistant.pending_visible_to ?? null, assistant.author_id))
+  }, [])
+
+  const handleReviewScope = useCallback(async (approved: boolean) => {
+    if (!reviewingScopeAssistant) return
+    setReviewingScope(true)
+    try {
+      await reviewTenantAssistantVisibility(
+        reviewingScopeAssistant.id,
+        approved,
+        approved ? customVisibleToFrom(reviewScope, reviewingScopeAssistant.author_id) : undefined,
+      )
+      toast.success(approved ? '已通过可用范围变更' : '已拒绝可用范围变更')
+      setReviewingScopeAssistant(null)
+      await fetchTenantAssistants()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '审批失败')
+    } finally {
+      setReviewingScope(false)
     }
-    void doSaveTenantVisibility()
-  }, [tenantVisibilityOutOfScope, doSaveTenantVisibility])
+  }, [reviewingScopeAssistant, reviewScope, fetchTenantAssistants])
 
   const handleConfirmDeleteTenantAssistant = useCallback(async () => {
     if (!editingTenantAssistant) return
@@ -2094,8 +2076,8 @@ export default function AgentHubPage() {
                   </button>
                 ))}
                 {/* Visibility filter for installed agents */}
-                <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
-                {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
+                <span className="text-sm text-muted-foreground ml-3 mr-1">可用范围</span>
+                {([['all', '全部'], ['public', '全员可用'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
@@ -2129,8 +2111,8 @@ export default function AgentHubPage() {
                     {label}
                   </button>
                 ))}
-                <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
-                {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
+                <span className="text-sm text-muted-foreground ml-3 mr-1">可用范围</span>
+                {([['all', '全部'], ['public', '全员可用'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
@@ -2295,6 +2277,9 @@ export default function AgentHubPage() {
                               ) : assistant.status === 'approved' ? (
                                 <Badge variant="outline" className="text-[10px]">已禁用</Badge>
                               ) : null}
+                              {assistant.visibility_change_pending ? (
+                                <Badge variant="secondary" className="text-[10px]">可用范围变更待审批</Badge>
+                              ) : null}
                             </div>
                             <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
                               {assistant.description || '暂无描述'}
@@ -2304,25 +2289,9 @@ export default function AgentHubPage() {
                               {' · '}
                               {new Date(assistant.created_at).toLocaleDateString()}
                             </div>
-                            {assistant.status === 'approved' && assistant.visible_to ? (
-                              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                {assistant.visible_to.user_ids?.length ? (
-                                  assistant.visible_to.user_ids.map(userId => {
-                                    const user = users.find(u => u.id === userId)
-                                    return user ? (
-                                      <Badge key={userId} variant="outline" className="text-[10px]">{user.name}</Badge>
-                                    ) : null
-                                  })
-                                ) : assistant.visible_to.department_ids?.length ? (
-                                  assistant.visible_to.department_ids.map(deptId => {
-                                    const name = departmentNameMap.get(deptId)
-                                    return name ? (
-                                      <Badge key={deptId} variant="outline" className="text-[10px]">{name}</Badge>
-                                    ) : null
-                                  })
-                                ) : (
-                                  <span className="text-[11px] text-muted-foreground">全员可见</span>
-                                )}
+                            {assistant.status === 'approved' ? (
+                              <div className="mt-2">
+                                <ScopeBadges visibleTo={assistant.visible_to} ownerId={assistant.author_id} />
                               </div>
                             ) : null}
                           </div>
@@ -2338,7 +2307,7 @@ export default function AgentHubPage() {
                                     variant="outline"
                                     onClick={() => {
                                       setApprovingAssistant(assistant)
-                                      prefillVisibility(assistant.visible_to)
+                                      prefillVisibility(assistant.visible_to, assistant.author_id)
                                       setApprovalDialogOpen(true)
                                     }}
                                   >
@@ -2350,7 +2319,7 @@ export default function AgentHubPage() {
                                   <Button
                                     size="icon"
                                     variant="ghost"
-                                    title="查看可见范围"
+                                    title="查看可用范围"
                                     onClick={() => setViewingVisibility(assistant)}
                                   >
                                     <Shield className="size-4" />
@@ -2374,6 +2343,11 @@ export default function AgentHubPage() {
                             ) : assistant.status === 'approved' ? (
                               assistant.can_manage !== false ? (
                                 <>
+                                  {isStoreAdmin && assistant.visibility_change_pending ? (
+                                    <Button size="sm" variant="outline" onClick={() => openScopeReview(assistant)}>
+                                      审批范围变更
+                                    </Button>
+                                  ) : null}
                                   <Button
                                     size="icon"
                                     variant="ghost"
@@ -2461,16 +2435,17 @@ export default function AgentHubPage() {
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
                     {filteredCustomAgents.map(agent => (
-                      // Custom agents are created from the SudoWork client and are
-                      // creator-only by design — no visibility management here (any
-                      // role). onOpenVisibility is intentionally omitted so the
-                      // Shield button doesn't render.
+                      // Custom agents are created from the SudoWork client: only
+                      // the creator manages visibility; the creator or a store
+                      // admin may uninstall.
                       <InstalledAgentCard
                         key={`${agent.source}:${agent.name}`}
                         agent={agent}
                         uninstalling={pendingUninstallAgent?.source === agent.source}
                         onOpenEdit={item => void openEdit(item)}
+                        onOpenVisibility={isCustomOwner(agent) ? openAgentVisibility : undefined}
                         onRequestUninstall={setPendingUninstallAgent}
+                        canUninstall={isStoreAdmin || isCustomOwner(agent)}
                       />
                     ))}
                   </div>
@@ -2702,6 +2677,11 @@ export default function AgentHubPage() {
           </DialogHeader>
 
           <ScrollArea className="max-h-[65vh] pr-4">
+          {/* Read-only for anyone who may not save (non-creator on a custom
+              agent, non-admin on a hub/system agent): a disabled fieldset
+              disables every native control inside it, so the form can't look
+              editable when 保存 is off. */}
+          <fieldset disabled={!canEditEditingAgent} className="min-w-0">
           <div className="space-y-5">
             <div className="space-y-2">
               <label className="text-sm font-medium">标识名称</label>
@@ -2882,9 +2862,21 @@ export default function AgentHubPage() {
               </div>
             ) : null}
 
+            {editingAgent?.meta?.source_type === 'custom' ? (
             <div className="space-y-3">
               <div>
-                <label className="text-sm font-medium">可见范围</label>
+                <label className="text-sm font-medium">可用范围</label>
+              </div>
+              <CustomVisibilityPicker
+                value={editCustomVisibility}
+                onChange={setEditCustomVisibility}
+                ownerId={editingAgent.ownerId}
+              />
+            </div>
+            ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="text-sm font-medium">可用范围</label>
               </div>
               <RadioGroup
                 value={editVisibilityMode}
@@ -2892,19 +2884,19 @@ export default function AgentHubPage() {
               >
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
+                  <label className="text-sm cursor-pointer">全员可用</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
+                  <label className="text-sm cursor-pointer">指定部门可用</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
+                  <label className="text-sm cursor-pointer">指定人员可用</label>
                 </div>
                 <div className="flex items-center gap-2">
                   <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
+                  <label className="text-sm cursor-pointer">仅管理员可用</label>
                 </div>
               </RadioGroup>
               {editVisibilityMode === 'departments' ? (
@@ -2959,6 +2951,7 @@ export default function AgentHubPage() {
                 )
               ) : null}
             </div>
+            )}
 
             <div className="space-y-3">
               <div>
@@ -3285,6 +3278,7 @@ export default function AgentHubPage() {
               </Alert>
             ) : null}
           </div>
+          </fieldset>
           </ScrollArea>
 
           <DialogFooter>
@@ -3354,9 +3348,7 @@ export default function AgentHubPage() {
             setCreateRules('')
             setCreateAgentType('chat')
             setCreateMemoryMode('session')
-            setCreateVisibilityMode('all')
-            setCreateVisibleTo([])
-            setCreateVisibleUserIds([])
+            applyDefaultCreateVisibility()
             setCreateWorkflowTrigger('manual')
             setCreateWorkflowCron('')
             setCreateWorkflowWebhookPath('')
@@ -3377,8 +3369,8 @@ export default function AgentHubPage() {
             <DialogTitle>{isStoreAdmin ? '创建专属智能体' : '提交专属智能体发布申请'}</DialogTitle>
             <DialogDescription>
               {isStoreAdmin
-                ? '创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。'
-                : '提交一个专属智能体发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。'}
+                ? '创建一个组织内共享的专属智能体（自动审批通过，按可用范围对成员可用）。自定义智能体由客户端创建并同步。'
+                : '提交一个专属智能体发布申请。提交后需管理员审批，审批通过后才会对组织成员可用；可用范围默认限定为你所在部门/本人。'}
             </DialogDescription>
           </DialogHeader>
 
@@ -3603,92 +3595,20 @@ export default function AgentHubPage() {
               </div>
             ) : null}
 
-            {(isStoreAdmin || user?.role === 'dept_admin') ? (
             <div className="space-y-3">
               <div>
-                <label className="text-sm font-medium">可见范围</label>
+                <label className="text-sm font-medium">可用范围</label>
+                {!isStoreAdmin ? (
+                  <p className="text-xs text-muted-foreground">作为发布申请的一部分提交，管理员审批时可调整。</p>
+                ) : null}
               </div>
-              <RadioGroup
-                value={createVisibilityMode}
-                onValueChange={value => setCreateVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-              >
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
-                </div>
-              </RadioGroup>
-              {createVisibilityMode === 'departments' ? (
-                departmentOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无部门数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-48 overflow-y-auto">
-                    {departmentOptions.map(dept => (
-                      <label
-                        key={dept.id}
-                        className="flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1"
-                      >
-                        <Checkbox
-                          checked={createVisibleTo.includes(dept.id)}
-                          onCheckedChange={checked => {
-                            setCreateVisibleTo(
-                              checked === true
-                                ? [...createVisibleTo, dept.id]
-                                : createVisibleTo.filter(id => id !== dept.id),
-                            )
-                          }}
-                        />
-                        <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : createVisibilityMode === 'users' ? (
-                users.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无用户数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-48 overflow-y-auto">
-                    {users.map(user => (
-                      <label
-                        key={user.id}
-                        className="flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1"
-                      >
-                        <Checkbox
-                          checked={createVisibleUserIds.includes(user.id)}
-                          onCheckedChange={checked => {
-                            setCreateVisibleUserIds(
-                              checked === true
-                                ? [...createVisibleUserIds, user.id]
-                                : createVisibleUserIds.filter(id => id !== user.id),
-                            )
-                          }}
-                        />
-                        <span>{user.name || user.email}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : null}
+              <CustomVisibilityPicker
+                value={createScope}
+                onChange={setCreateScope}
+                ownerId={user?.id}
+                hint={TENANT_SCOPE_HINT}
+              />
             </div>
-            ) : (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">可见范围</label>
-                <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-                  该专属智能体将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
-                </p>
-              </div>
-            )}
 
             <div className="space-y-3">
               <div>
@@ -3949,11 +3869,18 @@ export default function AgentHubPage() {
       <Dialog open={agentVisibilityOpen} onOpenChange={setAgentVisibilityOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>编辑智能体可见性</DialogTitle>
+            <DialogTitle>编辑智能体可用范围</DialogTitle>
             <DialogDescription>
               {editingVisibilityAgent?.displayName ?? ''}
             </DialogDescription>
           </DialogHeader>
+          {editingVisibilityAgent?.meta?.source_type === 'custom' ? (
+          <CustomVisibilityPicker
+            value={agentCustomVisibility}
+            onChange={setAgentCustomVisibility}
+            ownerId={editingVisibilityAgent.ownerId}
+          />
+          ) : (
           <div className="space-y-3">
             <RadioGroup
               value={agentVisibilityMode}
@@ -3961,19 +3888,19 @@ export default function AgentHubPage() {
             >
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="all" />
-                <label className="text-sm cursor-pointer">全员可见</label>
+                <label className="text-sm cursor-pointer">全员可用</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="departments" />
-                <label className="text-sm cursor-pointer">指定部门可见</label>
+                <label className="text-sm cursor-pointer">指定部门可用</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="users" />
-                <label className="text-sm cursor-pointer">指定人员可见</label>
+                <label className="text-sm cursor-pointer">指定人员可用</label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="admin" />
-                <label className="text-sm cursor-pointer">仅管理员可见</label>
+                <label className="text-sm cursor-pointer">仅管理员可用</label>
               </div>
             </RadioGroup>
             {agentVisibilityMode === 'departments' ? (
@@ -4028,6 +3955,7 @@ export default function AgentHubPage() {
               )
             ) : null}
           </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setAgentVisibilityOpen(false)}>
               取消
@@ -4060,74 +3988,14 @@ export default function AgentHubPage() {
               <p className="mt-1 text-muted-foreground">{approvingAssistant?.publish_note || '无发布说明'}</p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">可见范围</label>
-              <p className="text-xs text-muted-foreground">申请人请求的可见范围，通过前可调整。</p>
-              <RadioGroup
-                value={tenantVisibilityMode}
-                onValueChange={value => setTenantVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-              >
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
-                </div>
-              </RadioGroup>
-              {tenantVisibilityMode === 'departments' ? (
-                departmentOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无部门数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {departmentOptions.map(dept => (
-                      <label key={dept.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={editTenantVisibleTo.includes(dept.id)}
-                          onCheckedChange={checked =>
-                            setEditTenantVisibleTo(
-                              checked === true
-                                ? [...editTenantVisibleTo, dept.id]
-                                : editTenantVisibleTo.filter(id => id !== dept.id),
-                            )
-                          }
-                        />
-                        <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : tenantVisibilityMode === 'users' ? (
-                users.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无用户数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {users.map(u => (
-                      <label key={u.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={editTenantVisibleUserIds.includes(u.id)}
-                          onCheckedChange={checked =>
-                            setEditTenantVisibleUserIds(
-                              checked === true
-                                ? [...editTenantVisibleUserIds, u.id]
-                                : editTenantVisibleUserIds.filter(id => id !== u.id),
-                            )
-                          }
-                        />
-                        <span>{u.displayName || u.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : null}
+              <label className="text-sm font-medium">可用范围</label>
+              <p className="text-xs text-muted-foreground">申请人请求的可用范围，通过前可调整。</p>
+              <CustomVisibilityPicker
+                value={tenantScope}
+                onChange={setTenantScope}
+                ownerId={approvingAssistant?.author_id}
+                hint={TENANT_SCOPE_HINT}
+              />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">审批备注</label>
@@ -4165,87 +4033,20 @@ export default function AgentHubPage() {
       <Dialog open={viewingVisibility !== null} onOpenChange={open => { if (!open) setViewingVisibility(null) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>可见范围</DialogTitle>
+            <DialogTitle>可用范围</DialogTitle>
             <DialogDescription>
-              {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可见范围（待审批）` : ''}
+              {viewingVisibility ? `${viewingVisibility.display_name || viewingVisibility.name} 申请的可用范围（待审批）` : ''}
             </DialogDescription>
           </DialogHeader>
-          {(() => {
-            const v = viewingVisibility?.visible_to
-            const mode: 'all' | 'departments' | 'users' | 'admin' =
-              !v || (!v.department_ids && !v.user_ids)
-                ? 'all'
-                : v.user_ids?.length === 1 && v.user_ids[0] === 'admin'
-                  ? 'admin'
-                  : v.department_ids?.length
-                    ? 'departments'
-                    : v.user_ids?.length
-                      ? 'users'
-                      : 'all'
-            const deptIds = v?.department_ids ?? []
-            const userIds = v?.user_ids ?? []
-            return (
-              <div className="space-y-3">
-                <RadioGroup value={mode} disabled>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="all" disabled />
-                    <label className="text-sm">全员可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="departments" disabled />
-                    <label className="text-sm">指定部门可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="users" disabled />
-                    <label className="text-sm">指定人员可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="admin" disabled />
-                    <label className="text-sm">仅管理员可见</label>
-                  </div>
-                </RadioGroup>
-                {mode === 'departments' ? (() => {
-                  const inScope = deptIds.filter(id => departmentNameMap.has(id))
-                  const outCount = deptIds.length - inScope.length
-                  return (
-                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                      {inScope.map(deptId => (
-                        <label key={deptId} className="flex items-center gap-2 text-sm">
-                          <Checkbox checked disabled />
-                          <span>{departmentNameMap.get(deptId)}</span>
-                        </label>
-                      ))}
-                      {outCount > 0 ? (
-                        <span className="text-xs text-muted-foreground">+ {outCount} 个其他部门（由管理员设置）</span>
-                      ) : null}
-                    </div>
-                  )
-                })() : mode === 'users' ? (() => {
-                  const resolve = (id: string) => {
-                    const u = users.find(x => x.id === id)
-                    if (u) return u.displayName || u.name
-                    if (user?.id === id) return user.displayName || user.name
-                    return null
-                  }
-                  const inScope = userIds.filter(id => resolve(id) !== null)
-                  const outCount = userIds.length - inScope.length
-                  return (
-                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                      {inScope.map(userId => (
-                        <label key={userId} className="flex items-center gap-2 text-sm">
-                          <Checkbox checked disabled />
-                          <span>{resolve(userId)}</span>
-                        </label>
-                      ))}
-                      {outCount > 0 ? (
-                        <span className="text-xs text-muted-foreground">+ {outCount} 个其他用户（由管理员设置）</span>
-                      ) : null}
-                    </div>
-                  )
-                })() : null}
-              </div>
-            )
-          })()}
+          {/* Read-only view of the requested scope (names from the org directory). */}
+          <fieldset disabled className="min-w-0">
+            <CustomVisibilityPicker
+              value={customVisibilityFrom(viewingVisibility?.visible_to, viewingVisibility?.author_id)}
+              onChange={() => {}}
+              ownerId={viewingVisibility?.author_id}
+              hint={TENANT_SCOPE_HINT}
+            />
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setViewingVisibility(null)}>关闭</Button>
           </DialogFooter>
@@ -4255,111 +4056,24 @@ export default function AgentHubPage() {
       <Dialog open={tenantVisibilityOpen} onOpenChange={open => { if (!open) setTenantVisibilityOpen(false) }}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
-            <DialogTitle>编辑专属智能体可见性</DialogTitle>
+            <DialogTitle>编辑专属智能体可用范围</DialogTitle>
             <DialogDescription>
-              {editingTenantAssistant ? `设置 ${editingTenantAssistant.display_name || editingTenantAssistant.name} 的可见范围` : '设置专属智能体的可见范围'}
+              {editingTenantAssistant ? `设置 ${editingTenantAssistant.display_name || editingTenantAssistant.name} 的可用范围` : '设置专属智能体的可用范围'}
             </DialogDescription>
           </DialogHeader>
-          {(() => {
-          const isNormalUser = !isStoreAdmin && user?.role !== 'dept_admin'
-          return (
           <div className='space-y-3'>
-            <RadioGroup
-              value={tenantVisibilityMode}
-              onValueChange={value => setTenantVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-            >
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="all" />
-                <label className='text-sm cursor-pointer'>全员可见</label>
-              </div>
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="departments" disabled={isNormalUser} />
-                <label className={`text-sm ${isNormalUser ? 'text-muted-foreground' : 'cursor-pointer'}`}>
-                  指定部门可见{isNormalUser ? '（仅管理员/部门管理员可用）' : ''}
-                </label>
-              </div>
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="users" />
-                <label className='text-sm cursor-pointer'>指定人员可见</label>
-              </div>
-              <div className='flex items-center gap-2'>
-                <RadioGroupItem value="admin" />
-                <label className='text-sm cursor-pointer'>仅管理员可见</label>
-              </div>
-            </RadioGroup>
-            {tenantVisibilityMode === 'departments' && !isNormalUser ? (
-              departmentOptions.length === 0 ? (
-                <p className='text-sm text-muted-foreground'>暂无部门数据</p>
-              ) : (
-                <div className='grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-64 overflow-y-auto'>
-                  {departmentOptions.map(dept => (
-                    <label
-                      key={dept.id}
-                      className='flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1'
-                    >
-                      <Checkbox
-                        checked={editTenantVisibleTo.includes(dept.id)}
-                        onCheckedChange={checked => {
-                          setEditTenantVisibleTo(
-                            checked === true
-                              ? [...editTenantVisibleTo, dept.id]
-                              : editTenantVisibleTo.filter(id => id !== dept.id),
-                          )
-                        }}
-                      />
-                      <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                    </label>
-                  ))}
-                  {tenantVisibilityOutOfScope.deptCount > 0 ? (
-                    <span className='text-xs text-muted-foreground sm:col-span-2'>
-                      + {tenantVisibilityOutOfScope.deptCount} 个其他部门（由管理员设置，超出你的管理范围，保存将被移除）
-                    </span>
-                  ) : null}
-                </div>
-              )
+            {editingTenantAssistant?.visibility_change_pending ? (
+              <p className='rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground'>
+                已有一项扩大可用范围的变更等待管理员审批。再次保存将替换该申请（缩小范围则立即生效并撤回申请）。
+              </p>
             ) : null}
-            {tenantVisibilityMode === 'users' ? (
-              (() => {
-                // A normal user may only grant to themselves; a dept_admin sees
-                // their subtree users. Either way the checkbox list is the scoped
-                // `users` (plus the current user for the normal-user case).
-                const pickable = isNormalUser
-                  ? (user ? [{ id: user.id, name: user.displayName || user.name }] : [])
-                  : users.map(u => ({ id: u.id, name: u.name }))
-                return pickable.length === 0 ? (
-                  <p className='text-sm text-muted-foreground'>暂无用户数据</p>
-                ) : (
-                  <div className='grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-64 overflow-y-auto'>
-                    {pickable.map(u => (
-                      <label
-                        key={u.id}
-                        className='flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1'
-                      >
-                        <Checkbox
-                          checked={editTenantVisibleUserIds.includes(u.id)}
-                          onCheckedChange={checked => {
-                            setEditTenantVisibleUserIds(
-                              checked === true
-                                ? [...editTenantVisibleUserIds, u.id]
-                                : editTenantVisibleUserIds.filter(id => id !== u.id),
-                            )
-                          }}
-                        />
-                        <span>{u.name}{isNormalUser ? '（本人）' : ''}</span>
-                      </label>
-                    ))}
-                    {tenantVisibilityOutOfScope.userCount > 0 ? (
-                      <span className='text-xs text-muted-foreground sm:col-span-2'>
-                        + {tenantVisibilityOutOfScope.userCount} 个其他用户（由管理员设置，超出你的管理范围，保存将被移除）
-                      </span>
-                    ) : null}
-                  </div>
-                )
-              })()
-            ) : null}
+            <CustomVisibilityPicker
+              value={tenantScope}
+              onChange={setTenantScope}
+              ownerId={editingTenantAssistant?.author_id}
+              hint={TENANT_SCOPE_HINT}
+            />
           </div>
-          )
-          })()}
           <DialogFooter>
             <Button variant='outline' onClick={() => setTenantVisibilityOpen(false)}>
               取消
@@ -4389,24 +4103,35 @@ export default function AgentHubPage() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={tenantVisibilityWarnOpen} onOpenChange={open => { if (!open) setTenantVisibilityWarnOpen(false) }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确认覆盖可见范围</AlertDialogTitle>
-            <AlertDialogDescription>
-              管理员为该智能体设置了
-              {tenantVisibilityOutOfScope.deptCount > 0 ? ` ${tenantVisibilityOutOfScope.deptCount} 个部门` : ''}
-              {tenantVisibilityOutOfScope.deptCount > 0 && tenantVisibilityOutOfScope.userCount > 0 ? ' 和' : ''}
-              {tenantVisibilityOutOfScope.userCount > 0 ? ` ${tenantVisibilityOutOfScope.userCount} 个用户` : ''}
-              的可见范围，这些超出你的管理范围。保存将移除这些设置，仅保留你选择的范围。确认继续？
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void doSaveTenantVisibility()}>确认覆盖</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+
+      {/* 专属智能体可用范围变更审批 */}
+      <Dialog open={reviewingScopeAssistant !== null} onOpenChange={open => { if (!open) setReviewingScopeAssistant(null) }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>审批可用范围变更</DialogTitle>
+            <DialogDescription>
+              {reviewingScopeAssistant
+                ? `${reviewingScopeAssistant.display_name || reviewingScopeAssistant.name} 申请扩大可用范围，通过前可调整。`
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <CustomVisibilityPicker
+            value={reviewScope}
+            onChange={setReviewScope}
+            ownerId={reviewingScopeAssistant?.author_id}
+            hint={TENANT_SCOPE_HINT}
+          />
+          <DialogFooter>
+            <Button variant="outline" disabled={reviewingScope} onClick={() => void handleReviewScope(false)}>
+              拒绝
+            </Button>
+            <Button disabled={reviewingScope} onClick={() => void handleReviewScope(true)}>
+              {reviewingScope ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+              通过
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 专属智能体详情对话框 */}
       <Dialog open={tenantAssistantDetail !== null} onOpenChange={open => { if (!open) setTenantAssistantDetail(null) }}>
@@ -4705,12 +4430,12 @@ export default function AgentHubPage() {
 
               {/* Visibility is NOT edited here. Pending items set visibility in
                   the 审批 (approve) dialog; approved items use the Shield
-                  "编辑专属智能体可见性" dialog. Kept out of the general edit dialog
+                  "编辑专属智能体可用范围" dialog. Kept out of the general edit dialog
                   to avoid a redundant/conflicting control. */}
               {false ? (
               <div className="space-y-3">
                 <div>
-                  <label className="text-sm font-medium">可见范围</label>
+                  <label className="text-sm font-medium">可用范围</label>
                 </div>
                 <RadioGroup
                   value={tenantEditVisibilityMode}
@@ -4718,19 +4443,19 @@ export default function AgentHubPage() {
                 >
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="all" />
-                    <label className="text-sm cursor-pointer">全员可见</label>
+                    <label className="text-sm cursor-pointer">全员可用</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="departments" />
-                    <label className="text-sm cursor-pointer">指定部门可见</label>
+                    <label className="text-sm cursor-pointer">指定部门可用</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="users" />
-                    <label className="text-sm cursor-pointer">指定人员可见</label>
+                    <label className="text-sm cursor-pointer">指定人员可用</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <RadioGroupItem value="admin" />
-                    <label className="text-sm cursor-pointer">仅管理员可见</label>
+                    <label className="text-sm cursor-pointer">仅管理员可用</label>
                   </div>
                 </RadioGroup>
                 {tenantEditVisibilityMode === 'departments' ? (

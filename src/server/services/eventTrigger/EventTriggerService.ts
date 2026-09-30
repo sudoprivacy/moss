@@ -223,7 +223,13 @@ export class EventTriggerService {
         summary: `Event trigger "${trigger.name}" completed`,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      let message = error instanceof Error ? error.message : String(error)
+      // The trigger's agent can no longer be used (disabled, or its creator
+      // withdrew access): every event would fail the same way, so pause it.
+      if (error instanceof Error && error.name === 'AgentNotUsableError') {
+        this.store.update(trigger.id, { enabled: false })
+        message = `已自动暂停：${message}`
+      }
       this.store.updateRunStatus(run.id, { status: 'error', sessionId, error: message })
       console.error(`[EventTriggerService] run ${run.id} failed: ${message}`)
     } finally {

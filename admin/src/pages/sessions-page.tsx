@@ -90,7 +90,7 @@ export default function SessionsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [sessionsRes, agentsRes] = await Promise.all([getSessions(), getInstalledAgents()])
+      const [sessionsRes, agentsRes] = await Promise.all([getSessions(), getInstalledAgents('manage')])
       setSessions(sessionsRes.sessions)
       setInstalledAgents(agentsRes)
       // getUsers requires admin:users scope; non-admin users can still view sessions

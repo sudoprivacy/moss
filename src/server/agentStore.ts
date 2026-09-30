@@ -10,7 +10,7 @@ import {
   type InstalledSkillInfo,
 } from './skillStore.js'
 import { getHubApiBaseUrl, getHubAuthorization, getCosBaseUrl } from './hubConfig.js'
-import type { VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, itemCreatorId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
 
 // Support MOSS_HOME environment variable for Docker/container environments
 const MOSS_HOME = process.env.MOSS_HOME || path.join(os.homedir(), '.moss')
@@ -112,6 +112,8 @@ export type AssistantStoreMeta = {
   agent_type?: 'chat' | 'workflow'
   memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo
+  /** Custom/tenant agents: the creating user. See customItemOwnerId / itemCreatorId. */
+  author_id?: string
   workflow?: {
     trigger: 'cron' | 'webhook' | 'manual'
     cron?: string
@@ -145,7 +147,10 @@ export type InstalledAssistantInfo = {
   meta: AssistantStoreMeta | null
   agentType: 'chat' | 'workflow'
   memoryMode: 'session' | 'user'
+  /** Effective visibility (a custom/tenant agent's creator is always included). */
   visibleTo: VisibleTo
+  /** Owner user id for custom agents; null for hub/system/tenant agents. */
+  ownerId: string | null
   workflow: AssistantStoreMeta['workflow']
 }
 
@@ -648,7 +653,8 @@ function toInstalledAssistantInfo(params: {
     meta,
     agentType: meta?.agent_type ?? 'chat',
     memoryMode: meta?.memory_mode ?? 'session',
-    visibleTo: meta?.visible_to ?? null,
+    visibleTo: withOwnerVisibility(meta?.visible_to, itemCreatorId(meta)),
+    ownerId: customItemOwnerId(meta),
     workflow: meta?.workflow ?? null,
   }
 }
@@ -850,6 +856,27 @@ export async function fetchAgentHubSkillDetailsByIds(
  * a stale orphan dir, and clears legacy empty-id dirs that share the id (none,
  * since empty ids never match a real catalog id).
  */
+/**
+ * Settings an admin manages locally on an installed hub agent — who may use
+ * it, whether it's enabled, and which wikis / corp apps / corp auth it gets.
+ * A hub update carries them over; content (rules, skills, …) comes from the hub.
+ */
+const HUB_LOCAL_SETTINGS = ['visible_to', 'enabled', 'enabledWikis', 'enabledCorpApps', 'enableCorpAuth'] as const
+
+/** Meta of the current hub install of a catalog id (under any dir name), if any. */
+async function findHubAssistantMetaById(assistantId: string, name: string): Promise<AssistantStoreMeta | null> {
+  const byName = await readAssistantMeta(path.join(ASSISTANT_HUB_DIR, name))
+  if (byName) return byName
+  const entries = await readdir(ASSISTANT_HUB_DIR, { withFileTypes: true }).catch(() => null)
+  if (!entries) return null
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('_')) continue
+    const meta = await readAssistantMeta(path.join(ASSISTANT_HUB_DIR, entry.name))
+    if (typeof meta?.id === 'string' && meta.id.trim() === assistantId) return meta
+  }
+  return null
+}
+
 async function removeHubAssistantDirsById(
   assistantId: string,
   keepName: string,
@@ -913,6 +940,10 @@ export async function installHubAssistant(params: {
   }
 
   await mkdir(ASSISTANT_HUB_DIR, { recursive: true })
+  // An update reinstalls from scratch; keep the admin's local governance
+  // settings from the previous install (see HUB_LOCAL_SETTINGS) instead of
+  // resetting them to the hub's defaults (typically: everyone may use it).
+  const previousMeta = await findHubAssistantMetaById(assistantId, assistantName)
   // Remove any existing hub install of the same catalog id, even under a
   // different dir name (e.g. an earlier install with a different name spelling),
   // so a re-install upserts instead of leaving a stale orphan dir behind.
@@ -1058,6 +1089,11 @@ export async function installHubAssistant(params: {
         ? (normalizedAssistant.workflow as AssistantStoreMeta['workflow'])
         : null,
   }
+  if (previousMeta) {
+    for (const key of HUB_LOCAL_SETTINGS) {
+      if (previousMeta[key] !== undefined) (meta as Record<string, unknown>)[key] = previousMeta[key]
+    }
+  }
   await writeAssistantMeta(assistantDir, meta)
 
   // Note: 在新方案中，智能体信息通过首次消息注入，不再需要 bridge 同步
@@ -1085,6 +1121,7 @@ export async function createCustomAssistant(params: {
   memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo
   workflow?: AssistantStoreMeta['workflow']
+  authorId?: string
 }): Promise<{ assistantName: string }> {
   const assistantName = params.name.trim().replace(/\s+/g, '-')
   if (!assistantName) throw new Error('Name is required')
@@ -1125,6 +1162,7 @@ export async function createCustomAssistant(params: {
     agent_type: params.agent_type,
     memory_mode: params.memory_mode,
     visible_to: params.visible_to,
+    author_id: params.authorId,
     workflow: params.workflow,
   }
   await writeAssistantMeta(assistantDir, meta)
@@ -1132,6 +1170,24 @@ export async function createCustomAssistant(params: {
   // Note: 在新方案中，智能体信息通过首次消息注入，不再需要 bridge 同步
 
   return { assistantName }
+}
+
+/**
+ * Owner of the custom agent a store route targets, or null when the target is
+ * not a custom agent. Resolves the dir the same way the store functions do
+ * (sourcePath, else lookup by name); a caller-supplied sourcePath only counts
+ * when it is a direct child of the custom dir, so an owner-gated route can't
+ * be pointed at some other directory.
+ */
+export async function resolveCustomAssistantOwner(params: {
+  assistantName: string
+  sourcePath?: string
+}): Promise<string | null> {
+  const dir = params.sourcePath || (await findAssistantDir(params.assistantName))?.dir
+  if (!dir || path.dirname(path.resolve(dir)) !== path.resolve(ASSISTANT_CUSTOM_DIR)) {
+    return null
+  }
+  return customItemOwnerId(await readAssistantMeta(dir))
 }
 
 export async function uninstallAssistant(params: {
@@ -1198,13 +1254,14 @@ export async function updateInstalledAssistantMeta(params: {
     nextMeta.memory_mode = params.updates.memory_mode
   }
   if (params.updates.visible_to !== undefined) {
-    // Custom agents are created from the SudoWork client and are creator-only by
-    // design (visible_to defaults to the uploader). Never let a visibility update
-    // widen or change that — ignore visible_to for custom items regardless of who
-    // asks, so the creator-only invariant holds even against a crafted request.
-    if (existingMeta.source_type !== 'custom') {
-      nextMeta.visible_to = params.updates.visible_to
+    // Custom agents: only the owner reaches here (enforced by the route). Pin
+    // the owner before replacing visible_to — legacy items derive ownership
+    // from visible_to, which the new scope may no longer name.
+    if (existingMeta.source_type === 'custom' && !existingMeta.author_id) {
+      const ownerId = customItemOwnerId(existingMeta)
+      if (ownerId) nextMeta.author_id = ownerId
     }
+    nextMeta.visible_to = params.updates.visible_to
   }
   if (params.updates.workflow !== undefined) {
     nextMeta.workflow = params.updates.workflow
@@ -1431,6 +1488,7 @@ export async function uploadCustomAssistant(params: {
         user_ids: [params.userId],
         department_ids: null,
       },
+      author_id: params.userId,
     }
     await writeAssistantMeta(targetDir, meta)
 

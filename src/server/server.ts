@@ -16,7 +16,7 @@ import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretA
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
-import { RuntimeService, ServerDrainingError } from './runtimeService.js'
+import { AgentNotUsableError, RuntimeService, ServerDrainingError, TokenQuotaExceededError } from './runtimeService.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
@@ -114,6 +114,7 @@ import {
   installHubAssistant,
   type AgentHubAssistant,
   uninstallAssistant,
+  resolveCustomAssistantOwner,
   updateInstalledAssistantMeta,
   batchSyncAssistants,
   type AssistantStoreMeta,
@@ -141,6 +142,8 @@ import {
   type SkillHubSkill,
   type SkillStoreMeta,
   uninstallSkill,
+  SkillNameConflictError,
+  resolveCustomSkillOwner,
   batchSyncSkills,
   uploadCustomSkill,
   packageSkillZip,
@@ -201,7 +204,7 @@ import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
-import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, isUsableBy, isVisibleTo, type VisibleTo } from './visibilityFilter.js'
 import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
@@ -660,6 +663,95 @@ function parseTenantBoolean(value: unknown, fieldName: string): boolean | undefi
 function formatTenantAssistantAvatarUrl(avatar: unknown, publicBaseUrl: string): unknown {
   if (typeof avatar !== 'string' || !publicBaseUrl) return avatar
   return getTenantAssistantAvatarFilename(avatar) ? `${publicBaseUrl}${avatar}` : avatar
+}
+
+/**
+ * Whether approving `record` into the tenant skill dir would overwrite an
+ * approved tenant skill of the same name owned by someone else. Re-approving
+ * your own name (a new version) stays allowed.
+ */
+function tenantSkillNameTakenByOther(
+  store: { listTenantSkills(status?: string, orgId?: string): Array<Record<string, unknown>> },
+  name: string,
+  authorId: string,
+  selfId?: string,
+): boolean {
+  return store
+    .listTenantSkills('approved')
+    .some(row => row.name === name && row.id !== selfId && row.author_id !== authorId)
+}
+
+/**
+ * Make every approved 专属 agent/skill's meta file carry the scope and author
+ * recorded in the DB — the installed list, IM picker and runtime read the file.
+ * Earlier builds only wrote the approved scope to the DB (an admin's
+ * adjustment at approval never reached the file) and never stamped the author
+ * (so the creator wasn't guaranteed access). Runs at startup; idempotent —
+ * only files that differ are rewritten.
+ */
+async function syncTenantItemFiles(store: {
+  listTenantAssistants(status?: string, orgId?: string): Array<Record<string, unknown>>
+  listTenantSkills(status?: string, orgId?: string): Array<Record<string, unknown>>
+}): Promise<void> {
+  const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+  let fixed = 0
+  for (const row of store.listTenantAssistants('approved')) {
+    const dir = typeof row.file_path === 'string' && existsSync(row.file_path)
+      ? row.file_path
+      : join(MOSS_HOME, 'assistants', 'tenant', String(row.name))
+    const meta = existsSync(dir) ? await readAssistantMeta(dir) : null
+    if (!meta) continue
+    const visibleTo = parseStoredVisibleTo(row.visible_to)
+    if (!same(meta.visible_to, visibleTo) || meta.author_id !== row.author_id) {
+      await syncTenantAssistantFileScope(dir, visibleTo, String(row.author_id))
+      fixed++
+    }
+  }
+  for (const row of store.listTenantSkills('approved')) {
+    const dir = join(MOSS_SKILLS_TENANT_DIR, String(row.name))
+    const meta = existsSync(dir) ? await readSkillMeta(dir) : null
+    if (!meta) continue
+    const visibleTo = parseStoredVisibleTo(row.visible_to)
+    if (!same(meta.visible_to, visibleTo) || meta.author_id !== row.author_id) {
+      await syncTenantSkillFileScope(dir, visibleTo, String(row.author_id))
+      fixed++
+    }
+  }
+  if (fixed > 0) console.log(`[syncTenantItemFiles] synced scope/author into ${fixed} 专属 item file(s)`)
+}
+
+/** Parse a stored visible_to column (JSON text, or NULL for everyone). */
+function parseStoredVisibleTo(raw: unknown): VisibleTo {
+  if (typeof raw !== 'string' || !raw) return null
+  try {
+    return JSON.parse(raw) as VisibleTo
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Write a tenant (专属) item's scope and author into its meta file. The
+ * installed list, IM picker and runtime read the file, not the DB row, so
+ * every approved scope change must land here too.
+ */
+async function syncTenantAssistantFileScope(dir: string | undefined, visibleTo: VisibleTo, authorId: string): Promise<void> {
+  if (!dir || !existsSync(dir)) return
+  const meta = await readAssistantMeta(dir)
+  if (!meta) return
+  meta.visible_to = visibleTo
+  meta.author_id = authorId
+  await writeAssistantMeta(dir, meta)
+}
+
+async function syncTenantSkillFileScope(dir: string | undefined, visibleTo: VisibleTo, authorId: string): Promise<void> {
+  if (!dir || !existsSync(dir)) return
+  const meta = await readSkillMeta(dir)
+  if (!meta) return
+  meta.visible_to = visibleTo
+  meta.author_id = authorId
+  await writeSkillMeta(dir, meta)
 }
 
 async function copySkillToTenantDir(skillName: string, sourcePathOverride?: string): Promise<void> {
@@ -2136,6 +2228,12 @@ export function startServer(
     console.warn('[seedBuiltins] background seed failed:', err)
   })
 
+  // Heal approved 专属 items whose files drifted from the DB (see
+  // syncTenantItemFiles). Best-effort, off the boot path.
+  void syncTenantItemFiles(runtime.store).catch(err => {
+    console.warn('[syncTenantItemFiles] failed:', err)
+  })
+
   // Boot-time settings.json sanity check — warns if model/url/apiKey
   // are missing so the operator doesn't discover it the hard way
   // (wiki builds hanging silently for minutes).
@@ -2349,7 +2447,8 @@ export function startServer(
         .filter((a) => {
           if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
           if (a.agentType === 'workflow') return false
-          return isVisibleTo(a.visibleTo, filter)
+          if (!a.enabled) return false
+          return isUsableBy(a.visibleTo, a.ownerId, filter)
         })
         .map((a) => ({
           name: a.name,
@@ -3395,6 +3494,13 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/roles') {
         authService.requireScope(auth, 'admin:users')
         writeJson(res, 200, authService.listRoles())
+        return
+      }
+
+      // Org directory (departments + active users, names only) for choosing who
+      // a custom skill/agent is shared with. Any member may read it.
+      if (req.method === 'GET' && pathname === '/api/v1/directory') {
+        writeJson(res, 200, authService.getOrgDirectory(auth.orgId))
         return
       }
 
@@ -6127,7 +6233,7 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           data: installed
-            .filter(assistant => isVisibleTo(assistant.visibleTo, filter))
+            .filter(assistant => assistant.enabled && isUsableBy(assistant.visibleTo, assistant.ownerId, filter))
             .map(assistant => ({
               assistant_id: assistant.meta?.id ?? assistant.name,
               tenant_id: auth.orgId,
@@ -8160,15 +8266,30 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/agents/installed') {
         const filter = authService.buildVisibilityFilter(auth)
-        // Return all installed assistants: hub, tenant, and custom
+        // Default (clients syncing what they may use): usable agents only.
+        // `view=manage` (admin UI): everything the caller may see — for an
+        // admin that includes other users' custom agents they can't use.
+        // The manage view flags each item `usable` so the UI can mark what the
+        // caller sees but may not use.
+        const manageView = url.searchParams.get('view') === 'manage'
         const all = await getInstalledAssistants()
         writeJson(
           res,
           200,
-          all.filter(a => {
-            if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
-            return isVisibleTo(a.visibleTo, filter)
-          }),
+          all
+            .filter(a => {
+              if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
+              // A disabled agent can't be used; the manage view still lists it.
+              return manageView ? isVisibleTo(a.visibleTo, filter) : a.enabled && isUsableBy(a.visibleTo, a.ownerId, filter)
+            })
+            .map(a => (manageView ? { ...a, usable: isUsableBy(a.visibleTo, a.ownerId, filter) } : a))
+            // Which wikis / corp apps an agent is bound to (the ids a grant
+            // needs) stays with admins and the agent's own creator.
+            .map(a => {
+              if (isStoreAdmin(auth) || a.ownerId === auth.userId || !a.meta) return a
+              const { enabledWikis: _wikis, enabledCorpApps: _corpApps, ...meta } = a.meta
+              return { ...a, meta }
+            }),
         )
         return
       }
@@ -8252,6 +8373,7 @@ export function startServer(
             body.workflow !== undefined
               ? (body.workflow as AssistantStoreMeta['workflow'])
               : undefined,
+          authorId: auth.userId,
         })
 
         writeJson(res, 200, { success: true, data: result })
@@ -8259,42 +8381,63 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/agents/uninstall') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        await uninstallAssistant({
+        const target = {
           assistantName:
             typeof body.assistantName === 'string' ? body.assistantName : '',
           sourcePath:
             typeof body.sourcePath === 'string' ? body.sourcePath : undefined,
-        })
-        writeJson(res, 200, { ok: true })
+        }
+        // Store admins may uninstall anything; a custom agent's creator may
+        // uninstall their own.
+        if ((await resolveCustomAssistantOwner(target)) !== auth.userId) {
+          authService.requireScope(auth, 'admin:settings')
+        }
+        // 专属 agents are removed through their own delete, which also drops the
+        // DB record; removing only the files here would orphan it.
+        const uninstallDir = target.sourcePath || (await findAssistantDir(target.assistantName))?.dir
+        if (uninstallDir && isInsideDir(join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant'), resolve(uninstallDir))) {
+          throw new HttpError(409, '专属智能体请在「专属」列表中删除')
+        }
+        await uninstallAssistant(target)
+        // A pending 专属 publish request made from this custom agent can no
+        // longer be approved; withdraw it rather than leave it dangling.
+        let withdrawnRequests = 0
+        if (uninstallDir) {
+          for (const row of runtime.store.listTenantAssistants('pending')) {
+            if (typeof row.file_path === 'string' && resolve(row.file_path) === resolve(uninstallDir)) {
+              runtime.store.deleteTenantAssistant(row.id as string)
+              withdrawnRequests++
+            }
+          }
+        }
+        writeJson(res, 200, { ok: true, withdrawn_publish_requests: withdrawnRequests })
         return
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/agents/meta') {
         const body = await readJsonBody(req)
         // Editing installed hub/system agents stays admin-only. CUSTOM agents
-        // (created from the SudoWork client, visible only to their owner) are
-        // strictly creator-only — editable ONLY by the owner, even for an admin
-        // who did not create it. Owner = a user id in the custom agent's
-        // visible_to.user_ids (custom items are per-user, so seeing one implies
-        // owning it). visible_to itself is still ignored for custom items on
-        // write; this only opens up the other meta fields for the owner.
+        // (created from the SudoWork client) are strictly creator-only —
+        // editable ONLY by the owner, even for an admin who did not create it.
+        // The owner may also change visibility: everyone / departments /
+        // users / only me, any of the org (see normalizeCustomVisibleTo).
+        const updates = isJsonBody(body.updates) ? body.updates : {}
         {
           const targetName = typeof body.assistantName === 'string' ? body.assistantName : ''
           const found = await findAssistantDir(targetName)
           const targetMeta = found ? await readAssistantMeta(found.dir) : null
           if (targetMeta?.source_type === 'custom') {
-            const ownsCustom = Array.isArray(targetMeta?.visible_to?.user_ids)
-              && (targetMeta?.visible_to?.user_ids?.includes(auth.userId) ?? false)
-            if (!ownsCustom) {
+            if (customItemOwnerId(targetMeta) !== auth.userId) {
               throw new HttpError(403, 'Only the creator can edit this custom agent')
+            }
+            if (updates.visible_to !== undefined) {
+              updates.visible_to = authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, (updates.visible_to ?? null) as VisibleTo)
             }
           } else {
             authService.requireScope(auth, 'admin:settings')
           }
         }
-        const updates = isJsonBody(body.updates) ? body.updates : {}
 
         await updateInstalledAssistantMeta({
           assistantName:
@@ -8355,11 +8498,24 @@ export function startServer(
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/agents/visibility') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
+        const assistantName = typeof body.assistantName === 'string' ? body.assistantName : ''
+        let visibleTo = (body.visible_to ?? null) as VisibleTo
+        const found = await findAssistantDir(assistantName)
+        const targetMeta = found ? await readAssistantMeta(found.dir) : null
+        if (targetMeta?.source_type === 'custom') {
+          // Custom agents: only the creator sets visibility (not even an admin
+          // who didn't create it).
+          if (customItemOwnerId(targetMeta) !== auth.userId) {
+            throw new HttpError(403, 'Only the creator can change this custom agent\'s visibility')
+          }
+          visibleTo = authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, visibleTo)
+        } else {
+          authService.requireScope(auth, 'admin:settings')
+        }
         await updateInstalledAssistantMeta({
-          assistantName: typeof body.assistantName === 'string' ? body.assistantName : '',
-          updates: { visible_to: (body.visible_to ?? null) as AssistantStoreMeta['visible_to'] },
+          assistantName,
+          updates: { visible_to: visibleTo as AssistantStoreMeta['visible_to'] },
         })
         writeJson(res, 200, { ok: true })
         return
@@ -8481,6 +8637,8 @@ export function startServer(
           if (row.status === 'pending') return isAdmin || canManage
           if (row.status === 'approved') {
             if (canManage) return true
+            // A disabled item is hidden from everyone who doesn't manage it.
+            if (Number(row.enabled) === 0) return false
             const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
             return isVisibleTo(visibleTo, filter)
           }
@@ -8504,20 +8662,28 @@ export function startServer(
               return fallback
             }
           }
+          const canManageRow = isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth)
+          // Server paths / source URLs are for admins; which wikis and corp apps
+          // an agent is bound to is for those who manage it (the ids are what a
+          // grant needs, so they aren't handed to every viewer).
+          const { file_path: _filePath, source_url: _sourceUrl, ...publicRow } = row
           return {
-            ...row,
+            ...(isAdmin ? row : publicRow),
             avatar: formatTenantAssistantAvatarUrl(row.avatar, config.publicBaseUrl),
             default_init_prompt: typeof row.default_init_prompt === 'string' ? row.default_init_prompt : '',
             prompts_i18n: parseObject(row.prompts_i18n, { 'zh-CN': [] }),
             categories: parseArray(row.categories),
             skills: parseArray(row.skills),
             enabled_skills: parseArray(row.enabled_skills),
-            enabled_wikis: parseArray(row.enabled_wikis),
-            enabled_corp_apps: parseArray(row.enabled_corp_apps),
+            enabled_wikis: canManageRow ? parseArray(row.enabled_wikis) : [],
+            enabled_corp_apps: canManageRow ? parseArray(row.enabled_corp_apps) : [],
             workflow: parseObject(row.workflow, null),
             visible_to: parseObject(row.visible_to, null),
+            // A widening request awaiting admin review (null here means everyone).
+            visibility_change_pending: row.pending_visible_to != null,
+            pending_visible_to: parseStoredVisibleTo(row.pending_visible_to),
             // Lets the frontend show edit/delete without re-deriving subtree math.
-            can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
+            can_manage: canManageRow,
           }
         })
         writeJson(res, 200, rows)
@@ -8532,7 +8698,8 @@ export function startServer(
           // Find assistant by ID in installed assistants list
           const installedAssistants = await getInstalledAssistants()
           const assistant = installedAssistants.find(a => a.id === assistantId)
-          if (!assistant) {
+          // Downloading = using (clients install it locally): same rule as the list.
+          if (!assistant || !assistant.enabled || !isUsableBy(assistant.visibleTo, assistant.ownerId, authService.buildVisibilityFilter(auth))) {
             throw new HttpError(404, `Assistant not found: ${assistantId}`)
           }
           // Use agent name for packaging (directory lookup)
@@ -8615,19 +8782,12 @@ export function startServer(
             ? body.avatar
             : undefined
 
-        // Visibility policy for the pending request:
-        //  - admin: as submitted (they create live).
-        //  - dept_admin: as submitted (a request the admin approves); when they
-        //    submit nothing, fall back to their default scope (own department).
-        //  - normal user: ALWAYS self-only, enforced server-side regardless of
-        //    what was submitted (they have no picker; the roster is admin-only).
-        const requestedVisibleTo = storeAdmin
-          ? (body.visible_to ?? null)
-          : authService.isDeptAdmin(auth)
-            ? (body.visible_to !== undefined
-                ? body.visible_to
-                : (authService.defaultTenantVisibility(auth) ?? null))
-            : (authService.defaultTenantVisibility(auth) ?? null)
+        // Visibility: the chosen scope (everyone / departments / users / only
+        // me, any of the org), else the role default. A non-admin's choice is
+        // part of the request the admin approves (and may adjust).
+        const requestedVisibleTo: VisibleTo = body.visible_to !== undefined
+          ? authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, (body.visible_to ?? null) as VisibleTo)
+          : storeAdmin ? null : (authService.defaultTenantVisibility(auth) ?? null)
 
         // Create metadata
         const rules = typeof body.rules === 'string' ? body.rules : ''
@@ -8653,6 +8813,7 @@ export function startServer(
           agent_type: body.agent_type || 'chat',
           memory_mode: body.memory_mode || 'session',
           visible_to: requestedVisibleTo,
+          author_id: auth.userId,
           workflow: body.workflow || null,
         }
 
@@ -8780,11 +8941,21 @@ export function startServer(
         if (!assistantId) {
           throw new HttpError(400, `assistantId is required`)
         }
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
 
         // Check if agent exists
         const assistantResult = await findAssistantDir(assistantId)
         if (!assistantResult) {
           throw new HttpError(404, `Assistant not found: ${assistantId}`)
+        }
+        // Only your own custom agent can be submitted — otherwise anyone who
+        // knew an id could publish someone else's private agent (or a hub /
+        // system one) as their own 专属 request.
+        if ((await resolveCustomAssistantOwner({ assistantName: assistantId, sourcePath: assistantResult.dir })) !== auth.userId) {
+          throw new HttpError(403, '只能发布自己创建的自定义智能体')
+        }
+        if (existsSync(join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant', basename(assistantResult.dir)))) {
+          throw new HttpError(409, '已存在同名专属智能体')
         }
 
         // Read agent metadata
@@ -8838,18 +9009,24 @@ export function startServer(
         }
 
         if (approved) {
+          // Refuse before changing anything when the files to approve are gone
+          // (e.g. the creator deleted the custom original); otherwise the record
+          // would end up approved with nothing installed.
+          const pendingSource = tenantAssistant.file_path as string | undefined
+          if (!pendingSource || !existsSync(pendingSource)) {
+            throw new HttpError(409, '申请对应的文件已不存在（可能已被创建者删除），请拒绝该申请')
+          }
           // Update status to approved
           runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
-          // Preserve the publisher's default visibility (dept/self) through
-          // approval. An admin may override via visible_to in the approve body;
-          // a legacy record without one falls back to global (null).
-          if (body.visible_to !== undefined) {
-            runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
-              visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
-            })
-          } else if (tenantAssistant.visible_to == null) {
-            runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
-          }
+          // The requested scope, or the admin's adjustment from the approve body.
+          const authorId = tenantAssistant.author_id as string
+          const approvedVisibleTo: VisibleTo = body.visible_to !== undefined
+            ? authService.normalizeCustomVisibleTo((tenantAssistant.org_id as string | null) ?? auth.orgId, authorId, (body.visible_to ?? null) as VisibleTo)
+            : parseStoredVisibleTo(tenantAssistant.visible_to)
+          runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
+            visible_to: approvedVisibleTo ? JSON.stringify(approvedVisibleTo) : null,
+          })
+          runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, null)
           // Copy agent to tenant directory using stored file_path
           const sourcePath = tenantAssistant.file_path as string | undefined
           if (sourcePath && existsSync(sourcePath)) {
@@ -8859,10 +9036,19 @@ export function startServer(
             const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
             const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', basename(sourcePath))
             runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
-            // MOVE semantics for non-admin-created pending items: remove the
-            // staged source so it lives only in the tenant dir. Items published
-            // from a real custom/ item keep their custom original (copy).
-            if (isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath)) {
+            // The copied meta still carries the requested (or, published from
+            // custom, creator-only) scope; the approved one is what applies.
+            const approvedRow = runtime.store.getTenantAssistant(tenantAssistantId)
+            await syncTenantAssistantFileScope(tenantPath, parseStoredVisibleTo(approvedRow?.visible_to), tenantAssistant.author_id as string)
+            // MOVE semantics: the approved item lives only in the tenant dir.
+            // Remove the staged pending source, and a custom original it was
+            // published from — keeping both left two same-id copies, where
+            // lookups hit the creator-only custom one first.
+            const ASSISTANT_CUSTOM_DIR = join(MOSS_HOME, 'assistants', 'custom')
+            if (
+              isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath) ||
+              dirname(resolve(sourcePath)) === resolve(ASSISTANT_CUSTOM_DIR)
+            ) {
               rmSync(sourcePath, { recursive: true, force: true })
             }
           } else {
@@ -8881,6 +9067,36 @@ export function startServer(
         }
 
         writeJson(res, 200, { id: tenantAssistantId, status: approved ? 'approved' : 'rejected' })
+        return
+      }
+
+      // POST /api/v1/admin/agents/tenant/:id/visibility-review - Approve (optionally
+      // adjusted) or reject a non-admin's pending request to widen visibility.
+      const agentVisibilityReviewMatch = pathname.match(/^\/api\/v1\/admin\/agents\/tenant\/([^/]+)\/visibility-review$/)
+      if (req.method === 'POST' && agentVisibilityReviewMatch) {
+        authService.requireScope(auth, 'admin:settings')
+        const tenantAssistantId = decodeURIComponent(agentVisibilityReviewMatch[1] || '')
+        const row = runtime.store.getTenantAssistant(tenantAssistantId)
+        if (!row) throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
+        if (row.pending_visible_to == null) throw new HttpError(409, 'No pending visibility change')
+        const body = await readJsonBody(req)
+        const approved = body.approved === true
+        if (approved) {
+          const authorId = row.author_id as string
+          const finalVisibleTo = authService.normalizeCustomVisibleTo(
+            (row.org_id as string | null) ?? auth.orgId,
+            authorId,
+            (body.visible_to !== undefined ? body.visible_to : parseStoredVisibleTo(row.pending_visible_to)) as VisibleTo,
+          )
+          runtime.store.updateTenantAssistantMeta(tenantAssistantId, {
+            visible_to: finalVisibleTo ? JSON.stringify(finalVisibleTo) : null,
+          })
+          if (row.status === 'approved') {
+            await syncTenantAssistantFileScope(row.file_path as string | undefined, finalVisibleTo, authorId)
+          }
+        }
+        runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, null)
+        writeJson(res, 200, { id: tenantAssistantId, approved })
         return
       }
 
@@ -8923,12 +9139,27 @@ export function startServer(
         }
         const enableCorpAuth = parseTenantBoolean(body.enableCorpAuth, 'enableCorpAuth')
         if (enableCorpAuth !== undefined) body.enableCorpAuth = enableCorpAuth
-        // A non-admin cannot widen visibility beyond their own scope: keep only
-        // the in-scope department/user ids they requested (out-of-scope ids an
-        // admin set are dropped — the client warns before this happens). This
-        // no longer overwrites a legitimate in-scope choice with their default.
-        if (!agentStoreAdmin && body.visible_to !== undefined) {
-          body.visible_to = authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
+        // Visibility: any of the org (everyone / departments / users / only me).
+        // Admins apply it directly; so do non-admins on a not-yet-approved item
+        // (it's still the request) or when narrowing an approved scope. Widening
+        // an approved scope is held as a pending change for admin re-approval.
+        let visibilityPending = false
+        if (body.visible_to !== undefined) {
+          const authorId = existingAssistant.author_id as string
+          const scopeOrgId = (existingAssistant.org_id as string | null) ?? auth.orgId
+          const requested = authService.normalizeCustomVisibleTo(scopeOrgId, authorId, (body.visible_to ?? null) as VisibleTo)
+          if (
+            agentStoreAdmin ||
+            existingAssistant.status !== 'approved' ||
+            authService.isScopeWithin(scopeOrgId, requested, parseStoredVisibleTo(existingAssistant.visible_to), authorId)
+          ) {
+            body.visible_to = requested
+            runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, null)
+          } else {
+            runtime.store.setTenantAssistantPendingVisibility(tenantAssistantId, JSON.stringify(requested))
+            delete body.visible_to
+            visibilityPending = true
+          }
         }
 
         const updates: Record<string, unknown> = {}
@@ -9032,6 +9263,7 @@ export function startServer(
               if (updates.memory_mode !== undefined) meta.memory_mode = updates.memory_mode as 'session' | 'user'
               if (updates.enabled !== undefined) meta.enabled = updates.enabled === 1
               if (body.visible_to !== undefined) meta.visible_to = body.visible_to as VisibleTo | null
+              meta.author_id = tenantAssistant.author_id as string
               if (body.enabledSkills !== undefined) meta.enabledSkills = body.enabledSkills as string[]
               if (body.enabledWikis !== undefined) meta.enabledWikis = body.enabledWikis as string[]
               if (body.enabledCorpApps !== undefined) meta.enabledCorpApps = body.enabledCorpApps as string[]
@@ -9048,7 +9280,7 @@ export function startServer(
         }
         if (updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, priorAvatar)
 
-        writeJson(res, 200, { ok: true })
+        writeJson(res, 200, { ok: true, visibility_pending: visibilityPending })
         return
       }
 
@@ -9159,9 +9391,18 @@ export function startServer(
         const filter = authService.buildVisibilityFilter(auth)
         // Scan all managed skill dirs (hub/system/custom/tenant), not just hub,
         // so tenant + custom skills are linkable by assistants and appear in the
-        // Skills page's custom/local groups. Visibility is still enforced below.
+        // Skills page's custom/local groups. Visibility is still enforced below:
+        // by default (clients syncing what they may use) usable skills only;
+        // `view=manage` (admin UI) returns everything the caller may see.
+        const manageView = url.searchParams.get('view') === 'manage'
         const all = await getInstalledSkills()
-        writeJson(res, 200, all.filter(s => isVisibleTo(s.visibleTo, filter)))
+        writeJson(
+          res,
+          200,
+          all
+            .filter(s => (manageView ? isVisibleTo(s.visibleTo, filter) : s.enabled && isUsableBy(s.visibleTo, s.ownerId, filter)))
+            .map(s => (manageView ? { ...s, usable: isUsableBy(s.visibleTo, s.ownerId, filter) } : s)),
+        )
         return
       }
 
@@ -9187,29 +9428,53 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/skills/uninstall') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        await uninstallSkill({
+        const target = {
           skillName: typeof body.skillName === 'string' ? body.skillName : '',
           sourcePath:
             typeof body.sourcePath === 'string' ? body.sourcePath : undefined,
-        })
-        writeJson(res, 200, { ok: true })
+        }
+        // Store admins may uninstall anything; a custom skill's creator may
+        // uninstall their own.
+        if ((await resolveCustomSkillOwner(target)) !== auth.userId) {
+          authService.requireScope(auth, 'admin:settings')
+        }
+        // 专属 skills are removed through their own delete (see agents).
+        const uninstallDir = target.sourcePath || (await findInstalledSkillPath(target.skillName))
+        if (uninstallDir && isInsideDir(MOSS_SKILLS_TENANT_DIR, resolve(uninstallDir))) {
+          throw new HttpError(409, '专属技能请在「专属」列表中删除')
+        }
+        await uninstallSkill(target)
+        // Withdraw a pending 专属 publish request made from this custom skill.
+        let withdrawnRequests = 0
+        if (uninstallDir) {
+          for (const row of runtime.store.listTenantSkills('pending')) {
+            if (typeof row.file_path === 'string' && resolve(row.file_path) === resolve(uninstallDir)) {
+              runtime.store.deleteTenantSkill(row.id as string)
+              withdrawnRequests++
+            }
+          }
+        }
+        writeJson(res, 200, { ok: true, withdrawn_publish_requests: withdrawnRequests })
         return
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/skills/enabled') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         if (typeof body.enabled !== 'boolean') {
           throw new HttpError(400, 'enabled must be a boolean')
         }
-        await setInstalledSkillEnabled({
+        const target = {
           skillName: typeof body.skillName === 'string' ? body.skillName : '',
-          enabled: body.enabled,
           sourcePath:
             typeof body.sourcePath === 'string' ? body.sourcePath : undefined,
-        })
+        }
+        // Store admins may toggle anything; a custom skill's creator may
+        // toggle their own.
+        if ((await resolveCustomSkillOwner(target)) !== auth.userId) {
+          authService.requireScope(auth, 'admin:settings')
+        }
+        await setInstalledSkillEnabled({ ...target, enabled: body.enabled })
         writeJson(res, 200, { ok: true })
         return
       }
@@ -9258,11 +9523,21 @@ export function startServer(
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/skills/visibility') {
-        authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const skillName =
           typeof body.skillName === 'string' ? body.skillName : ''
-        const visibleTo = body.visible_to ?? null
+        let visibleTo = (body.visible_to ?? null) as VisibleTo
+        const customOwnerId = await resolveCustomSkillOwner({ skillName })
+        if (customOwnerId) {
+          // Custom skills: only the creator sets visibility (not even an admin
+          // who didn't create it).
+          if (customOwnerId !== auth.userId) {
+            throw new HttpError(403, 'Only the creator can change this custom skill\'s visibility')
+          }
+          visibleTo = authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, visibleTo)
+        } else {
+          authService.requireScope(auth, 'admin:settings')
+        }
         await setInstalledSkillMeta(skillName, {
           visible_to: visibleTo as SkillStoreMeta['visible_to'],
         })
@@ -9355,6 +9630,9 @@ export function startServer(
           description: typeof body.description === 'string' ? body.description : undefined,
           version: typeof body.version === 'string' ? body.version : undefined,
           userId: auth.userId,
+        }).catch(error => {
+          if (error instanceof SkillNameConflictError) throw new HttpError(409, error.message)
+          throw error
         })
         writeJson(res, 200, result)
         return
@@ -9376,19 +9654,28 @@ export function startServer(
             if (row.status === 'pending') return isAdmin || canManage
             if (row.status === 'approved') {
               if (canManage) return true
+              // A disabled item is hidden from everyone who doesn't manage it.
+              if (Number(row.enabled) === 0) return false
               const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
               return isVisibleTo(visibleTo, filter)
             }
             return canManage || isAdmin
           })
-          .map((row: Record<string, unknown>) => ({
-            ...row,
+          .map((row: Record<string, unknown>) => {
+            // Server paths / source URLs are for admins only.
+            const { file_path: _filePath, source_url: _sourceUrl, ...publicRow } = row
+            return {
+            ...(isAdmin ? row : publicRow),
             // Parse visible_to so the approval page receives an object (matches
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
+            // A widening request awaiting admin review (null here means everyone).
+            visibility_change_pending: row.pending_visible_to != null,
+            pending_visible_to: parseStoredVisibleTo(row.pending_visible_to),
             // Lets the frontend show edit/delete without re-deriving subtree math.
             can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
-          }))
+            }
+          })
         writeJson(res, 200, rows)
         return
       }
@@ -9401,7 +9688,8 @@ export function startServer(
           // Find skill by ID in installed skills list
           const installedSkills = await getInstalledSkills()
           const skill = installedSkills.find(s => s.id === skillId)
-          if (!skill) {
+          // Downloading = using (clients install it locally): same rule as the list.
+          if (!skill || !skill.enabled || !isUsableBy(skill.visibleTo, skill.ownerId, authService.buildVisibilityFilter(auth))) {
             throw new HttpError(404, `Skill not found: ${skillId}`)
           }
           // Use skill name for packaging (directory lookup)
@@ -9430,17 +9718,12 @@ export function startServer(
         // Get author name from user info
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
-        // Visibility policy (same as agent create): admin as submitted;
-        // dept_admin as submitted (default own dept when unset); normal user
-        // ALWAYS self-only, enforced server-side (no picker; roster is admin-only).
+        // Visibility (same as agent create): the chosen scope, any of the org,
+        // else the role default; a non-admin's choice is part of the request.
         const skillStatus = storeAdmin ? 'approved' : 'pending'
-        const requestedVisibleTo = storeAdmin
-          ? (body.visible_to ?? null)
-          : authService.isDeptAdmin(auth)
-            ? (body.visible_to !== undefined
-                ? body.visible_to
-                : (authService.defaultTenantVisibility(auth) ?? null))
-            : (authService.defaultTenantVisibility(auth) ?? null)
+        const requestedVisibleTo: VisibleTo = body.visible_to !== undefined
+          ? authService.normalizeCustomVisibleTo(auth.orgId, auth.userId, (body.visible_to ?? null) as VisibleTo)
+          : storeAdmin ? null : (authService.defaultTenantVisibility(auth) ?? null)
         const skillResponse = (result: unknown) =>
           storeAdmin
             ? result
@@ -9470,6 +9753,7 @@ export function startServer(
             visible_to: requestedVisibleTo ? JSON.stringify(requestedVisibleTo) : null,
             org_id: auth.orgId,
           })
+          await syncTenantSkillFileScope(result.filePath, requestedVisibleTo, auth.userId)
 
           writeJson(res, 200, skillResponse(result))
           return
@@ -9506,6 +9790,7 @@ export function startServer(
             visible_to: requestedVisibleTo ? JSON.stringify(requestedVisibleTo) : null,
             org_id: auth.orgId,
           })
+          await syncTenantSkillFileScope(result.filePath, requestedVisibleTo, auth.userId)
 
           writeJson(res, 200, skillResponse(result))
           return
@@ -9521,10 +9806,18 @@ export function startServer(
         const skillId = typeof body.skillId === 'string' ? body.skillId : skillName
         const publishNote = typeof body.publishNote === 'string' ? body.publishNote : undefined
 
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         // Check if skill exists in custom directory
         const skillPath = await findInstalledSkillPath(skillId)
         if (!skillPath) {
           throw new HttpError(404, `Skill not found: ${skillId}`)
+        }
+        // Only your own custom skill can be submitted (see agent publish).
+        if ((await resolveCustomSkillOwner({ skillName: skillId, sourcePath: skillPath })) !== auth.userId) {
+          throw new HttpError(403, '只能发布自己创建的自定义技能')
+        }
+        if (tenantSkillNameTakenByOther(runtime.store, basename(skillPath), auth.userId)) {
+          throw new HttpError(409, '已存在同名专属技能')
         }
 
         // Read skill metadata
@@ -9532,8 +9825,9 @@ export function startServer(
         const version = await readSkillVersion(skillPath)
         const dirName = basename(skillPath)
 
-        // Use actual skill name from metadata or directory name
-        const actualSkillName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : dirName
+        // The tenant copy is keyed by directory name (a custom skill's may be
+        // per-user, see uploadCustomSkill); the source path is what approval moves.
+        const actualSkillName = dirName
 
         // Get author name from user info
         const authorUser = authService.getUserOrNull(auth.userId, auth.orgId, auth)
@@ -9555,6 +9849,7 @@ export function startServer(
           author_id: auth.userId,
           author_name: authorName,
           status: 'pending',
+          file_path: skillPath,
           visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
           org_id: auth.orgId,
         })
@@ -9577,25 +9872,36 @@ export function startServer(
         }
 
         if (approved) {
+          // Refuse before changing anything: approving would overwrite another
+          // author's approved tenant skill of the same name.
+          if (tenantSkillNameTakenByOther(runtime.store, tenantSkill.name as string, tenantSkill.author_id as string, tenantSkillId)) {
+            throw new HttpError(409, `已存在他人的同名专属技能: ${tenantSkill.name as string}`)
+          }
+          // Refuse before changing anything when the files to approve are gone.
+          const pendingSource = typeof tenantSkill.file_path === 'string' && tenantSkill.file_path
+            ? tenantSkill.file_path
+            : join(MOSS_SKILLS_CUSTOM_DIR, tenantSkill.name as string)
+          if (!existsSync(pendingSource)) {
+            throw new HttpError(409, '申请对应的文件已不存在（可能已被创建者删除），请拒绝该申请')
+          }
           // Update status to approved
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
-          // Preserve the publisher's default visibility (dept/self) through
-          // approval. An admin may still override it by passing visible_to in the
-          // approve body; a record published before this change (no visible_to)
-          // falls back to global (null), the prior behavior.
-          if (body.visible_to !== undefined) {
-            runtime.store.updateTenantSkillMeta(tenantSkillId, {
-              visible_to: body.visible_to === null ? null : JSON.stringify(body.visible_to),
-            })
-          } else if (tenantSkill.visible_to == null) {
-            runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
-          }
+          // The requested scope, or the admin's adjustment from the approve body.
+          const approvedVisibleTo: VisibleTo = body.visible_to !== undefined
+            ? authService.normalizeCustomVisibleTo((tenantSkill.org_id as string | null) ?? auth.orgId, tenantSkill.author_id as string, (body.visible_to ?? null) as VisibleTo)
+            : parseStoredVisibleTo(tenantSkill.visible_to)
+          runtime.store.updateTenantSkillMeta(tenantSkillId, {
+            visible_to: approvedVisibleTo ? JSON.stringify(approvedVisibleTo) : null,
+          })
+          runtime.store.setTenantSkillPendingVisibility(tenantSkillId, null)
           // Copy skill to tenant directory using the record's staged file_path
           // (tenant-pending for non-admin submissions), falling back to the
           // custom dir by name for legacy publish-from-custom records.
           const skillName = tenantSkill.name as string
           const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
           await copySkillToTenantDir(skillName, sourcePath)
+          // The source actually copied (see copySkillToTenantDir's fallback).
+          const copiedFrom = sourcePath && existsSync(sourcePath) ? sourcePath : join(MOSS_SKILLS_CUSTOM_DIR, skillName)
           // Point file_path at the tenant copy, and MOVE (remove the staged
           // source) for tenant-pending items so the skill lives only in tenant.
           const tenantSkillPath = join(MOSS_SKILLS_TENANT_DIR, skillName)
@@ -9605,9 +9911,18 @@ export function startServer(
             typeof tenantSkill.source_url === 'string' ? tenantSkill.source_url : '',
             typeof tenantSkill.checksum === 'string' ? tenantSkill.checksum : '',
           )
-          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
+          // MOVE semantics: remove the staged pending source, and a custom
+          // original it was published from, so only the tenant copy remains.
+          if (
+            existsSync(copiedFrom) &&
+            (isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, copiedFrom) ||
+              dirname(resolve(copiedFrom)) === resolve(MOSS_SKILLS_CUSTOM_DIR))
+          ) {
+            rmSync(copiedFrom, { recursive: true, force: true })
           }
+          // The copied meta still carries the requested (or, published from
+          // custom, creator-only) scope; the approved one is what applies.
+          await syncTenantSkillFileScope(tenantSkillPath, approvedVisibleTo, tenantSkill.author_id as string)
         } else {
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
           // Clean up staged files for a rejected non-admin submission.
@@ -9618,6 +9933,36 @@ export function startServer(
         }
 
         writeJson(res, 200, { id: tenantSkillId, status: approved ? 'approved' : 'rejected' })
+        return
+      }
+
+      // POST /api/v1/admin/skills/tenant/:id/visibility-review - Approve (optionally
+      // adjusted) or reject a non-admin's pending request to widen visibility.
+      const skillVisibilityReviewMatch = pathname.match(/^\/api\/v1\/admin\/skills\/tenant\/([^/]+)\/visibility-review$/)
+      if (req.method === 'POST' && skillVisibilityReviewMatch) {
+        authService.requireScope(auth, 'admin:settings')
+        const tenantSkillId = decodeURIComponent(skillVisibilityReviewMatch[1] || '')
+        const row = runtime.store.getTenantSkill(tenantSkillId)
+        if (!row) throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
+        if (row.pending_visible_to == null) throw new HttpError(409, 'No pending visibility change')
+        const body = await readJsonBody(req)
+        const approved = body.approved === true
+        if (approved) {
+          const authorId = row.author_id as string
+          const finalVisibleTo = authService.normalizeCustomVisibleTo(
+            (row.org_id as string | null) ?? auth.orgId,
+            authorId,
+            (body.visible_to !== undefined ? body.visible_to : parseStoredVisibleTo(row.pending_visible_to)) as VisibleTo,
+          )
+          runtime.store.updateTenantSkillMeta(tenantSkillId, {
+            visible_to: finalVisibleTo ? JSON.stringify(finalVisibleTo) : null,
+          })
+          if (row.status === 'approved') {
+            await syncTenantSkillFileScope(join(MOSS_SKILLS_TENANT_DIR, row.name as string), finalVisibleTo, authorId)
+          }
+        }
+        runtime.store.setTenantSkillPendingVisibility(tenantSkillId, null)
+        writeJson(res, 200, { id: tenantSkillId, approved })
         return
       }
 
@@ -9648,15 +9993,25 @@ export function startServer(
         if (typeof body.enabled === 'boolean') {
           updates.enabled = body.enabled ? 1 : 0
         }
+        // Visibility: same rules as tenant agents — applied directly for
+        // admins, not-yet-approved items and narrowing; widening an approved
+        // scope is held as a pending change for admin re-approval.
+        let visibilityPending = false
         if (body.visible_to !== undefined) {
-          // A non-admin cannot widen visibility beyond their own scope: keep only
-          // the in-scope ids they requested (out-of-scope admin-set ids are
-          // dropped — the client warns first). Admins set it verbatim. This no
-          // longer overwrites a legitimate in-scope choice with their default.
-          const clamped = skillStoreAdmin
-            ? (body.visible_to as VisibleTo)
-            : authService.clampVisibleToScope(auth, body.visible_to as VisibleTo)
-          updates.visible_to = clamped ? JSON.stringify(clamped) : null
+          const authorId = existing.author_id as string
+          const scopeOrgId = (existing.org_id as string | null) ?? auth.orgId
+          const requested = authService.normalizeCustomVisibleTo(scopeOrgId, authorId, (body.visible_to ?? null) as VisibleTo)
+          if (
+            skillStoreAdmin ||
+            existing.status !== 'approved' ||
+            authService.isScopeWithin(scopeOrgId, requested, parseStoredVisibleTo(existing.visible_to), authorId)
+          ) {
+            updates.visible_to = requested ? JSON.stringify(requested) : null
+            runtime.store.setTenantSkillPendingVisibility(tenantSkillId, null)
+          } else {
+            runtime.store.setTenantSkillPendingVisibility(tenantSkillId, JSON.stringify(requested))
+            visibilityPending = true
+          }
         }
 
         runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
@@ -9673,16 +10028,17 @@ export function startServer(
                 meta.enabled = updates.enabled === 1
               }
               if (updates.visible_to !== undefined) {
-                // Use the clamped value written to the DB, not the raw request,
-                // so a non-admin can't push a wider visibility to the file meta.
+                // The value written to the DB (normalized, and never a pending
+                // widening), not the raw request.
                 meta.visible_to = updates.visible_to ? JSON.parse(updates.visible_to) : null
               }
+              meta.author_id = tenantSkill.author_id as string
               await writeSkillMeta(skillDir, meta)
             }
           }
         }
 
-        writeJson(res, 200, { ok: true })
+        writeJson(res, 200, { ok: true, visibility_pending: visibilityPending })
         return
       }
 
@@ -10330,9 +10686,23 @@ export function startServer(
         // Reusing it here avoids a second disposable socket racing the actual
         // WebSocket attachment. Missing, stale, or newly adopted attempts still
         // go through the regular probe/recovery path.
-        const ready = locallyOwnedAttempt
-          ? { session, attempt: locallyOwnedAttempt }
-          : await runtime.ensureSessionReady(sessionId)
+        let ready: Awaited<ReturnType<typeof runtime.ensureSessionReady>>
+        try {
+          ready = locallyOwnedAttempt
+            ? { session, attempt: locallyOwnedAttempt }
+            : await runtime.ensureSessionReady(sessionId)
+        } catch (error) {
+          // A refusal the client should be told about (agent disabled / no
+          // longer usable, token quota used up): finish the handshake and close
+          // with the reason instead of dropping the socket silently.
+          if (error instanceof AgentNotUsableError || error instanceof TokenQuotaExceededError) {
+            let reason = error.message
+            while (Buffer.byteLength(reason) > 120) reason = reason.slice(0, -1)
+            wss.handleUpgrade(req, socket, head, (ws: { close(code: number, reason: string): void }) => ws.close(4403, reason))
+            return
+          }
+          throw error
+        }
         wss.handleUpgrade(req, socket, head, ws => {
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
             let buffer = ''

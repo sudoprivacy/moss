@@ -30,6 +30,7 @@ const BUN = [
   'nexusClient.test.ts',
   'nexusManager.test.ts',
   // src/channels/__tests__
+  'agentUnavailableRecovery.test.ts',
   'connectionScope.test.ts',
   'crashSeedRecovery.test.ts',
   'untrustedText.test.ts',
@@ -40,6 +41,7 @@ const BUN = [
   'authProxyMintedTokenInject.test.ts',
   'configItemsTokenPlacement.test.ts',
   'credentialsEnvelope.test.ts',
+  'customItemOwnership.test.ts',
   'credits.test.ts',
   'fuiou.test.ts',
   'lbHaConfig.test.ts',

@@ -29,6 +29,13 @@ interface ChannelSessionState {
   responseText: string;
   lastMsgId: string | null;
   isProcessing: boolean;
+  /** One-off message for the chat about how this session came to be (sent once). */
+  notice?: string;
+}
+
+/** The runtime refused the session's agent (disabled, or no longer usable by this user). */
+function isAgentNotUsable(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'AgentNotUsableError';
 }
 
 /**
@@ -284,7 +291,13 @@ export class MossActionExecutor {
         }
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to create runtime session:`, error);
-        await sendFn({ type: 'text', text: '❌ Failed to create AI session. Please try again.', parseMode: 'HTML' });
+        await sendFn({
+          type: 'text',
+          text: isAgentNotUsable(error)
+            ? `❌ 无法开始对话：${error.message}。请联系管理员或切换智能体。`
+            : '❌ Failed to create AI session. Please try again.',
+          parseMode: 'HTML',
+        });
         return;
       }
     }
@@ -304,9 +317,42 @@ export class MossActionExecutor {
         channelState = await this.reconnectRuntimeSession(channelUserKey, channelState.sessionId);
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to reconnect runtime session:`, error);
-        await sendFn({ type: 'text', text: '❌ Session disconnected. Please try again.', parseMode: 'HTML' });
-        return;
+        if (!isAgentNotUsable(error)) {
+          await sendFn({ type: 'text', text: '❌ Session disconnected. Please try again.', parseMode: 'HTML' });
+          return;
+        }
+        // The session's agent can no longer be used: move the chat to a fresh
+        // session on its current agent (carrying the recent context) and say so.
+        try {
+          const seedText = await this.buildSeedForSession(channelState.sessionId);
+          await this.runtime.terminateSession(channelState.sessionId).catch(() => {});
+          channelState = await this.createRuntimeSession(
+            channelUserKey, channelUser, platform, pluginId, chatId, mossUserId,
+            { forceReplace: true, seedText },
+          );
+          channelState.notice = `⚠️ 原智能体已不可用（${error.message}），已切换为新的会话继续对话` +
+            (seedText ? '，并保留了最近的对话摘要。' : '。');
+        } catch (retryError) {
+          console.error(`[MossActionExecutor] Failed to replace session after agent refusal:`, retryError);
+          await sendFn({
+            type: 'text',
+            text: isAgentNotUsable(retryError)
+              ? `❌ 无法开始对话：${retryError.message}。请联系管理员或切换智能体。`
+              : '❌ Session disconnected. Please try again.',
+            parseMode: 'HTML',
+          });
+          return;
+        }
       }
+    }
+
+    // Tell the chat once why its session changed (e.g. its agent became unavailable).
+    if (channelState.notice) {
+      const notice = channelState.notice;
+      channelState.notice = undefined;
+      try {
+        await sendFn({ type: 'text', text: notice, parseMode: 'HTML' });
+      } catch { /* best-effort */ }
     }
 
     // Reset response state
@@ -562,7 +608,10 @@ export class MossActionExecutor {
         );
       }
     }
-    const effectiveSeed = seedText ?? recoveredSeed;
+    let effectiveSeed = seedText ?? recoveredSeed;
+    // Set when the existing session's agent can no longer be used: the chat is
+    // moved to a fresh session on the chat's current agent, and told so.
+    let agentUnavailable: string | undefined;
 
     if (existingSession && recovery !== 'replace') {
       console.log(
@@ -602,6 +651,13 @@ export class MossActionExecutor {
         return state;
       } catch (error) {
         console.log(`[MossActionExecutor] Failed to reconnect session ${existingSession.sessionId}, creating new one:`, error);
+        if (isAgentNotUsable(error)) {
+          agentUnavailable = error.message;
+          // Keep the conversation's thread in the successor, and retire the old
+          // session so nothing keeps trying to revive it.
+          effectiveSeed ??= await this.buildSeedForSession(existingSession.sessionId);
+          await this.runtime.terminateSession(existingSession.sessionId).catch(() => {});
+        }
       }
     }
 
@@ -680,6 +736,13 @@ export class MossActionExecutor {
     // to the user as total amnesia. Sent as a plain turn before the user's message; the runtime
     // answers it, but processMessage is not waiting on this write, so the reply is
     // absorbed as context rather than delivered to the chat.
+    if (agentUnavailable) {
+      const current = activeAgent ? `「${activeAgent.displayName || activeAgent.name}」` : '通用助手'
+      state.notice =
+        `⚠️ 原智能体已不可用（${agentUnavailable}），已切换为${current}继续对话` +
+        (effectiveSeed ? '，并保留了最近的对话摘要。' : '。')
+    }
+
     if (effectiveSeed) {
       try {
         socket.write(`${JSON.stringify({ type: 'stdin', data: `${effectiveSeed}\n` })}\n`);

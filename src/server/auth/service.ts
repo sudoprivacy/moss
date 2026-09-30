@@ -2149,53 +2149,69 @@ export class AuthService {
   }
 
   /**
-   * Clamp a non-admin's requested `visible_to` to what they are allowed to set,
-   * instead of overwriting it wholesale with their default (which silently
-   * dropped a legitimate in-scope choice AND revoked any admin-set out-of-scope
-   * grants). A full admin's request passes through untouched. For a non-admin we
-   * keep only the department/user ids inside their subtree; the `'admin'`
-   * sentinel and the "all" (null) value pass through as-is. If the chosen mode's
-   * list is emptied by the intersection (e.g. only out-of-scope ids were sent),
-   * fall back to the caller's default so we never persist an empty list that
-   * would mean "visible to nobody". The frontend is responsible for dropping the
-   * out-of-scope entries it can't see; this is the server-side guard so a
-   * hand-crafted request can't widen visibility beyond the caller's scope.
+   * Org directory for choosing who a custom skill/agent is shared with: every
+   * department and active user of the org, ids and names only. Readable by any
+   * member — a custom item may be shared with anyone in its org.
    */
-  clampVisibleToScope(auth: AuthContext, requested: VisibleTo): VisibleTo {
-    const visibleDepartmentIds = this.getVisibleDepartmentIds(auth.orgId, auth)
-    if (visibleDepartmentIds === null) {
-      return requested // admin / super_admin: unrestricted
+  getOrgDirectory(orgId: string): {
+    departments: Array<{ id: string; name: string; parentId: string | null }>
+    users: Array<{ id: string; name: string; displayName: string | null; departmentId: string | null }>
+  } {
+    return {
+      departments: this.db
+        .listDepartmentsByOrg(orgId)
+        .map(d => ({ id: d.id, name: d.name, parentId: d.parentId })),
+      users: this.db
+        .listUsersByOrg(orgId)
+        .filter(u => u.status === 'active')
+        .map(u => ({ id: u.id, name: u.name, displayName: u.displayName ?? null, departmentId: u.departmentId })),
     }
-    // "all" (null / no constraints) is always allowed.
-    if (!requested || (!requested.department_ids && !requested.user_ids)) {
-      return requested
-    }
-    // "admin only" sentinel passes through unchanged.
-    if (requested.user_ids?.length === 1 && requested.user_ids[0] === 'admin') {
-      return { department_ids: null, user_ids: ['admin'] }
-    }
-    if (requested.department_ids?.length) {
-      const inScope = requested.department_ids.filter(id => visibleDepartmentIds.has(id))
-      if (inScope.length === 0) {
-        return this.defaultTenantVisibility(auth)
-      }
-      return { department_ids: inScope, user_ids: null }
-    }
-    if (requested.user_ids?.length) {
-      const subtreeUserIds = this.listSubtreeUserIds(auth.orgId, auth) ?? new Set<string>([auth.userId])
-      const inScope = requested.user_ids.filter(id => subtreeUserIds.has(id))
-      if (inScope.length === 0) {
-        return this.defaultTenantVisibility(auth)
-      }
-      return { department_ids: null, user_ids: inScope }
-    }
-    return this.defaultTenantVisibility(auth)
   }
 
-  /** True when the actor is a dept_admin (not a full admin, not a plain user). */
-  isDeptAdmin(auth: AuthContext): boolean {
-    const actor = this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
-    return actor?.role === 'dept_admin'
+  /**
+   * Normalize the scope chosen for a custom or tenant (专属) skill/agent to one
+   * of everyone (null) / departments / users / only me ({ user_ids: [owner] }).
+   * Any department or user of the org may be picked — "everyone" is already
+   * allowed, so a narrower choice can never widen exposure (tenant items gate
+   * widening through re-approval instead, see isScopeWithin) — but unknown ids
+   * are dropped. An empty choice, `{ null, null }` and the retired "admins
+   * only" value mean only me. The owner is always included at read time
+   * (withOwnerVisibility).
+   */
+  normalizeCustomVisibleTo(orgId: string, ownerId: string, requested: VisibleTo): VisibleTo {
+    const onlyMe: VisibleTo = { department_ids: null, user_ids: [ownerId] }
+    if (!requested) return null
+    if (requested.department_ids?.length) {
+      const known = new Set(this.db.listDepartmentsByOrg(orgId).map(d => d.id))
+      const picked = [...new Set(requested.department_ids.filter(id => known.has(id)))]
+      return picked.length ? { department_ids: picked, user_ids: null } : onlyMe
+    }
+    if (requested.user_ids?.length) {
+      const known = new Set(this.db.listUsersByOrg(orgId).map(u => u.id))
+      const picked = [...new Set(requested.user_ids.filter(id => known.has(id)))]
+      return picked.length ? { department_ids: null, user_ids: picked } : onlyMe
+    }
+    return onlyMe
+  }
+
+  /**
+   * Whether `next` reaches nobody outside `current` (plus the owner, who is
+   * always included) — i.e. it narrows or keeps an approved tenant scope, so it
+   * needs no re-approval. Department-tree aware: a sub-department of a listed
+   * department, or a user in one, is inside it.
+   */
+  isScopeWithin(orgId: string, next: VisibleTo, current: VisibleTo, ownerId: string): boolean {
+    if (!current) return true
+    if (!next) return false
+    const scopeDepts = new Set(current.department_ids ?? [])
+    const scopeUsers = new Set([...(current.user_ids ?? []), ownerId])
+    const chainHits = (deptId: string | null) =>
+      getDepartmentAncestorChain(orgId, deptId, oid => this.db.listDepartmentsByOrg(oid)).some(id => scopeDepts.has(id))
+    const deptOf = new Map(this.db.listUsersByOrg(orgId).map(u => [u.id, u.departmentId]))
+    return (
+      (next.department_ids ?? []).every(chainHits) &&
+      (next.user_ids ?? []).every(id => scopeUsers.has(id) || chainHits(deptOf.get(id) ?? null))
+    )
   }
 
   private requireAuthUser(auth: AuthContext): AuthCenterUser {

@@ -4,7 +4,7 @@ import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
-import type { VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, itemCreatorId, withOwnerVisibility, type VisibleTo } from './visibilityFilter.js'
 import {
   MANAGED_SKILL_SEARCH_DIRS,
   MOSS_SKILLS_CUSTOM_DIR,
@@ -78,6 +78,8 @@ export type SkillStoreMeta = {
   installed_version?: string
   installed_at?: string
   visible_to?: VisibleTo
+  /** Custom skills: the name sessions load it under, when its directory is per-user. */
+  skill_name?: string
   [key: string]: unknown
 }
 
@@ -97,7 +99,10 @@ export type InstalledSkillInfo = {
   enabled: boolean
   source: string
   meta: SkillStoreMeta | null
+  /** Effective visibility (a custom/tenant skill's creator is always included). */
   visibleTo: VisibleTo
+  /** Owner user id for custom skills; null for hub/system/tenant/upload skills. */
+  ownerId: string | null
 }
 
 export type FetchSkillHubSkillsParams = {
@@ -387,6 +392,8 @@ function toInstalledSkillInfo(params: {
   const dirDefaults = inferLocalSkillMetaDefaults(skillDir)
   const effectiveSourceType: SkillStoreMeta['source_type'] | undefined =
     meta?.source_type ?? dirDefaults.source_type
+  const effectiveMeta = meta ? { ...meta, source_type: effectiveSourceType } : null
+  const customOwnerId = customItemOwnerId(effectiveMeta)
   // Trim skill name to avoid leading/trailing spaces
   const trimmedSkillName = skillName.trim()
   const displayName =
@@ -436,7 +443,8 @@ function toInstalledSkillInfo(params: {
       : effectiveSourceType
         ? ({ source_type: effectiveSourceType } as SkillStoreMeta)
         : meta,
-    visibleTo: meta?.visible_to ?? null,
+    visibleTo: withOwnerVisibility(meta?.visible_to, itemCreatorId(effectiveMeta)),
+    ownerId: customOwnerId,
   }
 }
 
@@ -796,6 +804,10 @@ export async function installHubSkill(params: {
   const trimmedSkillName = params.skillName.trim()
   await mkdir(MOSS_SKILLS_HUB_DIR, { recursive: true })
   const skillDir = path.join(MOSS_SKILLS_HUB_DIR, trimmedSkillName)
+  // An update reinstalls from scratch; keep the admin's local governance
+  // settings (who may use it, whether it's enabled) instead of resetting them
+  // to everyone / enabled.
+  const previousMeta = await readSkillMeta(skillDir)
   await rm(skillDir, { recursive: true, force: true })
   await mkdir(skillDir, { recursive: true })
   await extractSkillZip(zipBuffer, skillDir)
@@ -839,9 +851,10 @@ export async function installHubSkill(params: {
         : '',
     source_type: 'hub',
     is_builtin: false,
-    enabled: true,
+    enabled: previousMeta ? previousMeta.enabled !== false : true,
     installed_version: params.version || '',
     installed_at: new Date().toISOString(),
+    ...(previousMeta && previousMeta.visible_to !== undefined ? { visible_to: previousMeta.visible_to } : {}),
   }
 
   await writeSkillMeta(skillDir, meta)
@@ -852,6 +865,24 @@ export async function installHubSkill(params: {
     skillName: params.skillName,
     version: params.version || '',
   }
+}
+
+/**
+ * Owner of the custom skill a store route targets, or null when the target is
+ * not a custom skill (admin 'upload' skills share the custom dir but carry no
+ * owner). Resolves the dir the same way the store functions do (sourcePath,
+ * else lookup by name); a caller-supplied sourcePath only counts when it is a
+ * direct child of the custom dir.
+ */
+export async function resolveCustomSkillOwner(params: {
+  skillName: string
+  sourcePath?: string
+}): Promise<string | null> {
+  const dir = params.sourcePath || (await findInstalledSkillPath(params.skillName))
+  if (!dir || path.dirname(path.resolve(dir)) !== path.resolve(MOSS_SKILLS_CUSTOM_DIR)) {
+    return null
+  }
+  return customItemOwnerId(await readSkillMeta(dir))
 }
 
 export async function uninstallSkill(params: {
@@ -1028,13 +1059,15 @@ export async function setInstalledSkillMeta(
   }
 
   if (updates.visible_to !== undefined) {
-    // Custom skills are created from the SudoWork client and are creator-only by
-    // design (visible_to defaults to the uploader). Never let a visibility update
-    // widen or change that — ignore visible_to for custom items regardless of who
-    // asks, so the creator-only invariant holds even against a crafted request.
-    if (meta.source_type !== 'custom') {
-      meta.visible_to = updates.visible_to
+    // Custom skills: only the owner reaches here (enforced by the route). Pin
+    // the owner before replacing visible_to — legacy items derive ownership
+    // from visible_to, which the new scope may no longer name.
+    const sourceType = meta.source_type ?? inferLocalSkillMetaDefaults(sourcePath).source_type
+    if (sourceType === 'custom' && !meta.author_id) {
+      const ownerId = customItemOwnerId({ ...meta, source_type: sourceType })
+      if (ownerId) meta.author_id = ownerId
     }
+    meta.visible_to = updates.visible_to
   }
 
   await writeSkillMeta(sourcePath, meta)
@@ -1044,6 +1077,14 @@ export async function setInstalledSkillMeta(
  * Upload a custom skill from a zip buffer.
  * The skill will be installed to the custom directory with visibility set to the uploader only.
  */
+/** The uploader already has a custom skill of this name (mapped to HTTP 409). */
+export class SkillNameConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SkillNameConflictError'
+  }
+}
+
 export async function uploadCustomSkill(params: {
   file: Buffer
   name: string
@@ -1052,15 +1093,27 @@ export async function uploadCustomSkill(params: {
   version?: string
   userId: string
 }): Promise<{ id: string; name: string; version: string }> {
-  const skillName = params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
-  if (!skillName) {
+  const baseName = params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
+  if (!baseName) {
     throw new Error('Invalid skill name')
   }
 
-  // Check if skill already exists
-  const existingPath = await findInstalledSkillPath(skillName)
+  // Custom skills are per-user: a name only conflicts with the uploader's own
+  // skill. When another user's skill (or a hub/system/tenant one) holds the
+  // plain name, this one gets a per-user directory; it still loads into
+  // sessions under its original name (skill_name, see syncWorkspaceSkills).
+  const ownsSkillAt = async (dir: string) =>
+    customItemOwnerId(await readSkillMeta(dir)) === params.userId
+  let skillName = baseName
+  const existingPath = await findInstalledSkillPath(baseName)
   if (existingPath) {
-    throw new Error(`Skill already exists: ${skillName}`)
+    if (path.dirname(path.resolve(existingPath)) === path.resolve(MOSS_SKILLS_CUSTOM_DIR) && await ownsSkillAt(existingPath)) {
+      throw new SkillNameConflictError(`你已有同名自定义技能: ${baseName}`)
+    }
+    skillName = `${baseName}-${params.userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}`
+    if (await findInstalledSkillPath(skillName)) {
+      throw new SkillNameConflictError(`你已有同名自定义技能: ${baseName}`)
+    }
   }
 
   // Extract to temp directory first
@@ -1091,7 +1144,7 @@ export async function uploadCustomSkill(params: {
     const meta: SkillStoreMeta = {
       id: skillName,
       name: skillName,
-      display_name: params.displayName || frontmatter.name || frontmatter.displayName || skillName,
+      display_name: params.displayName || frontmatter.name || frontmatter.displayName || baseName,
       description: params.description || frontmatter.description || '',
       icon: frontmatter.icon || '',
       emoji: frontmatter.emoji || null,
@@ -1106,6 +1159,10 @@ export async function uploadCustomSkill(params: {
         user_ids: [params.userId],
         department_ids: null,
       },
+      author_id: params.userId,
+      // The name sessions load it under (differs from the directory only for
+      // a per-user directory, see above).
+      skill_name: baseName,
     }
     await writeSkillMeta(targetDir, meta)
 

@@ -171,6 +171,14 @@ export class SessionRunnerDaemon {
           visibleDepartmentIds: this.manifest.session.visibilityFilter.visibleDepartmentIds
             ? new Set(this.manifest.session.visibilityFilter.visibleDepartmentIds)
             : null,
+          ...(this.manifest.session.visibilityFilter.member
+            ? {
+                member: {
+                  departmentId: this.manifest.session.visibilityFilter.member.departmentId,
+                  visibleDepartmentIds: new Set(this.manifest.session.visibilityFilter.member.visibleDepartmentIds),
+                },
+              }
+            : {}),
         } : null,
         mcpSettings: this.manifest.session.mcpSettings,
       })

@@ -133,6 +133,16 @@ export async function createApiKey(
   return authClient.post<CreateApiKeyResponse>('/api/v1/api-keys', data)
 }
 
+export interface OrgDirectory {
+  departments: Array<{ id: string; name: string; parentId: string | null }>
+  users: Array<{ id: string; name: string; displayName: string | null; departmentId: string | null }>
+}
+
+/** Whole-org departments + active users, for sharing a custom skill/agent. Any member may read it. */
+export async function getOrgDirectory(): Promise<OrgDirectory> {
+  return authClient.get<OrgDirectory>('/api/v1/directory')
+}
+
 export async function getDepartments(): Promise<DepartmentsListResponse> {
   return authClient.get<DepartmentsListResponse>('/api/v1/departments')
 }

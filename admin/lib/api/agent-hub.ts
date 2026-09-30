@@ -90,7 +90,12 @@ export interface InstalledAgentInfo {
   meta: InstalledAgentMeta | null
   agentType: 'chat' | 'workflow'
   memoryMode: 'session' | 'user'
+  /** Effective visibility; for custom agents it also includes the owner. */
   visibleTo: VisibleTo | null
+  /** Creator of a custom agent; null for hub/system/tenant agents. */
+  ownerId?: string | null
+  /** Manage view only: whether the caller may use it (false = see-only). */
+  usable?: boolean
   workflow: InstalledAgentMeta['workflow']
 }
 
@@ -149,8 +154,15 @@ export function getAgentHubDetail(
   )
 }
 
-export function getInstalledAgents(): Promise<InstalledAgentInfo[]> {
-  return authClient.get<InstalledAgentInfo[]>('/api/v1/agents/installed')
+/**
+ * Installed agents. Default: the ones the caller may USE (pickers). `manage`:
+ * everything the caller may see — for an admin that includes other users'
+ * custom agents they can't use unless the creator permits.
+ */
+export function getInstalledAgents(view?: 'manage'): Promise<InstalledAgentInfo[]> {
+  return authClient.get<InstalledAgentInfo[]>(
+    view === 'manage' ? '/api/v1/agents/installed?view=manage' : '/api/v1/agents/installed',
+  )
 }
 
 export function installAgent(
@@ -172,8 +184,8 @@ export function installAgent(
 export function uninstallAgent(data: {
   assistantName: string
   sourcePath?: string
-}): Promise<{ ok: boolean }> {
-  return authClient.post<{ ok: boolean }>('/api/v1/agents/uninstall', data)
+}): Promise<{ ok: boolean; withdrawn_publish_requests?: number }> {
+  return authClient.post<{ ok: boolean; withdrawn_publish_requests?: number }>('/api/v1/agents/uninstall', data)
 }
 
 export function createCustomAssistant(
@@ -273,6 +285,9 @@ export interface TenantAssistantInfo {
   reviewed_at?: number
   enabled: number
   visible_to?: VisibleTo | null
+  /** A non-admin's request to widen the approved scope, awaiting admin review. */
+  visibility_change_pending?: boolean
+  pending_visible_to?: VisibleTo | null
   rules?: string
   workflow?: {
     trigger?: 'cron' | 'webhook' | 'manual'
@@ -293,6 +308,18 @@ export interface TenantAssistantInfo {
 export function getTenantAssistants(status?: string): Promise<TenantAssistantInfo[]> {
   const queryString = status ? `?status=${encodeURIComponent(status)}` : ''
   return authClient.get<TenantAssistantInfo[]>(`/api/v1/agents/tenant${queryString}`)
+}
+
+/** Admin: approve (optionally adjusted) or reject a pending visibility widening. */
+export function reviewTenantAssistantVisibility(
+  id: string,
+  approved: boolean,
+  visible_to?: VisibleTo | null,
+): Promise<{ id: string; approved: boolean }> {
+  return authClient.post<{ id: string; approved: boolean }>(
+    `/api/v1/admin/agents/tenant/${encodeURIComponent(id)}/visibility-review`,
+    visible_to !== undefined ? { approved, visible_to } : { approved },
+  )
 }
 
 export function approveTenantAssistant(
@@ -370,7 +397,9 @@ export type UpdateTenantAssistantRequest = Omit<Partial<CreateTenantAssistantReq
   enableCorpAuth?: boolean
 }
 
-export function updateTenantAssistantMeta(params: UpdateTenantAssistantRequest): Promise<{ ok: boolean }> {
+export function updateTenantAssistantMeta(
+  params: UpdateTenantAssistantRequest,
+): Promise<{ ok: boolean; visibility_pending?: boolean }> {
   const form = new FormData()
   if (params.display_name !== undefined) form.set('display_name', params.display_name)
   appendTenantAssistantFormData(form, params)
@@ -380,7 +409,7 @@ export function updateTenantAssistantMeta(params: UpdateTenantAssistantRequest):
   if (params.enableCorpAuth !== undefined) form.set('enableCorpAuth', String(params.enableCorpAuth))
   if (params.enabled !== undefined) form.set('enabled', String(params.enabled))
   if (params.removeAvatar === true) form.set('remove_avatar', 'true')
-  return authClient.patch<{ ok: boolean }>(
+  return authClient.patch<{ ok: boolean; visibility_pending?: boolean }>(
     `/api/v1/agents/tenant/${encodeURIComponent(params.id)}`,
     form,
   )
