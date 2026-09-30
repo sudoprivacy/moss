@@ -53,6 +53,8 @@ const BUN = [
   'recharge.test.ts',
   'runtimeScodePaths.test.ts',
   'smsTencent.test.ts',
+  'knowledgeRoutes.test.ts',
+  'wikiAccess.test.ts',
 ]
 
 /** Need Node: either they reach `node:sqlite` (Bun lacks it), or they pin the
@@ -63,6 +65,7 @@ const NODE = [
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
   'jsonlParse.test.ts',
+  'knowledgeSpaces.test.ts',
   'lbDraining.test.ts',
   'lbServerInstance.test.ts',
   'phoneAuth.test.ts',

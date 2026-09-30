@@ -66,7 +66,23 @@ All requests carry `Authorization: Bearer ${SESSION_TOKEN}`.
 | `search`       | `GET /api/v1/agent/wikis/:id/search?q=...`        |
 | `metadata`     | `GET /api/v1/agent/wikis/:id/metadata`            |
 
-Server-side scope check (currently `admin:documents`) will be replaced
-in D6 by SESSION_TOKEN-based assistant filtering, so each assistant only
-sees the wikis it has been authorised for (via the assistant meta
-`enabledWikis: string[]` field).
+Which wikis a session may reach is decided server-side on every request
+(`src/server/wikiAccess.ts`); no agent is required:
+
+- **Any session** — the wikis its user may use directly: tenant (文档中心)
+  wikis whose 可用范围 includes them, plus private (私有) wikis whose owner
+  shared them with them (their own included). Disabled wikis never count.
+- **Agent session** (token carries `assistant_id`) — additionally, the
+  agent's `enabledWikis` that it may delegate: tenant wikis on admin-controlled
+  agents (hub/system, or custom/专属 authored by a full admin; a non-admin's
+  专属 agent only when the wiki's scope covers the agent's). A non-admin's
+  custom agent and private wikis never delegate — those reach only users who
+  may use the wiki themselves.
+- `admin:documents` holders also reach every enabled tenant wiki.
+
+The `[Available Wikis]` prompt block lists the agent's wikis plus those
+picked for the session (`enabled_wikis` on `POST /api/v1/sessions`, chosen
+from `GET /api/v1/wikis/usable`), filtered by the same rules.
+
+Wiki image links (`/api/v1/resources/<token>/…`) stay public, keyed by an
+unguessable per-file HMAC token — including for private wikis.

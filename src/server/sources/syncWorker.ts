@@ -629,7 +629,10 @@ export class SourceSyncWorker {
     stats.wikisMarked++
     const wikiRow = this.db.getWikiById(wikiId) as Record<string, unknown> | null
     const autoRebuild = wikiRow ? Number(wikiRow.auto_rebuild ?? 0) === 1 : false
-    if (autoRebuild && this.onWikiNeedsRebuild) {
+    // A disabled wiki is still flagged stale, but not rebuilt (no token spend
+    // on a wiki nothing uses); re-enabling it lets the admin build on demand.
+    const enabled = wikiRow ? Number(wikiRow.enabled ?? 1) !== 0 : false
+    if (autoRebuild && enabled && this.onWikiNeedsRebuild) {
       this.onWikiNeedsRebuild(wikiId, source.org_id, source.id)
     }
   }
@@ -646,7 +649,9 @@ export class SourceSyncWorker {
     if (dirtyNodeIds.size === 0) return
     // Build a child→parent map once from the org's node list so we can expand
     // each dirty node to its full ancestor chain (root-ward).
-    const nodes = this.db.listDocumentTreeNodes(source.org_id)
+    // Soft-deleted nodes included: a folder removed in this run must still
+    // resolve to its ancestors.
+    const nodes = this.db.listDocumentTreeNodes(source.org_id, { includeDeleted: true })
     const parentOf = new Map<string, string | null>()
     for (const n of nodes) {
       parentOf.set(String(n.id), (n.parent_id as string | null) ?? null)

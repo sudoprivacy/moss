@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from 'fs/promises'
 import path from 'path'
 import { randomUUID } from 'crypto'
 import type { DirectConnectStore } from './db.js'
+import type { VisibleTo } from './visibilityFilter.js'
 import {
   MOSS_DOCS_DIR,
   MOSS_WIKIS_DIR,
@@ -15,6 +16,23 @@ import {
 // Public types — kept independent from SQL row shape so that
 // server.ts/admin can use them without knowing about node:sqlite.
 // ============================================================
+
+/**
+ * 'tenant' — the org knowledge base, managed in the admin UI (专属-like).
+ * 'private' — a user's own 私有 space, managed from SudoWork (custom-like).
+ */
+export type KnowledgeScope = 'tenant' | 'private'
+
+/** Name of the root node of every user's private space. */
+export const PRIVATE_ROOT_NAME = '私有'
+
+/** Thrown for invalid input (bad parent, cross-scope source…) → HTTP 400. */
+export class DocumentStoreError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message)
+    this.name = 'DocumentStoreError'
+  }
+}
 
 export type DocumentTreeNode = {
   id: string
@@ -31,6 +49,9 @@ export type DocumentTreeNode = {
   autoManaged: boolean
   alias: string | null
   lastSyncedAt: number | null
+  scope: KnowledgeScope
+  /** Creator/owner user id; 'admin' for rows that predate ownership. */
+  ownerId: string
 }
 
 export type DocumentRecord = {
@@ -49,6 +70,8 @@ export type DocumentRecord = {
    * (the two 'files'-mode variants).
    */
   sourceId: string | null
+  scope: KnowledgeScope
+  ownerId: string
 }
 
 export type WikiRecord = {
@@ -84,6 +107,13 @@ export type WikiRecord = {
   needsRebuild: boolean
   /** True once a successful build exists (drives the 已构建 tag). */
   hasBuilt: boolean
+  scope: KnowledgeScope
+  /** Owner user id; 'admin' for wikis that predate ownership. */
+  ownerId: string
+  /** Who may use the wiki directly (null = everyone). See wikiAccess.ts. */
+  visibleTo: VisibleTo
+  /** A disabled wiki is left out of every use path (sessions, agents, CLI). */
+  enabled: boolean
 }
 
 export type WikiBuildJob = {
@@ -105,6 +135,15 @@ export type WikiBuildJobListItem = WikiBuildJob & {
   wikiNodeId: string | null
   wikiBuildStatus: WikiRecord['buildStatus']
   wikiNeedsRebuild: boolean
+  wikiScope: KnowledgeScope
+  wikiOwnerId: string
+}
+
+export type WikiListFilter = {
+  nodeId?: string
+  buildStatus?: WikiRecord['buildStatus']
+  scope?: KnowledgeScope
+  ownerId?: string
 }
 
 type SqlRow = Record<string, unknown>
@@ -128,6 +167,25 @@ function mapTreeNode(row: SqlRow): DocumentTreeNode {
     autoManaged: Number(row.auto_managed ?? 0) === 1,
     alias: typeof row.alias === 'string' ? row.alias : null,
     lastSyncedAt: row.last_synced_at == null ? null : Number(row.last_synced_at),
+    scope: mapScope(row.scope),
+    ownerId: typeof row.owner_id === 'string' && row.owner_id ? row.owner_id : 'admin',
+  }
+}
+
+function mapScope(value: unknown): KnowledgeScope {
+  return value === 'private' ? 'private' : 'tenant'
+}
+
+function parseVisibleTo(value: unknown): VisibleTo {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!parsed || typeof parsed !== 'object') return null
+    const v = parsed as { department_ids?: unknown; user_ids?: unknown }
+    const ids = (x: unknown) => (Array.isArray(x) ? x.filter((i): i is string => typeof i === 'string') : null)
+    return { department_ids: ids(v.department_ids), user_ids: ids(v.user_ids) }
+  } catch {
+    return null
   }
 }
 
@@ -143,6 +201,8 @@ function mapDocument(row: SqlRow): DocumentRecord {
     uploadedBy: String(row.uploaded_by),
     uploadedAt: Number(row.uploaded_at),
     sourceId: typeof row.source_id === 'string' ? row.source_id : null,
+    scope: mapScope(row.scope),
+    ownerId: typeof row.owner_id === 'string' && row.owner_id ? row.owner_id : 'admin',
   }
 }
 
@@ -188,6 +248,10 @@ function mapWiki(row: SqlRow): WikiRecord {
     // get it recomputed against _moss_meta.json by the DocumentStore enrich step.
     needsRebuild: Number(row.needs_rebuild ?? 0) === 1,
     hasBuilt: row.last_built_at != null,
+    scope: mapScope(row.scope),
+    ownerId: typeof row.owner_id === 'string' && row.owner_id ? row.owner_id : 'admin',
+    visibleTo: parseVisibleTo(row.visible_to),
+    enabled: Number(row.enabled ?? 1) !== 0,
   }
 }
 
@@ -268,6 +332,8 @@ function mapBuildJobListItem(row: SqlRow): WikiBuildJobListItem {
       ? wikiStatus
       : 'pending') as WikiRecord['buildStatus'],
     wikiNeedsRebuild: Number(row.wiki_needs_rebuild ?? 0) === 1,
+    wikiScope: mapScope(row.wiki_scope),
+    wikiOwnerId: typeof row.wiki_owner_id === 'string' && row.wiki_owner_id ? row.wiki_owner_id : 'admin',
   }
 }
 
@@ -280,8 +346,38 @@ export class DocumentStore {
 
   // ---------- Tree ----------
 
-  listTree(orgId: string): DocumentTreeNode[] {
-    return this.store.listDocumentTreeNodes(orgId).map(mapTreeNode)
+  /** The org's tree, optionally narrowed to one scope (and owner). */
+  listTree(orgId: string, filter?: { scope?: KnowledgeScope; ownerId?: string }): DocumentTreeNode[] {
+    return this.store.listDocumentTreeNodes(orgId, filter).map(mapTreeNode)
+  }
+
+  /**
+   * A user's 私有 root, created on first use. Every private node and document
+   * of that user lives under it; the partial unique index keeps it single.
+   */
+  getOrCreatePrivateRoot(orgId: string, ownerId: string): DocumentTreeNode {
+    const existing = this.store.getPrivateRootNode(orgId, ownerId)
+    if (existing) return mapTreeNode(existing)
+    try {
+      this.store.createDocumentTreeNode({
+        id: randomUUID(),
+        org_id: orgId,
+        parent_id: null,
+        name: PRIVATE_ROOT_NAME,
+        scope: 'private',
+        owner_id: ownerId,
+      })
+    } catch {
+      // lost a race with a concurrent request — the row exists now
+    }
+    const row = this.store.getPrivateRootNode(orgId, ownerId)
+    if (!row) throw new Error(`failed to create private root for ${ownerId}`)
+    return mapTreeNode(row)
+  }
+
+  /** Whether `nodeId` is the root of a private space. */
+  isPrivateRoot(node: DocumentTreeNode): boolean {
+    return node.scope === 'private' && node.parentId === null
   }
 
   getNode(id: string, orgId: string): DocumentTreeNode | null {
@@ -289,17 +385,29 @@ export class DocumentStore {
     return row ? mapTreeNode(row) : null
   }
 
+  /**
+   * Create a folder. A child inherits its parent's scope and owner; a
+   * top-level node is always tenant (private roots come from
+   * getOrCreatePrivateRoot). `ownerId` is the creator of a tenant node.
+   */
   createNode(input: {
     orgId: string
     parentId: string | null
     name: string
     description?: string
     sortOrder?: number
+    ownerId?: string
   }): DocumentTreeNode {
+    let scope: KnowledgeScope = 'tenant'
+    let ownerId = input.ownerId ?? 'admin'
     if (input.parentId) {
       const parent = this.getNode(input.parentId, input.orgId)
       if (!parent) {
-        throw new Error(`parent node not found: ${input.parentId}`)
+        throw new DocumentStoreError(`parent node not found: ${input.parentId}`)
+      }
+      if (parent.scope === 'private') {
+        scope = 'private'
+        ownerId = parent.ownerId
       }
     }
     const id = randomUUID()
@@ -310,6 +418,8 @@ export class DocumentStore {
       name: input.name,
       description: input.description ?? null,
       sort_order: input.sortOrder ?? 0,
+      scope,
+      owner_id: ownerId,
     })
     return this.getNode(id, input.orgId)!
   }
@@ -323,10 +433,27 @@ export class DocumentStore {
     // Move guard: do not allow moving under a descendant (cycle).
     if (updates.parentId !== undefined && updates.parentId !== null) {
       if (updates.parentId === id) {
-        throw new Error('cannot set node as its own parent')
+        throw new DocumentStoreError('cannot set node as its own parent')
       }
       if (this.isDescendant(updates.parentId, id, orgId)) {
-        throw new Error('cannot move node under its own descendant')
+        throw new DocumentStoreError('cannot move node under its own descendant')
+      }
+    }
+    // Scope guard: a node never leaves its space (tenant ↔ private, or into
+    // another user's private space), and a private root stays a root.
+    if (updates.parentId !== undefined) {
+      const node = this.getNode(id, orgId)
+      if (!node) throw new DocumentStoreError(`node not found: ${id}`, 404)
+      if (this.isPrivateRoot(node)) {
+        if (updates.parentId !== null) throw new DocumentStoreError('cannot move a private root')
+      } else if (updates.parentId === null) {
+        if (node.scope === 'private') throw new DocumentStoreError('private folders must stay under 私有')
+      } else {
+        const parent = this.getNode(updates.parentId, orgId)
+        if (!parent) throw new DocumentStoreError(`parent node not found: ${updates.parentId}`)
+        if (parent.scope !== node.scope || (node.scope === 'private' && parent.ownerId !== node.ownerId)) {
+          throw new DocumentStoreError('cannot move a folder across knowledge spaces')
+        }
       }
     }
     this.store.updateDocumentTreeNode(id, orgId, {
@@ -347,11 +474,12 @@ export class DocumentStore {
   async deleteNode(id: string, orgId: string): Promise<void> {
     const descendantIds = this.collectDescendantNodeIds(id, orgId)
     descendantIds.add(id)
-    // Gather all document storage paths before cascade deletes them
+    // Gather all document storage paths before cascade deletes them —
+    // soft-deleted ones too, since the cascade removes their rows as well.
     const docPaths: string[] = []
     for (const nid of descendantIds) {
-      for (const doc of this.listDocumentsForNode(nid, orgId)) {
-        docPaths.push(doc.storagePath)
+      for (const row of this.store.listDocumentsByNode(nid, orgId, { includeDeleted: true })) {
+        docPaths.push(String(row.storage_path))
       }
     }
     this.store.deleteDocumentTreeNode(id, orgId)
@@ -381,7 +509,8 @@ export class DocumentStore {
   }
 
   private collectDescendantNodeIds(rootId: string, orgId: string): Set<string> {
-    const all = this.listTree(orgId)
+    // Soft-deleted descendants too: they're cascade-deleted with the root.
+    const all = this.store.listDocumentTreeNodes(orgId, { includeDeleted: true }).map(mapTreeNode)
     const childrenByParent = new Map<string, DocumentTreeNode[]>()
     for (const n of all) {
       if (n.parentId) {
@@ -441,7 +570,7 @@ export class DocumentStore {
     // Validate node exists
     const node = this.getNode(input.nodeId, input.orgId)
     if (!node) {
-      throw new Error(`node not found: ${input.nodeId}`)
+      throw new DocumentStoreError(`node not found: ${input.nodeId}`, 404)
     }
 
     const id = randomUUID()
@@ -460,9 +589,41 @@ export class DocumentStore {
       size_bytes: input.content.byteLength,
       storage_path: storagePath,
       uploaded_by: input.uploadedBy,
+      scope: node.scope,
+      // A private document belongs to its space's owner; a tenant one to its uploader.
+      owner_id: node.scope === 'private' ? node.ownerId : input.uploadedBy,
     })
 
     return this.getDocument(id, input.orgId)!
+  }
+
+  /**
+   * Replace a document's bytes in place, keeping its id — so 'files'-mode
+   * wikis that picked it keep it (and get flagged to rebuild) instead of
+   * silently losing a source, as a delete + re-upload would.
+   */
+  async replaceDocumentContent(id: string, orgId: string, input: {
+    fileName: string
+    content: Buffer
+  }): Promise<DocumentRecord> {
+    const doc = this.getDocument(id, orgId)
+    if (!doc) throw new DocumentStoreError(`document not found: ${id}`, 404)
+    const safeName = sanitizeFileName(input.fileName)
+    const storagePath = getDocumentStoragePath(id, safeName)
+    await mkdir(getDocumentDir(id), { recursive: true })
+    await writeFile(storagePath, input.content)
+    if (doc.storagePath !== storagePath && path.dirname(doc.storagePath) === getDocumentDir(id)) {
+      await rm(doc.storagePath, { force: true }).catch(() => {})
+    }
+    this.store.updateDocumentContent(id, {
+      storage_path: storagePath,
+      size_bytes: input.content.byteLength,
+      content_sha256: null,
+    })
+    for (const row of this.store.findWikisReferencingDocument(id)) {
+      this.store.markWikiNeedsRebuild(String(row.id), true)
+    }
+    return this.getDocument(id, orgId)!
   }
 
   async deleteDocument(id: string, orgId: string): Promise<void> {
@@ -482,7 +643,7 @@ export class DocumentStore {
 
   // ---------- Wikis ----------
 
-  listWikis(orgId: string, filter?: { nodeId?: string; buildStatus?: WikiRecord['buildStatus'] }): WikiRecord[] {
+  listWikis(orgId: string, filter?: WikiListFilter): WikiRecord[] {
     return this.store.listWikis(orgId, filter).map(mapWiki)
   }
 
@@ -493,7 +654,7 @@ export class DocumentStore {
    */
   async listWikisEnriched(
     orgId: string,
-    filter?: { nodeId?: string; buildStatus?: WikiRecord['buildStatus'] },
+    filter?: WikiListFilter,
   ): Promise<WikiRecord[]> {
     const wikis = this.listWikis(orgId, filter)
     return Promise.all(wikis.map(enrichWikiStaleness))
@@ -527,22 +688,25 @@ export class DocumentStore {
     sourceExcludeNodeIds?: string[]
     autoRebuild?: boolean
     createdBy: string
+    /** Default 'tenant'. A private wiki is owned by `createdBy`. */
+    scope?: KnowledgeScope
+    /** Owner of a tenant wiki (defaults to createdBy). */
+    ownerId?: string
+    visibleTo?: VisibleTo
   }): Promise<WikiRecord> {
-    if (input.nodeId) {
-      const node = this.getNode(input.nodeId, input.orgId)
-      if (!node) {
-        throw new Error(`node not found: ${input.nodeId}`)
-      }
-    }
+    const scope = input.scope ?? 'tenant'
+    const ownerId = scope === 'private' ? input.createdBy : (input.ownerId ?? input.createdBy)
+    const space = { scope, ownerId }
+    if (input.nodeId) this.requireNodeInSpace(input.nodeId, input.orgId, space)
     const sourceMode = input.sourceMode ?? 'files'
     const includeIds = input.sourceNodeIds ?? []
     if (sourceMode === 'dir') {
-      if (includeIds.length === 0) throw new Error('dir-mode wiki requires at least one source node')
-      for (const nid of includeIds) {
-        if (!this.getNode(nid, input.orgId)) throw new Error(`source node not found: ${nid}`)
-      }
+      if (includeIds.length === 0) throw new DocumentStoreError('dir-mode wiki requires at least one source node')
+      for (const nid of includeIds) this.requireNodeInSpace(nid, input.orgId, space)
     } else if (input.sourceDocumentIds.length === 0) {
-      throw new Error('files-mode wiki requires at least one document')
+      throw new DocumentStoreError('files-mode wiki requires at least one document')
+    } else {
+      for (const did of input.sourceDocumentIds) this.requireDocumentInSpace(did, input.orgId, space)
     }
     const id = randomUUID()
     const storagePath = getWikiDir(id)
@@ -563,9 +727,34 @@ export class DocumentStore {
       // auto_rebuild valid for dir + external-files; UI sends false for uploads.
       auto_rebuild: Boolean(input.autoRebuild),
       created_by: input.createdBy,
+      scope,
+      owner_id: ownerId,
+      visible_to: input.visibleTo === undefined || input.visibleTo === null ? null : JSON.stringify(input.visibleTo),
     })
 
     return this.getWiki(id, input.orgId)!
+  }
+
+  /**
+   * A wiki may only be anchored to / built from its own knowledge space: a
+   * tenant wiki never reads a private folder or document, and a private wiki
+   * only reads its owner's private space.
+   */
+  private inSpace(item: { scope: KnowledgeScope; ownerId: string }, space: { scope: KnowledgeScope; ownerId: string }): boolean {
+    if (item.scope !== space.scope) return false
+    return space.scope === 'tenant' || item.ownerId === space.ownerId
+  }
+
+  private requireNodeInSpace(nodeId: string, orgId: string, space: { scope: KnowledgeScope; ownerId: string }): void {
+    const node = this.getNode(nodeId, orgId)
+    if (!node) throw new DocumentStoreError(`source node not found: ${nodeId}`)
+    if (!this.inSpace(node, space)) throw new DocumentStoreError(`node ${nodeId} is outside this wiki's knowledge space`)
+  }
+
+  private requireDocumentInSpace(docId: string, orgId: string, space: { scope: KnowledgeScope; ownerId: string }): void {
+    const doc = this.getDocument(docId, orgId)
+    if (!doc) throw new DocumentStoreError(`document not found: ${docId}`)
+    if (!this.inSpace(doc, space)) throw new DocumentStoreError(`document ${docId} is outside this wiki's knowledge space`)
   }
 
   updateWiki(id: string, orgId: string, updates: {
@@ -577,17 +766,22 @@ export class DocumentStore {
     sourceNodeIds?: string[]
     sourceExcludeNodeIds?: string[]
     autoRebuild?: boolean
+    /** undefined = keep; null = everyone. */
+    visibleTo?: VisibleTo
+    enabled?: boolean
   }): WikiRecord {
     const existing = this.getWiki(id, orgId)
-    if (!existing) throw new Error(`wiki not found: ${id}`)
+    if (!existing) throw new DocumentStoreError(`wiki not found: ${id}`, 404)
+    const space = { scope: existing.scope, ownerId: existing.ownerId }
+    if (updates.nodeId) this.requireNodeInSpace(updates.nodeId, orgId, space)
     const nextMode = updates.sourceMode ?? existing.sourceMode
     const nextIncludes =
       updates.sourceNodeIds !== undefined ? updates.sourceNodeIds : existing.sourceNodeIds
     if (nextMode === 'dir') {
-      if (nextIncludes.length === 0) throw new Error('dir-mode wiki requires at least one source node')
-      for (const nid of nextIncludes) {
-        if (!this.getNode(nid, orgId)) throw new Error(`source node not found: ${nid}`)
-      }
+      if (nextIncludes.length === 0) throw new DocumentStoreError('dir-mode wiki requires at least one source node')
+      for (const nid of nextIncludes) this.requireNodeInSpace(nid, orgId, space)
+    } else {
+      for (const did of updates.sourceDocumentIds ?? []) this.requireDocumentInSpace(did, orgId, space)
     }
     this.store.updateWiki(id, orgId, {
       name: updates.name,
@@ -605,6 +799,9 @@ export class DocumentStore {
           : [],
       auto_rebuild:
         updates.autoRebuild !== undefined ? updates.autoRebuild : existing.autoRebuild,
+      visible_to:
+        updates.visibleTo === undefined ? undefined : updates.visibleTo === null ? null : JSON.stringify(updates.visibleTo),
+      enabled: updates.enabled,
     })
     const wiki = this.getWiki(id, orgId)
     if (!wiki) throw new Error(`wiki ${id} disappeared after update`)
@@ -672,6 +869,33 @@ export class DocumentStore {
 
   countActiveBuildJobs(): number {
     return this.store.countRunningWikiBuildJobs()
+  }
+
+  countActivePrivateBuildJobs(orgId: string, ownerId: string): number {
+    return this.store.countActivePrivateWikiBuildJobs(orgId, ownerId)
+  }
+
+  /** Bytes a user's private space currently holds (quota check). */
+  privateUsageBytes(orgId: string, ownerId: string): number {
+    return this.store.sumPrivateDocumentBytes(orgId, ownerId)
+  }
+
+  /**
+   * Flag every dir-mode wiki tracking `nodeId` (directly or via an ancestor)
+   * as needing a rebuild, after a manual upload or delete under it. Returns
+   * the flagged wikis so the caller can auto-enqueue builds.
+   */
+  markDirWikisStale(nodeId: string, orgId: string): WikiRecord[] {
+    const byId = new Map(this.listTree(orgId).map(n => [n.id, n]))
+    const chain: string[] = []
+    let cur = byId.get(nodeId)
+    while (cur && !chain.includes(cur.id)) {
+      chain.push(cur.id)
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+    const wikis = this.store.findDirWikisForNode(chain).map(mapWiki).filter(w => w.orgId === orgId)
+    for (const w of wikis) this.store.markWikiNeedsRebuild(w.id, true)
+    return wikis
   }
 
   listQueuedBuildJobs(limit?: number): WikiBuildJob[] {

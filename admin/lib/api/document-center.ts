@@ -1,9 +1,16 @@
 import { authClient, getToken } from './client'
+import type { VisibleTo } from './agent-hub'
 
 // ============================================================
 // Document Center API types — mirror server-side DocumentStore types
 // (camelCase here; server returns same shape from documentStore.ts).
 // ============================================================
+
+/**
+ * 'tenant' — the org knowledge base managed here; 'private' — a user's 私有
+ * space managed from SudoWork (admins may only view / disable / delete).
+ */
+export type KnowledgeScope = 'tenant' | 'private'
 
 export type DocumentTreeNode = {
   id: string
@@ -21,6 +28,10 @@ export type DocumentTreeNode = {
   autoManaged?: boolean
   alias?: string | null
   lastSyncedAt?: number | null
+  scope?: KnowledgeScope
+  ownerId?: string
+  /** Whether the caller may rename / move / delete it. */
+  canManage?: boolean
 }
 
 export type DocumentRecord = {
@@ -70,6 +81,19 @@ export type WikiRecord = {
   needsRebuild?: boolean
   /** True once a successful build exists — drives the 已构建 tag. */
   hasBuilt?: boolean
+  scope?: KnowledgeScope
+  /** Owner user id; 'admin' for wikis that predate ownership. */
+  ownerId?: string
+  /** Who may use it directly in a session (null = everyone). */
+  visibleTo?: VisibleTo | null
+  /** A disabled wiki is left out of every session and agent. */
+  enabled?: boolean
+  /** May edit / rebuild / change scope. */
+  canManage?: boolean
+  /** May enable / disable / delete (admins on private wikis too). */
+  canAdminister?: boolean
+  /** May the caller use it themselves. */
+  usable?: boolean
 }
 
 export type WikiBuildJob = {
@@ -91,6 +115,8 @@ export type WikiBuildJobListItem = WikiBuildJob & {
   wikiNodeId: string | null
   wikiBuildStatus: WikiBuildStatus
   wikiNeedsRebuild: boolean
+  wikiScope?: KnowledgeScope
+  wikiOwnerId?: string
 }
 
 // ============================================================
@@ -204,10 +230,13 @@ export async function fileToBase64(file: File): Promise<string> {
 export async function listWikis(filter?: {
   node_id?: string
   build_status?: WikiBuildStatus
+  /** 'private': every user's private wikis (admins: view / disable / delete). */
+  scope?: KnowledgeScope
 }): Promise<WikiRecord[]> {
   const params = new URLSearchParams()
   if (filter?.node_id) params.set('node_id', filter.node_id)
   if (filter?.build_status) params.set('build_status', filter.build_status)
+  if (filter?.scope) params.set('scope', filter.scope)
   const qs = params.toString()
   const data = await authClient.get<{ wikis: WikiRecord[] }>(
     `/api/v1/wikis${qs ? `?${qs}` : ''}`,
@@ -228,6 +257,7 @@ export function createWiki(input: {
   source_node_ids?: string[]
   source_exclude_node_ids?: string[]
   auto_rebuild?: boolean
+  visible_to?: VisibleTo | null
 }): Promise<WikiRecord> {
   return authClient.post<WikiRecord>('/api/v1/wikis', input)
 }
@@ -243,9 +273,64 @@ export function updateWiki(
     source_node_ids?: string[]
     source_exclude_node_ids?: string[]
     auto_rebuild?: boolean
+    visible_to?: VisibleTo | null
   },
 ): Promise<WikiRecord> {
   return authClient.patch<WikiRecord>(`/api/v1/wikis/${id}`, input)
+}
+
+export function setWikiEnabled(id: string, enabled: boolean): Promise<WikiRecord> {
+  return authClient.patch<WikiRecord>(`/api/v1/wikis/${id}/enabled`, { enabled })
+}
+
+/** A wiki any member may use (session pickers, agent wiki binding). */
+export type UsableWiki = {
+  id: string
+  name: string
+  description: string | null
+  scope: KnowledgeScope
+  owner_id: string
+  is_owner: boolean
+  build_status: WikiBuildStatus
+  has_built: boolean
+  updated_at: number
+}
+
+export async function listUsableWikis(): Promise<UsableWiki[]> {
+  const data = await authClient.get<{ wikis: UsableWiki[] }>('/api/v1/wikis/usable')
+  return data.wikis
+}
+
+/**
+ * What kind of agent a binding is on — decides whether it hands tenant wikis
+ * to users outside their scope: 'managed' (hub/system) always, 'tenant' (专属)
+ * when admin-authored or the wiki covers the agent, 'custom' never.
+ */
+export type AgentKind = 'managed' | 'tenant' | 'custom'
+
+export type WikiScopeCheck = {
+  wiki_id: string
+  scope: KnowledgeScope
+  enabled: boolean
+  /** Everyone who may use the agent may also use the wiki directly. */
+  covered: boolean
+  /** The agent still hands the wiki to users outside its scope. */
+  delegated: boolean
+}
+
+/** Per bound wiki: how the agent's reach compares with the wiki's (agent editor warnings). */
+export async function checkWikiScopes(
+  agent: { visibleTo: VisibleTo | null | undefined; kind: AgentKind; authorId?: string | null },
+  wikiIds: string[],
+): Promise<WikiScopeCheck[]> {
+  if (wikiIds.length === 0) return []
+  const data = await authClient.post<{ results: WikiScopeCheck[] }>('/api/v1/wikis/scope-check', {
+    agent_visible_to: agent.visibleTo ?? null,
+    agent_kind: agent.kind,
+    agent_author_id: agent.authorId ?? undefined,
+    wiki_ids: wikiIds,
+  })
+  return data.results
 }
 
 export function deleteWiki(id: string): Promise<{ ok: boolean }> {
