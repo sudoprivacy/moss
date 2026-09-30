@@ -31,6 +31,13 @@ export const ZONE_BINDING_TABLES_DDL = `
     last_error_code TEXT,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
+    observed_display_name TEXT,
+    observed_zone_status TEXT,
+    observed_revision TEXT,
+    observed_grant_status TEXT,
+    observed_grant_source TEXT,
+    grant_expires_at BIGINT,
+    observed_at BIGINT,
     UNIQUE (org_id, nexus_deployment_id, zone_id, purpose)
   );
   CREATE UNIQUE INDEX IF NOT EXISTS org_zone_bindings_default_uniq

@@ -36,13 +36,15 @@ export class NexusZoneUnknownError extends Error {
   }
 }
 
-/** Nexus 返回的结构化错误（detail: {code, message, retryable}）。 */
+/** Nexus 返回的结构化错误（detail: {code, message, retryable, details?}）。 */
 export class NexusZoneApiError extends Error {
   constructor(
     message: string,
     public readonly code: string,
     public readonly retryable: boolean,
     public readonly status: number,
+    /** 可操作拒绝的结构化负载（如 ZONE_DELETE_BLOCKED 的 blocker 清单）。 */
+    public readonly details?: unknown,
   ) {
     super(message)
     this.name = 'NexusZoneApiError'
@@ -164,17 +166,19 @@ export class NexusZoneClient {
       let code = 'UNKNOWN'
       let message = `nexus /v2 ${method} ${path} -> ${response.status}`
       let retryable = false
+      let details: unknown
       try {
-        const detail = (await response.json()) as { detail?: { code?: string; message?: string; retryable?: boolean } }
+        const detail = (await response.json()) as { detail?: { code?: string; message?: string; retryable?: boolean; details?: unknown } }
         if (detail?.detail && typeof detail.detail === 'object') {
           code = detail.detail.code ?? code
           message = detail.detail.message ?? message
           retryable = Boolean(detail.detail.retryable)
+          if ('details' in detail.detail) details = detail.detail.details
         }
       } catch {
         // 非 JSON 错误体：保留 HTTP 语义
       }
-      throw new NexusZoneApiError(message, code, retryable, response.status)
+      throw new NexusZoneApiError(message, code, retryable, response.status, details)
     }
 
     if (response.status === 204) return null

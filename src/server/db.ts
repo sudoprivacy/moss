@@ -129,6 +129,7 @@ function mapSession(row: SqlRow): SessionRecord {
     lastActiveAt: Number(row.last_active_at),
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
     deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
+    homeZoneId: row.home_zone_id == null ? null : String(row.home_zone_id),
   }
 }
 
@@ -4827,6 +4828,7 @@ export function toSessionSummary(session: SessionRecord): SessionSummary {
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,
+    homeZoneId: session.homeZoneId,
   }
 }
 

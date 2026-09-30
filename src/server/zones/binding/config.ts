@@ -33,10 +33,17 @@ export interface ZoneBindingConfig {
   nexusDeploymentId: string
   nexusV2TimeoutMs: number
   internalApiToken: string
+  /**
+   * 企业严格模式（MOSS_REQUIRE_ZONE）：无 active default binding 的 Org
+   * 拒绝创建会话（fail-closed）。默认 false 保持 P1a 渐进语义（无 Zone
+   * 会话落 moss 本地），部署方自行选择。
+   */
+  requireZone: boolean
 }
 
 export function resolveZoneBindingConfig(env: NodeJS.ProcessEnv = process.env): ZoneBindingConfig {
   const nexusV2BaseUrl = env.MOSS_NEXUS_V2_BASE_URL?.trim() ?? ''
+  const requireZoneRaw = env.MOSS_REQUIRE_ZONE?.trim().toLowerCase() ?? ''
   return {
     zoneBindingEnabled: nexusV2BaseUrl !== '',
     nexusV2BaseUrl,
@@ -44,5 +51,6 @@ export function resolveZoneBindingConfig(env: NodeJS.ProcessEnv = process.env): 
     nexusDeploymentId: env.MOSS_NEXUS_DEPLOYMENT_ID?.trim() || 'local',
     nexusV2TimeoutMs: Number(env.MOSS_NEXUS_V2_TIMEOUT_MS) || 10_000,
     internalApiToken: env.MOSS_INTERNAL_API_TOKEN?.trim() ?? '',
+    requireZone: requireZoneRaw === '1' || requireZoneRaw === 'true',
   }
 }

@@ -341,6 +341,8 @@ export interface Session {
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
+  /** P1a home Zone 投影（null = Org 无 active binding，会话仅落本地）。 */
+  homeZoneId?: string | null
 }
 
 export interface SessionsListResponse {
