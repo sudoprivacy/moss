@@ -1969,7 +1969,13 @@ ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS grant_expires_at BIGINT;
 ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_at BIGINT;
 `
 
-const MIGRATIONS: PgMigration[] = [
+/** M-5 expand-only：session_attempts 的 Nexus run 生命周期对账标记
+ *  （老 PG 库补齐；fresh install 由 CREATE TABLE 直接带列）。 */
+const MIGRATION_0010_SESSION_ATTEMPT_RUN_END = `
+ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS nexus_run_ended_at BIGINT;
+`
+
+export const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
@@ -2005,6 +2011,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 15, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
   { version: 16, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
   { version: 17, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
+  { version: 18, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

@@ -5,9 +5,12 @@
  *  - 只走 public `/v2` HTTP API；不扩展 raw VFS secrets client（gRPC 通道，
  *    nexusClient.ts/nexusSecretClient.ts）做管理——endpoint、service
  *    credential、timeout 与 VFS 通道完全分离（config 见 zones/binding/config.ts）；
- *  - mutation 一律携带 Idempotency-Key；重试（网络不确定后的收敛查询、
- *    429/5xx retryable）必须**复用同一 key**——同 key 同请求返回同
- *    operation，换 key 等于重建资源；
+ *  - 管理面 mutation（createZone/createGrant/revokeGrant/zoneLifecycle/
+ *    deprovisionZone）一律携带 Idempotency-Key；重试（网络不确定后的收敛
+ *    查询、429/5xx retryable）必须**复用同一 key**——同 key 同请求返回同
+ *    operation，换 key 等于重建资源。P1a session/runtime 面（createSession/
+ *    startRuntimeRun/cancelRuntimeRun）不带 key——owner 契约未定义该面的
+ *    幂等语义，是否补 key 待 nexus 侧确认（低-14⑥：如实描述，不虚标）；
  *  - timeout/连接丢失 => `NexusZoneUnknownError`：效果未知（call 可能已
  *    成功、响应丢失），调用方必须先把 binding 置 `unknown` 并凭 operation
  *    查询收敛，不得当失败重发；
@@ -95,6 +98,15 @@ const OPERATION_STATES: readonly ZoneOperationRef['state'][] = [
   'failed',
 ]
 
+/** 低-10②：null/非对象 payload 的契约守卫——按自建三类错误分类抛 CONTRACT
+ * （不再对 null 解引用抛裸 TypeError，与错误分派逻辑错位）。 */
+function requireObjectPayload(payload: unknown, what: string): Record<string, unknown> {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new NexusZoneApiError(`malformed ${what}`, 'CONTRACT', false, 0)
+  }
+  return payload as Record<string, unknown>
+}
+
 export class NexusZoneClient {
   private readonly baseUrl: string
   private readonly token: string
@@ -140,52 +152,56 @@ export class NexusZoneClient {
     input: { body?: unknown; idempotencyKey?: string; delegationRef?: string; confirmZone?: string } = {},
   ): Promise<unknown> {
     const controller = new AbortController()
+    // 低-10①：超时保护覆盖到 body 读取完成（错误体与正常体）——headers 到达
+    // 即 clear 会让慢 body 挂到 undici 默认 bodyTimeout（300s）。
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
-    let response: Response
     try {
-      response = await fetch(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          ...(input.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-          ...(input.idempotencyKey ? { 'Idempotency-Key': input.idempotencyKey } : {}),
-          ...(input.delegationRef ? { 'X-Nexus-Zone-Delegation': input.delegationRef } : {}),
-          ...(input.confirmZone ? { 'X-Nexus-Confirm-Zone': input.confirmZone } : {}),
-          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-        },
-        body: input.body !== undefined ? JSON.stringify(input.body) : undefined,
-        signal: controller.signal,
-      })
-    } catch (error) {
-      // 网络层失败（含 timeout abort）：效果未知
-      throw new NexusZoneUnknownError(`nexus /v2 ${method} ${path} outcome unknown`, error)
+      let response: Response
+      try {
+        response = await fetch(`${this.baseUrl}${path}`, {
+          method,
+          headers: {
+            ...(input.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            ...(input.idempotencyKey ? { 'Idempotency-Key': input.idempotencyKey } : {}),
+            ...(input.delegationRef ? { 'X-Nexus-Zone-Delegation': input.delegationRef } : {}),
+            ...(input.confirmZone ? { 'X-Nexus-Confirm-Zone': input.confirmZone } : {}),
+            ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          },
+          body: input.body !== undefined ? JSON.stringify(input.body) : undefined,
+          signal: controller.signal,
+        })
+      } catch (error) {
+        // 网络层失败（含 timeout abort）：效果未知
+        throw new NexusZoneUnknownError(`nexus /v2 ${method} ${path} outcome unknown`, error)
+      }
+
+      if (!response.ok) {
+        let code = 'UNKNOWN'
+        let message = `nexus /v2 ${method} ${path} -> ${response.status}`
+        let retryable = false
+        let details: unknown
+        try {
+          const detail = (await response.json()) as { detail?: { code?: string; message?: string; retryable?: boolean; details?: unknown } }
+          if (detail?.detail && typeof detail.detail === 'object') {
+            code = detail.detail.code ?? code
+            message = detail.detail.message ?? message
+            retryable = Boolean(detail.detail.retryable)
+            if ('details' in detail.detail) details = detail.detail.details
+          }
+        } catch {
+          // 非 JSON 错误体：保留 HTTP 语义
+        }
+        throw new NexusZoneApiError(message, code, retryable, response.status, details)
+      }
+
+      if (response.status === 204) return null
+      try {
+        return await response.json()
+      } catch (error) {
+        throw new NexusZoneUnknownError(`nexus /v2 ${method} ${path} returned unparseable body`, error)
+      }
     } finally {
       clearTimeout(timer)
-    }
-
-    if (!response.ok) {
-      let code = 'UNKNOWN'
-      let message = `nexus /v2 ${method} ${path} -> ${response.status}`
-      let retryable = false
-      let details: unknown
-      try {
-        const detail = (await response.json()) as { detail?: { code?: string; message?: string; retryable?: boolean; details?: unknown } }
-        if (detail?.detail && typeof detail.detail === 'object') {
-          code = detail.detail.code ?? code
-          message = detail.detail.message ?? message
-          retryable = Boolean(detail.detail.retryable)
-          if ('details' in detail.detail) details = detail.detail.details
-        }
-      } catch {
-        // 非 JSON 错误体：保留 HTTP 语义
-      }
-      throw new NexusZoneApiError(message, code, retryable, response.status, details)
-    }
-
-    if (response.status === 204) return null
-    try {
-      return await response.json()
-    } catch (error) {
-      throw new NexusZoneUnknownError(`nexus /v2 ${method} ${path} returned unparseable body`, error)
     }
   }
 
@@ -350,28 +366,21 @@ export class NexusZoneClient {
   /**
    * DELETE /v2/zones/{zone_id}/grants/{grant_id} —— revoke = DELETE grant
    * （§6.3）。响应携带 operation + authorization revision（无 action/state/
-   * step 字段——与 mutation 端点的 OperationView 不同，勿用 parseOperation）。
+   * step 字段——与 mutation 端点的 OperationView 不同，勿用 parseOperation）；
+   * 返回窄化为 operation 引用（低-10③：不合成 owner 响应里不存在的 state
+   * 等字段，终态由调用方经 getOperation 收敛判定）。
    */
-  async revokeGrant(zoneId: string, grantId: string, idempotencyKey: string): Promise<ZoneOperationRef> {
+  async revokeGrant(zoneId: string, grantId: string, idempotencyKey: string): Promise<{ operation_id: string }> {
     const payload = await this.request(
       'DELETE',
       `/v2/zones/${encodeURIComponent(zoneId)}/grants/${encodeURIComponent(grantId)}`,
       { idempotencyKey },
     )
-    if (typeof payload !== 'object' || payload === null || typeof (payload as Record<string, unknown>).operation_id !== 'string') {
+    const op = requireObjectPayload(payload, 'revoke payload')
+    if (typeof op.operation_id !== 'string') {
       throw new NexusZoneApiError('revoke payload missing operation_id', 'CONTRACT', false, 0)
     }
-    const op = payload as Record<string, unknown>
-    return {
-      operation_id: String(op.operation_id),
-      action: 'revoke',
-      zone_id: zoneId,
-      grant_id: grantId,
-      state: 'succeeded',
-      step: '',
-      retryable: false,
-      error: null,
-    }
+    return { operation_id: op.operation_id }
   }
 
   /** POST /v2/zones/{zone_id}:suspend|:resume —— super-admin 生命周期管理（§6.2）。 */
@@ -425,6 +434,9 @@ export class NexusZoneClient {
   /** GET /v2/sessions/{id} —— 权威回读（对账/测试）。 */
   async getSession(sessionId: string): Promise<{ session_id: string; home_zone_id: string; updated_at: string }> {
     const payload = await this.request('GET', `/v2/sessions/${encodeURIComponent(sessionId)}`)
+    if (typeof payload !== 'object' || payload === null) {
+      throw new NexusZoneApiError('malformed session payload', 'CONTRACT', false, 0)
+    }
     const s = payload as Record<string, unknown>
     return {
       session_id: String(s.session_id),
@@ -460,7 +472,7 @@ export class NexusZoneClient {
         ...(input.policyVersion !== undefined ? { policy_version: input.policyVersion } : {}),
       },
     })
-    const r = payload as Record<string, unknown>
+    const r = requireObjectPayload(payload, 'runtime run start payload')
     return {
       pid: String(r.pid),
       execution_zone_id: String(r.execution_zone_id),
@@ -481,7 +493,7 @@ export class NexusZoneClient {
     authorization_epoch: number | null
   }> {
     const payload = await this.request('GET', `/v2/runtime/runs/${encodeURIComponent(pid)}`)
-    const r = payload as Record<string, unknown>
+    const r = requireObjectPayload(payload, 'runtime run payload')
     return {
       pid: String(r.pid),
       execution_zone_id: String(r.execution_zone_id),
@@ -497,7 +509,7 @@ export class NexusZoneClient {
     const payload = await this.request('POST', `/v2/runtime/runs/${encodeURIComponent(pid)}/cancel`, {
       body: { mode },
     })
-    const r = payload as Record<string, unknown>
+    const r = requireObjectPayload(payload, 'runtime run cancel payload')
     return { pid: String(r.pid), state: String(r.state) }
   }
 }

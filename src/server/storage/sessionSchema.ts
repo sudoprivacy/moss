@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS session_attempts (
   exit_signal TEXT,
   stop_reason TEXT,
   error_text TEXT,
+  -- M-5：终态 attempt 的 Nexus run 收尾标记（endZoneRunsForSettledAttempts）。
+  nexus_run_ended_at BIGINT,
   UNIQUE (session_id, generation)
 );
 

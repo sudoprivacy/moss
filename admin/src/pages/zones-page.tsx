@@ -53,22 +53,15 @@ function syncBadge(status: string): BadgeVariant {
 
 /** purpose 已注册值（契约 x-known-values 的开放注册表，前端为封闭下拉——契约注册新值时需同步）。 */
 const PURPOSE_OPTIONS: Array<{ value: string; tip: string }> = [
-  { value: 'default', tip: '组织默认主 Zone：每组织唯一，用户会话默认落地于此' },
+  { value: 'default', tip: '将该 Zone 设为组织默认（当前默认将转移）：用户会话路由与 delegation 仅消费 default Zone' },
   { value: 'office', tip: '办公数据域 Zone（预留标签）：对应 Zone 部署属性 data_domain=office，当前无特殊行为。注意：非 default 绑定当前仅用于授权管理（撤销/审计），会话路由与 delegation 仅消费 default Zone' },
   { value: 'core', tip: '核心数据域 Zone（预留标签）：对应 data_domain=core，当前无特殊行为。注意：非 default 绑定当前仅用于授权管理（撤销/审计），会话路由与 delegation 仅消费 default Zone' },
   { value: 'shared', tip: '多组织共享 Zone：用于一个 Zone 绑定多个组织的场景。注意：非 default 绑定当前仅用于授权管理（撤销/审计），会话路由与 delegation 仅消费 default Zone' },
 ]
 
-/** zones 路由的错误经 HttpError(JSON.stringify({code,message})) 通道透传，前端需解包取 message。 */
+/** zones 路由的错误经结构化 {error:{code,message}} 信封透传，client 已解包 message（低-1：双重编码补丁已随服务端统一而移除）。 */
 function zoneErrMsg(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error)
-  if (raw.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(raw) as { message?: string }
-      if (parsed.message) return parsed.message
-    } catch { /* 回退原文 */ }
-  }
-  return raw
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** ZONE_DELETE_BLOCKED 的 blocker 清单（nexus details 结构，B-1）。 */
@@ -103,24 +96,52 @@ export default function ZonesPage() {
   const [addZoneId, setAddZoneId] = useState('')
   const [addPurpose, setAddPurpose] = useState('shared')
   const [addZoneNew, setAddZoneNew] = useState(false)
+  const [addSubmitting, setAddSubmitting] = useState(false)
+  const [detachSubmitting, setDetachSubmitting] = useState(false)
+  const [deprovisionSubmitting, setDeprovisionSubmitting] = useState(false)
+  const [lifecycleTarget, setLifecycleTarget] = useState<{ zoneId: string; action: 'suspend' | 'resume'; orgCount: number } | null>(null)
+  const [lifecycleSubmitting, setLifecycleSubmitting] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [organizations, setOrganizations] = useState<AuthOrgWithCounts[]>([])
   const [orgsLoadState, setOrgsLoadState] = useState<'loading' | 'ready' | 'failed'>('loading')
 
   const onAddBinding = async () => {
+    if (addSubmitting) return
+    setAddSubmitting(true)
     try {
-      const created = await addZoneBinding({ org_id: addOrgId.trim(), zone_id: addZoneId.trim(), purpose: addPurpose })
+      // H-2/低-5：purpose='default' 联动 is_default=true——tip 承诺的"设为默认"
+      // 必须真正落到 is_default=1（会话路由与 delegation 只认 is_default=1）。
+      const created = await addZoneBinding({
+        org_id: addOrgId.trim(),
+        zone_id: addZoneId.trim(),
+        purpose: addPurpose,
+        is_default: addPurpose === 'default',
+      })
       toast.success(`绑定已创建（pending，异步收敛）：${created.zone_id}`)
       setAddOpen(false); setAddOrgId(''); setAddZoneId(''); setAddPurpose('shared'); setAddZoneNew(false)
       await reload()
     } catch (error) {
       toast.error(`创建失败：${zoneErrMsg(error)}`)
+    } finally {
+      setAddSubmitting(false)
     }
   }
 
   const reload = useCallback(async () => {
     setLoading(true)
+    setLoadError(null)
     try {
-      const [me, zones] = await Promise.all([getMe(), listAvailableZones().catch(() => ({ zones: [] }))])
+      // 低-14②：getMe 单独捕获——此前与 availableZones 同处 Promise.all 且无
+      // catch，失败异常穿透后 role 停留空串，页面误显示"无权查看"。
+      let me: Awaited<ReturnType<typeof getMe>> | null = null
+      try { me = await getMe() } catch { me = null }
+      if (!me) {
+        setLoadError('加载失败（无法获取登录状态），请刷新重试或重新登录')
+        setBindings([])
+        setAvailableZones([])
+        return
+      }
+      const zones = await listAvailableZones().catch(() => ({ zones: [] as Array<{ zone_id: string; purpose: string }> }))
       setRole(me.user?.role ?? '')
       setAvailableZones(zones.zones)
       // 组织列表仅供 super_admin 的添加绑定弹窗使用（接口 requireSuperAdmin）；
@@ -163,7 +184,8 @@ export default function ZonesPage() {
   }
 
   const onDetach = async () => {
-    if (!detachTarget) return
+    if (!detachTarget || detachSubmitting) return
+    setDetachSubmitting(true)
     try {
       await detachZoneBinding(detachTarget.binding_id)
       toast.success(`已提交解绑（generation 递增，异步撤销访问）：${detachTarget.zone_id}`)
@@ -171,11 +193,14 @@ export default function ZonesPage() {
       await reload()
     } catch (error) {
       toast.error(`解绑失败：${zoneErrMsg(error)}`)
+    } finally {
+      setDetachSubmitting(false)
     }
   }
 
   const onDeprovision = async () => {
-    if (!deprovisionTarget) return
+    if (!deprovisionTarget || deprovisionSubmitting) return
+    setDeprovisionSubmitting(true)
     try {
       const op = await deprovisionZone(deprovisionTarget.zone_id, confirmInput.trim())
       toast.success(`deprovision 已受理（operation ${op.operation_id}，异步执行，可用下方面板跟踪）`)
@@ -187,6 +212,21 @@ export default function ZonesPage() {
       const blockers = zoneBlockersOf(error)
       setDeprovisionBlockers(blockers)
       toast.error(`deprovision 失败：${zoneErrMsg(error)}`)
+    } finally {
+      setDeprovisionSubmitting(false)
+    }
+  }
+
+  /** M-10：zone 级挂起/恢复经确认 Dialog（shared zone 影响多个 org 的新会话路由）。 */
+  const onLifecycleConfirm = async () => {
+    if (!lifecycleTarget || lifecycleSubmitting) return
+    setLifecycleSubmitting(true)
+    try {
+      const { zoneId, action } = lifecycleTarget
+      setLifecycleTarget(null)
+      await onLifecycle(zoneId, action)
+    } finally {
+      setLifecycleSubmitting(false)
     }
   }
 
@@ -313,7 +353,11 @@ export default function ZonesPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {bindings.length === 0 ? (
+                {loadError ? (
+                  <TableRow>
+                    <TableCell colSpan={8} className="text-center text-destructive">{loadError}</TableCell>
+                  </TableRow>
+                ) : bindings.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={8} className="text-center text-muted-foreground">
                       {role === 'super_admin' ? '暂无绑定' : '无权查看绑定列表（普通用户仅见可用 Zone）'}
@@ -346,7 +390,7 @@ export default function ZonesPage() {
                       {b.nexus_grant_id ? (
                         <>
                           <div>{b.observed_grant_status ?? '—'} · {b.observed_grant_source ?? '—'}</div>
-                          <div className="text-muted-foreground">{b.grant_expires_at ?? '无到期'}</div>
+                          <div className="text-muted-foreground">{b.grant_expires_at ? new Date(b.grant_expires_at).toLocaleString() : '无到期'}</div>
                         </>
                       ) : '—'}
                     </TableCell>
@@ -372,10 +416,16 @@ export default function ZonesPage() {
                         ) : null}
                         {role === 'super_admin' ? (
                           <>
-                            <Button variant="outline" size="sm" onClick={() => void onLifecycle(b.zone_id, 'suspend')}>
+                            <Button
+                              variant="outline" size="sm" disabled={lifecycleSubmitting}
+                              onClick={() => setLifecycleTarget({ zoneId: b.zone_id, action: 'suspend', orgCount: bindings.filter(x => x.zone_id === b.zone_id).length })}
+                            >
                               <PauseCircle className="mr-1 size-4" /> 挂起
                             </Button>
-                            <Button variant="outline" size="sm" onClick={() => void onLifecycle(b.zone_id, 'resume')}>
+                            <Button
+                              variant="outline" size="sm" disabled={lifecycleSubmitting}
+                              onClick={() => setLifecycleTarget({ zoneId: b.zone_id, action: 'resume', orgCount: bindings.filter(x => x.zone_id === b.zone_id).length })}
+                            >
                               <PlayCircle className="mr-1 size-4" /> 恢复
                             </Button>
                             <Button variant="destructive" size="sm" onClick={() => { setDeprovisionTarget(b); setConfirmInput(''); setDeprovisionBlockers(null) }}>
@@ -503,13 +553,13 @@ export default function ZonesPage() {
               </Select>
             </div>
             {duplicate ? <p className="text-xs text-destructive">该绑定已存在（用途：{duplicate.purpose}）</p> : null}
-            {detachedSameCombo ? <p className="text-xs text-yellow-600">该组合存在已解绑的历史绑定（后端将拒绝重复创建）</p> : null}
+            {detachedSameCombo ? <p className="text-xs text-yellow-600">该组合存在已解绑的历史绑定，创建将复活该绑定（重新授权）</p> : null}
             {!duplicate && sameOrgZone ? <p className="text-xs text-yellow-600">该组织已绑定此 Zone（用途：{sameOrgZone.purpose}），将以新用途追加绑定</p> : null}
             {addPurpose !== 'default' ? <p className="text-xs text-muted-foreground">非 default 用途的绑定当前仅用于授权管理（撤销/审计）；会话路由与 delegation 仅消费 default Zone</p> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)}>取消</Button>
-            <Button disabled={!addOrgId.trim() || !addZoneId.trim() || duplicate !== undefined} onClick={() => void onAddBinding()}>创建</Button>
+            <Button disabled={addSubmitting || !addOrgId.trim() || !addZoneId.trim() || duplicate !== undefined} onClick={() => void onAddBinding()}>{addSubmitting ? '创建中…' : '创建'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -526,9 +576,34 @@ export default function ZonesPage() {
           <div className="text-sm">
             目标：<span className="font-mono text-xs">{detachTarget?.zone_id}</span>（generation {detachTarget?.generation} → {((detachTarget?.generation ?? 0) + 1)}）
           </div>
+          {detachTarget?.is_default ? (
+            <div className="rounded border border-destructive/40 bg-destructive/5 p-3 text-xs">
+              这是该组织的<b>默认绑定</b>：解绑后本组织将失去会话路由锚点（严格模式下无法创建会话），直至重新绑定默认 Zone。
+            </div>
+          ) : null}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDetachTarget(null)}>取消</Button>
-            <Button onClick={() => void onDetach()}>确认解绑</Button>
+            <Button disabled={detachSubmitting} onClick={() => void onDetach()}>{detachSubmitting ? '提交中…' : '确认解绑'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={lifecycleTarget !== null} onOpenChange={(open) => !open && setLifecycleTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{lifecycleTarget?.action === 'suspend' ? '挂起 Zone' : '恢复 Zone'}</DialogTitle>
+            <DialogDescription>
+              {lifecycleTarget?.action === 'suspend'
+                ? `挂起后该 Zone 上的新数据写入与 runtime 操作将被拒绝（影响该 Zone 绑定的 ${lifecycleTarget?.orgCount ?? 0} 个组织的新会话路由），恢复后自动恢复。`
+                : '恢复已挂起的 Zone，解除其数据写入与 runtime 操作限制。'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="text-sm">
+            目标：<span className="font-mono text-xs">{lifecycleTarget?.zoneId}</span>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLifecycleTarget(null)}>取消</Button>
+            <Button disabled={lifecycleSubmitting} onClick={() => void onLifecycleConfirm()}>{lifecycleSubmitting ? '提交中…' : lifecycleTarget?.action === 'suspend' ? '确认挂起' : '确认恢复'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -586,8 +661,8 @@ export default function ZonesPage() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeprovisionTarget(null)}>取消</Button>
-            <Button variant="destructive" disabled={confirmInput.trim() !== deprovisionTarget?.zone_id} onClick={() => void onDeprovision()}>
-              确认删除
+            <Button variant="destructive" disabled={deprovisionSubmitting || confirmInput.trim() !== deprovisionTarget?.zone_id} onClick={() => void onDeprovision()}>
+              {deprovisionSubmitting ? '提交中…' : '确认删除'}
             </Button>
           </DialogFooter>
         </DialogContent>

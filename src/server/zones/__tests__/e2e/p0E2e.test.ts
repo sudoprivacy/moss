@@ -27,6 +27,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import {
   freePort, login, mintNexusUserKey, mossApi, nexusApi, sleep, startMoss, startNexus,
+  zonesE2eEnvReady,
   type MossProcess, type NexusProcess,
 } from './p0Harness.js'
 import { startNexusFaultProxy, type NexusFaultProxy } from './nexusFaultProxy.js'
@@ -52,21 +53,9 @@ async function startMossForP0(
   throw new Error('unreachable')
 }
 
-before(async () => {
-  // 阶段一：moss 单独起，/v2 未配置（Nexus 离线语义——binding 写入并保持
-  // pending，无网络尝试）。阶段二（场景 3）以真实 nexus 地址重启 moss：
-  // V2 endpoint 是进程 env，运行期不可变，重启是唯一正确的编排。
-  moss = await startMossForP0(tmp, {
-    nexusV2BaseUrl: '', nexusServiceToken: '', internalApiToken,
-  })
-  adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
-})
-
-after(async () => {
-  if (moss) await moss.stop()
-  if (nexusProxy) await nexusProxy.stop()
-  if (nexus) await nexus.stop()
-})
+// H-1：环境自检放在 describe 的 { skip } 选项上——钩子随用例一起跳过，
+// CI / 无 nexus checkout 的机器整套 skip 而非 before() 里 spawn 失败。
+const e2eEnv = zonesE2eEnvReady()
 
 async function createOrg(name: string): Promise<string> {
   const { status, json } = await mossApi(moss, adminToken, 'POST', '/api/v1/organizations', { name })
@@ -94,7 +83,7 @@ async function waitBindingActive(orgId: string, timeoutMs = 120_000): Promise<Re
   }
 }
 
-describe('P0 real-process E2E (moss-side scenarios)', () => {
+describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false : `zones E2E environment incomplete: ${e2eEnv.missing.join('; ')}` }, () => {
   let orgA = ''
   let orgB = ''
   let zoneA = ''
@@ -104,6 +93,22 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
   let nexusKeyA = ''
   let orgAAdminToken = ''
   let zoneBDefault = ''
+
+  before(async () => {
+    // 阶段一：moss 单独起，/v2 未配置（Nexus 离线语义——binding 写入并保持
+    // pending，无网络尝试）。阶段二（场景 3）以真实 nexus 地址重启 moss：
+    // V2 endpoint 是进程 env，运行期不可变，重启是唯一正确的编排。
+    moss = await startMossForP0(tmp, {
+      nexusV2BaseUrl: '', nexusServiceToken: '', internalApiToken,
+    })
+    adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
+  })
+
+  after(async () => {
+    if (moss) await moss.stop()
+    if (nexusProxy) await nexusProxy.stop()
+    if (nexus) await nexus.stop()
+  })
 
   it('scenario 1: creating an org leaves a pending default binding while nexus is offline', async () => {
     orgA = await createOrg('P0 E2E Org A')
@@ -136,8 +141,9 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     })
     adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
     const row = await waitBindingActive(orgA)
-    // grant id 已记录（string 或 null——收敛后应为 string）
-    assert.ok(row.nexus_grant_id === null || typeof row.nexus_grant_id === 'string')
+    // waitBindingActive 即 reconciler 已 completeProvision——其输入经 grant_id
+    // 非空检查（bindingService），active 行的 nexus_grant_id 必为 string
+    assert.equal(typeof row.nexus_grant_id, 'string')
     // Nexus 侧确实只有一个 zone（无重复创建）
     const { status, json } = await nexusApi(nexus!, 'GET', `/v2/zones/${encodeURIComponent(zoneA)}`)
     assert.equal(status, 200, `zone should exist on nexus: ${JSON.stringify(json)}`)

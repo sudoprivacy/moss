@@ -24,6 +24,10 @@
 import type { DbDriver } from '../../db/driver.js'
 import type { ZoneBindingConfig } from '../binding/config.js'
 import { NexusZoneApiError, NexusZoneClient } from '../../nexus/nexusZoneClient.js'
+// M-4：非终态 attempt 白名单的唯一事实源（与 db.ts touchAttemptHeartbeat 的
+// 内联先例同款）——park 的 SQL IN 集合由它编译期生成，杜绝手写列表漂移
+// （原 'waiting' 是本地状态机不存在的死值、'detached' 活 runner 被漏）。
+import { ALIVE_ATTEMPT_STATES } from '../../attemptLiveness.js'
 
 export interface HomeZoneResolution {
   homeZoneId: string | null
@@ -39,7 +43,12 @@ export interface RunnerZoneContext {
   NEXUS_RESOURCE_SCOPE: string
 }
 
-/** Build the child environment without leaking Moss/Nexus control-plane keys. */
+/**
+ * Build the child environment stripping the NEXUS-zone control-plane keys
+ * (低-15⑦ 如实声明：MOSS_NEXUS_AUTH_TOKEN / CABIN_TOKEN_SECRET /
+ * MOSS_RESOURCE_TOKEN_SECRET 等基线遗留的进程级密钥仍随 process.env 直传
+ * runner——基线行为，超出本机制范围，修复需先验证 runner 对它们无依赖）。
+ */
 export function applyRunnerZoneContext(
   baseEnv: Record<string, string>,
   context: RunnerZoneContext | null,
@@ -82,6 +91,17 @@ export async function resolveHomeZoneWithHint(
   payloadZoneHint: string | undefined,
   config: ZoneBindingConfig,
 ): Promise<HomeZoneResolution> {
+  // M-6：未配置 /v2 endpoint（zoneBindingEnabled=false）时 Nexus 会话不存
+  // 在（P1a 渐进语义：无 Zone 会话落 moss 本地）——新会话不解析 home zone，
+  // 不落 home_zone_id；严格模式的 ZoneRequiredError 由调用方的 requireZone
+  // 门在 homeZoneId=null 处自然触发。
+  if (!config.zoneBindingEnabled) {
+    return {
+      homeZoneId: null,
+      payloadZoneAccepted: false,
+      payloadZoneIgnoredReason: 'zone binding disabled (MOSS_NEXUS_V2_BASE_URL unset)',
+    }
+  }
   const homeZoneId = await resolveHomeZone(driver, orgId, config.nexusDeploymentId)
   if (homeZoneId === null) {
     return {
@@ -151,7 +171,7 @@ export async function establishNexusSession(
   }
 }
 
-/** 后台补写：observed 为 null 的已解析 session 重试权威写入。 */
+/** 后台补写：observed 为 null 的已解析 session 重试权威写入（低-15⑤：LIMIT 批次化）。 */
 export async function reconcilePendingNexusSessions(
   driver: DbDriver,
   client: NexusZoneClient,
@@ -160,7 +180,8 @@ export async function reconcilePendingNexusSessions(
     `SELECT session_id, home_zone_id FROM sessions
      WHERE home_zone_id IS NOT NULL
        AND home_zone_observed_revision IS NULL
-       AND home_zone_sync_error IS NULL`,
+       AND home_zone_sync_error IS NULL
+     LIMIT 50`,
   )
   let written = 0
   for (const row of rows) {
@@ -186,10 +207,19 @@ export async function reconcilePendingNexusSessions(
   return written
 }
 
+/** reconcileRunnerGeneration 的结果：ok=false 携带错误码（低-15④——不再吞根因）。 */
+export type RunnerGenerationReconcileResult =
+  | { ok: true; executionZoneId: string; pid: string }
+  | { ok: false; errorCode: string }
+
 /**
  * runner generation 对账（R5.2）：以 attempt 为 pid 在 Nexus 固化 execution
- * zone（默认 home zone），回读校验。返回对账结果（null=Nexus 不可达，
- * 本地 execution_zone_id 仍记录，对账待补）。
+ * zone（默认 home zone），回读校验。
+ *
+ * 低-15④/M-5：start 成功但后续失败（回读超时等）时立即 best-effort 取消
+ * 该 run——"幽灵 run"（Nexus 侧已固化、本地 markAttemptLost 后不再有任何
+ * 自动取消路径）不再产生；错误码随结果带出，供 markAttemptLost 的
+ * error_text 记录（不再 catch-all 吞根因）。
  */
 export async function reconcileRunnerGeneration(
   client: NexusZoneClient,
@@ -202,7 +232,7 @@ export async function reconcileRunnerGeneration(
     decisionReason?: string
     policyVersion?: string
   },
-): Promise<{ executionZoneId: string; pid: string } | null> {
+): Promise<RunnerGenerationReconcileResult> {
   const pid = runnerPid(input.attemptId)
   const executionZoneId = input.executionZoneId ?? input.homeZoneId
   if (
@@ -211,8 +241,9 @@ export async function reconcileRunnerGeneration(
   ) {
     throw new Error('cross-Zone execution requires decision reason and policy version')
   }
+  let started = false
   try {
-    const run = await client.startRuntimeRun({
+    await client.startRuntimeRun({
       pid,
       sessionId: input.sessionId,
       executionZoneHint: executionZoneId,
@@ -220,13 +251,21 @@ export async function reconcileRunnerGeneration(
       decisionReason: input.decisionReason,
       policyVersion: input.policyVersion,
     })
+    started = true
     const readBack = await client.getRuntimeRun(pid)
     return {
-      executionZoneId: readBack.execution_zone_id || run.execution_zone_id,
+      ok: true,
+      executionZoneId: readBack.execution_zone_id || executionZoneId,
       pid,
     }
-  } catch {
-    return null
+  } catch (error) {
+    if (started) {
+      try { await client.cancelRuntimeRun(pid, 'terminate') } catch { /* best-effort */ }
+    }
+    return {
+      ok: false,
+      errorCode: error instanceof NexusZoneApiError ? error.code : 'OUTCOME_UNKNOWN',
+    }
   }
 }
 
@@ -239,11 +278,17 @@ export function runnerPid(attemptId: string): string {
  * runner env 的 Zone context（R5.4/R5.5）：NEXUS_ZONE_ID + endpoint + 短期
  * **用户** delegation ref。service credential 留在 moss 进程内，永不进
  * runner env。
+ *
+ * 低-7：delegation 服务优先取进程级共享实例（组装处 set）——registry 的
+ * 短 TTL 复用与 membership revoke 钩子对 runner 路径生效（此前每次 spawn
+ * new 一个实例，registry 与 revoke 覆盖对 runner 拿走的 delegation 均不
+ * 成立）；未 set（测试）时回退新建。runtimePid 必填——与真实 run 的 pid
+ * （attemptId 派生）一致由调用方保证，不留错误默认值。
  */
 export async function runnerZoneContext(
   driver: DbDriver,
   client: NexusZoneClient,
-  input: { sessionId: string; runtimePid?: string; config?: ZoneBindingConfig },
+  input: { sessionId: string; runtimePid: string; config?: ZoneBindingConfig },
 ): Promise<RunnerZoneContext | null> {
   const row = await driver.get(
     `SELECT home_zone_id FROM sessions WHERE session_id = ? LIMIT 1`,
@@ -258,15 +303,15 @@ export async function runnerZoneContext(
   if (!userRow) return null
   // 短期用户 delegation：由 moss 的 issuance service 换发；runner 只拿到
   // delegation ref（短期、最小 scope），拿不到 service credential。
-  const { ZoneDelegationService } = await import('../binding/delegationService.js')
+  const { ZoneDelegationService, getSharedZoneDelegation } = await import('../binding/delegationService.js')
   const { resolveZoneBindingConfig } = await import('../binding/config.js')
   const config = input.config ?? resolveZoneBindingConfig()
-  const delegation = new ZoneDelegationService({
+  const delegation = getSharedZoneDelegation() ?? new ZoneDelegationService({
     driver,
     client,
     config,
   })
-  const runtimePidValue = input.runtimePid ?? runnerPid(input.sessionId)
+  const runtimePidValue = input.runtimePid
   const issued = await delegation.issueForOrgUser({
     orgId: String(userRow.org_id),
     userId: String(userRow.user_id),
@@ -309,8 +354,8 @@ export async function parkRunsForZone(
   const rows = await driver.all(
     `SELECT a.attempt_id FROM session_attempts a
      JOIN sessions s ON s.session_id = a.session_id
-     WHERE a.execution_zone_id = ? AND a.runtime_state IN ('starting', 'running', 'waiting')
-       AND s.status = 'active'`,
+     WHERE a.execution_zone_id = ? AND a.runtime_state IN (${ALIVE_ATTEMPT_STATES.map(s => `'${s}'`).join(', ')})
+       AND s.status IN ('active', 'detached')`,
     [zoneId],
   )
   let parked = 0
@@ -323,4 +368,61 @@ export async function parkRunsForZone(
     }
   }
   return parked
+}
+
+/**
+ * run 生命周期对账（M-5）：moss 侧的 run 只有 start 没有 end——正常结束、
+ * idle kill、terminate、drain、markAttemptStopped/markAttemptLost 全路径都
+ * 不通知 Nexus，run 在 Nexus 侧停留活跃态（ZONE_DELETE_BLOCKED 卡住
+ * deprovision），回读超时产生的"幽灵 run"更是永不收敛。
+ *
+ * 后台对账模型（唯一完备解——同步式嵌入覆盖不了进程崩溃场景）：扫终态
+ * attempt（stopped/failed/lost，含僵尸 attempt 的幽灵 run）且未标记
+ * nexus_run_ended_at 的行，逐个 cancelRuntimeRun(terminate) 后回填标记。
+ * 失败（Nexus 不可达）下轮重试（未标记的行仍在查询集内）；对不存在的
+ * run 的 404 也标记（幂等语义，宁可标记）。
+ */
+export async function endZoneRunsForSettledAttempts(
+  driver: DbDriver,
+  client: NexusZoneClient,
+  limit: number,
+): Promise<number> {
+  const rows = await driver.all(
+    `SELECT attempt_id FROM session_attempts
+     WHERE execution_zone_id IS NOT NULL
+       AND nexus_run_ended_at IS NULL
+       AND runtime_state IN ('stopped', 'failed', 'lost')
+     ORDER BY started_at
+     LIMIT ?`,
+    [limit],
+  )
+  let ended = 0
+  for (const row of rows) {
+    const attemptId = String(row.attempt_id)
+    try {
+      await client.cancelRuntimeRun(runnerPid(attemptId), 'terminate')
+    } catch {
+      // 404（run 从未建/已清）同样标记结束；网络失败不标记、下轮重试。
+      // 区分不了 404 与网络错时保守不标记——宁可下轮重试（幂等），不可
+      // 漏标（漏标无收敛）。
+      if (!(await isRunCancelConfirmedAbsent(driver, client, attemptId))) continue
+    }
+    await driver.run(
+      `UPDATE session_attempts SET nexus_run_ended_at = ? WHERE attempt_id = ?`,
+      [Date.now(), attemptId],
+    )
+    ended += 1
+  }
+  return ended
+}
+
+/** cancel 失败后的甄别：回读 run 确认其已不存在（不存在=幂等可标记；读不到=保守不标记）。 */
+async function isRunCancelConfirmedAbsent(driver: DbDriver, client: NexusZoneClient, attemptId: string): Promise<boolean> {
+  try {
+    await client.getRuntimeRun(runnerPid(attemptId))
+    return false // run 仍在——cancel 确实失败，不标记
+  } catch (error) {
+    if (error instanceof NexusZoneApiError && error.status === 404) return true
+    return false // 网络类——保守不标记
+  }
 }

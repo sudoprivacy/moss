@@ -21,10 +21,13 @@ import { AuthCenterDb } from '../../authCenter/db.js'
 import {
   claimDueOutbox,
   completeProvision,
+  detachAllBindingsForOrg,
   failOutboxAttempt,
   getBinding,
   insertDefaultBindingIntent,
   insertDetachIntent,
+  insertManagedBindingIntent,
+  reviveBindingIntent,
 } from '../binding/bindingRepository.js'
 import { ZoneBindingReconciler } from '../binding/bindingService.js'
 import { ZoneDelegationService, ZoneDelegationError } from '../binding/delegationService.js'
@@ -233,9 +236,9 @@ class FakeZoneClient {
   }
 
   revokedGrants: string[] = []
-  async revokeGrant(_zoneId: string, grantId: string, _key: string): Promise<ZoneOperationRef> {
+  async revokeGrant(_zoneId: string, grantId: string, _key: string): Promise<{ operation_id: string }> {
     this.revokedGrants.push(grantId)
-    return { operation_id: 'revoke-op-1', action: 'revoke', zone_id: _zoneId, grant_id: grantId, state: 'succeeded', step: 'done', retryable: false, error: null }
+    return { operation_id: 'revoke-op-1' }
   }
 }
 
@@ -382,6 +385,42 @@ describe('ZoneDelegationService', () => {
     assert.equal(fake.issued[0].membershipVersion, 'r0')
     assert.equal(fake.issued[0].grantId, 'grant-test')
     assert.equal(validateZoneId(issued.zoneId), null)
+  })
+
+  it('rejects audiences outside the allowlist (M-7) — only nexus-api verifies', async () => {
+    const { orgId, userId } = await seedActiveOrgWithUser()
+    const service = new ZoneDelegationService({
+      driver: db.driver,
+      client: new FakeDelegationClient() as unknown as NexusZoneClient,
+      config: CONFIG,
+    })
+    await assert.rejects(
+      service.issueForOrgUser({ orgId, userId, audience: 'random-audience' }),
+      (error: unknown) => error instanceof ZoneDelegationError && error.code === 'AUDIENCE_NOT_ALLOWED',
+    )
+  })
+
+  it('revokeForUser matches by userId across an org move (低-6) and evicts expired entries on issue (M-7)', async () => {
+    const { orgId, userId } = await seedActiveOrgWithUser()
+    const fake = new FakeDelegationClient()
+    const service = new ZoneDelegationService({
+      driver: db.driver,
+      client: fake as unknown as NexusZoneClient,
+      config: CONFIG,
+    })
+    await service.issueForOrgUser({ orgId, userId })
+    // 用户被移到别的 org 后，revokeForUser（调用方传新 org）仍须命中旧 org
+    // 前缀下的 registry 条目——匹配器按 key 的 userId 段，不按 org 前缀。
+    await service.revokeForUser('ffffffff-0000-4000-8000-0000000000ff', userId)
+    assert.deepEqual(fake.revoked, ['del-1'])
+    // M-7：过期条目在下次签发入口被惰性清扫（签发重放，不残留）
+    const expired = new Date(Date.now() - 1_000).toISOString()
+    ;(service as unknown as { registry: Map<string, { expiresAt: string }> }).registry.forEach(
+      (v) => { v.expiresAt = expired },
+    )
+    await service.issueForOrgUser({ orgId, userId })
+    const registrySize = (service as unknown as { registry: Map<string, unknown> }).registry.size
+    assert.equal(registrySize, 1, 'expired entries evicted; only the fresh issuance remains')
   })
 
   it('binds runtime issuance to the persisted grant and exact session rule', async () => {
@@ -566,11 +605,12 @@ describe('detach flow (§8.8: unbind ≠ delete data)', () => {
     assert.equal(bindingRow.sync_status, 'active')
 
     // 解绑意图：generation+1，outbox detach 行
-    const { generation } = await insertDetachIntent(db.driver, {
+    const detach = await insertDetachIntent(db.driver, {
       bindingId: String(bindingRow.binding_id),
       now: Date.now(),
     })
-    assert.equal(generation, 2)
+    assert.ok(detach.ok)
+    assert.equal(detach.generation, 2)
     const desired = (raw
       .prepare(`SELECT desired_state, sync_status FROM org_zone_bindings WHERE binding_id = ?`)
       .get(String(bindingRow.binding_id))) as Record<string, unknown>
@@ -586,11 +626,290 @@ describe('detach flow (§8.8: unbind ≠ delete data)', () => {
       .get(String(bindingRow.binding_id))) as Record<string, unknown>
     assert.equal(settled.sync_status, 'detached')
 
-    // 已解绑再解绑 → 拒绝
+    // 已解绑再解绑 → ok:false（低-2：并发败者得到明确结果而非撞 outbox
+    // UNIQUE 抛裸 500；service 层转 409）
+    const again = await insertDetachIntent(db.driver, { bindingId: String(bindingRow.binding_id), now: Date.now() })
+    assert.ok(!again.ok)
+    assert.equal(again.reason, 'already-detached')
+  })
+})
+
+describe('revive detached binding (H-2 recovery path)', () => {
+  /** 建-org → provision 收敛 active → detach 收敛 detached 终态，返回 binding_id。 */
+  async function detachedDefaultBinding(orgId: string): Promise<string> {
+    await db.createOrganization(orgId, `Revive ${orgId.slice(0, 8)}`, Date.now())
+    const bindingRow = raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>
+    const bindingId = String(bindingRow.binding_id)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    const detach = await insertDetachIntent(db.driver, { bindingId, now: Date.now() })
+    assert.ok(detach.ok)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    const settled = raw
+      .prepare(`SELECT sync_status FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(settled.sync_status, 'detached')
+    return bindingId
+  }
+
+  it('revives to bound/pending with a fresh provision outbox row and cleared grant reference', async () => {
+    const bindingId = await detachedDefaultBinding('77777777-7777-4777-8777-777777777701')
+    // provision g=1 → detach g=2 → revive g=3
+    const result = await reviveBindingIntent(db.driver, { bindingId, isDefault: true, now: Date.now() })
+    assert.ok(result.ok)
+    assert.equal(result.generation, 3)
+    const row = raw
+      .prepare(`SELECT desired_state, sync_status, is_default, nexus_grant_id, generation FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(row.desired_state, 'bound')
+    assert.equal(row.sync_status, 'pending')
+    assert.equal(row.is_default, 1)
+    assert.equal(row.nexus_grant_id, null)
+    assert.equal(row.generation, 3)
+    const outbox = raw
+      .prepare(`SELECT status, generation, grant_source_id FROM zone_binding_outbox WHERE binding_id = ? AND action = 'provision' ORDER BY created_at DESC LIMIT 1`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(outbox.status, 'pending')
+    assert.equal(outbox.generation, 3)
+    assert.equal(outbox.grant_source_id, `${bindingId}:3`)
+    const audit = raw
+      .prepare(`SELECT COUNT(*) AS n FROM zone_binding_audit WHERE action = 'binding-intent-revived'`)
+      .get() as { n: number }
+    assert.equal(audit.n, 1)
+  })
+
+  it('is idempotent when the binding is already bound (concurrent revive winner)', async () => {
+    const bindingId = await detachedDefaultBinding('77777777-7777-4777-8777-777777777702')
+    const first = await reviveBindingIntent(db.driver, { bindingId, isDefault: true, now: Date.now() })
+    assert.ok(first.ok)
+    const second = await reviveBindingIntent(db.driver, { bindingId, isDefault: true, now: Date.now() })
+    assert.ok(second.ok)
+    assert.equal(second.generation, first.generation)
+  })
+
+  it('refuses revive while a detach outbox row is still converging (outbox-in-flight)', async () => {
+    const orgId = '77777777-7777-4777-8777-777777777703'
+    await db.createOrganization(orgId, 'Revive InFlight', Date.now())
+    const bindingRow = raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>
+    const bindingId = String(bindingRow.binding_id)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    const detach = await insertDetachIntent(db.driver, { bindingId, now: Date.now() })
+    assert.ok(detach.ok)
+    // 不跑 reconciler——detach 行仍 pending：FIFO 下复活会被在途 detach 行
+    // 覆盖回 detached，必须拒绝。
+    const result = await reviveBindingIntent(db.driver, { bindingId, isDefault: true, now: Date.now() })
+    assert.ok(!result.ok)
+    assert.equal(result.reason, 'outbox-in-flight')
+  })
+
+  it('demotes the existing bound default when reviving as default (partial unique 共存)', async () => {
+    const orgId = '77777777-7777-4777-8777-777777777704'
+    const bindingId = await detachedDefaultBinding(orgId)
+    // 期间 admin 已建立新的 bound default（managed 入口直写模拟）
+    await insertManagedBindingIntent(db.driver, {
+      orgId,
+      nexusDeploymentId: 'local',
+      zoneId: 'org-' + 'ab'.repeat(16),
+      purpose: 'shared',
+      isDefault: true,
+      now: Date.now(),
+    })
+    const result = await reviveBindingIntent(db.driver, { bindingId, isDefault: true, now: Date.now() })
+    assert.ok(result.ok)
+    const demoted = raw
+      .prepare(`SELECT is_default FROM org_zone_bindings WHERE org_id = ? AND binding_id != ?`)
+      .get(orgId, bindingId) as Record<string, unknown>
+    assert.equal(demoted.is_default, 0)
+    const revived = raw
+      .prepare(`SELECT is_default, desired_state FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(revived.is_default, 1)
+    assert.equal(revived.desired_state, 'bound')
+    const moved = raw
+      .prepare(`SELECT COUNT(*) AS n FROM zone_binding_audit WHERE action = 'default-moved'`)
+      .get() as { n: number }
+    assert.equal(moved.n, 1)
+  })
+})
+
+describe('backfill would-rebind plan & revive apply (H-2)', () => {
+  async function detachedDefaultOrg(orgId: string): Promise<string> {
+    await db.createOrganization(orgId, `Rebind ${orgId.slice(0, 8)}`, Date.now())
+    const bindingRow = raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>
+    const bindingId = String(bindingRow.binding_id)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    const detach = await insertDetachIntent(db.driver, { bindingId, now: Date.now() })
+    assert.ok(detach.ok)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    return bindingId
+  }
+
+  it('plans would-rebind (not would-create/collision) for an org whose detached default occupies the candidate', async () => {
+    const orgId = '88888888-8888-4888-8888-888888888801'
+    const bindingId = await detachedDefaultOrg(orgId)
+    const plan = await planOrgZoneBackfill(db.driver, { nexusDeploymentId: 'local' })
+    const item = plan.items.find((i) => i.orgId === orgId)
+    assert.equal(item?.status, 'would-rebind')
+    assert.equal(item?.bindingId, bindingId)
+    assert.equal(plan.rebinds, 1)
+    assert.equal(plan.wouldCreate, 0)
+  })
+
+  it('apply revives the detached default (revived 数组) instead of UNIQUE-skipping', async () => {
+    const orgId = '88888888-8888-4888-8888-888888888802'
+    const bindingId = await detachedDefaultOrg(orgId)
+    const applied = await applyOrgZoneBackfill(db.driver, { nexusDeploymentId: 'local' })
+    assert.ok(applied.revived.includes(orgId))
+    assert.equal(applied.skipped.length, 0)
+    assert.equal(applied.failed.length, 0)
+    const row = raw
+      .prepare(`SELECT desired_state, sync_status, is_default FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(row.desired_state, 'bound')
+    assert.equal(row.sync_status, 'pending')
+    assert.equal(row.is_default, 1)
+    const provision = raw
+      .prepare(`SELECT COUNT(*) AS n FROM zone_binding_outbox WHERE binding_id = ? AND action = 'provision' AND status = 'pending'`)
+      .get(bindingId) as { n: number }
+    assert.equal(provision.n, 1)
+  })
+})
+
+describe('per-binding FIFO + desired-flipped grant reference (M-1/Z-1)', () => {
+  it('FIFO: a detach row is not claimable while an earlier provision row is in flight', async () => {
+    const orgId = 'aaaaaaaa-0000-4000-8000-0000000000f1'
+    await db.createOrganization(orgId, 'FifoOrg', Date.now())
+    const bindingId = String((raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>).binding_id)
+    // worker A 领取 provision（真实 claim，lease 未过期）
+    const claimedA = await claimDueOutbox(db.driver, {
+      leaseOwner: 'fifo-wA', leaseUntilMs: Date.now() + 60_000, now: Date.now(), limit: 10,
+    })
+    assert.ok(claimedA.some((r) => r.binding_id === bindingId && r.action === 'provision'))
+    // 在途期间 admin 发起 detach（detach 行入队、desired 翻转）
+    const detach = await insertDetachIntent(db.driver, { bindingId, now: Date.now() })
+    assert.ok(detach.ok)
+    // worker B 领取不到该 binding 的任何行（FIFO：前序 provision 行未终态）
+    const claimedB = await claimDueOutbox(db.driver, {
+      leaseOwner: 'fifo-wB', leaseUntilMs: Date.now() + 60_000, now: Date.now(), limit: 10,
+    })
+    assert.ok(!claimedB.some((r) => r.binding_id === bindingId), 'detach must wait for the in-flight provision')
+    // provision 行终态后 detach 行可领取
+    raw.prepare(`UPDATE zone_binding_outbox SET status = 'completed' WHERE binding_id = ? AND action = 'provision'`).run(bindingId)
+    const claimedC = await claimDueOutbox(db.driver, {
+      leaseOwner: 'fifo-wC', leaseUntilMs: Date.now() + 60_000, now: Date.now(), limit: 10,
+    })
+    assert.ok(claimedC.some((r) => r.binding_id === bindingId && r.action === 'detach'))
+  })
+
+  it('desired-flipped: grant reference lands atomically and the queued detach row revokes it', async () => {
+    const orgId = 'bbbbbbbb-0000-4000-8000-0000000000f2'
+    await db.createOrganization(orgId, 'FlipOrg', Date.now())
+    const bindingId = String((raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>).binding_id)
+    const fake = new FakeZoneClient()
+    // worker A 领取 provision（真实 claim）
+    const claimedA = await claimDueOutbox(db.driver, {
+      leaseOwner: 'flip-wA', leaseUntilMs: Date.now() + 60_000, now: Date.now(), limit: 10,
+    })
+    const provRow = claimedA.find((r) => r.binding_id === bindingId && r.action === 'provision')
+    assert.ok(provRow)
+    // 在途期间 admin 发起 detach；worker B 领取不到 detach（FIFO 挡住）
+    const detach = await insertDetachIntent(db.driver, { bindingId, now: Date.now() })
+    assert.ok(detach.ok)
+    const claimedB = await claimDueOutbox(db.driver, {
+      leaseOwner: 'flip-wB', leaseUntilMs: Date.now() + 60_000, now: Date.now(), limit: 10,
+    })
+    assert.ok(!claimedB.some((r) => r.binding_id === bindingId))
+    // worker A 恢复后写回：desired 已翻 → 仅落 grant 引用（同事务），不回 active
+    const outcome = await completeProvision(db.driver, {
+      outboxId: provRow.id,
+      fence: provRow.fence,
+      bindingId,
+      zoneId: 'z-flip',
+      grantId: 'grant-flip-1',
+      operationId: 'op-flip-1',
+      now: Date.now(),
+    })
+    assert.equal(outcome, 'desired-flipped')
+    const afterFlip = raw
+      .prepare(`SELECT sync_status, desired_state, nexus_grant_id FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(afterFlip.desired_state, 'detached')
+    assert.notEqual(afterFlip.sync_status, 'active', 'binding must not flip back to active')
+    assert.equal(afterFlip.nexus_grant_id, 'grant-flip-1', 'grant reference landed atomically')
+    // FIFO 放行 detach 行 → 按落库的引用正常 revoke（不再跳过）
+    const result = await makeReconciler(fake).reconcileOnce()
+    assert.equal(result.completed, 1)
+    assert.deepEqual(fake.revokedGrants, ['grant-flip-1'])
+    const settled = raw
+      .prepare(`SELECT sync_status FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(settled.sync_status, 'detached')
+    const audit = raw
+      .prepare(`SELECT COUNT(*) AS n FROM zone_binding_audit WHERE action = 'provision-completed-desired-flipped'`)
+      .get() as { n: number }
+    assert.equal(audit.n, 1)
+  })
+})
+
+describe('org delete transaction (G-1/低-4)', () => {
+  it('rolls back binding detach together with the org DELETE when FK fails (non-empty org)', async () => {
+    const orgId = '99999999-9999-4999-8999-999999999901'
+    await db.createOrganization(orgId, 'DelOrg', Date.now())
+    const bindingId = String((raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>).binding_id)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    // org 非空（user 行引用 org）→ DELETE 触发 FK；detach 与 DELETE 同事务
+    // 必须一并回滚——试探删除不得误毁 binding（G-1 行为验证）。
+    raw.prepare(
+      `INSERT INTO users (id, org_id, email, name, role, status, local_auth, created_at) VALUES (?, ?, ?, ?, 'admin', 'active', 1, ?)`,
+    ).run('99999999-9999-4999-8999-9999999999u1', orgId, 'del@x.test', 'deluser', Date.now())
     await assert.rejects(
-      insertDetachIntent(db.driver, { bindingId: String(bindingRow.binding_id), now: Date.now() }),
-      /already detached/,
+      db.driver.transaction(async () => {
+        await detachAllBindingsForOrg(db.driver, { orgId, now: Date.now() })
+        await db.deleteOrganization(orgId)
+      }),
+      /FOREIGN KEY/i,
     )
+    const row = raw
+      .prepare(`SELECT desired_state, sync_status FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(row.desired_state, 'bound')
+    assert.equal(row.sync_status, 'active')
+    const detachRows = raw
+      .prepare(`SELECT COUNT(*) AS n FROM zone_binding_outbox WHERE binding_id = ? AND action = 'detach'`)
+      .get(bindingId) as { n: number }
+    assert.equal(detachRows.n, 0, 'no detach intent may survive the rolled-back delete')
+  })
+
+  it('writes detach intents (outbox-backed) for every bound binding when the org delete succeeds', async () => {
+    const orgId = '99999999-9999-4999-8999-999999999902'
+    await db.createOrganization(orgId, 'DelEmptyOrg', Date.now())
+    const bindingId = String((raw
+      .prepare(`SELECT binding_id FROM org_zone_bindings WHERE org_id = ?`)
+      .get(orgId) as Record<string, unknown>).binding_id)
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    await db.driver.transaction(async () => {
+      await detachAllBindingsForOrg(db.driver, { orgId, now: Date.now() })
+      await db.deleteOrganization(orgId)
+    })
+    const row = raw
+      .prepare(`SELECT desired_state FROM org_zone_bindings WHERE binding_id = ?`)
+      .get(bindingId) as Record<string, unknown>
+    assert.equal(row.desired_state, 'detached')
+    const detach = raw
+      .prepare(`SELECT COUNT(*) AS n FROM zone_binding_outbox WHERE binding_id = ? AND action = 'detach' AND status = 'pending'`)
+      .get(bindingId) as { n: number }
+    assert.equal(detach.n, 1, 'outbox-backed revoke path exists (低-4)')
   })
 })
 
@@ -723,6 +1042,9 @@ describe('ZoneManagementService observed snapshot persistence (B-3)', () => {
     assert.equal(listed.observed_grant_source, null)
     assert.equal(listed.grant_expires_at, null)
     assert.ok(listed.observed_at !== null && Date.now() - listed.observed_at < 60_000)
+    // M-2 洗白根除：grant 引用未落库的 bound 行，对账不写 sync_status——
+    // 远端 zone active 不能把"本地未收敛"翻成 active。
+    assert.equal(listed.sync_status, 'pending')
   })
 
   it('reconcileObservedSnapshot back-writes every binding, detached included', async () => {
@@ -735,7 +1057,8 @@ describe('ZoneManagementService observed snapshot persistence (B-3)', () => {
     )
     await svc.detachBinding(shared!.binding_id, viewer)
 
-    // 远端 zone 仍 active → detached 行判 sync_failed（期望已解绑但远端仍活跃）
+    // M-3：detached 判定只看 grant——该行 grant 引用为空（无 grant 可撤）
+    // 即已收敛，远端 zone 保持 active（detach 不触碰 Zone 数据）不再是漂移。
     const reconciler = svcWithObserved('active')
     const written = await reconciler.reconcileObservedSnapshot()
     assert.equal(written, 2)
@@ -743,7 +1066,8 @@ describe('ZoneManagementService observed snapshot persistence (B-3)', () => {
     const bound = rows.find((b) => b.binding_id === defaultBinding.binding_id)
     const detached = rows.find((b) => b.zone_id === 'org-obs-detached')
     assert.equal(bound!.observed_display_name, 'Observed Name')
-    assert.equal(detached!.sync_status, 'sync_failed')
+    assert.equal(bound!.sync_status, 'pending', 'bound row without grant reference must not be whitewashed')
+    assert.equal(detached!.sync_status, 'detached')
     assert.ok(detached!.observed_at !== null)
   })
 })
@@ -790,7 +1114,7 @@ describe('ZoneManagementService addBinding validation & zoneLifecycle outcomes',
     }
   })
 
-  it('rejects duplicate addBinding with 409 and distinguishes detached history rows', async () => {
+  it('rejects duplicate addBinding with 409 and revives detached history rows (H-2)', async () => {
     const svc = svcWith(new FakeZoneClient())
     await svc.addBinding({ orgId: ORG, zoneId: 'org-zonea', purpose: 'shared' })
     await assert.rejects(
@@ -799,13 +1123,12 @@ describe('ZoneManagementService addBinding validation & zoneLifecycle outcomes',
         && error.status === 409 && error.code === 'BINDING_ALREADY_EXISTS'
         && error.message.includes('无需重复创建'),
     )
+    // H-2 恢复路径：同组合的 detached 历史行不再 409——创建即复活该绑定
+    // （重新走 provision 收敛），可逆性由产品路径保证。
     insertRow('org-zoneb', 'detached')
-    await assert.rejects(
-      svc.addBinding({ orgId: ORG, zoneId: 'org-zoneb', purpose: 'shared' }),
-      (error: unknown) => error instanceof ZoneManagementError
-        && error.status === 409 && error.code === 'BINDING_ALREADY_EXISTS'
-        && error.message.includes('已解绑的历史绑定'),
-    )
+    const revived = await svc.addBinding({ orgId: ORG, zoneId: 'org-zoneb', purpose: 'shared' })
+    assert.equal(revived.desired_state, 'bound')
+    assert.equal(revived.sync_status, 'pending')
   })
 
   it('creates a pending binding on the happy path', async () => {

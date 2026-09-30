@@ -60,6 +60,8 @@ export function addZoneBinding(input: {
   org_id: string
   zone_id: string
   purpose?: string
+  /** H-2 default 转移：true 时后端事务内置既有 default 降级。 */
+  is_default?: boolean
 }): Promise<ZoneBinding> {
   return dcClient.post('/api/v1/zones/bindings', input)
 }

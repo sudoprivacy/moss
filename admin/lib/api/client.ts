@@ -218,7 +218,11 @@ export class ApiClient {
       const raw = (error as any).error
       const message = typeof raw === 'string' ? raw : (raw?.message || (error as any).message || 'Request failed')
       const details = typeof raw === 'object' && raw !== null ? raw.details : undefined
+<<<<<<< HEAD
       const code = typeof raw?.code === 'string' ? raw.code : undefined
+=======
+      const code = typeof raw === 'object' && raw !== null ? raw.code : undefined
+>>>>>>> 8c970afa (fix(zones): 修复分支审核 27 项——E2E 门禁可迁移、binding 可逆与状态机收敛、delegation 约束与管理面加固)
       throw new ApiRequestError(response.status, message, details, code)
     }
 

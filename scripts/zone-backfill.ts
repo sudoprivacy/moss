@@ -58,33 +58,38 @@ async function run(): Promise<number> {
 
     let plan = await planOrgZoneBackfill(driver, { nexusDeploymentId: options.deployment })
     const created: string[] = []
+    const revived: string[] = []
     const skipped: string[] = []
     const failed: Array<{ orgId: string; error: string }> = []
     let stalled = false
     if (options.apply) {
-      while (plan.wouldCreate > 0) {
-        const before = plan.wouldCreate
+      // 循环与停滞判定均按"剩余可处理总数"（would-create + would-rebind）——
+      // rebind-only 存量（wouldCreate=0、rebinds>0）必须进入循环体执行复活，
+      // 且 revive-only 轮不能被 created 空判误报 stalled。
+      while (plan.wouldCreate + plan.rebinds > 0) {
+        const before = plan.wouldCreate + plan.rebinds
         const batch = await applyOrgZoneBackfill(driver, { nexusDeploymentId: options.deployment, batchSize: options.batchSize })
         created.push(...batch.created)
+        revived.push(...batch.revived)
         skipped.push(...batch.skipped)
         failed.push(...batch.failed)
         plan = await planOrgZoneBackfill(driver, { nexusDeploymentId: options.deployment })
-        if (batch.failed.length || batch.created.length === 0 || plan.wouldCreate >= before) {
+        if (batch.failed.length || batch.created.length + batch.revived.length === 0 || plan.wouldCreate + plan.rebinds >= before) {
           stalled = true
           break
         }
       }
     }
-    const unfinished = plan.items.filter((item) => item.status === 'would-create' || item.status === 'collision' || item.status === 'invalid')
-    const report = { deployment: options.deployment, dryRun: !options.apply, plan, created, skipped, failed, unfinished }
+    const unfinished = plan.items.filter((item) => item.status === 'would-create' || item.status === 'would-rebind' || item.status === 'collision' || item.status === 'invalid')
+    const report = { deployment: options.deployment, dryRun: !options.apply, plan, created, revived, skipped, failed, unfinished }
     if (options.json) console.log(JSON.stringify(report))
     else {
       console.log(`deployment: ${options.deployment}`)
-      console.log(`would-create=${plan.wouldCreate} already-bound=${plan.alreadyBound} collision=${plan.collisions} invalid=${plan.invalid} created=${created.length} failed=${failed.length}`)
+      console.log(`would-create=${plan.wouldCreate} would-rebind=${plan.rebinds} already-bound=${plan.alreadyBound} collision=${plan.collisions} invalid=${plan.invalid} created=${created.length} revived=${revived.length} failed=${failed.length}`)
       console.log(`unfinished: ${JSON.stringify(unfinished)}`)
     }
     if (!options.apply) return 0
-    if (failed.length || stalled || plan.wouldCreate > 0) return 1
+    if (failed.length || stalled || plan.wouldCreate + plan.rebinds > 0) return 1
     if (plan.collisions || plan.invalid) return 3
     return 0
   } catch (error) {

@@ -419,6 +419,11 @@ export class DirectConnectStore {
       this.db.exec(`ALTER TABLE session_attempts ADD COLUMN execution_zone_id TEXT`)
       console.log('[DB] Added execution_zone_id column to session_attempts')
     }
+    // M-5：老库补 run 生命周期对账标记（表内注释见 DDL）。
+    if (!attemptsColumns.some(col => col.name === 'nexus_run_ended_at')) {
+      this.db.exec(`ALTER TABLE session_attempts ADD COLUMN nexus_run_ended_at INTEGER`)
+      console.log('[DB] Added nexus_run_ended_at column to session_attempts')
+    }
 
     // Migration: add source and channel_chat_id columns if they don't exist
     if (!sessionsColumns.some(col => col.name === 'source')) {

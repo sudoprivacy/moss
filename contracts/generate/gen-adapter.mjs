@@ -33,13 +33,24 @@ function tsStr(v) {
   return `'${String(v).replaceAll("'", "\\'")}'`
 }
 
-/** JSON Schema property -> TypeScript type annotation. */
+/** JSON Schema property -> TypeScript type annotation.
+ * 低-15③：支持 number / nullable（['x','null'] 等 type 组合）——此前这些
+ * 形态静默 fallback 到 'string'，schema 演进会生成错误类型。 */
 function tsType(prop) {
   if ('const' in prop) return tsStr(prop.const)
   if (Array.isArray(prop.enum)) return prop.enum.map((v) => tsStr(v)).join(' | ')
-  if (prop.type === 'integer') return 'number'
+  if (Array.isArray(prop.type)) {
+    const parts = prop.type.map((t) => {
+      if (t === 'integer' || t === 'number') return 'number'
+      if (t === 'boolean') return 'boolean'
+      if (t === 'array') return `${tsType(prop.items ?? { type: 'string' })}[]`
+      return t === 'null' ? 'null' : 'string'
+    })
+    return [...new Set(parts)].join(' | ')
+  }
+  if (prop.type === 'integer' || prop.type === 'number') return 'number'
   if (prop.type === 'boolean') return 'boolean'
-  if (prop.type === 'array') return `${tsType(prop.items)}[]`
+  if (prop.type === 'array') return `${tsType(prop.items ?? { type: 'string' })}[]`
   return 'string'
 }
 

@@ -11,14 +11,28 @@
 import { validateZoneId } from '@sudo/contracts/zone-id'
 
 export function defaultZoneIdCandidate(orgId: string): string {
+  const result = tryDefaultZoneIdCandidate(orgId)
+  if (!result.ok) {
+    // 防御分支：hex 输入理论上恒合法；走到这里说明政策本身被破坏，必须炸出
+    throw new Error(
+      `default zone id candidate ${JSON.stringify(result.candidate)} rejected by owner validator: ${result.refusal.kind}`,
+    )
+  }
+  return result.zoneId
+}
+
+/**
+ * 低-15②：非抛出的判定形式——存量迁移（migrateFromJson）的 org id 可能含
+ * zone-id 非法字符（非 UUID 历史数据），迁移路径据此优雅降级（跳过 binding
+ * 写入、org 行照插，由 backfill 补），不再 fail-loud 回滚整个迁移。在线
+ * 入口（org 创建）仍走抛出的 defaultZoneIdCandidate——政策不被静默放宽。
+ */
+export function tryDefaultZoneIdCandidate(orgId: string):
+  | { ok: true; zoneId: string }
+  | { ok: false; candidate: string; refusal: { kind: string } } {
   const hex = orgId.replaceAll('-', '').toLowerCase()
   const candidate = `org-${hex.slice(0, 32)}`
   const refusal = validateZoneId(candidate)
-  if (refusal) {
-    // 防御分支：hex 输入理论上恒合法；走到这里说明政策本身被破坏，必须炸出
-    throw new Error(
-      `default zone id candidate ${JSON.stringify(candidate)} rejected by owner validator: ${refusal.kind}`,
-    )
-  }
-  return candidate
+  if (refusal) return { ok: false, candidate, refusal: { kind: refusal.kind } }
+  return { ok: true, zoneId: candidate }
 }
