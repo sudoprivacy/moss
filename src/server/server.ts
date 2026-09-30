@@ -2969,8 +2969,9 @@ export function startServer(
 
       // Zone delegation 自助换发（§5.4）：普通用户以自身 active Membership
       // 获取可被 Nexus 验证的短期 delegation。audience/ttl 可选（默认
-      // 'vfs'/900s）。Zone 未配置（/v2 endpoint 缺失）时 503——不是错误
-      // 配置下的静默降级。
+      // 'nexus-api'——nexus zone_security 的 verify_delegation 硬编码该值、
+      // 按 audience 精确匹配；/900s，服务端校验上限 900）。Zone 未配置
+      // （/v2 endpoint 缺失）时 503——不是错误配置下的静默降级。
       if (req.method === 'POST' && pathname === '/api/v1/zones/delegations') {
         const token = getBearerToken(req)
         if (!token) {
@@ -2988,7 +2989,13 @@ export function startServer(
         }
         const body = await readJsonBody(req).catch(() => ({}) as JsonBody)
         const audience = typeof body.audience === 'string' && body.audience.trim() ? body.audience.trim() : undefined
+        // M-8：ttl_s 服务端校验——上限 900 与默认值一致（§5.4"短期 delegation"
+        // 承诺），下限 1 防非正数；越界显式 400（不静默 clamp——请求语义与
+        // 返回物必须一致）。
         const ttlS = typeof body.ttl_s === 'number' ? body.ttl_s : undefined
+        if (ttlS !== undefined && (!Number.isInteger(ttlS) || ttlS < 1 || ttlS > 900)) {
+          throw new HttpError(400, 'ttl_s must be an integer between 1 and 900')
+        }
         try {
           const issued = await authService.zoneDelegation.issueForOrgUser({
             orgId: auth.orgId,
@@ -3005,7 +3012,9 @@ export function startServer(
         } catch (error) {
           const code = error instanceof ZoneDelegationError ? error.code : 'DELEGATION_FAILED'
           const message = error instanceof Error ? error.message : 'delegation issuance failed'
-          throw new HttpError(409, JSON.stringify({ code, message }))
+          // 低-1：统一结构化信封（ZoneDelegationError 无 status 字段，维持既有固定 409）
+          writeJson(res, 409, { error: { code, message } })
+          return
         }
         return
       }
@@ -3020,7 +3029,10 @@ export function startServer(
         try {
           writeJson(res, 200, { bindings: await zoneManagement.listBindings({ role: auth.role, orgId: auth.orgId }) })
         } catch (error) {
-          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, { error: { code: error.code, message: error.message, retryable: error.retryable, ...(error.details !== undefined ? { details: error.details } : {}) } })
+            return
+          }
           throw error
         }
         return
@@ -3033,13 +3045,19 @@ export function startServer(
         const orgId = typeof body.org_id === 'string' ? body.org_id.trim() : ''
         const zoneId = typeof body.zone_id === 'string' ? body.zone_id.trim() : ''
         const purpose = typeof body.purpose === 'string' && body.purpose.trim() ? body.purpose.trim() : 'shared'
+        // H-2 default 转移：透传 is_default（true 时 service 层事务内置既有
+        // default 降级）；默认 false 维持既有行为。
+        const isDefault = body.is_default === true
         if (!orgId || !zoneId) {
           throw new HttpError(400, 'Missing org_id or zone_id')
         }
         try {
-          writeJson(res, 201, await zoneManagement.addBinding({ orgId, zoneId, purpose }))
+          writeJson(res, 201, await zoneManagement.addBinding({ orgId, zoneId, purpose, isDefault }))
         } catch (error) {
-          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, { error: { code: error.code, message: error.message, retryable: error.retryable, ...(error.details !== undefined ? { details: error.details } : {}) } })
+            return
+          }
           throw error
         }
         return
@@ -3057,7 +3075,10 @@ export function startServer(
               : await zoneManagement.detachBinding(bindingId, { role: auth.role, orgId: auth.orgId })
           writeJson(res, 200, result)
         } catch (error) {
-          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, { error: { code: error.code, message: error.message, retryable: error.retryable, ...(error.details !== undefined ? { details: error.details } : {}) } })
+            return
+          }
           throw error
         }
         return
@@ -3078,7 +3099,10 @@ export function startServer(
         try {
           writeJson(res, 200, await zoneManagement.getOperation(zoneOperationMatch[1]))
         } catch (error) {
-          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, { error: { code: error.code, message: error.message, retryable: error.retryable, ...(error.details !== undefined ? { details: error.details } : {}) } })
+            return
+          }
           throw error
         }
         return
@@ -3103,7 +3127,10 @@ export function startServer(
               : inner !== undefined ? String(inner) : 'n/a'
             logger.error(`zones ${zoneLifecycleMatch[2]} ${zoneLifecycleMatch[1]} outcome unknown | cause=${causeMsg} | rootCause=${rootMsg}`)
           }
-          if (error instanceof ZoneManagementError) throw new HttpError(error.status, JSON.stringify({ code: error.code, message: error.message }))
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, { error: { code: error.code, message: error.message, retryable: error.retryable, ...(error.details !== undefined ? { details: error.details } : {}) } })
+            return
+          }
           throw error
         }
         return

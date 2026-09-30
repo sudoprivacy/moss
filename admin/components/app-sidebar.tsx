@@ -90,7 +90,9 @@ const menuItems: NavItem[] = [
     requiredScope: 'admin:users',
   },
   {
-    title: 'Zone 管理',
+    // 普通用户可见（页面对其展示"可用 Zone"列表是设计行为，后端 binding
+    // 管理入口 403 兜底）——标题不带"管理"字样，避免误导。
+    title: 'Zone',
     url: '/zones',
     icon: Boxes,
   },

@@ -14,6 +14,7 @@ import { getSystemSettings } from '../systemSettings.js'
 import { NexusZoneClient } from '../nexus/nexusZoneClient.js'
 import { resolveZoneBindingConfig } from '../zones/binding/config.js'
 import { ZoneDelegationService } from '../zones/binding/delegationService.js'
+import { detachAllBindingsForOrg } from '../zones/binding/bindingRepository.js'
 import { ADMIN_ROLES, type AuthRole } from './roles.js'
 export type { AuthRole } from './roles.js'
 import {
@@ -387,6 +388,14 @@ export class AuthService {
       this.db,
       this.identityRepository,
       this.unifiedIdentity,
+      // 低-6：跨 org 移动的 membership revoke 钩子——identity 路径的
+      // moveUserOrganization 此前完全不触发 delegation revoke（安全兜底是
+      // nexus verify 复查，此处主动 revoke 只加速收敛）。
+      this.zoneDelegation
+        ? (fromOrgId: string, userId: string) => {
+            void this.zoneDelegation?.revokeForUser(fromOrgId, userId).catch(() => {})
+          }
+        : undefined,
     )
   }
 
@@ -1592,7 +1601,15 @@ export class AuthService {
       throw new AuthServiceError(404, 'Unknown organization')
     }
     try {
-      await this.db.deleteOrganization(org.id)
+      // Org delete 只撤销访问，不自动 deprovision Zone 数据（§8.7 验收）。
+      // 低-4/G-1：binding detach 与 org DELETE 同一事务——detach intent 走
+      // outbox（reconciler 异步 revoke grant，不再是不写 outbox 的裸 UPDATE
+      // 导致 grant 残留）；FK 失败（org 非空）时连 detach 一并回滚，非空
+      // org 的试探删除（常规 409 路径）不会误毁 binding。
+      await this.db.driver.transaction(async () => {
+        await detachAllBindingsForOrg(this.db.driver, { orgId: org.id, now: Date.now() })
+        await this.db.deleteOrganization(org.id)
+      })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (/FOREIGN KEY constraint failed/i.test(msg)) {
@@ -1603,13 +1620,8 @@ export class AuthService {
       }
       throw err
     }
-    // Org delete 只撤销访问，不自动 deprovision Zone 数据（§8.7 验收）：
-    // binding desired_state → detached（远端 detach 由 05B 管理面处理），
-    // 已发 delegation 主动 revoke（best-effort；nexus membership 复查兜底）。
-    await this.db.driver.run(
-      `UPDATE org_zone_bindings SET desired_state = 'detached', updated_at = ? WHERE org_id = ?`,
-      [Date.now(), org.id],
-    )
+    // 已发 delegation 主动 revoke（best-effort；nexus membership 复查兜底）——
+    // 网络调用保持在事务外。
     if (this.zoneDelegation) {
       void this.zoneDelegation.revokeForOrg(org.id).catch(() => {})
     }

@@ -178,7 +178,21 @@ void describe('organization identity service', () => {
     assert.equal(await authDb.getUserById(created.userId), null)
     assert.equal(repository.getNumericAlias('user', created.userId), null)
     assert.equal(repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
+    // N-1（低-4）：identity 路径删除 org 必须把 binding 翻为 detached 并写
+    // detach outbox（此前该路径不触碰 org_zone_bindings——僵尸 bound + grant 泄漏）。
+    const firstBinding = db.prepare(
+      `SELECT binding_id FROM org_zone_bindings WHERE org_id = ? LIMIT 1`,
+    ).get(first.organization.id) as { binding_id: string } | undefined
+    assert.ok(firstBinding, 'identity createOrganization writes the default binding intent')
     await service.deleteOrganization(first.organization.id, actor)
+    const afterDelete = db.prepare(
+      `SELECT desired_state FROM org_zone_bindings WHERE binding_id = ?`,
+    ).get(firstBinding.binding_id) as { desired_state: string }
+    assert.equal(afterDelete.desired_state, 'detached')
+    const detachOutbox = db.prepare(
+      `SELECT COUNT(*) AS n FROM zone_binding_outbox WHERE binding_id = ? AND action = 'detach' AND status = 'pending'`,
+    ).get(firstBinding.binding_id) as { n: number }
+    assert.equal(detachOutbox.n, 1, 'outbox-backed revoke path exists (低-4)')
     await service.deleteOrganization(second.organization.id, actor)
     assert.equal(await authDb.getOrganization(first.organization.id), null)
     assert.equal(repository.getOrganizationProfile(second.organization.id), null)

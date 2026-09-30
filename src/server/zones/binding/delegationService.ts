@@ -46,6 +46,25 @@ const DEFAULT_TTL_S = 900
 // nexus zone_security 的 delegation 验证硬编码 audience="nexus-api"
 // （verify_delegation 按 audience 精确匹配）——默认值必须与之对齐
 const DEFAULT_AUDIENCE = 'nexus-api'
+// M-7：audience 白名单——verify 按 audience 精确匹配，非 'nexus-api' 的
+// audience 签得出但永远验不过（等于白签 + registry 无界堆积）；端点校验
+// 收口于此。nexus 侧支持多 audience 时再扩展。
+const ALLOWED_AUDIENCES: readonly string[] = ['nexus-api']
+
+/**
+ * 进程级共享实例（低-7）：registry 的短 TTL 复用与 membership revoke 钩子
+ * 需要 runner 路径与 API 路径共用同一个实例——组装处（startStandaloneServer
+ * 创建 authService 后）set；测试/未 set 场景回退调用方自建。
+ */
+let sharedZoneDelegation: ZoneDelegationService | null = null
+
+export function setSharedZoneDelegation(service: ZoneDelegationService): void {
+  sharedZoneDelegation = service
+}
+
+export function getSharedZoneDelegation(): ZoneDelegationService | null {
+  return sharedZoneDelegation
+}
 
 export class ZoneDelegationService {
   private readonly driver: DbDriver
@@ -74,7 +93,21 @@ export class ZoneDelegationService {
     scopeRules?: Array<{ capability: string; resourcePrefixes: string[] }>
   }): Promise<IssuedDelegation> {
     const audience = input.audience ?? DEFAULT_AUDIENCE
+    if (!ALLOWED_AUDIENCES.includes(audience)) {
+      throw new ZoneDelegationError(
+        `audience '${audience}' is not allowed (allowed: ${ALLOWED_AUDIENCES.join(', ')})`,
+        'AUDIENCE_NOT_ALLOWED',
+      )
+    }
     const ttlS = input.ttlS ?? DEFAULT_TTL_S
+    // M-7：签发入口惰性清扫过期条目——不同 key（换 audience/ttl/grant）的
+    // 过期条目此前永久驻留（唯一删除路径是 membership/org revoke）。活条目
+    // 由 TTL（≤900s）+ 本清扫自然界定，不设硬上限（上限值无依据，且驱逐
+    // 活条目会丢失 revoke 覆盖）。
+    const now = Date.now()
+    for (const [key, value] of this.registry) {
+      if (Date.parse(value.expiresAt) <= now) this.registry.delete(key)
+    }
 
     const user = await this.driver.get(
       `SELECT id, org_id, role, status, membership_revision FROM users WHERE id = ? AND org_id = ? LIMIT 1`,
@@ -110,7 +143,9 @@ export class ZoneDelegationService {
 
     const purpose = input.purpose ?? 'data-access'
     const scopeRules = input.scopeRules ?? []
-    const cacheKey = `${input.orgId}:${input.userId}:${audience}:${JSON.stringify([
+    // M-8：cacheKey 含 ttlS——先 ttl=3600 再 ttl=60 命中缓存返回 3600s 的
+    // delegation，请求语义与返回物不符。
+    const cacheKey = `${input.orgId}:${input.userId}:${audience}:${ttlS}:${JSON.stringify([
       String(binding.nexus_grant_id),
       purpose,
       scopeRules,
@@ -158,7 +193,11 @@ export class ZoneDelegationService {
    * 的 membership 复查——这里失败（网络等）不影响安全语义，只影响收敛速度。
    */
   async revokeForUser(orgId: string, userId: string): Promise<void> {
-    await this.revokeMatching((key) => key.startsWith(`${orgId}:${userId}:`))
+    // 低-6：匹配 key 的第二段（userId）——org 前缀匹配在"用户已被移动过
+    // org 后的混合更新"场景必落空（registry 里的条目挂在旧 org 前缀下）。
+    // orgId 仅保留供调用方日志语义。
+    void orgId
+    await this.revokeMatching((key) => key.split(':')[1] === userId)
   }
 
   /** Org detach / binding 失效钩子。 */

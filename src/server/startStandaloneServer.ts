@@ -14,7 +14,8 @@ import { NexusZoneClient } from './nexus/nexusZoneClient.js'
 import { resolveZoneBindingConfig } from './zones/binding/config.js'
 import { ZoneBindingReconciler } from './zones/binding/bindingService.js'
 import { ZoneManagementService } from './zones/binding/managementService.js'
-import { reconcilePendingNexusSessions } from './zones/runtime/sessionZoneBridge.js'
+import { endZoneRunsForSettledAttempts, reconcilePendingNexusSessions } from './zones/runtime/sessionZoneBridge.js'
+import { setSharedZoneDelegation } from './zones/binding/delegationService.js'
 import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
@@ -551,6 +552,11 @@ async function finishStandaloneServerStartup(
   // the specified offline behavior.
   const zoneBindingConfig = resolveZoneBindingConfig()
   if (zoneBindingConfig.zoneBindingEnabled) {
+    // 低-7：runner 路径（runnerZoneContext）与 API 路径共享同一个 delegation
+    // 实例——registry 复用与 membership revoke 钩子对 runner 生效。
+    if (authService.zoneDelegation) {
+      setSharedZoneDelegation(authService.zoneDelegation)
+    }
     const zoneBindingReconciler = new ZoneBindingReconciler({
       driver: store.driver,
       client: new NexusZoneClient(zoneBindingConfig),
@@ -565,11 +571,25 @@ async function finishStandaloneServerStartup(
       config: zoneBindingConfig,
     })
     let zoneObservedTickCount = 0
+    // 低-15⑤：补写轮防重入（上一轮黑洞超时时 pass 不堆叠）。
+    let sessionsBackfillInFlight = false
     const zoneBindingTimer = setInterval(() => {
       // P1a（§8.10 R5.1）：Nexus session 权威写入补写（离线期创建的 session）。
-      void reconcilePendingNexusSessions(store.driver, new NexusZoneClient(zoneBindingConfig))
-        .then((written) => {
-          if (written > 0) console.log(`[ZoneBinding] nexus sessions backfilled: ${written}`)
+      if (!sessionsBackfillInFlight) {
+        sessionsBackfillInFlight = true
+        void reconcilePendingNexusSessions(store.driver, new NexusZoneClient(zoneBindingConfig))
+          .then((written) => {
+            if (written > 0) console.log(`[ZoneBinding] nexus sessions backfilled: ${written}`)
+          })
+          .catch(() => { /* 下一轮重试 */ })
+          .finally(() => { sessionsBackfillInFlight = false })
+      }
+      // M-5：run 生命周期对账——终态 attempt 的 Nexus run 补发 cancel
+      // （正常结束/idle/terminate/drain/崩溃残留/幽灵 run 全路径的唯一
+      // 完备收敛；失败下轮重试）。
+      void endZoneRunsForSettledAttempts(store.driver, new NexusZoneClient(zoneBindingConfig), 20)
+        .then((ended) => {
+          if (ended > 0) console.log(`[ZoneBinding] ended settled nexus runs: ${ended}`)
         })
         .catch(() => { /* 下一轮重试 */ })
       void zoneBindingReconciler.reconcileOnce().then(

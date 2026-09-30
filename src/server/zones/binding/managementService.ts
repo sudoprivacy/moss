@@ -20,7 +20,13 @@ import { ADMIN_ROLES } from '../../auth/roles.js'
 import { isUniqueViolation, type DbDriver } from '../../db/driver.js'
 import type { ZoneBindingConfig } from './config.js'
 import { NexusZoneApiError, NexusZoneUnknownError, NexusZoneClient, type ZoneOperationRef } from '../../nexus/nexusZoneClient.js'
-import { insertDetachIntent, insertManagedBindingIntent, listBindingsByOrg } from './bindingRepository.js'
+import {
+  demoteExistingDefaultBinding,
+  insertDetachIntent,
+  insertManagedBindingIntent,
+  listBindingsByOrg,
+  reviveBindingIntent,
+} from './bindingRepository.js'
 import { rowToOrgZoneBinding } from './bindingWire.js'
 import { describeRefusal, validateZoneId } from '@sudo/contracts/zone-id'
 
@@ -74,7 +80,7 @@ export interface ZoneLifecycleConfirmed {
   confirmed: true
 }
 
-/** observed 族列的落库值（毫秒时间戳 + 各快照字段）+ 对账得出的 sync_status。 */
+/** observed 族列的落库值（毫秒时间戳 + 各快照字段）+ 对账得出的 sync_status（null = 不写 sync_status，仅更新展示列）。 */
 interface ObservedSnapshot {
   observed_display_name: string | null
   observed_zone_status: string | null
@@ -82,7 +88,7 @@ interface ObservedSnapshot {
   observed_grant_status: string | null
   observed_grant_source: string | null
   grant_expires_at_ms: number | null
-  sync_status: string
+  sync_status: string | null
 }
 
 function toView(row: Record<string, unknown>): BindingView {
@@ -114,6 +120,36 @@ function toView(row: Record<string, unknown>): BindingView {
     grant_expires_at:
       expiresRaw == null || expiresRaw === '' ? null : new Date(Number(expiresRaw)).toISOString(),
     observed_at: row.observed_at == null ? null : Number(row.observed_at),
+  }
+}
+
+/** 低-11：wire 解析失败行的占位视图——binding_id/org/zone 可见，其余归 unknown，管理列表不整批失败。 */
+function placeholderView(row: Record<string, unknown>): BindingView {
+  const str = (key: string): string => row[key] == null ? '' : String(row[key])
+  const nullable = (key: string): string | null => row[key] == null ? null : String(row[key])
+  const ts = (key: string): number => Number(row[key] ?? 0)
+  return {
+    binding_id: str('binding_id'),
+    org_id: str('org_id'),
+    nexus_deployment_id: str('nexus_deployment_id'),
+    zone_id: str('zone_id'),
+    purpose: str('purpose'),
+    is_default: Number(row.is_default ?? 0) !== 0,
+    desired_state: str('desired_state') || 'unknown',
+    sync_status: 'unknown',
+    generation: Number(row.generation ?? 0),
+    nexus_grant_id: nullable('nexus_grant_id'),
+    nexus_operation_id: nullable('nexus_operation_id'),
+    last_error_code: nullable('last_error_code'),
+    created_at: ts('created_at'),
+    updated_at: ts('updated_at'),
+    observed_display_name: null,
+    observed_zone_status: null,
+    observed_revision: null,
+    observed_grant_status: null,
+    observed_grant_source: null,
+    grant_expires_at: null,
+    observed_at: null,
   }
 }
 
@@ -158,9 +194,20 @@ export class ZoneManagementService {
     if (!ADMIN_ROLES.has(viewer.role)) throw new ZoneManagementError('binding management requires org admin', 'FORBIDDEN', 403)
     if (viewer.role === 'super_admin') {
       const rows = await this.driver.all(
-        `SELECT * FROM org_zone_bindings ORDER BY created_at, binding_id`,
+        `SELECT * FROM org_zone_bindings WHERE nexus_deployment_id = ? ORDER BY created_at, binding_id`,
+        [this.config.nexusDeploymentId],
       )
-      return rows.map(toView)
+      // 低-11：单行畸形数据（wire safeParse 失败）降级为占位行（binding_id
+      // 可见 + unknown），不毒化整张管理列表。
+      return rows.map((row) => {
+        try {
+          return toView(row)
+        } catch (error) {
+          const id = String((row as Record<string, unknown>).binding_id)
+          console.warn(`[ZoneBinding] malformed binding row ${id}: ${error instanceof Error ? error.message : String(error)}`)
+          return placeholderView(row)
+        }
+      })
     }
     return (await listBindingsByOrg(this.driver, viewer.orgId)).map((row) =>
       toView(row as unknown as Record<string, unknown>),
@@ -171,36 +218,42 @@ export class ZoneManagementService {
    * 对账核心：实时查 Nexus zone+grant，得出 observed 快照与 sync_status。
    * HTTP refreshBinding 与后台 reconcileObservedSnapshot 共用（B-3——
    * 逻辑单点，两个入口不再各持一份判定）。
+   *
+   * 判定原则（M-2/M-3/低-13 重写）：
+   *  - 对账只证实、不推进本地状态机：grant 引用尚未落库（provision 在途或
+   *    失败）的 bound 行**不写 sync_status**——杜绝把"本地未收敛"洗白成
+   *    active（在途/失败的区分是本地 outbox 状态机的职责）；
+   *  - detached 只看 grant：detach 不触碰 Zone 数据是设计常态（§8.8），
+   *    zone 保持 active 不构成漂移；grant 不存在（引用未落库 / 明确 404 /
+   *    status 非 active）即已收敛；
+   *  - 网络类失败（非 404 的任何错误）→ unknown：效果未知，不得当"不存
+   *    在"判定（否则 Nexus 不可达期间 detached 行会被误判已收敛）。
    */
   private async _refreshObservedCore(
     client: NexusZoneClient,
     view: Pick<BindingView, 'zone_id' | 'nexus_grant_id' | 'desired_state'>,
   ): Promise<ObservedSnapshot> {
+    // 分別 try：grant 查询失败不连坐 zone 快照的读取；getZone 404 不短路
+    // detached 判定（grant 是其唯一依据）。
+    let zone: Awaited<ReturnType<NexusZoneClient['getZone']>> | null = null
+    let zoneError: unknown = null
     try {
-      const zone = await client.getZone(view.zone_id)
-      const grant = view.nexus_grant_id
-        ? await client.getGrant(view.zone_id, view.nexus_grant_id)
-        : null
-      const syncStatus =
-        view.desired_state === 'detached'
-          ? zone.status === 'active' || grant?.status === 'active'
-            ? 'sync_failed' // 期望已解绑但远端仍活跃
-            : 'detached'
-          : zone.status === 'active' && (!view.nexus_grant_id || grant?.status === 'active')
-            ? 'active'
-            : zone.status === 'suspended'
-              ? 'syncing' // Zone 挂起非 binding 故障，保留中间态供 UI 区分
-              : 'syncing'
-      return {
-        observed_display_name: zone.display_name,
-        observed_zone_status: zone.status,
-        observed_revision: zone.revision,
-        observed_grant_status: grant?.status ?? null,
-        observed_grant_source: grant?.sourceType ?? null,
-        grant_expires_at_ms: grant?.expires_at ? Date.parse(grant.expires_at) : null,
-        sync_status: syncStatus,
-      }
+      zone = await client.getZone(view.zone_id)
     } catch (error) {
+      zoneError = error
+    }
+    let grant: Awaited<ReturnType<NexusZoneClient['getGrant']>> | null = null
+    let grantError: unknown = null
+    if (view.nexus_grant_id) {
+      try {
+        grant = await client.getGrant(view.zone_id, view.nexus_grant_id)
+      } catch (error) {
+        grantError = error
+      }
+    }
+    const zoneNotFound = zoneError !== null && zoneError instanceof NexusZoneApiError && zoneError.status === 404
+    const grantNotFound = grantError !== null && grantError instanceof NexusZoneApiError && grantError.status === 404
+    if ((zoneError !== null && !zoneNotFound) || (grantError !== null && !grantNotFound)) {
       return {
         observed_display_name: null,
         observed_zone_status: null,
@@ -208,15 +261,62 @@ export class ZoneManagementService {
         observed_grant_status: null,
         observed_grant_source: null,
         grant_expires_at_ms: null,
-        sync_status:
-          error instanceof NexusZoneApiError && error.status === 404 ? 'sync_failed' : 'unknown',
+        sync_status: 'unknown',
       }
+    }
+    const grantGone =
+      !view.nexus_grant_id
+      || grantNotFound
+      || (grant !== null && grant.status !== 'active')
+    const zoneView = zone!
+    const syncStatus: string | null =
+      view.desired_state === 'detached'
+        ? grantGone ? 'detached' : 'sync_failed'
+        : zoneNotFound
+          ? 'sync_failed'
+          : zoneView.status === 'suspended'
+            ? 'syncing' // zone 挂起非 binding 故障（低-13：显式分支）；挂起态由 observed_zone_status 单独展示
+            : zoneView.status === 'active' && view.nexus_grant_id != null && grant?.status === 'active'
+              ? 'active'
+              : view.nexus_grant_id != null
+                ? 'sync_failed' // grant 引用在而远端非 active（404/revoked）——binding 授权异常，不得落 'syncing' 掩盖
+                : null // grant 引用未落库：对账不写 sync_status（洗白根除）
+    return {
+      observed_display_name: zoneView.display_name,
+      observed_zone_status: zoneView.status,
+      observed_revision: zoneView.revision,
+      observed_grant_status: grant?.status ?? null,
+      observed_grant_source: grant?.sourceType ?? null,
+      grant_expires_at_ms: grant?.expires_at ? Date.parse(grant.expires_at) : null,
+      sync_status: syncStatus,
     }
   }
 
-  /** 对账成功时回写全部 observed 持久化列 + sync_status（B-3）。 */
+  /** 对账成功时回写 observed 持久化列（sync_status 为 null 时只写展示列，B-3）。 */
   private async _writeObserved(bindingId: string, snapshot: ObservedSnapshot): Promise<void> {
     const now = Date.now()
+    if (snapshot.sync_status === null) {
+      await this.driver.run(
+        `UPDATE org_zone_bindings
+         SET updated_at = ?,
+             observed_display_name = ?, observed_zone_status = ?, observed_revision = ?,
+             observed_grant_status = ?, observed_grant_source = ?, grant_expires_at = ?,
+             observed_at = ?
+         WHERE binding_id = ?`,
+        [
+          now,
+          snapshot.observed_display_name,
+          snapshot.observed_zone_status,
+          snapshot.observed_revision,
+          snapshot.observed_grant_status,
+          snapshot.observed_grant_source,
+          snapshot.grant_expires_at_ms,
+          now,
+          bindingId,
+        ],
+      )
+      return
+    }
     await this.driver.run(
       `UPDATE org_zone_bindings
        SET sync_status = ?, updated_at = ?,
@@ -276,10 +376,17 @@ export class ZoneManagementService {
     )
     let written = 0
     for (const row of rows) {
-      const view = toView(row as Record<string, unknown>)
-      const snapshot = await this._refreshObservedCore(client, view)
-      await this._writeObserved(view.binding_id, snapshot)
-      written += 1
+      // 低-11：行级失败不中断整批（类注释承诺的行为）——坏行记日志继续。
+      try {
+        const view = toView(row as Record<string, unknown>)
+        const snapshot = await this._refreshObservedCore(client, view)
+        await this._writeObserved(view.binding_id, snapshot)
+        written += 1
+      } catch (error) {
+        process.stderr.write(
+          `[ZoneBinding] observed reconcile row failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        )
+      }
     }
     return written
   }
@@ -301,7 +408,12 @@ export class ZoneManagementService {
     if (String(row.desired_state) === 'detached') {
       throw new ZoneManagementError('binding already detached', 'ALREADY_DETACHED', 409)
     }
-    const { generation } = await insertDetachIntent(this.driver, { bindingId, now: Date.now() })
+    const detach = await insertDetachIntent(this.driver, { bindingId, now: Date.now() })
+    if (!detach.ok) {
+      // 并发双击的败者（条件 UPDATE 落空）：明确 409 而非裸 500（低-2）。
+      throw new ZoneManagementError('binding already detached', 'ALREADY_DETACHED', 409)
+    }
+    const { generation } = detach
     // P1a (§8.10 R5.7)：解绑即隔离——该 zone 上 active 的 runner generation
     // 在 Nexus 打成 revocation_pending（不再获得新资源）。
     if (this.client) {
@@ -327,7 +439,10 @@ export class ZoneManagementService {
    * 添加 binding（super admin）：一个 Org 多 Zone / 一个 Zone 多 Org（§8.7
    * 验收）。zone_id 由管理员指定（不做自动候选）；同 provision 收敛路径。
    * 入口校验：org 存在性 + zone_id 契约格式（保留字归 Nexus daemon 拒绝）；
-   * 重复组合按 UNIQUE 约束捕获转 409（竞态安全，非预检）。
+   * 重复组合按 UNIQUE 约束捕获后分流（detached 历史行 → 复活重绑，H-2）。
+   * is_default=true 时事务内转移既有 default（partial unique 由 demote 清出
+   * 空间）；UNIQUE 冲突让事务回滚后，诊断查询在事务外执行（PG 事务无
+   * SAVEPOINT，冲突后事务即 aborted，事务内再查询会 25P02）。
    */
   async addBinding(input: {
     orgId: string
@@ -342,33 +457,69 @@ export class ZoneManagementService {
     if (!org) throw new ZoneManagementError(`组织不存在：${input.orgId}`, 'ORG_NOT_FOUND', 404)
     const refusal = validateZoneId(input.zoneId)
     if (refusal) throw new ZoneManagementError(`zone_id 不合法：${describeRefusal(refusal)}`, 'INVALID_ZONE_ID', 400)
+    const isDefault = input.isDefault ?? false
     let bindingId: string
     try {
-      ;({ bindingId } = await insertManagedBindingIntent(this.driver, {
-        orgId: input.orgId,
-        nexusDeploymentId: this.config.nexusDeploymentId,
-        zoneId: input.zoneId,
-        purpose: input.purpose,
-        isDefault: input.isDefault ?? false,
-        now: Date.now(),
-      }))
+      // catch 包 transaction（而非反之）：冲突路径的事务整体回滚后再诊断。
+      bindingId = await this.driver.transaction(async () => {
+        if (isDefault) {
+          await demoteExistingDefaultBinding(this.driver, {
+            orgId: input.orgId,
+            nexusDeploymentId: this.config.nexusDeploymentId,
+            now: Date.now(),
+          })
+        }
+        const { bindingId } = await insertManagedBindingIntent(this.driver, {
+          orgId: input.orgId,
+          nexusDeploymentId: this.config.nexusDeploymentId,
+          zoneId: input.zoneId,
+          purpose: input.purpose,
+          isDefault,
+          now: Date.now(),
+        })
+        return bindingId
+      })
     } catch (err) {
-      // 表级 4 列 UNIQUE 是本入口唯一可能冲突源（partial unique 仅约束
-      // is_default=1 的行，而本入口 isDefault 恒为 false）。
       if (isUniqueViolation(err)) {
         // 冲突行可能是已解绑（detached）的历史行：UNIQUE 不含 desired_state，
-        // detach 只 UPDATE 不删行——文案必须与事实一致。
+        // detach 只 UPDATE 不删行——复活该行（H-2 恢复路径），不再拒绝。
         const existing = await this.driver.get(
-          `SELECT desired_state FROM org_zone_bindings
+          `SELECT binding_id, desired_state FROM org_zone_bindings
            WHERE org_id = ? AND nexus_deployment_id = ? AND zone_id = ? AND purpose = ? LIMIT 1`,
           [input.orgId, this.config.nexusDeploymentId, input.zoneId, input.purpose],
         )
         if (existing && String(existing.desired_state) === 'detached') {
-          throw new ZoneManagementError('该组合存在已解绑的历史绑定行，需先处理该历史行（当前 schema 不支持同组合重绑）', 'BINDING_ALREADY_EXISTS', 409)
+          const revived = await reviveBindingIntent(this.driver, {
+            bindingId: String(existing.binding_id),
+            isDefault,
+            now: Date.now(),
+          })
+          if (revived.ok) {
+            bindingId = revived.bindingId
+          } else if (revived.reason === 'outbox-in-flight') {
+            throw new ZoneManagementError('该组合存在正在收敛中的解绑操作，请稍后重试创建', 'DETACH_STILL_CONVERGING', 409)
+          } else {
+            throw new ZoneManagementError('创建与其他管理操作并发冲突，请重试', 'BINDING_REVIVE_RACE', 409)
+          }
+        } else if (existing) {
+          throw new ZoneManagementError('该绑定已存在（同组织 + Zone + 用途），无需重复创建', 'BINDING_ALREADY_EXISTS', 409)
+        } else {
+          // 4 列组合无行 → partial unique 场景（并发双 is_default=true 的窄
+          // 窗口）：按 org 的生效 default 行给出准确文案。
+          const defaultRow = await this.driver.get(
+            `SELECT binding_id FROM org_zone_bindings
+             WHERE org_id = ? AND nexus_deployment_id = ? AND is_default = 1 AND desired_state = 'bound'
+             LIMIT 1`,
+            [input.orgId, this.config.nexusDeploymentId],
+          )
+          if (defaultRow) {
+            throw new ZoneManagementError('该组织已有生效的默认绑定，请先处理现有默认绑定', 'DEFAULT_ALREADY_EXISTS', 409)
+          }
+          throw err
         }
-        throw new ZoneManagementError('该绑定已存在（同组织 + Zone + 用途），无需重复创建', 'BINDING_ALREADY_EXISTS', 409)
+      } else {
+        throw err
       }
-      throw err
     }
     const row = await this.driver.get(
       `SELECT * FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
@@ -382,8 +533,16 @@ export class ZoneManagementService {
     zoneId: string,
     action: 'suspend' | 'resume',
   ): Promise<ZoneOperationRef | ZoneLifecycleConfirmed> {
+    // M-10/Z-4：幂等键用秒级窗——同窗双击/网络层重发复用同一 key（nexusd
+    // 同 key 返回同一 operation，不产生双操作）；窗取秒级而非分钟：分钟窗
+    // 对同分钟内 suspend→resume→suspend 的反向序列会错误短路（第三次复用
+    // 第一次的 key 拿回旧 succeeded operation，新操作不执行），秒级窗下该
+    // 序列需要两次 Dialog 确认在 1 秒内完成，管理面不可达。已知权衡（无
+    // 正确性影响）：同窗内第一次操作若得到确定性 failed operation，nexusd
+    // 按 key 缓存，重试将拿到同一 failed 结果，需等 1 秒跨窗。
+    const idempotencyWindow = Math.floor(Date.now() / 1000)
     try {
-      return await this.requireClient().zoneLifecycle(zoneId, action, `moss-admin:${zoneId}:${action}:${Date.now()}:${randomUUID()}`)
+      return await this.requireClient().zoneLifecycle(zoneId, action, `moss-admin:${zoneId}:${action}:${idempotencyWindow}`)
     } catch (error) {
       // zone 不存在（本地环境收敛前的高频路径）→ 明确中文提示
       if (error instanceof NexusZoneApiError && error.status === 404) {
@@ -434,9 +593,11 @@ export class ZoneManagementService {
       )
     }
     try {
+      // M-10/Z-4：同 zoneLifecycle 的秒级窗幂等键（同窗双击不产生双删除
+      // operation；跨窗重复由 Nexus 侧 zone-404/终态拒绝兜底）。
       return await this.requireClient().deprovisionZone(
         zoneId,
-        `moss-admin:deprovision:${zoneId}:${randomUUID()}`,
+        `moss-admin:deprovision:${zoneId}:${Math.floor(Date.now() / 1000)}`,
       )
     } catch (error) {
       return this.mapNexusZoneError(error)

@@ -1815,38 +1815,45 @@ export class RuntimeService {
         const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
         const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
         const zoneConfig = resolveZoneBindingConfig()
-        let executionZoneId: string = homeZoneId
-        if (zoneConfig.zoneBindingEnabled) {
-          const client = new NexusZoneClient(zoneConfig)
-          p1aRunnerZoneContext = await runnerZoneContext(
-            this.store.driver,
-            client,
-            {
-              sessionId: session.sessionId,
-              runtimePid: `moss-${attempt.attemptId}`,
-              config: zoneConfig,
-            },
-          )
-          if (!p1aRunnerZoneContext) {
-            throw new Error('zoned session has no usable runner delegation')
-          }
-          const reconciled = await reconcileRunnerGeneration(
-            client,
-            {
-              attemptId: attempt.attemptId,
-              sessionId: session.sessionId,
-              homeZoneId,
-              delegationRef: p1aRunnerZoneContext.NEXUS_DELEGATION_REF,
-            },
-          )
-          if (!reconciled) {
-            throw new Error('Nexus runtime descriptor reconciliation failed')
-          }
-          executionZoneId = reconciled.executionZoneId
+        if (!zoneConfig.zoneBindingEnabled) {
+          // M-6：存量 zoned 会话 + 配置回退（MOSS_NEXUS_V2_BASE_URL 被移除）
+          // ——显式 fail-closed，与本段注释"zoned runner 始终 fail closed"的
+          // 承诺一致；不再静默以无 NEXUS_* env 启动本地 runner 且
+          // execution_zone_id 照样落库（审计列失真）。
+          throw new Error('zoned session but zone binding is disabled (MOSS_NEXUS_V2_BASE_URL unset)')
         }
+        const client = new NexusZoneClient(zoneConfig)
+        p1aRunnerZoneContext = await runnerZoneContext(
+          this.store.driver,
+          client,
+          {
+            sessionId: session.sessionId,
+            runtimePid: `moss-${attempt.attemptId}`,
+            config: zoneConfig,
+          },
+        )
+        if (!p1aRunnerZoneContext) {
+          throw new Error('zoned session has no usable runner delegation')
+        }
+        const reconciled = await reconcileRunnerGeneration(
+          client,
+          {
+            attemptId: attempt.attemptId,
+            sessionId: session.sessionId,
+            homeZoneId,
+            delegationRef: p1aRunnerZoneContext.NEXUS_DELEGATION_REF,
+          },
+        )
+        if (!reconciled.ok) {
+          // 低-15④：reconcile 失败携带 Nexus 错误码（不再吞根因）；start 已
+          // 成功的场景 bridge 已 best-effort 取消该 run（幽灵 run 不产生）。
+          throw new Error(`Nexus runtime descriptor reconciliation failed (${reconciled.errorCode})`)
+        }
+        // M-6：execution_zone_id 仅在 context/reconcile 确立后落库——审计列
+        // 与 runner 实况一致。
         await this.store.driver.run(
           `UPDATE session_attempts SET execution_zone_id = ? WHERE attempt_id = ?`,
-          [executionZoneId, attempt.attemptId],
+          [reconciled.executionZoneId, attempt.attemptId],
         )
       }
     } catch (zoneError) {

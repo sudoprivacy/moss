@@ -214,6 +214,10 @@ export class DirectConnectStore {
         -- P1a (§8.10 R5.2)：runner generation 的 execution zone。本表仍是
         -- runtime generation（R5.9）；真正 Attempt.execution_zone_id 属 P1b。
         execution_zone_id TEXT,
+        -- M-5：run 生命周期对账标记——终态 attempt 的 Nexus run 已发 cancel
+        -- （后台 end-run 收敛，覆盖正常结束/idle kill/terminate/drain/崩溃
+        -- 残留/幽灵 run 全路径）。
+        nexus_run_ended_at INTEGER,
         started_at INTEGER NOT NULL,
         last_heartbeat_at INTEGER,
         stopped_at INTEGER,
@@ -357,6 +361,11 @@ export class DirectConnectStore {
     if (!attemptsColumns.some(col => col.name === 'execution_zone_id')) {
       this.db.exec(`ALTER TABLE session_attempts ADD COLUMN execution_zone_id TEXT`)
       console.log('[DB] Added execution_zone_id column to session_attempts')
+    }
+    // M-5：老库补 run 生命周期对账标记（表内注释见 DDL）。
+    if (!attemptsColumns.some(col => col.name === 'nexus_run_ended_at')) {
+      this.db.exec(`ALTER TABLE session_attempts ADD COLUMN nexus_run_ended_at INTEGER`)
+      console.log('[DB] Added nexus_run_ended_at column to session_attempts')
     }
 
     // Migration: add source and channel_chat_id columns if they don't exist

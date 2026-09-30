@@ -11,6 +11,7 @@ import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 import { resolveZoneBindingConfig, type ZoneBindingConfig } from '../zones/binding/config.js'
 import { insertDefaultBindingIntent } from '../zones/binding/bindingRepository.js'
+import { tryDefaultZoneIdCandidate } from '../zones/binding/zoneIdPolicy.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -840,17 +841,24 @@ export class AuthCenterDb {
     name: string,
     createdAt: number,
     extOrgId: string | null = null,
+    options: { skipZoneBinding?: boolean } = {},
   ): Promise<void> {
     const now = Date.now()
     await this.driver.transaction(async () => {
       await this.driver.run(`
         INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
       `, [id, name, extOrgId, createdAt])
-      await insertDefaultBindingIntent(this.driver, {
-        orgId: id,
-        nexusDeploymentId: this.#zoneBindingConfig.nexusDeploymentId,
-        now,
-      })
+      // 低-15②：skipZoneBinding 仅供存量迁移（migrateFromJson）使用——org id
+      // 含 zone-id 非法字符的历史数据跳过 binding 写入（org 行照插，binding
+      // 由 backfill 补），不再让 defaultZoneIdCandidate 的 throw 连 org INSERT
+      // 一并回滚。其余 6 个入口不传该参数，行为不变。
+      if (!options.skipZoneBinding) {
+        await insertDefaultBindingIntent(this.driver, {
+          orgId: id,
+          nexusDeploymentId: this.#zoneBindingConfig.nexusDeploymentId,
+          now,
+        })
+      }
     })
   }
 
@@ -1617,12 +1625,6 @@ export class AuthCenterDb {
     `, [now(), id])
   }
 
-  async updateUserOrg(id: string, orgId: string): Promise<void> {
-    await this.driver.run(`
-      UPDATE users SET org_id = ? WHERE id = ?
-    `, [orgId, id])
-  }
-
   async setUserTokenLimit(id: string, tokenLimit: number | null): Promise<void> {
     await this.driver.run(`
       UPDATE users SET token_limit = ? WHERE id = ?
@@ -2012,8 +2014,15 @@ export class AuthCenterDb {
   async migrateFromJson(jsonStore: AuthCenterStore): Promise<void> {
     await this.driver.transaction(async () => {
       // Migrate organizations
+      // 低-15②：org id 含 zone-id 非法字符的历史数据（非 UUID）预判跳过
+      // binding 写入（org 行照插，binding 由 backfill 补）——不再回滚整个
+      // 迁移（与 backfill 的 invalid 语义对齐）。
       for (const org of jsonStore.organizations) {
-        await this.createOrganization(org.id, org.name, org.createdAt)
+        const zoneIdCandidate = tryDefaultZoneIdCandidate(org.id)
+        if (!zoneIdCandidate.ok) {
+          console.warn(`[migrateFromJson] org ${org.id} 的 zone-id 候选非法（${zoneIdCandidate.refusal.kind}），跳过 default binding 写入——由 zone-backfill 补齐`)
+        }
+        await this.createOrganization(org.id, org.name, org.createdAt, null, { skipZoneBinding: !zoneIdCandidate.ok })
       }
 
       // Migrate departments

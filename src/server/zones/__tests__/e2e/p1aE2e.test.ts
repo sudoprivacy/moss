@@ -25,7 +25,7 @@ import {
 } from '../../runtime/sessionZoneBridge.js'
 import { NexusZoneClient } from '../../../nexus/nexusZoneClient.js'
 import { resolveZoneBindingConfig, type ZoneBindingConfig } from '../../binding/config.js'
-import { startNexus, sleep, type NexusProcess } from './p0Harness.js'
+import { startNexus, sleep, zonesE2eEnvReady, type NexusProcess } from './p0Harness.js'
 
 const tmp = mkdtempSync(join(tmpdir(), 'moss-p1a-e2e-'))
 mkdirSync(join(tmp, 'moss'), { recursive: true })
@@ -38,78 +38,82 @@ let authDb: AuthCenterDb
 // MOSS_NEXUS_DEPLOYMENT_ID → 'local'），binding 行与解析必须同源。
 let config: ZoneBindingConfig
 
-before(async () => {
-  nexus = await startNexus(join(tmp, 'nexus'))
-  config = {
-    ...resolveZoneBindingConfig(),
-    zoneBindingEnabled: true,
-    nexusDeploymentId: 'local',
-    nexusV2BaseUrl: nexus.baseUrl,
-    nexusV2ServiceToken: nexus.apiKey,
-  }
-  client = new NexusZoneClient({ nexusV2BaseUrl: nexus.baseUrl, nexusV2ServiceToken: nexus.apiKey, nexusV2TimeoutMs: 15_000 })
-  // moss 主库 + auth 库（同目录结构；直接建全新实例——桥只依赖表结构）
-  raw = new DatabaseSync(join(tmp, 'moss', 'direct-connect.db'))
-  driver = new SqliteDriver(raw)
-  // 建表：借用 moss 的 schema 初始化——AuthCenterDb 自带；主库 sessions 等表
-  // 通过 DirectConnectStore 构造太重，这里按需建最小表集（桥只读写这几张表，
-  // 与 db.ts 的 DDL 逐列一致——expand-only 列含于其中）。
-  raw.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      session_id TEXT PRIMARY KEY,
-      transcript_session_id TEXT NOT NULL,
-      org_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      scopes_json TEXT NOT NULL,
-      cwd TEXT NOT NULL,
-      runtime_type TEXT NOT NULL,
-      docker_image TEXT, docker_mode TEXT, config_dir TEXT, container_name TEXT,
-      status TEXT NOT NULL,
-      desired_state TEXT NOT NULL,
-      current_attempt_id TEXT,
-      transcript_path TEXT NOT NULL,
-      title TEXT, summary TEXT, assistant_name TEXT, source TEXT, channel_chat_id TEXT, client_metadata TEXT,
-      created_at INTEGER NOT NULL,
-      last_active_at INTEGER NOT NULL,
-      ended_at INTEGER,
-      deleted_at INTEGER,
-      home_zone_id TEXT,
-      home_zone_observed_at TEXT,
-      home_zone_observed_revision TEXT,
-      home_zone_sync_error TEXT
-    );
-    CREATE TABLE IF NOT EXISTS session_attempts (
-      attempt_id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL REFERENCES sessions(session_id),
-      generation INTEGER NOT NULL,
-      backend_type TEXT NOT NULL,
-      runtime_state TEXT NOT NULL,
-      server_instance_id TEXT,
-      runner_pid INTEGER,
-      container_name TEXT, attach_path TEXT,
-      resume_transcript_session_id TEXT NOT NULL,
-      execution_zone_id TEXT,
-      started_at INTEGER NOT NULL,
-      last_heartbeat_at INTEGER,
-      stopped_at INTEGER, exit_code INTEGER, exit_signal TEXT, stop_reason TEXT, error_text TEXT,
-      UNIQUE (session_id, generation)
-    );
-  `)
-  // 生产同构：AuthCenterDb 与主库共享同一 sqlite handle（shared-store 形态），
-  // 桥函数跨 sessions/users/org_zone_bindings 的查询在同一个 driver 上成立。
-  authDb = new AuthCenterDb(raw, join(tmp, 'moss', 'direct-connect.db'))
-})
+// H-1：环境自检放在 describe 的 { skip } 选项上——钩子随用例一起跳过，
+// CI / 无 nexus checkout 的机器整套 skip 而非 before() 里 spawn 失败。
+const e2eEnv = zonesE2eEnvReady()
 
-after(async () => {
-  raw.close()
-  await nexus.stop()
-})
-
-describe('P1a session zone bridge (real nexus)', () => {
+describe('P1a session zone bridge (real nexus)', { skip: e2eEnv.ok ? false : `zones E2E environment incomplete: ${e2eEnv.missing.join('; ')}` }, () => {
   const orgId = 'p1aorg-0000-4000-8000-000000000001'
   const otherOrg = 'p1aorg-0000-4000-8000-000000000002'
   let homeZone = ''
+
+  before(async () => {
+    nexus = await startNexus(join(tmp, 'nexus'))
+    config = {
+      ...resolveZoneBindingConfig(),
+      zoneBindingEnabled: true,
+      nexusDeploymentId: 'local',
+      nexusV2BaseUrl: nexus.baseUrl,
+      nexusV2ServiceToken: nexus.apiKey,
+    }
+    client = new NexusZoneClient({ nexusV2BaseUrl: nexus.baseUrl, nexusV2ServiceToken: nexus.apiKey, nexusV2TimeoutMs: 15_000 })
+    // moss 主库 + auth 库（同目录结构；直接建全新实例——桥只依赖表结构）
+    raw = new DatabaseSync(join(tmp, 'moss', 'direct-connect.db'))
+    driver = new SqliteDriver(raw)
+    // 建表：借用 moss 的 schema 初始化——AuthCenterDb 自带；主库 sessions 等表
+    // 通过 DirectConnectStore 构造太重，这里按需建最小表集（桥只读写这几张表，
+    // 与 db.ts 的 DDL 逐列一致——expand-only 列含于其中）。
+    raw.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        transcript_session_id TEXT NOT NULL,
+        org_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        scopes_json TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        runtime_type TEXT NOT NULL,
+        docker_image TEXT, docker_mode TEXT, config_dir TEXT, container_name TEXT,
+        status TEXT NOT NULL,
+        desired_state TEXT NOT NULL,
+        current_attempt_id TEXT,
+        transcript_path TEXT NOT NULL,
+        title TEXT, summary TEXT, assistant_name TEXT, source TEXT, channel_chat_id TEXT, client_metadata TEXT,
+        created_at INTEGER NOT NULL,
+        last_active_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        deleted_at INTEGER,
+        home_zone_id TEXT,
+        home_zone_observed_at TEXT,
+        home_zone_observed_revision TEXT,
+        home_zone_sync_error TEXT
+      );
+      CREATE TABLE IF NOT EXISTS session_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(session_id),
+        generation INTEGER NOT NULL,
+        backend_type TEXT NOT NULL,
+        runtime_state TEXT NOT NULL,
+        server_instance_id TEXT,
+        runner_pid INTEGER,
+        container_name TEXT, attach_path TEXT,
+        resume_transcript_session_id TEXT NOT NULL,
+        execution_zone_id TEXT,
+        started_at INTEGER NOT NULL,
+        last_heartbeat_at INTEGER,
+        stopped_at INTEGER, exit_code INTEGER, exit_signal TEXT, stop_reason TEXT, error_text TEXT,
+        UNIQUE (session_id, generation)
+      );
+    `)
+    // 生产同构：AuthCenterDb 与主库共享同一 sqlite handle（shared-store 形态），
+    // 桥函数跨 sessions/users/org_zone_bindings 的查询在同一个 driver 上成立。
+    authDb = new AuthCenterDb(raw, join(tmp, 'moss', 'direct-connect.db'))
+  })
+
+  after(async () => {
+    raw.close()
+    await nexus.stop()
+  })
 
   it('R5.8/R5.1: home zone comes from the active binding (never the org_id string) and lands authoritatively in nexus', async () => {
     // moss 侧先建 org（binding 的候选 zone id 由 policy 生成：org-<hex>）
@@ -219,7 +223,12 @@ describe('P1a session zone bridge (real nexus)', () => {
       [sessionId, sessionId, orgId, userId, `/t/${sessionId}.jsonl`, now, now, homeZone],
     )
     await establishNexusSession(client, { sessionId, homeZoneId: homeZone })
-    const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, { sessionId, config })
+    const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, {
+      sessionId,
+      // 低-7：runtimePid 必填——与真实 run 的 pid（attemptId 派生）一致
+      runtimePid: 'moss-p1a-attempt-0002',
+      config,
+    })
     assert.ok(context)
     assert.equal(context.NEXUS_ZONE_ID, homeZone)
     assert.equal(context.NEXUS_V2_BASE_URL, nexus.baseUrl)
@@ -234,7 +243,8 @@ describe('P1a session zone bridge (real nexus)', () => {
       homeZoneId: homeZone,
       delegationRef: context.NEXUS_DELEGATION_REF,
     })
-    assert.ok(reconciled)
+    // 低-15④：结果为 discriminated result（ok + 错误码带出）
+    assert.ok(reconciled.ok)
     assert.equal(reconciled.executionZoneId, homeZone)
     const readBack = await client.getRuntimeRun(runnerPid(attemptId))
     assert.equal(readBack.execution_zone_id, homeZone)
@@ -322,6 +332,7 @@ describe('P1a session zone bridge (real nexus)', () => {
     await establishNexusSession(client, { sessionId, homeZoneId: homeZone })
     const context = await runnerZoneContext(authDb.driver as SqliteDriver, client, {
       sessionId,
+      runtimePid: runnerPid(attemptId),
       config,
     })
     assert.ok(context)

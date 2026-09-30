@@ -17,7 +17,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
@@ -35,8 +35,33 @@ setGlobalDispatcher(new Agent({
   bodyTimeout: 30_000,
 }))
 
-export const NEXUS_REPO = 'C:/work/sudo_workspace_v3/nexus'
-export const MOSS_REPO = 'C:/work/sudo_workspace_v3/moss'
+export const NEXUS_REPO = process.env.MOSS_E2E_NEXUS_REPO ?? 'C:/work/sudo_workspace_v3/nexus'
+export const MOSS_REPO = process.env.MOSS_E2E_MOSS_REPO ?? 'C:/work/sudo_workspace_v3/moss'
+
+/**
+ * E2E 环境自检（H-1）：两个 E2E 套件的硬依赖清单。CI / 其他开发机缺任一项
+ * 时整套 skip（describe `{ skip }`，钩子随之不执行），而非 before() 里 spawn
+ * 失败把门禁跑红。路径可用 MOSS_E2E_NEXUS_REPO / MOSS_E2E_MOSS_REPO 覆盖。
+ */
+export function zonesE2eEnvReady(): { ok: boolean; missing: string[] } {
+  const python = process.platform === 'win32'
+    ? join(NEXUS_REPO, '.venv', 'Scripts', 'python.exe')
+    : join(NEXUS_REPO, '.venv', 'bin', 'python')
+  const missing: string[] = []
+  if (!existsSync(NEXUS_REPO)) {
+    missing.push(`NEXUS_REPO not found: ${NEXUS_REPO} (checkout the nexus repo or set MOSS_E2E_NEXUS_REPO)`)
+  } else {
+    if (!existsSync(python)) missing.push(`nexus .venv python not found: ${python}`)
+    if (!existsSync(kernelBinary())) missing.push(`nexus kernel binary not found: ${kernelBinary()} (cargo build in the nexus repo)`)
+  }
+  if (!existsSync(MOSS_REPO)) {
+    missing.push(`MOSS_REPO not found: ${MOSS_REPO} (set MOSS_E2E_MOSS_REPO)`)
+  } else {
+    if (!existsSync(join(MOSS_REPO, 'bin', 'moss-server.mjs'))) missing.push('bin/moss-server.mjs not found (run `npm run build` first)')
+    if (!existsSync(join(MOSS_REPO, 'bin', 'nexus', 'local-trust'))) missing.push('bin/nexus/local-trust not found (run `npm run build` first)')
+  }
+  return { ok: missing.length === 0, missing }
+}
 
 export interface NexusProcess {
   baseUrl: string

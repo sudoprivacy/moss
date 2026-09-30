@@ -125,21 +125,13 @@ export class ZoneBindingReconciler {
     if (row.action === 'detach') {
       return this.processDetach(row, binding, now)
     }
-    if (binding.desired_state !== 'bound') {
-      // provision 语义已被 desired 翻转取代（例如 provision 排队期间解绑）：
-      // 该 provision 行不再收敛，标 failed 终态
-      await failOutboxAttempt(this.driver, {
-        outboxId: row.id,
-        fence: row.fence,
-        bindingId: row.binding_id,
-        errorCode: 'DESIRED_STATE_DETACHED',
-        unknownOutcome: false,
-        retryable: false,
-        now,
-        baseBackoffMs: this.baseBackoffMs,
-      })
-      return 'failed'
-    }
+    // 注：desired≠bound 的 provision 行不在此提前终态化（中-1）——直接跳过
+    // 收敛会在"grant 已发出但 waitOperation 超时回 pending、期间发生 detach"
+    // 的场景下泄漏 grant（行标 failed、引用从未落库，detach 行读到 NULL 跳过
+    // revoke）。改为继续走幂等收敛（createZone/createGrant 同 key 重放，等价
+    // 于先查 operation；grant 从未发出时新建再撤，幂等模型内无害），最终由
+    // completeProvision 的 desired-flipped 分支落 grant 引用、既有 detach 行
+    // 完成 revoke。
 
     await markBindingSyncing(this.driver, { bindingId: binding.binding_id, operationId: null, now })
 
@@ -216,7 +208,7 @@ export class ZoneBindingReconciler {
         return ok ? 'failed' : 'retried'
       }
 
-      const ok = await completeProvision(this.driver, {
+      const outcome = await completeProvision(this.driver, {
         outboxId: row.id,
         fence: row.fence,
         bindingId: binding.binding_id,
@@ -225,7 +217,16 @@ export class ZoneBindingReconciler {
         operationId: doneGrantOp.operation_id,
         now: Date.now(),
       })
-      return ok ? 'completed' : 'retried' // ok=false：lease 被接管，本 worker 放弃
+      if (outcome === 'desired-flipped') {
+        // M-1/Z-1：provision 完成时 desired 已被翻转为 detached——grant 引用
+        // 已在同事务落库（provision 行与引用原子提交），队列中已有的 detach 行
+        // 将按该 grant_id 走正常 revoke。写库动作已全部完成，此处仅观测日志。
+        process.stderr.write(
+          `[ZoneBinding] provision completed after desired flip: binding=${row.binding_id} grant=${doneGrantOp.grant_id}\n`,
+        )
+        return 'completed'
+      }
+      return outcome ? 'completed' : 'retried' // false：lease 被接管，本 worker 放弃
     } catch (error) {
       const unknown = !(error instanceof NexusZoneApiError)
       const retryable = unknown ? true : error.retryable
@@ -257,18 +258,20 @@ export class ZoneBindingReconciler {
       let operationId: string | null = null
       if (binding.nexus_grant_id) {
         const revokeKey = `moss-binding:${row.binding_id}:${row.generation}:detach-revoke`
-        let op
+        let revokeOperationId: string
         try {
-          op = await this.client.revokeGrant(binding.zone_id, binding.nexus_grant_id, revokeKey)
+          // 低-10③：revokeGrant 返回窄化为 operation 引用——终态由
+          // waitOperation 收敛判定，不消费合成 state。
+          revokeOperationId = (await this.client.revokeGrant(binding.zone_id, binding.nexus_grant_id, revokeKey)).operation_id
         } catch (error) {
           if (error instanceof NexusZoneApiError && error.code === 'GRANT_NOT_FOUND') {
-            op = { operation_id: '', action: 'revoke', zone_id: binding.zone_id, grant_id: null, state: 'succeeded', step: 'already-revoked', retryable: false, error: null }
+            revokeOperationId = '' // grant 已不存在：合法收敛（already-revoked）
           } else {
             throw error
           }
         }
-        if (op.operation_id !== '') {
-          const done = await this.waitOperation(op.operation_id)
+        if (revokeOperationId !== '') {
+          const done = await this.waitOperation(revokeOperationId)
           if (done.state !== 'succeeded') {
             const ok = await failOutboxAttempt(this.driver, {
               outboxId: row.id,

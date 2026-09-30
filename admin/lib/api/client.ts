@@ -132,6 +132,8 @@ export class ApiRequestError extends Error {
     message: string,
     /** 结构化错误负载（如 ZONE_DELETE_BLOCKED 的 blocker 清单），有则透传。 */
     readonly details?: unknown,
+    /** 结构化信封的错误码（低-1：zones 路由统一 {error:{code,...}} 后不再丢失）。 */
+    readonly code?: string,
   ) {
     super(message)
     this.name = 'ApiRequestError'
@@ -216,7 +218,8 @@ export class ApiClient {
       const raw = (error as any).error
       const message = typeof raw === 'string' ? raw : (raw?.message || (error as any).message || 'Request failed')
       const details = typeof raw === 'object' && raw !== null ? raw.details : undefined
-      throw new ApiRequestError(response.status, message, details)
+      const code = typeof raw === 'object' && raw !== null ? raw.code : undefined
+      throw new ApiRequestError(response.status, message, details, code)
     }
 
     return response.json()
