@@ -31,7 +31,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { getMe, getOrganizations } from '@/lib/api/auth'
 import type { AuthOrgWithCounts } from '@/lib/api/types'
 import {
-  addZoneBinding, deprovisionZone, detachZoneBinding, getZoneOperation,
+  addZoneBinding, cancelZoneRuntimeRun, deprovisionZone, detachZoneBinding, getZoneOperation,
   listAvailableZones, listZoneBindings, refreshZoneBinding, zoneLifecycle,
   type ZoneBinding, type ZoneLifecycleConfirmed, type ZoneOperation,
 } from '@/lib/api/zones'
@@ -54,9 +54,9 @@ function syncBadge(status: string): BadgeVariant {
 /** purpose 已注册值（契约 x-known-values 的开放注册表，前端为封闭下拉——契约注册新值时需同步）。 */
 const PURPOSE_OPTIONS: Array<{ value: string; tip: string }> = [
   { value: 'default', tip: '组织默认主 Zone：每组织唯一，用户会话默认落地于此' },
-  { value: 'office', tip: '办公数据域 Zone（预留标签）：对应 Zone 部署属性 data_domain=office，当前无特殊行为' },
-  { value: 'core', tip: '核心数据域 Zone（预留标签）：对应 data_domain=core，当前无特殊行为' },
-  { value: 'shared', tip: '多组织共享 Zone：用于一个 Zone 绑定多个组织的场景' },
+  { value: 'office', tip: '办公数据域 Zone（预留标签）：对应 Zone 部署属性 data_domain=office，当前无特殊行为。注意：非 default 绑定当前仅用于授权管理（撤销/审计），会话路由与 delegation 仅消费 default Zone' },
+  { value: 'core', tip: '核心数据域 Zone（预留标签）：对应 data_domain=core，当前无特殊行为。注意：非 default 绑定当前仅用于授权管理（撤销/审计），会话路由与 delegation 仅消费 default Zone' },
+  { value: 'shared', tip: '多组织共享 Zone：用于一个 Zone 绑定多个组织的场景。注意：非 default 绑定当前仅用于授权管理（撤销/审计），会话路由与 delegation 仅消费 default Zone' },
 ]
 
 /** zones 路由的错误经 HttpError(JSON.stringify({code,message})) 通道透传，前端需解包取 message。 */
@@ -71,6 +71,19 @@ function zoneErrMsg(error: unknown): string {
   return raw
 }
 
+/** ZONE_DELETE_BLOCKED 的 blocker 清单（nexus details 结构，B-1）。 */
+interface ZoneDeleteBlockers {
+  grants?: Array<{ grant_id: string; grantee?: Record<string, unknown> }>
+  runs?: Array<{ pid: string; session_id: string; state: string }>
+  mounts?: Array<{ mount_id: string }>
+}
+
+function zoneBlockersOf(error: unknown): ZoneDeleteBlockers | null {
+  const details = (error as { details?: unknown } | null)?.details
+  if (typeof details !== 'object' || details === null) return null
+  return details as ZoneDeleteBlockers
+}
+
 export default function ZonesPage() {
   const [role, setRole] = useState<string>('')
   const [bindings, setBindings] = useState<ZoneBinding[]>([])
@@ -79,6 +92,8 @@ export default function ZonesPage() {
   const [refreshing, setRefreshing] = useState<string | null>(null)
   const [detachTarget, setDetachTarget] = useState<ZoneBinding | null>(null)
   const [deprovisionTarget, setDeprovisionTarget] = useState<ZoneBinding | null>(null)
+  const [deprovisionBlockers, setDeprovisionBlockers] = useState<ZoneDeleteBlockers | null>(null)
+  const [cancellingPid, setCancellingPid] = useState<string | null>(null)
   const [confirmInput, setConfirmInput] = useState('')
   const [operationId, setOperationId] = useState('')
   const [operation, setOperation] = useState<ZoneOperation | null>(null)
@@ -165,10 +180,29 @@ export default function ZonesPage() {
       const op = await deprovisionZone(deprovisionTarget.zone_id, confirmInput.trim())
       toast.success(`deprovision 已受理（operation ${op.operation_id}，异步执行，可用下方面板跟踪）`)
       setDeprovisionTarget(null)
+      setDeprovisionBlockers(null)
       setConfirmInput('')
       setOperation(op)
     } catch (error) {
+      const blockers = zoneBlockersOf(error)
+      setDeprovisionBlockers(blockers)
       toast.error(`deprovision 失败：${zoneErrMsg(error)}`)
+    }
+  }
+
+  /** B-1：解除 ZONE_DELETE_BLOCKED 的 runtime blocker（terminate 终止 / park 隔离）。 */
+  const onCancelBlockerRun = async (pid: string, mode: 'terminate' | 'pending') => {
+    setCancellingPid(pid)
+    try {
+      const result = await cancelZoneRuntimeRun(pid, mode)
+      toast.success(`runtime ${result.pid} 已${mode === 'terminate' ? '终止' : '隔离'}（state: ${result.state}），请重试删除`)
+      setDeprovisionBlockers((prev) =>
+        prev ? { ...prev, runs: (prev.runs ?? []).filter((r) => r.pid !== pid) } : prev,
+      )
+    } catch (error) {
+      toast.error(`runtime 取消失败：${zoneErrMsg(error)}`)
+    } finally {
+      setCancellingPid(null)
     }
   }
 
@@ -289,7 +323,19 @@ export default function ZonesPage() {
                   <TableRow key={b.binding_id}>
                     <TableCell className="font-mono text-xs">{b.zone_id}</TableCell>
                     <TableCell>{b.observed_display_name ?? '—'}</TableCell>
-                    <TableCell>{b.purpose}{b.is_default ? '（默认）' : ''}</TableCell>
+                    <TableCell>
+                      {b.purpose}{b.is_default ? '（默认）' : ''}
+                      {!b.is_default && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="ml-1 inline size-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-72">
+                            仅授权管理：该绑定当前仅用于授权管理（撤销/审计）；会话路由与 delegation 仅消费 default Zone。按 Zone 消费为后续 work item。
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </TableCell>
                     <TableCell><Badge variant={desiredBadge(b.desired_state)}>{b.desired_state}</Badge></TableCell>
                     <TableCell className="space-x-1">
                       <Badge variant={syncBadge(b.sync_status)}>{b.sync_status}</Badge>
@@ -305,7 +351,10 @@ export default function ZonesPage() {
                       ) : '—'}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {new Date(b.updated_at).toLocaleString()}
+                      {b.observed_at != null ? (
+                        <div>对账于 {Math.max(0, Math.round((Date.now() - b.observed_at) / 60_000))} 分钟前</div>
+                      ) : '—'}
+                      <div>{new Date(b.updated_at).toLocaleString()}</div>
                       {b.observed_revision ? <div>rev {b.observed_revision.slice(0, 8)}</div> : null}
                     </TableCell>
                     <TableCell className="text-right">
@@ -329,7 +378,7 @@ export default function ZonesPage() {
                             <Button variant="outline" size="sm" onClick={() => void onLifecycle(b.zone_id, 'resume')}>
                               <PlayCircle className="mr-1 size-4" /> 恢复
                             </Button>
-                            <Button variant="destructive" size="sm" onClick={() => { setDeprovisionTarget(b); setConfirmInput('') }}>
+                            <Button variant="destructive" size="sm" onClick={() => { setDeprovisionTarget(b); setConfirmInput(''); setDeprovisionBlockers(null) }}>
                               <ShieldAlert className="mr-1 size-4" /> 删除 Zone 数据
                             </Button>
                           </>
@@ -456,6 +505,7 @@ export default function ZonesPage() {
             {duplicate ? <p className="text-xs text-destructive">该绑定已存在（用途：{duplicate.purpose}）</p> : null}
             {detachedSameCombo ? <p className="text-xs text-yellow-600">该组合存在已解绑的历史绑定（后端将拒绝重复创建）</p> : null}
             {!duplicate && sameOrgZone ? <p className="text-xs text-yellow-600">该组织已绑定此 Zone（用途：{sameOrgZone.purpose}），将以新用途追加绑定</p> : null}
+            {addPurpose !== 'default' ? <p className="text-xs text-muted-foreground">非 default 用途的绑定当前仅用于授权管理（撤销/审计）；会话路由与 delegation 仅消费 default Zone</p> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)}>取消</Button>
@@ -489,6 +539,7 @@ export default function ZonesPage() {
             <DialogTitle>删除 Zone 数据（不可逆）</DialogTitle>
             <DialogDescription>
               这会发起异步 deprovision：撤销全部授权、卸载挂载、按副本回执删除物理数据。
+              删除后，曾绑定此 Zone 的组织新会话将不再受 Zone 管控（数据仅落 moss 本地；如部署启用 MOSS_REQUIRE_ZONE 则此类组织将无法创建会话）。
               存在 blocker（活跃授权/挂载/会话）时操作会被拒绝或等待，可随后用 operation 面板跟踪。
               请输入完整 Zone ID 二次确认。
             </DialogDescription>
@@ -499,6 +550,40 @@ export default function ZonesPage() {
             onChange={(e) => setConfirmInput(e.target.value)}
             className="font-mono"
           />
+          {deprovisionBlockers && (
+            <div className="rounded border border-destructive/40 bg-destructive/5 p-3 text-xs space-y-2">
+              <div className="font-medium">删除被阻止——活动依赖清单（解除后重试）：</div>
+              {(deprovisionBlockers.grants ?? []).map((g) => (
+                <div key={g.grant_id} className="flex items-center gap-2">
+                  <Badge variant="destructive">grant</Badge>
+                  <span className="font-mono">{g.grant_id}</span>
+                  <span className="text-muted-foreground">于本页对该组织执行「解绑访问」撤销 grant</span>
+                </div>
+              ))}
+              {(deprovisionBlockers.runs ?? []).map((r) => (
+                <div key={r.pid} className="flex items-center gap-2 flex-wrap">
+                  <Badge variant="destructive">runtime</Badge>
+                  <span className="font-mono">{r.pid}</span>
+                  <span className="text-muted-foreground">session {r.session_id.slice(0, 8)}… · {r.state}</span>
+                  <Button
+                    size="sm" variant="destructive" disabled={cancellingPid === r.pid}
+                    onClick={() => void onCancelBlockerRun(r.pid, 'terminate')}
+                  >终止</Button>
+                  <Button
+                    size="sm" variant="outline" disabled={cancellingPid === r.pid}
+                    onClick={() => void onCancelBlockerRun(r.pid, 'pending')}
+                  >隔离 (park)</Button>
+                </div>
+              ))}
+              {(deprovisionBlockers.mounts ?? []).map((m) => (
+                <div key={m.mount_id} className="flex items-center gap-2">
+                  <Badge variant="destructive">mount</Badge>
+                  <span className="font-mono">{m.mount_id}</span>
+                  <span className="text-muted-foreground">请先在 Nexus 侧卸载该挂载</span>
+                </div>
+              ))}
+            </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeprovisionTarget(null)}>取消</Button>
             <Button variant="destructive" disabled={confirmInput.trim() !== deprovisionTarget?.zone_id} onClick={() => void onDeprovision()}>

@@ -400,6 +400,18 @@ export class TokenQuotaExceededError extends Error {
 }
 
 /**
+ * MOSS_REQUIRE_ZONE 严格模式拒绝：Org 无 active default Zone binding 时
+ * 创建会话被 fail-closed 拒绝（409）。与渐进语义（默认宽松、无 Zone 会话
+ * 落本地）相对，由部署方显式选择。
+ */
+export class ZoneRequiredError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ZoneRequiredError'
+  }
+}
+
+/**
  * How long a computed usage total may be reused.
  *
  * Usage is not stored anywhere — `loadBudgetStats` derives it by parsing every
@@ -717,6 +729,45 @@ export class RuntimeService {
       sessionId,
     )
     await mkdir(dirname(transcriptPath), { recursive: true })
+
+    // P1a (§8.10 R5.1/R5.3)：home Zone 由 Org binding policy 解析；payload 的
+    // zone 只是提示，仅当与 policy 一致才被接受。Nexus 权威写入失败时投影
+    // 记 observed=null（后台补写），session 创建不被 Nexus 可用性阻塞。
+    // 解析先于 createSession：解析只依赖 orgId/zoneHint——严格模式
+    // （MOSS_REQUIRE_ZONE）下无 home Zone 在任何会话行写入前拒绝（零残留）。
+    let zoneResolution: { homeZoneId: string | null } | null = null
+    try {
+      const { resolveHomeZoneWithHint } = await import(
+        './zones/runtime/sessionZoneBridge.js'
+      )
+      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+      const zoneConfig = resolveZoneBindingConfig()
+      zoneResolution = await resolveHomeZoneWithHint(
+        this.store.driver,
+        input.orgId,
+        input.zoneHint,
+        zoneConfig,
+      )
+      if (!zoneResolution.homeZoneId && zoneConfig.requireZone) {
+        throw new ZoneRequiredError(
+          `ZONE_REQUIRED: org ${input.orgId} has no active default zone binding and MOSS_REQUIRE_ZONE is enabled; session creation is rejected in strict mode`,
+        )
+      }
+    } catch (zoneError) {
+      if (zoneError instanceof ZoneRequiredError) throw zoneError
+      // Zone 解析失败不阻塞 session 创建（P1a 渐进语义），记录即可。
+      console.warn('[RuntimeService] session zone bridge failed:', zoneError)
+    }
+    if (zoneResolution === null) {
+      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+      const zoneConfig = resolveZoneBindingConfig()
+      if (zoneConfig.requireZone) {
+        throw new ZoneRequiredError(
+          `ZONE_REQUIRED: zone binding resolution failed for org ${input.orgId} and MOSS_REQUIRE_ZONE is enabled; session creation is rejected in strict mode`,
+        )
+      }
+    }
+
     const created = await this.store.createSession({
       sessionId,
       transcriptSessionId: sessionId,
@@ -734,27 +785,18 @@ export class RuntimeService {
       channelChatId: input.channelChatId,
     })
 
-    // P1a (§8.10 R5.1/R5.3)：home Zone 由 Org binding policy 解析；payload 的
-    // zone 只是提示，仅当与 policy 一致才被接受。Nexus 权威写入失败时投影
-    // 记 observed=null（后台补写），session 创建不被 Nexus 可用性阻塞。
-    try {
-      const { resolveHomeZoneWithHint, establishNexusSession } = await import(
-        './zones/runtime/sessionZoneBridge.js'
-      )
-      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
-      const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
-      const zoneConfig = resolveZoneBindingConfig()
-      const resolution = await resolveHomeZoneWithHint(
-        this.store.driver,
-        input.orgId,
-        input.zoneHint,
-        zoneConfig,
-      )
-      if (resolution.homeZoneId) {
+    if (zoneResolution && zoneResolution.homeZoneId) {
+      try {
+        const { establishNexusSession } = await import(
+          './zones/runtime/sessionZoneBridge.js'
+        )
+        const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+        const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
+        const zoneConfig = resolveZoneBindingConfig()
         const observed = zoneConfig.zoneBindingEnabled
           ? await establishNexusSession(
               new NexusZoneClient(zoneConfig),
-              { sessionId: created.sessionId, homeZoneId: resolution.homeZoneId },
+              { sessionId: created.sessionId, homeZoneId: zoneResolution.homeZoneId },
             )
           : null
         await this.store.driver.run(
@@ -763,17 +805,23 @@ export class RuntimeService {
                home_zone_sync_error = ?
            WHERE session_id = ?`,
           [
-            resolution.homeZoneId,
+            zoneResolution.homeZoneId,
             observed?.observedAt ?? null,
             observed?.observedRevision ?? null,
             observed?.syncError ?? null,
             created.sessionId,
           ],
         )
+      } catch (zoneError) {
+        // Nexus 权威写入失败不阻塞 session 创建（P1a 渐进语义），投影由
+        // 后台补写，记录即可。
+        console.warn('[RuntimeService] session zone bridge failed:', zoneError)
       }
-    } catch (zoneError) {
-      // Zone 解析/写入失败不阻塞 session 创建（P1a 渐进语义），记录即可。
-      console.warn('[RuntimeService] session zone bridge failed:', zoneError)
+    } else if (zoneResolution) {
+      // 无 Zone 会话（宽松模式）：显式留痕，降级对管理者可见可审计。
+      console.warn(
+        `[ZoneBinding] session created without zone binding: org=${input.orgId} user=${input.userId} session=${created.sessionId} requireZone=false`,
+      )
     }
 
     // Ensure config directory exists for scode sessions (which don't use session-runner which normally creates it)

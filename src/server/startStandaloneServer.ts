@@ -13,6 +13,7 @@ import { NexusClient } from './nexus/nexusClient.js'
 import { NexusZoneClient } from './nexus/nexusZoneClient.js'
 import { resolveZoneBindingConfig } from './zones/binding/config.js'
 import { ZoneBindingReconciler } from './zones/binding/bindingService.js'
+import { ZoneManagementService } from './zones/binding/managementService.js'
 import { reconcilePendingNexusSessions } from './zones/runtime/sessionZoneBridge.js'
 import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
@@ -555,6 +556,15 @@ async function finishStandaloneServerStartup(
       client: new NexusZoneClient(zoneBindingConfig),
       config: zoneBindingConfig,
     })
+    // B-3：observed 快照对账（desired↔observed 展示链的持久化回写）。
+    // 低频分支：每 10 轮（≈5 分钟）一批，错误仅日志，下轮重试——与同
+    // timer 内既有错误处理模式一致。
+    const zoneObservedManagement = new ZoneManagementService({
+      driver: store.driver,
+      client: new NexusZoneClient(zoneBindingConfig),
+      config: zoneBindingConfig,
+    })
+    let zoneObservedTickCount = 0
     const zoneBindingTimer = setInterval(() => {
       // P1a（§8.10 R5.1）：Nexus session 权威写入补写（离线期创建的 session）。
       void reconcilePendingNexusSessions(store.driver, new NexusZoneClient(zoneBindingConfig))
@@ -576,6 +586,14 @@ async function finishStandaloneServerStartup(
           )
         },
       )
+      zoneObservedTickCount += 1
+      if (zoneObservedTickCount % 10 === 0) {
+        void zoneObservedManagement.reconcileObservedSnapshot().catch((err: unknown) => {
+          process.stderr.write(
+            `[ZoneBinding] observed reconcile failed: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        })
+      }
     }, 30_000)
     zoneBindingTimer.unref?.()
   }

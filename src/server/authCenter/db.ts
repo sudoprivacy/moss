@@ -738,6 +738,20 @@ export class AuthCenterDb {
       'grant_source_id',
       'ALTER TABLE zone_binding_outbox ADD COLUMN grant_source_id TEXT',
     )
+    // B-3 expand-only：org_zone_bindings 的 observed 快照列（老库补齐；fresh
+    // install 由上方 DDL 直接带列，ensureColumn 幂等跳过）。时间戳遵循约定：
+    // 落库 BIGINT 毫秒，wire RFC 3339 由出参转换。
+    for (const [column, ddl] of [
+      ['observed_display_name', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_display_name TEXT'],
+      ['observed_zone_status', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_zone_status TEXT'],
+      ['observed_revision', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_revision TEXT'],
+      ['observed_grant_status', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_grant_status TEXT'],
+      ['observed_grant_source', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_grant_source TEXT'],
+      ['grant_expires_at', 'ALTER TABLE org_zone_bindings ADD COLUMN grant_expires_at BIGINT'],
+      ['observed_at', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_at BIGINT'],
+    ] as const) {
+      this.ensureColumn('org_zone_bindings', column, ddl)
+    }
   }
 
   private ensureColumn(

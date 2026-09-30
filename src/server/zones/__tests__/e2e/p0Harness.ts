@@ -248,6 +248,8 @@ export async function startMoss(
     nexusServiceToken: string
     port?: number
     internalApiToken?: string
+    /** 场景级 env 覆盖（后合并，如 MOSS_REQUIRE_ZONE）——仅测试编排用。 */
+    env?: Record<string, string>
   },
 ): Promise<MossProcess> {
   const adminUsername = 'p0admin'
@@ -276,6 +278,13 @@ export async function startMoss(
     // embedded nexus（secrets 数据面）gRPC 端口随机：moss#1 停止后端口可能
     // 处于 TIME_WAIT，复用 2126 会让 moss#2 的 embedded nexusd bind 失败
     MOSS_NEXUS_GRPC_PORT: String(await freePort()),
+    // embedded nexusd 的 vault plugin 由仓内 local key 签名（bin/nexus/local-trust，
+    // 产物随 0bf6f4f 就位）——不注入则 kernel 签名校验 fail-loud 拒启（实测）
+    NEXUS_LOCAL_TRUSTED_KEYS_DIR: join(MOSS_REPO, 'bin', 'nexus', 'local-trust'),
+    // Auth Proxy 默认端口 12013：常驻 moss 实例占用时 E2E 实例 bind 失败，
+    // 仿 MOSS_NEXUS_GRPC_PORT 随机隔离
+    MOSS_AUTH_PROXY_PORT: String(await freePort()),
+    ...(input.env ?? {}),
   }
   // 生产部署形态：node 跑 build 产物（源码直跑被 bun:/node:sqlite 双向
   // 卡死——bun 缺 node:sqlite，node 的 tsx 链含 bun: 协议；bundle 两者皆无）。

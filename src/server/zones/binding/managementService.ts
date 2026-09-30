@@ -30,6 +30,8 @@ export class ZoneManagementError extends Error {
     public readonly code: string,
     public readonly status: number,
     public readonly retryable: boolean = false,
+    /** 可操作拒绝的结构化负载（如 ZONE_DELETE_BLOCKED 的 blocker 清单）。 */
+    public readonly details?: unknown,
   ) {
     super(message)
     this.name = 'ZoneManagementError'
@@ -53,13 +55,16 @@ export interface BindingView {
   last_error_code: string | null
   created_at: number
   updated_at: number
-  /** 以下为最近一次 refresh 的 observed 详情（未对账时为 null）。 */
-  observed_display_name?: string | null
-  observed_zone_status?: string | null
-  observed_revision?: string | null
-  observed_grant_status?: string | null
-  observed_grant_source?: string | null
-  grant_expires_at?: string | null
+  /** 以下为最近一次对账的 observed 详情（B-3 持久化列；未对账时为 null）。 */
+  observed_display_name: string | null
+  observed_zone_status: string | null
+  observed_revision: string | null
+  observed_grant_status: string | null
+  observed_grant_source: string | null
+  /** RFC 3339（出参转换；落库为 BIGINT 毫秒）。 */
+  grant_expires_at: string | null
+  /** 对账时间（BIGINT 毫秒——UI 计算"对账于 X 分钟前"直接用）。 */
+  observed_at: number | null
 }
 
 /** zoneLifecycle 的读收敛确认结果：unknown 后经 getZone 判定操作已实际生效（无 operation 可引用）。 */
@@ -69,8 +74,23 @@ export interface ZoneLifecycleConfirmed {
   confirmed: true
 }
 
+/** observed 族列的落库值（毫秒时间戳 + 各快照字段）+ 对账得出的 sync_status。 */
+interface ObservedSnapshot {
+  observed_display_name: string | null
+  observed_zone_status: string | null
+  observed_revision: string | null
+  observed_grant_status: string | null
+  observed_grant_source: string | null
+  grant_expires_at_ms: number | null
+  sync_status: string
+}
+
 function toView(row: Record<string, unknown>): BindingView {
   const wire = rowToOrgZoneBinding(row)
+  // observed 字段从 row 直读（持久化列），不经生成契约 wire——契约
+  // org-zone-binding.gen 的 safeParse 白名单不含 observed，扩契约会牵连
+  // sudocontracts 生成物；row 直读即 refreshBinding 单次响应合并先例的常规化。
+  const expiresRaw = row.grant_expires_at
   return {
     binding_id: wire.binding_id,
     org_id: wire.org_id,
@@ -86,6 +106,14 @@ function toView(row: Record<string, unknown>): BindingView {
     last_error_code: wire.last_error_code ?? null,
     created_at: Date.parse(wire.created_at),
     updated_at: Date.parse(wire.updated_at),
+    observed_display_name: row.observed_display_name == null ? null : String(row.observed_display_name),
+    observed_zone_status: row.observed_zone_status == null ? null : String(row.observed_zone_status),
+    observed_revision: row.observed_revision == null ? null : String(row.observed_revision),
+    observed_grant_status: row.observed_grant_status == null ? null : String(row.observed_grant_status),
+    observed_grant_source: row.observed_grant_source == null ? null : String(row.observed_grant_source),
+    grant_expires_at:
+      expiresRaw == null || expiresRaw === '' ? null : new Date(Number(expiresRaw)).toISOString(),
+    observed_at: row.observed_at == null ? null : Number(row.observed_at),
   }
 }
 
@@ -107,6 +135,11 @@ export class ZoneManagementService {
     return this.client
   }
 
+  /** 解除 ZONE_DELETE_BLOCKED 的 runtime 入口：terminate 终止 / park 隔离。 */
+  async cancelRuntimeRun(pid: string, mode: 'terminate' | 'pending'): Promise<unknown> {
+    return this.requireClient().cancelRuntimeRun(pid, mode)
+  }
+
   private mapNexusZoneError(error: unknown): never {
     if (error instanceof NexusZoneApiError) {
       throw new ZoneManagementError(
@@ -114,6 +147,7 @@ export class ZoneManagementService {
         error.code,
         error.status || 502,
         error.retryable,
+        error.details,
       )
     }
     throw error
@@ -133,6 +167,78 @@ export class ZoneManagementService {
     )
   }
 
+  /**
+   * 对账核心：实时查 Nexus zone+grant，得出 observed 快照与 sync_status。
+   * HTTP refreshBinding 与后台 reconcileObservedSnapshot 共用（B-3——
+   * 逻辑单点，两个入口不再各持一份判定）。
+   */
+  private async _refreshObservedCore(
+    client: NexusZoneClient,
+    view: Pick<BindingView, 'zone_id' | 'nexus_grant_id' | 'desired_state'>,
+  ): Promise<ObservedSnapshot> {
+    try {
+      const zone = await client.getZone(view.zone_id)
+      const grant = view.nexus_grant_id
+        ? await client.getGrant(view.zone_id, view.nexus_grant_id)
+        : null
+      const syncStatus =
+        view.desired_state === 'detached'
+          ? zone.status === 'active' || grant?.status === 'active'
+            ? 'sync_failed' // 期望已解绑但远端仍活跃
+            : 'detached'
+          : zone.status === 'active' && (!view.nexus_grant_id || grant?.status === 'active')
+            ? 'active'
+            : zone.status === 'suspended'
+              ? 'syncing' // Zone 挂起非 binding 故障，保留中间态供 UI 区分
+              : 'syncing'
+      return {
+        observed_display_name: zone.display_name,
+        observed_zone_status: zone.status,
+        observed_revision: zone.revision,
+        observed_grant_status: grant?.status ?? null,
+        observed_grant_source: grant?.sourceType ?? null,
+        grant_expires_at_ms: grant?.expires_at ? Date.parse(grant.expires_at) : null,
+        sync_status: syncStatus,
+      }
+    } catch (error) {
+      return {
+        observed_display_name: null,
+        observed_zone_status: null,
+        observed_revision: null,
+        observed_grant_status: null,
+        observed_grant_source: null,
+        grant_expires_at_ms: null,
+        sync_status:
+          error instanceof NexusZoneApiError && error.status === 404 ? 'sync_failed' : 'unknown',
+      }
+    }
+  }
+
+  /** 对账成功时回写全部 observed 持久化列 + sync_status（B-3）。 */
+  private async _writeObserved(bindingId: string, snapshot: ObservedSnapshot): Promise<void> {
+    const now = Date.now()
+    await this.driver.run(
+      `UPDATE org_zone_bindings
+       SET sync_status = ?, updated_at = ?,
+           observed_display_name = ?, observed_zone_status = ?, observed_revision = ?,
+           observed_grant_status = ?, observed_grant_source = ?, grant_expires_at = ?,
+           observed_at = ?
+       WHERE binding_id = ?`,
+      [
+        snapshot.sync_status,
+        now,
+        snapshot.observed_display_name,
+        snapshot.observed_zone_status,
+        snapshot.observed_revision,
+        snapshot.observed_grant_status,
+        snapshot.observed_grant_source,
+        snapshot.grant_expires_at_ms,
+        now,
+        bindingId,
+      ],
+    )
+  }
+
   /** desired vs observed 对账：实时查 Nexus zone+grant，更新本地快照。 */
   async refreshBinding(bindingId: string, viewer: { role: string; orgId: string }): Promise<BindingView> {
     if (!ADMIN_ROLES.has(viewer.role)) throw new ZoneManagementError('binding management requires org admin', 'FORBIDDEN', 403)
@@ -146,44 +252,36 @@ export class ZoneManagementService {
       throw new ZoneManagementError('not your org binding', 'FORBIDDEN', 403)
     }
     const client = this.requireClient()
-    const now = Date.now()
-    let observed: string
-    let observedDetail: Partial<BindingView> = {}
-    try {
-      const zone = await client.getZone(view.zone_id)
-      const grant = view.nexus_grant_id
-        ? await client.getGrant(view.zone_id, view.nexus_grant_id)
-        : null
-      observed =
-        view.desired_state === 'detached'
-          ? zone.status === 'active' || grant?.status === 'active'
-            ? 'sync_failed' // 期望已解绑但远端仍活跃
-            : 'detached'
-          : zone.status === 'active' && (!view.nexus_grant_id || grant?.status === 'active')
-            ? 'active'
-            : zone.status === 'suspended'
-              ? 'syncing' // Zone 挂起非 binding 故障，保留中间态供 UI 区分
-              : 'syncing'
-      observedDetail = {
-        observed_display_name: zone.display_name,
-        observed_zone_status: zone.status,
-        observed_revision: zone.revision,
-        observed_grant_status: grant?.status ?? null,
-        observed_grant_source: grant?.sourceType ?? null,
-        grant_expires_at: grant?.expires_at ?? null,
-      }
-    } catch (error) {
-      observed = error instanceof NexusZoneApiError && error.status === 404 ? 'sync_failed' : 'unknown'
-    }
-    await this.driver.run(
-      `UPDATE org_zone_bindings SET sync_status = ?, updated_at = ? WHERE binding_id = ?`,
-      [observed, now, bindingId],
-    )
+    const snapshot = await this._refreshObservedCore(client, view)
+    await this._writeObserved(bindingId, snapshot)
     const updated = await this.driver.get(
       `SELECT * FROM org_zone_bindings WHERE binding_id = ? LIMIT 1`,
       [bindingId],
     )
-    return { ...toView(updated as Record<string, unknown>), ...observedDetail }
+    return toView(updated as Record<string, unknown>)
+  }
+
+  /**
+   * 后台低频对账（B-3，挂 zoneBindingTimer 的低频分支）：对本 deployment
+   * 全部 binding（bound 与 detached——detached 行同样在管理列表展示
+   * observed）回写 observed 快照。Nexus 不可达由 core 内部归为
+   * sync_status='unknown'，行级失败不中断整批。
+   */
+  async reconcileObservedSnapshot(): Promise<number> {
+    const client = this.client
+    if (!client) return 0
+    const rows = await this.driver.all(
+      `SELECT * FROM org_zone_bindings WHERE nexus_deployment_id = ?`,
+      [this.config.nexusDeploymentId],
+    )
+    let written = 0
+    for (const row of rows) {
+      const view = toView(row as Record<string, unknown>)
+      const snapshot = await this._refreshObservedCore(client, view)
+      await this._writeObserved(view.binding_id, snapshot)
+      written += 1
+    }
+    return written
   }
 
   /** 解绑 Org 访问（≠删除 Zone 数据）：desired→detached + outbox detach。 */

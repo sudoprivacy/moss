@@ -1259,6 +1259,18 @@ ALTER TABLE zone_binding_outbox ADD COLUMN IF NOT EXISTS grant_source_id TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_sync_error TEXT;
 `
 
+/** B-3 expand-only：org_zone_bindings 的 observed 快照列（老 PG 库补齐；
+ *  fresh install 由 MIGRATION_0005 的双方言 DDL 直接带列）。 */
+const MIGRATION_0009_ZONE_BINDING_OBSERVED = `
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_display_name TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_zone_status TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_revision TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_grant_status TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_grant_source TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS grant_expires_at BIGINT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_at BIGINT;
+`
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
@@ -1268,6 +1280,7 @@ const MIGRATIONS: PgMigration[] = [
   { version: 6, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
   { version: 7, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
   { version: 8, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
+  { version: 9, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

@@ -3123,6 +3123,34 @@ export function startServer(
         } catch (error) {
           if (error instanceof ZoneManagementError) {
             writeJson(res, error.status, {
+              error: {
+                code: error.code,
+                message: error.message,
+                retryable: error.retryable,
+                ...(error.details !== undefined ? { details: error.details } : {}),
+              },
+            })
+            return
+          }
+          throw error
+        }
+        return
+      }
+
+      // B-1：runtime run 取消入口（ZONE_DELETE_BLOCKED 的解除路径——terminate
+      // 终止 / park 隔离），super_admin 与 deprovision 同级授权。
+      const zoneRunCancelMatch = pathname.match(/^\/api\/v1\/zones\/runtime-runs\/([^/]+)\/cancel$/)
+      if (req.method === 'POST' && zoneRunCancelMatch) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        await authService.requireSuperAdmin(auth)
+        const body = await readJsonBody(req).catch(() => ({}) as JsonBody)
+        const mode = body.mode === 'pending' ? 'pending' : 'terminate'
+        try {
+          writeJson(res, 200, await zoneManagement.cancelRuntimeRun(zoneRunCancelMatch[1], mode))
+        } catch (error) {
+          if (error instanceof ZoneManagementError) {
+            writeJson(res, error.status, {
               error: { code: error.code, message: error.message, retryable: error.retryable },
             })
             return
@@ -10572,6 +10600,7 @@ export function startServer(
           runtime: created.runtime,
           owner_instance_id: owner.ownerInstanceId,
           owner_live: owner.ownerLive,
+          home_zone_id: created.homeZoneId ?? null,
         })
         return
       }

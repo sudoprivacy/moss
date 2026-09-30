@@ -32,6 +32,8 @@ export interface ZoneBinding {
   observed_grant_status?: string | null
   observed_grant_source?: string | null
   grant_expires_at?: string | null
+  /** 对账时间（BIGINT 毫秒，B-3 持久化列；UI 计算相对时长）。 */
+  observed_at?: number | null
 }
 
 export interface ZoneOperation {
@@ -91,4 +93,9 @@ export function zoneLifecycle(zoneId: string, action: 'suspend' | 'resume'): Pro
 
 export function deprovisionZone(zoneId: string, confirmZoneId: string): Promise<ZoneOperation> {
   return dcClient.post(`/api/v1/zones/${zoneId}/deprovision`, { confirm_zone_id: confirmZoneId })
+}
+
+/** 解除 ZONE_DELETE_BLOCKED 的 runtime 入口：terminate 终止 / park 隔离。 */
+export function cancelZoneRuntimeRun(pid: string, mode: 'terminate' | 'pending'): Promise<{ pid: string; state: string }> {
+  return dcClient.post(`/api/v1/zones/runtime-runs/${pid}/cancel`, { mode })
 }

@@ -149,10 +149,25 @@ export class ZoneBindingReconciler {
 
     try {
       // 1) Zone（幂等；已存在视为合法收敛，继续 grant）
+      // display_name 语义化：Org 显示名（非 default purpose 带后缀）——
+      // zone_id 是机器身份（policy 生成），display_name 是给人看的；查不到
+      // Org 行（极端）时回退 zone_id，provision 不因命名失败而阻塞。
+      let zoneDisplayName = binding.zone_id
+      try {
+        const orgRow = await this.driver.get(
+          `SELECT name FROM organizations WHERE id = ? LIMIT 1`,
+          [binding.org_id],
+        )
+        if (orgRow && typeof orgRow.name === 'string' && orgRow.name.trim()) {
+          zoneDisplayName = binding.purpose === 'default'
+            ? orgRow.name.trim()
+            : `${orgRow.name.trim()} (${binding.purpose})`
+        }
+      } catch { /* Org 名查询失败回退 zone_id */ }
       let zoneOp: ZoneOperationRef
       try {
         zoneOp = await this.client.createZone(
-          { zoneId: binding.zone_id, displayName: binding.zone_id },
+          { zoneId: binding.zone_id, displayName: zoneDisplayName },
           zoneKey,
         )
       } catch (error) {

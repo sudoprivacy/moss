@@ -258,6 +258,7 @@ export default function SessionsPage() {
               <TableRow>
                 <TableHead>Session ID</TableHead>
                 <TableHead>用户</TableHead>
+                <TableHead>Zone</TableHead>
                 <TableHead>运行时</TableHead>
                 <TableHead>模式</TableHead>
                 <TableHead>创建时间</TableHead>
@@ -273,6 +274,15 @@ export default function SessionsPage() {
                   <TableRow key={session.sessionId}>
                     <TableCell className="font-mono text-sm">{session.sessionId.slice(0, 12)}...</TableCell>
                     <TableCell>{getUserName(session)}</TableCell>
+                    <TableCell>
+                      {session.homeZoneId ? (
+                        <span className="font-mono text-xs" title={session.homeZoneId}>
+                          {session.homeZoneId.slice(0, 16)}...
+                        </span>
+                      ) : (
+                        <Badge variant="outline" className="text-xs">无 Zone · 仅本地</Badge>
+                      )}
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">
                         <div className="flex items-center gap-1">

@@ -665,4 +665,46 @@ describe('P0 real-process E2E (moss-side scenarios)', () => {
     }
     assert.equal(coreRow?.sync_status, 'active', JSON.stringify(coreRow))
   })
+
+  it('A-2: session creation surfaces home_zone_id; requireZone refuses unbound orgs', async () => {
+    // 宽松模式（默认）：无 active binding 的 Org（binding pending）建会话
+    // 成功，响应显式携带 home_zone_id:null，审计日志留痕。
+    const orgUnbound = await createOrg('P0 E2E Org Unbound')
+    const switched = await mossApi(moss, adminToken, 'POST', '/api/v1/auth/switch-org', { org_id: orgUnbound })
+    assert.equal(switched.status, 200, JSON.stringify(switched.json))
+    const unboundToken = (switched.json as { access_token: string }).access_token
+    const created = await mossApi(moss, unboundToken, 'POST', '/api/v1/sessions', {})
+    assert.equal(created.status, 200, JSON.stringify(created.json))
+    assert.equal((created.json as { home_zone_id?: string | null }).home_zone_id, null)
+    const createdSessionId = (created.json as { session_id: string }).session_id
+
+    // 严格模式：MOSS_REQUIRE_ZONE=true 重启 moss，同一 Org 建会话 409
+    // （ZONE_REQUIRED，会话行零残留）。
+    await moss.stop()
+    await sleep(35_000)
+    mossPort = await freePort()
+    moss = await startMossForP0(tmp, {
+      nexusV2BaseUrl: nexusProxy!.baseUrl,
+      nexusServiceToken: nexus!.apiKey,
+      port: mossPort,
+      internalApiToken,
+      env: { MOSS_REQUIRE_ZONE: 'true' },
+    })
+    adminToken = await login(moss, moss.adminUsername, moss.adminPassword)
+    const switchedStrict = await mossApi(moss, adminToken, 'POST', '/api/v1/auth/switch-org', { org_id: orgUnbound })
+    assert.equal(switchedStrict.status, 200, JSON.stringify(switchedStrict.json))
+    const strictToken = (switchedStrict.json as { access_token: string }).access_token
+    const refused = await mossApi(moss, strictToken, 'POST', '/api/v1/sessions', {})
+    assert.equal(refused.status, 409, JSON.stringify(refused.json))
+    assert.match(String((refused.json as { error?: string }).error), /ZONE_REQUIRED/)
+
+    // 会话列表无残留行（严格模式拒绝发生在任何会话行写入之前）。
+    // 列表按调用者 Org 上下文过滤（附录边界 4），用切到目标 org 的 token 查。
+    const list = await mossApi(moss, strictToken, 'GET', '/api/v1/sessions?active_only=false')
+    assert.equal(list.status, 200, JSON.stringify(list.json))
+    const sessionsOfOrg = ((list.json as { sessions: Array<{ sessionId: string; orgId: string }> }).sessions)
+      .filter((s) => s.orgId === orgUnbound)
+    assert.equal(sessionsOfOrg.length, 1, `expected only the lenient-mode session: ${JSON.stringify(sessionsOfOrg)}`)
+    assert.equal(sessionsOfOrg[0].sessionId, createdSessionId)
+  })
 })

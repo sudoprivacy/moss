@@ -851,6 +851,8 @@ export type SessionRecord = {
   lastActiveAt: number
   endedAt: number | null
   deletedAt: number | null
+  /** P1a home Zone 投影（null = Org 无 active binding，会话仅落本地）。 */
+  homeZoneId: string | null
 }
 
 export type AttemptRecord = {
@@ -917,6 +919,8 @@ export type SessionSummary = {
   createdAt: number
   lastActiveAt: number
   endedAt: number | null
+  /** P1a home Zone 投影（null = Org 无 active binding，会话仅落本地）。 */
+  homeZoneId: string | null
 }
 
 export type SessionCreateInput = {

@@ -61,6 +61,7 @@ const CONFIG: ZoneBindingConfig = {
   nexusDeploymentId: 'local',
   nexusV2TimeoutMs: 50,
   internalApiToken: '',
+  requireZone: false,
 }
 
 describe('org creation writes binding intent + outbox in one transaction', () => {
@@ -209,12 +210,12 @@ describe('zone_binding_outbox claim/fence lifecycle', () => {
 
 /** 记录调用并按脚本回放的 fake /v2 client——不产生任何网络。 */
 class FakeZoneClient {
-  readonly zoneCalls: Array<{ zoneId: string; key: string }> = []
+  readonly zoneCalls: Array<{ zoneId: string; displayName?: string; key: string }> = []
   readonly grantCalls: Array<{ zoneId: string; grantee: string; sourceId: string; resourcePrefixes?: string[]; key: string }> = []
   script: Array<'ok' | 'unknown' | 'retryable' | 'fatal'> = ['ok']
 
-  async createZone(input: { zoneId: string }, key: string): Promise<ZoneOperationRef> {
-    this.zoneCalls.push({ zoneId: input.zoneId, key })
+  async createZone(input: { zoneId: string; displayName?: string }, key: string): Promise<ZoneOperationRef> {
+    this.zoneCalls.push({ zoneId: input.zoneId, displayName: input.displayName, key })
     const step = this.script.shift() ?? 'ok'
     if (step === 'unknown') throw new NexusZoneUnknownError('simulated timeout')
     if (step === 'retryable') throw new NexusZoneApiError('busy', 'ZONE_QUORUM_UNAVAILABLE', true, 503)
@@ -261,6 +262,8 @@ describe('reconciler', () => {
     assert.equal(fake.grantCalls[0].grantee, orgId)
     assert.match(fake.grantCalls[0].sourceId, /:1$/)
     assert.deepEqual(fake.grantCalls[0].resourcePrefixes, ['/'])
+    // B-3：display_name 语义化——Org 名而非机器 zone_id
+    assert.equal(fake.zoneCalls[0].displayName, 'Zeta')
     const binding = (raw
       .prepare(`SELECT * FROM org_zone_bindings WHERE org_id = ?`)
       .get(orgId)) as Record<string, unknown>
@@ -660,6 +663,88 @@ describe('ZoneManagementService (§8.8 permissions & confirmations)', () => {
         && error.code === 'ZONE_RUNTIME_UNAVAILABLE'
         && error.retryable,
     )
+  })
+})
+
+describe('ZoneManagementService observed snapshot persistence (B-3)', () => {
+  const ORG = 'd5d5d5d5-0000-4000-8000-000000000001'
+  const viewer = { role: 'super_admin', orgId: ORG }
+
+  function observedClient(zoneStatus = 'active') {
+    return {
+      async getZone() {
+        return {
+          zone_id: 'org-obs-zone',
+          display_name: 'Observed Name',
+          status: zoneStatus,
+          revision: 'rev-9',
+        }
+      },
+      async getGrant() {
+        return {
+          grant_id: 'grant-obs-1',
+          status: 'active',
+          sourceType: 'moss_org_binding',
+          expires_at: '2027-01-01T00:00:00.000Z',
+        }
+      },
+    } as unknown as NexusZoneClient
+  }
+
+  function svcWithObserved(zoneStatus?: string): ZoneManagementService {
+    return new ZoneManagementService({
+      driver: db.driver,
+      client: observedClient(zoneStatus),
+      config: CONFIG,
+    })
+  }
+
+  beforeEach(async () => {
+    // createOrganization 自带一条 pending default binding（§8.7 Org 入口语义）
+    await db.createOrganization(ORG, 'ObsOrg', Date.now())
+  })
+
+  it('persists observed columns on refresh — listBindings reads them back from the row', async () => {
+    const svc = svcWithObserved()
+    const binding = (await svc.listBindings(viewer))[0]
+    assert.ok(binding, 'org creation must seed a default binding row')
+    await svc.refreshBinding(binding.binding_id, viewer)
+    // B-3 核心：observed 详情来自落库回读，不再只存在于单次 refresh 响应。
+    const listed = (await svc.listBindings(viewer)).find(
+      (b) => b.binding_id === binding.binding_id,
+    )
+    assert.ok(listed, 'binding row missing from list')
+    assert.equal(listed.observed_display_name, 'Observed Name')
+    assert.equal(listed.observed_zone_status, 'active')
+    assert.equal(listed.observed_revision, 'rev-9')
+    // pending 行尚无 nexus_grant_id → core 不查 grant，observed grant 族为
+    // null（grant 侧快照见第二个用例的 grant-active 行为覆盖）
+    assert.equal(listed.observed_grant_status, null)
+    assert.equal(listed.observed_grant_source, null)
+    assert.equal(listed.grant_expires_at, null)
+    assert.ok(listed.observed_at !== null && Date.now() - listed.observed_at < 60_000)
+  })
+
+  it('reconcileObservedSnapshot back-writes every binding, detached included', async () => {
+    const svc = svcWithObserved()
+    const defaultBinding = (await svc.listBindings(viewer))[0]
+    // 第二条（shared）走 detach，形成 bound + detached 混合行集。
+    await svc.addBinding({ orgId: ORG, zoneId: 'org-obs-detached', purpose: 'shared' })
+    const shared = (await svc.listBindings(viewer)).find(
+      (b) => b.zone_id === 'org-obs-detached',
+    )
+    await svc.detachBinding(shared!.binding_id, viewer)
+
+    // 远端 zone 仍 active → detached 行判 sync_failed（期望已解绑但远端仍活跃）
+    const reconciler = svcWithObserved('active')
+    const written = await reconciler.reconcileObservedSnapshot()
+    assert.equal(written, 2)
+    const rows = await reconciler.listBindings(viewer)
+    const bound = rows.find((b) => b.binding_id === defaultBinding.binding_id)
+    const detached = rows.find((b) => b.zone_id === 'org-obs-detached')
+    assert.equal(bound!.observed_display_name, 'Observed Name')
+    assert.equal(detached!.sync_status, 'sync_failed')
+    assert.ok(detached!.observed_at !== null)
   })
 })
 
