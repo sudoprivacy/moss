@@ -184,8 +184,8 @@ export function installAgent(
 export function uninstallAgent(data: {
   assistantName: string
   sourcePath?: string
-}): Promise<{ ok: boolean }> {
-  return authClient.post<{ ok: boolean }>('/api/v1/agents/uninstall', data)
+}): Promise<{ ok: boolean; withdrawn_publish_requests?: number }> {
+  return authClient.post<{ ok: boolean; withdrawn_publish_requests?: number }>('/api/v1/agents/uninstall', data)
 }
 
 export function createCustomAssistant(

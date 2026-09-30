@@ -1269,11 +1269,15 @@ export default function SkillStorePage() {
 
     const skill = pendingUninstallSkill
     try {
-      await uninstallSkill({
+      const result = await uninstallSkill({
         skillName: skill.name,
         sourcePath: skill.source,
       })
-      toast.success(`已卸载 ${skill.displayName}`)
+      toast.success(
+        result.withdrawn_publish_requests
+          ? `已卸载 ${skill.displayName}，并撤回了待审批的专属发布申请`
+          : `已卸载 ${skill.displayName}`,
+      )
       await fetchInstalledList()
       if (detailResolvedInstalledSkill?.name === skill.name) {
         setDetailOpen(false)

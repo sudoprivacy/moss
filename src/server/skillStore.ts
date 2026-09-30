@@ -804,6 +804,10 @@ export async function installHubSkill(params: {
   const trimmedSkillName = params.skillName.trim()
   await mkdir(MOSS_SKILLS_HUB_DIR, { recursive: true })
   const skillDir = path.join(MOSS_SKILLS_HUB_DIR, trimmedSkillName)
+  // An update reinstalls from scratch; keep the admin's local governance
+  // settings (who may use it, whether it's enabled) instead of resetting them
+  // to everyone / enabled.
+  const previousMeta = await readSkillMeta(skillDir)
   await rm(skillDir, { recursive: true, force: true })
   await mkdir(skillDir, { recursive: true })
   await extractSkillZip(zipBuffer, skillDir)
@@ -847,9 +851,10 @@ export async function installHubSkill(params: {
         : '',
     source_type: 'hub',
     is_builtin: false,
-    enabled: true,
+    enabled: previousMeta ? previousMeta.enabled !== false : true,
     installed_version: params.version || '',
     installed_at: new Date().toISOString(),
+    ...(previousMeta && previousMeta.visible_to !== undefined ? { visible_to: previousMeta.visible_to } : {}),
   }
 
   await writeSkillMeta(skillDir, meta)

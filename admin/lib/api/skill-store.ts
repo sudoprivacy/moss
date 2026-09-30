@@ -162,8 +162,8 @@ export function installSkill(
 export function uninstallSkill(data: {
   skillName: string
   sourcePath?: string
-}): Promise<{ ok: boolean }> {
-  return authClient.post<{ ok: boolean }>('/api/v1/skills/uninstall', data)
+}): Promise<{ ok: boolean; withdrawn_publish_requests?: number }> {
+  return authClient.post<{ ok: boolean; withdrawn_publish_requests?: number }>('/api/v1/skills/uninstall', data)
 }
 
 export function setInstalledSkillEnabled(data: {

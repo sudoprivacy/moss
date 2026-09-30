@@ -1303,12 +1303,16 @@ export class RuntimeService {
     // Using a custom agent follows the scope its creator chose, admins
     // included. Checked here, the choke point every entry (chat, IM, cron,
     // triggers, resume) passes through, before its rules reach the workspace.
-    if (effectiveAssistantName && visibilityFilter) {
+    if (effectiveAssistantName) {
       const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
       const found = await findAssistantDir(effectiveAssistantName)
       const meta = found ? await readAssistantMeta(found.dir) : null
-      const ownerId = customItemOwnerId(meta)
-      if (ownerId && ownerId !== session.userId && !isUsableBy(meta?.visible_to, ownerId, visibilityFilter)) {
+      // A disabled agent (e.g. a 专属 agent switched off) can't be started.
+      if (meta?.enabled === false) {
+        throw new AgentNotUsableError('该智能体已停用')
+      }
+      const ownerId = visibilityFilter ? customItemOwnerId(meta) : null
+      if (visibilityFilter && ownerId && ownerId !== session.userId && !isUsableBy(meta?.visible_to, ownerId, visibilityFilter)) {
         throw new AgentNotUsableError('无权使用该自定义智能体（创建者未向你开放）')
       }
     }

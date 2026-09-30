@@ -1277,11 +1277,15 @@ export default function AgentHubPage() {
     }
 
     try {
-      await uninstallAgent({
+      const result = await uninstallAgent({
         assistantName: pendingUninstallAgent.name,
         sourcePath: pendingUninstallAgent.source,
       })
-      toast.success(`已卸载 ${pendingUninstallAgent.displayName}`)
+      toast.success(
+        result.withdrawn_publish_requests
+          ? `已卸载 ${pendingUninstallAgent.displayName}，并撤回了待审批的专属发布申请`
+          : `已卸载 ${pendingUninstallAgent.displayName}`,
+      )
       await fetchInstalledState(false)
       if (detailResolvedInstalledAgent?.name === pendingUninstallAgent.name) {
         setDetailOpen(false)

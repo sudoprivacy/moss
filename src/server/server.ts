@@ -2401,6 +2401,7 @@ export function startServer(
         .filter((a) => {
           if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
           if (a.agentType === 'workflow') return false
+          if (!a.enabled) return false
           return isUsableBy(a.visibleTo, a.ownerId, filter)
         })
         .map((a) => ({
@@ -6186,7 +6187,7 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           data: installed
-            .filter(assistant => isUsableBy(assistant.visibleTo, assistant.ownerId, filter))
+            .filter(assistant => assistant.enabled && isUsableBy(assistant.visibleTo, assistant.ownerId, filter))
             .map(assistant => ({
               assistant_id: assistant.meta?.id ?? assistant.name,
               tenant_id: auth.orgId,
@@ -8232,9 +8233,17 @@ export function startServer(
           all
             .filter(a => {
               if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
-              return manageView ? isVisibleTo(a.visibleTo, filter) : isUsableBy(a.visibleTo, a.ownerId, filter)
+              // A disabled agent can't be used; the manage view still lists it.
+              return manageView ? isVisibleTo(a.visibleTo, filter) : a.enabled && isUsableBy(a.visibleTo, a.ownerId, filter)
             })
-            .map(a => (manageView ? { ...a, usable: isUsableBy(a.visibleTo, a.ownerId, filter) } : a)),
+            .map(a => (manageView ? { ...a, usable: isUsableBy(a.visibleTo, a.ownerId, filter) } : a))
+            // Which wikis / corp apps an agent is bound to (the ids a grant
+            // needs) stays with admins and the agent's own creator.
+            .map(a => {
+              if (isStoreAdmin(auth) || a.ownerId === auth.userId || !a.meta) return a
+              const { enabledWikis: _wikis, enabledCorpApps: _corpApps, ...meta } = a.meta
+              return { ...a, meta }
+            }),
         )
         return
       }
@@ -8338,8 +8347,25 @@ export function startServer(
         if ((await resolveCustomAssistantOwner(target)) !== auth.userId) {
           authService.requireScope(auth, 'admin:settings')
         }
+        // 专属 agents are removed through their own delete, which also drops the
+        // DB record; removing only the files here would orphan it.
+        const uninstallDir = target.sourcePath || (await findAssistantDir(target.assistantName))?.dir
+        if (uninstallDir && isInsideDir(join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant'), resolve(uninstallDir))) {
+          throw new HttpError(409, '专属智能体请在「专属」列表中删除')
+        }
         await uninstallAssistant(target)
-        writeJson(res, 200, { ok: true })
+        // A pending 专属 publish request made from this custom agent can no
+        // longer be approved; withdraw it rather than leave it dangling.
+        let withdrawnRequests = 0
+        if (uninstallDir) {
+          for (const row of runtime.store.listTenantAssistants('pending')) {
+            if (typeof row.file_path === 'string' && resolve(row.file_path) === resolve(uninstallDir)) {
+              runtime.store.deleteTenantAssistant(row.id as string)
+              withdrawnRequests++
+            }
+          }
+        }
+        writeJson(res, 200, { ok: true, withdrawn_publish_requests: withdrawnRequests })
         return
       }
 
@@ -8565,6 +8591,8 @@ export function startServer(
           if (row.status === 'pending') return isAdmin || canManage
           if (row.status === 'approved') {
             if (canManage) return true
+            // A disabled item is hidden from everyone who doesn't manage it.
+            if (Number(row.enabled) === 0) return false
             const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
             return isVisibleTo(visibleTo, filter)
           }
@@ -8588,23 +8616,28 @@ export function startServer(
               return fallback
             }
           }
+          const canManageRow = isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth)
+          // Server paths / source URLs are for admins; which wikis and corp apps
+          // an agent is bound to is for those who manage it (the ids are what a
+          // grant needs, so they aren't handed to every viewer).
+          const { file_path: _filePath, source_url: _sourceUrl, ...publicRow } = row
           return {
-            ...row,
+            ...(isAdmin ? row : publicRow),
             avatar: formatTenantAssistantAvatarUrl(row.avatar, config.publicBaseUrl),
             default_init_prompt: typeof row.default_init_prompt === 'string' ? row.default_init_prompt : '',
             prompts_i18n: parseObject(row.prompts_i18n, { 'zh-CN': [] }),
             categories: parseArray(row.categories),
             skills: parseArray(row.skills),
             enabled_skills: parseArray(row.enabled_skills),
-            enabled_wikis: parseArray(row.enabled_wikis),
-            enabled_corp_apps: parseArray(row.enabled_corp_apps),
+            enabled_wikis: canManageRow ? parseArray(row.enabled_wikis) : [],
+            enabled_corp_apps: canManageRow ? parseArray(row.enabled_corp_apps) : [],
             workflow: parseObject(row.workflow, null),
             visible_to: parseObject(row.visible_to, null),
             // A widening request awaiting admin review (null here means everyone).
             visibility_change_pending: row.pending_visible_to != null,
             pending_visible_to: parseStoredVisibleTo(row.pending_visible_to),
             // Lets the frontend show edit/delete without re-deriving subtree math.
-            can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
+            can_manage: canManageRow,
           }
         })
         writeJson(res, 200, rows)
@@ -8620,7 +8653,7 @@ export function startServer(
           const installedAssistants = await getInstalledAssistants()
           const assistant = installedAssistants.find(a => a.id === assistantId)
           // Downloading = using (clients install it locally): same rule as the list.
-          if (!assistant || !isUsableBy(assistant.visibleTo, assistant.ownerId, authService.buildVisibilityFilter(auth))) {
+          if (!assistant || !assistant.enabled || !isUsableBy(assistant.visibleTo, assistant.ownerId, authService.buildVisibilityFilter(auth))) {
             throw new HttpError(404, `Assistant not found: ${assistantId}`)
           }
           // Use agent name for packaging (directory lookup)
@@ -8930,6 +8963,13 @@ export function startServer(
         }
 
         if (approved) {
+          // Refuse before changing anything when the files to approve are gone
+          // (e.g. the creator deleted the custom original); otherwise the record
+          // would end up approved with nothing installed.
+          const pendingSource = tenantAssistant.file_path as string | undefined
+          if (!pendingSource || !existsSync(pendingSource)) {
+            throw new HttpError(409, '申请对应的文件已不存在（可能已被创建者删除），请拒绝该申请')
+          }
           // Update status to approved
           runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
           // The requested scope, or the admin's adjustment from the approve body.
@@ -9314,7 +9354,7 @@ export function startServer(
           res,
           200,
           all
-            .filter(s => (manageView ? isVisibleTo(s.visibleTo, filter) : isUsableBy(s.visibleTo, s.ownerId, filter)))
+            .filter(s => (manageView ? isVisibleTo(s.visibleTo, filter) : s.enabled && isUsableBy(s.visibleTo, s.ownerId, filter)))
             .map(s => (manageView ? { ...s, usable: isUsableBy(s.visibleTo, s.ownerId, filter) } : s)),
         )
         return
@@ -9353,8 +9393,23 @@ export function startServer(
         if ((await resolveCustomSkillOwner(target)) !== auth.userId) {
           authService.requireScope(auth, 'admin:settings')
         }
+        // 专属 skills are removed through their own delete (see agents).
+        const uninstallDir = target.sourcePath || (await findInstalledSkillPath(target.skillName))
+        if (uninstallDir && isInsideDir(MOSS_SKILLS_TENANT_DIR, resolve(uninstallDir))) {
+          throw new HttpError(409, '专属技能请在「专属」列表中删除')
+        }
         await uninstallSkill(target)
-        writeJson(res, 200, { ok: true })
+        // Withdraw a pending 专属 publish request made from this custom skill.
+        let withdrawnRequests = 0
+        if (uninstallDir) {
+          for (const row of runtime.store.listTenantSkills('pending')) {
+            if (typeof row.file_path === 'string' && resolve(row.file_path) === resolve(uninstallDir)) {
+              runtime.store.deleteTenantSkill(row.id as string)
+              withdrawnRequests++
+            }
+          }
+        }
+        writeJson(res, 200, { ok: true, withdrawn_publish_requests: withdrawnRequests })
         return
       }
 
@@ -9553,13 +9608,18 @@ export function startServer(
             if (row.status === 'pending') return isAdmin || canManage
             if (row.status === 'approved') {
               if (canManage) return true
+              // A disabled item is hidden from everyone who doesn't manage it.
+              if (Number(row.enabled) === 0) return false
               const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
               return isVisibleTo(visibleTo, filter)
             }
             return canManage || isAdmin
           })
-          .map((row: Record<string, unknown>) => ({
-            ...row,
+          .map((row: Record<string, unknown>) => {
+            // Server paths / source URLs are for admins only.
+            const { file_path: _filePath, source_url: _sourceUrl, ...publicRow } = row
+            return {
+            ...(isAdmin ? row : publicRow),
             // Parse visible_to so the approval page receives an object (matches
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
@@ -9568,7 +9628,8 @@ export function startServer(
             pending_visible_to: parseStoredVisibleTo(row.pending_visible_to),
             // Lets the frontend show edit/delete without re-deriving subtree math.
             can_manage: isAdmin || authService.isCreatorInScope(auth.orgId, row.author_id as string, auth),
-          }))
+            }
+          })
         writeJson(res, 200, rows)
         return
       }
@@ -9582,7 +9643,7 @@ export function startServer(
           const installedSkills = await getInstalledSkills()
           const skill = installedSkills.find(s => s.id === skillId)
           // Downloading = using (clients install it locally): same rule as the list.
-          if (!skill || !isUsableBy(skill.visibleTo, skill.ownerId, authService.buildVisibilityFilter(auth))) {
+          if (!skill || !skill.enabled || !isUsableBy(skill.visibleTo, skill.ownerId, authService.buildVisibilityFilter(auth))) {
             throw new HttpError(404, `Skill not found: ${skillId}`)
           }
           // Use skill name for packaging (directory lookup)
@@ -9769,6 +9830,13 @@ export function startServer(
           // author's approved tenant skill of the same name.
           if (tenantSkillNameTakenByOther(runtime.store, tenantSkill.name as string, tenantSkill.author_id as string, tenantSkillId)) {
             throw new HttpError(409, `已存在他人的同名专属技能: ${tenantSkill.name as string}`)
+          }
+          // Refuse before changing anything when the files to approve are gone.
+          const pendingSource = typeof tenantSkill.file_path === 'string' && tenantSkill.file_path
+            ? tenantSkill.file_path
+            : join(MOSS_SKILLS_CUSTOM_DIR, tenantSkill.name as string)
+          if (!existsSync(pendingSource)) {
+            throw new HttpError(409, '申请对应的文件已不存在（可能已被创建者删除），请拒绝该申请')
           }
           // Update status to approved
           runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)

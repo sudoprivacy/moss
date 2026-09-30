@@ -856,6 +856,27 @@ export async function fetchAgentHubSkillDetailsByIds(
  * a stale orphan dir, and clears legacy empty-id dirs that share the id (none,
  * since empty ids never match a real catalog id).
  */
+/**
+ * Settings an admin manages locally on an installed hub agent — who may use
+ * it, whether it's enabled, and which wikis / corp apps / corp auth it gets.
+ * A hub update carries them over; content (rules, skills, …) comes from the hub.
+ */
+const HUB_LOCAL_SETTINGS = ['visible_to', 'enabled', 'enabledWikis', 'enabledCorpApps', 'enableCorpAuth'] as const
+
+/** Meta of the current hub install of a catalog id (under any dir name), if any. */
+async function findHubAssistantMetaById(assistantId: string, name: string): Promise<AssistantStoreMeta | null> {
+  const byName = await readAssistantMeta(path.join(ASSISTANT_HUB_DIR, name))
+  if (byName) return byName
+  const entries = await readdir(ASSISTANT_HUB_DIR, { withFileTypes: true }).catch(() => null)
+  if (!entries) return null
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('_')) continue
+    const meta = await readAssistantMeta(path.join(ASSISTANT_HUB_DIR, entry.name))
+    if (typeof meta?.id === 'string' && meta.id.trim() === assistantId) return meta
+  }
+  return null
+}
+
 async function removeHubAssistantDirsById(
   assistantId: string,
   keepName: string,
@@ -919,6 +940,10 @@ export async function installHubAssistant(params: {
   }
 
   await mkdir(ASSISTANT_HUB_DIR, { recursive: true })
+  // An update reinstalls from scratch; keep the admin's local governance
+  // settings from the previous install (see HUB_LOCAL_SETTINGS) instead of
+  // resetting them to the hub's defaults (typically: everyone may use it).
+  const previousMeta = await findHubAssistantMetaById(assistantId, assistantName)
   // Remove any existing hub install of the same catalog id, even under a
   // different dir name (e.g. an earlier install with a different name spelling),
   // so a re-install upserts instead of leaving a stale orphan dir behind.
@@ -1063,6 +1088,11 @@ export async function installHubAssistant(params: {
       'trigger' in (normalizedAssistant.workflow as object)
         ? (normalizedAssistant.workflow as AssistantStoreMeta['workflow'])
         : null,
+  }
+  if (previousMeta) {
+    for (const key of HUB_LOCAL_SETTINGS) {
+      if (previousMeta[key] !== undefined) (meta as Record<string, unknown>)[key] = previousMeta[key]
+    }
   }
   await writeAssistantMeta(assistantDir, meta)
 
