@@ -127,6 +127,7 @@ import {
 import { hasScope } from '@/lib/api/client'
 import { getUserSessions } from '@/lib/api/sessions'
 import { useAuth } from '@/lib/hooks/use-auth'
+import { ModelAccountManagement } from '../components/model-account-management'
 import { UserOperationsDialogs } from '../components/user-operations-dialogs'
 import { accountStatusLabel, availableUserOperations, type UserOperation } from '../user-operations'
 import type {
@@ -237,6 +238,8 @@ const userFormSchema = z.object({
   orgId: z.string().optional(),
   departmentId: z.string().nullable().optional(),
   extUserId: z.string().optional(),
+  memberLimit: z.string().optional(),
+  memberLimitMode: z.enum(['default', 'limited', 'unlimited']).optional(),
 })
 
 const departmentFormSchema = z.object({
@@ -247,6 +250,8 @@ const departmentFormSchema = z.object({
 })
 
 const organizationFormSchema = z.object({
+  initialAmount: z.string().optional(),
+  memberLimit: z.string().optional(),
   name: z.string().trim().min(1, '请输入组织名称'),
   extOrgId: z.string().optional(),
 })
@@ -869,6 +874,7 @@ export default function UsersPage() {
           createUserRequest.current = { identity, key: crypto.randomUUID() }
         }
         await createUser({
+          member_limit_usd: values.memberLimitMode === 'unlimited' ? null : values.memberLimitMode === 'limited' ? values.memberLimit?.trim() || '0.00' : undefined,
           name: values.name,
           email: values.email || undefined,
           org_id: values.orgId || undefined,
@@ -938,12 +944,16 @@ export default function UsersPage() {
     }
   }
 
+  const organizationRequest = useRef<{ identity: string; key: string } | null>(null)
   const handleSubmitOrganization = async (values: OrganizationFormData) => {
     setIsSubmittingOrganization(true)
     try {
       const extOrgId = values.extOrgId?.trim() || null
       if (organizationDialog.mode === 'create') {
-        await createOrganization({ name: values.name, ext_org_id: extOrgId })
+        const identity = JSON.stringify(values)
+        if (organizationRequest.current?.identity !== identity) organizationRequest.current = { identity, key: crypto.randomUUID() }
+        await createOrganization({ name: values.name, ext_org_id: extOrgId, initial_amount_usd: values.initialAmount?.trim() || '0.00', default_member_limit_usd: values.memberLimit?.trim() || null }, organizationRequest.current.key)
+        organizationRequest.current = null
         toast.success('组织创建成功')
       } else if (organizationDialog.organization) {
         await updateOrganization(organizationDialog.organization.id, {
@@ -1285,7 +1295,7 @@ export default function UsersPage() {
                         <TableHead>所属组织</TableHead>
                         <TableHead>所属部门</TableHead>
                         <TableHead>角色</TableHead>
-                        <TableHead className="text-right">积分余额</TableHead>
+                        <TableHead>模型限额</TableHead>
                         <TableHead>Moss API Keys</TableHead>
                         <TableHead>Sudorouter API Key</TableHead>
                         <TableHead>状态</TableHead>
@@ -1324,7 +1334,7 @@ export default function UsersPage() {
                                 {ROLE_LABELS[user.role]}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-right tabular-nums">{(user.balanceUnits ?? 0).toLocaleString()}</TableCell>
+                            <TableCell><Button variant="link" size="sm" onClick={() => setUserOperation({ user, operation: 'model_account' })}>查看限额</Button></TableCell>
                             <TableCell>
                               {userKeys.length > 0 ? (
                                 <div className="flex flex-wrap gap-1">
@@ -1396,13 +1406,9 @@ export default function UsersPage() {
                                       onClick={() => setUserOperation({ user, operation })}
                                     >
                                       <Coins className="mr-2 size-4" />
-                                      {operation === 'approve' ? '审批通过'
+                                      {operation === 'model_account' ? '模型限额与 Key' : operation === 'approve' ? '审批通过'
                                         : operation === 'reject' ? '拒绝申请'
-                                          : operation === 'delete_pending' ? '删除待审批用户'
-                                            : operation === 'recharge' ? '后台充值'
-                                              : operation === 'adjust' ? '积分调整'
-                                                : operation === 'sync_quota' ? '同步额度'
-                                                  : '查看账本'}
+                                          : '删除待审批用户'}
                                     </DropdownMenuItem>
                                   ))}
                                   <DropdownMenuItem
@@ -1628,6 +1634,7 @@ export default function UsersPage() {
             </TabsContent>
           ) : null}
         </Tabs>
+        <ModelAccountManagement orgId={activeOrgId} />
       </div>
 
       <Dialog
@@ -1658,6 +1665,7 @@ export default function UsersPage() {
           </DialogHeader>
           <Form {...userForm}>
             <form onSubmit={userForm.handleSubmit(handleSubmitUser)} className="space-y-4">
+              {userDialog.mode === 'create' && <><FormField control={userForm.control} name="memberLimitMode" render={({ field }) => <FormItem><FormLabel>成员限额</FormLabel><Select value={field.value ?? 'default'} onValueChange={field.onChange}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent><SelectItem value="default">使用组织默认限额</SelectItem><SelectItem value="limited">设置限额</SelectItem><SelectItem value="unlimited">不限额</SelectItem></SelectContent></Select><FormDescription>成员与组织共享余额；限额不会预扣组织余额。</FormDescription></FormItem>} />{userForm.watch('memberLimitMode') === 'limited' && <FormField control={userForm.control} name="memberLimit" render={({ field }) => <FormItem><FormLabel>限额金额（USD）</FormLabel><FormControl><Input {...field} placeholder="0.00" /></FormControl></FormItem>} />}</>}
               <FormField
                 control={userForm.control}
                 name="name"
@@ -1668,7 +1676,7 @@ export default function UsersPage() {
                       <Input {...field} placeholder="请输入用户名" />
                     </FormControl>
                     {userDialog.mode === 'create' ? (
-                      <FormDescription>Sudorouter 初始密码为账户名，不足 8 位在末尾补 1。</FormDescription>
+                      <FormDescription>成员使用独立的模型 Key，共享所属组织账户额度。</FormDescription>
                     ) : null}
                     <FormMessage />
                   </FormItem>
@@ -2051,6 +2059,7 @@ export default function UsersPage() {
           </DialogHeader>
           <Form {...organizationForm}>
             <form onSubmit={organizationForm.handleSubmit(handleSubmitOrganization)} className="space-y-4">
+              {organizationDialog.mode === 'create' && <><FormField control={organizationForm.control} name="initialAmount" render={({ field }) => <FormItem><FormLabel>组织初始额度（USD）</FormLabel><FormControl><Input {...field} placeholder="0.00" /></FormControl><FormDescription>上游已有赠额计入初始额度，只补不足部分。</FormDescription></FormItem>} /><FormField control={organizationForm.control} name="memberLimit" render={({ field }) => <FormItem><FormLabel>默认成员限额（USD）</FormLabel><FormControl><Input {...field} placeholder="留空表示不限额" /></FormControl><FormDescription>适用于新成员和邀请码注册成员。</FormDescription></FormItem>} /></>}
               <FormField
                 control={organizationForm.control}
                 name="name"
@@ -2417,8 +2426,8 @@ export default function UsersPage() {
                     <code className="text-xs">#{selectedUser.legacyId ?? '-'}</code>
                   </div>
                   <div className="flex justify-between gap-4">
-                    <span className="text-muted-foreground">积分余额</span>
-                    <span>{(selectedUser.balanceUnits ?? 0).toLocaleString()}</span>
+                    <span className="text-muted-foreground">模型限额</span>
+                    <Button variant="link" size="sm" onClick={() => setUserOperation({ user: selectedUser, operation: 'model_account' })}>查看与调整</Button>
                   </div>
                   <div className="flex justify-between gap-4">
                     <span className="text-muted-foreground">所属部门</span>

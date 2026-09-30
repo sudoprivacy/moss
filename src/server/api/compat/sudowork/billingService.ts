@@ -107,6 +107,7 @@ interface SudoworkBillingServiceOptions {
   refund?: RefundService
   payment?: BillingPaymentPort
   paymentsEnabled?: boolean
+  isShared?: (orgId: string) => Promise<boolean>
   clock?: () => number
 }
 
@@ -135,6 +136,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     if (this.options.paymentsEnabled === false) throw new SudoworkBillingError(403, '平台支付服务已停用新支付')
     this.requirePayment()
     const user = await this.requireUser(input.actor.userId)
+    await this.assertPersonalBilling(user.orgId)
     const legacyUserId = await this.ensureAlias('user', user.id, user.orgId)
     const phone = (await this.options.identities.findAuthIdentityByUser(user.id, 'phone', 'sudowork'))?.normalizedSubject ?? null
     const order = await this.options.recharge.createOrder({
@@ -356,6 +358,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     reason?: string; syncSudorouter?: boolean; idempotencyKey?: string
   }): Promise<unknown> {
     const user = await this.requireLegacyUser(input.legacyUserId)
+    await this.assertPersonalBilling(user.orgId)
     this.assertOrgScope(input.actor, user.orgId)
     this.validatePoints(input.amount)
     if (input.operation !== 'add' && input.operation !== 'subtract') {
@@ -389,6 +392,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
     if (input.actor.role !== 'super_admin') throw new SudoworkBillingError(403, '只有超级管理员可以为用户充值')
     this.validatePoints(input.points)
     const user = await this.requireLegacyUser(input.legacyUserId)
+    await this.assertPersonalBilling(user.orgId)
     this.assertOrgScope(input.actor, user.orgId)
     const external = await this.requireExternal(user.id)
     const context = this.context(input.idempotencyKey, 'admin-recharge')
@@ -418,6 +422,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
 
   async syncUserQuota(input: { actor: IdentityActor; legacyUserId: number }): Promise<unknown> {
     const user = await this.requireLegacyUser(input.legacyUserId)
+    await this.assertPersonalBilling(user.orgId)
     this.assertOrgScope(input.actor, user.orgId)
     const external = await this.requireExternal(user.id)
     const snapshot = await this.options.coordinator.syncQuota('user', user.id, external.externalAccountId)
@@ -426,6 +431,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }
 
   async createCreditApplication(input: { actor: IdentityActor; requestedPoints: number; reason: unknown; idempotencyKey?: string }): Promise<unknown> {
+    await this.assertPersonalBilling(input.actor.orgId)
     const record = await this.options.credit.createApplication({
       requestedPoints: input.requestedPoints, reason: typeof input.reason === 'string' ? input.reason : '',
     }, input.actor, this.context(input.idempotencyKey, 'credit-create'))
@@ -472,6 +478,7 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   }): Promise<unknown> {
     const record = await this.requireCredit(input.legacyApplicationId)
     this.assertOrgScope(input.actor, record.orgId)
+    await this.assertPersonalBilling(record.orgId)
     const result = await this.options.credit.approveApplication({
       applicationId: record.id, approvedPoints: input.approvedPoints, adminComment: input.adminComment,
     }, input.actor, this.context(input.idempotencyKey, 'credit-approve'))
@@ -488,7 +495,12 @@ export class SudoworkBillingService implements SudoworkBillingPort {
   async retryCreditApplication(input: { actor: IdentityActor; legacyApplicationId: number }): Promise<unknown> {
     const record = await this.requireCredit(input.legacyApplicationId)
     this.assertOrgScope(input.actor, record.orgId)
+    await this.assertPersonalBilling(record.orgId)
     return await this.creditDto(await this.options.credit.retryApplication(record.id, input.actor), true)
+  }
+
+  private async assertPersonalBilling(orgId: string): Promise<void> {
+    if (await this.options.isShared?.(orgId)) throw new SudoworkBillingError(409, '组织已启用共享账户，请使用组织充值和成员限额管理')
   }
 
   private async requireUser(id: string): Promise<AuthCenterUser> {

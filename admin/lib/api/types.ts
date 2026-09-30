@@ -94,6 +94,7 @@ export interface UsersListResponse {
 }
 
 export interface CreateUserRequest {
+  member_limit_usd?: string | null
   email?: string
   name: string
   org_id?: string
@@ -147,6 +148,8 @@ export interface OrganizationsListResponse {
 }
 
 export interface CreateOrganizationRequest {
+  initial_amount_usd?: string
+  default_member_limit_usd?: string | null
   name: string
   ext_org_id?: string | null
 }

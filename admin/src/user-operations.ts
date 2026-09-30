@@ -1,13 +1,6 @@
 import type { AuthUser } from '@/lib/api/types'
 
-export type UserOperation =
-  | 'approve'
-  | 'reject'
-  | 'delete_pending'
-  | 'recharge'
-  | 'adjust'
-  | 'sync_quota'
-  | 'ledger'
+export type UserOperation = 'model_account' | 'approve' | 'reject' | 'delete_pending'
 
 export function accountStatusLabel(status: AuthUser['status']): string {
   if (status === 'pending') return '待审批'
@@ -16,23 +9,7 @@ export function accountStatusLabel(status: AuthUser['status']): string {
   return '禁用'
 }
 
-export function availableUserOperations(
-  status: AuthUser['status'],
-  isSuperAdmin: boolean,
-): UserOperation[] {
-  if (status === 'pending') return ['approve', 'reject', 'delete_pending']
-  if (status === 'locked') return ['ledger']
-  if (status !== 'active') return ['ledger']
-  return [
-    ...(isSuperAdmin ? ['recharge' as const] : []),
-    'adjust',
-    'sync_quota',
-    'ledger',
-  ]
-}
-
-export function parsePositiveIntegerPoints(value: string): number {
-  const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error('积分必须是正整数')
-  return parsed
+export function availableUserOperations(status: AuthUser['status'], _isSuperAdmin: boolean): UserOperation[] {
+  if (status === 'pending') return ['approve', 'reject', 'delete_pending', 'model_account']
+  return ['model_account']
 }

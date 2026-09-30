@@ -96,6 +96,7 @@ export interface SudoworkAdministrationPort {
     name: string
     code: string
     creditPool?: number
+    modelBilling?: import('../../../billing/organizationBillingService.js').CreateOrganizationModelInput
     logo?: string | null
     appName?: string | null
     topName?: string | null
@@ -187,16 +188,17 @@ export interface SudoworkCasPort {
 }
 
 export interface SudoworkUserProjection {
+  billingMode?: 'organization_shared'
   sudorouterKey: string | null
   modelServiceUrl: string
   models: string[]
   scodeAutoModel: string
-  totalPoints: number
-  usedPoints: number
-  remainingPoints: number
-  bonusPoints: number
-  quota: number
-  usedQuota: number
+  totalPoints?: number
+  usedPoints?: number
+  remainingPoints?: number
+  bonusPoints?: number
+  quota?: number
+  usedQuota?: number
 }
 
 export interface SudoworkSmsPort {
@@ -457,12 +459,12 @@ export function createSudoworkCompatibilityApp(options: {
           model_service_url: projection.modelServiceUrl,
           models: projection.models,
           scode_auto_model: projection.scodeAutoModel,
-          points: {
+          ...(projection.billingMode ? { billing_mode: projection.billingMode } : { points: {
             total: projection.totalPoints,
             used: projection.usedPoints,
             remaining: projection.remainingPoints,
             bonus: projection.bonusPoints,
-          },
+          } }),
         },
       },
     }
@@ -890,6 +892,7 @@ export function createSudoworkCompatibilityApp(options: {
     await options.administration.createEnterprise({
       actor, name, code,
       creditPool: typeof body.credit_pool === 'number' ? body.credit_pool : undefined,
+      modelBilling: typeof body.initial_amount_usd === 'string' ? { initialAmountUsd: body.initial_amount_usd, defaultMemberLimitUsd: typeof body.default_member_limit_usd === 'string' ? body.default_member_limit_usd : null } : undefined,
       logo: typeof body.logo === 'string' ? body.logo : null,
       appName: typeof body.app_name === 'string' ? body.app_name : null,
       topName: typeof body.top_name === 'string' ? body.top_name : null,
@@ -1447,11 +1450,13 @@ export function createSudoworkCompatibilityApp(options: {
         status: user.status,
         enterprise_id: user.enterpriseId,
         enterprise_code: user.enterpriseCode,
+        ...(projection.billingMode ? { billing_mode: projection.billingMode } : {
         bonus_points: projection.bonusPoints,
         remaining_points: projection.remainingPoints,
         used_points: projection.usedPoints,
         quota: projection.quota,
         used_quota: projection.usedQuota,
+        }),
       },
     })
   })

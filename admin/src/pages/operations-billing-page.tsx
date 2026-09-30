@@ -198,8 +198,8 @@ export default function OperationsBillingPage() {
 
   return (
     <DashboardLayout
-      title="计费运营"
-      description="处理 Sudowork 兼容充值订单、充值记录和 SudoRouter 到账同步。"
+      title="历史个人账务"
+      description="保留原个人订单、原始单位及历史处理记录。组织共享账户充值请在 Sudowork 组织充值中心操作。"
     >
       <div className="space-y-6">
         <div className="grid gap-4 md:grid-cols-4">

@@ -38,6 +38,7 @@ export class OrganizationIdentityService {
     private readonly authDb: AuthCenterDb,
     private readonly repository: IdentityRepository,
     private readonly unifiedIdentity: UnifiedIdentityService,
+    private readonly modelBilling?: { isShared(orgId: string): Promise<boolean>; beforeMemberChange(orgId: string, userId: string, status: string, targetOrgId?: string): Promise<void> },
   ) {}
 
   createOrganization(input: {
@@ -53,6 +54,7 @@ export class OrganizationIdentityService {
     appCompanyName?: string | null
     loginDescription?: string | null
     initialCreditUnits?: number
+    modelBilling?: import('../billing/organizationBillingService.js').CreateOrganizationModelInput
     legacyEnterpriseId?: number
   }, context: CommandContext, actor?: IdentityActor) {
     if (actor) this.assertSuperAdmin(actor)
@@ -237,6 +239,7 @@ export class OrganizationIdentityService {
         throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
       }
     }
+    await this.modelBilling?.beforeMemberChange(user.orgId, user.id, patch.status ?? user.status, patch.orgId)
     return this.authDb.driver.transaction(async () => {
       await this.authDb.updateUser(userId, {
         displayName: patch.displayName,
@@ -261,6 +264,7 @@ export class OrganizationIdentityService {
     if (user.role === 'super_admin') {
       throw new IdentityDomainError('SUPER_ADMIN_IMMUTABLE', 'Super admin cannot be deleted')
     }
+    await this.modelBilling?.beforeMemberChange(user.orgId, user.id, 'deleted')
     await this.authDb.driver.transaction(async () => {
       await this.repository.deleteUserRecords(userId)
       await this.authDb.deleteUser(userId)
@@ -279,6 +283,7 @@ export class OrganizationIdentityService {
     if (!(await this.authDb.getOrganization(orgId))) {
       throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
     }
+    if (await this.modelBilling?.isShared(orgId)) throw new IdentityDomainError('MODEL_ACCOUNT_EXISTS', '组织含有模型账户及资金记录，不能删除')
     if ((await this.authDb.countUsersByOrg(orgId)) > 0 || (await this.authDb.countDepartmentsByOrg(orgId)) > 0) {
       throw new IdentityDomainError('ORGANIZATION_NOT_EMPTY', 'Organization is not empty')
     }
@@ -291,6 +296,7 @@ export class OrganizationIdentityService {
   async setUserStatus(userId: string, status: AuthCenterUser['status']): Promise<AuthCenterUser> {
     const user = await this.authDb.getUserById(userId)
     if (!user) throw new IdentityDomainError('USER_NOT_FOUND', 'User not found')
+    await this.modelBilling?.beforeMemberChange(user.orgId, user.id, status)
     await this.authDb.updateUser(userId, { status })
     return (await this.authDb.getUserById(userId))!
   }

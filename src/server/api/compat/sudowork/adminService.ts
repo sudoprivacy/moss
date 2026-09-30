@@ -1,3 +1,4 @@
+import type { OrganizationBillingService, CreateOrganizationModelInput } from '../../../billing/organizationBillingService.js'
 import { randomUUID } from 'node:crypto'
 import type { CommandContext } from '../../../application/commandContext.js'
 import { onlineCommandContext } from '../../../application/commandContext.js'
@@ -77,6 +78,7 @@ export class SudoworkAdministrationService {
     private readonly authDb: AuthCenterDb,
     private readonly options: {
       getDifyFeatureFlags?: () => { enabled: boolean; missingEnv: string[] }
+      modelBilling?: OrganizationBillingService
       defaultInitialQuota?: number
       accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     } = {},
@@ -106,6 +108,7 @@ export class SudoworkAdministrationService {
     name: string
     code: string
     creditPool?: number
+    modelBilling?: CreateOrganizationModelInput
     logo?: string | null
     appName?: string | null
     topName?: string | null
@@ -124,7 +127,9 @@ export class SudoworkAdministrationService {
       appCompanyName: input.appCompanyName,
       loginDescription: input.loginDescription,
       initialCreditUnits: input.creditPool ?? 10_000,
+      modelBilling: input.modelBilling,
     }, this.context(input.idempotencyKey), input.actor)
+    if (this.options.modelBilling) await this.options.modelBilling.retryOrganization(created.organization.id, input.name).catch(() => {})
     return {
       id: created.legacyEnterpriseId,
       name: created.organization.name,
@@ -176,13 +181,14 @@ export class SudoworkAdministrationService {
     const orgId = input.enterpriseId === undefined
       ? input.actor.orgId
       : await this.requireOrganizationId(input.enterpriseId)
+    const isShared = await this.options.modelBilling?.isShared(orgId) ?? false
     const invitations = await this.organizations.createInvitations({
       orgId,
       count: Math.min(Math.max(input.count || 1, 1), 100),
-      initialCreditUnits: input.initialQuotaUsd == null
+      initialCreditUnits: isShared ? 0 : input.initialQuotaUsd == null
         ? sudoworkQuotaToCreditUnits(this.options.defaultInitialQuota ?? 100_000)
         : sudoworkUsdToCreditUnits(input.initialQuotaUsd),
-      legacyInitialQuotaUsd: input.initialQuotaUsd ?? null,
+      legacyInitialQuotaUsd: isShared ? null : input.initialQuotaUsd ?? null,
     }, codeFactory ?? generateInvitationCode, input.actor)
     return { codes: invitations.map((item) => item.code), count: invitations.length }
   }
@@ -415,10 +421,12 @@ export class SudoworkAdministrationService {
     if (await this.identities.hasOperationAudit(key)) return
     const target = await this.requireManagedUser(input.actor, input.legacyUserId)
     if (target.status !== 'pending') throw new SudoworkAdministrationError(400, '用户不是待审批状态')
+    const isShared = await this.options.modelBilling?.isShared(target.orgId) ?? false
+    if (isShared) await this.options.modelBilling!.provisionMemberAccount(target.orgId, target.id)
     await this.authDb.driver.transaction(async () => {
       const current = (await this.identities.getWallet('user', target.id))?.balanceUnits
       if (current === undefined) throw new SudoworkAdministrationError(404, '用户不存在')
-      const adjustment = 100 - current
+      const adjustment = isShared ? 0 : 100 - current
       if (adjustment !== 0) {
         await this.wallet.post({
           ownerType: 'user', ownerId: target.id, deltaUnits: adjustment,
@@ -430,7 +438,7 @@ export class SudoworkAdministrationService {
       await this.organizations.updateUser(target.id, { status: 'active' }, input.actor)
       await this.writeUserAudit({
         key, actor: input.actor, target, legacyUserId: input.legacyUserId,
-        action: 'USER_APPROVE', path: '/api/v1/admin/approve', response: { status: 1, balance: 100 },
+        action: 'USER_APPROVE', path: '/api/v1/admin/approve', response: isShared ? { status: 1, billing_mode: 'organization_shared' } : { status: 1, balance: 100 },
       })
     })
   }
@@ -440,8 +448,9 @@ export class SudoworkAdministrationService {
     if (await this.identities.hasOperationAudit(key)) return
     const target = await this.requireManagedUser(input.actor, input.legacyUserId)
     if (target.status !== 'pending') throw new SudoworkAdministrationError(400, '用户不是待审批状态')
+    await this.options.modelBilling?.beforeMemberChange(target.orgId, target.id, 'disabled')
     await this.authDb.driver.transaction(async () => {
-      await this.organizations.updateUser(target.id, { status: 'disabled' }, input.actor)
+      await this.authDb.updateUser(target.id, { status: 'disabled' })
       await this.writeUserAudit({
         key, actor: input.actor, target, legacyUserId: input.legacyUserId,
         action: 'USER_REJECT', path: '/api/v1/admin/reject', response: { status: 2 },
@@ -457,6 +466,7 @@ export class SudoworkAdministrationService {
     if (await this.billing.countOwnerLedgerEntries('user', target.id) > 0) {
       throw new SudoworkAdministrationError(409, '用户已有账本记录，不能删除')
     }
+    await this.options.modelBilling?.beforeMemberChange(target.orgId, target.id, 'deleted')
     await this.authDb.driver.transaction(async () => {
       await this.writeUserAudit({
         key, actor: input.actor, target, legacyUserId: input.legacyUserId,

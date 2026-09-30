@@ -1,4 +1,7 @@
+import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
+import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
+import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
 import { artifactManifestPath, readArtifacts, projectArtifactDrafts } from './artifacts.js'
 import { SudoworkCasService, SudoworkCasError } from './api/compat/sudowork/casService.js'
 import { PlatformConfigService } from './configuration/platformConfigService.js'
@@ -1969,28 +1972,6 @@ async function serveAdminRequest(
   await writeFileResponse(res, join(adminDistDir, 'index.html'), headOnly)
 }
 
-function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  const origin = req.headers.origin
-  if (!origin) return false
-
-  res.setHeader('Access-Control-Allow-Origin', origin)
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-Id, X-Cabin-Tablet-Token, X-Cabin-Tablet-Id')
-  res.setHeader('Access-Control-Allow-Credentials', 'true')
-  res.setHeader('Access-Control-Max-Age', '86400')
-  return true
-}
-
-function handleCorsPreflight(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  if (req.method === 'OPTIONS' && req.headers.origin) {
-    setCorsHeaders(req, res)
-    res.writeHead(204)
-    res.end()
-    return true
-  }
-  return false
-}
-
 export function startServer(
   config: ServerConfig,
   runtime: RuntimeService,
@@ -2558,6 +2539,18 @@ export function startServer(
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/model-billing/callback') {
+        try {
+          const recharge = authService.getOrganizationRechargeService()
+          if (!recharge) throw new HttpError(503, '组织充值未配置')
+          await recharge.handleCallback(parseOrganizationPaymentCallback(await readBody(req), String(req.headers['content-type'] ?? 'application/json')))
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); res.end('success')
+        } catch {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }); res.end('fail')
+        }
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/recharge/callback') {
         try {
           await handleRechargeCallback(
@@ -2565,7 +2558,7 @@ export function startServer(
             buildFuiouClient(config),
             buildSudorouterClient(config),
             await readJsonBody(req) as unknown as FuiouCallbackPayload,
-            async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+            async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
           )
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
           res.end('success')
@@ -3576,6 +3569,22 @@ export function startServer(
       if (await handlePrivateAgentArchives(req, res, pathname, auth, privateAgentArchives)) return
       return await withOrganizationResources({ orgId: auth.orgId, userId: auth.userId, driver: runtime.store.driver, visibility: await authService.buildVisibilityFilter(auth) }, async () => {
       const auth = resourceAuth
+      if (pathname.startsWith('/api/v1/model-billing/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchOrganizationRecharge(authService.getOrganizationRechargeService(), auth, req.method ?? 'GET', url,
+          ['POST', 'PATCH'].includes(req.method ?? '') ? await readJsonBody(req) : {},
+          typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined)
+        writeJson(res, result.status, result.body)
+        return
+      }
+      if (pathname === '/api/v1/model-account' || pathname.startsWith('/api/v1/model-account/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchOrganizationBilling(authService.getOrganizationBillingService(), auth, req.method ?? 'GET', url,
+          ['POST', 'PATCH'].includes(req.method ?? '') ? await readJsonBody(req) : {},
+          typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined)
+        writeJson(res, result.status, result.body)
+        return
+      }
       if (req.method === 'GET' && pathname === '/api/v1/client/local-runtime') {
         res.setHeader('Cache-Control', 'no-store')
         writeJson(res, 200, await buildClientRuntime(authService, { id: auth.userId, orgId: auth.orgId }))
@@ -3724,11 +3733,21 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/organizations') {
         await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
+        if (authService.getOrganizationBillingService()
+          && (typeof body.initial_amount_usd !== 'string' || body.default_member_limit_usd !== null && typeof body.default_member_limit_usd !== 'string')) {
+          throw new HttpError(400, '请设置组织初始额度与默认成员限额（USD），不限额请传 null')
+        }
         writeJson(
           res,
           200,
           await authService.createOrganization({
             name: typeof body.name === 'string' ? body.name : '',
+            idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
+            modelBilling: authService.getOrganizationBillingService() ? {
+              initialAmountUsd: body.initial_amount_usd as string,
+              defaultMemberLimitUsd: body.default_member_limit_usd as string | null,
+              serviceLimitUsd: typeof body.service_limit_usd === 'string' ? body.service_limit_usd : undefined,
+            } : undefined,
             extOrgId:
               body.ext_org_id === null || typeof body.ext_org_id === 'string'
                 ? body.ext_org_id
@@ -6223,6 +6242,9 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
+        if (body.member_limit_usd !== undefined && body.member_limit_usd !== null && typeof body.member_limit_usd !== 'string') {
+          throw new HttpError(400, '成员限额须为 USD 字符串或 null（不限额）')
+        }
         // Org is pinned to the caller's current org — never trust body.org_id.
         // A super_admin targets another org by switching into it (switchOrg),
         // which makes auth.orgId that org; this blocks cross-org user creation.
@@ -6231,6 +6253,7 @@ export function startServer(
           200,
           await authService.createProvisionedUser({
             orgId: auth.orgId,
+            memberLimitUsd: body.member_limit_usd as string | null | undefined,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
             displayName:
@@ -6331,12 +6354,15 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/user/dashboard') {
         writeJson(res, 200, {
           success: true,
-          data: await readUserCredits(authService, config, auth.userId),
+          data: await authService.getOrganizationBillingService()?.isShared(auth.orgId)
+            ? await authService.getOrganizationBillingService()!.dashboard(auth)
+            : await readUserCredits(authService, config, auth.userId),
         })
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/create') {
+        if (await authService.getOrganizationBillingService()?.isShared(auth.orgId)) throw new HttpError(409, '请使用组织充值中心')
         if (config.systemConfig.rechargeMode !== 'pay' || config.systemConfig.recharge.fuiou.enabled === false || config.systemConfig.sudorouterEnabled === false) {
           writeJson(res, 403, { success: false, msg: '充值功能未开启' })
           return
@@ -6441,7 +6467,8 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/user/model-usage-stats') {
-        const gatewayUserId = (await authService.getUserModelCredential(auth.userId))?.sudorouterUserId
+        if (await authService.getOrganizationBillingService()?.isShared(auth.orgId)) throw new HttpError(409, '请使用组织模型账户的用量接口')
+        const gatewayUserId = (await authService.getLegacyUserModelCredential(auth.userId))?.sudorouterUserId
         if (!gatewayUserId) {
           writeJson(res, 200, { success: true, data: [] })
           return
@@ -6482,6 +6509,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/credit-applications') {
+        if (await authService.getOrganizationBillingService()?.isShared(auth.orgId)) throw new HttpError(409, '请联系管理员调整成员限额')
         if (config.systemConfig.rechargeMode !== 'approve') {
           writeJson(res, 403, { success: false, msg: '积分申请未开启' })
           return
@@ -6521,6 +6549,7 @@ export function startServer(
         // Only an approval needs the gateway; reviewApplication enforces that.
         // Requiring it for a rejection too would leave a deployment with no
         // gateway unable to close a request it never intended to grant.
+        if (await authService.getOrganizationBillingService()?.isShared(application.orgId)) throw new HttpError(409, '请使用成员限额管理')
         const approving = body.approve === true
         const client = buildSudorouterClient(config)
         try {
@@ -6531,7 +6560,7 @@ export function startServer(
               typeof body.approved_points === 'number' ? body.approved_points : undefined,
             adminComment: typeof body.admin_comment === 'string' ? body.admin_comment : undefined,
             gatewayUserId:
-              (await authService.getUserModelCredential(application.userId))?.sudorouterUserId ?? null,
+              (await authService.getLegacyUserModelCredential(application.userId))?.sudorouterUserId ?? null,
           })
           writeJson(res, 200, { success: true, data: toPayload(reviewed, pointsToQuota) })
         } catch (err) {
@@ -6658,7 +6687,7 @@ export function startServer(
             {
               orderId: byId ? existing.id : undefined,
               orderNo: byId ? undefined : existing.orderNo,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单同步重试成功', data })
@@ -6688,7 +6717,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orderNo,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单状态同步完成', data })
@@ -6711,7 +6740,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '待处理订单同步完成', data })
@@ -6752,7 +6781,7 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '订单状态不支持退款' })
           return
         }
-        const gatewayUserId = (await authService.getUserModelCredential(order.userId))?.sudorouterUserId
+        const gatewayUserId = (await authService.getLegacyUserModelCredential(order.userId))?.sudorouterUserId
         const client = buildSudorouterClient(config)
         if (!gatewayUserId || !client) {
           writeJson(res, 409, { success: false, msg: '用户信息异常' })
@@ -6798,7 +6827,7 @@ export function startServer(
               orderNo,
               reason,
               adminId: auth.userId,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '退款成功', data: result })
@@ -6835,7 +6864,7 @@ export function startServer(
             buildSudorouterClient(config),
             order,
             {
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '模拟支付成功', data: { order_no: order.orderNo } })

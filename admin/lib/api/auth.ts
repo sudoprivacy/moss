@@ -181,8 +181,11 @@ export async function getOrganizations(): Promise<OrganizationsListResponse> {
 
 export async function createOrganization(
   data: CreateOrganizationRequest,
+  idempotencyKey?: string,
 ): Promise<OrganizationResponse> {
-  const response = await authClient.post<OrganizationResponse>('/api/v1/organizations', data)
+  const response = await authClient.post<OrganizationResponse>('/api/v1/organizations', data, {
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+  })
   notifyOrganizationsChanged()
   return response
 }

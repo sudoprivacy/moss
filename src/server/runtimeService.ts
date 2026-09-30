@@ -57,6 +57,7 @@ import {
 import { errorMessage } from '../utils/errors.js'
 import { getUserModelPreference } from './userModelPreference.js'
 import { getModelProviderApiKey, getModelsForSelection } from './modelListCache.js'
+import { resolveModelSelection } from './modelProviders.js'
 import type { AuthProxyServer } from './authProxy/authProxyServer.js'
 import {
   appendSharedAgentMemory,
@@ -2181,8 +2182,10 @@ export class RuntimeService {
     // Build environment for runner from system settings
     const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
     const userModelKey = session.userId
-      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
+      ? (await this.authService.getUserModelCredential(session.userId, session.orgId))?.sudorouterKey
       : undefined
+    const sharedBilling = this.authService.getOrganizationBillingService?.()
+    const isSharedModelAccount = Boolean(session.orgId && sharedBilling && await sharedBilling.isShared(session.orgId))
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
@@ -2198,6 +2201,8 @@ export class RuntimeService {
     // A selected Provider is a routing boundary.  Do not fall back to the
     // process-global endpoint when its catalog cannot be resolved: that would
     // make an unavailable/stale selection call a different Provider.
+    const requestedProvider = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel).provider : null
+    if (isSharedModelAccount && requestedProvider && (requestedProvider.id === 'legacy-default' || requestedProvider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl) && !userModelKey) throw new Error('组织成员模型凭据不可用，请联系管理员')
     const providerCatalog = !isCabinSession
       ? await getModelsForSelection(requestedModel, {
         settings: systemSettings,
@@ -2235,7 +2240,8 @@ export class RuntimeService {
     // configured Provider must never receive a process-global or legacy key;
     // local unauthenticated endpoints intentionally run with no credential.
     const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
-    const sessionApiKey = isLegacyProvider
+    const isManagedRouter = isSharedModelAccount && (isLegacyProvider || providerCatalog?.selection.provider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl)
+    const sessionApiKey = isManagedRouter ? userModelKey : isLegacyProvider
       ? userModelKey || providerApiKey
       : providerApiKey
     if (providerCatalog) {
