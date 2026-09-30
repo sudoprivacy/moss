@@ -429,7 +429,7 @@ export class CronService {
 
       console.log(`[CronService] Job ${job.id} completed successfully, session: ${sessionId}`)
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
+      const errorMsg = this.pauseIfAgentUnusable(job, error)
 
       // Update run status
       this.store.updateRunStatus(run.id, {
@@ -825,8 +825,20 @@ export class CronService {
     }
   }
 
-  private markRunFailed(job: CronJob, run: CronJobRun, error: unknown): void {
+  /**
+   * A job whose agent can no longer be used (disabled, or its creator withdrew
+   * access) would fail identically on every tick: pause it instead and say why.
+   * Returns the error text to record.
+   */
+  private pauseIfAgentUnusable(job: CronJob, error: unknown): string {
     const errorMsg = error instanceof Error ? error.message : String(error)
+    if (!(error instanceof Error && error.name === 'AgentNotUsableError')) return errorMsg
+    this.store.update(job.id, { enabled: false })
+    return `已自动暂停：${errorMsg}`
+  }
+
+  private markRunFailed(job: CronJob, run: CronJobRun, error: unknown): void {
+    const errorMsg = this.pauseIfAgentUnusable(job, error)
 
     this.store.updateRunStatus(run.id, {
       status: 'error',

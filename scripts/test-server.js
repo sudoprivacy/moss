@@ -30,6 +30,7 @@ const BUN = [
   'nexusClient.test.ts',
   'nexusManager.test.ts',
   // src/channels/__tests__
+  'agentUnavailableRecovery.test.ts',
   'connectionScope.test.ts',
   'crashSeedRecovery.test.ts',
   'untrustedText.test.ts',

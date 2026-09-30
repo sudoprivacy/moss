@@ -16,7 +16,7 @@ import { hasScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretA
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
-import { RuntimeService, ServerDrainingError } from './runtimeService.js'
+import { AgentNotUsableError, RuntimeService, ServerDrainingError, TokenQuotaExceededError } from './runtimeService.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
@@ -679,6 +679,46 @@ function tenantSkillNameTakenByOther(
   return store
     .listTenantSkills('approved')
     .some(row => row.name === name && row.id !== selfId && row.author_id !== authorId)
+}
+
+/**
+ * Make every approved 专属 agent/skill's meta file carry the scope and author
+ * recorded in the DB — the installed list, IM picker and runtime read the file.
+ * Earlier builds only wrote the approved scope to the DB (an admin's
+ * adjustment at approval never reached the file) and never stamped the author
+ * (so the creator wasn't guaranteed access). Runs at startup; idempotent —
+ * only files that differ are rewritten.
+ */
+async function syncTenantItemFiles(store: {
+  listTenantAssistants(status?: string, orgId?: string): Array<Record<string, unknown>>
+  listTenantSkills(status?: string, orgId?: string): Array<Record<string, unknown>>
+}): Promise<void> {
+  const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+  let fixed = 0
+  for (const row of store.listTenantAssistants('approved')) {
+    const dir = typeof row.file_path === 'string' && existsSync(row.file_path)
+      ? row.file_path
+      : join(MOSS_HOME, 'assistants', 'tenant', String(row.name))
+    const meta = existsSync(dir) ? await readAssistantMeta(dir) : null
+    if (!meta) continue
+    const visibleTo = parseStoredVisibleTo(row.visible_to)
+    if (!same(meta.visible_to, visibleTo) || meta.author_id !== row.author_id) {
+      await syncTenantAssistantFileScope(dir, visibleTo, String(row.author_id))
+      fixed++
+    }
+  }
+  for (const row of store.listTenantSkills('approved')) {
+    const dir = join(MOSS_SKILLS_TENANT_DIR, String(row.name))
+    const meta = existsSync(dir) ? await readSkillMeta(dir) : null
+    if (!meta) continue
+    const visibleTo = parseStoredVisibleTo(row.visible_to)
+    if (!same(meta.visible_to, visibleTo) || meta.author_id !== row.author_id) {
+      await syncTenantSkillFileScope(dir, visibleTo, String(row.author_id))
+      fixed++
+    }
+  }
+  if (fixed > 0) console.log(`[syncTenantItemFiles] synced scope/author into ${fixed} 专属 item file(s)`)
 }
 
 /** Parse a stored visible_to column (JSON text, or NULL for everyone). */
@@ -2186,6 +2226,12 @@ export function startServer(
     seedBundledHubSkills({ cabinEnabled: config.cabin.enabled }),
   ]).catch((err) => {
     console.warn('[seedBuiltins] background seed failed:', err)
+  })
+
+  // Heal approved 专属 items whose files drifted from the DB (see
+  // syncTenantItemFiles). Best-effort, off the boot path.
+  void syncTenantItemFiles(runtime.store).catch(err => {
+    console.warn('[syncTenantItemFiles] failed:', err)
   })
 
   // Boot-time settings.json sanity check — warns if model/url/apiKey
@@ -10640,9 +10686,23 @@ export function startServer(
         // Reusing it here avoids a second disposable socket racing the actual
         // WebSocket attachment. Missing, stale, or newly adopted attempts still
         // go through the regular probe/recovery path.
-        const ready = locallyOwnedAttempt
-          ? { session, attempt: locallyOwnedAttempt }
-          : await runtime.ensureSessionReady(sessionId)
+        let ready: Awaited<ReturnType<typeof runtime.ensureSessionReady>>
+        try {
+          ready = locallyOwnedAttempt
+            ? { session, attempt: locallyOwnedAttempt }
+            : await runtime.ensureSessionReady(sessionId)
+        } catch (error) {
+          // A refusal the client should be told about (agent disabled / no
+          // longer usable, token quota used up): finish the handshake and close
+          // with the reason instead of dropping the socket silently.
+          if (error instanceof AgentNotUsableError || error instanceof TokenQuotaExceededError) {
+            let reason = error.message
+            while (Buffer.byteLength(reason) > 120) reason = reason.slice(0, -1)
+            wss.handleUpgrade(req, socket, head, (ws: { close(code: number, reason: string): void }) => ws.close(4403, reason))
+            return
+          }
+          throw error
+        }
         wss.handleUpgrade(req, socket, head, ws => {
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
             let buffer = ''
