@@ -258,7 +258,12 @@ export default function BuildJobsPage() {
                 <div className="mt-1 text-xs text-muted-foreground">{job.triggeredBy}</div>
               </div>
               <div className="min-w-0">
-                <div className="truncate font-medium" title={job.wikiName}>{job.wikiName}</div>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="truncate font-medium" title={job.wikiName}>{job.wikiName}</span>
+                  {job.wikiScope === 'private' && (
+                    <Badge variant="outline" className="shrink-0 text-[10px]" title="用户在 SudoWork 构建的私有知识库">私有</Badge>
+                  )}
+                </div>
                 {job.errorMessage && (
                   <div className="mt-1 flex items-center gap-1 truncate text-xs text-red-500" title={job.errorMessage}>
                     <AlertCircle className="size-3" />

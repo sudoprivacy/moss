@@ -204,9 +204,27 @@ import { loadBudgetStats } from './budgetStats.js'
 import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
-import { customItemOwnerId, isUsableBy, isVisibleTo, type VisibleTo } from './visibilityFilter.js'
+import { customItemOwnerId, isUsableBy, isVisibleTo, type VisibilityFilter, type VisibleTo } from './visibilityFilter.js'
 import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
-import { DocumentStore } from './documentStore.js'
+import {
+  DocumentStore,
+  DocumentStoreError,
+  type DocumentRecord,
+  type DocumentTreeNode,
+  type KnowledgeScope,
+  type WikiRecord,
+} from './documentStore.js'
+import {
+  NO_DELEGATION,
+  agentDeliveredWikis,
+  agentDelegationPolicy,
+  canAdministerWiki,
+  canManageKnowledgeItem,
+  canSeeWiki,
+  isWikiUsableBy,
+  wikiEffectiveVisibleTo,
+  type DelegationPolicy,
+} from './wikiAccess.js'
 import {
   getUserModelPreference,
   setUserModelPreference,
@@ -537,14 +555,26 @@ function parseOptionalTimestampQuery(
   return parsed
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(req: http.IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise((resolveBody, reject) => {
     let data = ''
+    let size = 0
+    let tooLarge = false
     req.setEncoding('utf8')
     req.on('data', chunk => {
+      if (tooLarge) return // keep draining so the 413 can still be written
+      size += Buffer.byteLength(chunk)
+      if (maxBytes !== undefined && size > maxBytes) {
+        tooLarge = true
+        data = ''
+        return
+      }
       data += chunk
     })
-    req.on('end', () => resolveBody(data))
+    req.on('end', () => {
+      if (tooLarge) reject(new HttpError(413, `request body exceeds ${Math.floor((maxBytes ?? 0) / 1024 / 1024)}MB limit`))
+      else resolveBody(data)
+    })
     req.on('error', reject)
   })
 }
@@ -560,8 +590,8 @@ function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
   })
 }
 
-async function readJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
-  const rawBody = await readBody(req)
+async function readJsonBody(req: http.IncomingMessage, maxBytes?: number): Promise<JsonBody> {
+  const rawBody = await readBody(req, maxBytes)
   if (!rawBody.trim()) {
     return {}
   }
@@ -575,6 +605,47 @@ async function readJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
     throw new HttpError(400, 'JSON body must be an object')
   }
   return parsed
+}
+
+// Knowledge uploads arrive as JSON with base64 content (≈4/3 of the bytes).
+const MAX_DOC_BYTES = 50 * 1024 * 1024
+const MAX_DOC_BODY_BYTES = Math.ceil(MAX_DOC_BYTES * 4 / 3) + 64 * 1024
+const MAX_FOLDER_BODY_BYTES = 200 * 1024 * 1024
+
+/** `{ file_name, mime_type?, content_base64 }` → bytes; 400 / 413 on bad input. */
+function decodeUploadedFile(body: JsonBody): { fileName: string; mimeType: string; content: Buffer } {
+  const fileName = typeof body.file_name === 'string' ? body.file_name : ''
+  const mimeType = typeof body.mime_type === 'string' && body.mime_type ? body.mime_type : 'application/octet-stream'
+  const contentB64 = typeof body.content_base64 === 'string' ? body.content_base64 : ''
+  if (!fileName || !contentB64) {
+    throw new HttpError(400, 'file_name and content_base64 are required')
+  }
+  const content = Buffer.from(contentB64, 'base64')
+  if (content.byteLength > MAX_DOC_BYTES) {
+    throw new HttpError(413, `${fileName}: document exceeds 50MB limit`)
+  }
+  return { fileName, mimeType, content }
+}
+
+/** A folder/file name as stored in the tree (no separators or control chars). */
+function sanitizeNodeName(name: string): string {
+  return name.replace(/[/\\\x00-\x1f]/g, '_').trim().slice(0, 200) || 'folder'
+}
+
+/** `a/b/c.md` (or `a\\b\\c.md`) → ['a', 'b', 'c.md']; rejects absolute paths and `.`/`..`. */
+function splitRelativePath(value: unknown): string[] {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new HttpError(400, 'relative_path is required for every file')
+  }
+  const normalized = value.replace(/\\/g, '/')
+  if (normalized.startsWith('/') || /^[a-zA-Z]:/.test(normalized)) {
+    throw new HttpError(400, `relative_path must be relative: ${value}`)
+  }
+  const segments = normalized.split('/').filter(s => s.length > 0)
+  if (segments.length === 0 || segments.some(s => s === '.' || s === '..')) {
+    throw new HttpError(400, `invalid relative_path: ${value}`)
+  }
+  return segments.map(sanitizeNodeName)
 }
 
 type TenantAssistantRequest = {
@@ -2213,6 +2284,251 @@ export function startServer(
 
   const documentStore = new DocumentStore(runtime.store)
 
+  // ---- Knowledge (文档中心) access helpers — see wikiAccess.ts for the model ----
+  const isCreatorInScope = (orgId: string, creatorUserId: string, a: AuthContext) =>
+    authService.isCreatorInScope(orgId, creatorUserId, a)
+
+  const wikiView = (wiki: WikiRecord, a: AuthContext, filter: VisibilityFilter) => ({
+    ...wiki,
+    canManage: canManageKnowledgeItem(wiki, a, isCreatorInScope),
+    canAdminister: canAdministerWiki(wiki, a, isCreatorInScope),
+    usable: isWikiUsableBy(wiki, filter),
+  })
+
+  const writeKnowledgeError = (res: http.ServerResponse, err: unknown, code: string) => {
+    if (err instanceof HttpError) throw err
+    const status = err instanceof DocumentStoreError ? err.status : 400
+    writeJson(res, status, {
+      error: { code: status === 404 ? 'not_found' : code, message: err instanceof Error ? err.message : String(err) },
+    })
+  }
+
+  const requireTenantNode = (nodeId: string, orgId: string): DocumentTreeNode => {
+    const node = documentStore.getNode(nodeId, orgId)
+    if (!node || node.scope !== 'tenant') throw new HttpError(404, 'node not found')
+    return node
+  }
+
+  const requireOwnPrivateNode = (nodeId: string, a: AuthContext): DocumentTreeNode => {
+    const node = documentStore.getNode(nodeId, a.orgId)
+    if (!node || node.scope !== 'private' || node.ownerId !== a.userId) throw new HttpError(404, 'node not found')
+    return node
+  }
+
+  /**
+   * A wiki for the admin UI routes; 404 otherwise. `admin:documents` holders
+   * see every tenant wiki (they manage the knowledge base, whatever its 可用范围);
+   * a private wiki only when they can see it (full admins).
+   */
+  const requireWiki = (wikiId: string, a: AuthContext): WikiRecord => {
+    const wiki = documentStore.getWiki(wikiId, a.orgId)
+    if (!wiki || !canListWikiInAdmin(wiki, a)) throw new HttpError(404, 'wiki not found')
+    return wiki
+  }
+
+  const canListWikiInAdmin = (wiki: WikiRecord, a: AuthContext): boolean =>
+    (wiki.scope === 'tenant' && hasScope(a.scopes, 'admin:documents'))
+    || canSeeWiki(wiki, authService.buildVisibilityFilter(a))
+
+  const requireOwnPrivateWiki = (wikiId: string, a: AuthContext): WikiRecord => {
+    const wiki = documentStore.getWiki(wikiId, a.orgId)
+    if (!wiki || wiki.scope !== 'private' || wiki.ownerId !== a.userId) throw new HttpError(404, 'wiki not found')
+    return wiki
+  }
+
+  const requireManage = (item: WikiRecord | DocumentTreeNode | DocumentRecord, a: AuthContext): void => {
+    if (canManageKnowledgeItem(item, a, isCreatorInScope)) return
+    throw new HttpError(403, item.scope === 'private' ? '私有知识库内容仅所有者可编辑' : '无权管理该知识库内容（不在你的管理范围内）')
+  }
+
+  /** Deleting a folder removes its whole subtree: every node and document in it must be manageable. */
+  const requireManageSubtree = (root: DocumentTreeNode, a: AuthContext): void => {
+    requireManage(root, a)
+    // Full admins manage every tenant item; skip the per-item walk (source trees get large).
+    if (root.scope === 'tenant' && hasScope(a.scopes, '*')) return
+    const nodes = documentStore.listTree(a.orgId, { scope: root.scope })
+    const childrenOf = new Map<string, DocumentTreeNode[]>()
+    for (const n of nodes) {
+      if (!n.parentId) continue
+      const list = childrenOf.get(n.parentId) ?? []
+      list.push(n)
+      childrenOf.set(n.parentId, list)
+    }
+    const stack = [root.id]
+    while (stack.length > 0) {
+      const id = stack.pop()!
+      for (const doc of documentStore.listDocumentsForNode(id, a.orgId)) requireManage(doc, a)
+      for (const child of childrenOf.get(id) ?? []) {
+        requireManage(child, a)
+        stack.push(child.id)
+      }
+    }
+  }
+
+  const enqueueWikiBuild = (wiki: WikiRecord, triggeredBy: string) => {
+    // Per-user fairness: private builds share the executor's few slots with
+    // the org's wikis, so each user gets one queued/running build at a time.
+    if (wiki.scope === 'private' && documentStore.countActivePrivateBuildJobs(wiki.orgId, wiki.ownerId) > 0) {
+      throw new HttpError(409, '你已有私有知识库正在构建，请等待其完成后再试')
+    }
+    const job = documentStore.createBuildJob({ wikiId: wiki.id, triggeredBy })
+    documentStore.setWikiBuildResult(wiki.id, { status: 'pending' })
+    return job
+  }
+
+  const privateQuotaBytes = () => (config.wikiIndex.privateSpaceQuotaMb ?? 1024) * 1024 * 1024
+
+  const requirePrivateQuota = (a: AuthContext, addBytes: number): void => {
+    const quota = privateQuotaBytes()
+    if (documentStore.privateUsageBytes(a.orgId, a.userId) + addBytes > quota) {
+      throw new HttpError(413, `私有空间容量不足（上限 ${Math.round(quota / 1024 / 1024)}MB）`)
+    }
+  }
+
+  /** Normalize a wiki scope: tenant wikis may also be 仅管理员可用 ({ [], [] }). */
+  const normalizeWikiVisibleTo = (orgId: string, ownerId: string, raw: unknown, scope: KnowledgeScope): VisibleTo => {
+    const requested = (raw ?? null) as VisibleTo
+    if (
+      scope === 'tenant'
+      && requested
+      && Array.isArray(requested.department_ids) && requested.department_ids.length === 0
+      && Array.isArray(requested.user_ids) && requested.user_ids.length === 0
+    ) {
+      return { department_ids: [], user_ids: [] }
+    }
+    return authService.normalizeCustomVisibleTo(orgId, ownerId, requested)
+  }
+
+  const strArr = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x: unknown): x is string => typeof x === 'string') : []
+
+  /**
+   * Wiki ids an agent editor may bind. Binding is always allowed for a wiki
+   * the editor can see (what users then get is decided at use time, see
+   * wikiAccess.ts); unknown ids and wikis the editor can't see are dropped,
+   * while ids already bound stay put so saving never unbinds someone else's
+   * choice.
+   */
+  const bindableWikiIds = (requested: unknown, previous: unknown, a: AuthContext): string[] => {
+    const kept = new Set(strArr(previous))
+    const filter = authService.buildVisibilityFilter(a)
+    return [...new Set(strArr(requested))].filter(id => {
+      if (kept.has(id)) return true
+      const wiki = documentStore.getWiki(id, a.orgId)
+      return !!wiki && canSeeWiki(wiki, filter)
+    })
+  }
+
+  /** POST /api/v1/wikis (tenant) and POST /api/v1/me/wikis (private). */
+  const createWikiFromBody = async (
+    res: http.ServerResponse,
+    body: JsonBody,
+    a: AuthContext,
+    scope: KnowledgeScope,
+  ): Promise<void> => {
+    const name = typeof body.name === 'string' ? body.name.trim() : ''
+    if (!name) {
+      writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name is required' } })
+      return
+    }
+    const sourceDocumentIds = strArr(body.source_document_ids)
+    const sourceMode = body.source_mode === 'dir' ? 'dir' : 'files'
+    // Multi-dir: source_node_ids[]; back-compat: fold single source_node_id.
+    const sourceNodeIds = strArr(body.source_node_ids)
+    if (sourceNodeIds.length === 0 && typeof body.source_node_id === 'string') {
+      sourceNodeIds.push(body.source_node_id)
+    }
+    const sourceExcludeNodeIds = strArr(body.source_exclude_node_ids)
+    // Validate per mode: dir needs >=1 dir node; files needs >=1 doc.
+    if (sourceMode === 'dir' && sourceNodeIds.length === 0) {
+      writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_node_ids must be non-empty for dir mode' } })
+      return
+    }
+    if (sourceMode === 'files' && sourceDocumentIds.length === 0) {
+      writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_document_ids must be non-empty for files mode' } })
+      return
+    }
+    // Scope: a private wiki defaults to only me; a tenant wiki to everyone.
+    const visibleTo = body.visible_to === undefined
+      ? (scope === 'private' ? { department_ids: null, user_ids: [a.userId] } : null)
+      : normalizeWikiVisibleTo(a.orgId, a.userId, body.visible_to, scope)
+    let nodeId = typeof body.node_id === 'string' && body.node_id ? body.node_id : null
+    if (scope === 'private' && !nodeId) nodeId = documentStore.getOrCreatePrivateRoot(a.orgId, a.userId).id
+    try {
+      const wiki = await documentStore.createWiki({
+        orgId: a.orgId,
+        nodeId,
+        name,
+        description: typeof body.description === 'string' ? body.description : undefined,
+        sourceDocumentIds,
+        sourceMode,
+        sourceNodeIds,
+        sourceExcludeNodeIds,
+        autoRebuild: body.auto_rebuild === true,
+        createdBy: a.userId,
+        scope,
+        visibleTo,
+      })
+      // SudoWork convenience: create and build in one call.
+      const job = body.build === true ? enqueueWikiBuild(wiki, a.userId) : null
+      writeJson(res, 200, job ? { ...documentStore.getWiki(wiki.id, a.orgId), build_job_id: job.id } : wiki)
+    } catch (err) {
+      writeKnowledgeError(res, err, 'create_failed')
+    }
+  }
+
+  /** PATCH /api/v1/wikis/:id and /api/v1/me/wikis/:id — caller already passed requireManage. */
+  const updateWikiFromBody = (res: http.ServerResponse, wiki: WikiRecord, body: JsonBody, a: AuthContext): void => {
+    const sourceMode =
+      body.source_mode === 'dir' ? 'dir' : body.source_mode === 'files' ? 'files' : undefined
+    const sourceDocumentIds =
+      body.source_document_ids !== undefined ? strArr(body.source_document_ids) : undefined
+    const sourceNodeIds =
+      body.source_node_ids !== undefined ? strArr(body.source_node_ids) : undefined
+    const sourceExcludeNodeIds =
+      body.source_exclude_node_ids !== undefined ? strArr(body.source_exclude_node_ids) : undefined
+    // Switching to files → require picks; switching to dir → require dir nodes.
+    if (sourceMode === 'files' && sourceDocumentIds !== undefined && sourceDocumentIds.length === 0) {
+      writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_document_ids must be non-empty for files mode' } })
+      return
+    }
+    if (sourceMode === 'dir' && sourceNodeIds !== undefined && sourceNodeIds.length === 0) {
+      writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_node_ids must be non-empty for dir mode' } })
+      return
+    }
+    try {
+      const updated = documentStore.updateWiki(wiki.id, a.orgId, {
+        name: typeof body.name === 'string' ? body.name : undefined,
+        description:
+          body.description === null
+            ? null
+            : typeof body.description === 'string'
+              ? body.description
+              : undefined,
+        nodeId:
+          body.node_id === undefined
+            ? undefined
+            : body.node_id === null
+              ? null
+              : typeof body.node_id === 'string'
+                ? body.node_id
+                : undefined,
+        sourceDocumentIds,
+        sourceMode,
+        sourceNodeIds,
+        sourceExcludeNodeIds,
+        autoRebuild: body.auto_rebuild === undefined ? undefined : body.auto_rebuild === true,
+        visibleTo: body.visible_to === undefined
+          ? undefined
+          : normalizeWikiVisibleTo(a.orgId, wiki.ownerId === 'admin' ? a.userId : wiki.ownerId, body.visible_to, wiki.scope),
+        enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+      })
+      writeJson(res, 200, wikiView(updated, a, authService.buildVisibilityFilter(a)))
+    } catch (err) {
+      writeKnowledgeError(res, err, 'update_failed')
+    }
+  }
+
   // Initialize user model preference store with the database
   initUserModelPreferenceStore(runtime.store.db)
 
@@ -2263,7 +2579,7 @@ export function startServer(
       // when the affected wiki's own `auto_rebuild` toggle is on.
       try {
         const wiki = documentStore.getWikiById(wikiId)
-        if (!wiki) return
+        if (!wiki || !wiki.enabled) return
         runtime.store.createWikiBuildJob({
           id: randomUUID(),
           wiki_id: wikiId,
@@ -3472,7 +3788,7 @@ export function startServer(
       // everywhere else.
       let auth = authenticateRequest(req, authService)
       if (!auth && req.method === 'GET') {
-        const isSseBuildEvents = /^\/api\/v1\/wikis\/[^/]+\/build-events$/.test(pathname)
+        const isSseBuildEvents = /^\/api\/v1\/(?:me\/)?wikis\/[^/]+\/build-events$/.test(pathname)
         const isSseMcpEvents = pathname === '/api/v1/mcp/events'
         if (isSseBuildEvents || isSseMcpEvents) {
           const queryToken = url.searchParams.get('token')
@@ -3635,10 +3951,17 @@ export function startServer(
       // Document Center (P0): /api/v1/documents/* + /api/v1/wikis/*
       // ============================================================
 
-      // ---- Tree nodes ----
+      // ---- Tree nodes (tenant space; managed in the admin UI) ----
+      // Private (私有) folders, documents and wikis never appear here — they
+      // are managed by their owner through /api/v1/me/* (SudoWork).
       if (req.method === 'GET' && pathname === '/api/v1/documents/tree') {
         authService.requireScope(auth, 'admin:documents')
-        writeJson(res, 200, { nodes: documentStore.listTree(auth.orgId) })
+        writeJson(res, 200, {
+          nodes: documentStore.listTree(auth.orgId, { scope: 'tenant' }).map(node => ({
+            ...node,
+            canManage: canManageKnowledgeItem(node, auth, isCreatorInScope),
+          })),
+        })
         return
       }
 
@@ -3648,34 +3971,31 @@ export function startServer(
         // Can't add manual children under a source-managed node — the whole
         // synced subtree is owned by the external source.
         if (typeof body.parent_id === 'string' && body.parent_id) {
-          const parent = documentStore.getNode(body.parent_id, auth.orgId)
-          if (parent?.autoManaged) {
+          const parent = requireTenantNode(body.parent_id, auth.orgId)
+          if (parent.autoManaged) {
             writeJson(res, 400, {
               error: { code: 'auto_managed', message: '该节点由外部数据源管理,无法在其下新建子节点。' },
             })
             return
           }
         }
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        if (!name) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name is required' } })
+          return
+        }
         try {
           const node = documentStore.createNode({
             orgId: auth.orgId,
-            parentId:
-              body.parent_id === null
-                ? null
-                : typeof body.parent_id === 'string'
-                  ? body.parent_id
-                  : null,
-            name: typeof body.name === 'string' ? body.name.trim() : '',
+            parentId: typeof body.parent_id === 'string' && body.parent_id ? body.parent_id : null,
+            name,
             description: typeof body.description === 'string' ? body.description : undefined,
             sortOrder: typeof body.sort_order === 'number' ? body.sort_order : undefined,
+            ownerId: auth.userId,
           })
-          if (!node.name) {
-            writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name is required' } })
-            return
-          }
           writeJson(res, 200, node)
         } catch (err) {
-          writeJson(res, 400, { error: { code: 'create_failed', message: err instanceof Error ? err.message : String(err) } })
+          writeKnowledgeError(res, err, 'create_failed')
         }
         return
       }
@@ -3685,10 +4005,11 @@ export function startServer(
         authService.requireScope(auth, 'admin:documents')
         const nodeId = documentNodeMatch[1] || ''
         const body = await readJsonBody(req)
+        const existingNode = requireTenantNode(nodeId, auth.orgId)
+        requireManage(existingNode, auth)
         // v2: auto_managed nodes cannot be renamed/moved/described by admins —
         // only their alias (via /alias endpoint below). Sync worker owns name.
-        const existingNode = documentStore.getNode(nodeId, auth.orgId)
-        if (existingNode?.autoManaged) {
+        if (existingNode.autoManaged) {
           writeJson(res, 400, {
             error: {
               code: 'auto_managed',
@@ -3718,7 +4039,7 @@ export function startServer(
           })
           writeJson(res, 200, updated)
         } catch (err) {
-          writeJson(res, 400, { error: { code: 'update_failed', message: err instanceof Error ? err.message : String(err) } })
+          writeKnowledgeError(res, err, 'update_failed')
         }
         return
       }
@@ -3726,14 +4047,15 @@ export function startServer(
       if (req.method === 'DELETE' && documentNodeMatch) {
         authService.requireScope(auth, 'admin:documents')
         const nodeId = documentNodeMatch[1] || ''
+        const existing = requireTenantNode(nodeId, auth.orgId)
+        requireManageSubtree(existing, auth)
         // v2: while its source still exists, an auto_managed node is mirror state —
         // it can only be removed by deleting the source or by sync's reverse-sweep,
         // so admins delete the SOURCE, not individual mirrored nodes. But once the
         // source is gone (deleted), the node is an orphaned tree with no owner and
         // no future sync to sweep it; allow deleting it directly so admins can clean
         // up stale trees left behind by pre-cascade source deletions.
-        const existing = documentStore.getNode(nodeId, auth.orgId)
-        if (existing?.autoManaged) {
+        if (existing.autoManaged) {
           const sourceStillExists =
             !!existing.sourceId && !!runtime.store.getExternalSource(existing.sourceId, auth.orgId)
           if (sourceStillExists) {
@@ -3746,6 +4068,7 @@ export function startServer(
             return
           }
         }
+        if (existing.parentId) documentStore.markDirWikisStale(existing.parentId, auth.orgId)
         await documentStore.deleteNode(nodeId, auth.orgId)
         writeJson(res, 200, { ok: true })
         return
@@ -3757,6 +4080,7 @@ export function startServer(
       if (req.method === 'PATCH' && aliasMatch) {
         authService.requireScope(auth, 'admin:documents')
         const nodeId = aliasMatch[1] || ''
+        requireManage(requireTenantNode(nodeId, auth.orgId), auth)
         const body = await readJsonBody(req)
         const alias = typeof body.alias === 'string'
           ? (body.alias.trim() || null)
@@ -3774,6 +4098,7 @@ export function startServer(
       if (req.method === 'GET' && documentsByNodeMatch) {
         authService.requireScope(auth, 'admin:documents')
         const nodeId = documentsByNodeMatch[1] || ''
+        requireTenantNode(nodeId, auth.orgId)
         // ?recursive=1 lists the whole subtree (used by the wiki external-source
         // files picker); default lists this node's direct documents.
         const recursive = new URL(req.url ?? '', 'http://localhost').searchParams.get('recursive') === '1'
@@ -3789,46 +4114,28 @@ export function startServer(
         const nodeId = documentsByNodeMatch[1] || ''
         // Can't upload into a source-managed node — content there is owned by
         // the external source (synced only).
-        const targetNode = documentStore.getNode(nodeId, auth.orgId)
-        if (targetNode?.autoManaged) {
+        const targetNode = requireTenantNode(nodeId, auth.orgId)
+        if (targetNode.autoManaged) {
           writeJson(res, 400, {
             error: { code: 'auto_managed', message: '该节点由外部数据源管理,无法手动上传文档。' },
           })
           return
         }
-        const body = await readJsonBody(req)
-        const fileName = typeof body.file_name === 'string' ? body.file_name : ''
-        const mimeType = typeof body.mime_type === 'string' ? body.mime_type : 'application/octet-stream'
-        const contentB64 = typeof body.content_base64 === 'string' ? body.content_base64 : ''
-        if (!fileName || !contentB64) {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'file_name and content_base64 are required' } })
-          return
-        }
-        let content: Buffer
-        try {
-          content = Buffer.from(contentB64, 'base64')
-        } catch {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'content_base64 is not valid base64' } })
-          return
-        }
-        // Size limit: 50MB per file
-        const MAX_DOC_SIZE = 50 * 1024 * 1024
-        if (content.byteLength > MAX_DOC_SIZE) {
-          writeJson(res, 413, { error: { code: 'payload_too_large', message: `document exceeds 50MB limit` } })
-          return
-        }
+        const body = await readJsonBody(req, MAX_DOC_BODY_BYTES)
+        const file = decodeUploadedFile(body)
         try {
           const doc = await documentStore.uploadDocument({
             orgId: auth.orgId,
             nodeId,
-            fileName,
-            mimeType,
-            content,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            content: file.content,
             uploadedBy: auth.userId,
           })
+          documentStore.markDirWikisStale(nodeId, auth.orgId)
           writeJson(res, 200, doc)
         } catch (err) {
-          writeJson(res, 400, { error: { code: 'upload_failed', message: err instanceof Error ? err.message : String(err) } })
+          writeKnowledgeError(res, err, 'upload_failed')
         }
         return
       }
@@ -3837,24 +4144,100 @@ export function startServer(
       if (req.method === 'DELETE' && documentItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const docId = documentItemMatch[1] || ''
+        const doc = documentStore.getDocument(docId, auth.orgId)
+        if (!doc || doc.scope !== 'tenant') {
+          writeJson(res, 200, { ok: true })
+          return
+        }
+        requireManage(doc, auth)
         await documentStore.deleteDocument(docId, auth.orgId)
+        documentStore.markDirWikisStale(doc.nodeId, auth.orgId)
         writeJson(res, 200, { ok: true })
         return
       }
 
       // ---- Wikis ----
+      // Wikis any member may use: tenant ones in their scope plus private ones
+      // shared with them (own included). SudoWork picks `enabled_wikis` for a
+      // session from this list; the agent editors bind wikis from it too.
+      if (req.method === 'GET' && pathname === '/api/v1/wikis/usable') {
+        const filter = authService.buildVisibilityFilter(auth)
+        const wikis = documentStore
+          .listWikis(auth.orgId)
+          .filter(w => isWikiUsableBy(w, filter))
+        writeJson(res, 200, {
+          wikis: wikis.map(w => ({
+            id: w.id,
+            name: w.name,
+            description: w.description,
+            scope: w.scope,
+            owner_id: w.ownerId,
+            is_owner: w.ownerId === auth.userId,
+            build_status: w.buildStatus,
+            has_built: w.hasBuilt,
+            updated_at: w.updatedAt,
+          })),
+        })
+        return
+      }
+
+      // Would every user of an agent also be allowed to use these wikis on
+      // their own (`covered`)? If not, does the agent still hand the wiki to
+      // them (`delegated`, see agentDelegationPolicy)? Drives the agent
+      // editor's warning when an agent reaches further than a bound wiki.
+      // Body: { agent_visible_to, wiki_ids, agent_kind?: 'custom' | 'tenant'
+      // | 'managed', agent_author_id? }.
+      if (req.method === 'POST' && pathname === '/api/v1/wikis/scope-check') {
+        const body = await readJsonBody(req)
+        const agentScope = (body.agent_visible_to ?? null) as VisibleTo
+        const ids = Array.isArray(body.wiki_ids)
+          ? body.wiki_ids.filter((v: unknown): v is string => typeof v === 'string')
+          : []
+        const kind = body.agent_kind === 'custom' || body.agent_kind === 'tenant' ? body.agent_kind : 'managed'
+        const delegates = agentDelegationPolicy(
+          { category: kind === 'managed' ? 'hub' : kind },
+          {
+            source_type: kind === 'managed' ? undefined : kind,
+            author_id: typeof body.agent_author_id === 'string' ? body.agent_author_id : undefined,
+            visible_to: agentScope,
+          },
+          auth.orgId,
+          authService,
+        )
+        const filter = authService.buildVisibilityFilter(auth)
+        const results = ids.flatMap((id: string) => {
+          const wiki = documentStore.getWiki(id, auth.orgId)
+          if (!wiki || !canSeeWiki(wiki, filter)) return []
+          return [{
+            wiki_id: wiki.id,
+            scope: wiki.scope,
+            enabled: wiki.enabled,
+            covered: authService.isScopeWithin(auth.orgId, agentScope, wikiEffectiveVisibleTo(wiki), wiki.ownerId),
+            delegated: delegates(wiki),
+          }]
+        })
+        writeJson(res, 200, { results })
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/wikis') {
         authService.requireScope(auth, 'admin:documents')
         const url = new URL(req.url ?? '', 'http://localhost')
         const nodeId = url.searchParams.get('node_id') ?? undefined
         const buildStatus = url.searchParams.get('build_status') ?? undefined
+        // ?scope=private: every user's private wikis, for admins to see /
+        // disable / delete (never edit) — like others' custom agents.
+        const scope = url.searchParams.get('scope') === 'private' ? 'private' : 'tenant'
+        const filter = authService.buildVisibilityFilter(auth)
+        const wikis = await documentStore.listWikisEnriched(auth.orgId, {
+          nodeId,
+          buildStatus: buildStatus as any,
+          scope,
+        })
         writeJson(res, 200, {
           // Enriched: recomputes Track 2 (files-mode) staleness against
           // _moss_meta.json so 已构建 / 需重新构建 tags are accurate.
-          wikis: await documentStore.listWikisEnriched(auth.orgId, {
-            nodeId,
-            buildStatus: buildStatus as any,
-          }),
+          wikis: wikis.filter(w => canListWikiInAdmin(w, auth)).map(w => wikiView(w, auth, filter)),
         })
         return
       }
@@ -3862,52 +4245,7 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/wikis') {
         authService.requireScope(auth, 'admin:documents')
         const body = await readJsonBody(req)
-        const name = typeof body.name === 'string' ? body.name.trim() : ''
-        if (!name) {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name is required' } })
-          return
-        }
-        const strArr = (v: unknown): string[] =>
-          Array.isArray(v) ? v.filter((x: unknown): x is string => typeof x === 'string') : []
-        const sourceDocumentIds = strArr(body.source_document_ids)
-        const sourceMode = body.source_mode === 'dir' ? 'dir' : 'files'
-        // Multi-dir: source_node_ids[]; back-compat: fold single source_node_id.
-        const sourceNodeIds = strArr(body.source_node_ids)
-        if (sourceNodeIds.length === 0 && typeof body.source_node_id === 'string') {
-          sourceNodeIds.push(body.source_node_id)
-        }
-        const sourceExcludeNodeIds = strArr(body.source_exclude_node_ids)
-        // Validate per mode: dir needs >=1 dir node; files needs >=1 doc.
-        if (sourceMode === 'dir' && sourceNodeIds.length === 0) {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_node_ids must be non-empty for dir mode' } })
-          return
-        }
-        if (sourceMode === 'files' && sourceDocumentIds.length === 0) {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_document_ids must be non-empty for files mode' } })
-          return
-        }
-        try {
-          const wiki = await documentStore.createWiki({
-            orgId: auth.orgId,
-            nodeId:
-              body.node_id === null
-                ? null
-                : typeof body.node_id === 'string'
-                  ? body.node_id
-                  : null,
-            name,
-            description: typeof body.description === 'string' ? body.description : undefined,
-            sourceDocumentIds,
-            sourceMode,
-            sourceNodeIds,
-            sourceExcludeNodeIds,
-            autoRebuild: body.auto_rebuild === true,
-            createdBy: auth.userId,
-          })
-          writeJson(res, 200, wiki)
-        } catch (err) {
-          writeJson(res, 400, { error: { code: 'create_failed', message: err instanceof Error ? err.message : String(err) } })
-        }
+        await createWikiFromBody(res, body, auth, 'tenant')
         return
       }
 
@@ -3916,71 +4254,52 @@ export function startServer(
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiItemMatch[1] || ''
         const wiki = await documentStore.getWikiEnriched(wikiId, auth.orgId)
-        if (!wiki) {
+        const filter = authService.buildVisibilityFilter(auth)
+        if (!wiki || !canListWikiInAdmin(wiki, auth)) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
           return
         }
-        writeJson(res, 200, wiki)
+        writeJson(res, 200, wikiView(wiki, auth, filter))
         return
       }
 
       if (req.method === 'PATCH' && wikiItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiItemMatch[1] || ''
+        const wiki = requireWiki(wikiId, auth)
+        requireManage(wiki, auth)
         const body = await readJsonBody(req)
-        const strArr = (v: unknown): string[] =>
-          Array.isArray(v) ? v.filter((x: unknown): x is string => typeof x === 'string') : []
-        const sourceMode =
-          body.source_mode === 'dir' ? 'dir' : body.source_mode === 'files' ? 'files' : undefined
-        const sourceDocumentIds =
-          body.source_document_ids !== undefined ? strArr(body.source_document_ids) : undefined
-        const sourceNodeIds =
-          body.source_node_ids !== undefined ? strArr(body.source_node_ids) : undefined
-        const sourceExcludeNodeIds =
-          body.source_exclude_node_ids !== undefined ? strArr(body.source_exclude_node_ids) : undefined
-        // Switching to files → require picks; switching to dir → require dir nodes.
-        if (sourceMode === 'files' && sourceDocumentIds !== undefined && sourceDocumentIds.length === 0) {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_document_ids must be non-empty for files mode' } })
+        updateWikiFromBody(res, wiki, body, auth)
+        return
+      }
+
+      // Enable / disable: the manager, or an admin on someone's private wiki.
+      const wikiEnabledMatch = pathname.match(/^\/api\/v1\/(me\/)?wikis\/([^/]+)\/enabled$/)
+      if (req.method === 'PATCH' && wikiEnabledMatch) {
+        const mine = !!wikiEnabledMatch[1]
+        const wiki = mine ? requireOwnPrivateWiki(wikiEnabledMatch[2] || '', auth) : requireWiki(wikiEnabledMatch[2] || '', auth)
+        if (!canAdministerWiki(wiki, auth, isCreatorInScope)) {
+          throw new HttpError(403, '无权启用或停用该知识库')
+        }
+        const body = await readJsonBody(req)
+        if (typeof body.enabled !== 'boolean') {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'enabled must be a boolean' } })
           return
         }
-        if (sourceMode === 'dir' && sourceNodeIds !== undefined && sourceNodeIds.length === 0) {
-          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'source_node_ids must be non-empty for dir mode' } })
-          return
-        }
-        try {
-          const wiki = documentStore.updateWiki(wikiId, auth.orgId, {
-            name: typeof body.name === 'string' ? body.name : undefined,
-            description:
-              body.description === null
-                ? null
-                : typeof body.description === 'string'
-                  ? body.description
-                  : undefined,
-            nodeId:
-              body.node_id === undefined
-                ? undefined
-                : body.node_id === null
-                  ? null
-                  : typeof body.node_id === 'string'
-                    ? body.node_id
-                    : undefined,
-            sourceDocumentIds,
-            sourceMode,
-            sourceNodeIds,
-            sourceExcludeNodeIds,
-            autoRebuild: body.auto_rebuild === undefined ? undefined : body.auto_rebuild === true,
-          })
-          writeJson(res, 200, wiki)
-        } catch (err) {
-          writeJson(res, 400, { error: { code: 'update_failed', message: err instanceof Error ? err.message : String(err) } })
-        }
+        writeJson(res, 200, documentStore.updateWiki(wiki.id, auth.orgId, { enabled: body.enabled }))
         return
       }
 
       if (req.method === 'DELETE' && wikiItemMatch) {
         authService.requireScope(auth, 'admin:documents')
         const wikiId = wikiItemMatch[1] || ''
-        await documentStore.deleteWiki(wikiId, auth.orgId)
+        const wiki = documentStore.getWiki(wikiId, auth.orgId)
+        if (wiki) {
+          if (!canAdministerWiki(wiki, auth, isCreatorInScope)) {
+            throw new HttpError(403, '无权删除该知识库')
+          }
+          await documentStore.deleteWiki(wikiId, auth.orgId)
+        }
         writeJson(res, 200, { ok: true })
         return
       }
@@ -4028,18 +4347,22 @@ export function startServer(
           writeJson(res, 404, { error: { code: 'not_found', message: 'build job not found' } })
           return
         }
-        const newJob = documentStore.createBuildJob({ wikiId: job.wikiId, triggeredBy: auth.userId })
-        documentStore.setWikiBuildResult(job.wikiId, { status: 'pending' })
+        const wiki = requireWiki(job.wikiId, auth)
+        requireManage(wiki, auth)
+        const newJob = enqueueWikiBuild(wiki, auth.userId)
         writeJson(res, 200, { job_id: newJob.id, wiki_id: job.wikiId })
         return
       }
 
-      const wikiBuildJobCancelMatch = pathname.match(/^\/api\/v1\/wiki-build-jobs\/([^/]+)\/cancel$/)
+      // Cancel: admins may stop any build (operations, private ones included);
+      // an owner may stop their own private wiki's build via /me/.
+      const wikiBuildJobCancelMatch = pathname.match(/^\/api\/v1\/(me\/)?wiki-build-jobs\/([^/]+)\/cancel$/)
       if (req.method === 'POST' && wikiBuildJobCancelMatch) {
-        authService.requireScope(auth, 'admin:documents')
-        const jobId = wikiBuildJobCancelMatch[1] || ''
+        const mine = !!wikiBuildJobCancelMatch[1]
+        if (!mine) authService.requireScope(auth, 'admin:documents')
+        const jobId = wikiBuildJobCancelMatch[2] || ''
         const job = documentStore.getBuildJobForOrg(jobId, auth.orgId)
-        if (!job) {
+        if (!job || (mine && (job.wikiScope !== 'private' || job.wikiOwnerId !== auth.userId))) {
           writeJson(res, 404, { error: { code: 'not_found', message: 'build job not found' } })
           return
         }
@@ -4064,129 +4387,342 @@ export function startServer(
         return
       }
 
-      const wikiBuildJobsByWikiMatch = pathname.match(/^\/api\/v1\/wikis\/([^/]+)\/build-jobs$/)
-      if (req.method === 'GET' && wikiBuildJobsByWikiMatch) {
-        authService.requireScope(auth, 'admin:documents')
-        const wikiId = wikiBuildJobsByWikiMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
-        if (!wiki) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
-          return
-        }
-        const url = new URL(req.url ?? '', 'http://localhost')
-        const limitParam = Number(url.searchParams.get('limit') ?? '20')
-        writeJson(res, 200, {
-          jobs: documentStore.listBuildJobs(wikiId, Number.isFinite(limitParam) ? limitParam : 20),
-        })
-        return
-      }
+      // Build routes, shared by the admin UI (/api/v1/wikis/:id/…, tenant
+      // wikis; admins may watch any wiki) and SudoWork (/api/v1/me/wikis/:id/…,
+      // the caller's own private wikis).
+      const wikiBuildRouteMatch = pathname.match(/^\/api\/v1\/(me\/)?wikis\/([^/]+)\/(build-jobs|build|build-status|build-events)$/)
+      if (wikiBuildRouteMatch) {
+        const mine = !!wikiBuildRouteMatch[1]
+        const wikiId = wikiBuildRouteMatch[2] || ''
+        const action = wikiBuildRouteMatch[3]
+        if (!mine) authService.requireScope(auth, 'admin:documents')
+        const wiki = mine ? requireOwnPrivateWiki(wikiId, auth) : requireWiki(wikiId, auth)
 
-      const wikiBuildMatch = pathname.match(/^\/api\/v1\/wikis\/([^/]+)\/build$/)
-      if (req.method === 'POST' && wikiBuildMatch) {
-        authService.requireScope(auth, 'admin:documents')
-        const wikiId = wikiBuildMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
-        if (!wiki) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
+        if (req.method === 'POST' && action === 'build') {
+          requireManage(wiki, auth)
+          if (!wiki.enabled) throw new HttpError(409, '知识库已停用，请先启用后再构建')
+          const job = enqueueWikiBuild(wiki, auth.userId)
+          writeJson(res, 200, { job_id: job.id, wiki_id: wikiId })
           return
         }
-        // P0: queue a build job. The actual worker (D5) will pick it up
-        // and call RuntimeService.createSession. For now we just persist
-        // the job; the placeholder build worker will be wired in next step.
-        const job = documentStore.createBuildJob({
-          wikiId,
-          triggeredBy: auth.userId,
-        })
-        documentStore.setWikiBuildResult(wikiId, { status: 'pending' })
-        writeJson(res, 200, { job_id: job.id, wiki_id: wikiId })
-        return
-      }
 
-      const wikiBuildStatusMatch = pathname.match(/^\/api\/v1\/wikis\/([^/]+)\/build-status$/)
-      if (req.method === 'GET' && wikiBuildStatusMatch) {
-        authService.requireScope(auth, 'admin:documents')
-        const wikiId = wikiBuildStatusMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
-        if (!wiki) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
+        if (req.method === 'GET' && action === 'build-jobs') {
+          const url = new URL(req.url ?? '', 'http://localhost')
+          const limitParam = Number(url.searchParams.get('limit') ?? '20')
+          writeJson(res, 200, {
+            jobs: documentStore.listBuildJobs(wikiId, Number.isFinite(limitParam) ? limitParam : 20),
+          })
           return
         }
-        const latestJob = documentStore.getLatestBuildJob(wikiId)
-        writeJson(res, 200, {
-          wiki_build_status: wiki.buildStatus,
-          last_built_at: wiki.lastBuiltAt,
-          last_build_error: wiki.lastBuildError,
-          latest_job: latestJob,
-        })
-        return
-      }
 
-      // SSE: stream wiki build progress.
-      // Simple poll-based implementation — checks the latest job row every
-      // 2s and pushes a `progress` event whenever the snapshot changes.
-      // Stops on terminal status (succeeded/failed/cancelled) or client
-      // disconnect.
-      const wikiBuildEventsMatch = pathname.match(/^\/api\/v1\/wikis\/([^/]+)\/build-events$/)
-      if (req.method === 'GET' && wikiBuildEventsMatch) {
-        authService.requireScope(auth, 'admin:documents')
-        const wikiId = wikiBuildEventsMatch[1] || ''
-        const wiki = documentStore.getWiki(wikiId, auth.orgId)
-        if (!wiki) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'wiki not found' } })
-          return
-        }
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache, no-transform',
-          Connection: 'keep-alive',
-          'X-Accel-Buffering': 'no',
-        })
-        res.flushHeaders?.()
-        // Initial event: current snapshot
-        let lastSnapshot = ''
-        const push = (event: string, data: unknown) => {
-          try {
-            res.write(`event: ${event}\n`)
-            res.write(`data: ${JSON.stringify(data)}\n\n`)
-          } catch {
-            // socket gone
-          }
-        }
-        const tick = () => {
-          const w = documentStore.getWiki(wikiId, auth.orgId)
+        if (req.method === 'GET' && action === 'build-status') {
           const latestJob = documentStore.getLatestBuildJob(wikiId)
-          const payload = {
-            wiki_build_status: w?.buildStatus ?? 'unknown',
-            last_built_at: w?.lastBuiltAt ?? null,
-            last_build_error: w?.lastBuildError ?? null,
+          writeJson(res, 200, {
+            wiki_build_status: wiki.buildStatus,
+            last_built_at: wiki.lastBuiltAt,
+            last_build_error: wiki.lastBuildError,
             latest_job: latestJob,
-          }
-          const snapshot = JSON.stringify(payload)
-          if (snapshot !== lastSnapshot) {
-            lastSnapshot = snapshot
-            push('progress', payload)
-          }
-          if (
-            payload.wiki_build_status === 'succeeded' ||
-            payload.wiki_build_status === 'failed' ||
-            (latestJob &&
-              (latestJob.status === 'succeeded' ||
-                latestJob.status === 'failed' ||
-                latestJob.status === 'cancelled'))
-          ) {
-            push('done', payload)
-            clearInterval(timer)
-            res.end()
-          }
+          })
+          return
         }
-        tick()
-        const timer = setInterval(tick, 2_000)
-        req.on('close', () => {
-          clearInterval(timer)
+
+        // SSE: stream wiki build progress.
+        // Simple poll-based implementation — checks the latest job row every
+        // 2s and pushes a `progress` event whenever the snapshot changes.
+        // Stops on terminal status (succeeded/failed/cancelled) or client
+        // disconnect.
+        if (req.method === 'GET' && action === 'build-events') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          })
+          res.flushHeaders?.()
+          // Initial event: current snapshot
+          let lastSnapshot = ''
+          const push = (event: string, data: unknown) => {
+            try {
+              res.write(`event: ${event}\n`)
+              res.write(`data: ${JSON.stringify(data)}\n\n`)
+            } catch {
+              // socket gone
+            }
+          }
+          const tick = () => {
+            const w = documentStore.getWiki(wikiId, auth.orgId)
+            const latestJob = documentStore.getLatestBuildJob(wikiId)
+            const payload = {
+              wiki_build_status: w?.buildStatus ?? 'unknown',
+              last_built_at: w?.lastBuiltAt ?? null,
+              last_build_error: w?.lastBuildError ?? null,
+              latest_job: latestJob,
+            }
+            const snapshot = JSON.stringify(payload)
+            if (snapshot !== lastSnapshot) {
+              lastSnapshot = snapshot
+              push('progress', payload)
+            }
+            if (
+              payload.wiki_build_status === 'succeeded' ||
+              payload.wiki_build_status === 'failed' ||
+              (latestJob &&
+                (latestJob.status === 'succeeded' ||
+                  latestJob.status === 'failed' ||
+                  latestJob.status === 'cancelled'))
+            ) {
+              push('done', payload)
+              clearInterval(timer)
+              res.end()
+            }
+          }
+          tick()
+          const timer = setInterval(tick, 2_000)
+          req.on('close', () => {
+            clearInterval(timer)
+          })
+          return
+        }
+      }
+
+      // ============================================================
+      // 私有 (private) knowledge space: /api/v1/me/documents/*, /api/v1/me/wikis/*
+      // Managed from SudoWork by its owner only; any authenticated user
+      // (admins included) has one. Everything is scoped to auth.userId.
+      // ============================================================
+
+      if (req.method === 'GET' && pathname === '/api/v1/me/documents/tree') {
+        const root = documentStore.getOrCreatePrivateRoot(auth.orgId, auth.userId)
+        writeJson(res, 200, {
+          root_id: root.id,
+          nodes: documentStore.listTree(auth.orgId, { scope: 'private', ownerId: auth.userId }),
+          usage_bytes: documentStore.privateUsageBytes(auth.orgId, auth.userId),
+          quota_bytes: privateQuotaBytes(),
         })
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/me/documents/nodes') {
+        const body = await readJsonBody(req)
+        const parent = typeof body.parent_id === 'string' && body.parent_id
+          ? requireOwnPrivateNode(body.parent_id, auth)
+          : documentStore.getOrCreatePrivateRoot(auth.orgId, auth.userId)
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        if (!name) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'name is required' } })
+          return
+        }
+        try {
+          writeJson(res, 200, documentStore.createNode({
+            orgId: auth.orgId,
+            parentId: parent.id,
+            name,
+            description: typeof body.description === 'string' ? body.description : undefined,
+            sortOrder: typeof body.sort_order === 'number' ? body.sort_order : undefined,
+          }))
+        } catch (err) {
+          writeKnowledgeError(res, err, 'create_failed')
+        }
+        return
+      }
+
+      const myNodeMatch = pathname.match(/^\/api\/v1\/me\/documents\/nodes\/([^/]+)$/)
+      if (req.method === 'PATCH' && myNodeMatch) {
+        const node = requireOwnPrivateNode(myNodeMatch[1] || '', auth)
+        if (documentStore.isPrivateRoot(node)) {
+          writeJson(res, 400, { error: { code: 'private_root', message: '私有根目录不能修改' } })
+          return
+        }
+        const body = await readJsonBody(req)
+        if (typeof body.parent_id === 'string') requireOwnPrivateNode(body.parent_id, auth)
+        try {
+          writeJson(res, 200, documentStore.updateNode(node.id, auth.orgId, {
+            parentId: typeof body.parent_id === 'string' ? body.parent_id : undefined,
+            name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : undefined,
+            description:
+              body.description === null
+                ? null
+                : typeof body.description === 'string'
+                  ? body.description
+                  : undefined,
+            sortOrder: typeof body.sort_order === 'number' ? body.sort_order : undefined,
+          }))
+          if (typeof body.parent_id === 'string') {
+            documentStore.markDirWikisStale(body.parent_id, auth.orgId)
+            if (node.parentId) documentStore.markDirWikisStale(node.parentId, auth.orgId)
+          }
+        } catch (err) {
+          writeKnowledgeError(res, err, 'update_failed')
+        }
+        return
+      }
+
+      if (req.method === 'DELETE' && myNodeMatch) {
+        const node = requireOwnPrivateNode(myNodeMatch[1] || '', auth)
+        if (documentStore.isPrivateRoot(node)) {
+          writeJson(res, 400, { error: { code: 'private_root', message: '私有根目录不能删除' } })
+          return
+        }
+        if (node.parentId) documentStore.markDirWikisStale(node.parentId, auth.orgId)
+        await documentStore.deleteNode(node.id, auth.orgId)
+        writeJson(res, 200, { ok: true })
+        return
+      }
+
+      const myNodeDocumentsMatch = pathname.match(/^\/api\/v1\/me\/documents\/nodes\/([^/]+)\/documents$/)
+      if (req.method === 'GET' && myNodeDocumentsMatch) {
+        const node = requireOwnPrivateNode(myNodeDocumentsMatch[1] || '', auth)
+        const recursive = new URL(req.url ?? '', 'http://localhost').searchParams.get('recursive') === '1'
+        writeJson(res, 200, {
+          documents: recursive
+            ? documentStore.listDocumentsUnderNode(node.id, auth.orgId)
+            : documentStore.listDocumentsForNode(node.id, auth.orgId),
+        })
+        return
+      }
+
+      if (req.method === 'POST' && myNodeDocumentsMatch) {
+        const node = requireOwnPrivateNode(myNodeDocumentsMatch[1] || '', auth)
+        const body = await readJsonBody(req, MAX_DOC_BODY_BYTES)
+        const file = decodeUploadedFile(body)
+        requirePrivateQuota(auth, file.content.byteLength)
+        try {
+          const doc = await documentStore.uploadDocument({
+            orgId: auth.orgId,
+            nodeId: node.id,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            content: file.content,
+            uploadedBy: auth.userId,
+          })
+          documentStore.markDirWikisStale(node.id, auth.orgId)
+          writeJson(res, 200, doc)
+        } catch (err) {
+          writeKnowledgeError(res, err, 'upload_failed')
+        }
+        return
+      }
+
+      // Folder upload: { folder_name?, on_conflict?: 'replace' | 'skip',
+      //   files: [{ relative_path, mime_type?, content_base64 }] }.
+      // Creates `folder_name` under the node (reused if it exists), then the
+      // sub-folder chain of every relative_path, then the files. Re-uploading
+      // a folder updates it in place (same-named files are replaced).
+      const myFolderUploadMatch = pathname.match(/^\/api\/v1\/me\/documents\/nodes\/([^/]+)\/folder$/)
+      if (req.method === 'POST' && myFolderUploadMatch) {
+        const base = requireOwnPrivateNode(myFolderUploadMatch[1] || '', auth)
+        const body = await readJsonBody(req, MAX_FOLDER_BODY_BYTES)
+        const onConflict = body.on_conflict === 'skip' ? 'skip' : 'replace'
+        const rawFiles = Array.isArray(body.files) ? body.files : []
+        if (rawFiles.length === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_payload', message: 'files must be a non-empty array' } })
+          return
+        }
+        const files = rawFiles.map((raw: unknown) => {
+          const entry = isJsonBody(raw) ? raw : {}
+          const segments = splitRelativePath(entry.relative_path)
+          const file = decodeUploadedFile({ ...entry, file_name: segments[segments.length - 1] })
+          return { dirs: segments.slice(0, -1), ...file }
+        })
+        requirePrivateQuota(auth, files.reduce((sum: number, f: { content: Buffer }) => sum + f.content.byteLength, 0))
+
+        const children = new Map<string, string>() // `${parentId}\0${name}` → node id
+        for (const n of documentStore.listTree(auth.orgId, { scope: 'private', ownerId: auth.userId })) {
+          if (n.parentId) children.set(`${n.parentId}\0${n.name}`, n.id)
+        }
+        const ensureChild = (parentId: string, name: string): string => {
+          const key = `${parentId}\0${name}`
+          const existing = children.get(key)
+          if (existing) return existing
+          const created = documentStore.createNode({ orgId: auth.orgId, parentId, name })
+          children.set(key, created.id)
+          return created.id
+        }
+        try {
+          const folderName = typeof body.folder_name === 'string' ? body.folder_name.trim() : ''
+          const rootId = folderName ? ensureChild(base.id, sanitizeNodeName(folderName)) : base.id
+          const uploaded: unknown[] = []
+          let skipped = 0
+          for (const f of files) {
+            let nodeId = rootId
+            for (const dir of f.dirs) nodeId = ensureChild(nodeId, dir)
+            const existing = documentStore.listDocumentsForNode(nodeId, auth.orgId).find(d => d.fileName === f.fileName)
+            if (existing && onConflict === 'skip') {
+              skipped++
+              continue
+            }
+            if (existing) {
+              // In place: keeps the document id, so wikis built from it keep it.
+              uploaded.push(await documentStore.replaceDocumentContent(existing.id, auth.orgId, {
+                fileName: f.fileName,
+                content: f.content,
+              }))
+              continue
+            }
+            uploaded.push(await documentStore.uploadDocument({
+              orgId: auth.orgId,
+              nodeId,
+              fileName: f.fileName,
+              mimeType: f.mimeType,
+              content: f.content,
+              uploadedBy: auth.userId,
+            }))
+          }
+          documentStore.markDirWikisStale(rootId, auth.orgId)
+          writeJson(res, 200, { node_id: rootId, documents: uploaded, skipped })
+        } catch (err) {
+          writeKnowledgeError(res, err, 'upload_failed')
+        }
+        return
+      }
+
+      const myDocumentMatch = pathname.match(/^\/api\/v1\/me\/documents\/([^/]+)$/)
+      if (req.method === 'DELETE' && myDocumentMatch) {
+        const doc = documentStore.getDocument(myDocumentMatch[1] || '', auth.orgId)
+        if (doc && doc.scope === 'private' && doc.ownerId === auth.userId) {
+          await documentStore.deleteDocument(doc.id, auth.orgId)
+          documentStore.markDirWikisStale(doc.nodeId, auth.orgId)
+        }
+        writeJson(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/me/wikis') {
+        const filter = authService.buildVisibilityFilter(auth)
+        const wikis = await documentStore.listWikisEnriched(auth.orgId, { scope: 'private', ownerId: auth.userId })
+        writeJson(res, 200, { wikis: wikis.map(w => wikiView(w, auth, filter)) })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/me/wikis') {
+        const body = await readJsonBody(req)
+        await createWikiFromBody(res, body, auth, 'private')
+        return
+      }
+
+      const myWikiMatch = pathname.match(/^\/api\/v1\/me\/wikis\/([^/]+)$/)
+      if (req.method === 'GET' && myWikiMatch) {
+        const wiki = requireOwnPrivateWiki(myWikiMatch[1] || '', auth)
+        const enriched = await documentStore.getWikiEnriched(wiki.id, auth.orgId)
+        writeJson(res, 200, wikiView(enriched ?? wiki, auth, authService.buildVisibilityFilter(auth)))
+        return
+      }
+
+      if (req.method === 'PATCH' && myWikiMatch) {
+        const wiki = requireOwnPrivateWiki(myWikiMatch[1] || '', auth)
+        const body = await readJsonBody(req)
+        updateWikiFromBody(res, wiki, body, auth)
+        return
+      }
+
+      if (req.method === 'DELETE' && myWikiMatch) {
+        const wiki = documentStore.getWiki(myWikiMatch[1] || '', auth.orgId)
+        if (wiki && wiki.scope === 'private' && wiki.ownerId === auth.userId) {
+          await documentStore.deleteWiki(wiki.id, auth.orgId)
+        }
+        writeJson(res, 200, { ok: true })
+        return
+      }
 
       // ============================================================
       // Document Center v2: /api/v1/external-sources/*
@@ -4919,38 +5455,46 @@ export function startServer(
 
 
       // ---- Agent-facing wiki endpoints (called by wikiCli from inside scode container) ----
-      // Auth model:
-      //   1. If the token was issued for an in-container scode session
-      //      (auth.assistantId is set), filter by that assistant's
-      //      `enabledWikis` from its `_moss_meta.json`.
-      //   2. Otherwise require admin:documents scope (used by admins
-      //      poking at the endpoint and by the AdminHub during dev).
+      // Auth model (see wikiAccess.ts):
+      //   - every caller may use the wikis they're allowed to use directly
+      //     (isWikiUsableBy) — a plain session without an agent included;
+      //     `admin:documents` holders also reach every enabled tenant wiki;
+      //   - a token issued for an agent session (auth.assistantId set) adds
+      //     what that agent delegates (agentDelegationPolicy): tenant wikis
+      //     on admin-managed agents; never private wikis or custom agents'.
       //
       // Helper that resolves which wiki IDs the current caller is
       // authorised to access. Returns:
       //   - Set<string> with wiki IDs → "filter to this set"
-      //   - null                       → "no restriction" (admin path)
-      //   - undefined                  → "denied" (caller should 403)
+      //   - null                       → "no restriction" (unused)
+      //   - undefined                  → "denied" (unused)
       const resolveAgentWikiAccess = async (): Promise<Set<string> | null | undefined> => {
+        const filter = authService.buildVisibilityFilter(auth)
+        let agentWikiIds: string[] = []
+        let delegates: DelegationPolicy = NO_DELEGATION
         if (typeof auth.assistantId === 'string' && auth.assistantId.length > 0) {
           try {
             const dir = await findAssistantDir(auth.assistantId)
-            if (!dir) return new Set()
-            const meta = await readAssistantMeta(dir.dir)
-            const ids = Array.isArray((meta as { enabledWikis?: unknown } | null)?.enabledWikis)
+            const meta = dir ? await readAssistantMeta(dir.dir) : null
+            agentWikiIds = Array.isArray((meta as { enabledWikis?: unknown } | null)?.enabledWikis)
               ? ((meta as { enabledWikis: unknown[] }).enabledWikis.filter(
                   (v): v is string => typeof v === 'string',
                 ))
               : []
-            return new Set(ids)
+            delegates = agentDelegationPolicy(dir, meta, auth.orgId, authService)
           } catch {
-            return new Set()
+            agentWikiIds = []
           }
         }
-        if (hasScope(auth.scopes, 'admin:documents')) {
-          return null
+        const allowed = new Set(
+          agentDeliveredWikis(agentWikiIds, auth.orgId, filter, id => documentStore.getWikiById(id), delegates)
+            .map(w => w.id),
+        )
+        const documentsManager = hasScope(auth.scopes, 'admin:documents')
+        for (const w of documentStore.listWikis(auth.orgId)) {
+          if (isWikiUsableBy(w, filter) || (documentsManager && w.scope === 'tenant' && w.enabled)) allowed.add(w.id)
         }
-        return undefined
+        return allowed
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/agent/wikis') {
@@ -8427,6 +8971,9 @@ export function startServer(
           const targetName = typeof body.assistantName === 'string' ? body.assistantName : ''
           const found = await findAssistantDir(targetName)
           const targetMeta = found ? await readAssistantMeta(found.dir) : null
+          if (Array.isArray(updates.enabledWikis)) {
+            updates.enabledWikis = bindableWikiIds(updates.enabledWikis, targetMeta?.enabledWikis, auth)
+          }
           if (targetMeta?.source_type === 'custom') {
             if (customItemOwnerId(targetMeta) !== auth.userId) {
               throw new HttpError(403, 'Only the creator can edit this custom agent')
@@ -8807,7 +9354,7 @@ export function startServer(
           ruleFile: 'system.md',
           skills: Array.isArray(body.skills) ? body.skills : [],
           enabledSkills: Array.isArray(body.enabled_skills) ? body.enabled_skills : [],
-          enabledWikis: Array.isArray(body.enabled_wikis) ? body.enabled_wikis : [],
+          enabledWikis: bindableWikiIds(body.enabled_wikis, [], auth),
           enabledCorpApps: Array.isArray(body.enabled_corp_apps) ? body.enabled_corp_apps : [],
           enableCorpAuth: body.enable_corp_auth === true,
           agent_type: body.agent_type || 'chat',
@@ -9208,7 +9755,18 @@ export function startServer(
           updates.enabled_skills = JSON.stringify(body.enabledSkills.filter((s: unknown) => typeof s === 'string'))
         }
         if (Array.isArray(body.enabledWikis)) {
-          updates.enabled_wikis = JSON.stringify(body.enabledWikis.filter((s: unknown) => typeof s === 'string'))
+          body.enabledWikis = bindableWikiIds(
+            body.enabledWikis,
+            (() => {
+              try {
+                return JSON.parse(String(existingAssistant.enabled_wikis ?? '[]')) as unknown
+              } catch {
+                return []
+              }
+            })(),
+            auth,
+          )
+          updates.enabled_wikis = JSON.stringify(body.enabledWikis)
         }
         if (Array.isArray(body.enabledCorpApps)) {
           updates.enabled_corp_apps = JSON.stringify(body.enabledCorpApps.filter((s: unknown) => typeof s === 'string'))
@@ -10569,6 +11127,11 @@ export function startServer(
           // 新增: 从请求体获取 enabled_skills
           enabledSkills: Array.isArray(body.enabled_skills)
             ? body.enabled_skills.filter((s: unknown) => typeof s === 'string')
+            : undefined,
+          // Wikis for this session (with or without an agent). Only those the
+          // user may use are advertised — see GET /api/v1/wikis/usable.
+          enabledWikis: Array.isArray(body.enabled_wikis)
+            ? body.enabled_wikis.filter((s: unknown): s is string => typeof s === 'string')
             : undefined,
         })
         writeJson(res, 200, {

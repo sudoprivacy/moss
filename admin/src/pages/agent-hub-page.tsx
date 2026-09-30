@@ -83,6 +83,7 @@ import {
 import type { AuthDepartment, AuthUser } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
 import { useAuth } from '@/lib/hooks/use-auth'
+import { WikiScopeWarnings } from '@/components/wiki-scope-warnings'
 import {
   CustomVisibilityPicker,
   ScopeBadges,
@@ -542,7 +543,7 @@ export default function AgentHubPage() {
   const [editEnabledWikis, setEditEnabledWikis] = useState<string[]>([])
   const [editEnabledCorpApps, setEditEnabledCorpApps] = useState<string[]>([])
   const [editRules, setEditRules] = useState('')
-  const [availableWikis, setAvailableWikis] = useState<Array<{ id: string; name: string; description: string | null; buildStatus: string }>>([])
+  const [availableWikis, setAvailableWikis] = useState<Array<{ id: string; name: string; description: string | null; buildStatus: string; scope?: string }>>([])
   const [availableCorpApps, setAvailableCorpApps] = useState<Array<{ id: string; name: string; type: string; appKey: string }>>([])
   const [editAddSkillOpen, setEditAddSkillOpen] = useState(false)
   const [editAddSkillSelection, setEditAddSkillSelection] = useState<string[]>([])
@@ -779,13 +780,16 @@ export default function AgentHubPage() {
 
   const loadAvailableWikis = useCallback(async () => {
     try {
-      const { listWikis } = await import('@/lib/api/document-center')
-      const list = await listWikis()
+      // Wikis the editor may use: tenant ones in their scope plus private ones
+      // shared with them (own included) — readable by every role.
+      const { listUsableWikis } = await import('@/lib/api/document-center')
+      const list = await listUsableWikis()
       setAvailableWikis(list.map(w => ({
         id: w.id,
         name: w.name,
         description: w.description,
-        buildStatus: w.buildStatus,
+        buildStatus: w.build_status,
+        scope: w.scope,
       })))
     } catch {
       setAvailableWikis([])
@@ -3147,6 +3151,21 @@ export default function AgentHubPage() {
               <p className="text-xs text-muted-foreground">
                 勾选 Wiki 即可让该智能体在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
               </p>
+              <WikiScopeWarnings
+                agentVisibleTo={
+                  editingAgent?.meta?.source_type === 'custom'
+                    ? customVisibleToFrom(editCustomVisibility, editingAgent.ownerId ?? user?.id ?? '')
+                    : editingAgent?.visibleTo
+                }
+                agentKind={
+                  editingAgent?.meta?.source_type === 'custom'
+                    ? 'custom'
+                    : editingAgent?.meta?.source_type === 'tenant' ? 'tenant' : 'managed'
+                }
+                agentAuthorId={(editingAgent?.meta as { author_id?: string } | undefined)?.author_id ?? editingAgent?.ownerId}
+                wikiIds={editEnabledWikis}
+                wikiNames={new Map(availableWikis.map(w => [w.id, w.name]))}
+              />
               {availableWikis.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
                   暂无可用 Wiki。请先在「文档中心」上传文档并构建 Wiki。
@@ -3190,6 +3209,9 @@ export default function AgentHubPage() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="truncate">{wiki.name}</span>
+                            {wiki.scope === 'private' && (
+                              <Badge variant="outline" className="text-xs">私有</Badge>
+                            )}
                             {!isBuilt && (
                               <Badge variant="outline" className="text-xs">
                                 {wiki.buildStatus === 'running' ? '构建中' : wiki.buildStatus === 'failed' ? '构建失败' : '未构建'}
@@ -3670,6 +3692,13 @@ export default function AgentHubPage() {
               <p className="text-xs text-muted-foreground">
                 创建时即可绑定 Wiki，让智能体可直接查询这些知识库。
               </p>
+              <WikiScopeWarnings
+                agentVisibleTo={customVisibleToFrom(createScope, user?.id ?? '')}
+                agentKind="tenant"
+                agentAuthorId={user?.id}
+                wikiIds={createSelectedWikis}
+                wikiNames={new Map(availableWikis.map(w => [w.id, w.name]))}
+              />
               {availableWikis.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
                   暂无可用 Wiki。请先在「文档中心」上传文档并构建 Wiki。
@@ -3708,6 +3737,9 @@ export default function AgentHubPage() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="truncate">{wiki.name}</span>
+                            {wiki.scope === 'private' && (
+                              <Badge variant="outline" className="text-xs">私有</Badge>
+                            )}
                             {wiki.buildStatus !== 'succeeded' && (
                               <Badge variant="outline" className="text-xs">
                                 {wiki.buildStatus === 'running' ? '构建中' : wiki.buildStatus === 'failed' ? '构建失败' : '未构建'}
@@ -4709,6 +4741,13 @@ export default function AgentHubPage() {
                 <p className="text-xs text-muted-foreground">
                   勾选 Wiki 即可让该智能体在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
                 </p>
+                <WikiScopeWarnings
+                  agentVisibleTo={editingTenantAgent?.visible_to}
+                  agentKind="tenant"
+                  agentAuthorId={editingTenantAgent?.author_id}
+                  wikiIds={tenantEditEnabledWikis}
+                  wikiNames={new Map(availableWikis.map(w => [w.id, w.name]))}
+                />
                 {availableWikis.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
                     暂无可用 Wiki。请先在「文档中心」上传文档并构建 Wiki。
@@ -4751,6 +4790,9 @@ export default function AgentHubPage() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <span className="truncate">{wiki.name}</span>
+                              {wiki.scope === 'private' && (
+                                <Badge variant="outline" className="text-xs">私有</Badge>
+                              )}
                               {!isBuilt && (
                                 <Badge variant="outline" className="text-xs">
                                   {wiki.buildStatus === 'running' ? '构建中' : wiki.buildStatus === 'failed' ? '构建失败' : '未构建'}

@@ -708,11 +708,17 @@ export class WikiJobExecutor {
     for (const docId of docIds) {
       // Cross-org lookup: build runs as system, document still has org_id
       const docRow = this.db.getDocument(docId, wiki.orgId)
-      if (!docRow) {
+      if (!docRow || docRow.deleted_at != null) {
         console.warn(`[WikiJobExecutor] source doc ${docId} not found, skipping`)
         continue
       }
       const doc = mapDocumentRow(docRow)
+      // A wiki only ever reads its own knowledge space (DocumentStore
+      // validates this on save; re-checked here as the last line).
+      if (doc.scope !== wiki.scope || (wiki.scope === 'private' && doc.ownerId !== wiki.ownerId)) {
+        console.warn(`[WikiJobExecutor] source doc ${docId} is outside wiki ${wiki.id}'s knowledge space, skipping`)
+        continue
+      }
       const safeName = path.basename(doc.fileName)
 
       try {
@@ -1090,5 +1096,8 @@ function mapDocumentRow(row: Record<string, unknown>): DocumentRecord {
     storagePath: String(row.storage_path),
     uploadedBy: String(row.uploaded_by),
     uploadedAt: Number(row.uploaded_at),
+    sourceId: typeof row.source_id === 'string' ? row.source_id : null,
+    scope: row.scope === 'private' ? 'private' : 'tenant',
+    ownerId: typeof row.owner_id === 'string' && row.owner_id ? row.owner_id : 'admin',
   }
 }

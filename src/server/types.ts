@@ -216,12 +216,16 @@ export const serverFileConfigSchema = lazySchema(() =>
       // it and every previously-issued image URL 404s. Env:
       // MOSS_RESOURCE_TOKEN_SECRET.
       resourceTokenSecret: z.string().default('dev-resource-token-secret'),
+      // Per-user size cap (MB) of a 私有 knowledge space uploaded from
+      // SudoWork. Env: MOSS_PRIVATE_SPACE_QUOTA_MB.
+      privateSpaceQuotaMb: z.number().int().min(1).default(1024),
     }).default({
       enabled: true,
       modelId: 'Xenova/multilingual-e5-small',
       maxPassagesPerWiki: 20_000,
       topKVector: 50,
       resourceTokenSecret: 'dev-resource-token-secret',
+      privateSpaceQuotaMb: 1024,
     }),
     cabin: z.object({
       enabled: z.boolean().default(false),
@@ -603,6 +607,8 @@ export type ServerConfig = {
     topKVector: number
     /** HMAC secret keying opaque tokens in public wiki-image URLs. */
     resourceTokenSecret: string
+    /** Per-user size cap (MB) of a 私有 knowledge space. Default 1024. */
+    privateSpaceQuotaMb?: number
   }
   cabin: {
     enabled: boolean
@@ -699,6 +705,8 @@ export type SessionRecord = {
   title: string | null
   summary: string | null
   assistantName: string | null
+  /** Wikis picked for the session itself (on top of its agent's). */
+  enabledWikis?: string[]
   source?: string
   channelChatId?: string
   clientMetadata?: Record<string, unknown>
@@ -790,6 +798,11 @@ export type SessionCreateInput = {
   channelChatId?: string
   /** Enabled skill names (optional, for non-agent sessions) */
   enabledSkills?: string[]
+  /**
+   * Wikis to advertise to the model, with or without an agent. Kept on the
+   * session; only those the user may use are advertised (wikiAccess.ts).
+   */
+  enabledWikis?: string[]
 }
 
 export type EnterpriseRecord = {

@@ -98,6 +98,7 @@ function mapSession(row: SqlRow): SessionRecord {
     title: typeof row.title === 'string' ? row.title : null,
     summary: typeof row.summary === 'string' ? row.summary : null,
     assistantName: typeof row.assistant_name === 'string' ? row.assistant_name : null,
+    enabledWikis: typeof row.enabled_wikis === 'string' ? parseJsonArray(row.enabled_wikis) : undefined,
     source: typeof row.source === 'string' ? row.source : undefined,
     channelChatId: typeof row.channel_chat_id === 'string' ? row.channel_chat_id : undefined,
     clientMetadata: parseJsonObject(row.client_metadata),
@@ -312,6 +313,13 @@ export class DirectConnectStore {
     if (!sessionsColumns.some(col => col.name === 'channel_chat_id')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN channel_chat_id TEXT`)
       console.log('[DB] Added channel_chat_id column to sessions')
+    }
+
+    // Migration: wikis picked for the session itself (JSON string[]), on top
+    // of its agent's — re-checked against the user's access on every attempt.
+    if (!sessionsColumns.some(col => col.name === 'enabled_wikis')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN enabled_wikis TEXT`)
+      console.log('[DB] Added enabled_wikis column to sessions')
     }
 
     // Migration: add client_metadata (opaque per-session client JSON) if absent
@@ -904,6 +912,47 @@ export class DirectConnectStore {
       }
     }
 
+    // Knowledge scopes: 'tenant' (专属-like, managed in the admin UI) vs
+    // 'private' (a user's own 私有 space, managed from SudoWork, custom-like).
+    // Legacy rows are tenant and owned by 'admin'.
+    for (const table of ['document_tree_nodes', 'documents', 'wikis']) {
+      for (const alter of [
+        `ALTER TABLE ${table} ADD COLUMN scope TEXT NOT NULL DEFAULT 'tenant'`,
+        `ALTER TABLE ${table} ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'admin'`,
+      ]) {
+        try {
+          this.db.exec(alter)
+        } catch {
+          // already exists
+        }
+      }
+    }
+    try {
+      this.db.exec(`ALTER TABLE wikis ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
+    } catch {
+      // already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE wikis ADD COLUMN visible_to TEXT`)
+      // First run only: wikis built before scopes existed were reachable only
+      // through agents, so they start as admin-only for direct use (agents
+      // bound to them keep working, see wikiAccess.ts).
+      this.db.exec(`UPDATE wikis SET visible_to = '{"department_ids":[],"user_ids":[]}'`)
+    } catch {
+      // already exists
+    }
+    try {
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS document_tree_nodes_private_root_idx
+          ON document_tree_nodes (org_id, owner_id)
+          WHERE scope = 'private' AND parent_id IS NULL;
+        CREATE INDEX IF NOT EXISTS wikis_scope_owner_idx
+          ON wikis (org_id, scope, owner_id);
+      `)
+    } catch {
+      // ignore
+    }
+
     // ============================================================
     // Secrets Management Tables
     // ============================================================
@@ -1419,6 +1468,7 @@ export class DirectConnectStore {
     status: SessionStatus
     desiredState: DesiredSessionState
     assistantName?: string
+    enabledWikis?: string[]
     source?: string
     channelChatId?: string
   }): SessionRecord {
@@ -1428,9 +1478,9 @@ export class DirectConnectStore {
         session_id, transcript_session_id, org_id, user_id, role, scopes_json,
         cwd, runtime_type, docker_image, docker_mode, config_dir, container_name,
         status, desired_state, current_attempt_id, transcript_path, title, summary, assistant_name,
-        source, channel_chat_id,
+        enabled_wikis, source, channel_chat_id,
         created_at, last_active_at, ended_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `).run(
       input.sessionId,
       input.transcriptSessionId,
@@ -1452,6 +1502,7 @@ export class DirectConnectStore {
       input.desiredState,
       input.transcriptPath,
       input.assistantName ?? null,
+      input.enabledWikis && input.enabledWikis.length > 0 ? JSON.stringify(input.enabledWikis) : null,
       input.source ?? null,
       input.channelChatId ?? null,
       ts,
@@ -2729,10 +2780,47 @@ export class DirectConnectStore {
 
   // ==================== Document Center: Tree Nodes ====================
 
-  listDocumentTreeNodes(orgId: string): SqlRow[] {
+  listDocumentTreeNodes(orgId: string, filter?: {
+    scope?: 'tenant' | 'private'
+    ownerId?: string
+    /** Also return soft-deleted nodes (cleanup / sync bookkeeping). */
+    includeDeleted?: boolean
+  }): SqlRow[] {
+    const conditions = ['org_id = ?']
+    if (!filter?.includeDeleted) conditions.push('deleted_at IS NULL')
+    const params: string[] = [orgId]
+    if (filter?.scope) {
+      conditions.push('scope = ?')
+      params.push(filter.scope)
+    }
+    if (filter?.ownerId) {
+      conditions.push('owner_id = ?')
+      params.push(filter.ownerId)
+    }
     return this.db
-      .prepare(`SELECT * FROM document_tree_nodes WHERE org_id = ? ORDER BY sort_order, created_at`)
-      .all(orgId) as SqlRow[]
+      .prepare(`SELECT * FROM document_tree_nodes WHERE ${conditions.join(' AND ')} ORDER BY sort_order, created_at`)
+      .all(...params) as SqlRow[]
+  }
+
+  /** A user's 私有 root node (parent_id IS NULL, scope = 'private'), if created yet. */
+  getPrivateRootNode(orgId: string, ownerId: string): SqlRow | null {
+    return (this.db
+      .prepare(
+        `SELECT * FROM document_tree_nodes
+         WHERE org_id = ? AND owner_id = ? AND scope = 'private' AND parent_id IS NULL LIMIT 1`,
+      )
+      .get(orgId, ownerId) as SqlRow) ?? null
+  }
+
+  /** Total bytes of a user's live private documents (quota check). */
+  sumPrivateDocumentBytes(orgId: string, ownerId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(size_bytes), 0) AS total FROM documents
+         WHERE org_id = ? AND owner_id = ? AND scope = 'private' AND deleted_at IS NULL`,
+      )
+      .get(orgId, ownerId) as { total?: number } | undefined
+    return Number(row?.total ?? 0)
   }
 
   getDocumentTreeNode(id: string, orgId: string): SqlRow | null {
@@ -2751,14 +2839,16 @@ export class DirectConnectStore {
     auto_managed?: number
     alias?: string | null
     last_synced_at?: number | null
+    scope?: 'tenant' | 'private'
+    owner_id?: string
   }): void {
     const ts = now()
     this.db.prepare(`
       INSERT INTO document_tree_nodes (
         id, org_id, parent_id, name, description, sort_order, created_at, updated_at,
-        source_id, source_path, auto_managed, alias, last_synced_at
+        source_id, source_path, auto_managed, alias, last_synced_at, scope, owner_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.org_id,
@@ -2773,6 +2863,8 @@ export class DirectConnectStore {
       row.auto_managed ?? 0,
       row.alias ?? null,
       row.last_synced_at ?? null,
+      row.scope ?? 'tenant',
+      row.owner_id ?? 'admin',
     )
   }
 
@@ -2807,9 +2899,10 @@ export class DirectConnectStore {
 
   // ==================== Document Center: Documents ====================
 
-  listDocumentsByNode(nodeId: string, orgId: string): SqlRow[] {
+  listDocumentsByNode(nodeId: string, orgId: string, opts?: { includeDeleted?: boolean }): SqlRow[] {
+    const live = opts?.includeDeleted ? '' : ' AND deleted_at IS NULL'
     return this.db
-      .prepare(`SELECT * FROM documents WHERE node_id = ? AND org_id = ? ORDER BY uploaded_at DESC`)
+      .prepare(`SELECT * FROM documents WHERE node_id = ? AND org_id = ?${live} ORDER BY uploaded_at DESC`)
       .all(nodeId, orgId) as SqlRow[]
   }
 
@@ -2830,15 +2923,17 @@ export class DirectConnectStore {
     external_id?: string | null
     external_etag?: string | null
     content_sha256?: string | null
+    scope?: 'tenant' | 'private'
+    owner_id?: string
   }): void {
     const ts = now()
     this.db.prepare(`
       INSERT INTO documents (
         id, org_id, node_id, file_name, mime_type, size_bytes, storage_path,
         uploaded_by, uploaded_at,
-        source_id, external_id, external_etag, content_sha256
+        source_id, external_id, external_etag, content_sha256, scope, owner_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.org_id,
@@ -2853,6 +2948,8 @@ export class DirectConnectStore {
       row.external_id ?? null,
       row.external_etag ?? null,
       row.content_sha256 ?? null,
+      row.scope ?? 'tenant',
+      row.owner_id ?? 'admin',
     )
   }
 
@@ -2862,9 +2959,22 @@ export class DirectConnectStore {
 
   // ==================== Document Center: Wikis ====================
 
-  listWikis(orgId: string, filter?: { nodeId?: string; buildStatus?: string }): SqlRow[] {
+  listWikis(orgId: string, filter?: {
+    nodeId?: string
+    buildStatus?: string
+    scope?: 'tenant' | 'private'
+    ownerId?: string
+  }): SqlRow[] {
     const conditions = ['org_id = ?']
     const params: unknown[] = [orgId]
+    if (filter?.scope) {
+      conditions.push('scope = ?')
+      params.push(filter.scope)
+    }
+    if (filter?.ownerId) {
+      conditions.push('owner_id = ?')
+      params.push(filter.ownerId)
+    }
     if (filter?.nodeId) {
       conditions.push('node_id = ?')
       params.push(filter.nodeId)
@@ -2901,6 +3011,9 @@ export class DirectConnectStore {
     source_exclude_node_ids?: string[]
     auto_rebuild?: boolean
     created_by: string
+    scope?: 'tenant' | 'private'
+    owner_id?: string
+    visible_to?: string | null
   }): void {
     const ts = now()
     this.db.prepare(`
@@ -2908,8 +3021,8 @@ export class DirectConnectStore {
         id, org_id, node_id, name, description, storage_path,
         build_status, source_document_ids, source_mode, source_node_id, auto_rebuild,
         source_node_ids, source_exclude_node_ids,
-        created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_by, created_at, updated_at, scope, owner_id, visible_to
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.org_id,
@@ -2926,6 +3039,9 @@ export class DirectConnectStore {
       row.created_by,
       ts,
       ts,
+      row.scope ?? 'tenant',
+      row.owner_id ?? row.created_by,
+      row.visible_to ?? null,
     )
   }
 
@@ -2939,6 +3055,9 @@ export class DirectConnectStore {
     source_node_ids?: string[]
     source_exclude_node_ids?: string[]
     auto_rebuild?: boolean
+    /** JSON-encoded VisibleTo; null = everyone; undefined = keep. */
+    visible_to?: string | null
+    enabled?: boolean
   }): void {
     const ts = now()
     const existing = this.getWiki(id, orgId)
@@ -2947,7 +3066,7 @@ export class DirectConnectStore {
       UPDATE wikis
       SET name = ?, description = ?, node_id = ?, source_document_ids = ?,
           source_mode = ?, source_node_id = ?, auto_rebuild = ?,
-          source_node_ids = ?, source_exclude_node_ids = ?, updated_at = ?
+          source_node_ids = ?, source_exclude_node_ids = ?, visible_to = ?, enabled = ?, updated_at = ?
       WHERE id = ? AND org_id = ?
     `).run(
       updates.name ?? (existing.name as string),
@@ -2967,6 +3086,8 @@ export class DirectConnectStore {
       updates.source_exclude_node_ids !== undefined
         ? JSON.stringify(updates.source_exclude_node_ids)
         : (existing.source_exclude_node_ids as string),
+      updates.visible_to !== undefined ? updates.visible_to : (existing.visible_to as string | null),
+      updates.enabled !== undefined ? (updates.enabled ? 1 : 0) : (existing.enabled as number),
       ts,
       id,
       orgId,
@@ -3038,7 +3159,9 @@ export class DirectConnectStore {
           w.name AS wiki_name,
           w.node_id AS wiki_node_id,
           w.build_status AS wiki_build_status,
-          w.needs_rebuild AS wiki_needs_rebuild
+          w.needs_rebuild AS wiki_needs_rebuild,
+          w.scope AS wiki_scope,
+          w.owner_id AS wiki_owner_id
         FROM wiki_build_jobs j
         JOIN wikis w ON w.id = j.wiki_id
         WHERE ${whereSql}
@@ -3057,7 +3180,9 @@ export class DirectConnectStore {
           w.name AS wiki_name,
           w.node_id AS wiki_node_id,
           w.build_status AS wiki_build_status,
-          w.needs_rebuild AS wiki_needs_rebuild
+          w.needs_rebuild AS wiki_needs_rebuild,
+          w.scope AS wiki_scope,
+          w.owner_id AS wiki_owner_id
         FROM wiki_build_jobs j
         JOIN wikis w ON w.id = j.wiki_id
         WHERE j.id = ? AND w.org_id = ?
@@ -3079,6 +3204,19 @@ export class DirectConnectStore {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS c FROM wiki_build_jobs WHERE status IN ('queued', 'running')`)
       .get() as { c: number } | undefined
+    return row ? Number(row.c) : 0
+  }
+
+  /** Queued/running builds of a user's private wikis (per-user build fairness). */
+  countActivePrivateWikiBuildJobs(orgId: string, ownerId: string): number {
+    const row = this.db
+      .prepare(`
+        SELECT COUNT(*) AS c
+        FROM wiki_build_jobs j
+        JOIN wikis w ON w.id = j.wiki_id
+        WHERE w.org_id = ? AND w.scope = 'private' AND w.owner_id = ? AND j.status IN ('queued', 'running')
+      `)
+      .get(orgId, ownerId) as { c: number } | undefined
     return row ? Number(row.c) : 0
   }
 
@@ -3463,10 +3601,19 @@ export class DirectConnectStore {
       .get(sourceId, externalId) as SqlRow) ?? null
   }
 
-  /** Find a non-deleted document by content hash within an org (for dedup). */
-  findDocumentByHash(orgId: string, sha256: string): SqlRow | null {
+  /**
+   * Find a non-deleted document by content hash within an org (for dedup).
+   * Restricted to one scope + owner so storage is never shared between a
+   * user's private space and tenant documents (or another user's).
+   */
+  findDocumentByHash(orgId: string, sha256: string, scope: 'tenant' | 'private' = 'tenant', ownerId?: string): SqlRow | null {
+    if (scope === 'private') {
+      return (this.db
+        .prepare(`SELECT * FROM documents WHERE org_id = ? AND content_sha256 = ? AND scope = 'private' AND owner_id = ? AND deleted_at IS NULL LIMIT 1`)
+        .get(orgId, sha256, ownerId ?? '') as SqlRow) ?? null
+    }
     return (this.db
-      .prepare(`SELECT * FROM documents WHERE org_id = ? AND content_sha256 = ? AND deleted_at IS NULL LIMIT 1`)
+      .prepare(`SELECT * FROM documents WHERE org_id = ? AND content_sha256 = ? AND scope = 'tenant' AND deleted_at IS NULL LIMIT 1`)
       .get(orgId, sha256) as SqlRow) ?? null
   }
 

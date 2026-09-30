@@ -690,6 +690,7 @@ export class RuntimeService {
       status: 'creating',
       desiredState: 'active',
       assistantName: input.assistantName,
+      enabledWikis: input.enabledWikis,
       source: input.source,
       channelChatId: input.channelChatId,
     })
@@ -710,6 +711,7 @@ export class RuntimeService {
         assistantName: input.assistantName,
         assistantDisplayName: input.assistantDisplayName,
         enabledSkills: input.enabledSkills,
+        enabledWikis: input.enabledWikis,
       })
     } catch (error) {
       this.store.markSessionEnded(created.sessionId, 'failed', 'active')
@@ -1243,6 +1245,7 @@ export class RuntimeService {
       assistantName?: string
       assistantDisplayName?: string
       enabledSkills?: string[]
+      enabledWikis?: string[]
     } = {},
   ): Promise<AttemptRecord> {
     // Graceful drain: this is the single choke point every "spin up a new
@@ -1429,31 +1432,19 @@ export class RuntimeService {
     let availableWikis: Array<{ id: string; name: string; description?: string | null }> | undefined
     let availableCorpApps: Array<{ id: string; name: string; type: string; key: string }> | undefined
     let sharedMemory: string | null = null
+    let agentWikiIds: string[] = []
+    let agentWikiDelegation: import('./wikiAccess.js').DelegationPolicy | null = null
     if (effectiveAssistantName) {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
         const found = await findAssistantDir(effectiveAssistantName)
         if (found) {
           const meta = await readAssistantMeta(found.dir)
-          const ids = Array.isArray(meta?.enabledWikis)
+          agentWikiIds = Array.isArray(meta?.enabledWikis)
             ? meta.enabledWikis.filter((v: unknown): v is string => typeof v === 'string')
             : []
-          if (ids.length > 0) {
-            const { DocumentStore } = await import('./documentStore.js')
-            const docStore = new DocumentStore(this.store)
-            const collected: Array<{ id: string; name: string; description?: string | null }> = []
-            for (const wid of ids) {
-              const wiki = docStore.getWikiById(wid)
-              if (wiki && wiki.orgId === session.orgId) {
-                collected.push({
-                  id: wiki.id,
-                  name: wiki.name,
-                  description: wiki.description,
-                })
-              }
-            }
-            if (collected.length > 0) availableWikis = collected
-          }
+          const { agentDelegationPolicy } = await import('./wikiAccess.js')
+          agentWikiDelegation = agentDelegationPolicy(found, meta, session.orgId, this.authService)
 
           // 企业应用管理: resolve `enabledCorpApps` so acpBridge can advertise
           // the `corpapp` CLI + the instance names the agent may use.
@@ -1536,6 +1527,32 @@ export class RuntimeService {
           `[RuntimeService] failed to resolve availableWikis for ${effectiveAssistantName}:`,
           err,
         )
+      }
+    }
+
+    // Wikis to advertise: what the agent delivers (tenant wikis it may
+    // delegate, see agentDelegationPolicy; others only within their own scope) plus the
+    // wikis picked for the session itself that the user may use. Re-resolved
+    // on every attempt, so a wiki disabled or narrowed since drops out.
+    const requestedWikiIds = options.enabledWikis ?? session.enabledWikis ?? []
+    if (agentWikiIds.length > 0 || requestedWikiIds.length > 0) {
+      try {
+        const { DocumentStore } = await import('./documentStore.js')
+        const { sessionAdvertisedWikis, NO_DELEGATION } = await import('./wikiAccess.js')
+        const docStore = new DocumentStore(this.store)
+        const wikis = sessionAdvertisedWikis({
+          orgId: session.orgId,
+          filter: visibilityFilter ?? { isAdmin: false, userId: session.userId ?? '', departmentId: null, visibleDepartmentIds: new Set() },
+          agentWikiIds,
+          agentDelegates: agentWikiDelegation ?? NO_DELEGATION,
+          requestedWikiIds,
+          getWikiById: id => docStore.getWikiById(id),
+        })
+        if (wikis.length > 0) {
+          availableWikis = wikis.map(w => ({ id: w.id, name: w.name, description: w.description }))
+        }
+      } catch (err) {
+        console.warn(`[RuntimeService] failed to resolve availableWikis (session=${session.sessionId}):`, err)
       }
     }
 

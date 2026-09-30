@@ -1464,8 +1464,13 @@ export async function uploadCustomAssistant(params: {
     // Copy to target directory
     await copyDirectoryRecursive(assistantDir, targetDir)
 
-    // Create or update metadata with visibility set to uploader only
-    const existingMeta = await readAssistantMeta(targetDir)
+    // Create or update metadata with visibility set to uploader only. Grants
+    // never come from the uploaded package: wiki / corp-app bindings are set
+    // by the owner afterwards through the (permission-checked) meta update.
+    const packagedMeta = await readAssistantMeta(targetDir)
+    const existingMeta = packagedMeta
+      ? (({ enabledWikis: _w, enabledCorpApps: _c, enableCorpAuth: _a, ...rest }) => rest)(packagedMeta)
+      : packagedMeta
     const version = params.version || '1.0.0'
     // Use displayName as the actual name, assistantId (UUID) as directory name/id
     const actualName = params.displayName || params.name || existingMeta?.display_name || assistantId

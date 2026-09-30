@@ -10,7 +10,7 @@ import type { VisibleTo } from '@/lib/api/agent-hub'
  * the creator is always included. Any department or user of the org may be
  * chosen (the server re-validates the ids).
  */
-export type CustomVisibilityMode = 'all' | 'departments' | 'users' | 'self'
+export type CustomVisibilityMode = 'all' | 'departments' | 'users' | 'self' | 'admins'
 
 export type CustomVisibilityValue = {
   mode: CustomVisibilityMode
@@ -23,9 +23,21 @@ export type CustomVisibilityValue = {
  * `{ null, null }` (an old empty pick — shown as 全员 but visible to nobody)
  * read as only me.
  */
-export function customVisibilityFrom(visibleTo: VisibleTo | null | undefined, ownerId: string | null | undefined): CustomVisibilityValue {
+export function customVisibilityFrom(
+  visibleTo: VisibleTo | null | undefined,
+  ownerId: string | null | undefined,
+  opts?: { allowAdminOnly?: boolean },
+): CustomVisibilityValue {
   if (!visibleTo) {
     return { mode: 'all', departmentIds: [], userIds: [] }
+  }
+  // Tenant wikis keep 仅管理员可用 ({ [], [] }) as a real scope.
+  if (
+    opts?.allowAdminOnly
+    && Array.isArray(visibleTo.department_ids) && visibleTo.department_ids.length === 0
+    && Array.isArray(visibleTo.user_ids) && visibleTo.user_ids.length === 0
+  ) {
+    return { mode: 'admins', departmentIds: [], userIds: [] }
   }
   if (visibleTo.department_ids?.length) {
     return { mode: 'departments', departmentIds: visibleTo.department_ids, userIds: [] }
@@ -40,6 +52,7 @@ export function customVisibilityFrom(visibleTo: VisibleTo | null | undefined, ow
 /** Build the scope to save. An empty department/user choice saves as only me. */
 export function customVisibleToFrom(value: CustomVisibilityValue, ownerId: string): VisibleTo | null {
   if (value.mode === 'all') return null
+  if (value.mode === 'admins') return { department_ids: [], user_ids: [] }
   if (value.mode === 'departments' && value.departmentIds.length) {
     return { department_ids: value.departmentIds, user_ids: null }
   }
@@ -51,6 +64,8 @@ export function customVisibleToFrom(value: CustomVisibilityValue, ownerId: strin
 
 /** Hint for custom items: admins get no special use rights. */
 export const CUSTOM_SCOPE_HINT = '创建者本人始终可用；管理员可在后台查看，但同样仅在上述范围内才能使用。'
+/** Hint for tenant knowledge-base wikis: agents bound to them still deliver them. */
+export const WIKI_SCOPE_HINT = '控制谁可在会话中直接使用此知识库。创建者本人与管理员始终可用；绑定了该知识库的智能体，其所有可用用户均可通过智能体使用它。'
 /** Hint for tenant (专属) items: widening an approved scope needs re-approval. */
 export const TENANT_SCOPE_HINT = '创建者本人与管理员始终可用。已审批的智能体/技能扩大可用范围需管理员重新审批，缩小范围立即生效。'
 
@@ -120,11 +135,14 @@ export function CustomVisibilityPicker({
   onChange,
   ownerId,
   hint = CUSTOM_SCOPE_HINT,
+  allowAdminOnly = false,
 }: {
   value: CustomVisibilityValue
   onChange: (value: CustomVisibilityValue) => void
   ownerId: string | null | undefined
   hint?: string
+  /** Offer 仅管理员可用 (tenant wikis; custom/专属 agents and skills don't have it). */
+  allowAdminOnly?: boolean
 }) {
   const { directory, failed: loadFailed } = useOrgDirectory()
 
@@ -168,6 +186,12 @@ export function CustomVisibilityPicker({
           <RadioGroupItem value="self" />
           <label className="text-sm cursor-pointer">仅自己可用</label>
         </div>
+        {allowAdminOnly && (
+          <div className="flex items-center gap-2">
+            <RadioGroupItem value="admins" />
+            <label className="text-sm cursor-pointer">仅管理员可用</label>
+          </div>
+        )}
       </RadioGroup>
       <p className="text-xs text-muted-foreground">{hint}</p>
       {value.mode === 'departments' ? (

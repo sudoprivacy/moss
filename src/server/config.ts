@@ -80,6 +80,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       maxPassagesPerWiki: 20_000,
       topKVector: 50,
       resourceTokenSecret: 'dev-resource-token-secret',
+      privateSpaceQuotaMb: 1024,
     },
     cabin: {
       enabled: false,
@@ -271,6 +272,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       topKVector: raw.wikiIndex.topKVector,
       resourceTokenSecret:
         process.env.MOSS_RESOURCE_TOKEN_SECRET || raw.wikiIndex.resourceTokenSecret,
+      privateSpaceQuotaMb: readIntEnv('MOSS_PRIVATE_SPACE_QUOTA_MB', raw.wikiIndex.privateSpaceQuotaMb ?? 1024),
     },
     cabin: {
       enabled: process.env.CABIN_ENABLED

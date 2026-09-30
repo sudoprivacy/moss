@@ -61,6 +61,7 @@ import {
   listDocumentsUnderNode,
   listWikis,
   setDocumentTreeNodeAlias,
+  setWikiEnabled,
   subscribeWikiBuildEvents,
   triggerWikiBuild,
   updateDocumentTreeNode,
@@ -68,6 +69,16 @@ import {
   uploadDocument,
 } from '@/lib/api/document-center'
 import { listExternalSources } from '@/lib/api/external-sources'
+import {
+  CustomVisibilityPicker,
+  ScopeBadges,
+  WIKI_SCOPE_HINT,
+  customVisibilityFrom,
+  customVisibleToFrom,
+  useOrgDirectory,
+  type CustomVisibilityValue,
+} from '@/components/custom-visibility-picker'
+import { useAuth } from '@/lib/hooks/use-auth'
 
 const MAX_DOC_SIZE = 50 * 1024 * 1024 // 50 MB; aligns with server-side limit
 
@@ -154,6 +165,14 @@ export default function DocumentCenterPage() {
   const [subtreeDocs, setSubtreeDocs] = useState<DocumentRecord[]>([])
   // The node whose subtree scopes the pickers (the node 新建 Wiki was clicked on).
   const [wikiScopeNodeId, setWikiScopeNodeId] = useState<string | null>(null)
+  // 可用范围 of the wiki being created / edited (tenant wikis keep 仅管理员可用).
+  const [wikiVisibility, setWikiVisibility] = useState<CustomVisibilityValue>({ mode: 'all', departmentIds: [], userIds: [] })
+  const [editingWikiOwnerId, setEditingWikiOwnerId] = useState<string | null>(null)
+  // Users' private (私有) wikis, built from SudoWork: admins may only view,
+  // disable or delete them here — never edit, rebuild or use them.
+  const [privateWikis, setPrivateWikis] = useState<WikiRecord[]>([])
+  const { user } = useAuth()
+  const { userName } = useOrgDirectory()
 
   const tree = useMemo(() => buildTree(nodes), [nodes])
   const selectedNode = useMemo(
@@ -164,14 +183,16 @@ export default function DocumentCenterPage() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [t, w, sources] = await Promise.all([
+      const [t, w, sources, pw] = await Promise.all([
         getDocumentTree(),
         listWikis(),
         // Best-effort: if this fails we simply treat all auto nodes as locked.
         listExternalSources().catch(() => []),
+        listWikis({ scope: 'private' }).catch(() => []),
       ])
       setNodes(t)
       setWikis(w)
+      setPrivateWikis(pw)
       setLiveSourceIds(new Set(sources.map(s => s.id)))
       // Auto-expand all on first load so user sees the structure
       setExpanded(prev => {
@@ -452,6 +473,8 @@ export default function DocumentCenterPage() {
     setWikiCheckedNodes(new Set())
     setWikiAutoRebuild(false)
     setSubtreeDocs([])
+    setWikiVisibility({ mode: 'all', departmentIds: [], userIds: [] })
+    setEditingWikiOwnerId(null)
   }
 
   // Load the scope node's subtree docs (files/upload pickers).
@@ -492,6 +515,8 @@ export default function DocumentCenterPage() {
     setWikiDesc(wiki.description ?? '')
     setWikiAutoRebuild(wiki.autoRebuild)
     setWikiSourceDocIds(new Set(wiki.sourceDocumentIds))
+    setEditingWikiOwnerId(wiki.ownerId ?? null)
+    setWikiVisibility(customVisibilityFrom(wiki.visibleTo, wiki.ownerId, { allowAdminOnly: true }))
     // Scope = the wiki's placement node (where the card shows). For dir mode we
     // scope to the smallest node that contains all included dirs' common root;
     // simplest: use the wiki's node_id (its placement) or the first include's
@@ -529,6 +554,10 @@ export default function DocumentCenterPage() {
       source_exclude_node_ids?: string[]
       auto_rebuild: boolean
     }
+    // 'Only me' means the wiki's owner (the creator; a legacy wiki's editor).
+    const scopeOwnerId =
+      editingWikiOwnerId && editingWikiOwnerId !== 'admin' ? editingWikiOwnerId : (user?.id ?? '')
+    const visibleTo = customVisibleToFrom(wikiVisibility, scopeOwnerId)
     if (wikiUiMode === 'dir') {
       const { include, exclude } = computeIncludeExclude(wikiCheckedNodes, scope)
       if (include.length === 0) { toast.error('请至少选择一个目录'); return }
@@ -552,11 +581,11 @@ export default function DocumentCenterPage() {
     }
     try {
       if (editingWikiId) {
-        const wiki = await updateWiki(editingWikiId, payload)
+        const wiki = await updateWiki(editingWikiId, { ...payload, visible_to: visibleTo })
         setWikis(prev => prev.map(w => (w.id === wiki.id ? wiki : w)))
         toast.success(`Wiki 已更新：${wiki.name}`)
       } else {
-        const wiki = await createWiki({ ...payload, node_id: scope })
+        const wiki = await createWiki({ ...payload, node_id: scope, visible_to: visibleTo })
         setWikis(prev => [wiki, ...prev])
         toast.success(`Wiki 已创建：${wiki.name}`)
       }
@@ -655,11 +684,24 @@ export default function DocumentCenterPage() {
     }
   }
 
+  const handleToggleWikiEnabled = async (wiki: WikiRecord, enabled: boolean) => {
+    try {
+      const updated = await setWikiEnabled(wiki.id, enabled)
+      const patch = (list: WikiRecord[]) => list.map(w => (w.id === wiki.id ? { ...w, ...updated } : w))
+      setWikis(patch)
+      setPrivateWikis(patch)
+      toast.success(enabled ? '知识库已启用' : '知识库已停用，会话与智能体将不再使用它')
+    } catch (err) {
+      toast.error(`操作失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   const handleDeleteWiki = async (wiki: WikiRecord) => {
     if (!window.confirm(`确认删除 Wiki「${wiki.name}」？此操作不可恢复。`)) return
     try {
       await deleteWiki(wiki.id)
       setWikis(prev => prev.filter(w => w.id !== wiki.id))
+      setPrivateWikis(prev => prev.filter(w => w.id !== wiki.id))
       toast.success('Wiki 已删除')
     } catch (err) {
       toast.error(`删除失败：${err instanceof Error ? err.message : String(err)}`)
@@ -871,6 +913,23 @@ export default function DocumentCenterPage() {
                             {wiki.description && (
                               <p className="text-xs text-muted-foreground">{wiki.description}</p>
                             )}
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                <span className="shrink-0">可用范围</span>
+                                <ScopeBadges visibleTo={wiki.visibleTo} ownerId={wiki.ownerId} />
+                              </div>
+                              <label
+                                className="flex items-center gap-2 text-xs text-muted-foreground"
+                                title="停用后，会话与绑定的智能体都不再使用此知识库"
+                              >
+                                {wiki.enabled === false ? '已停用' : '已启用'}
+                                <Switch
+                                  checked={wiki.enabled !== false}
+                                  disabled={wiki.canAdminister === false}
+                                  onCheckedChange={checked => void handleToggleWikiEnabled(wiki, checked)}
+                                />
+                              </label>
+                            </div>
                             <p className="text-xs text-muted-foreground">
                               {wiki.sourceMode === 'dir'
                                 ? '源:整个目录(自动跟随)'
@@ -885,6 +944,12 @@ export default function DocumentCenterPage() {
                                 构建错误：{wiki.lastBuildError}
                               </p>
                             )}
+                            {wiki.canManage === false ? (
+                              <p className="text-xs text-muted-foreground pt-1">
+                                <Lock className="mr-1 inline size-3" />
+                                仅可查看（不在你的管理范围内）
+                              </p>
+                            ) : (
                             <div className="flex gap-2 pt-1">
                               <Button
                                 size="sm"
@@ -911,6 +976,7 @@ export default function DocumentCenterPage() {
                                 删除
                               </Button>
                             </div>
+                            )}
                           </CardContent>
                         </Card>
                       ))}
@@ -922,6 +988,60 @@ export default function DocumentCenterPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Users' private wikis (SudoWork 私有空间): view / disable / delete only */}
+      {privateWikis.length > 0 && (
+        <Card className="mt-4">
+          <CardHeader className="py-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Lock className="size-4" />
+              用户私有知识库（{privateWikis.length}）
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              由用户在 SudoWork 客户端上传并构建，仅所有者可编辑。管理员可查看、停用或删除，但仅在所有者设定的可用范围内才能使用。
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {privateWikis.map(wiki => (
+              <div key={wiki.id} className="flex flex-wrap items-center gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-medium">{wiki.name}</p>
+                    <Badge variant="outline" className="text-[10px]">私有</Badge>
+                    <WikiStatusBadge status={wiki.buildStatus} />
+                    {wiki.usable === false && (
+                      <Badge variant="secondary" className="text-[10px]">仅可查看（所有者未开放使用）</Badge>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>所有者：{(wiki.ownerId && userName(wiki.ownerId)) ?? wiki.ownerId}</span>
+                    <span>·</span>
+                    <span className="shrink-0">可用范围</span>
+                    <ScopeBadges visibleTo={wiki.visibleTo} ownerId={wiki.ownerId} />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  {wiki.enabled === false ? '已停用' : '已启用'}
+                  <Switch
+                    checked={wiki.enabled !== false}
+                    disabled={wiki.canAdminister === false}
+                    onCheckedChange={checked => void handleToggleWikiEnabled(wiki, checked)}
+                  />
+                </label>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={wiki.canAdminister === false}
+                  onClick={() => void handleDeleteWiki(wiki)}
+                >
+                  <Trash2 className="mr-2 size-4" />
+                  删除
+                </Button>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Create node dialog */}
       <Dialog open={createNodeOpen} onOpenChange={setCreateNodeOpen}>
@@ -1169,6 +1289,17 @@ export default function DocumentCenterPage() {
                       </div>
                     </div>
                   )}
+
+                  <div className="space-y-2 rounded border p-3">
+                    <Label>可用范围</Label>
+                    <CustomVisibilityPicker
+                      value={wikiVisibility}
+                      onChange={setWikiVisibility}
+                      ownerId={editingWikiOwnerId && editingWikiOwnerId !== 'admin' ? editingWikiOwnerId : user?.id}
+                      hint={WIKI_SCOPE_HINT}
+                      allowAdminOnly
+                    />
+                  </div>
 
                   {/* Auto-rebuild — external source modes only. */}
                   {isSource && (wikiUiMode === 'dir' || wikiUiMode === 'files') && (
