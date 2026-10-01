@@ -25,6 +25,8 @@ import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
 
 import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
+import { collectSkillAssets } from './skillAssets.js'
+import { createPodWorkspaceAccess } from './podWorkspace.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -220,6 +222,7 @@ export class K8sBackend implements SessionBackend {
       process.stderr.write(`[K8sBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
+    const skillAssets = await collectSkillAssets(workspaceSkillLinks)
 
     const env = buildSessionEnv(options, {
       ...(options.sessionToken ? { SESSION_TOKEN: options.sessionToken } : {}),
@@ -270,9 +273,8 @@ export class K8sBackend implements SessionBackend {
 
     // Skills: pack each enabled skill's SKILL.md into the Secret and mount it at
     // the workspace skills dir scode discovers (`<cwd>/.nexus/sudocode/skills`).
-    // NOTE (PoC): a flat Secret can only carry the top-level SKILL.md manifest,
-    // not a skill's nested asset tree (scripts/, references/); those need the
-    // image bake / a PVC in production.
+    // Scripts and references are copied into the writable workspace after the
+    // pod becomes ready, keeping binary/large payloads out of the Secret.
     const workspaceSkillsDir = posixPath.join(safeCwd, '.nexus', 'sudocode', 'skills')
     let skillIdx = 0
     for (const link of workspaceSkillLinks) {
@@ -387,6 +389,10 @@ export class K8sBackend implements SessionBackend {
     await applyPodManifest(kubectlBase, podManifest, podName)
     try {
       await waitPodRunning(kubectlBase, podName, podReadyTimeoutSec)
+      const workspace = createPodWorkspaceAccess({ kubectlBase, podName, cwd: safeCwd })
+      for (const asset of skillAssets) {
+        await workspace.writeFile(asset.path, asset.content, asset.mode)
+      }
     } catch (err) {
       // Pod never came up — reap both so we don't leak the Secret (auth token).
       await deletePod(kubectlBase, podName).catch(() => {})

@@ -50,18 +50,42 @@ ENV DEBIAN_FRONTEND=noninteractive
 #    时间、日志、scode 时间戳均为 CST，与服务端保持一致（默认 UTC 会导致时间偏差）。
 ENV TZ=Asia/Shanghai
 
+# Ubuntu's image gives /home/ubuntu mode 0750. Sandboxed commands drop DAC
+# bypass capabilities, so they must be able to traverse this empty image home
+# to reach session workspaces mounted below it. Keep directory listing private.
+RUN chmod 0711 /home/ubuntu
+
 # 1. 安装基础依赖和常用工具（含 tzdata 以提供时区数据库）
 RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     git \
     python3 \
+    python3-venv \
+    ffmpeg \
+    fonts-noto-cjk \
     bash \
     tzdata \
     && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo 'Asia/Shanghai' > /etc/timezone \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Keep media dependencies and the speech model in the image, outside each
+# session's empty HOME. New cloud conversations work without package downloads.
+ENV SUDOWORK_SUBTITLE_PYTHON=/opt/sudowork-subtitles/bin/python \
+    SUDOWORK_WHISPER_MODEL_DIR=/opt/sudowork-models/faster-whisper-small
+RUN python3 -m venv /opt/sudowork-subtitles \
+    && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 av==16.1.0 \
+    && /opt/sudowork-subtitles/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small', revision='536b0662742c02347bc0e980a01041f333bce120', local_dir='/opt/sudowork-models/faster-whisper-small', allow_patterns=['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'])" \
+    && /opt/sudowork-subtitles/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/sudowork-models/faster-whisper-small', device='cpu', compute_type='int8', cpu_threads=2)" \
+    && ffmpeg -hide_banner -filters 2>/dev/null | grep -q subtitles
+
+# Exercise decoding as well as imports: incompatible PyAV releases can import
+# successfully while rejecting the arguments faster-whisper uses to open audio.
+RUN ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 0.1 /tmp/subtitle-smoke.wav \
+    && /opt/sudowork-subtitles/bin/python -c "from faster_whisper.audio import decode_audio; assert len(decode_audio('/tmp/subtitle-smoke.wav')) > 0" \
+    && rm /tmp/subtitle-smoke.wav
 
 # 2. 安装 Node.js 20 (如果 scode 本身或其插件需要 Node 环境)
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
