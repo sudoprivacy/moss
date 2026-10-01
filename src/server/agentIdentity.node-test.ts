@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { writeAssistantOverrideAgentsMd } from './sharedAgentMemory.js'
 import { createCatalogTestRepository } from './testing/compatibilityRepositories.js'
 import { SqliteDriver } from './db/driver.js'
 import {
@@ -57,5 +61,52 @@ void test('a session on the user agent gets memory; one on nobody never did', as
     })
   } finally {
     db.close()
+  }
+})
+
+void test('a user agent gets its memory but does not claim a role', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'moss-user-agent-'))
+  try {
+    await writeAssistantOverrideAgentsMd({
+      workspace,
+      assistantName: defaultAgentName('user-1'),
+      sharedMemory: "The current logged-in user's name is 宋一民.",
+    })
+    const written = await readFile(join(workspace, 'AGENTS.md'), 'utf8')
+    // The memory has to reach the agent — this file is how.
+    assert.match(written, /Shared User Memory/)
+    assert.match(written, /宋一民/)
+    // But a name derived from a user id is not a persona: naming it here would
+    // make the agent answer "I am user-user-1".
+    assert.doesNotMatch(written, /Application role/)
+    assert.doesNotMatch(written, /as your assistant name/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+void test('a catalog assistant is named even with no display name', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'moss-catalog-agent-'))
+  try {
+    // The distinction is the agent's kind, not whether a display name happens
+    // to be supplied — keying on the display name silently dropped the role
+    // section for every assistant that has none.
+    await writeAssistantOverrideAgentsMd({ workspace, assistantName: 'quote' })
+    const written = await readFile(join(workspace, 'AGENTS.md'), 'utf8')
+    assert.match(written, /use quote as your assistant name/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+void test('nothing to say writes nothing at all', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'moss-empty-agent-'))
+  try {
+    await writeAssistantOverrideAgentsMd({ workspace, assistantName: defaultAgentName('user-2') })
+    // No role, no memory, no rules. A header-only file would announce itself as
+    // an override and override nothing, in a directory that may be the user's.
+    await assert.rejects(() => readFile(join(workspace, 'AGENTS.md'), 'utf8'))
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
   }
 })

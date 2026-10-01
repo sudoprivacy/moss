@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import path from 'path'
 import * as lockfile from '../utils/lockfile.js'
+import { isDefaultAgentName } from './agentIdentity.js'
 
 export type SharedAgentMemoryEntry = {
   content: string
@@ -224,10 +225,13 @@ export async function writeAssistantOverrideAgentsMd(params: {
   // persona — its name is derived from a user id, so naming it here would make
   // the agent call itself `user-<uuid>`, which is worse than saying nothing. It
   // still gets the memory section below: that is how its memory reaches it.
-  const identityName = params.assistantDisplayName?.trim()
+  // The test is the agent's kind, not whether a display name happens to be
+  // supplied — a catalog assistant without one is still named by its own name.
+  const hasRole = !isDefaultAgentName(params.assistantName)
+  const identityName = params.assistantDisplayName?.trim() || params.assistantName
   const lines = [AGENTS_MD_HEADER, '']
 
-  if (identityName) {
+  if (hasRole) {
     lines.push(
       '## Application role',
       'Follow the role, identity, and response instructions defined in Assistant Rules below.',
@@ -261,7 +265,7 @@ export async function writeAssistantOverrideAgentsMd(params: {
   // would plant a file that announces itself as an override and overrides
   // nothing — and in a real user directory that is a file we created for no
   // reason.
-  if (!identityName && !params.sharedMemory?.trim() && !params.assistantRules?.trim()) {
+  if (!hasRole && !params.sharedMemory?.trim() && !params.assistantRules?.trim()) {
     return
   }
 
