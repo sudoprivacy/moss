@@ -1,5 +1,6 @@
 import { SessionStartupError } from './sessionStartup.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
+import { defaultAgentName, isDefaultAgentName } from './agentIdentity.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
@@ -626,7 +627,14 @@ export class RuntimeService {
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
     return withOrganizationResources(await this.resourceScope(input), async () => {
-      if (input.assistantName) {
+      // Every session belongs to an agent. Without one chosen, it belongs to the
+      // user's own — not to nobody, which is what left this cohort ungroupable
+      // in the sidebar and with `memory_mode: session`, i.e. no memory of the
+      // last conversation.
+      if (!input.assistantName) {
+        input = { ...input, assistantName: defaultAgentName(input.userId) }
+      }
+      if (input.assistantName && !isDefaultAgentName(input.assistantName)) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
@@ -1724,14 +1732,23 @@ export class RuntimeService {
     // below still runs. Without this, a reused session signs a token with
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
-    let effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
-    if (effectiveAssistantName) {
+    // Sessions created before every session had an agent carry no name, so the
+    // same rule is applied here too rather than letting a relaunch of an old
+    // conversation be the one spawn that belongs to nobody.
+    let effectiveAssistantName =
+      options.assistantName ?? session.assistantName ?? defaultAgentName(session.userId)
+    // A user's own agent is not in the catalog — asking for it would 404 a
+    // session that is perfectly valid.
+    if (effectiveAssistantName && !isDefaultAgentName(effectiveAssistantName)) {
       const resource = await requireOrganizationResource('agent', effectiveAssistantName)
       effectiveAssistantName = resource.id
       if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     }
     let assistantDisplayName = options.assistantDisplayName
-    if (!assistantDisplayName && effectiveAssistantName) {
+    // Only a catalog assistant has a display name to resolve. A default agent's
+    // name is derived from a user id, so resolving it would surface `user-<uuid>`
+    // as the thing the agent calls itself.
+    if (!assistantDisplayName && effectiveAssistantName && !isDefaultAgentName(effectiveAssistantName)) {
       try {
         const { resolveAssistantDisplayName } = await import('./agentStore.js')
         assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)
