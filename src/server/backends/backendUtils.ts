@@ -11,6 +11,7 @@ import {
 } from '../../utils/skills/localSkillDirectories.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { findAssistantDir, readAssistantMeta } from '../agentStore.js'
+import { isDefaultAgentName } from '../agentIdentity.js'
 import type {
   BackendAvailableSkill,
   BackendHandle,
@@ -320,6 +321,12 @@ export async function getAssistantRuntimeConfig(
 }> {
   if (getOrganizationResourceScope()) {
     const skills = (await listOrganizationResources('skill') ?? []).filter(skill => skill.meta.enabled !== false)
+    // A user's own agent has no catalog entry to look up, and nothing has
+    // narrowed its skills — it gets what an unattributed session used to get,
+    // plus the cross-session memory that only `user` mode turns on.
+    if (isDefaultAgentName(assistantName)) {
+      return { memoryMode: 'user', enabledSkills: skills.map(skill => skill.name) }
+    }
     if (!assistantName) return { memoryMode: 'session', enabledSkills: skills.map(skill => skill.name) }
     const agent = await requireOrganizationResource('agent', assistantName)
     if (agent.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
@@ -330,6 +337,11 @@ export async function getAssistantRuntimeConfig(
       return matches[0]!.name
     })
     return { memoryMode: agent.meta.memory_mode === 'user' ? 'user' : 'session', enabledSkills }
+  }
+  // 用户自己的 agent：没有目录项可查，技能也没被收窄 —— 给全量，并开启跨会话记忆
+  if (isDefaultAgentName(assistantName)) {
+    const allSkills = await getAllAvailableSkillNames()
+    return { memoryMode: 'user', enabledSkills: allSkills }
   }
   // 未指定智能体时，返回所有可用 skills
   if (!assistantName) {

@@ -77,6 +77,23 @@ type PodVolumeMount = {
 }
 
 /** Drop mounts that would collide on the same in-pod path (first wins). */
+/**
+ * The agent this spawn belongs to.
+ *
+ * `RuntimeService` assigns one to every session — the chosen assistant, or the
+ * user's own agent — including when relaunching a session created before that
+ * was true. So a spawn without one means the assignment was bypassed, and the
+ * useful response is to say so rather than invent a name.
+ */
+function requireAgentId(options: BackendSpawnOptions): string {
+  if (!options.assistantName) {
+    throw new Error(
+      `k8s spawn for session ${options.sessionId} has no agent; RuntimeService assigns one to every session`,
+    )
+  }
+  return options.assistantName
+}
+
 function dedupeMounts(mounts: PodVolumeMount[]): PodVolumeMount[] {
   const seen = new Set<string>()
   const out: PodVolumeMount[] = []
@@ -399,7 +416,13 @@ export class K8sBackend implements SessionBackend {
       execArgs,
       env,
       cwd: safeCwd,
-      agentId: options.assistantName || 'scode-standard',
+      // Every session carries the agent it belongs to, so there is nothing left
+      // to fall back to. The old `scode-standard` default leaked an internal
+      // constant into a field callers read as the session's agent, and the
+      // sidebar rendered it as the conversation's name. If it is ever missing,
+      // that is an upstream bug worth hearing about rather than papering over
+      // with a constant that looks like an agent and is not one.
+      agentId: requireAgentId(options),
       model,
       ownerId: options.userId,
     })
