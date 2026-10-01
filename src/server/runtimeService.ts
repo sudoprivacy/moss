@@ -2185,8 +2185,6 @@ export class RuntimeService {
     }
     if (providerCatalog) {
       runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
-      runnerEnv.MOSS_MODEL_PROVIDER_PROTOCOL = providerCatalog.selection.provider.protocol
-      runnerEnv.MOSS_PROVIDER_MODELS_JSON = JSON.stringify(providerCatalog.models)
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
       runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
     }

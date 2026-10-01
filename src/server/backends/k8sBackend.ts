@@ -23,7 +23,7 @@ import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
 import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
-import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
+
 import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
 
 const execFileAsync = promisify(execFile)
@@ -208,11 +208,12 @@ export class K8sBackend implements SessionBackend {
       ...(options.sessionToken ? { SESSION_TOKEN: options.sessionToken } : {}),
     })
 
-    // Resolve model (identical priority to docker/scode backend).
-    let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-    if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
-      model = `proxy/${model}`
-    }
+    // Resolve model (identical priority to docker/scode backend). The id goes to
+    // scode verbatim: `--auth proxy` already selects the proxy auth mode, and
+    // scode's passthrough forwards the alias to sudorouter as the model name, so
+    // a `proxy/` prefix arrives there as part of the name and 400s with
+    // "No available channel for model proxy/...".
+    const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
 
     // ---- Build the per-session Secret payload (delivered into the pod) ----
     // Keys map 1:1 to files mounted read-only at the paths scode reads. This is
@@ -224,24 +225,22 @@ export class K8sBackend implements SessionBackend {
     const secretData: Record<string, string> = { ...instructions.data }
     const secretMounts = [...instructions.mounts]
 
-    // sudocode.json — preloaded auth + models, exactly like docker backend.
+    // sudocode.json — the proxy connection only. A static model list here would
+    // pin every model to one wire format and freeze a catalog that sudorouter
+    // changes underneath us; with only the proxy connection present, scode
+    // resolves unknown aliases through passthrough and takes each model's wire
+    // format from the capabilities it reads off sudorouter `/v1/models`.
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      const allModels = ensureOpenAIModelConfig(
-        await buildAllModelsConfig(baseUrl),
-        env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview',
-        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
-          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
-          : 'openai-completions',
-      )
       const scodeConfig = {
         auth_modes: { proxy: { 'moss-proxy': { baseUrl, apiKey } } },
-        models: allModels,
       }
       secretData['sudocode.json'] = JSON.stringify(scodeConfig, null, 2)
       secretMounts.push({ key: 'sudocode.json', mountPath: posixPath.join(scodeHomeDir, 'sudocode.json') })
-      process.stderr.write(`[K8sBackend] Packed ${Object.keys(allModels).length} models into sudocode.json secret\n`)
+      process.stderr.write(
+        `[K8sBackend] Wrote sudocode.json secret (proxy connection only; models resolved dynamically via sudorouter)\n`,
+      )
     } catch (e) {
       process.stderr.write(`[K8sBackend] Failed to build sudocode.json: ${e}\n`)
     }

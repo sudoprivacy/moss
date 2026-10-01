@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { buildModelsConfig, getAvailableModels, getModelsForSelection, refreshModelCache } from '../modelListCache.js'
+import { getAvailableModels, getModelsForSelection, refreshModelCache } from '../modelListCache.js'
 import type { SystemSettingsPayload } from '../systemSettings.js'
 import {
   clearProviderModelCache,
@@ -26,8 +26,8 @@ describe('provider model discovery', () => {
       { id: 'invalid-limits', context_window: -1, max_output_tokens: '64000' },
     ] }))) as typeof fetch
     const models = await discoverProviderModels(provider, 'user-key')
-    expect(buildModelsConfig(models)['proxy/gpt-4o']).toMatchObject({ contextWindow: 128000, maxOutputTokens: 16384 })
-    expect(buildModelsConfig(models)['proxy/alias-model']).toMatchObject({ contextWindow: 64000, maxOutputTokens: 8000 })
+    expect(models[0]).toMatchObject({ modelId: 'gpt-4o', contextWindow: 128000, maxOutputTokens: 16384 })
+    expect(models[1]).toMatchObject({ modelId: 'alias-model', contextWindow: 64000, maxOutputTokens: 8000 })
     expect(models[2]?.contextWindow).toBeUndefined()
     expect(models[2]?.maxOutputTokens).toBeUndefined()
   })
@@ -252,26 +252,6 @@ describe('provider model discovery', () => {
     })
     expect(resolveModelSelection(providers, 'local-vllm', 'Qwen', 'Qwen')).toMatchObject({
       provider: { id: 'local-vllm' }, modelId: 'Qwen', selectionId: 'local-vllm:Qwen',
-    })
-  })
-
-  it('keeps the configured inference protocol in the generated scode model entry', () => {
-    expect(buildModelsConfig([{
-      modelId: 'gpt-5.6',
-      protocol: 'openai-responses',
-    }])).toEqual({
-      'proxy/gpt-5.6': {
-        alias: 'proxy/gpt-5.6',
-        name: 'Moss provider: proxy/gpt-5.6',
-        input: ['text'],
-        providers: {
-          proxy: {
-            provider: 'moss-proxy',
-            model: 'gpt-5.6',
-            api: 'openai-responses',
-          },
-        },
-      },
     })
   })
 
