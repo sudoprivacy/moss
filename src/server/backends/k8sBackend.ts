@@ -1,4 +1,5 @@
 import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
+import { isDefaultAgentName } from '../agentIdentity.js'
 import { execFile, spawn } from 'child_process'
 import { mkdir, readFile } from 'fs/promises'
 import { join, posix as posixPath } from 'path'
@@ -118,10 +119,11 @@ async function readScodeSessionId(filePath: string): Promise<string | undefined>
 }
 
 /** Deliver the workspace instructions across the control-plane/pod filesystem boundary. */
-export async function buildWorkspaceInstructionsSecret(workspace: string, isRequired = false): Promise<{
+export async function buildWorkspaceInstructionsSecret(workspace: string, assistantName?: string): Promise<{
   data: Record<string, string>
   mounts: Array<{ key: string; mountPath: string }>
 }> {
+  const isRequired = Boolean(assistantName && !isDefaultAgentName(assistantName))
   const filePath = getWorkspaceAgentsMdPath(workspace)
   try {
     const body = await readFile(filePath, 'utf8')
@@ -241,7 +243,7 @@ export class K8sBackend implements SessionBackend {
     // (remote) pod — hence a Secret, not a ConfigMap or hostPath.
     // RuntimeService writes AGENTS.md on the control plane. The pod's emptyDir
     // does not contain that file until we explicitly deliver it, just like skills.
-    const instructions = await buildWorkspaceInstructionsSecret(safeCwd, Boolean(options.assistantName))
+    const instructions = await buildWorkspaceInstructionsSecret(safeCwd, options.assistantName)
     const secretData: Record<string, string> = { ...instructions.data }
     const secretMounts = [...instructions.mounts]
 

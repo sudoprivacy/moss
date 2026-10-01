@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { test } from 'node:test'
 import { writeAssistantOverrideAgentsMd } from '../sharedAgentMemory.js'
+import { defaultAgentName } from '../agentIdentity.js'
 import { buildWorkspaceInstructionsSecret } from './k8sBackend.js'
 
 void test('assistant rules reach the pod workspace and take precedence over the catalog display name', async t => {
@@ -15,8 +16,8 @@ void test('assistant rules reach the pod workspace and take precedence over the 
   const assistant = { configDir, workspace, assistantName: 'tenant-agent-id', assistantDisplayName: 'test' }
   await writeAssistantOverrideAgentsMd({ ...assistant, assistantRules: '# 角色\n你是测试demo', sharedMemory: 'User prefers Chinese.' })
 
-  const secret = await buildWorkspaceInstructionsSecret(workspace, true)
-  assert.deepEqual(secret.mounts, [{ key: 'AGENTS.md', mountPath: join(workspace, 'AGENTS.md') }])
+  const secret = await buildWorkspaceInstructionsSecret(workspace, assistant.assistantName)
+  assert.deepEqual(secret.mounts, [{ key: 'AGENTS.md', mountPath: posix.join(workspace, 'AGENTS.md') }])
   assert.equal(secret.data['AGENTS.md'], await readFile(join(workspace, 'AGENTS.md'), 'utf8'))
   assert.match(secret.data['AGENTS.md']!, /## Assistant Rules\n\n# 角色\n你是测试demo/)
   assert.match(secret.data['AGENTS.md']!, /If those rules do not specify an identity, use test/)
@@ -25,7 +26,7 @@ void test('assistant rules reach the pod workspace and take precedence over the 
   assert.match(secret.data['AGENTS.md']!, /User prefers Chinese/)
 
   await writeAssistantOverrideAgentsMd({ ...assistant, assistantRules: 'Updated tenant rules' })
-  const refreshed = await buildWorkspaceInstructionsSecret(workspace, true)
+  const refreshed = await buildWorkspaceInstructionsSecret(workspace, assistant.assistantName)
   assert.match(refreshed.data['AGENTS.md']!, /Updated tenant rules/)
   assert.doesNotMatch(refreshed.data['AGENTS.md']!, /测试demo|User prefers Chinese/)
 })
@@ -39,11 +40,11 @@ void test('workspace instructions remain isolated and user-authored instructions
   await mkdir(second)
   await writeAssistantOverrideAgentsMd({ workspace: first, assistantName: 'first', assistantRules: 'First tenant rules' })
   await writeAssistantOverrideAgentsMd({ workspace: second, assistantName: 'second', assistantRules: 'Second tenant rules' })
-  assert.doesNotMatch((await buildWorkspaceInstructionsSecret(second, true)).data['AGENTS.md']!, /First tenant rules/)
+  assert.doesNotMatch((await buildWorkspaceInstructionsSecret(second, 'second')).data['AGENTS.md']!, /First tenant rules/)
 
   await writeFile(join(first, 'AGENTS.md'), '# Repository instructions\nKeep this file.')
   await writeAssistantOverrideAgentsMd({ workspace: first, assistantName: 'first', assistantRules: 'Replacement' })
-  const secret = await buildWorkspaceInstructionsSecret(first, true)
+  const secret = await buildWorkspaceInstructionsSecret(first, 'first')
   assert.equal(secret.data['AGENTS.md'], '# Repository instructions\nKeep this file.')
   assert.equal(await readFile(join(first, 'AGENTS.md'), 'utf8'), secret.data['AGENTS.md'])
 })
@@ -52,5 +53,14 @@ void test('a selected assistant cannot silently start without its instructions',
   const root = await mkdtemp(join(tmpdir(), 'moss-k8s-missing-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   assert.deepEqual(await buildWorkspaceInstructionsSecret(root), { data: {}, mounts: [] })
-  await assert.rejects(buildWorkspaceInstructionsSecret(root, true), /Unable to deliver assistant instructions/)
+  await assert.rejects(buildWorkspaceInstructionsSecret(root, 'catalog-agent'), /Unable to deliver assistant instructions/)
+})
+
+void test('the default user agent starts without catalog instructions and preserves workspace instructions when present', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-k8s-default-agent-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const assistantName = defaultAgentName('test-user')
+  assert.deepEqual(await buildWorkspaceInstructionsSecret(root, assistantName), { data: {}, mounts: [] })
+  await writeFile(join(root, 'AGENTS.md'), '# Workspace rules\nPreserve original videos.')
+  assert.equal((await buildWorkspaceInstructionsSecret(root, assistantName)).data['AGENTS.md'], '# Workspace rules\nPreserve original videos.')
 })
