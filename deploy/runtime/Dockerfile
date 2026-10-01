@@ -56,12 +56,25 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     git \
     python3 \
+    python3-venv \
+    ffmpeg \
+    fonts-noto-cjk \
     bash \
     tzdata \
     && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo 'Asia/Shanghai' > /etc/timezone \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Keep media dependencies and the speech model in the image, outside each
+# session's empty HOME. New cloud conversations work without package downloads.
+ENV SUDOWORK_SUBTITLE_PYTHON=/opt/sudowork-subtitles/bin/python \
+    SUDOWORK_WHISPER_MODEL_DIR=/opt/sudowork-models/faster-whisper-small
+RUN python3 -m venv /opt/sudowork-subtitles \
+    && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 \
+    && /opt/sudowork-subtitles/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small', revision='536b0662742c02347bc0e980a01041f333bce120', local_dir='/opt/sudowork-models/faster-whisper-small', allow_patterns=['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'])" \
+    && /opt/sudowork-subtitles/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/sudowork-models/faster-whisper-small', device='cpu', compute_type='int8', cpu_threads=2)" \
+    && ffmpeg -hide_banner -filters 2>/dev/null | grep -q subtitles
 
 # 2. 安装 Node.js 20 (如果 scode 本身或其插件需要 Node 环境)
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
