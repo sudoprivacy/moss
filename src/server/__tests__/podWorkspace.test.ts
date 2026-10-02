@@ -63,6 +63,32 @@ describe('persistent workspace recovery', () => {
     expect(restores).toBe(0)
   })
 
+  it('waits past runner readiness for a cold container to accept workspace exec', async () => {
+    let calls = 0
+    let restores = 0
+    const bytes = Buffer.from('cold workspace contents')
+    const result = await withPodReadinessRetry(async () => {
+      calls++
+      if (calls <= 5) throw new PodExecError('exec failed', 1, 'unable to upgrade connection: container not found ("scode")')
+      return bytes
+    }, async () => { restores++ })
+    expect(result).toEqual(bytes)
+    expect(calls).toBe(6)
+    expect(restores).toBe(1)
+  }, 15_000)
+
+  it('still surfaces the final readiness failure when the container never starts', async () => {
+    const failure = new PodExecError('exec failed', 1, 'container not found ("scode")')
+    let calls = 0
+    let restores = 0
+    await expect(withPodReadinessRetry(async () => {
+      calls++
+      throw failure
+    }, async () => { restores++ })).rejects.toBe(failure)
+    expect(calls).toBe(10)
+    expect(restores).toBe(1)
+  }, 40_000)
+
   it('surfaces recovery errors instead of returning an empty workspace', async () => {
     const failure = new Error('PVC ownership mismatch')
     await expect(withPodReadinessRetry(async () => {

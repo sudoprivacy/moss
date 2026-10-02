@@ -115,11 +115,15 @@ const POD_OBJECT_MISSING = /pods "[^"]*" not found/
  * kubectl answers `container not found`. That is not a workspace error: the same
  * exec succeeds moments later. Retrying briefly turns a panel that opened too
  * early into one that fills in, rather than one the user has to poke again.
+ * A runner's attach socket can be ready before its pod accepts exec, so even
+ * ensureSessionReady does not eliminate this window. Cold gvisor starts need
+ * more than the original four seconds; keep retries bounded below 30 seconds.
  *
  * Safe for all three callers: the two reads are idempotent, and the write resends
  * the same bytes to the same path.
  */
 const EXEC_RETRY_DELAYS_MS = [250, 500, 1000, 2000]
+const STARTUP_RETRY_DELAYS_MS = [...EXEC_RETRY_DELAYS_MS, 4000, 5000, 5000, 5000, 5000]
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -138,6 +142,7 @@ export async function withPodReadinessRetry(
   execute: () => Promise<Buffer>,
   onPodUnavailable?: () => Promise<void>,
 ): Promise<Buffer> {
+  const retryDelays = onPodUnavailable ? STARTUP_RETRY_DELAYS_MS : EXEC_RETRY_DELAYS_MS
   let isRecoveryAttempted = false
   for (let attempt = 0; ; attempt++) {
     try {
@@ -145,12 +150,12 @@ export async function withPodReadinessRetry(
     } catch (error) {
       const notReady =
         error instanceof PodExecError && isPodNotReadyExecError(error.exitCode, error.stderr)
-      if (!notReady || attempt >= EXEC_RETRY_DELAYS_MS.length) throw error
+      if (!notReady || attempt >= retryDelays.length) throw error
       if (onPodUnavailable && !isRecoveryAttempted) {
         isRecoveryAttempted = true
         await onPodUnavailable()
       }
-      await sleep(EXEC_RETRY_DELAYS_MS[attempt]!)
+      await sleep(retryDelays[attempt]!)
     }
   }
 }
